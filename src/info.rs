@@ -75,7 +75,12 @@ fn parse_num(b: &[u8]) -> Option<i32> {
 /// Parse `YYYY-MM-DDTHH:MM:SS` (local time) to a unix timestamp.
 pub fn parse_local_to_epoch(s: &str) -> Option<i64> {
     let b = s.as_bytes();
-    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':'
+    if b.len() < 19
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
     {
         return None;
     }

@@ -49,7 +49,11 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
             });
         }
     }
-    out.sort_by(|a, b| a.epoch.cmp(&b.epoch).then_with(|| a.original.cmp(&b.original)));
+    out.sort_by(|a, b| {
+        a.epoch
+            .cmp(&b.epoch)
+            .then_with(|| a.original.cmp(&b.original))
+    });
     out
 }
 
@@ -73,7 +77,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     for entry in collect(&trashdir::all()) {
         let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
         // trash-list prints "YYYY-MM-DD HH:MM:SS path".
-        println!("{} {}", date.replacen('T', " ", 1), entry.original.display());
+        println!(
+            "{} {}",
+            date.replacen('T', " ", 1),
+            entry.original.display()
+        );
     }
     0
 }

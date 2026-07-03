@@ -71,7 +71,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     } else {
         for (i, e) in matches.iter().enumerate() {
             let date = e.date.as_deref().unwrap_or("????-??-??T??:??:??");
-            println!("{i:4}  {}  {}", date.replacen('T', " ", 1), e.original.display());
+            println!(
+                "{i:4}  {}  {}",
+                date.replacen('T', " ", 1),
+                e.original.display()
+            );
         }
         if !stdin_is_tty() {
             eprintln!(
@@ -149,7 +153,10 @@ fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
     }
     let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
     if let Err(e) = fs::remove_file(&info_path) {
-        eprintln!("{prog}: warning: cannot remove '{}': {e}", info_path.display());
+        eprintln!(
+            "{prog}: warning: cannot remove '{}': {e}",
+            info_path.display()
+        );
     }
     println!("restored '{}'", dest.display());
     0

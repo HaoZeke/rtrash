@@ -14,10 +14,7 @@ struct Sandbox {
 
 impl Sandbox {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "rtrash-test-{}-{tag}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("rtrash-test-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("work")).unwrap();
         Sandbox { root }
@@ -103,7 +100,11 @@ fn put_directory_requires_recursive() {
 
     let out = sb.run(&["put", "d"]);
     assert_eq!(out.status.code(), Some(1));
-    assert!(stderr_of(&out).contains("Is a directory"), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("Is a directory"),
+        "{}",
+        stderr_of(&out)
+    );
     assert!(sb.work().join("d").exists());
 
     let out = sb.run(&["put", "-r", "d"]);
@@ -188,7 +189,12 @@ fn symlink_trashes_link_not_target() {
     let out = sb.run(&["put", "link"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(target.exists(), "target must survive");
-    assert!(sb.trash().join("files/link").symlink_metadata().unwrap().is_symlink());
+    assert!(sb
+        .trash()
+        .join("files/link")
+        .symlink_metadata()
+        .unwrap()
+        .is_symlink());
 }
 
 #[test]
@@ -198,7 +204,11 @@ fn list_shows_original_path() {
     sb.run(&["put", "seen.txt"]);
     let out = sb.run(&["list"]);
     assert!(out.status.success());
-    assert!(stdout_of(&out).contains(&f.display().to_string()), "{}", stdout_of(&out));
+    assert!(
+        stdout_of(&out).contains(&f.display().to_string()),
+        "{}",
+        stdout_of(&out)
+    );
 }
 
 #[test]
@@ -214,7 +224,10 @@ fn empty_removes_everything() {
     let out = sb.empty(&[]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(trash_names(&sb).is_empty());
-    assert!(fs::read_dir(sb.trash().join("info")).unwrap().next().is_none());
+    assert!(fs::read_dir(sb.trash().join("info"))
+        .unwrap()
+        .next()
+        .is_none());
 }
 
 #[test]
@@ -225,7 +238,11 @@ fn empty_days_keeps_recent_items() {
 
     let out = sb.empty(&["5"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(trash_names(&sb), vec!["fresh.txt"], "recent item must survive");
+    assert_eq!(
+        trash_names(&sb),
+        vec!["fresh.txt"],
+        "recent item must survive"
+    );
 
     // Backdate the info file, then a 5-day empty purges it.
     let info_path = sb.trash().join("info/fresh.txt.trashinfo");
@@ -307,7 +324,13 @@ fn multicall_names_dispatch() {
     let sb = Sandbox::new("multicall");
     let bindir = sb.root.join("bin");
     fs::create_dir_all(&bindir).unwrap();
-    for name in ["rm", "trash-put", "trash-empty", "trash-list", "trash-restore"] {
+    for name in [
+        "rm",
+        "trash-put",
+        "trash-empty",
+        "trash-list",
+        "trash-restore",
+    ] {
         std::os::unix::fs::symlink(bin(), bindir.join(name)).unwrap();
     }
     let run_as = |name: &str, args: &[&str]| {

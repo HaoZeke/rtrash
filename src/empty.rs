@@ -88,7 +88,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
 
     let n = removed.load(Ordering::Relaxed);
-    let verb = if opts.dry_run { "Would remove" } else { "Removed" };
+    let verb = if opts.dry_run {
+        "Would remove"
+    } else {
+        "Removed"
+    };
     let noun = if n == 1 { "item" } else { "items" };
     if opts.verbose || opts.dry_run || n > 0 {
         eprintln!("{verb} {n} {noun}");
@@ -134,10 +138,11 @@ fn empty_one(
             let take = match cutoff {
                 None => true,
                 Some(cut) => {
-                    let parsed = fs::read_to_string(&info_path)
-                        .map(|c| info::parse(&c))
-                        .ok();
-                    is_old(parsed.as_ref().and_then(|i| i.deletion_date.as_deref()), cut)
+                    let parsed = fs::read_to_string(&info_path).map(|c| info::parse(&c)).ok();
+                    is_old(
+                        parsed.as_ref().and_then(|i| i.deletion_date.as_deref()),
+                        cut,
+                    )
                 }
             };
             if take {
@@ -246,6 +251,9 @@ mod tests {
     fn cutoff_comparison() {
         let now = info::now_local_string();
         assert!(!is_old(Some(&now), info::now_epoch() - 3600));
-        assert!(is_old(Some("2001-01-01T00:00:00"), info::now_epoch() - 3600));
+        assert!(is_old(
+            Some("2001-01-01T00:00:00"),
+            info::now_epoch() - 3600
+        ));
     }
 }

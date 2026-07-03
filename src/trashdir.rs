@@ -50,7 +50,9 @@ pub fn home_trash() -> PathBuf {
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default();
             home.join(".local/share")
         });
     data.join("Trash")
@@ -161,9 +163,30 @@ pub fn all() -> Vec<TrashDir> {
 }
 
 const PSEUDO_FS: &[&str] = &[
-    "proc", "sysfs", "devtmpfs", "devpts", "securityfs", "cgroup", "cgroup2", "pstore", "bpf",
-    "autofs", "mqueue", "hugetlbfs", "debugfs", "tracefs", "fusectl", "configfs", "binfmt_misc",
-    "rpc_pipefs", "nsfs", "efivarfs", "fuse.portal", "fuse.gvfsd-fuse", "squashfs", "ramfs",
+    "proc",
+    "sysfs",
+    "devtmpfs",
+    "devpts",
+    "securityfs",
+    "cgroup",
+    "cgroup2",
+    "pstore",
+    "bpf",
+    "autofs",
+    "mqueue",
+    "hugetlbfs",
+    "debugfs",
+    "tracefs",
+    "fusectl",
+    "configfs",
+    "binfmt_misc",
+    "rpc_pipefs",
+    "nsfs",
+    "efivarfs",
+    "fuse.portal",
+    "fuse.gvfsd-fuse",
+    "squashfs",
+    "ramfs",
 ];
 
 /// Mount-point escapes per fstab(5): `\040` space, `\011` tab, `\012` newline, `\134` backslash.
@@ -214,9 +237,9 @@ fn mount_points() -> Vec<PathBuf> {
 /// Absolute path without resolving the final component (so symlinks trash as
 /// symlinks): canonicalize the parent, re-attach the file name.
 pub fn abs_nofollow(path: &Path) -> io::Result<PathBuf> {
-    let file_name = path.file_name().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "path has no file name")
-    })?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.canonicalize()?,
         _ => std::env::current_dir()?,
@@ -237,7 +260,10 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
         });
 
     let recorded: PathBuf = match &trash.topdir {
-        Some(top) => abs.strip_prefix(top).map(|p| p.to_path_buf()).unwrap_or_else(|_| abs.to_path_buf()),
+        Some(top) => abs
+            .strip_prefix(top)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|_| abs.to_path_buf()),
         None => abs.to_path_buf(),
     };
     let body = info::render(&recorded, &info::now_local_string());

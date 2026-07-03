@@ -58,7 +58,10 @@ pub fn confirm(prompt: &str) -> bool {
     if io::stdin().lock().read_line(&mut line).is_err() {
         return false;
     }
-    matches!(line.trim_start().as_bytes().first(), Some(b'y') | Some(b'Y'))
+    matches!(
+        line.trim_start().as_bytes().first(),
+        Some(b'y') | Some(b'Y')
+    )
 }
 
 pub fn stdin_is_tty() -> bool {
