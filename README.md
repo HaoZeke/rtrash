@@ -81,6 +81,21 @@ under the current directory when `PATH` is omitted). A single match restores
 directly; multiple matches list with indices for interactive selection.
 Existing files at the destination are preserved unless `-f` is given.
 
+## Performance
+
+Measured against trash-cli 0.24.5.26 (CPython 3) on an NVMe-backed Linux
+machine, best of warm runs:
+
+| Operation                  | trash-cli | rtrash | ratio |
+| -------------------------- | --------- | ------ | ----- |
+| `empty`, 100 000 entries   | 0.92 s    | 0.36 s | 2.5x  |
+| `empty`, 20 000 entries    | 0.21 s    | 0.07 s | 3x    |
+| `put`, one file            | 52 ms     | 1 ms   | 52x   |
+
+Emptying parallelizes the unlinks (3.3 s of system time in 0.36 s of wall
+time on the 100 000-entry run); `put` wins on process startup, which is what
+an interactive shell feels.
+
 ## Citation
 
 ```bibtex
