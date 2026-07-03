@@ -44,7 +44,7 @@ fn main() {
             Some("restore") => restore::run(&argv0, &rest[1..]),
             Some("-h") | Some("--help") | Some("help") | None => {
                 print!("{HELP}");
-                i32::from(rest.first().is_none())
+                i32::from(rest.is_empty())
             }
             Some("-V") | Some("--version") => {
                 println!("rtrash {}", env!("CARGO_PKG_VERSION"));

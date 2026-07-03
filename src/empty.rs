@@ -56,7 +56,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 return 0;
             }
             a if a.starts_with("--trash-dir=") => {
-                opts.trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
+                opts.trash_dirs
+                    .push(PathBuf::from(&a["--trash-dir=".len()..]));
             }
             a if !a.starts_with('-') => match a.parse::<i64>() {
                 Ok(d) if d >= 0 => opts.days = Some(d),
@@ -221,7 +222,7 @@ fn prune_directorysizes(dir: &TrashDir, kept: &[String]) {
     let filtered: String = content
         .lines()
         .filter(|line| {
-            line.rsplit(' ').next().map_or(false, |enc| {
+            line.rsplit(' ').next().is_some_and(|enc| {
                 let decoded = url_decode(enc);
                 keep.contains(String::from_utf8_lossy(&decoded).as_ref())
             })

@@ -54,7 +54,7 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
-    for arg in args {
+    if let Some(arg) = args.first() {
         match arg.as_str() {
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));

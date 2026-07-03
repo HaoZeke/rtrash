@@ -70,8 +70,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut no_more_opts = false;
 
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
+    for arg in args {
         if no_more_opts || arg == "-" || !arg.starts_with('-') {
             files.push(PathBuf::from(arg));
             continue;
