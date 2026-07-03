@@ -46,6 +46,15 @@ impl Sandbox {
         fs::write(&p, b"payload").unwrap();
         p
     }
+
+    /// Run `empty` pinned to this sandbox's trash dir; a bare `empty` scans
+    /// every mounted volume's trash and would purge the host's real trash.
+    fn empty(&self, extra: &[&str]) -> Output {
+        let pin = format!("--trash-dir={}", self.trash().display());
+        let mut args: Vec<&str> = vec!["empty", &pin];
+        args.extend_from_slice(extra);
+        self.run(&args)
+    }
 }
 
 impl Drop for Sandbox {
@@ -202,7 +211,7 @@ fn empty_removes_everything() {
     sb.run(&["put", "-r", "a", "b", "d"]);
     assert_eq!(trash_names(&sb).len(), 3);
 
-    let out = sb.run(&["empty"]);
+    let out = sb.empty(&[]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(trash_names(&sb).is_empty());
     assert!(fs::read_dir(sb.trash().join("info")).unwrap().next().is_none());
@@ -214,7 +223,7 @@ fn empty_days_keeps_recent_items() {
     sb.touch("fresh.txt");
     sb.run(&["put", "fresh.txt"]);
 
-    let out = sb.run(&["empty", "5"]);
+    let out = sb.empty(&["5"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb), vec!["fresh.txt"], "recent item must survive");
 
@@ -234,7 +243,7 @@ fn empty_days_keeps_recent_items() {
         .join("\n");
     fs::write(&info_path, old).unwrap();
 
-    let out = sb.run(&["empty", "5"]);
+    let out = sb.empty(&["5"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(trash_names(&sb).is_empty());
 }
@@ -244,7 +253,7 @@ fn empty_dry_run_removes_nothing() {
     let sb = Sandbox::new("empty-dry");
     sb.touch("keep.txt");
     sb.run(&["put", "keep.txt"]);
-    let out = sb.run(&["empty", "--dry-run"]);
+    let out = sb.empty(&["--dry-run"]);
     assert!(out.status.success());
     assert_eq!(trash_names(&sb), vec!["keep.txt"]);
     assert!(stderr_of(&out).contains("Would remove 1 item"));
@@ -256,7 +265,7 @@ fn empty_purges_orphaned_files() {
     sb.touch("x");
     sb.run(&["put", "x"]);
     fs::remove_file(sb.trash().join("info/x.trashinfo")).unwrap();
-    let out = sb.run(&["empty"]);
+    let out = sb.empty(&[]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(trash_names(&sb).is_empty());
 }
@@ -319,6 +328,7 @@ fn multicall_names_dispatch() {
     let out = run_as("trash-list", &[]);
     assert!(stdout_of(&out).contains("m.txt"));
 
-    assert!(run_as("trash-empty", &[]).status.success());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    assert!(run_as("trash-empty", &[&pin]).status.success());
     assert!(trash_names(&sb).is_empty());
 }

@@ -1,4 +1,5 @@
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -178,9 +179,14 @@ fn empty_one(
         match trashdir::remove_any_path(target) {
             Ok(()) => {
                 if let Some(ip) = info_path {
-                    if let Err(e) = fs::remove_file(ip) {
-                        eprintln!("{prog}: cannot remove '{}': {e}", ip.display());
-                        errors.fetch_add(1, Ordering::Relaxed);
+                    match fs::remove_file(ip) {
+                        Ok(()) => {}
+                        // A concurrent empty may have won the race.
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            eprintln!("{prog}: cannot remove '{}': {e}", ip.display());
+                            errors.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }
                 if opts.verbose {
