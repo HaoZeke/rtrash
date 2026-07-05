@@ -1,12 +1,4 @@
-mod empty;
-mod fastdelete;
-mod info;
-mod list;
-mod put;
-mod restore;
-mod rm;
-mod trashdir;
-mod util;
+use rtrash::{empty, list, put, restore, rm};
 
 const HELP: &str = "\
 Usage: rtrash <COMMAND> [ARGS]...
@@ -53,7 +45,7 @@ fn main() {
                 i32::from(rest.is_empty())
             }
             Some("-V") | Some("--version") => {
-                println!("rtrash {}", env!("CARGO_PKG_VERSION"));
+                println!("rtrash {}", rtrash::version());
                 0
             }
             // rm-style direct invocation: `rtrash -rf dir`, `rtrash file`.

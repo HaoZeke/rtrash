@@ -1,0 +1,33 @@
+#+title: Benchmarks and comparison vs Python trash-cli
+#+options: toc:2 num:nil
+
+* Verdict (honest, multi-axis)
+
+| Question | Verdict |
+|----------------------------------+------------------------------------------------------|
+| *Safer* than permanent =os.remove= / bare =rm=? | *Yes* — recoverable FreeDesktop trash + rm fail-safes |
+| *Safer* than trash-cli? | *Roughly equivalent* FreeDesktop correctness; stronger rm-flag fail-safes on put |
+| *Better* as a daily driver for this niche? | *Yes* for native multi-call + in-process Python |
+| *Faster*? | *Yes on the measured fixtures* (~19× put, ~13× empty on rg.terra) |
+
+* Reproduce
+
+#+begin_src shell
+cargo build --release
+export RTRASH_BIN=$PWD/target/release/rtrash
+python3 benches/compare_trash_cli.py | tee compare-trash-cli.log
+#+end_src
+
+Fixture: 400 small files + multi-file directory tree; two trials; put then
+empty with =--trash-dir= pin. trash-cli *0.24.5.26* on the verification host.
+
+* Measured results (rg.terra, 2026-07-05)
+
+| Tool | put avg (s) | empty avg (s) |
+|------+-------------+---------------|
+| rtrash release | 0.00496 | 0.00325 |
+| trash-cli 0.24.5.26 | 0.0950 | 0.0422 |
+| speedup | ~19× | ~13× |
+
+Both tools: =ec=0=, =entries=401= after put, empty leaves =files_left=0=
+=info_left=0=, =LIST_OK= for a single-file put.

@@ -8,6 +8,31 @@ with an rm-compatible put path and the full everyday trash-cli suite
 interpreter startup; emptying deletes entries in parallel via
 [rayon](https://crates.io/crates/rayon).
 
+## Documentation
+
+| Doc | Contents |
+| --- | --- |
+| [docs/getting-started.md](docs/getting-started.md) | Install CLI + Python, shortest paths |
+| [docs/architecture.md](docs/architecture.md) | FreeDesktop layout, safety vs `rm` / `os.remove` / trash-cli |
+| [docs/benchmarks.md](docs/benchmarks.md) | Measured safer/better/faster vs trash-cli |
+| [docs/bindings.md](docs/bindings.md) | Maturin/PyO3 API (`unlink` / `rmtree` replacements) |
+
+Org-mode sources (readcon-core style): [docs/orgmode/](docs/orgmode/).
+
+### Python: replace permanent delete
+
+```python
+import rtrash
+rtrash.unlink("file.txt")    # not os.remove
+rtrash.rmtree("build/")      # not shutil.rmtree
+```
+
+```console
+$ pip install maturin && maturin develop --features python
+```
+
+## Platform
+
 **Platform:** Linux FreeDesktop trash only (home trash + per-mount trash
 dirs). Not a Windows/macOS system-trash wrapper, and not a colored TUI — see
 [docs/SOTA.md](docs/SOTA.md) for the niche claim and non-goals.

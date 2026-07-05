@@ -1,0 +1,75 @@
+#+title: Architecture and safety model
+#+options: toc:2 num:nil
+
+* What rtrash is
+
+A *native* FreeDesktop trash implementation: one Rust library driving the
+=rtrash= multi-call CLI and optional Python bindings. Files are *moved* into
+the same trash layout used by GNOME/KDE/Xfce file managers, not unlinked.
+
+* FreeDesktop layout
+
+| Location | Role |
+|----------------------------------+----------------------------------------|
+| =$XDG_DATA_HOME/Trash= | Home trash (default =~/.local/share/Trash=) |
+| =$top/.Trash/$uid= | Per-mount shared trash (sticky, non-symlink) |
+| =$top/.Trash-$uid= | Per-mount private trash |
+| =files/= + =info/*.trashinfo= | Payload + =Path= / =DeletionDate= metadata |
+
+Atomic reservation: create-new on =.trashinfo= *before* moving the payload
+(spec requirement). Collisions become =name.2=, =name.3=, …
+
+* Safer than permanent delete (=os.remove= / =rm= without trash)
+
+| Risk | =os.remove= / =Path.unlink= / =rm= | rtrash put |
+|----------------------------------+------------------------------------|----------------------------------|
+| Data gone immediately | Yes | No — recoverable until empty |
+| Shared with DE trash UI | No | Yes (FreeDesktop) |
+| Accidental =rm -rf= of work tree | Permanent | Recover with =restore= |
+| Cross-device | Unlink only | Copy-into-home-trash fallback |
+
+rtrash put also applies *rm-shaped fail-safes*: refuse =.= / =..= / =/=
+(with preserve-root), require =-r= for directories, GNU-style last-wins for
+=-f= / =-i= / =-I=, exit codes 0/1/2.
+
+* Safer than a naive “mv to ~/.Trash” script
+
+- Correct =.trashinfo= encoding (percent-encoded =Path=)
+- Mount-aware placement (not only home trash)
+- Concurrent-safe name allocation
+- Restore overwrite protection (=-f= to replace)
+- Empty with age filter, dry-run, orphan purge, =directorysizes= prune
+
+* Versus Python trash-cli (design, not speed)
+
+| Axis | trash-cli | rtrash |
+|----------------------------------+---------------------------|--------------------------------|
+| Runtime | CPython suite of scripts | Single native binary / lib |
+| FreeDesktop put/list/empty/restore/rm | Yes | Yes (multi-call + subcommands) |
+| rm-compatible put flags | Partial (own CLI) | Strong (GNU-style set) |
+| Permanent =os.remove= replacement API | Separate process spawn | In-process Python module |
+| Parallel full empty | Sequential Python | Rayon + bulk unlinkat; btrfs subvol ioctl when applicable |
+
+* Where permanent delete is still preferable
+
+- You *intend* unrecoverable wipe (secrets, free space forensics)
+- Non-Linux platforms (use OS trash APIs, not this crate)
+- You must delete *inside* the trash by policy that forbids recoverability
+
+Use =rtrash empty= / =trash-rm= only after accepting permanent loss of those
+entries.
+
+* Library layout
+
+#+begin_src text
+src/lib.rs          public modules + optional python feature
+src/main.rs         multi-call CLI dispatcher
+src/put.rs          rm-compatible trash put
+src/empty.rs        age filter + full wipe path
+src/fastdelete.rs   unlinkat tree walk; btrfs subvol destroy
+src/list.rs restore.rs rm.rs trashdir.rs info.rs util.rs
+src/python.rs       PyO3 (feature = python)
+#+end_src
+
+CLI and Python call the *same* put/empty/list/restore entry points—no second
+filesystem model.

@@ -9,10 +9,26 @@ authors = ["Rohit Goswami <rgoswami@ieee.org>"]
 repository = "https://github.com/HaoZeke/rtrash"
 categories = ["command-line-utilities", "filesystem"]
 keywords = ["trash", "rm", "freedesktop", "xdg"]
+readme = "README.md"
+
+[lib]
+name = "rtrash"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "rtrash"
+path = "src/main.rs"
+
+[features]
+default = []
+# Build the PyO3 extension module (maturin --features python).
+python = ["dep:pyo3"]
 
 [dependencies]
 libc = "0.2"
 rayon = "1.10"
+pyo3 = { version = "0.25", optional = true, features = ["extension-module"] }
 
 [profile.release]
 lto = true

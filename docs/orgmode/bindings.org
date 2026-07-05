@@ -1,0 +1,59 @@
+#+title: Python bindings
+#+options: toc:2 num:nil
+
+* Goal
+
+Replace permanent deletion of *recoverable user data* with FreeDesktop trash:
+
+| Instead of | Use |
+|----------------------------------|--------------------------------|
+| =os.remove(path)= / =os.unlink= | =rtrash.unlink(path)= |
+| =pathlib.Path.unlink()= | =rtrash.unlink(path)= |
+| =shutil.rmtree(path)= | =rtrash.rmtree(path)= |
+| ad-hoc =subprocess= to trash-cli | =rtrash.put= / =empty_trash= in-process |
+
+This does *not* monkey-patch =os= or =pathlib= globally.
+
+* Install
+
+#+begin_src shell
+pip install maturin
+maturin develop --features python
+# from repo root; needs a Rust toolchain
+#+end_src
+
+* API
+
+#+begin_src python
+import rtrash
+
+rtrash.put(path, recursive=False, force=False)
+rtrash.put_paths([p1, p2], recursive=False, force=False)
+rtrash.unlink(path, recursive=False, force=False)   # os.remove-shaped
+rtrash.rmtree(path, force=False)                    # shutil.rmtree-shaped
+
+rtrash.list_trash(trash_dir=None)  # -> list[(date_str, original_path)]
+rtrash.empty_trash(days=None, trash_dir=None, dry_run=False)
+rtrash.restore_path(path, force=False, trash_dir=None)
+rtrash.home_trash()  # Path to $XDG_DATA_HOME/Trash
+rtrash.version()
+#+end_src
+
+All operations honor =XDG_DATA_HOME= / FreeDesktop placement from the Rust
+core (same as the CLI).
+
+* Testing
+
+#+begin_src shell
+maturin develop --features python
+python -m unittest tests.python.test_rtrash -v
+#+end_src
+
+Tests set =XDG_DATA_HOME= to a temporary directory so they never touch the
+host trash.
+
+* Errors
+
+Failed put/empty/restore surfaces as =OSError= (operation failed) or
+=ValueError= (bad arguments), mapped from the CLI-layer exit codes of the
+shared Rust entry points.

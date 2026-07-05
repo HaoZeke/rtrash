@@ -1,0 +1,78 @@
+#+title: Getting started
+#+options: toc:2 num:nil
+
+* When to use what
+
+| Need | Use |
+|----------------------------------+-----------------------------------------------|
+| Interactive shell / scripts | =rtrash= CLI (or multi-call =trash-put= etc.) |
+| Safer than =os.remove= in Python | =import rtrash; rtrash.unlink(path)= |
+| Drop-in mental model for =rm= | =rtrash -rf path= or symlink =rm= → put |
+| Permanent purge of trash entries | =rtrash empty= / =rtrash rm PATTERN= |
+| Windows / macOS system trash | *Not supported* (Linux FreeDesktop only) |
+
+Safety model and FreeDesktop layout: [[file:architecture.org][architecture.org]].
+Measured comparison to Python trash-cli: [[file:benchmarks.org][benchmarks.org]].
+Python API detail: [[file:bindings.org][bindings.org]].
+
+* Install
+
+** CLI (Rust)
+
+#+begin_src shell
+cargo install --git https://github.com/HaoZeke/rtrash
+# optional multi-call names:
+for n in trash trash-put trash-empty trash-list trash-restore trash-rm; do
+  ln -s "$(command -v rtrash)" ~/.local/bin/$n
+done
+#+end_src
+
+MSRV *1.77*. Default install is a normal dynamically linked Linux binary.
+
+** Python (maturin / PyO3)
+
+#+begin_src shell
+# from a checkout, on a machine with Rust + maturin:
+pip install maturin
+maturin develop --features python
+# or: pip install .   # uses pyproject.toml / maturin backend
+python -c "import rtrash; print(rtrash.version())"
+#+end_src
+
+* Shortest CLI path
+
+#+begin_src shell
+echo data > scratch.txt
+rtrash scratch.txt          # put (rm-shaped)
+rtrash list
+rtrash restore scratch.txt
+rtrash scratch.txt
+rtrash empty --trash-dir="$XDG_DATA_HOME/Trash"   # pin in scripts/tests
+#+end_src
+
+* Shortest Python path (replace permanent delete)
+
+#+begin_src python
+import os
+from pathlib import Path
+import rtrash
+
+# Isolate trash in tests/scripts:
+# os.environ["XDG_DATA_HOME"] = "/tmp/my-xdg"
+
+p = Path("scratch.txt")
+p.write_text("data")
+rtrash.unlink(p)            # was: p.unlink() / os.remove(p)
+assert not p.exists()
+rtrash.restore_path(p)      # recover
+assert p.read_text() == "data"
+
+# directories (was shutil.rmtree):
+# rtrash.rmtree("build/")
+#+end_src
+
+* Next
+
+- [[file:architecture.org][architecture.org]] — FreeDesktop placement, fail-safes vs =rm= / =os.remove=
+- [[file:benchmarks.org][benchmarks.org]] — safer / better / faster vs trash-cli (measured)
+- [[file:bindings.org][bindings.org]] — full Python surface

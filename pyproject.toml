@@ -1,0 +1,31 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rtrash"
+version = "0.1.0"
+description = "Python bindings for rtrash — FreeDesktop trash as a safe alternative to os.remove"
+requires-python = ">=3.10"
+license = "MIT"
+readme = "README.md"
+keywords = ["trash", "freedesktop", "xdg", "rm", "unlink"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: System :: Filesystems",
+]
+
+[project.urls]
+Homepage = "https://github.com/HaoZeke/rtrash"
+Repository = "https://github.com/HaoZeke/rtrash"
+Documentation = "https://github.com/HaoZeke/rtrash/tree/main/docs"
+
+[tool.maturin]
+features = ["python"]
+module-name = "rtrash"
+# Mixed bin+lib: install the CLI binary too when building the wheel if desired.
+# bindings = "pyo3"
