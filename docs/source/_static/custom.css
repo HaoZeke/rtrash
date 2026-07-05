@@ -1,0 +1,39 @@
+/* Landing hero — calm teal, not a billboard */
+.rt-hero {
+  margin: 0 0 1.75rem;
+  padding: 1.5rem 1.25rem 1.25rem;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #f0fdfa 0%, #ecfeff 45%, #f8fafc 100%);
+  border: 1px solid #99f6e4;
+}
+html.dark .rt-hero {
+  background: linear-gradient(145deg, #042f2e 0%, #0f172a 100%);
+  border-color: #115e59;
+}
+.rt-hero-logo { display: block; max-width: min(280px, 70vw); height: auto; margin: 0 0 0.75rem; }
+.rt-hero-tagline {
+  margin: 0;
+  font-size: 1.1rem;
+  line-height: 1.45;
+  color: #134e4a;
+  max-width: 40rem;
+}
+html.dark .rt-hero-tagline { color: #ccfbf1; }
+.rt-hero-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.9rem;
+}
+.rt-hero-pills span {
+  font-size: 0.8rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: #ccfbf1;
+  color: #115e59;
+  font-weight: 600;
+}
+html.dark .rt-hero-pills span {
+  background: #115e59;
+  color: #ecfdf5;
+}

@@ -6,7 +6,7 @@
 | Need | Use |
 |----------------------------------+-----------------------------------------------|
 | Interactive shell / scripts | =rtrash= CLI (or multi-call =trash-put= etc.) |
-| Safer than =os.remove= in Python | =import rtrash; rtrash.unlink(path)= |
+| Safer than permanent delete in Python | =rtrash.unlink(path)= (after importing =rtrash=) |
 | Drop-in mental model for =rm= | =rtrash -rf path= or symlink =rm= → put |
 | Permanent purge of trash entries | =rtrash empty= / =rtrash rm PATTERN= |
 | Windows / macOS system trash | *Not supported* (Linux FreeDesktop only) |

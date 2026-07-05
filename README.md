@@ -31,6 +31,32 @@ rtrash.rmtree("build/")      # not shutil.rmtree
 $ pip install maturin && maturin develop --features python
 ```
 
+
+## Docs site
+
+Project documentation is authored in **orgmode** under
+[`docs/orgmode/`](docs/orgmode/) and built to a **Sphinx + Shibuya** static site
+(readcon-style: org → RST → HTML).
+
+```shell
+# needs: pandoc (or emacs + ox-rst), python3, venv
+./docs/build.sh
+# HTML → docs/build/index.html
+python3 -m http.server -d docs/build 8000
+```
+
+| Page | Source |
+|------|--------|
+| Landing | `docs/orgmode/index.org` |
+| Getting started | `docs/orgmode/getting-started.org` |
+| Architecture | `docs/orgmode/architecture.org` |
+| Benchmarks | `docs/orgmode/benchmarks.org` |
+| Python bindings | `docs/orgmode/bindings.org` |
+
+Markdown mirrors under `docs/*.md` remain for quick GitHub reading; the site is
+the structured presentation of the same material.
+
+
 ## Platform
 
 **Platform:** Linux FreeDesktop trash only (home trash + per-mount trash

@@ -1,0 +1,113 @@
+#+title: rtrash
+#+options: toc:nil num:nil
+
+#+begin_export rst
+.. raw:: html
+
+   <div class="rt-hero">
+     <img class="rt-hero-logo" src="_static/logo.svg" width="280" height="63" alt="rtrash" />
+     <p class="rt-hero-tagline">One native FreeDesktop trash tool — rm-compatible put, full trash-cli suite, optional Python bindings. Recoverable by design.</p>
+     <div class="rt-hero-pills">
+       <span>FreeDesktop</span>
+       <span>rm-compatible</span>
+       <span>Linux</span>
+       <span>Rust + Python</span>
+     </div>
+   </div>
+#+end_export
+
+* Why rtrash
+
+Permanent =os.remove= / bare =rm= is instant and unforgiving. Desktop environments
+already share a FreeDesktop trash layout — *rtrash* is a single Rust binary (and
+library) that puts files there with *GNU rm–shaped* flags, then lists, restores,
+empties, and selectively purges like the trash-cli suite — without CPython
+startup on every call.
+
+| Need | Use |
+|------+-----|
+| Safer interactive delete | =rtrash path= or multi-call =rm= → trash |
+| Scripts / tests | pin with =--trash-dir= ; isolate =XDG_DATA_HOME= |
+| Python instead of permanent unlink | =rtrash.unlink(path)= after =import rtrash= |
+| See reclaim before empty | =rtrash empty --dry-run= |
+
+* Install (shortest path)
+
+** CLI
+
+#+begin_src shell
+cargo install --git https://github.com/HaoZeke/rtrash
+# optional multi-call names: trash-put, trash-empty, trash-list, trash-restore, trash-rm
+#+end_src
+
+** Python
+
+#+begin_src shell
+pip install maturin
+maturin develop --features python   # from a checkout
+python -c "import rtrash; rtrash.unlink('scratch.txt')"
+#+end_src
+
+Details, multi-call symlinks, and MSRV: [[file:getting-started.org][Getting started]].
+
+* What you get
+
+- *FreeDesktop-correct* home and per-mount trash, atomic =.trashinfo= reservation
+- *rm-compatible put* (=-rf=, =-i= / =-I= last-wins, preserve-root, exit 0/1/2)
+- *Suite*: put / list / restore / empty / selective =trash-rm=
+- *Fast empty*: parallel top-level wipe, =d_type= unlinks, optional btrfs subvol destroy
+- *Dry-run reclaim*: =empty -n= reports approximate space that would be freed
+- *Python*: in-process =unlink= / =rmtree= over the same core as the CLI
+
+Honest comparison to trash-cli (measured on the project build host):
+[[file:benchmarks.org][Benchmarks]]. Safety model vs permanent delete:
+[[file:architecture.org][Architecture]].
+
+* Documentation map
+
+#+begin_export rst
+.. grid:: 1 2 2 2
+   :gutter: 2
+
+   .. grid-item-card:: Getting started
+      :link: getting-started
+      :link-type: doc
+
+      Install the CLI and Python module; shortest put / restore / empty flows.
+
+   .. grid-item-card:: Architecture & safety
+      :link: architecture
+      :link-type: doc
+
+      FreeDesktop layout, fail-safes, and when permanent delete still wins.
+
+   .. grid-item-card:: Benchmarks
+      :link: benchmarks
+      :link-type: doc
+
+      Measured safer / better / faster vs trash-cli and large empty timings.
+
+   .. grid-item-card:: Python bindings
+      :link: bindings
+      :link-type: doc
+
+      Replace ``os.remove`` / ``Path.unlink`` / ``shutil.rmtree`` with trash put.
+#+end_export
+
+#+begin_export rst
+.. toctree::
+   :maxdepth: 1
+   :caption: Guides
+   :hidden:
+
+   getting-started
+   architecture
+   benchmarks
+   bindings
+#+end_export
+
+* Source & license
+
+- Repository: https://github.com/HaoZeke/rtrash
+- License: MIT
+- Org sources for this site: =docs/orgmode/= (export → Sphinx / Shibuya)
