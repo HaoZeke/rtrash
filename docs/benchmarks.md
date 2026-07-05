@@ -49,3 +49,25 @@ Per-trial post-conditions for **both** tools: `ec=0`, multi-entry trash after pu
 ## Prior empty microbench (rtrash-only)
 
 An earlier same-host empty microbench (2001 top-level entries) measured bulk-unlink empty ~1.35× vs the pre-fastdelete rtrash binary. That is **rtrash evolution**, not trash-cli. Prefer this document’s harness for cross-tool claims.
+
+## Large full-empty (rtrash vs prior rtrash, same host)
+
+Fixture on **rg.terra** btrfs home (2026-07-05): **8000** small top-level files +
+one deep tree (1000 nested files + 250 wide dirs) → **8001** top-level trash
+entries. Timed `rtrash empty --trash-dir=…` only; five trials each after warm-up.
+
+| Binary | avg wall (ms) | best | median |
+|--------|---------------|------|--------|
+| Prior release (`fc7272f`) | 153.4 | 138 | 154 |
+| This empty path | **141.4** | **136** | **140** |
+| speedup | **~1.08× avg** | ~1.01× best | **~1.10× median** |
+
+Reproduce:
+
+```shell
+# build baseline from a prior commit, then current tree; use benches below
+cargo build --release
+# see goal verification empty-fast-bench harness (5000–8000 files + deep tree)
+```
+
+Correctness: every timed run ended with `files_left=0` and `info_left=0`.

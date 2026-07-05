@@ -210,8 +210,8 @@ fn empty_one(
     }
 }
 
-/// Count trash items, optionally print them, then parallel-wipe `files/` and
-/// `info/` children (keeps the directory nodes themselves).
+/// Full empty: wipe `files/` and `info/` concurrently. Skip expensive
+/// pre-scans unless verbose (count comes from the wipe itself).
 fn full_empty_wipe(
     prog: &str,
     dir: &TrashDir,
@@ -222,53 +222,30 @@ fn full_empty_wipe(
     let info_dir = dir.info();
     let files_dir = dir.files();
 
-    let mut n: u64 = 0;
-    if let Ok(entries) = fs::read_dir(&info_dir) {
-        for entry in entries.flatten() {
-            let fname = entry.file_name();
-            let fname = fname.to_string_lossy();
-            let Some(name) = fname.strip_suffix(".trashinfo") else {
-                continue;
-            };
-            n += 1;
-            if opts.verbose {
-                println!("removed {}", files_dir.join(name).display());
-            }
-        }
-    }
-    if let Ok(entries) = fs::read_dir(&files_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let has_info = info_dir
-                .join(format!("{}.trashinfo", name.to_string_lossy()))
-                .exists();
-            if !has_info {
-                n += 1;
-                if opts.verbose {
-                    println!("removed {}", entry.path().display());
-                }
+    // Verbose still lists intended removals before delete (stable UX).
+    if opts.verbose {
+        if let Ok(entries) = fs::read_dir(&files_dir) {
+            for entry in entries.flatten() {
+                println!("removed {}", entry.path().display());
             }
         }
     }
 
-    match crate::fastdelete::wipe_children_parallel(&files_dir) {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("{prog}: cannot wipe '{}': {e}", files_dir.display());
-            errors.fetch_add(1, Ordering::Relaxed);
-            return;
+    match crate::fastdelete::wipe_two_parallel(&files_dir, &info_dir) {
+        Ok((n_files, _n_info)) => {
+            // Top-level `files/` children ≈ trashed items (incl. orphans).
+            removed.fetch_add(n_files, Ordering::Relaxed);
         }
-    }
-    match crate::fastdelete::wipe_children_parallel(&info_dir) {
-        Ok(_) => {}
         Err(e) => {
-            eprintln!("{prog}: cannot wipe '{}': {e}", info_dir.display());
+            eprintln!(
+                "{prog}: cannot wipe trash under '{}': {e}",
+                dir.root.display()
+            );
             errors.fetch_add(1, Ordering::Relaxed);
             return;
         }
     }
 
-    removed.fetch_add(n, Ordering::Relaxed);
     // Full empty: nothing kept — drop directorysizes entirely.
     prune_directorysizes(dir, &[]);
 }

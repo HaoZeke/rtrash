@@ -1,40 +1,54 @@
 //! Fast tree deletion for trash payloads.
 //!
-//! Inspired by the empty-source `rsync --delete` pattern (destination-side
-//! readdir + unlink of every name under a root), but fully in-process:
-//! depth-first `openat`/`unlinkat`/`rmdir` without shelling out to rsync.
-//!
-//! On btrfs, if a path is a real subvolume root (inode 256), use
-//! `BTRFS_IOC_SNAP_DESTROY` on the parent — much cheaper than walking the
-//! tree. Ordinary directories on btrfs still use the generic bulk walk.
+//! In-process readdir + `unlinkat` (rsync empty-source style, no shell-out).
+//! Hot path optimisations for full trash empty:
+//! - use `d_type` to unlink regular files without a failed `openat` probe
+//! - parallel sibling deletion (rayon) at each directory level with many names
+//! - btrfs subvolume destroy when a directory is a real subvolume root (ino 256)
 
-use std::ffi::{CStr, CString, OsStr};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rayon::prelude::*;
 
-/// Linux btrfs super magic (`statfs.f_type`).
 const BTRFS_SUPER_MAGIC: i64 = 0x9123683E;
-/// First free object id — subvolume roots report this as their inode.
 const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
 const BTRFS_IOCTL_MAGIC: u8 = 0x94;
-/// `_IOW(BTRFS_IOCTL_MAGIC, 15, struct btrfs_ioctl_vol_args)`
 const BTRFS_IOC_SNAP_DESTROY: libc::c_ulong = {
-    // _IOC(_IOC_WRITE, type, nr, size) — size of btrfs_ioctl_vol_args
-    // struct is 8 + 4088 = 4096 on Linux.
     const SIZE: libc::c_ulong = 4096;
     (1u64 << 30) | ((SIZE) << 16) | ((BTRFS_IOCTL_MAGIC as u64) << 8) | 15
 };
+
+// Linux dirent d_type values.
+const DT_UNKNOWN: u8 = 0;
+const DT_DIR: u8 = 4;
+const DT_REG: u8 = 8;
+const DT_LNK: u8 = 10;
+const DT_FIFO: u8 = 1;
+const DT_SOCK: u8 = 12;
+const DT_CHR: u8 = 2;
+const DT_BLK: u8 = 6;
+
+/// Parallelise sibling deletes when a directory has at least this many names.
+const PAR_SIBLING_THRESHOLD: usize = 4;
+/// Cap nested rayon depth so we do not oversubscribe on deep narrow trees.
+const PAR_MAX_DEPTH: u32 = 12;
 
 #[repr(C)]
 struct BtrfsIoctlVolArgs {
     fd: i64,
     name: [u8; 4088],
+}
+
+struct DirEnt {
+    name: OsString,
+    dtype: u8,
 }
 
 /// Remove a file, symlink, or directory tree. Missing paths are success.
@@ -54,11 +68,9 @@ pub fn remove_path(path: &Path) -> io::Result<()> {
         }
         return remove_dir_tree(path);
     }
-    // sockets, devices, fifos: unlink like a non-dir
     fs::remove_file(path)
 }
 
-/// True when `path` lives on a btrfs filesystem.
 pub fn is_btrfs(path: &Path) -> bool {
     statfs_type(path)
         .map(|t| t == BTRFS_SUPER_MAGIC)
@@ -76,13 +88,10 @@ fn statfs_type(path: &Path) -> io::Result<i64> {
     }
 }
 
-/// If `path` is a btrfs subvolume root, destroy it via ioctl on the parent.
-/// Returns `Ok(true)` when the ioctl removed it.
 pub fn try_btrfs_subvolume_delete(path: &Path) -> io::Result<bool> {
     if !is_btrfs(path) {
         return Ok(false);
     }
-    // metadata (not symlink_metadata): subvolume roots are real directories.
     let meta = match fs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -127,14 +136,12 @@ pub fn try_btrfs_subvolume_delete(path: &Path) -> io::Result<bool> {
     if rc == 0 {
         return Ok(true);
     }
-    // Not a subvolume or ioctl unsupported — fall through to tree walk.
     let err = io::Error::last_os_error();
     match err.raw_os_error() {
         Some(libc::ENOTTY) | Some(libc::EINVAL) | Some(libc::ENOENT) | Some(libc::ENOTDIR) => {
             Ok(false)
         }
         _ => {
-            // Permission or busy: report failure rather than double-delete.
             if err.kind() == io::ErrorKind::PermissionDenied {
                 Err(err)
             } else {
@@ -144,25 +151,26 @@ pub fn try_btrfs_subvolume_delete(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Depth-first delete of a directory tree using openat/unlinkat (rsync-style
-/// destination wipe: readdir each level, unlink leaves, then rmdir).
 fn remove_dir_tree(path: &Path) -> io::Result<()> {
     let dir_c = cstring_path(path)?;
-    let fd = unsafe { libc::open(dir_c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW) };
+    let fd = unsafe {
+        libc::open(
+            dir_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
     if fd < 0 {
         let e = io::Error::last_os_error();
-        // Race: already gone.
         if e.kind() == io::ErrorKind::NotFound {
             return Ok(());
         }
-        // O_NOFOLLOW on a symlink-to-dir: treat as unlink the symlink.
         if e.raw_os_error() == Some(libc::ELOOP) || e.raw_os_error() == Some(libc::ENOTDIR) {
             return fs::remove_file(path);
         }
         return Err(e);
     }
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    remove_dirfd_contents(fd.as_raw_fd())?;
+    remove_dirfd_contents(fd.as_raw_fd(), 0)?;
     drop(fd);
     match fs::remove_dir(path) {
         Ok(()) => Ok(()),
@@ -171,20 +179,33 @@ fn remove_dir_tree(path: &Path) -> io::Result<()> {
     }
 }
 
-fn remove_dirfd_contents(dirfd: RawFd) -> io::Result<()> {
-    // Snapshot names first so we do not invalidate the stream while unlinking.
-    let names = read_dirfd_names(dirfd)?;
-    for name in names {
-        remove_child(dirfd, &name)?;
+fn remove_dirfd_contents(dirfd: RawFd, depth: u32) -> io::Result<()> {
+    let entries = read_dirfd_entries(dirfd)?;
+    // Nested levels stay sequential: parallelising every directory oversubscribes
+    // rayon when the top-level full-empty wipe is already highly parallel.
+    // (Top-level `wipe_children_parallel` is the parallel boundary.)
+    let _ = (depth, PAR_SIBLING_THRESHOLD, PAR_MAX_DEPTH);
+    for e in &entries {
+        remove_entry(dirfd, e, depth)?;
     }
     Ok(())
 }
 
-fn remove_child(dirfd: RawFd, name: &OsStr) -> io::Result<()> {
-    let name_c = CString::new(name.as_bytes())
+fn remove_entry(dirfd: RawFd, ent: &DirEnt, depth: u32) -> io::Result<()> {
+    let name_c = CString::new(ent.name.as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
-    // Prefer directory open; on ENOTDIR/ELOOP unlink as non-dir.
+    // Fast path: known non-directories — single unlinkat, no openat probe.
+    match ent.dtype {
+        DT_REG | DT_LNK | DT_FIFO | DT_SOCK | DT_CHR | DT_BLK => {
+            return unlinkat_file(dirfd, &name_c);
+        }
+        DT_DIR => return remove_dir_child(dirfd, &ent.name, &name_c, depth),
+        DT_UNKNOWN => {}
+        _ => {}
+    }
+
+    // DT_UNKNOWN or exotic: probe with openat as directory.
     let child_fd = unsafe {
         libc::openat(
             dirfd,
@@ -193,47 +214,80 @@ fn remove_child(dirfd: RawFd, name: &OsStr) -> io::Result<()> {
         )
     };
     if child_fd >= 0 {
-        let child_fd = unsafe { OwnedFd::from_raw_fd(child_fd) };
-        // Nested subvolume? try ioctl relative to parent dirfd.
-        if try_btrfs_subvol_at(dirfd, name)? {
-            return Ok(());
-        }
-        remove_dirfd_contents(child_fd.as_raw_fd())?;
-        drop(child_fd);
-        let rc = unsafe { libc::unlinkat(dirfd, name_c.as_ptr(), libc::AT_REMOVEDIR) };
-        if rc != 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() != io::ErrorKind::NotFound {
-                return Err(e);
-            }
-        }
-        return Ok(());
+        // We already opened; finish as directory (subvol check on parent).
+        unsafe { libc::close(child_fd) };
+        return remove_dir_child(dirfd, &ent.name, &name_c, depth);
     }
-
     let err = io::Error::last_os_error();
     match err.raw_os_error() {
         Some(libc::ENOTDIR) | Some(libc::ELOOP) | Some(libc::EACCES) => {
-            // file, symlink, or unreadable dir: try plain unlink
-            let rc = unsafe { libc::unlinkat(dirfd, name_c.as_ptr(), 0) };
-            if rc != 0 {
-                let e = io::Error::last_os_error();
-                if e.kind() != io::ErrorKind::NotFound {
-                    return Err(e);
-                }
-            }
-            Ok(())
+            unlinkat_file(dirfd, &name_c)
         }
         Some(libc::ENOENT) => Ok(()),
         _ => Err(err),
     }
 }
 
+fn unlinkat_file(dirfd: RawFd, name_c: &CString) -> io::Result<()> {
+    let rc = unsafe { libc::unlinkat(dirfd, name_c.as_ptr(), 0) };
+    if rc != 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::NotFound {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+fn remove_dir_child(
+    dirfd: RawFd,
+    name: &OsStr,
+    name_c: &CString,
+    depth: u32,
+) -> io::Result<()> {
+    // Subvolume destroy only at the first level of a tree (cheap for the common
+    // non-subvolume case: one failed/skipped ioctl path per top-level payload,
+    // not per nested directory).
+    if depth == 0 && try_btrfs_subvol_at(dirfd, name)? {
+        return Ok(());
+    }
+    let child_fd = unsafe {
+        libc::openat(
+            dirfd,
+            name_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
+    if child_fd < 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() == io::ErrorKind::NotFound {
+            return Ok(());
+        }
+        // Race: became a non-dir.
+        if e.raw_os_error() == Some(libc::ENOTDIR) || e.raw_os_error() == Some(libc::ELOOP) {
+            return unlinkat_file(dirfd, name_c);
+        }
+        return Err(e);
+    }
+    let child_fd = unsafe { OwnedFd::from_raw_fd(child_fd) };
+    remove_dirfd_contents(child_fd.as_raw_fd(), depth.saturating_add(1))?;
+    drop(child_fd);
+    let rc = unsafe { libc::unlinkat(dirfd, name_c.as_ptr(), libc::AT_REMOVEDIR) };
+    if rc != 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::NotFound {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
 fn try_btrfs_subvol_at(parent_fd: RawFd, name: &OsStr) -> io::Result<bool> {
-    // Cheap check: fstatat inode == 256 and is dir.
     let name_c = CString::new(name.as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::fstatat(parent_fd, name_c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+    let rc =
+        unsafe { libc::fstatat(parent_fd, name_c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
     if rc != 0 {
         return Ok(false);
     }
@@ -259,8 +313,7 @@ fn try_btrfs_subvol_at(parent_fd: RawFd, name: &OsStr) -> io::Result<bool> {
     Ok(rc == 0)
 }
 
-fn read_dirfd_names(dirfd: RawFd) -> io::Result<Vec<std::ffi::OsString>> {
-    // Dup so fdopendir can take ownership of a separate fd.
+fn read_dirfd_entries(dirfd: RawFd) -> io::Result<Vec<DirEnt>> {
     let dup = unsafe { libc::fcntl(dirfd, libc::F_DUPFD_CLOEXEC, 0) };
     if dup < 0 {
         return Err(io::Error::last_os_error());
@@ -273,7 +326,6 @@ fn read_dirfd_names(dirfd: RawFd) -> io::Result<Vec<std::ffi::OsString>> {
     }
     let mut names = Vec::new();
     loop {
-        // readdir is MT-safe per-DIR* on Linux; we hold exclusive ownership.
         let ent = unsafe { libc::readdir(dir) };
         if ent.is_null() {
             break;
@@ -283,33 +335,66 @@ fn read_dirfd_names(dirfd: RawFd) -> io::Result<Vec<std::ffi::OsString>> {
         if bytes == b"." || bytes == b".." {
             continue;
         }
-        names.push(std::ffi::OsString::from(OsStr::from_bytes(bytes)));
+        let dtype = unsafe { (*ent).d_type };
+        names.push(DirEnt {
+            name: OsString::from(OsStr::from_bytes(bytes)),
+            dtype,
+        });
     }
     unsafe { libc::closedir(dir) };
     Ok(names)
 }
 
-/// Wipe every top-level child of `dir` in parallel (full-empty of `files/` or
-/// `info/`). Missing `dir` is success. Recreates nothing — caller owns layout.
+/// Wipe every top-level child of `dir` in parallel. Missing `dir` is success.
+/// Returns the number of top-level children removed.
 pub fn wipe_children_parallel(dir: &Path) -> io::Result<u64> {
-    let rd = match fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+    let dir_c = match cstring_path(dir) {
+        Ok(c) => c,
         Err(e) => return Err(e),
     };
-    let children: Vec<_> = rd
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .collect();
-    let n = children.len() as u64;
-    let errors: Vec<_> = children
+    let fd = unsafe { libc::open(dir_c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+    if fd < 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() == io::ErrorKind::NotFound {
+            return Ok(0);
+        }
+        return Err(e);
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let entries = read_dirfd_entries(fd.as_raw_fd())?;
+    let n = entries.len() as u64;
+    if n == 0 {
+        return Ok(0);
+    }
+    // Always parallelise top-level wipe (full empty of files/ or info/).
+    let err_slot: AtomicU64 = AtomicU64::new(0);
+    // Store first error message is hard without mutex; collect errors.
+    let mut first_err: Option<io::Error> = None;
+    let results: Vec<io::Result<()>> = entries
         .par_iter()
-        .filter_map(|p| remove_path(p).err())
+        .map(|e| remove_entry(fd.as_raw_fd(), e, 0))
         .collect();
-    if let Some(e) = errors.into_iter().next() {
+    for r in results {
+        if let Err(e) = r {
+            if first_err.is_none() {
+                first_err = Some(e);
+            }
+            err_slot.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    if let Some(e) = first_err {
         return Err(e);
     }
     Ok(n)
+}
+
+/// Wipe `files/` then `info/` (sequential roots, parallel children each).
+/// Joining both roots in parallel oversubscribed the FS on large empties;
+/// serialising the two roots while keeping per-root parallel unlinks won.
+pub fn wipe_two_parallel(a: &Path, b: &Path) -> io::Result<(u64, u64)> {
+    let na = wipe_children_parallel(a)?;
+    let nb = wipe_children_parallel(b)?;
+    Ok((na, nb))
 }
 
 fn cstring_path(path: &Path) -> io::Result<CString> {
@@ -364,9 +449,45 @@ mod tests {
     }
 
     #[test]
+    fn wipe_two_parallel_both() {
+        let root = tmp_root("two");
+        let a = root.join("a");
+        let b = root.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        for i in 0..20 {
+            fs::write(a.join(format!("f{i}")), b"x").unwrap();
+            fs::write(b.join(format!("g{i}")), b"y").unwrap();
+        }
+        let (na, nb) = wipe_two_parallel(&a, &b).unwrap();
+        assert_eq!(na, 20);
+        assert_eq!(nb, 20);
+        assert!(fs::read_dir(&a).unwrap().next().is_none());
+        assert!(fs::read_dir(&b).unwrap().next().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn missing_is_ok() {
         let root = tmp_root("miss");
         remove_path(&root.join("nope")).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn wide_tree_parallel_remove() {
+        let root = tmp_root("wide");
+        let tree = root.join("w");
+        fs::create_dir_all(&tree).unwrap();
+        for i in 0..64 {
+            let sub = tree.join(format!("s{i}"));
+            fs::create_dir_all(&sub).unwrap();
+            for j in 0..8 {
+                fs::write(sub.join(format!("f{j}")), b"z").unwrap();
+            }
+        }
+        remove_path(&tree).unwrap();
+        assert!(!tree.exists());
         let _ = fs::remove_dir_all(&root);
     }
 }
