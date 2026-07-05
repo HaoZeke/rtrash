@@ -435,20 +435,16 @@ pub fn directorysizes_remove(trash: &TrashDir, name: &str) {
 
 fn remove_any(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
     if meta.is_dir() {
-        fs::remove_dir_all(path)
+        crate::fastdelete::remove_path(path)
     } else {
         fs::remove_file(path)
     }
 }
 
 /// Remove a path whatever it is; used by empty, restore force-overwrite, and error cleanup.
+/// Directory trees use the bulk unlinkat walker (and btrfs subvolume destroy when applicable).
 pub fn remove_any_path(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(m) if m.is_dir() => fs::remove_dir_all(path),
-        Ok(_) => fs::remove_file(path),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+    crate::fastdelete::remove_path(path)
 }
 
 /// Move `src` to `dest`, falling back to copy+delete across devices (EXDEV).

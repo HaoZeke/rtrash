@@ -520,6 +520,30 @@ fn volume_trash_pin_resolves_relative_path() {
     assert!(!trash_root.join("info/rel.txt.trashinfo").exists());
 }
 
+/// Multi-file directory payload must be fully removed via the shipped empty
+/// path (fastdelete / full wipe), not only a single top-level name.
+#[test]
+fn empty_removes_deep_directory_payload() {
+    let sb = Sandbox::new("empty-deep");
+    let root = sb.work().join("deep");
+    fs::create_dir_all(root.join("a/b/c")).unwrap();
+    for i in 0..50 {
+        fs::write(root.join(format!("a/b/c/f{i}")), format!("body{i}")).unwrap();
+    }
+    fs::write(root.join("a/leaf"), b"leaf").unwrap();
+    assert!(sb.run(&["put", "-r", "deep"]).status.success());
+    assert!(sb.trash().join("files/deep/a/b/c/f0").is_file());
+
+    let out = sb.empty(&[]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty());
+    assert!(!sb.trash().join("files/deep").exists());
+    assert!(fs::read_dir(sb.trash().join("info"))
+        .unwrap()
+        .next()
+        .is_none());
+}
+
 #[test]
 fn directory_put_writes_directorysizes_empty_prunes() {
     let sb = Sandbox::new("dirsizes");

@@ -1,4 +1,5 @@
 mod empty;
+mod fastdelete;
 mod info;
 mod list;
 mod put;

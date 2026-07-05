@@ -114,6 +114,14 @@ fn empty_one(
     let info_dir = dir.info();
     let files_dir = dir.files();
 
+    // Full empty (no age filter), real delete: wipe `files/` and `info/` like
+    // empty-source rsync --delete (every name under the root goes), with
+    // parallel top-level unlinks and fastdelete for deep trees / btrfs subvols.
+    if cutoff.is_none() && !opts.dry_run {
+        full_empty_wipe(prog, dir, opts, removed, errors);
+        return;
+    }
+
     let mut kept_names: Vec<String> = Vec::new();
     let mut victims: Vec<(PathBuf, Option<PathBuf>, PathBuf)> = Vec::new(); // (target, info, display)
 
@@ -200,6 +208,69 @@ fn empty_one(
     if !opts.dry_run {
         prune_directorysizes(dir, &kept_names);
     }
+}
+
+/// Count trash items, optionally print them, then parallel-wipe `files/` and
+/// `info/` children (keeps the directory nodes themselves).
+fn full_empty_wipe(
+    prog: &str,
+    dir: &TrashDir,
+    opts: &Opts,
+    removed: &AtomicU64,
+    errors: &AtomicU64,
+) {
+    let info_dir = dir.info();
+    let files_dir = dir.files();
+
+    let mut n: u64 = 0;
+    if let Ok(entries) = fs::read_dir(&info_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name();
+            let fname = fname.to_string_lossy();
+            let Some(name) = fname.strip_suffix(".trashinfo") else {
+                continue;
+            };
+            n += 1;
+            if opts.verbose {
+                println!("removed {}", files_dir.join(name).display());
+            }
+        }
+    }
+    if let Ok(entries) = fs::read_dir(&files_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let has_info = info_dir
+                .join(format!("{}.trashinfo", name.to_string_lossy()))
+                .exists();
+            if !has_info {
+                n += 1;
+                if opts.verbose {
+                    println!("removed {}", entry.path().display());
+                }
+            }
+        }
+    }
+
+    match crate::fastdelete::wipe_children_parallel(&files_dir) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("{prog}: cannot wipe '{}': {e}", files_dir.display());
+            errors.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+    match crate::fastdelete::wipe_children_parallel(&info_dir) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("{prog}: cannot wipe '{}': {e}", info_dir.display());
+            errors.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+
+    removed.fetch_add(n, Ordering::Relaxed);
+    // Full empty: nothing kept — drop directorysizes entirely.
+    prune_directorysizes(dir, &[]);
 }
 
 /// Rewrite the spec's `directorysizes` cache keeping only surviving entries;
