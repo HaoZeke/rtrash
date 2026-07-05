@@ -67,17 +67,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
-    let dirs: Vec<TrashDir> = if opts.trash_dirs.is_empty() {
-        trashdir::all()
-    } else {
-        opts.trash_dirs
-            .iter()
-            .map(|p| TrashDir {
-                root: p.clone(),
-                topdir: None,
-            })
-            .collect()
-    };
+    let dirs: Vec<TrashDir> = trashdir::resolve_dirs(&opts.trash_dirs);
 
     let cutoff = opts.days.map(|d| info::now_epoch() - d * 86_400);
     let removed = AtomicU64::new(0);

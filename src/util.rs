@@ -68,6 +68,98 @@ pub fn stdin_is_tty() -> bool {
     unsafe { libc::isatty(libc::STDIN_FILENO) == 1 }
 }
 
+/// Shell-style glob match (`*`, `?`, `[…]` / `[!…]`), as used by trash-cli `trash-rm`.
+/// Matching is on the full string (callers also try the basename separately).
+pub fn fnmatch(pat: &str, text: &str) -> bool {
+    fnmatch_bytes(pat.as_bytes(), text.as_bytes())
+}
+
+fn fnmatch_bytes(pat: &[u8], text: &[u8]) -> bool {
+    let mut pi = 0;
+    let mut ti = 0;
+    let mut star_p: Option<usize> = None;
+    let mut star_t: usize = 0;
+    while ti < text.len() {
+        if pi < pat.len() {
+            match pat[pi] {
+                b'*' => {
+                    star_p = Some(pi);
+                    star_t = ti;
+                    pi += 1;
+                    continue;
+                }
+                b'?' => {
+                    pi += 1;
+                    ti += 1;
+                    continue;
+                }
+                b'[' => {
+                    if let Some((next_p, ok)) = class_match(&pat[pi..], text[ti]) {
+                        if ok {
+                            pi += next_p;
+                            ti += 1;
+                            continue;
+                        }
+                    }
+                }
+                c if c == text[ti] => {
+                    pi += 1;
+                    ti += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if let Some(sp) = star_p {
+            pi = sp + 1;
+            star_t += 1;
+            ti = star_t;
+            continue;
+        }
+        return false;
+    }
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
+/// Parse a `[…]` class starting at `pat[0] == b'['`. Returns (bytes consumed, matched).
+fn class_match(pat: &[u8], ch: u8) -> Option<(usize, bool)> {
+    if pat.first() != Some(&b'[') || pat.len() < 3 {
+        return None;
+    }
+    let mut i = 1;
+    let mut negated = false;
+    if pat[i] == b'!' || pat[i] == b'^' {
+        negated = true;
+        i += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    while i < pat.len() {
+        if pat[i] == b']' && !first {
+            let ok = if negated { !matched } else { matched };
+            return Some((i + 1, ok));
+        }
+        first = false;
+        if i + 2 < pat.len() && pat[i + 1] == b'-' && pat[i + 2] != b']' {
+            let lo = pat[i];
+            let hi = pat[i + 2];
+            if (lo..=hi).contains(&ch) {
+                matched = true;
+            }
+            i += 3;
+        } else {
+            if pat[i] == ch {
+                matched = true;
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +183,19 @@ mod tests {
     #[test]
     fn decode_malformed_passthrough() {
         assert_eq!(url_decode("%zz%4"), b"%zz%4");
+    }
+
+    #[test]
+    fn fnmatch_star_question_class() {
+        assert!(fnmatch("*.o", "a.o"));
+        assert!(fnmatch("foo?", "food"));
+        assert!(!fnmatch("foo?", "foo"));
+        assert!(fnmatch("file[0-9].txt", "file3.txt"));
+        assert!(!fnmatch("file[0-9].txt", "filea.txt"));
+        assert!(fnmatch("[!a]*", "bcd"));
+        assert!(!fnmatch("[!a]*", "abc"));
+        assert!(fnmatch("*", "anything"));
+        assert!(fnmatch("exact", "exact"));
+        assert!(!fnmatch("exact", "exactx"));
     }
 }

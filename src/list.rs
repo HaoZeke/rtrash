@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::PathBuf;
 
 use crate::info;
 use crate::trashdir::{self, TrashDir};
@@ -7,6 +8,8 @@ const HELP: &str = "\
 Usage: {prog} [OPTION]...
 List trashed items as 'DELETION-DATE ORIGINAL-PATH', oldest first.
 
+      --trash-dir=PATH  list only this trash directory (repeatable);
+                     default is the home trash plus every mounted volume
       --help       display this help and exit
       --version    output version information and exit
 ";
@@ -58,7 +61,8 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
-    if let Some(arg) = args.first() {
+    let mut trash_dirs: Vec<PathBuf> = Vec::new();
+    for arg in args {
         match arg.as_str() {
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
@@ -68,13 +72,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                 return 0;
             }
+            a if a.starts_with("--trash-dir=") => {
+                trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
+            }
             a => {
                 eprintln!("{prog}: unrecognized option '{a}'");
+                eprintln!("Try '{prog} --help' for more information.");
                 return 2;
             }
         }
     }
-    for entry in collect(&trashdir::all()) {
+    for entry in collect(&trashdir::resolve_dirs(&trash_dirs)) {
         let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
         // trash-list prints "YYYY-MM-DD HH:MM:SS path".
         println!(

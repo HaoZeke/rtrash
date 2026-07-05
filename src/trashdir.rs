@@ -132,6 +132,20 @@ pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
     Ok(home)
 }
 
+/// Resolve the set of trash directories to operate on: explicit pins, or every
+/// visible trash dir when `pins` is empty.
+pub fn resolve_dirs(pins: &[PathBuf]) -> Vec<TrashDir> {
+    if pins.is_empty() {
+        return all();
+    }
+    pins.iter()
+        .map(|p| TrashDir {
+            root: p.clone(),
+            topdir: None,
+        })
+        .collect()
+}
+
 /// All trash dirs visible to this user: home trash plus per-mount dirs.
 pub fn all() -> Vec<TrashDir> {
     let mut seen = HashSet::new();
@@ -310,7 +324,82 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
         let _ = remove_any_path(&dest);
         return Err(e);
     }
+    // FreeDesktop directorysizes cache: only for trashed directories.
+    if meta.is_dir() {
+        let size = dir_tree_size(&dest).unwrap_or(0);
+        let mtime = info_mtime_secs(&trash.info().join(format!("{name}.trashinfo"))).unwrap_or(0);
+        let _ = directorysizes_upsert(trash, &name, size, mtime);
+    }
     Ok(name)
+}
+
+/// Total byte size of a directory tree (symlink targets not followed).
+fn dir_tree_size(path: &Path) -> io::Result<u64> {
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_dir() {
+        return Ok(meta.len());
+    }
+    let mut total = 0u64;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let emeta = fs::symlink_metadata(entry.path())?;
+        if emeta.is_dir() {
+            total = total.saturating_add(dir_tree_size(&entry.path())?);
+        } else {
+            total = total.saturating_add(emeta.len());
+        }
+    }
+    Ok(total)
+}
+
+fn info_mtime_secs(path: &Path) -> io::Result<i64> {
+    use std::time::SystemTime;
+    let meta = fs::metadata(path)?;
+    let d = meta
+        .modified()?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    Ok(d.as_secs() as i64)
+}
+
+/// Insert or replace a `directorysizes` line: `size mtime percent-encoded-name`.
+pub fn directorysizes_upsert(trash: &TrashDir, name: &str, size: u64, mtime: i64) -> io::Result<()> {
+    use crate::util::url_encode;
+    let path = trash.root.join("directorysizes");
+    let enc = url_encode(name.as_bytes());
+    let line = format!("{size} {mtime} {enc}\n");
+    let mut out = String::new();
+    if let Ok(existing) = fs::read_to_string(&path) {
+        for l in existing.lines() {
+            let keep = l.rsplit(' ').next().is_some_and(|e| e != enc.as_str());
+            if keep && !l.is_empty() {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+    }
+    out.push_str(&line);
+    fs::write(path, out)
+}
+
+/// Drop a single name from `directorysizes` (used by selective trash-rm).
+pub fn directorysizes_remove(trash: &TrashDir, name: &str) {
+    use crate::util::url_encode;
+    let path = trash.root.join("directorysizes");
+    let Ok(existing) = fs::read_to_string(&path) else {
+        return;
+    };
+    let enc = url_encode(name.as_bytes());
+    let filtered: String = existing
+        .lines()
+        .filter(|l| l.rsplit(' ').next().is_some_and(|e| e != enc.as_str()))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    if filtered.is_empty() {
+        let _ = fs::remove_file(&path);
+    } else {
+        let _ = fs::write(&path, filtered);
+    }
 }
 
 fn remove_any(path: &Path, meta: &fs::Metadata) -> io::Result<()> {

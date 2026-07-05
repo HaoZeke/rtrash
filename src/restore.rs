@@ -14,6 +14,7 @@ current directory. A single match restores directly; multiple matches are
 listed for interactive selection.
 
   -f, --force     overwrite an existing file at the original location
+      --trash-dir=PATH  only consider this trash directory (repeatable)
       --help      display this help and exit
       --version   output version information and exit
 ";
@@ -21,6 +22,7 @@ listed for interactive selection.
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut force = false;
     let mut target: Option<PathBuf> = None;
+    let mut trash_dirs: Vec<PathBuf> = Vec::new();
     for arg in args {
         match arg.as_str() {
             "-f" | "--force" => force = true,
@@ -31,6 +33,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--version" => {
                 println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                 return 0;
+            }
+            a if a.starts_with("--trash-dir=") => {
+                trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
             }
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
@@ -46,7 +51,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
-    let entries = list::collect(&trashdir::all());
+    let entries = list::collect(&trashdir::resolve_dirs(&trash_dirs));
     let matches: Vec<&list::Entry> = match &target {
         Some(t) => {
             let abs = absolutize(t);
@@ -169,6 +174,7 @@ fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
             info_path.display()
         );
     }
+    trashdir::directorysizes_remove(&entry.dir, &entry.name);
     println!("restored '{}'", dest.display());
     0
 }

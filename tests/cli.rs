@@ -359,6 +359,7 @@ fn multicall_names_dispatch() {
         "trash-empty",
         "trash-list",
         "trash-restore",
+        "trash-rm",
     ] {
         std::os::unix::fs::symlink(bin(), bindir.join(name)).unwrap();
     }
@@ -388,4 +389,115 @@ fn multicall_names_dispatch() {
     sb.touch("via-trash.txt");
     assert!(run_as("trash", &["via-trash.txt"]).status.success());
     assert_eq!(trash_names(&sb), vec!["via-trash.txt"]);
+
+    // trash-rm permanently deletes matching trash entries (not restore).
+    let out = run_as("trash-rm", &["via-trash.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty());
+}
+
+#[test]
+fn trash_rm_removes_match_keeps_other() {
+    let sb = Sandbox::new("trash-rm-select");
+    sb.touch("keep.dat");
+    sb.touch("drop.o");
+    sb.touch("also.o");
+    assert!(sb.run(&["put", "keep.dat", "drop.o", "also.o"]).status.success());
+    assert_eq!(trash_names(&sb).len(), 3);
+
+    let out = sb.run(&["rm", "*.o"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["keep.dat"], "only non-matching entry remains");
+    assert!(sb.trash().join("info/keep.dat.trashinfo").exists());
+    assert!(!sb.trash().join("info/drop.o.trashinfo").exists());
+    assert!(!sb.trash().join("files/drop.o").exists());
+}
+
+#[test]
+fn trash_rm_literal_basename() {
+    let sb = Sandbox::new("trash-rm-literal");
+    sb.touch("foo");
+    sb.touch("foobar");
+    assert!(sb.run(&["put", "foo", "foobar"]).status.success());
+    let out = sb.run(&["rm", "foo"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["foobar"]);
+}
+
+#[test]
+fn list_and_restore_respect_trash_dir_pin() {
+    let sb = Sandbox::new("pin-list-restore");
+    let f = sb.touch("pinned.txt");
+    assert!(sb.run(&["put", "pinned.txt"]).status.success());
+
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = sb.run(&["list", &pin]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains(&f.display().to_string()),
+        "{}",
+        stdout_of(&out)
+    );
+
+    // Pin to an empty foreign trash dir: list must not show the real entry.
+    let foreign = sb.root.join("other-trash");
+    fs::create_dir_all(foreign.join("files")).unwrap();
+    fs::create_dir_all(foreign.join("info")).unwrap();
+    let foreign_pin = format!("--trash-dir={}", foreign.display());
+    let out = sb.run(&["list", &foreign_pin]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        !stdout_of(&out).contains("pinned.txt"),
+        "pinned foreign trash must hide home entries: {}",
+        stdout_of(&out)
+    );
+
+    // Restore with the correct pin brings the file back.
+    let out = sb.run(&["restore", &pin, "pinned.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(f.exists());
+    assert_eq!(fs::read(&f).unwrap(), b"payload");
+}
+
+#[test]
+fn directory_put_writes_directorysizes_empty_prunes() {
+    let sb = Sandbox::new("dirsizes");
+    fs::create_dir(sb.work().join("tree")).unwrap();
+    fs::write(sb.work().join("tree/a"), b"aaaa").unwrap();
+    fs::write(sb.work().join("tree/b"), b"bbbbbbbb").unwrap();
+    assert!(sb.run(&["put", "-r", "tree"]).status.success());
+
+    let cache = sb.trash().join("directorysizes");
+    assert!(cache.is_file(), "directory put must write directorysizes");
+    let body = fs::read_to_string(&cache).unwrap();
+    // FreeDesktop: "size mtime percent-encoded-name"
+    let line = body.lines().next().expect("at least one cache line");
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    assert!(
+        parts.len() >= 3,
+        "expected size mtime name, got {line:?}"
+    );
+    let size: u64 = parts[0].parse().expect("size");
+    assert_eq!(size, 12, "4+8 payload bytes");
+    assert_eq!(parts[parts.len() - 1], "tree");
+
+    // File-only put must not invent a directorysizes line for that file name.
+    sb.touch("solo.txt");
+    assert!(sb.run(&["put", "solo.txt"]).status.success());
+    let body2 = fs::read_to_string(&cache).unwrap();
+    assert!(
+        !body2.split_whitespace().any(|t| t == "solo.txt"),
+        "file put must not add directorysizes for files: {body2}"
+    );
+
+    let out = sb.empty(&[]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        !cache.exists(),
+        "full empty must prune/remove directorysizes"
+    );
 }

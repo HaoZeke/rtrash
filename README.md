@@ -1,18 +1,16 @@
 # rtrash
 
-A single native binary for the [freedesktop.org Trash
-specification](https://specifications.freedesktop.org/trash-spec/trashspec-latest.html)
-with an rm-compatible put interface. One Rust executable covers the
-`trash-cli` command names (`trash-put`, `trash-empty`, `trash-list`,
-`trash-restore`, and bare `trash`): no interpreter startup, and emptying
-deletes trash entries in parallel via [rayon](https://crates.io/crates/rayon).
+**SOTA for the Linux FreeDesktop / rm-compatible / trash-cli multi-call niche:**
+one native Rust binary that implements the
+[freedesktop.org Trash specification](https://specifications.freedesktop.org/trash-spec/trashspec-latest.html)
+with an rm-compatible put path and the full everyday trash-cli suite
+(`trash-put`, `trash-empty`, `trash-list`, `trash-restore`, `trash-rm`). No
+interpreter startup; emptying deletes entries in parallel via
+[rayon](https://crates.io/crates/rayon).
 
 **Platform:** Linux FreeDesktop trash only (home trash + per-mount trash
-dirs). Not a Windows/macOS system-trash wrapper.
-
-**Competitive position:** for that niche (native, FreeDesktop-correct,
-rm-compatible multi-call replacement), rtrash is strong; it is not a
-full UX competitor to trashy/gtrash. See [docs/SOTA.md](docs/SOTA.md).
+dirs). Not a Windows/macOS system-trash wrapper, and not a colored TUI — see
+[docs/SOTA.md](docs/SOTA.md) for the niche claim and non-goals.
 
 ## Install
 
@@ -20,22 +18,32 @@ full UX competitor to trashy/gtrash. See [docs/SOTA.md](docs/SOTA.md).
 $ cargo install --git https://github.com/HaoZeke/rtrash
 ```
 
-Requires a Rust toolchain (MSRV **1.77**). The default `cargo install`
-build is a normal dynamically linked Linux binary (glibc), not a musl
-static link; use a musl target yourself if you need a fully static
-artifact.
+Requires a Rust toolchain (MSRV **1.77**). Default `cargo install` produces a
+dynamically linked Linux binary (glibc); use a musl target if you need a fully
+static artifact.
 
-Optional multi-call symlinks make it a drop-in for `rm` and the trash-cli
-commands (dispatch is on `argv[0]`):
+Optional multi-call symlinks (dispatch on `argv[0]`):
 
 ```console
-$ for n in trash trash-put trash-empty trash-list trash-restore; do
+$ for n in trash trash-put trash-empty trash-list trash-restore trash-rm; do
 >   ln -s "$(command -v rtrash)" ~/.local/bin/$n
 > done
-$ ln -s "$(command -v rtrash)" ~/.local/bin/rm   # optional, shadows rm
+$ ln -s "$(command -v rtrash)" ~/.local/bin/rm   # optional: rm → put into trash
 ```
 
-Subcommands also work without symlinks: `rtrash put|empty|list|restore …`.
+Subcommands without symlinks:
+`rtrash put|empty|list|restore|rm …`.
+
+| Multi-call name | Meaning |
+| --------------- | ------- |
+| `rm` / `trash` / `trash-put` | put (move paths into the trash) |
+| `trash-list` | list |
+| `trash-restore` | restore |
+| `trash-empty` | empty |
+| `trash-rm` | permanently delete matching **trash** entries |
+
+Subcommand `rtrash rm PATTERN` is the same as multi-call `trash-rm` (not the
+same as multi-call `rm`, which puts).
 
 ## Tutorial
 
@@ -53,13 +61,20 @@ $ rtrash empty
 Removed 1 item
 ```
 
+Selective permanent delete from the trash (trash-cli `trash-rm`):
+
+```console
+$ rtrash put a.o b.c
+$ rtrash rm '*.o'          # quote globs; removes a.o from trash only
+$ rtrash list              # b.c still listed
+```
+
 `rtrash FILE` with no subcommand behaves like `rm`, so shell habits carry
 over: `rtrash -rf build/` moves `build/` to the trash instead of unlinking
 it.
 
-**Scripts / tests:** prefer `rtrash empty --trash-dir="$XDG_DATA_HOME/Trash"`
-(or an isolated `XDG_DATA_HOME`) so a bare `empty` does not walk every
-mounted volume’s trash on the machine.
+**Scripts / tests:** pin with `--trash-dir=…` and/or isolate
+`XDG_DATA_HOME` so list/empty/restore/rm do not walk every mount’s trash.
 
 ## Reference
 
@@ -84,6 +99,10 @@ the volume cannot host a trash directory. Names are reserved atomically
 (create-new / `O_EXCL` on the `.trashinfo`), so concurrent invocations never
 clobber each other; collisions get `name.2`, `name.3`, ...
 
+Putting a **directory** updates that trash dir’s FreeDesktop `directorysizes`
+cache (`size mtime percent-encoded-name`). Putting ordinary files does not
+add directory lines.
+
 ### `rtrash empty [DAYS]` (also `trash-empty`)
 
 Purges every trash directory visible to the user (home trash plus mounted
@@ -99,7 +118,7 @@ trash-cli compatibility; emptying never prompts).
 Prints `DELETION-DATE ORIGINAL-PATH` per item, oldest first, in the
 `trash-list` output format (`YYYY-MM-DD HH:MM:SS` plus the original path).
 Scans the home trash and per-mount trash directories owned by the current
-user. No filter flags in this version.
+user, or only the directories given with `--trash-dir=PATH` (repeatable).
 
 ### `rtrash restore [PATH]` (also `trash-restore`)
 
@@ -110,22 +129,23 @@ directly; multiple matches list with indices for interactive selection
 unless `-f` / `--force` is given; with `-f`, a blocking destination is
 removed first. Same-filesystem restore uses `rename`; cross-device restore
 copies then deletes the trash payload (needed when put fell back to the home
-trash).
+trash). Options: `--trash-dir=PATH` (repeatable).
+
+### `rtrash rm PATTERN...` (also `trash-rm`)
+
+Permanently deletes trash entries whose original path, basename, or trash
+name matches a shell-style glob `PATTERN` (quote globs from the shell).
+Matching `files/` payloads and `.trashinfo` files are removed; non-matches
+stay. Does **not** restore. Options: `-v`/`--verbose`,
+`--trash-dir=PATH` (repeatable).
 
 ## Limitations and non-goals
 
-- **No `trash-rm`:** cannot permanently delete selected trash entries by
-  pattern the way trash-cli’s `trash-rm` does; use a careful `empty` or
-  restore-then-delete.
 - **No pretty TUI:** no colored tables or fuzzy restore (see trashy/gtrash).
 - **Linux FreeDesktop only:** no Windows Recycle Bin / macOS Trash backends.
-- **No `directorysizes` updates on put:** empty may prune an existing cache;
-  desktop “trash size” may recompute until something else rewrites the cache.
-- **list/restore have no `--trash-dir`:** only `empty` pins trash directories
-  today.
 - **Not a general soft-delete database:** only the FreeDesktop on-disk layout.
 
-Details and competitor framing: [docs/SOTA.md](docs/SOTA.md).
+Niche claim and competitor framing: [docs/SOTA.md](docs/SOTA.md).
 
 ## Performance
 
@@ -152,7 +172,8 @@ $ cargo test
 ```
 
 Integration tests isolate trash under a temporary `XDG_DATA_HOME` and pin
-`empty --trash-dir=…` so they never clear the host trash.
+`empty` / list / restore / `rm` with `--trash-dir=…` so they never clear the
+host trash.
 
 ## Citation
 

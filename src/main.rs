@@ -3,6 +3,7 @@ mod info;
 mod list;
 mod put;
 mod restore;
+mod rm;
 mod trashdir;
 mod util;
 
@@ -11,14 +12,16 @@ Usage: rtrash <COMMAND> [ARGS]...
 Fast freedesktop.org trash tool with an rm-compatible interface.
 
 Commands:
-  put [OPTION]... FILE...   move files to the trash (accepts rm(1) flags)
-  empty [OPTION]... [DAYS]  purge trashed items, optionally older than DAYS
-  list                      list trashed items
-  restore [PATH]            restore a trashed item
+  put [OPTION]... FILE...     move files to the trash (accepts rm(1) flags)
+  empty [OPTION]... [DAYS]    purge trashed items, optionally older than DAYS
+  list [OPTION]...            list trashed items
+  restore [OPTION]... [PATH]  restore a trashed item
+  rm PATTERN...               permanently delete matching trash entries
 
 Multi-call: a symlink or hardlink named rm or trash-put runs `put`;
 trash-empty runs `empty`; trash-list runs `list`; trash-restore runs
-`restore`. Anything else (e.g. `rtrash -rf dir`) falls through to `put`.
+`restore`; trash-rm runs selective permanent delete. Anything else
+(e.g. `rtrash -rf dir`) falls through to `put`.
 
   -h, --help     display this help and exit
   -V, --version  output version information and exit
@@ -36,12 +39,14 @@ fn main() {
         "trash-empty" => empty::run(&argv0, rest),
         "trash-list" => list::run(&argv0, rest),
         "trash-restore" => restore::run(&argv0, rest),
+        "trash-rm" => rm::run(&argv0, rest),
         "rm" | "trash-put" | "trash" => put::run(&argv0, rest),
         _ => match rest.first().map(String::as_str) {
             Some("put") => put::run(&argv0, &rest[1..]),
             Some("empty") => empty::run(&argv0, &rest[1..]),
             Some("list") => list::run(&argv0, &rest[1..]),
             Some("restore") => restore::run(&argv0, &rest[1..]),
+            Some("rm") => rm::run(&argv0, &rest[1..]),
             Some("-h") | Some("--help") | Some("help") | None => {
                 print!("{HELP}");
                 i32::from(rest.is_empty())
