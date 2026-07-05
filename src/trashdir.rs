@@ -132,8 +132,39 @@ pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
     Ok(home)
 }
 
+/// Infer the FreeDesktop volume topdir from a trash root path.
+///
+/// - `$top/.Trash-$uid` → `Some(top)`
+/// - `$top/.Trash/$uid` → `Some(top)`
+/// - home-style trash (or unrecognized layout) → `None` (Path= is absolute)
+pub fn infer_topdir(root: &Path) -> Option<PathBuf> {
+    let name = root.file_name()?.to_string_lossy();
+    let parent = root.parent()?;
+
+    // $topdir/.Trash-$uid
+    if let Some(rest) = name.strip_prefix(".Trash-") {
+        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+            return Some(parent.to_path_buf());
+        }
+    }
+
+    // $topdir/.Trash/$uid
+    let parent_name = parent.file_name()?.to_string_lossy();
+    if parent_name == ".Trash"
+        && !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_digit())
+    {
+        return parent.parent().map(|p| p.to_path_buf());
+    }
+
+    None
+}
+
 /// Resolve the set of trash directories to operate on: explicit pins, or every
 /// visible trash dir when `pins` is empty.
+///
+/// Pins that look like volume trash roots (`.Trash-$uid` or `.Trash/$uid`) get
+/// a `topdir` so relative `Path=` values resolve the same as in [`all`].
 pub fn resolve_dirs(pins: &[PathBuf]) -> Vec<TrashDir> {
     if pins.is_empty() {
         return all();
@@ -141,7 +172,7 @@ pub fn resolve_dirs(pins: &[PathBuf]) -> Vec<TrashDir> {
     pins.iter()
         .map(|p| TrashDir {
             root: p.clone(),
-            topdir: None,
+            topdir: infer_topdir(p),
         })
         .collect()
 }
@@ -457,6 +488,41 @@ mod tests {
         assert!(!src.exists());
         assert_eq!(fs::read(&dst).unwrap(), b"payload");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn infer_topdir_trash_dash_uid() {
+        let root = PathBuf::from("/mnt/usb/.Trash-1000");
+        assert_eq!(
+            infer_topdir(&root).as_deref(),
+            Some(Path::new("/mnt/usb"))
+        );
+    }
+
+    #[test]
+    fn infer_topdir_shared_trash_uid() {
+        let root = PathBuf::from("/mnt/usb/.Trash/1000");
+        assert_eq!(
+            infer_topdir(&root).as_deref(),
+            Some(Path::new("/mnt/usb"))
+        );
+    }
+
+    #[test]
+    fn infer_topdir_home_style_is_none() {
+        assert!(infer_topdir(Path::new("/home/u/.local/share/Trash")).is_none());
+        assert!(infer_topdir(Path::new("/tmp/xdg/Trash")).is_none());
+    }
+
+    #[test]
+    fn resolve_dirs_pin_sets_topdir_for_volume_layout() {
+        let pin = PathBuf::from("/vol/.Trash-42");
+        let dirs = resolve_dirs(&[pin.clone()]);
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].root, pin);
+        assert_eq!(dirs[0].topdir.as_deref(), Some(Path::new("/vol")));
+        let abs = dirs[0].resolve_original(Path::new("docs/x.txt"));
+        assert_eq!(abs, Path::new("/vol/docs/x.txt"));
     }
 }
 

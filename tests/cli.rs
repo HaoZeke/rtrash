@@ -463,6 +463,63 @@ fn list_and_restore_respect_trash_dir_pin() {
     assert_eq!(fs::read(&f).unwrap(), b"payload");
 }
 
+/// Volume trash stores relative Path=; --trash-dir pins must infer topdir so
+/// list/restore/rm agree with unpinned volume entries (absolute originals).
+#[test]
+fn volume_trash_pin_resolves_relative_path() {
+    let sb = Sandbox::new("volume-pin");
+    let uid = unsafe { libc::getuid() };
+    let vol = sb.root.join("vol");
+    let trash_root = vol.join(format!(".Trash-{uid}"));
+    fs::create_dir_all(trash_root.join("files")).unwrap();
+    fs::create_dir_all(trash_root.join("info")).unwrap();
+    fs::create_dir_all(vol.join("docs")).unwrap();
+
+    let seed = |payload: &[u8]| {
+        fs::write(trash_root.join("files/rel.txt"), payload).unwrap();
+        fs::write(
+            trash_root.join("info/rel.txt.trashinfo"),
+            "[Trash Info]\nPath=docs/rel.txt\nDeletionDate=2026-01-02T03:04:05\n",
+        )
+        .unwrap();
+    };
+    seed(b"vol-payload");
+
+    let pin = format!("--trash-dir={}", trash_root.display());
+    let expect_abs = vol.join("docs/rel.txt");
+    let expect_s = expect_abs.display().to_string();
+
+    let out = sb.run(&["list", &pin]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let listed = stdout_of(&out);
+    assert!(
+        listed.contains(&expect_s),
+        "pinned list must resolve relative Path= to absolute under topdir, got: {listed}"
+    );
+    // Unresolved relative path would appear as a bare "docs/rel.txt" token.
+    let only_relative = listed.lines().any(|l| {
+        l.ends_with(" docs/rel.txt") || l == "docs/rel.txt" || l.ends_with("\tdocs/rel.txt")
+    });
+    assert!(
+        !only_relative,
+        "must not list unresolved relative Path= alone: {listed}"
+    );
+
+    let out = sb.run(&["restore", &pin, &expect_s]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(expect_abs.is_file(), "restore must land at absolute original");
+    assert_eq!(fs::read(&expect_abs).unwrap(), b"vol-payload");
+    assert!(!trash_root.join("files/rel.txt").exists());
+
+    // trash-rm by full absolute original must match after topdir resolve.
+    seed(b"again");
+    let _ = fs::remove_file(&expect_abs);
+    let out = sb.run(&["rm", &pin, &expect_s]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!trash_root.join("files/rel.txt").exists());
+    assert!(!trash_root.join("info/rel.txt.trashinfo").exists());
+}
+
 #[test]
 fn directory_put_writes_directorysizes_empty_prunes() {
     let sb = Sandbox::new("dirsizes");
