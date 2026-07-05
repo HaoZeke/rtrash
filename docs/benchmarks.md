@@ -52,22 +52,20 @@ An earlier same-host empty microbench (2001 top-level entries) measured bulk-unl
 
 ## Large full-empty (rtrash vs prior rtrash, same host)
 
-Fixture on **rg.terra** btrfs home (2026-07-05): **8000** small top-level files +
-one deep tree (1000 nested files + 250 wide dirs) → **8001** top-level trash
-entries. Timed `rtrash empty --trash-dir=…` only; five trials each after warm-up.
+Fixture on **rg.terra** btrfs `/home` (2026-07-05): **8000** small top-level
+files + one deep tree (1000 nested files + 250 wide dirs) → **8001** top-level
+trash entries. Timed `rtrash empty --trash-dir=…` only; **7 trials** each after
+warm-up. Full per-trial lines (with `ec=`, `files_left=`, `info_left=`,
+`top_before=`) are in the verification `empty-fast-bench.log`.
 
-| Binary | avg wall (ms) | best | median |
-|--------|---------------|------|--------|
-| Prior release (`fc7272f`) | 153.4 | 138 | 154 |
-| This empty path | **141.4** | **136** | **140** |
-| speedup | **~1.08× avg** | ~1.01× best | **~1.10× median** |
+| Binary | avg wall (ms) | best | median | trimmed avg |
+|--------|---------------|------|--------|-------------|
+| Prior release (`fc7272f` baseline binary) | 274.4 | 236 | 286 | 275.0 |
+| This empty path | **144.0** | **138** | **143** | **143.8** |
+| speedup | **~1.91×** | ~1.71× | **~2.00×** | **~1.91×** |
 
-Reproduce:
+Every timed trial: `ec=0`, `top_before=8001`, `files_left=0`, `info_left=0`.
 
-```shell
-# build baseline from a prior commit, then current tree; use benches below
-cargo build --release
-# see goal verification empty-fast-bench harness (5000–8000 files + deep tree)
-```
-
-Correctness: every timed run ended with `files_left=0` and `info_left=0`.
+Reproduce: build a prior-commit release binary as baseline and the current tree
+as new; run `implementer/run_empty_fast_bench.sh` (or the same populate/empty
+loop against an isolated `XDG_DATA_HOME` on btrfs).
