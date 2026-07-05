@@ -321,13 +321,53 @@ fn remove_any(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
     }
 }
 
-/// Remove a path whatever it is; used by empty and error cleanup.
+/// Remove a path whatever it is; used by empty, restore force-overwrite, and error cleanup.
 pub fn remove_any_path(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(m) if m.is_dir() => fs::remove_dir_all(path),
         Ok(_) => fs::remove_file(path),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
+    }
+}
+
+/// Move `src` to `dest`, falling back to copy+delete across devices (EXDEV).
+/// Used by restore when the trash entry lives on a different filesystem than
+/// the original path (e.g. home-trash fallback after a volume was full).
+pub fn relocate(src: &Path, dest: &Path) -> io::Result<()> {
+    match fs::rename(src, dest) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            let meta = fs::symlink_metadata(src)?;
+            copy_recursive(src, dest, &meta).and_then(|_| remove_any(src, &meta))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relocate_same_fs_moves_file() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-relocate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::write(&src, b"payload").unwrap();
+        relocate(&src, &dst).unwrap();
+        assert!(!src.exists());
+        assert_eq!(fs::read(&dst).unwrap(), b"payload");
+        let _ = fs::remove_dir_all(&root);
     }
 }
 

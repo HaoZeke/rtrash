@@ -320,12 +320,41 @@ fn restore_refuses_overwrite_without_force() {
 }
 
 #[test]
+fn force_interactive_last_wins_like_gnu_rm() {
+    let sb = Sandbox::new("fi-wins");
+    // -if: force last → ignore missing, exit 0 (GNU rm last-wins).
+    let out = sb.run(&["put", "-if", "nope"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    // -fi: interactive last clears force → missing still errors.
+    let out = sb.run(&["put", "-fi", "nope"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("No such file or directory"));
+}
+
+#[test]
+fn restore_force_replaces_directory_at_dest() {
+    let sb = Sandbox::new("restore-force-dir");
+    sb.touch("x");
+    assert!(sb.run(&["put", "x"]).status.success());
+    // Recreate original path as a non-empty directory; rename alone cannot replace it.
+    fs::create_dir(sb.work().join("x")).unwrap();
+    fs::write(sb.work().join("x/inner"), b"blocker").unwrap();
+
+    let out = sb.run(&["restore", "-f", "x"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(fs::read(sb.work().join("x")).unwrap(), b"payload");
+    assert!(!sb.work().join("x/inner").exists());
+}
+
+#[test]
 fn multicall_names_dispatch() {
     let sb = Sandbox::new("multicall");
     let bindir = sb.root.join("bin");
     fs::create_dir_all(&bindir).unwrap();
     for name in [
         "rm",
+        "trash",
         "trash-put",
         "trash-empty",
         "trash-list",
@@ -354,4 +383,9 @@ fn multicall_names_dispatch() {
     let pin = format!("--trash-dir={}", sb.trash().display());
     assert!(run_as("trash-empty", &[&pin]).status.success());
     assert!(trash_names(&sb).is_empty());
+
+    // `trash` argv0 is an alias for put (trash-cli style).
+    sb.touch("via-trash.txt");
+    assert!(run_as("trash", &["via-trash.txt"]).status.success());
+    assert_eq!(trash_names(&sb), vec!["via-trash.txt"]);
 }

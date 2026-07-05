@@ -77,6 +77,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         match arg.as_str() {
             "--" => no_more_opts = true,
+            // GNU rm: -f / -i / --interactive last flag wins for prompt vs force.
             "--force" => {
                 opts.force = true;
                 opts.interactive = Interactive::Never;
@@ -87,12 +88,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--one-file-system" => {}
             "--preserve-root" => opts.preserve_root = true,
             "--no-preserve-root" => opts.preserve_root = false,
-            "--interactive" => opts.interactive = Interactive::Always,
-            "--interactive=never" | "--interactive=no" | "--interactive=none" => {
-                opts.interactive = Interactive::Never
+            "--interactive" => {
+                opts.force = false;
+                opts.interactive = Interactive::Always;
             }
-            "--interactive=once" => opts.interactive = Interactive::Once,
-            "--interactive=always" | "--interactive=yes" => opts.interactive = Interactive::Always,
+            "--interactive=never" | "--interactive=no" | "--interactive=none" => {
+                opts.interactive = Interactive::Never;
+            }
+            "--interactive=once" => {
+                opts.force = false;
+                opts.interactive = Interactive::Once;
+            }
+            "--interactive=always" | "--interactive=yes" => {
+                opts.force = false;
+                opts.interactive = Interactive::Always;
+            }
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -114,8 +124,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                         'r' | 'R' => opts.recursive = true,
                         'd' => opts.empty_dirs = true,
                         'v' => opts.verbose = true,
-                        'i' => opts.interactive = Interactive::Always,
-                        'I' => opts.interactive = Interactive::Once,
+                        'i' => {
+                            opts.force = false;
+                            opts.interactive = Interactive::Always;
+                        }
+                        'I' => {
+                            opts.force = false;
+                            opts.interactive = Interactive::Once;
+                        }
                         other => {
                             return usage_err(prog, &format!("invalid option -- '{other}'"));
                         }

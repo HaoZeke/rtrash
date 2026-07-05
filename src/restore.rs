@@ -130,12 +130,22 @@ fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
     let src = entry.dir.files().join(&entry.name);
     let dest = &entry.original;
 
-    if dest.symlink_metadata().is_ok() && !force {
-        eprintln!(
-            "{prog}: refusing to overwrite existing '{}' (use -f to force)",
-            dest.display()
-        );
-        return 1;
+    if dest.symlink_metadata().is_ok() {
+        if !force {
+            eprintln!(
+                "{prog}: refusing to overwrite existing '{}' (use -f to force)",
+                dest.display()
+            );
+            return 1;
+        }
+        // rename(2) will not replace a directory; remove first so -f is reliable.
+        if let Err(e) = trashdir::remove_any_path(dest) {
+            eprintln!(
+                "{prog}: cannot remove existing '{}': {e}",
+                dest.display()
+            );
+            return 1;
+        }
     }
     if let Some(parent) = dest.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
@@ -143,7 +153,8 @@ fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
             return 1;
         }
     }
-    if let Err(e) = fs::rename(&src, dest) {
+    // rename same-fs; copy+delete on EXDEV (home-trash fallback across mounts).
+    if let Err(e) = trashdir::relocate(&src, dest) {
         eprintln!(
             "{prog}: cannot restore '{}' to '{}': {e}",
             src.display(),
