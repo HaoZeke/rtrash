@@ -13,7 +13,9 @@ const HELP: &str = "\
 Usage: {prog} [OPTION]... [DAYS]
 Purge trashed items. With DAYS, only items trashed more than DAYS days ago.
 
-  -n, --dry-run    report what would be removed without removing anything
+  -n, --dry-run    report what would be removed without removing anything;
+                     also prints approximate reclaimable disk space (fast
+                     in-process walk, like du of the victims)
   -v, --verbose    print each removed item
   -f, --force      accepted for trash-cli compatibility (emptying never prompts)
       --trash-dir=PATH  empty only this trash directory (repeatable);
@@ -71,13 +73,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 
     let cutoff = opts.days.map(|d| info::now_epoch() - d * 86_400);
     let removed = AtomicU64::new(0);
+    let bytes = AtomicU64::new(0);
     let errors = AtomicU64::new(0);
 
     for dir in &dirs {
-        empty_one(prog, dir, cutoff, &opts, &removed, &errors);
+        empty_one(prog, dir, cutoff, &opts, &removed, &bytes, &errors);
     }
 
     let n = removed.load(Ordering::Relaxed);
+    let b = bytes.load(Ordering::Relaxed);
     let verb = if opts.dry_run {
         "Would remove"
     } else {
@@ -85,7 +89,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     };
     let noun = if n == 1 { "item" } else { "items" };
     if opts.verbose || opts.dry_run || n > 0 {
-        eprintln!("{verb} {n} {noun}");
+        if opts.dry_run {
+            // Always show reclaim estimate on dry-run (the main reason to use -n).
+            eprintln!(
+                "{verb} {n} {noun} ({}, approximately reclaimable)",
+                crate::fastdelete::format_bytes(b)
+            );
+        } else {
+            eprintln!("{verb} {n} {noun}");
+        }
     }
     if errors.load(Ordering::Relaxed) > 0 {
         1
@@ -109,6 +121,7 @@ fn empty_one(
     cutoff: Option<i64>,
     opts: &Opts,
     removed: &AtomicU64,
+    bytes: &AtomicU64,
     errors: &AtomicU64,
 ) {
     let info_dir = dir.info();
@@ -174,8 +187,19 @@ fn empty_one(
 
     victims.par_iter().for_each(|(target, info_path, display)| {
         if opts.dry_run {
+            // Fast in-process du of the payload (+ .trashinfo) for reclaim estimate.
+            let sz = crate::fastdelete::disk_usage(target)
+                + info_path
+                    .as_ref()
+                    .map(|p| crate::fastdelete::disk_usage(p))
+                    .unwrap_or(0);
+            bytes.fetch_add(sz, Ordering::Relaxed);
             if opts.verbose {
-                println!("would remove {}", display.display());
+                println!(
+                    "would remove {} ({})",
+                    display.display(),
+                    crate::fastdelete::format_bytes(sz)
+                );
             }
             removed.fetch_add(1, Ordering::Relaxed);
             return;

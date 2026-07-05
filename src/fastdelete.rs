@@ -345,6 +345,47 @@ fn read_dirfd_entries(dirfd: RawFd) -> io::Result<Vec<DirEnt>> {
     Ok(names)
 }
 
+/// Allocated disk usage of `path` in bytes (`st_blocks * 512`), like a fast
+/// in-process `du -sB1` / `du --apparent-size` hybrid: we use block allocation
+/// so sparse files report reclaimable space, not logical length.
+///
+/// Symlinks count only the link inode (not the target). Missing paths are 0.
+pub fn disk_usage(path: &Path) -> u64 {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    let own = meta.blocks().saturating_mul(512);
+    if !meta.is_dir() {
+        return own;
+    }
+    // Directory tree: sum children (parallel at this level when wide).
+    let Ok(rd) = fs::read_dir(path) else {
+        return own;
+    };
+    let children: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    let child_sum: u64 = if children.len() >= 4 {
+        children.par_iter().map(|p| disk_usage(p)).sum()
+    } else {
+        children.iter().map(|p| disk_usage(p)).sum()
+    };
+    own.saturating_add(child_sum)
+}
+
+/// Human-readable binary units (KiB/MiB/GiB) for CLI summaries.
+pub fn format_bytes(n: u64) -> String {
+    const K: f64 = 1024.0;
+    if n < 1024 {
+        format!("{n} B")
+    } else if (n as f64) < K * K {
+        format!("{:.1} KiB", n as f64 / K)
+    } else if (n as f64) < K * K * K {
+        format!("{:.1} MiB", n as f64 / (K * K))
+    } else {
+        format!("{:.2} GiB", n as f64 / (K * K * K))
+    }
+}
+
 /// Wipe every top-level child of `dir` in parallel. Missing `dir` is success.
 /// Returns the number of top-level children removed.
 pub fn wipe_children_parallel(dir: &Path) -> io::Result<u64> {
@@ -471,6 +512,24 @@ mod tests {
     fn missing_is_ok() {
         let root = tmp_root("miss");
         remove_path(&root.join("nope")).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn disk_usage_file_and_tree() {
+        let root = tmp_root("du");
+        let f = root.join("f");
+        fs::write(&f, vec![b'x'; 4096]).unwrap();
+        let file_u = disk_usage(&f);
+        assert!(file_u >= 4096, "allocated size at least payload: {file_u}");
+        let d = root.join("d");
+        fs::create_dir(&d).unwrap();
+        fs::write(d.join("a"), vec![b'y'; 2048]).unwrap();
+        fs::write(d.join("b"), vec![b'z'; 2048]).unwrap();
+        let tree_u = disk_usage(&d);
+        assert!(tree_u >= 4096, "tree at least children: {tree_u}");
+        assert_eq!(format_bytes(512), "512 B");
+        assert!(format_bytes(1536).contains("KiB"));
         let _ = fs::remove_dir_all(&root);
     }
 

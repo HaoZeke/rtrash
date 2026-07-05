@@ -134,9 +134,11 @@ Purges every trash directory visible to the user (home trash plus mounted
 volumes). With `DAYS`, only items trashed more than `DAYS` days ago go.
 Entries are removed in parallel. Orphaned `files/` entries (no
 `.trashinfo`) and entries with broken metadata are purged on a full empty,
-and the `directorysizes` cache is pruned when present. Options: `-n`/`--dry-run`,
-`-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for
-trash-cli compatibility; emptying never prompts).
+and the `directorysizes` cache is pruned when present. Options: `-n`/`--dry-run`
+(also prints an approximate **reclaimable** size via a fast in-process walk of
+the victims, like a small `du` of what would go away), `-v`/`--verbose`,
+`--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility;
+emptying never prompts).
 
 ### `rtrash list` (also `trash-list`)
 

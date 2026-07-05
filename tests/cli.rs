@@ -273,7 +273,33 @@ fn empty_dry_run_removes_nothing() {
     let out = sb.empty(&["--dry-run"]);
     assert!(out.status.success());
     assert_eq!(trash_names(&sb), vec!["keep.txt"]);
-    assert!(stderr_of(&out).contains("Would remove 1 item"));
+    let err = stderr_of(&out);
+    assert!(err.contains("Would remove 1 item"), "{err}");
+    assert!(
+        err.contains("reclaimable"),
+        "dry-run must report reclaimable space: {err}"
+    );
+}
+
+#[test]
+fn empty_dry_run_reports_space_for_tree() {
+    let sb = Sandbox::new("empty-dry-du");
+    let d = sb.work().join("big");
+    fs::create_dir(&d).unwrap();
+    // ~64 KiB payload so the summary cannot be "0 B" on any normal FS.
+    fs::write(d.join("blob"), vec![b'z'; 64 * 1024]).unwrap();
+    assert!(sb.run(&["put", "-r", "big"]).status.success());
+    let out = sb.empty(&["--dry-run"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(sb.trash().join("files/big/blob").is_file());
+    let err = stderr_of(&out);
+    assert!(err.contains("Would remove 1 item"), "{err}");
+    assert!(err.contains("reclaimable"), "{err}");
+    // Must not claim zero reclaim for a large file.
+    assert!(
+        !err.contains("(0 B,"),
+        "expected non-zero reclaim estimate: {err}"
+    );
 }
 
 #[test]
