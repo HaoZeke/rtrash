@@ -214,7 +214,10 @@ native startup and parallel empty help, not as a live leaderboard.
 | `empty`, 20 000 entries    | 0.21 s    | 0.07 s | 3x    |
 | `put`, one file            | 52 ms     | 1 ms   | 52x   |
 
-Full empty was further optimized for large trashcans: no pre-scan when not verbose, `d_type`-fast `unlinkat` for regular files, and parallel top-level wipes of `files/` and `info/`. Emptying parallelizes top-level unlinks and uses an in-process bulk tree
+Full empty was further optimized for large trashcans: no pre-scan when not
+verbose, `d_type`-fast `unlinkat` for regular files, and **serial** wipes of the
+`files/` then `info/` roots with **parallel children** inside each. Emptying
+uses an in-process bulk tree
 delete (readdir/`unlinkat` walk inspired by empty-source `rsync --delete`,
 not a shell-out to rsync). On btrfs, if a trash payload is a real subvolume
 root, empty uses `BTRFS_IOC_SNAP_DESTROY` instead of walking the tree.

@@ -51,7 +51,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
-    let entries = list::collect(&trashdir::resolve_dirs(&trash_dirs));
+    let dirs = trashdir::resolve_dirs(&trash_dirs);
+    if dirs.is_empty() && !trash_dirs.is_empty() {
+        eprintln!("{prog}: no valid --trash-dir pins (need files/ and info/ directories)");
+        return 2;
+    }
+    let entries = list::collect(&dirs);
     let matches: Vec<&list::Entry> = match &target {
         Some(t) => {
             let abs = absolutize(t);
@@ -135,38 +140,76 @@ fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
     let src = entry.dir.files().join(&entry.name);
     let dest = &entry.original;
 
-    if dest.symlink_metadata().is_ok() {
-        if !force {
-            eprintln!(
-                "{prog}: refusing to overwrite existing '{}' (use -f to force)",
-                dest.display()
-            );
+    // Never destroy the live destination until the trash payload is known good.
+    if !src.symlink_metadata().is_ok() {
+        eprintln!(
+            "{prog}: trash payload missing for '{}' (stale .trashinfo?)",
+            entry.name
+        );
+        return 1;
+    }
+
+    let dest_exists = dest.symlink_metadata().is_ok();
+    if dest_exists && !force {
+        eprintln!(
+            "{prog}: refusing to overwrite existing '{}' (use -f to force)",
+            dest.display()
+        );
+        return 1;
+    }
+
+    let parent = match dest.parent() {
+        Some(p) => p,
+        None => {
+            eprintln!("{prog}: cannot restore to '{}': no parent", dest.display());
             return 1;
         }
-        // rename(2) will not replace a directory; remove first so -f is reliable.
+    };
+    if let Err(e) = fs::create_dir_all(parent) {
+        eprintln!("{prog}: cannot create '{}': {e}", parent.display());
+        return 1;
+    }
+
+    // Stage into the destination directory first, then swap over any blocker.
+    // On failure the live dest (if any) is left intact.
+    let staged = parent.join(format!(
+        ".rtrash-restore-{}-{}",
+        std::process::id(),
+        entry.name
+    ));
+    let _ = trashdir::remove_any_path(&staged);
+    if let Err(e) = trashdir::relocate(&src, &staged) {
+        eprintln!(
+            "{prog}: cannot restore '{}' to staging area: {e}",
+            src.display()
+        );
+        let _ = trashdir::remove_any_path(&staged);
+        return 1;
+    }
+
+    if dest_exists {
+        // Payload is durable under `staged`; only now remove the blocker.
         if let Err(e) = trashdir::remove_any_path(dest) {
             eprintln!(
                 "{prog}: cannot remove existing '{}': {e}",
                 dest.display()
             );
+            // Best-effort: put payload back into the trash name.
+            let _ = trashdir::relocate(&staged, &src);
             return 1;
         }
     }
-    if let Some(parent) = dest.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            eprintln!("{prog}: cannot create '{}': {e}", parent.display());
-            return 1;
-        }
-    }
-    // rename same-fs; copy+delete on EXDEV (home-trash fallback across mounts).
-    if let Err(e) = trashdir::relocate(&src, dest) {
+
+    if let Err(e) = fs::rename(&staged, dest) {
+        // Same-FS rename of staged→dest; EXDEV should not happen (same parent).
         eprintln!(
-            "{prog}: cannot restore '{}' to '{}': {e}",
-            src.display(),
+            "{prog}: cannot place restored file at '{}': {e}",
             dest.display()
         );
+        // Leave staged for recovery; try not to drop payload.
         return 1;
     }
+
     let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
     if let Err(e) = fs::remove_file(&info_path) {
         eprintln!(

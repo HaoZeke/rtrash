@@ -12,7 +12,12 @@ Permanently remove trashed items whose original path or basename matches
 a PATTERN (shell-style glob; quote globs from the shell). Matching entries
 are deleted from the trash (files/ + .trashinfo), not restored.
 
+Note: multi-call name `rm` means *put into trash* (safe). This command
+(subcommand `rtrash rm` or multi-call `trash-rm`) permanently deletes
+matching *trash* entries — not a synonym for put.
+
       --trash-dir=PATH  only consider this trash directory (repeatable)
+  -f, --force      allow mass patterns that match everything (e.g. '*')
   -v, --verbose    print each permanently removed original path
       --help       display this help and exit
       --version    output version information and exit
@@ -25,12 +30,14 @@ Examples:
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut verbose = false;
+    let mut force = false;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut patterns: Vec<String> = Vec::new();
 
     for arg in args {
         match arg.as_str() {
             "-v" | "--verbose" => verbose = true,
+            "-f" | "--force" => force = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -54,6 +61,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if patterns.is_empty() {
         eprintln!("{prog}: missing operand");
         eprintln!("Try '{prog} --help' for more information.");
+        return 2;
+    }
+
+    // Refuse accidental host-wide permanent purge of the whole trash.
+    if !force
+        && patterns
+            .iter()
+            .any(|p| p == "*" || p == "*.*" || p == "**" || p == "**/*")
+    {
+        eprintln!(
+            "{prog}: refusing mass pattern {:?} without --force (would permanently delete matching trash entries)",
+            patterns
+        );
+        eprintln!("Try '{prog} --force …' only if you intend a full selective purge.");
         return 2;
     }
 

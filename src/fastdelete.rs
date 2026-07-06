@@ -393,7 +393,13 @@ pub fn wipe_children_parallel(dir: &Path) -> io::Result<u64> {
         Ok(c) => c,
         Err(e) => return Err(e),
     };
-    let fd = unsafe { libc::open(dir_c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+    // Never follow a symlink posing as files/ or info/ (full-empty footgun).
+    let fd = unsafe {
+        libc::open(
+            dir_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )
+    };
     if fd < 0 {
         let e = io::Error::last_os_error();
         if e.kind() == io::ErrorKind::NotFound {
@@ -430,12 +436,24 @@ pub fn wipe_children_parallel(dir: &Path) -> io::Result<u64> {
 }
 
 /// Wipe `files/` then `info/` (sequential roots, parallel children each).
-/// Joining both roots in parallel oversubscribed the FS on large empties;
-/// serialising the two roots while keeping per-root parallel unlinks won.
+/// Always attempts **both** roots even if the first returns an error, so a
+/// partial failure does not leave one side fully intact and the other half-gone
+/// without trying to finish the pair.
 pub fn wipe_two_parallel(a: &Path, b: &Path) -> io::Result<(u64, u64)> {
-    let na = wipe_children_parallel(a)?;
-    let nb = wipe_children_parallel(b)?;
-    Ok((na, nb))
+    let ra = wipe_children_parallel(a);
+    let rb = wipe_children_parallel(b);
+    match (ra, rb) {
+        (Ok(na), Ok(nb)) => Ok((na, nb)),
+        (Err(e), Ok(nb)) => {
+            let _ = nb;
+            Err(e)
+        }
+        (Ok(na), Err(e)) => {
+            let _ = na;
+            Err(e)
+        }
+        (Err(e), Err(_)) => Err(e),
+    }
 }
 
 fn cstring_path(path: &Path) -> io::Result<CString> {

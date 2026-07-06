@@ -70,6 +70,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
 
     let dirs: Vec<TrashDir> = trashdir::resolve_dirs(&opts.trash_dirs);
+    if dirs.is_empty() && !opts.trash_dirs.is_empty() {
+        eprintln!("{prog}: no valid --trash-dir pins (need non-symlink files/ and info/ directories)");
+        return 2;
+    }
 
     let cutoff = opts.days.map(|d| info::now_epoch() - d * 86_400);
     let removed = AtomicU64::new(0);
@@ -127,11 +131,14 @@ fn empty_one(
     let info_dir = dir.info();
     let files_dir = dir.files();
 
-    // Full empty (no age filter), real delete: wipe `files/` and `info/` like
-    // empty-source rsync --delete (every name under the root goes), with
-    // parallel top-level unlinks and fastdelete for deep trees / btrfs subvols.
-    if cutoff.is_none() && !opts.dry_run {
-        full_empty_wipe(prog, dir, opts, removed, errors);
+    // Full empty (no age filter): real wipe, or dry-run that inventories the
+    // same two roots (every child of files/ and info/), not only .trashinfo rows.
+    if cutoff.is_none() {
+        if opts.dry_run {
+            full_empty_dry_run(dir, opts, removed, bytes);
+        } else {
+            full_empty_wipe(prog, dir, opts, removed, errors);
+        }
         return;
     }
 
@@ -234,8 +241,45 @@ fn empty_one(
     }
 }
 
-/// Full empty: wipe `files/` and `info/` concurrently. Skip expensive
-/// pre-scans unless verbose (count comes from the wipe itself).
+/// Dry-run inventory matching full wipe: every top-level child of `files/` and
+/// non-counted-as-item names under `info/` still contribute reclaim size; item
+/// count is top-level `files/` children (same as live wipe `n_files`).
+fn full_empty_dry_run(
+    dir: &TrashDir,
+    opts: &Opts,
+    removed: &AtomicU64,
+    bytes: &AtomicU64,
+) {
+    let files_dir = dir.files();
+    let info_dir = dir.info();
+    let mut n_files = 0u64;
+    let mut total = 0u64;
+    if let Ok(entries) = fs::read_dir(&files_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let sz = crate::fastdelete::disk_usage(&p);
+            total = total.saturating_add(sz);
+            n_files += 1;
+            if opts.verbose {
+                println!(
+                    "would remove {} ({})",
+                    p.display(),
+                    crate::fastdelete::format_bytes(sz)
+                );
+            }
+        }
+    }
+    if let Ok(entries) = fs::read_dir(&info_dir) {
+        for entry in entries.flatten() {
+            total = total.saturating_add(crate::fastdelete::disk_usage(&entry.path()));
+        }
+    }
+    removed.fetch_add(n_files, Ordering::Relaxed);
+    bytes.fetch_add(total, Ordering::Relaxed);
+}
+
+/// Full empty: wipe `files/` and `info/`. Skip expensive pre-scans unless
+/// verbose (count comes from the wipe itself).
 fn full_empty_wipe(
     prog: &str,
     dir: &TrashDir,

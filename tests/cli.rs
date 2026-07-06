@@ -282,6 +282,46 @@ fn empty_dry_run_removes_nothing() {
 }
 
 #[test]
+fn restore_force_missing_payload_keeps_dest() {
+    let sb = Sandbox::new("restore-missing-payload");
+    sb.touch("live.txt");
+    assert!(sb.run(&["put", "live.txt"]).status.success());
+    // Stale info, missing payload: must not destroy a recreated dest with -f.
+    fs::remove_file(sb.trash().join("files/live.txt")).unwrap();
+    fs::write(sb.work().join("live.txt"), b"survivor").unwrap();
+    let out = sb.run(&["restore", "-f", "live.txt"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert_eq!(fs::read(sb.work().join("live.txt")).unwrap(), b"survivor");
+}
+
+#[test]
+fn trash_dir_pin_rejects_non_trash_layout() {
+    let sb = Sandbox::new("bad-pin");
+    let fake = sb.root.join("project");
+    fs::create_dir_all(fake.join("files")).unwrap();
+    fs::create_dir_all(fake.join("info")).unwrap();
+    fs::write(fake.join("files/secret"), b"do-not-wipe").unwrap();
+    // Valid-looking names but we still require the layout — this IS valid layout.
+    // Make info a symlink so validation fails.
+    fs::remove_dir(fake.join("info")).unwrap();
+    std::os::unix::fs::symlink("/tmp", fake.join("info")).unwrap();
+    let pin = format!("--trash-dir={}", fake.display());
+    let out = sb.run(&["empty", &pin]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert_eq!(fs::read(fake.join("files/secret")).unwrap(), b"do-not-wipe");
+}
+
+#[test]
+fn trash_rm_refuses_star_without_force() {
+    let sb = Sandbox::new("rm-star");
+    sb.touch("a.txt");
+    sb.run(&["put", "a.txt"]);
+    let out = sb.run(&["rm", "*"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), vec!["a.txt"]);
+}
+
+#[test]
 fn empty_dry_run_reports_space_for_tree() {
     let sb = Sandbox::new("empty-dry-du");
     let d = sb.work().join("big");

@@ -33,12 +33,66 @@ impl TrashDir {
     }
 
     /// Original path recorded in `info`, resolved to absolute.
+    ///
+    /// Relative volume paths are joined to `topdir` only if they do not escape
+    /// it via `..` (hostile/corrupt `.trashinfo` fail closed to the joined path
+    /// rejected by callers that use [`resolve_original_checked`]).
     pub fn resolve_original(&self, recorded: &Path) -> PathBuf {
-        match (&self.topdir, recorded.is_absolute()) {
-            (Some(top), false) => top.join(recorded),
-            _ => recorded.to_path_buf(),
+        match self.resolve_original_checked(recorded) {
+            Ok(p) => p,
+            // Fail soft for list display: show the raw joined/lex path, but
+            // restore must use the checked form.
+            Err(_) => match (&self.topdir, recorded.is_absolute()) {
+                (Some(top), false) => top.join(recorded),
+                _ => recorded.to_path_buf(),
+            },
         }
     }
+
+    /// Like [`resolve_original`] but returns an error if a relative `Path=`
+    /// escapes the volume topdir (contains `..` that leaves the mount root).
+    pub fn resolve_original_checked(&self, recorded: &Path) -> io::Result<PathBuf> {
+        match (&self.topdir, recorded.is_absolute()) {
+            (Some(top), false) => {
+                if recorded
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    // Also reject after lexical clean escapes top.
+                    let joined = lexical_join_under(top, recorded);
+                    if !joined.starts_with(top) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "trash Path= escapes volume topdir",
+                        ));
+                    }
+                    // ParentDir present is enough to refuse even if still under top
+                    // after clean (spec paths should not need ..).
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "trash Path= must not contain '..'",
+                    ));
+                }
+                Ok(top.join(recorded))
+            }
+            _ => Ok(recorded.to_path_buf()),
+        }
+    }
+}
+
+/// Join `rel` under `top` with lexical `..` resolution (no symlink walk).
+fn lexical_join_under(top: &Path, rel: &Path) -> PathBuf {
+    let mut out = top.to_path_buf();
+    for c in rel.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 pub fn uid() -> u32 {
@@ -165,16 +219,47 @@ pub fn infer_topdir(root: &Path) -> Option<PathBuf> {
 ///
 /// Pins that look like volume trash roots (`.Trash-$uid` or `.Trash/$uid`) get
 /// a `topdir` so relative `Path=` values resolve the same as in [`all`].
+/// Explicit pins must look like a FreeDesktop trash root (real `files/` and
+/// `info/` directories, not symlinks) so a mistaken `--trash-dir=./project` with
+/// co-incidental child names cannot mass-wipe.
 pub fn resolve_dirs(pins: &[PathBuf]) -> Vec<TrashDir> {
     if pins.is_empty() {
         return all();
     }
     pins.iter()
-        .map(|p| TrashDir {
-            root: p.clone(),
-            topdir: infer_topdir(p),
+        .filter_map(|p| {
+            let root = if p.is_absolute() {
+                p.clone()
+            } else {
+                std::env::current_dir().ok()?.join(p)
+            };
+            if !is_valid_trash_root(&root) {
+                eprintln!(
+                    "rtrash: ignoring --trash-dir='{}' (need non-symlink files/ and info/ directories)",
+                    p.display()
+                );
+                return None;
+            }
+            Some(TrashDir {
+                root: root.clone(),
+                topdir: infer_topdir(&root),
+            })
         })
         .collect()
+}
+
+/// True when `root` has non-symlink directory children `files` and `info`.
+pub fn is_valid_trash_root(root: &Path) -> bool {
+    for name in ["files", "info"] {
+        let p = root.join(name);
+        let Ok(meta) = fs::symlink_metadata(&p) else {
+            return false;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return false;
+        }
+    }
+    true
 }
 
 /// All trash dirs visible to this user: home trash plus per-mount dirs.
@@ -190,7 +275,13 @@ pub fn all() -> Vec<TrashDir> {
         });
     }
     let uid = uid();
-    for mp in mount_points() {
+    // Always probe root-FS volume trash: mount_points() historically skipped
+    // `/`, which left `/.Trash-$uid` invisible to list/empty/restore/rm.
+    let mut mps = mount_points();
+    if !mps.iter().any(|p| p == Path::new("/")) {
+        mps.insert(0, PathBuf::from("/"));
+    }
+    for mp in mps {
         for cand in [
             mp.join(".Trash").join(uid.to_string()),
             mp.join(format!(".Trash-{uid}")),
@@ -320,6 +411,17 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
         } else {
             format!("{base}.{}", attempt + 1)
         };
+        // Skip names already occupied by an orphan payload (no .trashinfo).
+        if trash.files().join(&name).symlink_metadata().is_ok() {
+            attempt += 1;
+            if attempt > 10_000 {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "could not reserve a unique trash name",
+                ));
+            }
+            continue;
+        }
         let info_path = trash.info().join(format!("{name}.trashinfo"));
         match fs::OpenOptions::new()
             .write(true)
@@ -343,7 +445,7 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
     drop(info_file);
 
     let dest = trash.files().join(&name);
-    let moved = match fs::rename(abs, &dest) {
+    let moved = match rename_noreplace(abs, &dest) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             copy_recursive(abs, &dest, meta).and_then(|_| remove_any(abs, meta))
@@ -362,6 +464,27 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
         let _ = directorysizes_upsert(trash, &name, size, mtime);
     }
     Ok(name)
+}
+
+/// `rename(2)` that refuses to replace an existing path when the kernel supports
+/// `RENAME_NOREPLACE` (Linux); falls back to plain `rename` otherwise.
+fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let src_c = std::ffi::CString::new(src.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let dest_c = std::ffi::CString::new(dest.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    // RENAME_NOREPLACE = 1 on Linux.
+    let rc = unsafe { libc::renameat2(libc::AT_FDCWD, src_c.as_ptr(), libc::AT_FDCWD, dest_c.as_ptr(), 1) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    // Older kernels / non-Linux: fall back (orphan pre-check still applies).
+    if err.raw_os_error() == Some(libc::EINVAL) || err.raw_os_error() == Some(libc::ENOSYS) {
+        return fs::rename(src, dest);
+    }
+    Err(err)
 }
 
 /// Total byte size of a directory tree (symlink targets not followed).
@@ -512,13 +635,34 @@ mod tests {
 
     #[test]
     fn resolve_dirs_pin_sets_topdir_for_volume_layout() {
-        let pin = PathBuf::from("/vol/.Trash-42");
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-pin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let pin = root.join("vol/.Trash-42");
+        fs::create_dir_all(pin.join("files")).unwrap();
+        fs::create_dir_all(pin.join("info")).unwrap();
         let dirs = resolve_dirs(&[pin.clone()]);
         assert_eq!(dirs.len(), 1);
         assert_eq!(dirs[0].root, pin);
-        assert_eq!(dirs[0].topdir.as_deref(), Some(Path::new("/vol")));
+        assert_eq!(dirs[0].topdir.as_deref(), Some(root.join("vol").as_path()));
         let abs = dirs[0].resolve_original(Path::new("docs/x.txt"));
-        assert_eq!(abs, Path::new("/vol/docs/x.txt"));
+        assert_eq!(abs, root.join("vol/docs/x.txt"));
+        assert!(resolve_original_escape_rejected());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn resolve_original_escape_rejected() -> bool {
+        let td = TrashDir {
+            root: PathBuf::from("/mnt/usb/.Trash-1"),
+            topdir: Some(PathBuf::from("/mnt/usb")),
+        };
+        td.resolve_original_checked(Path::new("../../../etc/passwd"))
+            .is_err()
     }
 }
 

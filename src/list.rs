@@ -43,8 +43,13 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
                 .as_deref()
                 .and_then(info::parse_local_to_epoch)
                 .unwrap_or(0);
+            // Skip hostile/corrupt relative Path= that escape the volume topdir.
+            let original = match dir.resolve_original_checked(&parsed.path) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
             out.push(Entry {
-                original: dir.resolve_original(&parsed.path),
+                original,
                 date: parsed.deletion_date,
                 epoch,
                 name: name.to_string(),
