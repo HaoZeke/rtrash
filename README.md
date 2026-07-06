@@ -96,6 +96,68 @@ Subcommands without symlinks:
 Subcommand `rtrash rm PATTERN` is the same as multi-call `trash-rm` (not the
 same as multi-call `rm`, which puts).
 
+### Shell completions
+
+Checked-in sources (no build step):
+
+| Shell | File |
+| ----- | ---- |
+| bash | [`completions/rtrash.bash`](completions/rtrash.bash) |
+| zsh | [`completions/_rtrash`](completions/_rtrash) |
+
+**bash** (user-local, after `cargo install` or from a source checkout):
+
+```console
+$ mkdir -p ~/.local/share/bash-completion/completions
+$ cp completions/rtrash.bash ~/.local/share/bash-completion/completions/rtrash
+# or, for the current session only:
+$ source /path/to/rtrash/completions/rtrash.bash
+```
+
+If bash-completion is system-installed, the same file may go under
+`/usr/share/bash-completion/completions/rtrash` (packager path).
+
+**zsh** (directory on `$fpath`):
+
+```console
+$ mkdir -p ~/.local/share/zsh/site-functions
+$ cp completions/_rtrash ~/.local/share/zsh/site-functions/_rtrash
+$ # ensure fpath includes that dir, then:
+$ autoload -Uz compinit && compinit
+```
+
+Completions cover `rtrash` subcommands (`put` `empty` `list` `status`
+`restore` `rm`) and multi-call names `trash-put` `trash-empty` `trash-list`
+`trash-restore` `trash-rm` `trash`. Multi-call `rm` is **not** registered by
+default (would shadow system `rm` completion); uncomment the line at the end
+of the bash file or add a zsh `#compdef` entry if you symlink `rm` → rtrash.
+
+### Man pages
+
+Section 1 page: [`man/rtrash.1`](man/rtrash.1) (full suite + multi-call names,
+aligned with in-binary `--help`).
+
+**User-local install** (source tree or after clone):
+
+```console
+$ mkdir -p ~/.local/share/man/man1
+$ cp man/rtrash.1 ~/.local/share/man/man1/
+$ # ensure man finds it, e.g.:
+$ export MANPATH="$HOME/.local/share/man:${MANPATH:-}"
+$ man rtrash
+```
+
+**Preview without installing:**
+
+```console
+$ man -l man/rtrash.1
+# or: mandoc -Tascii man/rtrash.1 | less
+# or: groff -man -Tascii man/rtrash.1 | less
+```
+
+Packagers: install `man/rtrash.1` to the distro `man1` directory (e.g.
+`/usr/share/man/man1/rtrash.1`).
+
 ## Tutorial
 
 Trash a file, inspect the trash, restore it, then empty:

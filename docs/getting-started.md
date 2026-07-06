@@ -25,6 +25,30 @@ for n in trash trash-put trash-empty trash-list trash-restore trash-rm; do
 done
 ```
 
+### Shell completions and man page
+
+From a source checkout (paths relative to the repo root):
+
+```shell
+# bash
+mkdir -p ~/.local/share/bash-completion/completions
+cp completions/rtrash.bash ~/.local/share/bash-completion/completions/rtrash
+
+# zsh (directory must be on $fpath)
+mkdir -p ~/.local/share/zsh/site-functions
+cp completions/_rtrash ~/.local/share/zsh/site-functions/_rtrash
+autoload -Uz compinit && compinit
+
+# man (section 1)
+mkdir -p ~/.local/share/man/man1
+cp man/rtrash.1 ~/.local/share/man/man1/
+export MANPATH="$HOME/.local/share/man:${MANPATH:-}"
+man rtrash
+```
+
+Preview man without installing: `man -l man/rtrash.1`. See the README for
+packager paths and the optional multi-call `rm` completion note.
+
 ### Python (maturin / PyO3)
 
 ```shell

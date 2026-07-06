@@ -1,0 +1,345 @@
+.\" SPDX-License-Identifier: MIT
+.TH RTRASH 1 "2026-07-06" "rtrash 0.1.0" "User Commands"
+.SH NAME
+rtrash \- fast freedesktop.org trash tool with an rm-compatible interface
+.SH SYNOPSIS
+.B rtrash
+[\fICOMMAND\fR] [\fIARGS\fR]...
+.PP
+.B rtrash
+[\fIOPTION\fR]... [\fIFILE\fR]...
+.PP
+Multi-call names (symlinks to the same binary):
+.BR trash-put ,
+.BR trash ,
+.BR trash-empty ,
+.BR trash-list ,
+.BR trash-restore ,
+.BR trash-rm ,
+and optionally
+.B rm
+(put into trash).
+.SH DESCRIPTION
+.B rtrash
+implements the freedesktop.org Trash specification on Linux: home trash
+(\fI$XDG_DATA_HOME/Trash\fR) and per-volume trash directories, with atomic
+.B .trashinfo
+files. It provides an rm-compatible put path and a trash-cli-style suite
+(list, restore, empty, selective permanent delete).
+.PP
+Invoked as
+.B rtrash
+with a known subcommand, that command runs. Invoked as
+.BR rtrash
+with no subcommand (or as
+.BR rm ,
+.BR trash ,
+or
+.BR trash-put ),
+arguments are treated as
+.B put
+(move into the trash). The multi-call name
+.B trash-rm
+is permanent delete of matching
+.I trash entries
+, not the same as multi-call
+.B rm
+(which puts).
+.SH GLOBAL OPTIONS
+When
+.B rtrash
+is invoked with no subcommand yet recognized:
+.TP
+.BR \-h ", " \-\-help
+Display help and exit.
+.TP
+.BR \-V ", " \-\-version
+Output version information and exit.
+.SH COMMANDS
+.SS put
+.B rtrash put
+[\fIOPTION\fR]... [\fIFILE\fR]...
+.PP
+Also:
+.BR trash-put ,
+.BR trash ,
+.BR rm
+(multi-call), or bare
+.B rtrash
+with paths/flags.
+.PP
+Move
+.I FILE
+s into the trash. Accepts common
+.BR rm (1)
+flags with the same interactive/force semantics; nothing is unlinked
+permanently.
+.TP
+.BR \-f ", " \-\-force
+Ignore nonexistent files and arguments, never prompt.
+.TP
+.B \-i
+Prompt before every removal.
+.TP
+.B \-I
+Prompt once before removing more than three files, or when removing
+recursively.
+.TP
+.BI \-\-interactive [=WHEN]
+Prompt according to
+.IR WHEN :
+.BR never ,
+.BR once
+(\-I), or
+.BR always
+(\-i); without
+.IR WHEN ,
+prompt always.
+.TP
+.BR \-r ", " \-R ", " \-\-recursive
+Remove directories and their contents (into the trash).
+.TP
+.BR \-d ", " \-\-dir
+Remove empty directories.
+.TP
+.BR \-v ", " \-\-verbose
+Explain what is being done.
+.TP
+.B \-\-one\-file\-system
+Accepted for rm compatibility (no-op: entries are moved whole, never
+traversed like
+.BR "rm \-x" ).
+.TP
+.B \-\-preserve\-root
+Do not remove
+.RB \(oq / \(cq
+(default).
+.TP
+.B \-\-no\-preserve\-root
+Do not treat
+.RB \(oq / \(cq
+specially.
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.SS empty
+.B rtrash empty
+[\fIOPTION\fR]... [\fIDAYS\fR]
+.PP
+Also multi-call
+.BR trash-empty .
+.PP
+Purge trashed items. With
+.IR DAYS ,
+only items trashed more than
+.I DAYS
+days ago.
+.TP
+.BR \-n ", " \-\-dry\-run
+Report what would be removed without removing anything; also prints
+approximate reclaimable disk space.
+.TP
+.BR \-v ", " \-\-verbose
+Print each removed item.
+.TP
+.BR \-f ", " \-\-force
+Accepted for trash-cli compatibility (emptying never prompts).
+.TP
+.BI \-\-trash\-dir =PATH
+Empty only this trash directory (repeatable); default is the home trash
+plus every mounted volume.
+.TP
+.B \-\-home\-only
+Only the home trash (skip volume trash discovery).
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.SS list
+.B rtrash list
+[\fIOPTION\fR]...
+.PP
+Also multi-call
+.BR trash-list .
+.PP
+List trashed items as
+.RB \(oq "DELETION-DATE ORIGINAL-PATH" \(cq,
+oldest first.
+.TP
+.B \-\-home\-only
+Only the home trash
+(\fI$XDG_DATA_HOME/Trash\fR).
+.TP
+.BI \-\-trash\-dir =PATH
+List only this trash directory (repeatable); default is the home trash
+plus every mounted volume.
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.SS status
+.B rtrash status
+[\fIOPTION\fR]...
+.PP
+Summarize discovered trash: item count and approximate reclaimable size
+(per root and total). Uses the same disk-usage walk as
+.BR "empty \-\-dry\-run" .
+.TP
+.B \-\-home\-only
+Only the home trash
+(\fI$XDG_DATA_HOME/Trash\fR).
+.TP
+.BI \-\-trash\-dir =PATH
+Only this trash directory (repeatable).
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.SS restore
+.B rtrash restore
+[\fIOPTION\fR]... [\fIPATH\fR]
+.PP
+Also multi-call
+.BR trash-restore .
+.PP
+Restore a trashed item to its original location. With
+.IR PATH ,
+restore the item originally at
+.IR PATH ;
+without, choose among items trashed from under the current directory.
+A single match restores directly; multiple matches are listed for
+interactive selection.
+.TP
+.BR \-f ", " \-\-force
+Overwrite an existing file at the original location.
+.TP
+.B \-\-home\-only
+Only the home trash (skip volume trash).
+.TP
+.BI \-\-trash\-dir =PATH
+Only consider this trash directory (repeatable).
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.SS rm (permanent delete from trash)
+.B rtrash rm
+[\fIOPTION\fR]...
+.I PATTERN
+...
+.PP
+Also multi-call
+.BR trash-rm .
+.PP
+Permanently remove trashed items whose original path or basename matches
+a
+.I PATTERN
+(shell-style glob; quote globs from the shell). Matching entries are
+deleted from the trash
+(\fBfiles/\fR and
+.BR .trashinfo ),
+not restored.
+.PP
+Note: multi-call name
+.B rm
+means
+.I put into trash
+(safe). This command (subcommand
+.B rtrash rm
+or multi-call
+.BR trash-rm )
+permanently deletes matching
+.I trash
+entries — not a synonym for put.
+.TP
+.BI \-\-trash\-dir =PATH
+Only consider this trash directory (repeatable).
+.TP
+.B \-\-home\-only
+Only the home trash (skip volume trash).
+.TP
+.BR \-n ", " \-\-dry\-run
+List matches and reclaimable size; do not delete.
+.TP
+.BR \-f ", " \-\-force
+Allow mass patterns that match everything (e.g.
+.RB \(oq * \(cq).
+.TP
+.BR \-v ", " \-\-verbose
+Print each permanently removed original path.
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.PP
+Examples:
+.nf
+.RS
+rtrash rm \(aq*.o\(aq
+rtrash rm \-n \(aq*.o\(aq
+trash-rm foo
+.RE
+.fi
+.SH ENVIRONMENT
+.TP
+.B XDG_DATA_HOME
+Base for the home trash directory
+(\fI$XDG_DATA_HOME/Trash\fR). Defaults under
+.I ~/.local/share
+when unset.
+.TP
+.B HOME
+Used when resolving the default data home.
+.SH FILES
+.TP
+.I $XDG_DATA_HOME/Trash
+Home trash:
+.BR files/ ,
+.BR info/ ,
+.BR directorysizes ,
+and optional lock file.
+.TP
+.IR $top /.Trash/ $uid
+or
+.IR $top /.Trash\- $uid
+Per-volume trash on other mounts (see the Trash specification).
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Failure (e.g. could not trash or purge an item).
+.TP
+.B 2
+Usage error.
+.PP
+Put mode mirrors common
+.BR rm (1)
+exit conventions.
+.SH SEE ALSO
+.BR rm (1),
+Trash specification:
+.UR https://specifications.freedesktop.org/trash-spec/trashspec-latest.html
+.UE
+.PP
+Shell completions ship in the source tree under
+.I completions/
+(bash and zsh). See the project README for install paths.
+.SH AUTHOR
+Written for the rtrash project.
+.SH COPYRIGHT
+MIT License. See the LICENSE file in the distribution.

@@ -1,0 +1,149 @@
+#compdef rtrash trash-put trash-empty trash-list trash-restore trash-rm trash
+# zsh completion for rtrash and multi-call names
+# Install: copy to a directory on $fpath, e.g.
+#   ~/.local/share/zsh/site-functions/_rtrash
+#   /usr/local/share/zsh/site-functions/_rtrash
+# then: autoload -Uz compinit && compinit
+
+local -a put_opts empty_opts list_opts status_opts restore_opts rm_opts
+
+put_opts=(
+  '(-f --force)'{-f,--force}'[ignore nonexistent files, never prompt]'
+  '(-i)'-i'[prompt before every removal]'
+  '(-I)'-I'[prompt once for more than three files or recursive]'
+  '--interactive=-[prompt according to WHEN]::when:(never once always)'
+  '(-r -R --recursive)'{-r,-R,--recursive}'[remove directories and contents]'
+  '(-d --dir)'{-d,--dir}'[remove empty directories]'
+  '(-v --verbose)'{-v,--verbose}'[explain what is being done]'
+  '--one-file-system[accepted for rm compatibility (no-op)]'
+  '--preserve-root[do not remove / (default)]'
+  '--no-preserve-root[do not treat / specially]'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+)
+
+empty_opts=(
+  '(-n --dry-run)'{-n,--dry-run}'[report what would be removed; show reclaimable size]'
+  '(-v --verbose)'{-v,--verbose}'[print each removed item]'
+  '(-f --force)'{-f,--force}'[accepted for trash-cli compatibility]'
+  '*--trash-dir=[empty only this trash directory]:path:_files -/'
+  '--home-only[only the home trash]'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+  '1:days:'
+)
+
+list_opts=(
+  '--home-only[only the home trash]'
+  '*--trash-dir=[list only this trash directory]:path:_files -/'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+)
+
+status_opts=(
+  '--home-only[only the home trash]'
+  '*--trash-dir=[only this trash directory]:path:_files -/'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+)
+
+restore_opts=(
+  '(-f --force)'{-f,--force}'[overwrite existing file at original location]'
+  '--home-only[only the home trash]'
+  '*--trash-dir=[only consider this trash directory]:path:_files -/'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+  '1:path:_files'
+)
+
+rm_opts=(
+  '*--trash-dir=[only consider this trash directory]:path:_files -/'
+  '--home-only[only the home trash]'
+  '(-n --dry-run)'{-n,--dry-run}'[list matches and reclaimable size; do not delete]'
+  '(-f --force)'{-f,--force}'[allow mass patterns that match everything]'
+  '(-v --verbose)'{-v,--verbose}'[print each permanently removed original path]'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+  '*:pattern:'
+)
+
+_rtrash_dispatch() {
+  local cmd="${words[1]##*/}"
+  case "$cmd" in
+    trash-empty)
+      _arguments -s -C $empty_opts
+      return
+      ;;
+    trash-list)
+      _arguments -s -C $list_opts
+      return
+      ;;
+    trash-restore)
+      _arguments -s -C $restore_opts
+      return
+      ;;
+    trash-rm)
+      _arguments -s -C $rm_opts
+      return
+      ;;
+    trash-put | trash)
+      _arguments -s -C $put_opts '*:file:_files'
+      return
+      ;;
+  esac
+
+  # rtrash: subcommands or put fallthrough
+  local -a subcmds
+  subcmds=(
+    'put:move files to the trash (rm-compatible flags)'
+    'empty:purge trashed items'
+    'list:list trashed items'
+    'status:item count and reclaimable size summary'
+    'restore:restore a trashed item'
+    'rm:permanently delete matching trash entries'
+  )
+
+  local curcontext="$curcontext" state line
+  typeset -A opt_args
+
+  _arguments -C \
+    '(-h --help)'{-h,--help}'[display help and exit]' \
+    '(-V --version)'{-V,--version}'[output version and exit]' \
+    '1: :->cmd' \
+    '*::arg:->args'
+
+  case "$state" in
+    cmd)
+      _describe -t commands 'rtrash command' subcmds
+      _files
+      ;;
+    args)
+      case "$line[1]" in
+        put)
+          _arguments -s -C $put_opts '*:file:_files'
+          ;;
+        empty)
+          _arguments -s -C $empty_opts
+          ;;
+        list)
+          _arguments -s -C $list_opts
+          ;;
+        status)
+          _arguments -s -C $status_opts
+          ;;
+        restore)
+          _arguments -s -C $restore_opts
+          ;;
+        rm)
+          _arguments -s -C $rm_opts
+          ;;
+        *)
+          # bare path / rm-style flags after first non-subcommand word
+          _arguments -s -C $put_opts '*:file:_files'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_rtrash_dispatch "$@"
