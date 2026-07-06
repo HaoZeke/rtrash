@@ -47,6 +47,13 @@ matching trash entries* (trash-cli `trash-rm`).
 
 ## Strengths that establish the niche claim
 
+- **Atomic `directorysizes`:** temp+rename rewrite on directory put/prune
+- **`rtrash status`:** item count + reclaimable size per discovered root
+- **`rtrash rm -n` / `--dry-run`:** match report + reclaim without permanent delete
+- **`--home-only`:** suite commands can skip multi-volume discovery (default remains all volumes)
+
+
+
 1. **FreeDesktop placement** — `$XDG_DATA_HOME/Trash`, sticky `$top/.Trash/$uid`,
    `$top/.Trash-$uid`, home-trash copy fallback; atomic create-new on
    `.trashinfo` before payload move; collision names `name.2`, …

@@ -20,6 +20,7 @@ Purge trashed items. With DAYS, only items trashed more than DAYS days ago.
   -f, --force      accepted for trash-cli compatibility (emptying never prompts)
       --trash-dir=PATH  empty only this trash directory (repeatable);
                      default is the home trash plus every mounted volume
+      --home-only  only the home trash (skip volume trash discovery)
       --help       display this help and exit
       --version    output version information and exit
 ";
@@ -28,6 +29,7 @@ struct Opts {
     days: Option<i64>,
     dry_run: bool,
     verbose: bool,
+    home_only: bool,
     trash_dirs: Vec<PathBuf>,
 }
 
@@ -42,6 +44,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         days: None,
         dry_run: false,
         verbose: false,
+        home_only: false,
         trash_dirs: Vec::new(),
     };
     for arg in args {
@@ -49,6 +52,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "-n" | "--dry-run" => opts.dry_run = true,
             "-v" | "--verbose" => opts.verbose = true,
             "-f" | "--force" => {}
+            "--home-only" => opts.home_only = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -69,7 +73,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
-    let dirs: Vec<TrashDir> = trashdir::resolve_dirs(&opts.trash_dirs);
+    let dirs: Vec<TrashDir> = trashdir::resolve_dirs_opts(&opts.trash_dirs, opts.home_only);
     if dirs.is_empty() && !opts.trash_dirs.is_empty() {
         eprintln!("{prog}: no valid --trash-dir pins (need non-symlink files/ and info/ directories)");
         return 2;
@@ -352,7 +356,7 @@ fn prune_directorysizes(dir: &TrashDir, kept: &[String]) {
         })
         .map(|l| format!("{l}\n"))
         .collect();
-    let _ = fs::write(&path, filtered);
+    let _ = trashdir::atomic_write(&path, filtered.as_bytes());
 }
 
 #[cfg(test)]

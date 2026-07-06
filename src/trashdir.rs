@@ -268,8 +268,14 @@ pub fn infer_topdir(root: &Path) -> Option<PathBuf> {
 /// `info/` directories, not symlinks) so a mistaken `--trash-dir=./project` with
 /// co-incidental child names cannot mass-wipe.
 pub fn resolve_dirs(pins: &[PathBuf]) -> Vec<TrashDir> {
+    resolve_dirs_opts(pins, false)
+}
+
+/// Like [`resolve_dirs`], but `home_only` restricts unpinned discovery to the
+/// home trash (scripts that must not touch volume trash on USB mounts).
+pub fn resolve_dirs_opts(pins: &[PathBuf], home_only: bool) -> Vec<TrashDir> {
     if pins.is_empty() {
-        return all();
+        return if home_only { home_only_dirs() } else { all() };
     }
     pins.iter()
         .filter_map(|p| {
@@ -291,6 +297,19 @@ pub fn resolve_dirs(pins: &[PathBuf]) -> Vec<TrashDir> {
             })
         })
         .collect()
+}
+
+/// Home trash only (if it exists), for `--home-only`.
+pub fn home_only_dirs() -> Vec<TrashDir> {
+    let home = home_trash();
+    if home.is_dir() {
+        vec![TrashDir {
+            root: home,
+            topdir: None,
+        }]
+    } else {
+        Vec::new()
+    }
 }
 
 /// True when `root` has non-symlink directory children `files` and `info`.
@@ -627,6 +646,7 @@ fn info_mtime_secs(path: &Path) -> io::Result<i64> {
 }
 
 /// Insert or replace a `directorysizes` line: `size mtime percent-encoded-name`.
+/// Writes via temp file + rename (FreeDesktop: avoid concurrent cache corruption).
 pub fn directorysizes_upsert(trash: &TrashDir, name: &str, size: u64, mtime: i64) -> io::Result<()> {
     use crate::util::url_encode;
     let path = trash.root.join("directorysizes");
@@ -643,7 +663,7 @@ pub fn directorysizes_upsert(trash: &TrashDir, name: &str, size: u64, mtime: i64
         }
     }
     out.push_str(&line);
-    fs::write(path, out)
+    atomic_write(&path, out.as_bytes())
 }
 
 /// Drop a single name from `directorysizes` (used by selective trash-rm).
@@ -662,7 +682,32 @@ pub fn directorysizes_remove(trash: &TrashDir, name: &str) {
     if filtered.is_empty() {
         let _ = fs::remove_file(&path);
     } else {
-        let _ = fs::write(&path, filtered);
+        let _ = atomic_write(&path, filtered.as_bytes());
+    }
+}
+
+/// Write `data` to `path` via a same-dir temp file and rename (atomic on POSIX).
+pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let tmp = parent.join(format!(
+        ".{}.tmp.{}",
+        path.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "rtrash".into()),
+        std::process::id()
+    ));
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
     }
 }
 

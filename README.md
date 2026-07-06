@@ -166,6 +166,10 @@ the victims, like a small `du` of what would go away), `-v`/`--verbose`,
 `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility;
 emptying never prompts).
 
+### `rtrash status`
+
+Prints per-trash-root and total **item count** plus approximate **reclaimable size** (same disk-usage walk as empty dry-run). Accepts `--home-only` and `--trash-dir`.
+
 ### `rtrash list` (also `trash-list`)
 
 Prints `DELETION-DATE ORIGINAL-PATH` per item, oldest first, in the

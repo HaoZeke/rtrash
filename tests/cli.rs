@@ -282,6 +282,79 @@ fn empty_dry_run_removes_nothing() {
 }
 
 #[test]
+fn directorysizes_atomic_rewrite_survives_put() {
+    let sb = Sandbox::new("dirsizes-atomic");
+    fs::create_dir(sb.work().join("d")).unwrap();
+    fs::write(sb.work().join("d/x"), b"payload-bytes").unwrap();
+    assert!(sb.run(&["put", "-r", "d"]).status.success());
+    let cache = sb.trash().join("directorysizes");
+    assert!(cache.is_file());
+    let body = fs::read_to_string(&cache).unwrap();
+    assert!(body.contains(" d\n") || body.ends_with(" d") || body.split_whitespace().any(|t| t == "d"), "{body}");
+    // No leftover temp files from atomic write.
+    let leftovers: Vec<_> = fs::read_dir(sb.trash())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+        .collect();
+    assert!(leftovers.is_empty(), "atomic write left temps: {leftovers:?}");
+}
+
+#[test]
+fn trash_rm_dry_run_keeps_entries_and_reports_reclaim() {
+    let sb = Sandbox::new("rm-dry");
+    sb.touch("drop.o");
+    sb.touch("keep.c");
+    assert!(sb.run(&["put", "drop.o", "keep.c"]).status.success());
+    let out = sb.run(&["rm", "--dry-run", "*.o"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(err.contains("Would permanently remove"), "{err}");
+    assert!(err.contains("reclaimable"), "{err}");
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["drop.o", "keep.c"]);
+}
+
+#[test]
+fn status_reports_items_and_size_after_put() {
+    let sb = Sandbox::new("status");
+    fs::write(sb.work().join("blob.bin"), vec![b'x'; 8192]).unwrap();
+    assert!(sb.run(&["put", "blob.bin"]).status.success());
+    let out = sb.run(&["status", "--home-only"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let s = stdout_of(&out);
+    assert!(s.contains("Total:"), "{s}");
+    assert!(s.contains("1 items") || s.contains("1 item"), "{s}");
+    assert!(!s.contains("Total: 0 items"), "{s}");
+}
+
+#[test]
+fn home_only_empty_ignores_foreign_trash_dir() {
+    let sb = Sandbox::new("home-only");
+    sb.touch("home.txt");
+    assert!(sb.run(&["put", "home.txt"]).status.success());
+    // Foreign volume-style trash with a separate entry (not under home discovery
+    // when --home-only). We pin is not used; foreign is outside XDG home trash.
+    let foreign = sb.root.join("mnt/.Trash-1");
+    fs::create_dir_all(foreign.join("files")).unwrap();
+    fs::create_dir_all(foreign.join("info")).unwrap();
+    fs::write(foreign.join("files/vol.dat"), b"keep-on-volume").unwrap();
+    fs::write(
+        foreign.join("info/vol.dat.trashinfo"),
+        "[Trash Info]\nPath=vol.dat\nDeletionDate=2020-01-01T00:00:00\n",
+    )
+    .unwrap();
+    let out = sb.run(&["empty", "--home-only"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty());
+    assert!(
+        foreign.join("files/vol.dat").is_file(),
+        "volume trash must survive --home-only empty"
+    );
+}
+
+#[test]
 fn put_writes_complete_trashinfo_after_fsync_path() {
     let sb = Sandbox::new("put-fsync-info");
     let f = sb.touch("syncme.txt");

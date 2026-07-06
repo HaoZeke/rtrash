@@ -1,4 +1,4 @@
-use rtrash::{empty, list, put, restore, rm};
+use rtrash::{empty, list, put, restore, rm, status};
 
 const HELP: &str = "\
 Usage: rtrash <COMMAND> [ARGS]...
@@ -8,6 +8,7 @@ Commands:
   put [OPTION]... FILE...     move files to the trash (accepts rm(1) flags)
   empty [OPTION]... [DAYS]    purge trashed items, optionally older than DAYS
   list [OPTION]...            list trashed items
+  status [OPTION]...          item count and reclaimable size summary
   restore [OPTION]... [PATH]  restore a trashed item
   rm PATTERN...               permanently delete matching trash entries
 
@@ -15,6 +16,9 @@ Multi-call: a symlink or hardlink named rm or trash-put runs `put`;
 trash-empty runs `empty`; trash-list runs `list`; trash-restore runs
 `restore`; trash-rm runs selective permanent delete. Anything else
 (e.g. `rtrash -rf dir`) falls through to `put`.
+
+Most suite commands accept --home-only (home trash only) and
+--trash-dir=PATH (repeatable pin).
 
   -h, --help     display this help and exit
   -V, --version  output version information and exit
@@ -38,6 +42,7 @@ fn main() {
             Some("put") => put::run(&argv0, &rest[1..]),
             Some("empty") => empty::run(&argv0, &rest[1..]),
             Some("list") => list::run(&argv0, &rest[1..]),
+            Some("status") => status::run(&argv0, &rest[1..]),
             Some("restore") => restore::run(&argv0, &rest[1..]),
             Some("rm") => rm::run(&argv0, &rest[1..]),
             Some("-h") | Some("--help") | Some("help") | None => {

@@ -14,6 +14,7 @@ current directory. A single match restores directly; multiple matches are
 listed for interactive selection.
 
   -f, --force     overwrite an existing file at the original location
+      --home-only  only the home trash (skip volume trash)
       --trash-dir=PATH  only consider this trash directory (repeatable)
       --help      display this help and exit
       --version   output version information and exit
@@ -21,11 +22,13 @@ listed for interactive selection.
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut force = false;
+    let mut home_only = false;
     let mut target: Option<PathBuf> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     for arg in args {
         match arg.as_str() {
             "-f" | "--force" => force = true,
+            "--home-only" => home_only = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -51,7 +54,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
-    let dirs = trashdir::resolve_dirs(&trash_dirs);
+    let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);
     if dirs.is_empty() && !trash_dirs.is_empty() {
         eprintln!("{prog}: no valid --trash-dir pins (need files/ and info/ directories)");
         return 2;

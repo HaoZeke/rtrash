@@ -17,6 +17,8 @@ Note: multi-call name `rm` means *put into trash* (safe). This command
 matching *trash* entries — not a synonym for put.
 
       --trash-dir=PATH  only consider this trash directory (repeatable)
+      --home-only  only the home trash (skip volume trash)
+  -n, --dry-run    list matches and reclaimable size; do not delete
   -f, --force      allow mass patterns that match everything (e.g. '*')
   -v, --verbose    print each permanently removed original path
       --help       display this help and exit
@@ -24,6 +26,7 @@ matching *trash* entries — not a synonym for put.
 
 Examples:
   {prog} '*.o'
+  {prog} -n '*.o'
   {prog} foo
   {prog} /home/you/old-project
 ";
@@ -31,6 +34,8 @@ Examples:
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut verbose = false;
     let mut force = false;
+    let mut dry_run = false;
+    let mut home_only = false;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut patterns: Vec<String> = Vec::new();
 
@@ -38,6 +43,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         match arg.as_str() {
             "-v" | "--verbose" => verbose = true,
             "-f" | "--force" => force = true,
+            "-n" | "--dry-run" => dry_run = true,
+            "--home-only" => home_only = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -78,10 +85,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 2;
     }
 
-    let dirs: Vec<TrashDir> = trashdir::resolve_dirs(&trash_dirs);
+    let dirs: Vec<TrashDir> = trashdir::resolve_dirs_opts(&trash_dirs, home_only);
+    if dirs.is_empty() && !trash_dirs.is_empty() {
+        eprintln!("{prog}: no valid --trash-dir pins");
+        return 2;
+    }
     let entries = list::collect(&dirs);
     let mut status = 0i32;
     let mut removed = 0u64;
+    let mut bytes = 0u64;
 
     for entry in &entries {
         let path_s = entry.original.to_string_lossy();
@@ -100,6 +112,22 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         let payload = entry.dir.files().join(&entry.name);
         let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
+        if dry_run {
+            let sz = crate::fastdelete::disk_usage(&payload)
+                + crate::fastdelete::disk_usage(&info_path);
+            bytes = bytes.saturating_add(sz);
+            if verbose {
+                println!(
+                    "would permanently remove {} ({})",
+                    entry.original.display(),
+                    crate::fastdelete::format_bytes(sz)
+                );
+            } else {
+                println!("{}", entry.original.display());
+            }
+            removed += 1;
+            continue;
+        }
         if let Err(e) = trashdir::remove_any_path(&payload) {
             eprintln!(
                 "{prog}: cannot remove '{}': {e}",
@@ -126,7 +154,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         removed += 1;
     }
 
-    if verbose || removed > 0 {
+    if dry_run {
+        let noun = if removed == 1 { "item" } else { "items" };
+        eprintln!(
+            "Would permanently remove {removed} {noun} ({}, approximately reclaimable)",
+            crate::fastdelete::format_bytes(bytes)
+        );
+    } else if verbose || removed > 0 {
         let noun = if removed == 1 { "item" } else { "items" };
         eprintln!("Permanently removed {removed} {noun}");
     }

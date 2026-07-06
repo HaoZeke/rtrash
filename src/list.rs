@@ -8,6 +8,7 @@ const HELP: &str = "\
 Usage: {prog} [OPTION]...
 List trashed items as 'DELETION-DATE ORIGINAL-PATH', oldest first.
 
+      --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  list only this trash directory (repeatable);
                      default is the home trash plus every mounted volume
       --help       display this help and exit
@@ -67,8 +68,10 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
+    let mut home_only = false;
     for arg in args {
         match arg.as_str() {
+            "--home-only" => home_only = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -87,7 +90,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
     }
-    for entry in collect(&trashdir::resolve_dirs(&trash_dirs)) {
+    for entry in collect(&trashdir::resolve_dirs_opts(&trash_dirs, home_only)) {
         let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
         // trash-list prints "YYYY-MM-DD HH:MM:SS path".
         println!(
