@@ -233,6 +233,52 @@ Display help and exit.
 .TP
 .B \-\-version
 Output version information and exit.
+.SS setup
+.B rtrash setup
+[\fIOPTION\fR]...
+.PP
+Install multi-call symlinks, bash/zsh completions, and this man page under a
+user prefix (default
+.IR ~/.local ,
+or
+.B $PREFIX
+if set). Assets are
+.B embedded in the binary
+so a
+.B cargo install
+user does not need a source checkout. Preferred post-install step:
+.BR "rtrash setup" .
+.TP
+.BI \-\-prefix =DIR
+Install root (default:
+.IR ~/.local ).
+.TP
+.BI \-\-bin\-dir =DIR
+Override the directory for multi-call symlinks (default:
+.IR PREFIX/bin ).
+.TP
+.B \-\-with\-rm
+Also link
+.B rm
+→ rtrash (put into trash).
+.TP
+.BR \-n ", " \-\-dry\-run
+Print actions without writing.
+.TP
+.BR \-f ", " \-\-force
+Replace existing links/files (use after upgrades).
+.TP
+.BR \-v ", " \-\-verbose
+Print each path written.
+.SS completions
+.B rtrash completions
+.RB { bash | zsh }
+.PP
+Print the embedded completion script to stdout (packagers / custom paths).
+.SS man
+.B rtrash man
+.PP
+Print the embedded man page source to stdout.
 .SS rm (permanent delete from trash)
 .B rtrash rm
 [\fIOPTION\fR]...

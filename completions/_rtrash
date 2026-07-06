@@ -1,9 +1,7 @@
 #compdef rtrash trash-put trash-empty trash-list trash-restore trash-rm trash
 # zsh completion for rtrash and multi-call names
-# Install: copy to a directory on $fpath, e.g.
-#   ~/.local/share/zsh/site-functions/_rtrash
-#   /usr/local/share/zsh/site-functions/_rtrash
-# then: autoload -Uz compinit && compinit
+# Preferred install: rtrash setup
+# Or: rtrash completions zsh > …/zsh/site-functions/_rtrash
 
 local -a put_opts empty_opts list_opts status_opts restore_opts rm_opts
 
@@ -101,6 +99,9 @@ _rtrash_dispatch() {
     'status:item count and reclaimable size summary'
     'restore:restore a trashed item'
     'rm:permanently delete matching trash entries'
+    'setup:install multi-call links, completions, man page'
+    'completions:print embedded shell completion script'
+    'man:print embedded man page to stdout'
   )
 
   local curcontext="$curcontext" state line
@@ -136,6 +137,24 @@ _rtrash_dispatch() {
           ;;
         rm)
           _arguments -s -C $rm_opts
+          ;;
+        setup)
+          _arguments -s -C \
+            '--prefix=[install root]:dir:_files -/' \
+            '--bin-dir=[binary/link directory]:dir:_files -/' \
+            '--with-rm[also link rm to rtrash]' \
+            '(-n --dry-run)'{-n,--dry-run}'[print actions without writing]' \
+            '(-f --force)'{-f,--force}'[replace existing links/files]' \
+            '(-v --verbose)'{-v,--verbose}'[print each path written]' \
+            '(- *)'--help'[display help and exit]'
+          ;;
+        completions)
+          _arguments -s -C \
+            '(- *)'--help'[display help and exit]' \
+            '1:shell:(bash zsh)'
+          ;;
+        man)
+          _arguments -s -C '(- *)'--help'[display help and exit]'
           ;;
         *)
           # bare path / rm-style flags after first non-subcommand word

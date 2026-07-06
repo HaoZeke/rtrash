@@ -751,3 +751,72 @@ fn directory_put_writes_directorysizes_empty_prunes() {
         "full empty must prune/remove directorysizes"
     );
 }
+
+#[test]
+fn completions_stdout_matches_embedded_markers() {
+    let out = Command::new(bin())
+        .args(["completions", "bash"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = stdout_of(&out);
+    assert!(s.contains("complete -F _rtrash_main rtrash"));
+    assert!(s.contains("--home-only"));
+
+    let out = Command::new(bin())
+        .args(["completions", "zsh"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(stdout_of(&out).contains("#compdef"));
+}
+
+#[test]
+fn man_subcommand_prints_page() {
+    let out = Command::new(bin()).args(["man"]).output().unwrap();
+    assert!(out.status.success());
+    let s = stdout_of(&out);
+    assert!(s.contains(".TH RTRASH 1"));
+    assert!(s.contains("setup"));
+}
+
+#[test]
+fn setup_installs_under_prefix() {
+    let prefix = std::env::temp_dir().join(format!(
+        "rtrash-setup-cli-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = fs::remove_dir_all(&prefix);
+    let prefix_s = prefix.display().to_string();
+    let out = Command::new(bin())
+        .args(["setup", &format!("--prefix={prefix_s}"), "-f", "-v"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "setup failed: {}",
+        stderr_of(&out)
+    );
+    let bash = prefix.join("share/bash-completion/completions/rtrash");
+    let zsh = prefix.join("share/zsh/site-functions/_rtrash");
+    let man = prefix.join("share/man/man1/rtrash.1");
+    assert!(bash.is_file(), "missing {bash:?}");
+    assert!(zsh.is_file(), "missing {zsh:?}");
+    assert!(man.is_file(), "missing {man:?}");
+    assert!(prefix.join("bin/trash-put").symlink_metadata().is_ok());
+    assert!(fs::read_to_string(&bash).unwrap().contains("setup"));
+    let _ = fs::remove_dir_all(&prefix);
+}
+
+#[test]
+fn help_mentions_setup() {
+    let out = Command::new(bin()).args(["--help"]).output().unwrap();
+    assert!(out.status.success());
+    let s = stdout_of(&out);
+    assert!(s.contains("setup"));
+    assert!(s.contains("completions"));
+}

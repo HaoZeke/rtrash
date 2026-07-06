@@ -37,7 +37,7 @@ startup on every call.
 
 #+begin_src shell
 cargo install --git https://github.com/HaoZeke/rtrash
-# optional multi-call names: trash-put, trash-empty, trash-list, trash-restore, trash-rm
+rtrash setup   # multi-call links + completions + man under ~/.local
 #+end_src
 
 ** Python

@@ -50,6 +50,8 @@ fn bash_completion_covers_surface() {
             "--recursive",
             "--force",
             "--verbose",
+            "setup",
+            "completions",
         ],
         "completions/rtrash.bash",
     );
@@ -114,16 +116,17 @@ fn man_page_covers_surface() {
 }
 
 #[test]
-fn readme_documents_completions_and_man() {
+fn readme_documents_setup_story() {
     let s = read("README.md");
     assert_contains(
         &s,
         &[
-            "completions/",
-            "man/rtrash.1",
+            "rtrash setup",
+            "completions bash",
             "bash-completion",
             "site-functions",
-            "MANPATH",
+            "man/rtrash.1",
+            "embedded",
         ],
         "README.md",
     );

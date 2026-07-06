@@ -1,4 +1,4 @@
-use rtrash::{empty, list, put, restore, rm, status};
+use rtrash::{empty, list, put, restore, rm, setup, status};
 
 const HELP: &str = "\
 Usage: rtrash <COMMAND> [ARGS]...
@@ -11,6 +11,9 @@ Commands:
   status [OPTION]...          item count and reclaimable size summary
   restore [OPTION]... [PATH]  restore a trashed item
   rm PATTERN...               permanently delete matching trash entries
+  setup [OPTION]...           install multi-call links, completions, man page
+  completions {bash|zsh}      print embedded shell completion script
+  man                         print embedded man(1) page to stdout
 
 Multi-call: a symlink or hardlink named rm or trash-put runs `put`;
 trash-empty runs `empty`; trash-list runs `list`; trash-restore runs
@@ -19,6 +22,8 @@ trash-empty runs `empty`; trash-list runs `list`; trash-restore runs
 
 Most suite commands accept --home-only (home trash only) and
 --trash-dir=PATH (repeatable pin).
+
+After cargo install, run:  rtrash setup
 
   -h, --help     display this help and exit
   -V, --version  output version information and exit
@@ -45,6 +50,9 @@ fn main() {
             Some("status") => status::run(&argv0, &rest[1..]),
             Some("restore") => restore::run(&argv0, &rest[1..]),
             Some("rm") => rm::run(&argv0, &rest[1..]),
+            Some("setup") => setup::run("setup", &rest[1..]),
+            Some("completions") => setup::run("completions", &rest[1..]),
+            Some("man") => setup::run("man", &rest[1..]),
             Some("-h") | Some("--help") | Some("help") | None => {
                 print!("{HELP}");
                 i32::from(rest.is_empty())

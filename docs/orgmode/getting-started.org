@@ -21,11 +21,14 @@ Python API detail: [[file:bindings.org][bindings.org]].
 
 #+begin_src shell
 cargo install --git https://github.com/HaoZeke/rtrash
-# optional multi-call names:
-for n in trash trash-put trash-empty trash-list trash-restore trash-rm; do
-  ln -s "$(command -v rtrash)" ~/.local/bin/$n
-done
+rtrash setup
 #+end_src
+
+~rtrash setup~ installs multi-call links, bash/zsh completions, and the man
+page under =~/.local= from assets *embedded in the binary* (no source checkout).
+Flags: ~--dry-run~, ~--force~ (after upgrades), ~--with-rm~, ~--prefix=DIR~.
+Packagers: ~rtrash completions bash|zsh~, ~rtrash man~, or
+~rtrash setup --prefix=/usr~.
 
 MSRV *1.77*. Default install is a normal dynamically linked Linux binary.
 

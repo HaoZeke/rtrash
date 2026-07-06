@@ -65,25 +65,35 @@ dirs). Not a Windows/macOS system-trash wrapper, and not a colored TUI — see
 
 ## Install
 
-```console
-$ cargo install --git https://github.com/HaoZeke/rtrash
-```
-
 Requires a Rust toolchain (MSRV **1.77**). Default `cargo install` produces a
 dynamically linked Linux binary (glibc); use a musl target if you need a fully
 static artifact.
 
-Optional multi-call symlinks (dispatch on `argv[0]`):
-
 ```console
-$ for n in trash trash-put trash-empty trash-list trash-restore trash-rm; do
->   ln -s "$(command -v rtrash)" ~/.local/bin/$n
-> done
-$ ln -s "$(command -v rtrash)" ~/.local/bin/rm   # optional: rm → put into trash
+$ cargo install --git https://github.com/HaoZeke/rtrash
+$ rtrash setup
 ```
 
-Subcommands without symlinks:
-`rtrash put|empty|list|restore|rm …`.
+**That is the full user install.** `rtrash setup` uses assets **embedded in the
+binary** (no source checkout) and under `~/.local` (override with
+`--prefix=DIR` or `$PREFIX`) installs:
+
+| What | Where (default) |
+| ---- | --------------- |
+| Multi-call symlinks (`trash-put`, `trash-empty`, `trash-list`, `trash-restore`, `trash-rm`, `trash`) | `~/.local/bin/` → this `rtrash` |
+| bash completion | `~/.local/share/bash-completion/completions/rtrash` (+ links for multi-call names) |
+| zsh completion | `~/.local/share/zsh/site-functions/_rtrash` |
+| man page | `~/.local/share/man/man1/rtrash.1` |
+
+Useful flags: `rtrash setup --dry-run`, `--force` (refresh after upgrade),
+`--with-rm` (also link `rm` → put into trash), `--prefix=/usr/local`.
+
+`setup` prints the one-time shell notes (PATH, zsh `fpath`, `MANPATH`) if your
+environment does not already pick up `~/.local`. Re-run `rtrash setup --force`
+after upgrading the binary to refresh completions and the man page.
+
+Subcommands work without multi-call names:
+`rtrash put|empty|list|status|restore|rm …`.
 
 | Multi-call name | Meaning |
 | --------------- | ------- |
@@ -96,67 +106,17 @@ Subcommands without symlinks:
 Subcommand `rtrash rm PATTERN` is the same as multi-call `trash-rm` (not the
 same as multi-call `rm`, which puts).
 
-### Shell completions
+### Packagers and custom layouts
 
-Checked-in sources (no build step):
-
-| Shell | File |
-| ----- | ---- |
-| bash | [`completions/rtrash.bash`](completions/rtrash.bash) |
-| zsh | [`completions/_rtrash`](completions/_rtrash) |
-
-**bash** (user-local, after `cargo install` or from a source checkout):
+Sources also live in-tree for packaging (`completions/`, `man/rtrash.1`). From
+any installed binary:
 
 ```console
-$ mkdir -p ~/.local/share/bash-completion/completions
-$ cp completions/rtrash.bash ~/.local/share/bash-completion/completions/rtrash
-# or, for the current session only:
-$ source /path/to/rtrash/completions/rtrash.bash
+$ rtrash completions bash > rtrash.bash
+$ rtrash completions zsh  > _rtrash
+$ rtrash man              > rtrash.1
+$ rtrash setup --prefix=/usr --force    # system prefix when packaging
 ```
-
-If bash-completion is system-installed, the same file may go under
-`/usr/share/bash-completion/completions/rtrash` (packager path).
-
-**zsh** (directory on `$fpath`):
-
-```console
-$ mkdir -p ~/.local/share/zsh/site-functions
-$ cp completions/_rtrash ~/.local/share/zsh/site-functions/_rtrash
-$ # ensure fpath includes that dir, then:
-$ autoload -Uz compinit && compinit
-```
-
-Completions cover `rtrash` subcommands (`put` `empty` `list` `status`
-`restore` `rm`) and multi-call names `trash-put` `trash-empty` `trash-list`
-`trash-restore` `trash-rm` `trash`. Multi-call `rm` is **not** registered by
-default (would shadow system `rm` completion); uncomment the line at the end
-of the bash file or add a zsh `#compdef` entry if you symlink `rm` → rtrash.
-
-### Man pages
-
-Section 1 page: [`man/rtrash.1`](man/rtrash.1) (full suite + multi-call names,
-aligned with in-binary `--help`).
-
-**User-local install** (source tree or after clone):
-
-```console
-$ mkdir -p ~/.local/share/man/man1
-$ cp man/rtrash.1 ~/.local/share/man/man1/
-$ # ensure man finds it, e.g.:
-$ export MANPATH="$HOME/.local/share/man:${MANPATH:-}"
-$ man rtrash
-```
-
-**Preview without installing:**
-
-```console
-$ man -l man/rtrash.1
-# or: mandoc -Tascii man/rtrash.1 | less
-# or: groff -man -Tascii man/rtrash.1 | less
-```
-
-Packagers: install `man/rtrash.1` to the distro `man1` directory (e.g.
-`/usr/share/man/man1/rtrash.1`).
 
 ## Tutorial
 

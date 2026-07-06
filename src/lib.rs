@@ -11,6 +11,7 @@ pub mod list;
 pub mod put;
 pub mod restore;
 pub mod rm;
+pub mod setup;
 pub mod status;
 pub mod trashdir;
 pub mod util;

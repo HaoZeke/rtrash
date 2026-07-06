@@ -1,8 +1,8 @@
 # bash completion for rtrash and multi-call names
 # shellcheck shell=bash
-# Install: source this file, or copy to e.g.
-#   /usr/share/bash-completion/completions/rtrash
-#   ~/.local/share/bash-completion/completions/rtrash
+# Preferred install (embedded assets, no source tree):
+#   rtrash setup
+# Or: rtrash completions bash > …/bash-completion/completions/rtrash
 
 _rtrash_put_opts=(
   -f --force -i -I --interactive
@@ -33,7 +33,11 @@ _rtrash_rm_opts=(
   --help --version
 )
 
-_rtrash_subcommands=(put empty list status restore rm)
+_rtrash_subcommands=(put empty list status restore rm setup completions man)
+
+_rtrash_setup_opts=(
+  --prefix= --bin-dir= --with-rm -n --dry-run -f --force -v --verbose --help
+)
 
 _rtrash_complete_from() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
@@ -118,6 +122,17 @@ _rtrash_main() {
     status) _rtrash_complete_from _rtrash_status_opts ;;
     restore) _rtrash_complete_from _rtrash_restore_opts ;;
     rm) _rtrash_complete_from _rtrash_rm_opts ;;
+    setup) _rtrash_complete_from _rtrash_setup_opts ;;
+    completions)
+      if [[ $cur == -* ]]; then
+        COMPREPLY=($(compgen -W "--help" -- "$cur"))
+      else
+        COMPREPLY=($(compgen -W "bash zsh" -- "$cur"))
+      fi
+      ;;
+    man)
+      COMPREPLY=($(compgen -W "--help" -- "$cur"))
+      ;;
   esac
 }
 
