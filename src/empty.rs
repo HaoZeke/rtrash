@@ -81,6 +81,18 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let errors = AtomicU64::new(0);
 
     for dir in &dirs {
+        // Exclusive lock for this trash root so put cannot interleave a half pair.
+        let _lock = match trashdir::TrashLock::acquire(&dir.root) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "{prog}: cannot lock trash '{}': {e}",
+                    dir.root.display()
+                );
+                errors.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+        };
         empty_one(prog, dir, cutoff, &opts, &removed, &bytes, &errors);
     }
 

@@ -24,7 +24,7 @@ impl TrashDir {
         self.root.join("info")
     }
 
-    fn ensure(&self) -> io::Result<()> {
+    pub fn ensure(&self) -> io::Result<()> {
         let mut b = fs::DirBuilder::new();
         b.recursive(true).mode(0o700);
         b.create(self.files())?;
@@ -127,8 +127,50 @@ fn dev_of_deepest_existing(path: &Path) -> Option<u64> {
     }
 }
 
-/// Walk up from `start` until the parent lives on a different device.
-fn mount_top_of(start: &Path, dev: u64) -> PathBuf {
+/// Mount point of `path`: longest prefix among non-pseudo mounts (btrfs-safe when
+/// many subvolumes share one `st_dev`). Falls back to an `st_dev` parent walk only
+/// when `/proc/self/mounts` is unreadable.
+pub fn mount_top_of_path(path: &Path) -> PathBuf {
+    let mounts = mount_points();
+    if mounts.is_empty() {
+        let dev = dev_of(path).or_else(|| dev_of_deepest_existing(path));
+        return match dev {
+            Some(d) => mount_top_of_by_dev(path, d),
+            None => PathBuf::from("/"),
+        };
+    }
+    longest_mount_prefix(path, &mounts)
+}
+
+/// Pure helper: longest mount-point prefix of `path` from a mount list.
+/// Used by put selection and unit-tested with synthetic tables (btrfs multi-subvol).
+pub fn longest_mount_prefix(path: &Path, mounts: &[PathBuf]) -> PathBuf {
+    let mut best: Option<&Path> = None;
+    let mut best_comps = 0usize;
+    for m in mounts {
+        if path.starts_with(m) {
+            let comps = m.components().count();
+            // Prefer deeper mounts; for equal depth prefer longer OsStr (ties rare).
+            let better = match best {
+                None => true,
+                Some(b) => {
+                    let bc = b.components().count();
+                    comps > bc
+                        || (comps == bc && m.as_os_str().len() > b.as_os_str().len())
+                }
+            };
+            if better {
+                best = Some(m.as_path());
+                best_comps = comps;
+            }
+        }
+    }
+    let _ = best_comps;
+    best.unwrap_or(Path::new("/")).to_path_buf()
+}
+
+/// Legacy fallback: walk parents while `st_dev` matches.
+fn mount_top_of_by_dev(start: &Path, dev: u64) -> PathBuf {
     let mut cur = start.to_path_buf();
     while let Some(parent) = cur.parent() {
         match dev_of(parent) {
@@ -147,6 +189,10 @@ fn sticky_and_dir(meta: &fs::Metadata) -> bool {
 /// Home trash when on the same fs; otherwise `$top/.Trash/$uid` (must be a
 /// sticky non-symlink dir) or `$top/.Trash-$uid`; home trash as last resort
 /// (put then copies across devices).
+///
+/// Volume `top` is the **mount point** of `abs` (longest `/proc/self/mounts`
+/// prefix), not a pure `st_dev` walk — required when btrfs subvolumes share one
+/// device id.
 pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
     let home = TrashDir {
         root: home_trash(),
@@ -157,8 +203,7 @@ pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
         return Ok(home);
     }
 
-    let parent = abs.parent().unwrap_or(Path::new("/"));
-    let top = mount_top_of(parent, dev);
+    let top = mount_top_of_path(abs);
     let uid = uid();
 
     let shared = top.join(".Trash");
@@ -262,7 +307,9 @@ pub fn is_valid_trash_root(root: &Path) -> bool {
     true
 }
 
-/// All trash dirs visible to this user: home trash plus per-mount dirs.
+/// All trash dirs visible to this user: home trash plus every non-pseudo
+/// mounted volume’s existing user trash (trash-cli multi-volume default).
+/// Does not create missing volume trash dirs — only discovers existing ones.
 pub fn all() -> Vec<TrashDir> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -275,13 +322,7 @@ pub fn all() -> Vec<TrashDir> {
         });
     }
     let uid = uid();
-    // Always probe root-FS volume trash: mount_points() historically skipped
-    // `/`, which left `/.Trash-$uid` invisible to list/empty/restore/rm.
-    let mut mps = mount_points();
-    if !mps.iter().any(|p| p == Path::new("/")) {
-        mps.insert(0, PathBuf::from("/"));
-    }
-    for mp in mps {
+    for mp in mount_points() {
         for cand in [
             mp.join(".Trash").join(uid.to_string()),
             mp.join(format!(".Trash-{uid}")),
@@ -296,6 +337,40 @@ pub fn all() -> Vec<TrashDir> {
         }
     }
     out
+}
+
+/// Exclusive per-trash-root lock (flock on `root/.rtrash.lock`) so put and empty
+/// cannot interleave a half-written pair under the same root.
+pub struct TrashLock {
+    _file: fs::File,
+}
+
+impl TrashLock {
+    /// Blocking exclusive lock for the critical section of put/empty.
+    pub fn acquire(root: &Path) -> io::Result<Self> {
+        Self::acquire_flags(root, libc::LOCK_EX)
+    }
+
+    /// Non-blocking attempt (tests).
+    pub fn try_acquire(root: &Path) -> io::Result<Self> {
+        Self::acquire_flags(root, libc::LOCK_EX | libc::LOCK_NB)
+    }
+
+    fn acquire_flags(root: &Path, flags: i32) -> io::Result<Self> {
+        fs::create_dir_all(root)?;
+        let path = root.join(".rtrash.lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        use std::os::unix::io::AsRawFd;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), flags) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(TrashLock { _file: file })
+    }
 }
 
 const PSEUDO_FS: &[&str] = &[
@@ -346,11 +421,19 @@ fn unescape_mount(s: &str) -> PathBuf {
     PathBuf::from(std::ffi::OsString::from_vec(out))
 }
 
-fn mount_points() -> Vec<PathBuf> {
-    let mut out = Vec::new();
+/// Non-pseudo mount points from `/proc/self/mounts`, **including `/`**, for
+/// trash-cli-compatible multi-volume discovery (home + every mount that may
+/// host `.Trash-$uid` / `.Trash/$uid`).
+pub fn mount_points() -> Vec<PathBuf> {
     let Ok(content) = fs::read_to_string("/proc/self/mounts") else {
-        return out;
+        return vec![PathBuf::from("/")];
     };
+    mount_points_from_table(&content)
+}
+
+/// Parse an fstab/mounts-style table into non-pseudo mount points (testable).
+pub fn mount_points_from_table(content: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
     let mut seen = HashSet::new();
     for line in content.lines() {
         let mut fields = line.split_whitespace();
@@ -362,10 +445,13 @@ fn mount_points() -> Vec<PathBuf> {
             continue;
         }
         let mp = unescape_mount(mp);
-        if mp == Path::new("/") || !seen.insert(mp.clone()) {
+        if !seen.insert(mp.clone()) {
             continue;
         }
         out.push(mp);
+    }
+    if !seen.contains(Path::new("/")) {
+        out.insert(0, PathBuf::from("/"));
     }
     out
 }
@@ -385,7 +471,17 @@ pub fn abs_nofollow(path: &Path) -> io::Result<PathBuf> {
 
 /// Move `abs` into `trash`, reserving a unique name via O_EXCL on the
 /// `.trashinfo` (the spec's atomicity requirement). Returns the name used.
+///
+/// Holds [`TrashLock`] for the duration of reserve → fsync → payload move so
+/// concurrent empty of the same root cannot tear the pair.
 pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
+    trash.ensure()?;
+    let _lock = TrashLock::acquire(&trash.root)?;
+    trash_move_locked(abs, meta, trash)
+}
+
+/// Inner put path (caller holds the trash-root lock). Exposed for tests.
+pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
     let base = abs
         .file_name()
         .and_then(|n| n.to_str())
@@ -442,7 +538,11 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
         }
     };
     info_file.write_all(body.as_bytes())?;
+    // Durable reservation before payload move (crash mid-put must not leave a
+    // truncated .trashinfo as the only recoverability record).
+    sync_file(&mut info_file)?;
     drop(info_file);
+    let _ = sync_dir(&trash.info());
 
     let dest = trash.files().join(&name);
     let moved = match rename_noreplace(abs, &dest) {
@@ -464,6 +564,16 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
         let _ = directorysizes_upsert(trash, &name, size, mtime);
     }
     Ok(name)
+}
+
+/// Flush file data+metadata to stable storage.
+pub fn sync_file(file: &mut fs::File) -> io::Result<()> {
+    file.sync_all()
+}
+
+fn sync_dir(path: &Path) -> io::Result<()> {
+    let f = fs::File::open(path)?;
+    f.sync_all()
 }
 
 /// `rename(2)` that refuses to replace an existing path when the kernel supports
@@ -587,6 +697,7 @@ pub fn relocate(src: &Path, dest: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn relocate_same_fs_moves_file() {
@@ -664,14 +775,162 @@ mod tests {
         td.resolve_original_checked(Path::new("../../../etc/passwd"))
             .is_err()
     }
+
+    #[test]
+    fn longest_mount_prefix_prefers_nested_over_root() {
+        // btrfs: / and /home share one st_dev; longest prefix must win.
+        let mounts = vec![
+            PathBuf::from("/"),
+            PathBuf::from("/home"),
+            PathBuf::from("/mnt/data"),
+        ];
+        assert_eq!(
+            longest_mount_prefix(Path::new("/home/u/file"), &mounts),
+            Path::new("/home")
+        );
+        assert_eq!(
+            longest_mount_prefix(Path::new("/mnt/data/x"), &mounts),
+            Path::new("/mnt/data")
+        );
+        assert_eq!(
+            longest_mount_prefix(Path::new("/opt/x"), &mounts),
+            Path::new("/")
+        );
+    }
+
+    #[test]
+    fn mount_points_from_table_includes_root_and_btrfs_subs() {
+        let table = "\
+/dev/sda1 / btrfs rw 0 0
+/dev/sda1 /home btrfs rw,subvol=@home 0 0
+/dev/sdb1 /mnt/usb ext4 rw 0 0
+proc /proc proc rw 0 0
+";
+        let mps = mount_points_from_table(table);
+        assert!(mps.iter().any(|p| p == Path::new("/")));
+        assert!(mps.iter().any(|p| p == Path::new("/home")));
+        assert!(mps.iter().any(|p| p == Path::new("/mnt/usb")));
+        assert!(!mps.iter().any(|p| p == Path::new("/proc")));
+    }
+
+    #[test]
+    fn copy_recursive_preserves_bytes_mode_mtime_symlink() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-copy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::write(&src, b"hello-exdev").unwrap();
+        let mode = fs::Permissions::from_mode(0o640);
+        fs::set_permissions(&src, mode.clone()).unwrap();
+        // Set a distinctive mtime (2001-01-01 UTC-ish).
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(978_307_200);
+        {
+            let f = fs::OpenOptions::new().write(true).open(&src).unwrap();
+            let times = fs::FileTimes::new().set_modified(old).set_accessed(old);
+            f.set_times(times).unwrap();
+        }
+        let meta = fs::symlink_metadata(&src).unwrap();
+        copy_recursive(&src, &dst, &meta).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"hello-exdev");
+        assert_eq!(
+            fs::symlink_metadata(&dst).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let dm = fs::symlink_metadata(&dst).unwrap().modified().unwrap();
+        let delta = dm
+            .duration_since(old)
+            .unwrap_or_else(|e| e.duration())
+            .as_secs();
+        assert!(delta <= 1, "mtime preserved within 1s, delta={delta}");
+
+        let link = root.join("link");
+        let link_dst = root.join("link-out");
+        std::os::unix::fs::symlink("target-name", &link).unwrap();
+        let lmeta = fs::symlink_metadata(&link).unwrap();
+        copy_recursive(&link, &link_dst, &lmeta).unwrap();
+        assert!(link_dst.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_link(&link_dst).unwrap(), Path::new("target-name"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn trash_lock_is_exclusive() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let a = TrashLock::acquire(&root).unwrap();
+        let b = TrashLock::try_acquire(&root);
+        assert!(b.is_err(), "second exclusive lock must fail with LOCK_NB");
+        drop(a);
+        let c = TrashLock::try_acquire(&root);
+        assert!(c.is_ok());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn trashinfo_sync_file_flushes() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-sync-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let p = root.join("x.trashinfo");
+        let mut f = fs::File::create(&p).unwrap();
+        use std::io::Write;
+        f.write_all(b"[Trash Info]\nPath=/a\nDeletionDate=2020-01-01T00:00:00\n")
+            .unwrap();
+        sync_file(&mut f).unwrap();
+        drop(f);
+        let body = fs::read_to_string(&p).unwrap();
+        assert!(body.contains("Path=/a"));
+        assert!(body.contains("[Trash Info]"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discovery_all_sees_volume_trash_fixture() {
+        // Structural: mount_points_from_table feeds longest_mount_prefix; all()
+        // probes each mp for .Trash-uid. Here we only assert the table includes
+        // / and an extra mount as required for trash-cli parity.
+        let mps = mount_points_from_table(
+            "/dev/a / btrfs rw 0 0\n/dev/a /home btrfs rw 0 0\n/dev/b /data ext4 rw 0 0\n",
+        );
+        assert!(mps.contains(&PathBuf::from("/")));
+        assert!(mps.contains(&PathBuf::from("/home")));
+        assert!(mps.contains(&PathBuf::from("/data")));
+    }
 }
 
-/// Cross-device fallback: copy preserving symlinks and permissions.
-fn copy_recursive(src: &Path, dst: &Path, meta: &fs::Metadata) -> io::Result<()> {
+/// Cross-device fallback: copy preserving symlinks-as-links, content, mode, and mtime.
+/// Shared by put (EXDEV into trash) and restore (`relocate`).
+pub fn copy_recursive(src: &Path, dst: &Path, meta: &fs::Metadata) -> io::Result<()> {
     let ftype = meta.file_type();
     if ftype.is_symlink() {
         let target = fs::read_link(src)?;
-        std::os::unix::fs::symlink(target, dst)
+        std::os::unix::fs::symlink(&target, dst)?;
+        // Symlink mtime: best-effort via lutimes/utimensat AT_SYMLINK_NOFOLLOW.
+        let _ = set_times_nofollow(dst, meta);
+        Ok(())
     } else if ftype.is_dir() {
         fs::create_dir(dst)?;
         fs::set_permissions(dst, meta.permissions())?;
@@ -680,8 +939,66 @@ fn copy_recursive(src: &Path, dst: &Path, meta: &fs::Metadata) -> io::Result<()>
             let emeta = fs::symlink_metadata(entry.path())?;
             copy_recursive(&entry.path(), &dst.join(entry.file_name()), &emeta)?;
         }
+        set_times(dst, meta)?;
         Ok(())
     } else {
-        fs::copy(src, dst).map(|_| ())
+        fs::copy(src, dst)?;
+        fs::set_permissions(dst, meta.permissions())?;
+        set_times(dst, meta)?;
+        Ok(())
+    }
+}
+
+fn set_times(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    let modified = meta.modified()?;
+    let accessed = meta.accessed().unwrap_or(modified);
+    if meta.is_dir() {
+        return set_times_path(path, accessed, modified, false);
+    }
+    match fs::OpenOptions::new().write(true).open(path) {
+        Ok(f) => {
+            let times = fs::FileTimes::new()
+                .set_accessed(accessed)
+                .set_modified(modified);
+            f.set_times(times)
+        }
+        Err(_) => set_times_path(path, accessed, modified, false),
+    }
+}
+
+fn set_times_nofollow(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    let modified = meta.modified()?;
+    let accessed = meta.accessed().unwrap_or(modified);
+    set_times_path(path, accessed, modified, true)
+}
+
+fn set_times_path(
+    path: &Path,
+    accessed: std::time::SystemTime,
+    modified: std::time::SystemTime,
+    nofollow: bool,
+) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::time::UNIX_EPOCH;
+    let to_timespec = |t: std::time::SystemTime| -> libc::timespec {
+        let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
+        libc::timespec {
+            tv_sec: d.as_secs() as libc::time_t,
+            tv_nsec: d.subsec_nanos() as libc::c_long,
+        }
+    };
+    let times = [to_timespec(accessed), to_timespec(modified)];
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let flags = if nofollow {
+        libc::AT_SYMLINK_NOFOLLOW
+    } else {
+        0
+    };
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), flags) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }

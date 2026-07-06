@@ -282,6 +282,36 @@ fn empty_dry_run_removes_nothing() {
 }
 
 #[test]
+fn put_writes_complete_trashinfo_after_fsync_path() {
+    let sb = Sandbox::new("put-fsync-info");
+    let f = sb.touch("syncme.txt");
+    assert!(sb.run(&["put", "syncme.txt"]).status.success());
+    let info = fs::read_to_string(sb.trash().join("info/syncme.txt.trashinfo")).unwrap();
+    assert!(info.starts_with("[Trash Info]\n"), "{info}");
+    assert!(info.contains("Path="), "{info}");
+    assert!(info.contains("DeletionDate="), "{info}");
+    // Full body must be present (not truncated reservation).
+    assert!(
+        info.lines().count() >= 3,
+        "expected full trashinfo lines, got {info:?}"
+    );
+    assert!(!f.exists());
+}
+
+#[test]
+fn empty_without_pin_clears_home_trash() {
+    // trash-cli parity: default empty visits home trash (no --trash-dir).
+    let sb = Sandbox::new("empty-default-home");
+    sb.touch("home-only.txt");
+    assert!(sb.run(&["put", "home-only.txt"]).status.success());
+    assert!(sb.trash().join("files/home-only.txt").exists());
+    // Bare empty (no pin) must clear this sandbox home trash via XDG_DATA_HOME.
+    let out = sb.run(&["empty"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty());
+}
+
+#[test]
 fn restore_force_missing_payload_keeps_dest() {
     let sb = Sandbox::new("restore-missing-payload");
     sb.touch("live.txt");

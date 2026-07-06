@@ -59,6 +59,16 @@ rtrash put also applies *rm-shaped fail-safes*: refuse =.= / =..= / =/=
 Use =rtrash empty= / =trash-rm= only after accepting permanent loss of those
 entries.
 
+* Durability and multi-volume (shipped)
+
+- Put fsyncs the reserved =.trashinfo= before the payload move.
+- Cross-device (EXDEV) put/restore preserve content, symlink targets, mode, and mtime.
+- Each trash root uses an exclusive =flock= on =.rtrash.lock= for put and empty.
+- Volume topdir is the longest matching mount point from =/proc/self/mounts=
+  (btrfs multi-subvol safe; not pure =st_dev= parent walk alone).
+- Default empty/list/restore/rm scan home trash plus existing trash on every
+  non-pseudo mount (trash-cli multi-volume parity), including =/=.
+
 * Library layout
 
 #+begin_src text
