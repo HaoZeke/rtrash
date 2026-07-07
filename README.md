@@ -75,21 +75,34 @@ Recommended order when a **GitHub Release** for this version exists
 ### 1. `cargo binstall` (preferred binary install)
 
 Uses [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) to download
-the prebuilt musl tarball from Releases (no local compile). Requires a published
-release asset for your version/target; the metadata in this repo points at that
-layout so you do **not** need hand-written `--pkg-url` flags.
+the prebuilt **x86_64 Linux musl static** tarball from Releases (no local
+compile). The release workflow only ships that musl asset today. Crate
+metadata remaps **both** `x86_64-unknown-linux-gnu` (typical glibc desktops)
+and `x86_64-unknown-linux-musl` hosts to
+`rtrash-<version>-x86_64-unknown-linux-musl.tar.gz`, so a normal:
+
+```console
+$ cargo binstall rtrash
+```
+
+does **not** look for a non-existent `*-linux-gnu*.tar.gz`. You do not need
+`--pkg-url` or `--target` on x86_64 Linux. Requires a published GitHub Release
+for this version (tag `v*`).
 
 ```console
 # one-time: install cargo-binstall itself (see upstream docs)
 $ cargo binstall cargo-binstall
 
-# once this version has a GitHub Release asset:
+# once this version has a GitHub Release asset (x86_64 Linux):
 $ cargo binstall rtrash
 # or before crates.io publish, from this repo's metadata:
 $ cargo binstall --git https://github.com/HaoZeke/rtrash rtrash
 
 $ rtrash setup
 ```
+
+Other OS/arch combos have no prebuilt asset yet — use from-source install
+below (or wait for multi-arch release assets).
 
 Always run **`rtrash setup`** after the binary lands on `PATH` so multi-call
 links, shell completions (bash/zsh/fish), and the man page are installed under

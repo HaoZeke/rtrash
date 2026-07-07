@@ -13,16 +13,27 @@ readme = "README.md"
 
 # cargo-binstall: resolve prebuilt binaries from GitHub Releases.
 # Must stay in lockstep with scripts/package-release.sh tarball naming:
-#   {name}-{version}-{target}.tar.gz
+#   {name}-{version}-x86_64-unknown-linux-musl.tar.gz
 # containing bin/{bin} (plus multi-call links, completions, man under share/).
 # Tags are v{version} (e.g. v0.1.0). After a matching Release asset is published:
 #   cargo binstall rtrash
 #   # or, from git metadata before crates.io publish:
 #   cargo binstall --git https://github.com/HaoZeke/rtrash rtrash
+#
+# Default templates still use { target } for future multi-arch assets. The
+# primary published asset is *musl static for x86_64 Linux only*; map both
+# typical glibc hosts (x86_64-unknown-linux-gnu) and musl hosts to that asset
+# so bare `cargo binstall rtrash` on a normal Linux workstation does not 404
+# looking for a non-existent *-linux-gnu*.tar.gz.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
 pkg-fmt = "tgz"
 bin-dir = "{ name }-{ version }-{ target }/bin/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides."cfg(all(target_os = \"linux\", target_arch = \"x86_64\"))"]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-x86_64-unknown-linux-musl.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ name }-{ version }-x86_64-unknown-linux-musl/bin/{ bin }{ binary-ext }"
 
 [lib]
 name = "rtrash"

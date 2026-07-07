@@ -18,8 +18,8 @@
 
 ### CLI (Rust)
 
-**Preferred** when a GitHub Release for this version exists (tag `v*`, musl
-tarball named `rtrash-<version>-<target>.tar.gz`):
+**Preferred** on **x86_64 Linux** when a GitHub Release for this version exists
+(tag `v*`, asset `rtrash-<version>-x86_64-unknown-linux-musl.tar.gz`):
 
 ```shell
 cargo binstall rtrash
@@ -27,10 +27,10 @@ cargo binstall rtrash
 rtrash setup
 ```
 
-`[package.metadata.binstall]` in `Cargo.toml` matches
-`scripts/package-release.sh` / the release workflow so binstall needs no
-custom `--pkg-url`. Always finish with **`rtrash setup`** (multi-call links,
-bash/zsh/fish completions, man page under `~/.local`).
+Metadata remaps typical glibc hosts (`x86_64-unknown-linux-gnu`) to that musl
+static tarball (no `--target` / `--pkg-url` required). Always finish with
+**`rtrash setup`** (multi-call links, bash/zsh/fish completions, man under
+`~/.local`).
 
 **Manual tarball:** download the Release asset or run
 `./scripts/package-release.sh`, then `rtrash setup`.
