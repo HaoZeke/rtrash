@@ -344,6 +344,41 @@ fn run_setup(args: &[String]) -> i32 {
         opts.dry_run,
         opts.verbose,
     ));
+    // Fish only auto-loads `completions/<command>.fish` for that command name.
+    // The shared script also defines multi-call completes; symlink it under each
+    // multi-call name so `trash-put` etc. load completions without shadowing `rm`.
+    for name in MULTICALL {
+        let link = fish_dir.join(format!("{name}.fish"));
+        let dest = PathBuf::from("rtrash.fish");
+        if link.symlink_metadata().is_ok() || link.exists() {
+            if opts.force {
+                if opts.verbose || opts.dry_run {
+                    eprintln!("rm {}", link.display());
+                }
+                if !opts.dry_run {
+                    ok &= absorb(fs::remove_file(&link));
+                    if !ok {
+                        continue;
+                    }
+                }
+            } else {
+                continue;
+            }
+        }
+        if opts.verbose || opts.dry_run {
+            eprintln!("ln -s rtrash.fish {}", link.display());
+        }
+        if !opts.dry_run {
+            match symlink(&dest, &link) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    eprintln!("rtrash setup: {}: {e}", link.display());
+                    ok = false;
+                }
+            }
+        }
+    }
 
     ok &= absorb(ensure_dir(&man_dir, opts.dry_run, opts.verbose));
     ok &= absorb(write_file(
@@ -366,7 +401,10 @@ fn run_setup(args: &[String]) -> i32 {
     println!("  multi-call links → {}", bin_dir.display());
     println!("  bash completion  → {}/rtrash", bash_dir.display());
     println!("  zsh completion   → {}/_rtrash", zsh_dir.display());
-    println!("  fish completion  → {}/rtrash.fish", fish_dir.display());
+    println!(
+        "  fish completion  → {}/rtrash.fish (+ multi-call *.fish links)",
+        fish_dir.display()
+    );
     println!("  man page         → {}/rtrash.1", man_dir.display());
     println!();
     println!("Shell notes (once per machine/login config):");
@@ -518,18 +556,27 @@ mod tests {
         assert_eq!(code, 0, "setup failed");
         assert!(prefix.join("share/bash-completion/completions/rtrash").is_file());
         assert!(prefix.join("share/zsh/site-functions/_rtrash").is_file());
-        assert!(prefix
-            .join("share/fish/vendor_completions.d/rtrash.fish")
-            .is_file());
+        let fish_main = prefix.join("share/fish/vendor_completions.d/rtrash.fish");
+        assert!(fish_main.is_file());
         assert!(prefix.join("share/man/man1/rtrash.1").is_file());
         let bash = fs::read_to_string(prefix.join("share/bash-completion/completions/rtrash")).unwrap();
         assert!(bash.contains("--home-only"));
-        let fish = fs::read_to_string(
-            prefix.join("share/fish/vendor_completions.d/rtrash.fish"),
-        )
-        .unwrap();
+        let fish = fs::read_to_string(&fish_main).unwrap();
         assert!(fish.contains("dry-run"));
         assert!(fish.contains("home-only"));
+        // Fish autoloads by command name: multi-call links must exist.
+        for name in MULTICALL {
+            let p = prefix.join(format!("share/fish/vendor_completions.d/{name}.fish"));
+            assert!(
+                p.symlink_metadata().is_ok() || p.is_file(),
+                "missing fish multi-call completion {p:?}"
+            );
+            // Symlink (or same content) must resolve to the shared script.
+            if p.symlink_metadata().ok().is_some_and(|m| m.file_type().is_symlink()) {
+                let dest = fs::read_link(&p).unwrap();
+                assert_eq!(dest.as_os_str(), "rtrash.fish");
+            }
+        }
         let _ = fs::remove_dir_all(&prefix);
     }
 }

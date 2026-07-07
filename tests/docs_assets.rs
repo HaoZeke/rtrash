@@ -175,3 +175,29 @@ fn readme_documents_release_or_binary_path() {
         "README must document a binary/release install path (binstall and/or release recipe)"
     );
 }
+
+#[test]
+fn package_release_script_stages_fish_multicall() {
+    let s = read("scripts/package-release.sh");
+    assert!(
+        s.contains("rtrash.fish"),
+        "package-release must stage fish main completion"
+    );
+    // Must link multi-call names so fish autoloads them (not only rtrash.fish).
+    for name in [
+        "trash-put.fish",
+        "trash-empty.fish",
+        "trash-list.fish",
+        "trash-restore.fish",
+        "trash-rm.fish",
+    ] {
+        assert!(
+            s.contains(name) || (s.contains("trash-put") && s.contains(".fish") && s.contains("ln -sf rtrash.fish")),
+            "package-release must stage fish multi-call file for {name}"
+        );
+    }
+    assert!(
+        s.contains("ln -sf rtrash.fish"),
+        "package-release must symlink multi-call fish completions to rtrash.fish"
+    );
+}

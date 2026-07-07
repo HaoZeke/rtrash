@@ -823,6 +823,31 @@ fn setup_installs_under_prefix() {
     assert!(prefix.join("bin/trash-put").symlink_metadata().is_ok());
     assert!(fs::read_to_string(&bash).unwrap().contains("setup"));
     assert!(fs::read_to_string(&fish).unwrap().contains("dry-run"));
+    // Fish only autoloads <command>.fish — multi-call names need their own files.
+    for name in [
+        "trash",
+        "trash-put",
+        "trash-empty",
+        "trash-list",
+        "trash-restore",
+        "trash-rm",
+    ] {
+        let p = prefix.join(format!("share/fish/vendor_completions.d/{name}.fish"));
+        assert!(
+            p.symlink_metadata().is_ok() || p.is_file(),
+            "setup must install fish multi-call completion {p:?}"
+        );
+        if p.symlink_metadata()
+            .ok()
+            .is_some_and(|m| m.file_type().is_symlink())
+        {
+            assert_eq!(
+                fs::read_link(&p).unwrap().as_os_str(),
+                "rtrash.fish",
+                "fish multi-call link should point at shared rtrash.fish"
+            );
+        }
+    }
     let _ = fs::remove_dir_all(&prefix);
 }
 

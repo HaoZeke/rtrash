@@ -58,6 +58,13 @@ done
 "$STAGE/bin/rtrash" completions bash >"$STAGE/share/bash-completion/completions/rtrash"
 "$STAGE/bin/rtrash" completions zsh >"$STAGE/share/zsh/site-functions/_rtrash"
 "$STAGE/bin/rtrash" completions fish >"$STAGE/share/fish/vendor_completions.d/rtrash.fish"
+# Fish loads completions/<command>.fish only for that command name; multi-call
+# tools need their own files (same content as the shared rtrash.fish script).
+for n in trash trash-put trash-empty trash-list trash-restore trash-rm; do
+  ln -sf rtrash.fish "$STAGE/share/fish/vendor_completions.d/${n}.fish"
+  # bash-completion also looks up by argv0:
+  ln -sf rtrash "$STAGE/share/bash-completion/completions/$n"
+done
 "$STAGE/bin/rtrash" man >"$STAGE/share/man/man1/rtrash.1"
 
 cat >"$STAGE/INSTALL.txt" <<INSTALL
