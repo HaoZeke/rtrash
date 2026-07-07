@@ -1,39 +1,91 @@
-/* Landing hero — calm teal, not a billboard */
+/* Landing hero — soft-bin brand mark + teal system */
 .rt-hero {
   margin: 0 0 1.75rem;
-  padding: 1.5rem 1.25rem 1.25rem;
-  border-radius: 12px;
-  background: linear-gradient(145deg, #f0fdfa 0%, #ecfeff 45%, #f8fafc 100%);
+  padding: 1.6rem 1.4rem 1.35rem;
+  border-radius: 16px;
+  background:
+    radial-gradient(120% 80% at 0% 0%, rgba(45, 212, 191, 0.18), transparent 55%),
+    linear-gradient(145deg, #f0fdfa 0%, #ecfeff 42%, #f8fafc 100%);
   border: 1px solid #99f6e4;
+  box-shadow: 0 1px 0 rgba(15, 118, 110, 0.06);
 }
 html.dark .rt-hero {
-  background: linear-gradient(145deg, #042f2e 0%, #0f172a 100%);
+  background:
+    radial-gradient(120% 80% at 0% 0%, rgba(20, 184, 166, 0.16), transparent 55%),
+    linear-gradient(145deg, #042f2e 0%, #0f172a 100%);
   border-color: #115e59;
+  box-shadow: none;
 }
-.rt-hero-logo { display: block; max-width: min(280px, 70vw); height: auto; margin: 0 0 0.75rem; }
+
+.rt-hero-brand {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 0 0 0.85rem;
+}
+.rt-hero-mark {
+  width: 56px;
+  height: 56px;
+  flex: 0 0 auto;
+  border-radius: 14px;
+  box-shadow: 0 4px 14px rgba(15, 118, 110, 0.22);
+}
+html.dark .rt-hero-mark {
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+}
+
+.rt-hero-name {
+  margin: 0;
+  font-size: clamp(1.75rem, 3vw, 2.15rem);
+  font-weight: 750;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  color: #115e59;
+}
+html.dark .rt-hero-name { color: #ccfbf1; }
+
+.rt-hero-logo {
+  display: block;
+  max-width: min(300px, 78vw);
+  height: auto;
+  margin: 0 0 0.75rem;
+}
+/* Prefer brand row; hide legacy full-width logo if both present */
+.rt-hero-brand + .rt-hero-logo { display: none; }
+html.dark .rt-hero-logo-light { display: none; }
+html:not(.dark) .rt-hero-logo-dark { display: none; }
+
 .rt-hero-tagline {
   margin: 0;
-  font-size: 1.1rem;
-  line-height: 1.45;
+  font-size: 1.08rem;
+  line-height: 1.5;
   color: #134e4a;
-  max-width: 40rem;
+  max-width: 42rem;
 }
-html.dark .rt-hero-tagline { color: #ccfbf1; }
+html.dark .rt-hero-tagline { color: #99f6e4; }
+
 .rt-hero-pills {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
-  margin-top: 0.9rem;
+  margin-top: 1rem;
 }
 .rt-hero-pills span {
-  font-size: 0.8rem;
-  padding: 0.2rem 0.55rem;
+  font-size: 0.78rem;
+  padding: 0.22rem 0.62rem;
   border-radius: 999px;
   background: #ccfbf1;
   color: #115e59;
-  font-weight: 600;
+  font-weight: 650;
+  letter-spacing: 0.01em;
 }
 html.dark .rt-hero-pills span {
   background: #115e59;
   color: #ecfdf5;
+}
+
+/* Slight polish on theme logo slot when present */
+.sy-head-brand img,
+.sidebar-logo {
+  border-radius: 6px;
 }

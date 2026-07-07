@@ -1,5 +1,9 @@
 # rtrash
 
+<p align="center">
+  <img src="docs/source/_static/logo.svg" width="280" alt="rtrash logo" />
+</p>
+
 **SOTA for the Linux FreeDesktop / rm-compatible / trash-cli multi-call niche:**
 one native Rust binary that implements the
 [freedesktop.org Trash specification](https://specifications.freedesktop.org/trash-spec/trashspec-latest.html)

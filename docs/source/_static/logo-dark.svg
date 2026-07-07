@@ -1,18 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 72" role="img" aria-label="rtrash">
   <defs>
     <linearGradient id="bg" x1="8" y1="8" x2="56" y2="64" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#0D9488"/>
-      <stop offset="1" stop-color="#0F766E"/>
+      <stop stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#0D9488"/>
     </linearGradient>
     <linearGradient id="can" x1="20" y1="26" x2="44" y2="58" gradientUnits="userSpaceOnUse">
       <stop stop-color="#F0FDFA"/>
       <stop offset="1" stop-color="#CCFBF1"/>
     </linearGradient>
   </defs>
-  <!-- mark tile -->
   <g transform="translate(4,4)">
     <rect width="64" height="64" rx="14" fill="url(#bg)"/>
-    <path d="M14 8c8-4 28-4 36 0 2 1 3 3 2 5-4 8-32 8-40 0-1-2 0-4 2-5z" fill="#5EEAD4" opacity=".35"/>
+    <path d="M14 8c8-4 28-4 36 0 2 1 3 3 2 5-4 8-32 8-40 0-1-2 0-4 2-5z" fill="#5EEAD4" opacity=".45"/>
     <rect x="27" y="12" width="10" height="5" rx="2.5" fill="#ECFDF5"/>
     <path d="M16 20h32a2 2 0 0 1 0 4H16a2 2 0 0 1 0-4z" fill="#ECFDF5"/>
     <path d="M20 24h24l-2.2 28.5A5 5 0 0 1 36.9 57H27.1a5 5 0 0 1-4.9-4.5L20 24z" fill="url(#can)"/>
@@ -20,10 +19,8 @@
     <path d="M16.5 38.5l-.2-5.2 5.1 1.4" fill="none" stroke="#0F766E" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
     <path d="M28 30v16M36 30v16" stroke="#0F766E" stroke-width="2.4" stroke-linecap="round" opacity=".55"/>
   </g>
-  <!-- wordmark -->
   <text x="84" y="48" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
-        font-size="38" font-weight="700" letter-spacing="-0.03em" fill="#115E59">rtrash</text>
-  <!-- accent underline tick (recoverability) -->
-  <path d="M86 56h92" stroke="#14B8A6" stroke-width="3" stroke-linecap="round" opacity=".85"/>
-  <path d="M178 52l6 4-6 4" fill="none" stroke="#14B8A6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        font-size="38" font-weight="700" letter-spacing="-0.03em" fill="#CCFBF1">rtrash</text>
+  <path d="M86 56h92" stroke="#5EEAD4" stroke-width="3" stroke-linecap="round" opacity=".9"/>
+  <path d="M178 52l6 4-6 4" fill="none" stroke="#5EEAD4" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

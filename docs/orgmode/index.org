@@ -5,7 +5,15 @@
 .. raw:: html
 
    <div class="rt-hero">
-     <img class="rt-hero-logo" src="_static/logo.svg" width="280" height="63" alt="rtrash" />
+     <div class="rt-hero-brand">
+       <img class="rt-hero-mark" src="_static/mark.svg" width="56" height="56" alt="" />
+       <div>
+         <p class="rt-hero-name">rtrash</p>
+       </div>
+     </div>
+     <!-- light/dark wordmarks for themes that only load img logos -->
+     <img class="rt-hero-logo rt-hero-logo-light" src="_static/logo.svg" width="300" height="60" alt="rtrash" />
+     <img class="rt-hero-logo rt-hero-logo-dark" src="_static/logo-dark.svg" width="300" height="60" alt="rtrash" />
      <p class="rt-hero-tagline">One native FreeDesktop trash tool — rm-compatible put, full trash-cli suite, optional Python bindings. Recoverable by design.</p>
      <div class="rt-hero-pills">
        <span>FreeDesktop</span>

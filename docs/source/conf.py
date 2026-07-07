@@ -28,6 +28,7 @@ exclude_patterns: list[str] = []
 html_theme = "shibuya"
 html_static_path = ["_static"]
 html_favicon = "_static/favicon.svg"
+html_logo = "_static/logo.svg"
 html_title = "rtrash"
 html_css_files = ["custom.css"]
 
@@ -41,6 +42,9 @@ html_context = {
 
 html_theme_options = {
     "accent_color": "teal",
+    # Wordmark variants: light nav uses html_logo; dark uses logo_dark when theme supports it.
+    "light_logo": "_static/logo.svg",
+    "dark_logo": "_static/logo-dark.svg",
     "github_url": "https://github.com/HaoZeke/rtrash",
     "nav_links": [
         {"title": "Get started", "url": "getting-started"},
