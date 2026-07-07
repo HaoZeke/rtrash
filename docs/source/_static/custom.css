@@ -50,10 +50,12 @@ html.dark .rt-hero-name { color: #ccfbf1; }
   height: auto;
   margin: 0 0 0.75rem;
 }
-/* Prefer brand row; hide legacy full-width logo if both present */
-.rt-hero-brand + .rt-hero-logo { display: none; }
-html.dark .rt-hero-logo-light { display: none; }
-html:not(.dark) .rt-hero-logo-dark { display: none; }
+/* Prefer brand row: hide ALL wordmark logos that follow it (light + dark).
+   Use general sibling (~), not adjacent (+), so logo-dark is not left visible. */
+.rt-hero-brand ~ .rt-hero-logo { display: none !important; }
+/* When brand row is absent, theme toggle still picks one wordmark: */
+html.dark .rt-hero:not(:has(.rt-hero-brand)) .rt-hero-logo-light { display: none; }
+html:not(.dark) .rt-hero:not(:has(.rt-hero-brand)) .rt-hero-logo-dark { display: none; }
 
 .rt-hero-tagline {
   margin: 0;
