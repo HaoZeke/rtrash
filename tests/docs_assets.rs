@@ -156,8 +156,8 @@ fn readme_documents_setup_story() {
             "bash-completion",
             "site-functions",
             "man/rtrash.1",
-            "embedded",
             "fish",
+            "cargo binstall",
         ],
         "README.md",
     );
@@ -166,13 +166,17 @@ fn readme_documents_setup_story() {
 #[test]
 fn readme_documents_release_or_binary_path() {
     let s = read("README.md");
-    // At least one concrete path beyond bare ad-hoc lore: binstall and/or release script.
-    let has_binstall = s.contains("cargo binstall") || s.contains("binstall");
-    let has_release = s.contains("release")
-        && (s.contains("musl") || s.contains("scripts/package-release") || s.contains("GitHub Release"));
     assert!(
-        has_binstall || has_release,
-        "README must document a binary/release install path (binstall and/or release recipe)"
+        s.contains("cargo binstall"),
+        "README must document cargo binstall"
+    );
+    assert!(
+        s.contains("scripts/package-release") || s.contains("package-release.sh"),
+        "README must mention package-release for tarball builds"
+    );
+    assert!(
+        s.contains("metadata.binstall") || s.contains("package.metadata.binstall"),
+        "README should point at binstall metadata alignment"
     );
 }
 

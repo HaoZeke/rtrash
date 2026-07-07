@@ -6,13 +6,20 @@
 # Env:
 #   OUT_DIR   output directory (default: dist/)
 #   SKIP_TEST set to 1 to skip cargo test before packaging
+#
+# Naming is locked to Cargo.toml [package.metadata.binstall]:
+#   archive:  {name}-{version}-{target}.tar.gz
+#   bin path: {name}-{version}-{target}/bin/{bin}
+#   release:  $repo/releases/download/v{version}/...
+# Tag releases as v$VERSION so cargo-binstall can resolve assets without flags.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 TARGET="${1:-x86_64-unknown-linux-musl}"
 OUT_DIR="${OUT_DIR:-$ROOT/dist}"
-VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+# First package.version only (not nested tables).
+VERSION="$(awk -F\" '/^version = / { print $2; exit }' Cargo.toml)"
 NAME="rtrash-${VERSION}-${TARGET}"
 
 echo "==> target=${TARGET} version=${VERSION}"

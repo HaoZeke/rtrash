@@ -11,6 +11,19 @@ categories = ["command-line-utilities", "filesystem"]
 keywords = ["trash", "rm", "freedesktop", "xdg"]
 readme = "README.md"
 
+# cargo-binstall: resolve prebuilt binaries from GitHub Releases.
+# Must stay in lockstep with scripts/package-release.sh tarball naming:
+#   {name}-{version}-{target}.tar.gz
+# containing bin/{bin} (plus multi-call links, completions, man under share/).
+# Tags are v{version} (e.g. v0.1.0). After a matching Release asset is published:
+#   cargo binstall rtrash
+#   # or, from git metadata before crates.io publish:
+#   cargo binstall --git https://github.com/HaoZeke/rtrash rtrash
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ name }-{ version }-{ target }/bin/{ bin }{ binary-ext }"
+
 [lib]
 name = "rtrash"
 path = "src/lib.rs"

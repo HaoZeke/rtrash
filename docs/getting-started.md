@@ -18,21 +18,29 @@
 
 ### CLI (Rust)
 
+**Preferred** when a GitHub Release for this version exists (tag `v*`, musl
+tarball named `rtrash-<version>-<target>.tar.gz`):
+
+```shell
+cargo binstall rtrash
+# or: cargo binstall --git https://github.com/HaoZeke/rtrash rtrash
+rtrash setup
+```
+
+`[package.metadata.binstall]` in `Cargo.toml` matches
+`scripts/package-release.sh` / the release workflow so binstall needs no
+custom `--pkg-url`. Always finish with **`rtrash setup`** (multi-call links,
+bash/zsh/fish completions, man page under `~/.local`).
+
+**Manual tarball:** download the Release asset or run
+`./scripts/package-release.sh`, then `rtrash setup`.
+
+**From source** (no release asset yet):
+
 ```shell
 cargo install --git https://github.com/HaoZeke/rtrash
 rtrash setup
 ```
-
-`rtrash setup` installs multi-call links, bash/zsh/**fish** completions, and the
-man page under `~/.local` from **embedded** assets (no clone required). Use
-`--dry-run` to preview, `--force` after upgrades, `--with-rm` to also link
-`rm` → put into trash. Packagers: `rtrash completions bash|zsh|fish`,
-`rtrash man`, or `rtrash setup --prefix=/usr`.
-
-**Without a full Rust toolchain:** use a musl release tarball from GitHub
-Releases (tag `v*`) or build one with `./scripts/package-release.sh` (see
-README). Optional: `cargo binstall --git https://github.com/HaoZeke/rtrash rtrash`
-when a release asset is published.
 
 ### Python (maturin / PyO3)
 
