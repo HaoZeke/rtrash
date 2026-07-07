@@ -4,12 +4,11 @@
   <img src="docs/source/_static/logo.svg" width="280" alt="rtrash logo" />
 </p>
 
-**SOTA for the Linux FreeDesktop / rm-compatible / trash-cli multi-call niche:**
-one native Rust binary that implements the
-[freedesktop.org Trash specification](https://specifications.freedesktop.org/trash-spec/trashspec-latest.html)
-with an rm-compatible put path and the full everyday trash-cli suite
-(`trash-put`, `trash-empty`, `trash-list`, `trash-restore`, `trash-rm`). No
-interpreter startup; emptying deletes entries in parallel via
+Native Rust FreeDesktop trash for Linux: an rm-compatible put path and the
+everyday trash-cli suite (`trash-put`, `trash-empty`, `trash-list`,
+`trash-restore`, `trash-rm`) as one multi-call binary. Implements the
+[freedesktop.org Trash specification](https://specifications.freedesktop.org/trash-spec/trashspec-latest.html).
+No interpreter startup; emptying deletes entries in parallel via
 [rayon](https://crates.io/crates/rayon).
 
 ## Documentation
@@ -64,8 +63,7 @@ the structured presentation of the same material.
 ## Platform
 
 **Platform:** Linux FreeDesktop trash only (home trash + per-mount trash
-dirs). Not a Windows/macOS system-trash wrapper, and not a colored TUI — see
-[docs/SOTA.md](docs/SOTA.md) for the niche claim and non-goals.
+dirs). Not a Windows/macOS system-trash wrapper, and not a colored TUI.
 
 ## Install
 
@@ -246,8 +244,6 @@ Previously deferred items are implemented in the shipped put/empty path:
 - **Not a general soft-delete database:** only the FreeDesktop on-disk layout.
 - **EXDEV does not re-create xattrs/ACLs/hardlinks** (mode+mtime+symlink+bytes only).
 - **Locks are local `flock`** (advisory on some network FS).
-
-Niche claim and competitor framing: [docs/SOTA.md](docs/SOTA.md).
 
 ## Performance
 

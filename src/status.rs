@@ -1,4 +1,4 @@
-//! Trash size/count summary (SOTA peer: gtrash/trashy status-style overview).
+//! Trash size/count summary (item count and reclaimable size per trash root).
 
 use std::path::PathBuf;
 
