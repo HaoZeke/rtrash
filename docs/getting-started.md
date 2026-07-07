@@ -23,11 +23,16 @@ cargo install --git https://github.com/HaoZeke/rtrash
 rtrash setup
 ```
 
-`rtrash setup` installs multi-call links, bash/zsh completions, and the man
-page under `~/.local` from **embedded** assets (no clone required). Use
+`rtrash setup` installs multi-call links, bash/zsh/**fish** completions, and the
+man page under `~/.local` from **embedded** assets (no clone required). Use
 `--dry-run` to preview, `--force` after upgrades, `--with-rm` to also link
-`rm` → put into trash. Packagers: `rtrash completions bash|zsh`, `rtrash man`,
-or `rtrash setup --prefix=/usr`.
+`rm` → put into trash. Packagers: `rtrash completions bash|zsh|fish`,
+`rtrash man`, or `rtrash setup --prefix=/usr`.
+
+**Without a full Rust toolchain:** use a musl release tarball from GitHub
+Releases (tag `v*`) or build one with `./scripts/package-release.sh` (see
+README). Optional: `cargo binstall --git https://github.com/HaoZeke/rtrash rtrash`
+when a release asset is published.
 
 ### Python (maturin / PyO3)
 

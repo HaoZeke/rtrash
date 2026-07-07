@@ -27,6 +27,36 @@ fn assert_contains(hay: &str, needles: &[&str], label: &str) {
 }
 
 #[test]
+fn fish_completion_covers_surface() {
+    let s = read("completions/rtrash.fish");
+    assert_contains(
+        &s,
+        &[
+            "put",
+            "empty",
+            "list",
+            "status",
+            "restore",
+            "rm",
+            "setup",
+            "completions",
+            "home-only",
+            "trash-dir",
+            "dry-run",
+            "trash-put",
+            "trash-empty",
+            "complete -c rtrash",
+        ],
+        "completions/rtrash.fish",
+    );
+    // Must not register system `rm` by default (would shadow GNU rm completion).
+    assert!(
+        !s.contains("complete -c rm "),
+        "fish must not complete multi-call rm by default"
+    );
+}
+
+#[test]
 fn bash_completion_covers_surface() {
     let s = read("completions/rtrash.bash");
     assert_contains(
@@ -127,7 +157,21 @@ fn readme_documents_setup_story() {
             "site-functions",
             "man/rtrash.1",
             "embedded",
+            "fish",
         ],
         "README.md",
+    );
+}
+
+#[test]
+fn readme_documents_release_or_binary_path() {
+    let s = read("README.md");
+    // At least one concrete path beyond bare ad-hoc lore: binstall and/or release script.
+    let has_binstall = s.contains("cargo binstall") || s.contains("binstall");
+    let has_release = s.contains("release")
+        && (s.contains("musl") || s.contains("scripts/package-release") || s.contains("GitHub Release"));
+    assert!(
+        has_binstall || has_release,
+        "README must document a binary/release install path (binstall and/or release recipe)"
     );
 }

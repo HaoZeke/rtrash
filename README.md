@@ -67,32 +67,61 @@ dirs). Not a Windows/macOS system-trash wrapper, and not a colored TUI.
 
 ## Install
 
+### From source (`cargo install`)
+
 Requires a Rust toolchain (MSRV **1.77**). Default `cargo install` produces a
-dynamically linked Linux binary (glibc); use a musl target if you need a fully
-static artifact.
+dynamically linked Linux binary (glibc).
 
 ```console
 $ cargo install --git https://github.com/HaoZeke/rtrash
 $ rtrash setup
 ```
 
-**That is the full user install.** `rtrash setup` uses assets **embedded in the
-binary** (no source checkout) and under `~/.local` (override with
-`--prefix=DIR` or `$PREFIX`) installs:
+**That is the full user install** for people who already use cargo. `rtrash setup`
+uses assets **embedded in the binary** (no source checkout) and under `~/.local`
+(override with `--prefix=DIR` or `$PREFIX`) installs:
 
 | What | Where (default) |
 | ---- | --------------- |
 | Multi-call symlinks (`trash-put`, `trash-empty`, `trash-list`, `trash-restore`, `trash-rm`, `trash`) | `~/.local/bin/` → this `rtrash` |
 | bash completion | `~/.local/share/bash-completion/completions/rtrash` (+ links for multi-call names) |
 | zsh completion | `~/.local/share/zsh/site-functions/_rtrash` |
+| fish completion | `~/.config/fish/completions/rtrash.fish` (or `PREFIX/share/fish/vendor_completions.d` for non-`~/.local` prefixes) |
 | man page | `~/.local/share/man/man1/rtrash.1` |
 
 Useful flags: `rtrash setup --dry-run`, `--force` (refresh after upgrade),
 `--with-rm` (also link `rm` → put into trash), `--prefix=/usr/local`.
 
-`setup` prints the one-time shell notes (PATH, zsh `fpath`, `MANPATH`) if your
-environment does not already pick up `~/.local`. Re-run `rtrash setup --force`
-after upgrading the binary to refresh completions and the man page.
+### Binary release (no cargo toolchain required)
+
+Prefer a **musl static tarball** when you do not want a full Rust install:
+
+1. **GitHub Release asset** (when a `v*` tag is published): download
+   `rtrash-*-x86_64-unknown-linux-musl.tar.gz` from the repository Releases
+   page, extract, put `bin/rtrash` on `PATH`, then run
+   `rtrash setup --force` (or follow `INSTALL.txt` in the tarball).
+2. **Build the same tarball yourself** from a checkout on a builder host:
+
+```console
+$ ./scripts/package-release.sh x86_64-unknown-linux-musl
+# → dist/rtrash-<version>-x86_64-unknown-linux-musl.tar.gz
+```
+
+The script builds a release binary for the target, stages multi-call links,
+shell completions (bash/zsh/fish), and the man page, and packs a relocatable
+tree. CI recipe: [`.github/workflows/release.yml`](.github/workflows/release.yml)
+(runs the same script on `v*` tags).
+
+3. **`cargo binstall`** (if you use [cargo-binstall](https://github.com/cargo-bins/cargo-binstall)
+   and a release asset is published for the crate/git source):
+
+```console
+$ cargo binstall --git https://github.com/HaoZeke/rtrash rtrash
+$ rtrash setup
+```
+
+(`binstall` still needs a one-time Rust/cargo-binstall install; the musl
+tarball path above needs neither after download.)
 
 Subcommands work without multi-call names:
 `rtrash put|empty|list|status|restore|rm …`.
@@ -116,6 +145,7 @@ any installed binary:
 ```console
 $ rtrash completions bash > rtrash.bash
 $ rtrash completions zsh  > _rtrash
+$ rtrash completions fish > rtrash.fish
 $ rtrash man              > rtrash.1
 $ rtrash setup --prefix=/usr --force    # system prefix when packaging
 ```

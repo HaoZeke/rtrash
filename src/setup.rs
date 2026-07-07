@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 const BASH_COMPLETION: &str = include_str!("../completions/rtrash.bash");
 const ZSH_COMPLETION: &str = include_str!("../completions/_rtrash");
+const FISH_COMPLETION: &str = include_str!("../completions/rtrash.fish");
 const MAN_PAGE: &str = include_str!("../man/rtrash.1");
 
 const MULTICALL: &[&str] = &[
@@ -24,11 +25,11 @@ const MULTICALL: &[&str] = &[
 
 const HELP: &str = "\
 Usage: rtrash setup [OPTION]...
-       rtrash completions {bash|zsh}
+       rtrash completions {bash|zsh|fish}
        rtrash man
 
 After `cargo install`, run `rtrash setup` once to install multi-call
-symlinks, bash/zsh completions, and the man page under a user prefix
+symlinks, bash/zsh/fish completions, and the man page under a user prefix
 (default: ~/.local). No source tree required — assets are embedded.
 
 setup options:
@@ -41,7 +42,7 @@ setup options:
       --help         display this help and exit
 
 completions:
-  Print the embedded completion script for bash or zsh to stdout
+  Print the embedded completion script for bash, zsh, or fish to stdout
   (for package recipes or custom paths).
 
 man:
@@ -231,6 +232,10 @@ fn run_setup(args: &[String]) -> i32 {
     let share = opts.prefix.join("share");
     let bash_dir = share.join("bash-completion/completions");
     let zsh_dir = share.join("zsh/site-functions");
+    // Fish loads user completions from $XDG_CONFIG_HOME/fish/completions or
+    // ~/.config/fish/completions. Prefer that under HOME when prefix is the
+    // default ~/.local; otherwise PREFIX/share/fish/vendor_completions.d.
+    let fish_dir = fish_completions_dir(&opts.prefix);
     let man_dir = share.join("man/man1");
 
     let target = match resolve_self_exe() {
@@ -331,6 +336,15 @@ fn run_setup(args: &[String]) -> i32 {
         opts.verbose,
     ));
 
+    ok &= absorb(ensure_dir(&fish_dir, opts.dry_run, opts.verbose));
+    ok &= absorb(write_file(
+        &fish_dir.join("rtrash.fish"),
+        FISH_COMPLETION,
+        opts.force,
+        opts.dry_run,
+        opts.verbose,
+    ));
+
     ok &= absorb(ensure_dir(&man_dir, opts.dry_run, opts.verbose));
     ok &= absorb(write_file(
         &man_dir.join("rtrash.1"),
@@ -352,6 +366,7 @@ fn run_setup(args: &[String]) -> i32 {
     println!("  multi-call links → {}", bin_dir.display());
     println!("  bash completion  → {}/rtrash", bash_dir.display());
     println!("  zsh completion   → {}/_rtrash", zsh_dir.display());
+    println!("  fish completion  → {}/rtrash.fish", fish_dir.display());
     println!("  man page         → {}/rtrash.1", man_dir.display());
     println!();
     println!("Shell notes (once per machine/login config):");
@@ -365,6 +380,9 @@ fn run_setup(args: &[String]) -> i32 {
     println!("  • zsh: ensure the site-functions dir is on fpath, e.g. in ~/.zshrc:");
     println!("      fpath=({}/zsh/site-functions $fpath)", share.display());
     println!("      autoload -Uz compinit && compinit");
+    println!("  • fish: user completions are loaded from");
+    println!("    ~/.config/fish/completions (default setup target) or");
+    println!("    PREFIX/share/fish/vendor_completions.d when --prefix is not ~/.local.");
     println!("  • man: if `man rtrash` misses the page, set:");
     println!(
         "      export MANPATH=\"{}:${{MANPATH:-}}\"",
@@ -377,6 +395,21 @@ fn run_setup(args: &[String]) -> i32 {
     println!();
     println!("Re-run with --force after upgrades to refresh completions/man.");
     0
+}
+
+/// Prefer fish's user config completions dir for the default user prefix.
+fn fish_completions_dir(prefix: &Path) -> PathBuf {
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let default_local = home.as_ref().map(|h| h.join(".local"));
+    if default_local.as_ref().is_some_and(|p| p == prefix) {
+        let cfg = env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home.map(|h| h.join(".config")));
+        if let Some(c) = cfg {
+            return c.join("fish/completions");
+        }
+    }
+    prefix.join("share/fish/vendor_completions.d")
 }
 
 fn run_completions(args: &[String]) -> i32 {
@@ -393,8 +426,12 @@ fn run_completions(args: &[String]) -> i32 {
             print!("{ZSH_COMPLETION}");
             0
         }
+        Some("fish") => {
+            print!("{FISH_COMPLETION}");
+            0
+        }
         Some(other) => {
-            eprintln!("rtrash completions: unknown shell '{other}' (want bash or zsh)");
+            eprintln!("rtrash completions: unknown shell '{other}' (want bash, zsh, or fish)");
             2
         }
     }
@@ -451,6 +488,10 @@ mod tests {
     fn embedded_assets_nonempty() {
         assert!(BASH_COMPLETION.contains("complete -F _rtrash_main rtrash"));
         assert!(ZSH_COMPLETION.contains("#compdef"));
+        assert!(FISH_COMPLETION.contains("complete -c rtrash"));
+        assert!(FISH_COMPLETION.contains("home-only"));
+        assert!(FISH_COMPLETION.contains("dry-run"));
+        assert!(FISH_COMPLETION.contains("put"));
         assert!(MAN_PAGE.contains(".TH RTRASH 1"));
     }
 
@@ -477,9 +518,18 @@ mod tests {
         assert_eq!(code, 0, "setup failed");
         assert!(prefix.join("share/bash-completion/completions/rtrash").is_file());
         assert!(prefix.join("share/zsh/site-functions/_rtrash").is_file());
+        assert!(prefix
+            .join("share/fish/vendor_completions.d/rtrash.fish")
+            .is_file());
         assert!(prefix.join("share/man/man1/rtrash.1").is_file());
         let bash = fs::read_to_string(prefix.join("share/bash-completion/completions/rtrash")).unwrap();
         assert!(bash.contains("--home-only"));
+        let fish = fs::read_to_string(
+            prefix.join("share/fish/vendor_completions.d/rtrash.fish"),
+        )
+        .unwrap();
+        assert!(fish.contains("dry-run"));
+        assert!(fish.contains("home-only"));
         let _ = fs::remove_dir_all(&prefix);
     }
 }

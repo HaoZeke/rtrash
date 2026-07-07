@@ -19,21 +19,44 @@ export RTRASH_BIN=$PWD/target/release/rtrash
 python3 benches/compare_trash_cli.py | tee compare-trash-cli.log
 ```
 
-Requires system `trash-put` / `trash-empty` / `trash-list` (trash-cli **0.24.5.26** on the verification host).
+Requires system `trash-put` / `trash-empty` / `trash-list` (trash-cli version
+printed by `trash-put --version` on the host).
 
-**Fixture class:** 400 small files + one multi-file directory tree (80 nested files); isolated `XDG_DATA_HOME`; two trials per tool; timed put of the whole set then empty with `--trash-dir` pin.
+**Fixture class:** 400 small files + one multi-file directory tree (80 nested
+files); isolated `XDG_DATA_HOME`; two trials per tool; timed put of the whole
+set then empty with `--trash-dir` pin.
 
-## Measured results (rg.terra / `rgam5terra`, 2026-07-05)
+Optional peers (trashy, gtrash) are measured only when present on `PATH`; the
+last refresh noted them as **unavailable** on the verification host (see table
+notes).
 
-From `benches/compare_trash_cli.py` (see verification `compare-trash-cli.log`):
+## Measured results (rg.terra / `rgam5terra`, 2026-07-07)
+
+Host: Linux `rgam5terra`, kernel `7.0.13-arch1-1-rg`, x86_64. UTC stamp:
+`2026-07-07T21:01:52Z`. Peers: **rtrash 0.1.0** (release build of this tree),
+**trash-cli 0.24.5.26**. **trashy** and **gtrash**: not installed on the host
+(no timings invented).
+
+From `benches/compare_trash_cli.py` (two warm trials each; full log in
+verification `bench-refresh.log`):
 
 | Tool | put avg (s) | empty avg (s) |
 |------|-------------|----------------|
-| **rtrash** (release) | **0.00496** | **0.00325** |
-| trash-cli 0.24.5.26 | 0.0950 | 0.0422 |
-| **speedup (trash-cli / rtrash)** | **~19×** | **~13×** |
+| **rtrash** (release) | **0.00507** | **0.00267** |
+| trash-cli 0.24.5.26 | 0.0674 | 0.0334 |
+| **speedup (trash-cli / rtrash)** | **~13×** | **~12×** |
 
-Per-trial post-conditions for **both** tools: `ec=0`, multi-entry trash after put (`entries=401` including deep tree), `files_left=0` and `info_left=0` after empty. `LIST_OK` for a single-file put on both tools.
+Per-trial post-conditions for **both** tools: `ec=0`, multi-entry trash after
+put (`entries=401` including deep tree), `files_left=0` and `info_left=0` after
+empty. `LIST_OK` for a single-file put on both tools. Harness footer:
+`COMPARE_OK`.
+
+### Prior snapshot (same host class, 2026-07-05)
+
+Earlier run on the same host class reported ~19× put / ~13× empty vs the same
+trash-cli version. Absolute times vary with load and filesystem state; the
+**order-of-magnitude** advantage for native put/empty remains. Prefer the
+**2026-07-07** table above as the current dated evidence.
 
 ## Safety / “better” (not a timer)
 
@@ -48,24 +71,21 @@ Per-trial post-conditions for **both** tools: `ec=0`, multi-entry trash after pu
 
 ## Prior empty microbench (rtrash-only)
 
-An earlier same-host empty microbench (2001 top-level entries) measured bulk-unlink empty ~1.35× vs the pre-fastdelete rtrash binary. That is **rtrash evolution**, not trash-cli. Prefer this document’s harness for cross-tool claims.
+An earlier same-host empty microbench (2001 top-level entries) measured
+bulk-unlink empty ~1.35× vs the pre-fastdelete rtrash binary. That is **rtrash
+evolution**, not trash-cli. Prefer this document’s harness for cross-tool claims.
 
 ## Large full-empty (rtrash vs prior rtrash, same host)
 
 Fixture on **rg.terra** btrfs `/home` (2026-07-05): **8000** small top-level
 files + one deep tree (1000 nested files + 250 wide dirs) → **8001** top-level
 trash entries. Timed `rtrash empty --trash-dir=…` only; **7 trials** each after
-warm-up. Full per-trial lines (with `ec=`, `files_left=`, `info_left=`,
-`top_before=`) are in the verification `empty-fast-bench.log`.
+warm-up.
 
 | Binary | avg wall (ms) | best | median | trimmed avg |
 |--------|---------------|------|--------|-------------|
 | Prior release (`fc7272f` baseline binary) | 274.4 | 236 | 286 | 275.0 |
-| This empty path | **144.0** | **138** | **143** | **143.8** |
+| Post-fastdelete empty path (2026-07-05) | **144.0** | **138** | **143** | **143.8** |
 | speedup | **~1.91×** | ~1.71× | **~2.00×** | **~1.91×** |
 
 Every timed trial: `ec=0`, `top_before=8001`, `files_left=0`, `info_left=0`.
-
-Reproduce: build a prior-commit release binary as baseline and the current tree
-as new; run `implementer/run_empty_fast_bench.sh` (or the same populate/empty
-loop against an isolated `XDG_DATA_HOME` on btrfs).

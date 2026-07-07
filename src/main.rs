@@ -12,7 +12,7 @@ Commands:
   restore [OPTION]... [PATH]  restore a trashed item
   rm PATTERN...               permanently delete matching trash entries
   setup [OPTION]...           install multi-call links, completions, man page
-  completions {bash|zsh}      print embedded shell completion script
+  completions {bash|zsh|fish} print embedded shell completion script
   man                         print embedded man(1) page to stdout
 
 Multi-call: a symlink or hardlink named rm or trash-put runs `put`;

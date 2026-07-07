@@ -769,6 +769,17 @@ fn completions_stdout_matches_embedded_markers() {
         .unwrap();
     assert!(out.status.success());
     assert!(stdout_of(&out).contains("#compdef"));
+
+    let out = Command::new(bin())
+        .args(["completions", "fish"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let fish = stdout_of(&out);
+    assert!(fish.contains("complete -c rtrash"));
+    assert!(fish.contains("home-only"));
+    assert!(fish.contains("dry-run"));
+    assert!(fish.contains("status"));
 }
 
 #[test]
@@ -807,8 +818,11 @@ fn setup_installs_under_prefix() {
     assert!(bash.is_file(), "missing {bash:?}");
     assert!(zsh.is_file(), "missing {zsh:?}");
     assert!(man.is_file(), "missing {man:?}");
+    let fish = prefix.join("share/fish/vendor_completions.d/rtrash.fish");
+    assert!(fish.is_file(), "missing {fish:?}");
     assert!(prefix.join("bin/trash-put").symlink_metadata().is_ok());
     assert!(fs::read_to_string(&bash).unwrap().contains("setup"));
+    assert!(fs::read_to_string(&fish).unwrap().contains("dry-run"));
     let _ = fs::remove_dir_all(&prefix);
 }
 
