@@ -210,12 +210,21 @@ fn empty_one(
 
     victims.par_iter().for_each(|(target, info_path, display)| {
         if opts.dry_run {
-            // Fast in-process du of the payload (+ .trashinfo) for reclaim estimate.
-            let sz = crate::fastdelete::disk_usage(target)
-                + info_path
-                    .as_ref()
-                    .map(|p| crate::fastdelete::disk_usage(p))
-                    .unwrap_or(0);
+            // Prefer FreeDesktop directorysizes for directory payloads; fall back
+            // to a disk_usage walk. Always add the .trashinfo size when present.
+            let name = target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let sz = if info_path.is_some() && !name.is_empty() {
+                trashdir::entry_reclaim_bytes(dir, &name)
+            } else {
+                crate::fastdelete::disk_usage(target)
+                    + info_path
+                        .as_ref()
+                        .map(|p| crate::fastdelete::disk_usage(p))
+                        .unwrap_or(0)
+            };
             bytes.fetch_add(sz, Ordering::Relaxed);
             if opts.verbose {
                 println!(
@@ -273,7 +282,8 @@ fn full_empty_dry_run(
     if let Ok(entries) = fs::read_dir(&files_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
-            let sz = crate::fastdelete::disk_usage(&p);
+            // Directory payloads: use validated directorysizes when present.
+            let sz = trashdir::files_child_reclaim_bytes(dir, &p);
             total = total.saturating_add(sz);
             n_files += 1;
             if opts.verbose {

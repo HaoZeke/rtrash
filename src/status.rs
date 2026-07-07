@@ -9,7 +9,8 @@ use crate::trashdir::{self, TrashDir};
 const HELP: &str = "\
 Usage: {prog} [OPTION]...
 Summarize discovered trash: item count and approximate reclaimable size
-(per root and total). Uses the same disk_usage walk as empty --dry-run.
+(per root and total). Directory payloads use FreeDesktop directorysizes when
+valid; otherwise the same disk_usage walk as empty --dry-run.
 
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  only this trash directory (repeatable)
@@ -61,22 +62,21 @@ pub fn print_status(dirs: &[TrashDir]) {
     for dir in dirs {
         let entries = list::collect(std::slice::from_ref(dir));
         let mut bytes = 0u64;
+        let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
         for e in &entries {
-            let payload = dir.files().join(&e.name);
-            let info = dir.info().join(format!("{}.trashinfo", e.name));
-            bytes = bytes
-                .saturating_add(fastdelete::disk_usage(&payload))
-                .saturating_add(fastdelete::disk_usage(&info));
+            bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes(dir, &e.name));
+            counted.insert(e.name.clone());
         }
         // Orphans in files/ without info (full empty would purge them).
         if let Ok(rd) = std::fs::read_dir(dir.files()) {
             for ent in rd.flatten() {
-                let name = ent.file_name();
-                let has_info = dir
-                    .info()
-                    .join(format!("{}.trashinfo", name.to_string_lossy()))
-                    .exists();
+                let name = ent.file_name().to_string_lossy().into_owned();
+                if counted.contains(&name) {
+                    continue;
+                }
+                let has_info = dir.info().join(format!("{name}.trashinfo")).exists();
                 if !has_info {
+                    // Orphans never use directorysizes (no matching .trashinfo mtime).
                     bytes = bytes.saturating_add(fastdelete::disk_usage(&ent.path()));
                 }
             }

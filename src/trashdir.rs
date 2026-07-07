@@ -686,6 +686,91 @@ pub fn directorysizes_remove(trash: &TrashDir, name: &str) {
     }
 }
 
+/// Parse one FreeDesktop `directorysizes` line: `size mtime percent-encoded-name`.
+/// Returns `None` on any malformed line (callers fall back to a real walk).
+pub fn directorysizes_parse_line(line: &str) -> Option<(u64, i64, String)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let mut parts = line.splitn(3, ' ');
+    let size: u64 = parts.next()?.parse().ok()?;
+    let mtime: i64 = parts.next()?.parse().ok()?;
+    let enc = parts.next()?.to_string();
+    if enc.is_empty() {
+        return None;
+    }
+    Some((size, mtime, enc))
+}
+
+/// Cached directory payload size from `$trash/directorysizes` when the line is
+/// still valid for `name`:
+/// - a matching percent-encoded name is present;
+/// - the payload under `files/` exists and is a directory (cache is for dirs);
+/// - the cached mtime equals the current `.trashinfo` mtime (FreeDesktop intent).
+///
+/// Any doubt → `None` so callers use [`crate::fastdelete::disk_usage`].
+pub fn directorysizes_cached_size(trash: &TrashDir, name: &str) -> Option<u64> {
+    use crate::util::url_encode;
+    let path = trash.root.join("directorysizes");
+    let body = fs::read_to_string(path).ok()?;
+    let want = url_encode(name.as_bytes());
+    let mut hit: Option<(u64, i64)> = None;
+    for line in body.lines() {
+        let Some((size, mtime, enc)) = directorysizes_parse_line(line) else {
+            continue;
+        };
+        if enc == want {
+            hit = Some((size, mtime));
+            // Last matching line wins (upsert rewrites whole file with one line,
+            // but tolerate hand-edited duplicates conservatively).
+        }
+    }
+    let (size, mtime) = hit?;
+    let payload = trash.files().join(name);
+    let meta = fs::symlink_metadata(&payload).ok()?;
+    if !meta.is_dir() {
+        return None;
+    }
+    let info = trash.info().join(format!("{name}.trashinfo"));
+    let info_mt = info_mtime_secs(&info).ok()?;
+    if info_mt != mtime {
+        return None;
+    }
+    Some(size)
+}
+
+/// Approximate reclaimable bytes for one named trash entry (payload + its
+/// `.trashinfo` when present). Directory payloads use a valid `directorysizes`
+/// cache line when available; files, orphans, and invalid cache always walk.
+pub fn entry_reclaim_bytes(trash: &TrashDir, name: &str) -> u64 {
+    let payload = trash.files().join(name);
+    let info = trash.info().join(format!("{name}.trashinfo"));
+    let payload_sz = directorysizes_cached_size(trash, name)
+        .unwrap_or_else(|| crate::fastdelete::disk_usage(&payload));
+    let info_sz = if info.exists() {
+        crate::fastdelete::disk_usage(&info)
+    } else {
+        0
+    };
+    payload_sz.saturating_add(info_sz)
+}
+
+/// Reclaimable bytes for a path under `files/` (top-level name), using the
+/// directorysizes cache when the payload is a directory with a valid line.
+pub fn files_child_reclaim_bytes(trash: &TrashDir, path: &Path) -> u64 {
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return crate::fastdelete::disk_usage(path);
+    };
+    // Prefer cache only when this is the trash files/ child (same parent as files()).
+    if path.parent().is_some_and(|p| p == trash.files()) {
+        if let Some(sz) = directorysizes_cached_size(trash, &name) {
+            return sz;
+        }
+    }
+    crate::fastdelete::disk_usage(path)
+}
+
 /// Write `data` to `path` via a same-dir temp file and rename (atomic on POSIX).
 pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
     use std::io::Write;
@@ -963,6 +1048,90 @@ proc /proc proc rw 0 0
         assert!(mps.contains(&PathBuf::from("/")));
         assert!(mps.contains(&PathBuf::from("/home")));
         assert!(mps.contains(&PathBuf::from("/data")));
+    }
+
+    #[test]
+    fn directorysizes_parse_line_ok_and_rejects_garbage() {
+        let (sz, mt, enc) = directorysizes_parse_line("1234 1700000000 mydir").unwrap();
+        assert_eq!(sz, 1234);
+        assert_eq!(mt, 1_700_000_000);
+        assert_eq!(enc, "mydir");
+        assert!(directorysizes_parse_line("").is_none());
+        assert!(directorysizes_parse_line("not-a-number 1 x").is_none());
+        assert!(directorysizes_parse_line("1 2").is_none()); // missing name
+    }
+
+    #[test]
+    fn directorysizes_cached_size_hit_and_stale_fallback() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-ds-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("files/tree/nested")).unwrap();
+        fs::create_dir_all(root.join("info")).unwrap();
+        fs::write(root.join("files/tree/nested/blob"), vec![b'x'; 4096]).unwrap();
+        let info_path = root.join("info/tree.trashinfo");
+        fs::write(
+            &info_path,
+            "[Trash Info]\nPath=/orig/tree\nDeletionDate=2020-01-01T00:00:00\n",
+        )
+        .unwrap();
+        let mtime = info_mtime_secs(&info_path).unwrap();
+        let trash = TrashDir {
+            root: root.clone(),
+            topdir: None,
+        };
+        // Write a deliberately huge cached size with matching mtime.
+        fs::write(
+            root.join("directorysizes"),
+            format!("999000000 {mtime} tree\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            directorysizes_cached_size(&trash, "tree"),
+            Some(999_000_000),
+            "valid cache line must be used"
+        );
+        assert_eq!(
+            entry_reclaim_bytes(&trash, "tree"),
+            999_000_000 + crate::fastdelete::disk_usage(&info_path)
+        );
+        // Stale mtime → None → walk.
+        fs::write(
+            root.join("directorysizes"),
+            format!("999000000 {} tree\n", mtime.saturating_sub(99)),
+        )
+        .unwrap();
+        assert_eq!(directorysizes_cached_size(&trash, "tree"), None);
+        let walked = entry_reclaim_bytes(&trash, "tree");
+        assert!(
+            walked < 999_000_000,
+            "stale cache must fall back to walk, got {walked}"
+        );
+        // File entry must not use a directorysizes line even if forged.
+        fs::write(root.join("files/onlyfile"), b"hi").unwrap();
+        fs::write(
+            root.join("info/onlyfile.trashinfo"),
+            "[Trash Info]\nPath=/orig/onlyfile\nDeletionDate=2020-01-01T00:00:00\n",
+        )
+        .unwrap();
+        let fmt = info_mtime_secs(&root.join("info/onlyfile.trashinfo")).unwrap();
+        fs::write(
+            root.join("directorysizes"),
+            format!("888000000 {fmt} onlyfile\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            directorysizes_cached_size(&trash, "onlyfile"),
+            None,
+            "file payloads must not use directorysizes"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }
 

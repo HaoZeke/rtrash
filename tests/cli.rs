@@ -820,3 +820,73 @@ fn help_mentions_setup() {
     assert!(s.contains("setup"));
     assert!(s.contains("completions"));
 }
+
+#[test]
+fn status_uses_directorysizes_cache_when_valid() {
+    let sb = Sandbox::new("status-dircache");
+    let d = sb.work().join("cachedir");
+    fs::create_dir(&d).unwrap();
+    fs::write(d.join("inner"), vec![b'q'; 2048]).unwrap();
+    assert!(sb.run(&["put", "-r", "cachedir"]).status.success());
+    let info = sb.trash().join("info/cachedir.trashinfo");
+    assert!(info.is_file());
+    // Inject an unmistakable cached size with matching .trashinfo mtime.
+    use std::os::unix::fs::MetadataExt;
+    let mtime = fs::metadata(&info).unwrap().mtime();
+    fs::write(
+        sb.trash().join("directorysizes"),
+        format!("777000000 {mtime} cachedir\n"),
+    )
+    .unwrap();
+    let out = sb.run(&["status", "--home-only"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let s = stdout_of(&out);
+    // 777000000 B ≈ 741.0 MiB via format_bytes — must appear when cache is used.
+    assert!(
+        s.contains("MiB") || s.contains("GiB") || s.contains("777"),
+        "status must reflect huge directorysizes cache line: {s}"
+    );
+    assert!(
+        !s.contains("Total: 0 items"),
+        "{s}"
+    );
+    // Corrupt mtime → fallback walk; total should shrink below the forged cache.
+    fs::write(
+        sb.trash().join("directorysizes"),
+        format!("777000000 {} cachedir\n", mtime.saturating_sub(12345)),
+    )
+    .unwrap();
+    let out2 = sb.run(&["status", "--home-only"]);
+    assert!(out2.status.success(), "{}", stderr_of(&out2));
+    let s2 = stdout_of(&out2);
+    // Fallback walk of a 2 KiB file must not still report ~741 MiB.
+    assert!(
+        !s2.contains("741") && !s2.contains("740.") && !s2.contains("GiB"),
+        "stale cache must not dominate status: {s2}"
+    );
+}
+
+#[test]
+fn empty_dry_run_uses_directorysizes_for_dir_payload() {
+    let sb = Sandbox::new("empty-dry-dircache");
+    let d = sb.work().join("drytree");
+    fs::create_dir(&d).unwrap();
+    fs::write(d.join("blob"), vec![b'z'; 1024]).unwrap();
+    assert!(sb.run(&["put", "-r", "drytree"]).status.success());
+    use std::os::unix::fs::MetadataExt;
+    let info = sb.trash().join("info/drytree.trashinfo");
+    let mtime = fs::metadata(&info).unwrap().mtime();
+    fs::write(
+        sb.trash().join("directorysizes"),
+        format!("555000000 {mtime} drytree\n"),
+    )
+    .unwrap();
+    let out = sb.empty(&["--dry-run"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(err.contains("Would remove"), "{err}");
+    assert!(
+        err.contains("MiB") || err.contains("GiB") || err.contains("555"),
+        "dry-run reclaim must use directorysizes when valid: {err}"
+    );
+}
