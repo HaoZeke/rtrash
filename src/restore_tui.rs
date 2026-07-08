@@ -1,49 +1,29 @@
-//! Interactive restore browser (ratatui).
-//!
-//! First-class TTY UX for `rtrash restore` without a path. Scope is product-
-//! driven (user/vault), not peer-identity: expand here when useful.
-//!
-//! - **Purpose:** browse, filter, and restore trashed items on a TTY. Scripts keep
-//!   path restore and piped/`--plain` index selection.
-//! - **Layout:** header (title + filter), scrollable table, footer (keys + status).
-//! - **Keys:** ↑↓/jk navigate, PgUp/PgDn, g/G, `/` filter, Enter restore,
-//!   `f` force, `y`/`n` confirm overwrite, `q`/Esc quit.
-//! - **Filter:** case-insensitive substring on original path (draft after `/`;
-//!   Enter applies, Esc cancels filter mode).
-//! - **After restore:** drop the row and stay open for multi-restore.
+//! Interactive restore browser (ratatui): multi-select, fuzzy filter, multi-restore.
 
-use std::io::{self, stdout};
+use std::io::{self};
 use std::path::Path;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
-use ratatui::Terminal;
 
 use crate::list::Entry;
 use crate::restore;
+use crate::tui_fuzzy;
+use crate::tui_select::Selection;
+use crate::tui_term;
 
-/// Pure filter: indices into `entries` whose original path matches `query`
-/// (case-insensitive substring). Empty query matches all.
+/// Fuzzy-rank entry indices by original path. Empty query keeps original order.
 pub fn filter_indices(entries: &[&Entry], query: &str) -> Vec<usize> {
-    let q = query.trim().to_lowercase();
-    if q.is_empty() {
-        return (0..entries.len()).collect();
-    }
-    entries
+    let hays: Vec<String> = entries
         .iter()
-        .enumerate()
-        .filter(|(_, e)| e.original.to_string_lossy().to_lowercase().contains(&q))
-        .map(|(i, _)| i)
-        .collect()
+        .map(|e| e.original.to_string_lossy().into_owned())
+        .collect();
+    let refs: Vec<&str> = hays.iter().map(String::as_str).collect();
+    tui_fuzzy::rank_indices(&refs, query)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,22 +31,22 @@ enum Mode {
     Browse,
     Filter,
     ConfirmOverwrite,
+    ConfirmBulk,
 }
 
 struct App<'a> {
     prog: &'a str,
-    /// Owned list of matching entries (we remove after restore).
     entries: Vec<&'a Entry>,
     filtered: Vec<usize>,
     list_state: ListState,
+    sel: Selection,
     force: bool,
     mode: Mode,
     filter: String,
     filter_draft: String,
     status: String,
     quit: bool,
-    /// Pending restore after overwrite confirm.
-    pending_idx: Option<usize>,
+    pending_idxs: Vec<usize>,
 }
 
 impl<'a> App<'a> {
@@ -81,13 +61,16 @@ impl<'a> App<'a> {
             entries,
             filtered: (0..n).collect(),
             list_state,
+            sel: Selection::new(),
             force,
             mode: Mode::Browse,
             filter: String::new(),
             filter_draft: String::new(),
-            status: format!("{n} item(s) · Enter restore · / filter · q quit"),
+            status: format!(
+                "{n} item(s) · Space mark · a/A all/none · Enter restore · / fuzzy · q quit"
+            ),
             quit: false,
-            pending_idx: None,
+            pending_idxs: Vec::new(),
         };
         app.refilter();
         app
@@ -96,7 +79,6 @@ impl<'a> App<'a> {
     fn refilter(&mut self) {
         let prev = self.selected_entry_idx();
         self.filtered = filter_indices(&self.entries, &self.filter);
-        // Keep selection on same entry if still visible.
         let new_sel = prev
             .and_then(|ei| self.filtered.iter().position(|&i| i == ei))
             .or(if self.filtered.is_empty() {
@@ -129,57 +111,104 @@ impl<'a> App<'a> {
     }
 
     fn page(&mut self, down: bool) {
-        let step = 10isize;
-        self.move_sel(if down { step } else { -step });
+        self.move_sel(if down { 10 } else { -10 });
+    }
+
+    fn targets_for_action(&self) -> Vec<usize> {
+        let marked = self.sel.marked_visible(&self.filtered);
+        if !marked.is_empty() {
+            marked
+        } else if let Some(ei) = self.selected_entry_idx() {
+            vec![ei]
+        } else {
+            Vec::new()
+        }
     }
 
     fn try_restore(&mut self) {
-        let Some(ei) = self.selected_entry_idx() else {
+        let targets = self.targets_for_action();
+        if targets.is_empty() {
             self.status = "nothing selected".into();
             return;
-        };
-        let entry = self.entries[ei];
-        let dest = &entry.original;
-        let dest_exists = dest.symlink_metadata().is_ok();
-        if dest_exists && !self.force {
-            self.mode = Mode::ConfirmOverwrite;
-            self.pending_idx = Some(ei);
+        }
+        // Single target may need overwrite confirm.
+        if targets.len() == 1 {
+            let ei = targets[0];
+            let entry = self.entries[ei];
+            let dest_exists = entry.original.symlink_metadata().is_ok();
+            if dest_exists && !self.force {
+                self.mode = Mode::ConfirmOverwrite;
+                self.pending_idxs = vec![ei];
+                self.status = format!(
+                    "overwrite existing '{}' ?  y confirm · n cancel",
+                    entry.original.display()
+                );
+                return;
+            }
+            self.perform_restores_tracked(&[ei], self.force || dest_exists);
+            return;
+        }
+        // Bulk: confirm when any dest exists without force.
+        let need_confirm = !self.force
+            && targets
+                .iter()
+                .any(|&ei| self.entries[ei].original.symlink_metadata().is_ok());
+        if need_confirm {
+            self.mode = Mode::ConfirmBulk;
+            self.pending_idxs = targets;
             self.status = format!(
-                "overwrite existing '{}' ?  y confirm · n cancel",
-                dest.display()
+                "restore {} items (some destinations exist)?  y force-all · n cancel",
+                self.pending_idxs.len()
             );
             return;
         }
-        self.perform_restore(ei, self.force || dest_exists);
+        self.perform_restores_tracked(&targets, self.force);
     }
 
-    fn perform_restore(&mut self, entry_idx: usize, force: bool) {
-        let entry = self.entries[entry_idx];
-        let path_disp = entry.original.display().to_string();
-        let code = restore::restore_entry(self.prog, entry, force);
-        self.mode = Mode::Browse;
-        self.pending_idx = None;
-        if code == 0 {
-            // Drop restored entry; fix selection.
-            self.entries.remove(entry_idx);
-            self.refilter();
-            if self.entries.is_empty() {
-                self.status = format!("restored '{path_disp}' · trash empty · q to quit");
-            } else {
-                self.status = format!(
-                    "restored '{path_disp}' · {} left · Enter for next",
-                    self.entries.len()
-                );
+    fn perform_restores_tracked(&mut self, idxs: &[usize], force: bool) {
+        let mut sorted = idxs.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let mut succeeded: Vec<usize> = Vec::new();
+        let mut fail = 0u32;
+        for &ei in sorted.iter().rev() {
+            if ei >= self.entries.len() {
+                continue;
             }
+            let entry = self.entries[ei];
+            let code = restore::restore_entry(self.prog, entry, force);
+            if code == 0 {
+                succeeded.push(ei);
+            } else {
+                fail += 1;
+            }
+        }
+        succeeded.sort_unstable();
+        // Remove from high to low
+        for &ei in succeeded.iter().rev() {
+            if ei < self.entries.len() {
+                self.entries.remove(ei);
+            }
+        }
+        self.sel.remap_after_removals(&succeeded);
+        self.mode = Mode::Browse;
+        self.pending_idxs.clear();
+        self.refilter();
+        let ok = succeeded.len();
+        if self.entries.is_empty() {
+            self.status = format!("restored {ok} · trash empty · q quit");
         } else {
-            self.status = format!("restore failed for '{path_disp}' (exit {code})");
+            self.status = format!(
+                "restored {ok} · fail {fail} · {} left · Space mark · Enter again",
+                self.entries.len()
+            );
         }
     }
 
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         match self.mode {
             Mode::Filter => self.on_key_filter(code),
-            Mode::ConfirmOverwrite => self.on_key_confirm(code),
+            Mode::ConfirmOverwrite | Mode::ConfirmBulk => self.on_key_confirm(code),
             Mode::Browse => self.on_key_browse(code, mods),
         }
     }
@@ -199,7 +228,7 @@ impl<'a> App<'a> {
                     "filter cleared".into()
                 } else {
                     format!(
-                        "filter {:?} · {} match(es)",
+                        "fuzzy {:?} · {} match(es)",
                         self.filter,
                         self.filtered.len()
                     )
@@ -218,14 +247,13 @@ impl<'a> App<'a> {
     fn on_key_confirm(&mut self, code: KeyCode) {
         match code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                if let Some(ei) = self.pending_idx.take() {
-                    self.perform_restore(ei, true);
-                }
+                let idxs = std::mem::take(&mut self.pending_idxs);
+                self.perform_restores_tracked(&idxs, true);
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                self.pending_idx = None;
+                self.pending_idxs.clear();
                 self.mode = Mode::Browse;
-                self.status = "overwrite cancelled".into();
+                self.status = "cancelled".into();
             }
             _ => {}
         }
@@ -249,10 +277,24 @@ impl<'a> App<'a> {
                     self.list_state.select(Some(self.filtered.len() - 1));
                 }
             }
+            KeyCode::Char(' ') => {
+                if let Some(ei) = self.selected_entry_idx() {
+                    self.sel.toggle(ei);
+                    self.status = format!("marked {}", self.sel.len());
+                }
+            }
+            KeyCode::Char('a') => {
+                self.sel.mark_all(self.filtered.iter().copied());
+                self.status = format!("marked all visible ({})", self.sel.len());
+            }
+            KeyCode::Char('A') => {
+                self.sel.clear();
+                self.status = "cleared marks".into();
+            }
             KeyCode::Char('/') => {
                 self.mode = Mode::Filter;
                 self.filter_draft = self.filter.clone();
-                self.status = "type filter · Enter apply · Esc cancel".into();
+                self.status = "fuzzy filter · Enter apply · Esc cancel".into();
             }
             KeyCode::Char('f') => {
                 self.force = !self.force;
@@ -286,11 +328,12 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
     } else if app.filter.is_empty() {
         String::new()
     } else {
-        format!(" filter:{:?}", app.filter)
+        format!(" fuzzy:{:?}", app.filter)
     };
     let title = format!(
-        " rtrash restore · {} item(s){} ",
+        " rtrash restore · {} item(s) · {} marked{} ",
         app.entries.len(),
+        app.sel.len(),
         filter_show
     );
     let header = Paragraph::new(Line::from(vec![
@@ -305,7 +348,8 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         .iter()
         .map(|&ei| {
             let e = app.entries[ei];
-            let line = format!("{:<20}  {}", date_label(e), e.original.display());
+            let mark = if app.sel.is_marked(ei) { "[x]" } else { "[ ]" };
+            let line = format!("{mark} {:<20}  {}", date_label(e), e.original.display());
             ListItem::new(line)
         })
         .collect();
@@ -314,34 +358,53 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" deleted at · original path "),
+                .title(" mark · deleted at · original path "),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD))
         .highlight_symbol("▸ ");
     f.render_stateful_widget(list, chunks[1], &mut app.list_state);
 
     let keys = match app.mode {
-        Mode::Browse => "↑↓/jk  / filter  Enter restore  f force  q quit",
-        Mode::Filter => "typing filter…  Enter apply  Esc cancel",
-        Mode::ConfirmOverwrite => "y overwrite  n cancel",
+        Mode::Browse => "↑↓/jk  Space mark  a/A all/none  / fuzzy  Enter restore  f force  q quit",
+        Mode::Filter => "typing fuzzy…  Enter apply  Esc cancel",
+        Mode::ConfirmOverwrite | Mode::ConfirmBulk => "y confirm  n cancel",
     };
     let footer = Paragraph::new(vec![Line::from(keys), Line::from(app.status.as_str())])
         .block(Block::default().borders(Borders::ALL).title("keys"));
     f.render_widget(footer, chunks[2]);
 
-    if app.mode == Mode::ConfirmOverwrite {
+    if matches!(app.mode, Mode::ConfirmOverwrite | Mode::ConfirmBulk) {
         if let Some(e) = app.selected_entry() {
-            draw_confirm(f, &e.original);
+            draw_confirm(f, &e.original, app.pending_idxs.len());
+        } else if !app.pending_idxs.is_empty() {
+            draw_confirm_bulk(f, app.pending_idxs.len());
         }
     }
 }
 
-fn draw_confirm(f: &mut ratatui::Frame, dest: &Path) {
-    let area = centered_rect(60, 5, f.area());
-    let msg = format!(
-        " Destination exists:\n {}\n [y] overwrite  [n] cancel ",
-        dest.display()
+fn draw_confirm(f: &mut ratatui::Frame, dest: &Path, n: usize) {
+    let area = centered_rect(70, 6, f.area());
+    let msg = if n > 1 {
+        format!(" Restore {n} items (overwrite as needed)?\n [y] yes  [n] cancel ")
+    } else {
+        format!(
+            " Destination exists:\n {}\n [y] overwrite  [n] cancel ",
+            dest.display()
+        )
+    };
+    let block = Paragraph::new(msg).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" confirm ")
+            .style(Style::default().add_modifier(Modifier::BOLD)),
     );
+    f.render_widget(Clear, area);
+    f.render_widget(block, area);
+}
+
+fn draw_confirm_bulk(f: &mut ratatui::Frame, n: usize) {
+    let area = centered_rect(60, 5, f.area());
+    let msg = format!(" Restore {n} marked items?\n [y] yes  [n] cancel ");
     let block = Paragraph::new(msg).block(
         Block::default()
             .borders(Borders::ALL)
@@ -377,35 +440,19 @@ pub fn run(prog: &str, entries: Vec<&Entry>, force: bool) -> i32 {
         eprintln!("{prog}: no trashed files match");
         return 1;
     }
-    // Single entry: restore immediately without chrome (same as non-TUI path).
     if entries.len() == 1 {
         return restore::restore_entry(prog, entries[0], force);
     }
 
-    if let Err(e) = enable_raw_mode() {
-        eprintln!("{prog}: cannot enable raw mode: {e}");
-        return 1;
-    }
-    let mut stdout = stdout();
-    if let Err(e) = execute!(stdout, EnterAlternateScreen) {
-        let _ = disable_raw_mode();
-        eprintln!("{prog}: cannot enter alternate screen: {e}");
-        return 1;
-    }
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = match Terminal::new(backend) {
+    let mut terminal = match tui_term::enter() {
         Ok(t) => t,
         Err(e) => {
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen);
-            eprintln!("{prog}: terminal init failed: {e}");
+            eprintln!("{prog}: cannot start TUI: {e}");
             return 1;
         }
     };
 
     let mut app = App::new(prog, entries, force);
-    let mut code = 0i32;
-
     let result = (|| -> io::Result<()> {
         loop {
             terminal.draw(|f| ui(f, &mut app))?;
@@ -423,21 +470,45 @@ pub fn run(prog: &str, entries: Vec<&Entry>, force: bool) -> i32 {
         Ok(())
     })();
 
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
-    let _ = terminal.show_cursor();
-
+    tui_term::leave(&mut terminal);
     if let Err(e) = result {
         eprintln!("{prog}: tui error: {e}");
-        code = 1;
+        return 1;
     }
-    code
+    0
+}
+
+/// Restore a set of entry indices (high-level logic for tests).
+/// `entries` is the full list; `idxs` are indices into it. Restores high→low.
+/// Returns (ok_count, fail_count). Mutates nothing in entries slice; caller drops ok ones.
+pub fn restore_selection(
+    prog: &str,
+    entries: &[&Entry],
+    idxs: &[usize],
+    force: bool,
+) -> (u32, u32) {
+    let mut sorted: Vec<usize> = idxs.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut ok = 0u32;
+    let mut fail = 0u32;
+    for &ei in sorted.iter().rev() {
+        if ei >= entries.len() {
+            fail += 1;
+            continue;
+        }
+        if restore::restore_entry(prog, entries[ei], force) == 0 {
+            ok += 1;
+        } else {
+            fail += 1;
+        }
+    }
+    (ok, fail)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::filter_indices;
-    use crate::list::Entry;
+    use super::*;
     use crate::trashdir::TrashDir;
     use std::path::PathBuf;
 
@@ -460,16 +531,25 @@ mod tests {
         let b = entry("/var/log/b.log");
         let entries = vec![&a, &b];
         assert_eq!(filter_indices(&entries, ""), vec![0, 1]);
-        assert_eq!(filter_indices(&entries, "   "), vec![0, 1]);
     }
 
     #[test]
-    fn filter_substring_case_insensitive() {
-        let a = entry("/Home/User/Notes.md");
-        let b = entry("/tmp/cache.bin");
+    fn filter_fuzzy_ranks_notes_first() {
+        let a = entry("/var/cache/n_x_o_t_e_s_backup.bin");
+        let b = entry("/home/user/Notes.md");
         let entries = vec![&a, &b];
-        assert_eq!(filter_indices(&entries, "notes"), vec![0]);
-        assert_eq!(filter_indices(&entries, "CACHE"), vec![1]);
-        assert_eq!(filter_indices(&entries, "nope"), Vec::<usize>::new());
+        let ranked = filter_indices(&entries, "notes");
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0], 1);
+    }
+
+    #[test]
+    fn multi_select_visible_and_remap() {
+        let mut s = Selection::new();
+        s.toggle(0);
+        s.toggle(2);
+        assert_eq!(s.marked_visible(&[2, 0, 1]), vec![2, 0]);
+        s.remap_after_removals(&[0]);
+        assert_eq!(s.marked_sorted(), vec![1]); // 2 -> 1
     }
 }

@@ -71,11 +71,15 @@ product UX, not a script-only fallback.
 | Key | Action |
 |-----|--------|
 | `↑` `↓` / `j` `k` | Move selection |
-| `/` | Filter by original path (substring) |
-| `Enter` | Restore selected item (session stays open) |
+| `Space` | Toggle mark (multi-select) |
+| `a` / `A` | Mark all visible / clear marks |
+| `/` | **Fuzzy** filter by original path |
+| `Enter` | Restore marked items (or cursor if none marked) |
 | `f` | Toggle force overwrite |
-| `y` / `n` | Confirm overwrite when destination exists |
+| `y` / `n` | Confirm overwrite / bulk restore |
 | `q` / `Esc` | Quit |
+
+Also: **`rtrash empty`** (TTY) multi-select permanent delete; **`rtrash put`** (TTY, no files) multi-select put from the current directory. Use `--plain` to force classic CLI behavior.
 
 For automation: `--plain` or pipe an index (`printf '0\n' | rtrash restore`).
 

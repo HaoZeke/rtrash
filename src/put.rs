@@ -7,19 +7,20 @@ use crate::trashdir;
 use crate::util::confirm;
 
 #[derive(Clone, Copy, PartialEq)]
-enum Interactive {
+pub(crate) enum Interactive {
     Never,
     Once,
     Always,
 }
 
-struct Opts {
-    force: bool,
-    recursive: bool,
-    empty_dirs: bool,
-    verbose: bool,
-    interactive: Interactive,
-    preserve_root: bool,
+#[derive(Clone)]
+pub(crate) struct Opts {
+    pub force: bool,
+    pub recursive: bool,
+    pub empty_dirs: bool,
+    pub verbose: bool,
+    pub interactive: Interactive,
+    pub preserve_root: bool,
 }
 
 impl Default for Opts {
@@ -38,6 +39,8 @@ impl Default for Opts {
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [FILE]...
 Move FILE(s) to the freedesktop.org trash. Accepts rm(1) flags.
+On a TTY with no FILE operands, opens the interactive put browser. Use --plain
+to require CLI operands even on a TTY.
 
   -f, --force           ignore nonexistent files and arguments, never prompt
   -i                    prompt before every removal
@@ -69,6 +72,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut opts = Opts::default();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut no_more_opts = false;
+    let mut plain = false;
 
     for arg in args {
         if no_more_opts || arg == "-" || !arg.starts_with('-') {
@@ -77,6 +81,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         match arg.as_str() {
             "--" => no_more_opts = true,
+            "--plain" => plain = true,
             // GNU rm: -f / -i / --interactive last flag wins for prompt vs force.
             "--force" => {
                 opts.force = true;
@@ -142,6 +147,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
 
     if files.is_empty() {
+        #[cfg(feature = "tui")]
+        if !plain && crate::util::stdin_is_tty() {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            return crate::put_tui::run(prog, &cwd);
+        }
+        let _ = plain;
         if opts.force {
             return 0;
         }
@@ -184,7 +195,7 @@ fn describe(meta: &fs::Metadata, path: &Path) -> &'static str {
     }
 }
 
-fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
+pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
     let name = path.as_os_str().to_string_lossy();
 
     if opts.preserve_root && path == Path::new("/") {

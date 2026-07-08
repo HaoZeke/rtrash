@@ -6,18 +6,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rayon::prelude::*;
 
 use crate::info;
+use crate::list;
 use crate::trashdir::{self, TrashDir};
-use crate::util::url_decode;
+use crate::util::{stdin_is_tty, url_decode};
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [DAYS]
 Purge trashed items. With DAYS, only items trashed more than DAYS days ago.
+On a TTY without DAYS, opens the interactive empty browser (multi-select
+permanent delete). Use --plain to skip the TUI.
 
   -n, --dry-run    report what would be removed without removing anything;
                      also prints approximate reclaimable disk space (fast
                      in-process walk, like du of the victims)
   -v, --verbose    print each removed item
   -f, --force      accepted for trash-cli compatibility (emptying never prompts)
+      --plain      skip TUI; non-interactive empty (also used when stdin is not a TTY)
       --trash-dir=PATH  empty only this trash directory (repeatable);
                      default is the home trash plus every mounted volume
       --home-only  only the home trash (skip volume trash discovery)
@@ -31,6 +35,7 @@ struct Opts {
     verbose: bool,
     home_only: bool,
     trash_dirs: Vec<PathBuf>,
+    plain: bool,
 }
 
 fn usage_err(prog: &str, msg: &str) -> i32 {
@@ -46,12 +51,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         verbose: false,
         home_only: false,
         trash_dirs: Vec::new(),
+        plain: false,
     };
     for arg in args {
         match arg.as_str() {
             "-n" | "--dry-run" => opts.dry_run = true,
             "-v" | "--verbose" => opts.verbose = true,
             "-f" | "--force" => {}
+            "--plain" => opts.plain = true,
             "--home-only" => opts.home_only = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
@@ -79,6 +86,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "{prog}: no valid --trash-dir pins (need non-symlink files/ and info/ directories)"
         );
         return 2;
+    }
+
+    // TTY empty browser when no age filter (full interactive review).
+    #[cfg(feature = "tui")]
+    if !opts.plain && opts.days.is_none() && stdin_is_tty() {
+        let entries = list::collect(&dirs);
+        let refs: Vec<&list::Entry> = entries.iter().collect();
+        return crate::empty_tui::run(prog, refs, opts.dry_run);
     }
 
     let cutoff = opts.days.map(|d| info::now_epoch() - d * 86_400);

@@ -256,11 +256,17 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 | Invocation | Behavior |
 |------------|----------|
 | `rtrash restore PATH` | Restore the item whose original path was `PATH` (exact match) |
-| `rtrash restore` | **TUI** (TTY): ratatui browser — filter, navigate, restore; multi-session until `q` |
+| `rtrash restore` | **TUI** (TTY): fuzzy filter, multi-select (Space/a/A), bulk restore; session until `q` |
 | `rtrash restore --plain` | Numbered line list + index (scripts / no TUI) |
 | `printf '0\n' \| rtrash restore` | Piped index without TUI |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
 | Single match | Restores immediately without prompting |
+
+**TUI keys (restore):** `↑↓/jk` move · `Space` mark · `a`/`A` mark all / none · `/` fuzzy filter · `Enter` restore marked (or cursor) · `f` force · `q` quit.
+
+**TUI empty:** bare `rtrash empty` on a TTY opens a multi-select permanent-delete browser (`--plain` or non-TTY keeps classic empty).
+
+**TUI put:** bare `rtrash put` on a TTY opens a multi-select path browser for the current directory (`--plain` or FILE operands keep classic put).
 
 Existing paths at the destination are preserved unless `-f` / `--force` is given; with `-f`, a blocking destination is removed first.
 Same-filesystem restore uses `rename`; cross-device restore copies then deletes the trash payload (needed when put fell back to the home trash).
