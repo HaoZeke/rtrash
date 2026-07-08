@@ -111,7 +111,7 @@ $ ./scripts/package-release.sh --all
 # → dist/rtrash-<version>-{x86_64,aarch64}-unknown-linux-musl.tar.gz
 ```
 
-CI: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds both targets on `v*` tags (x86_64 and ubuntu-24.04-arm) and attaches the tarballs to the GitHub Release (what binstall downloads).
+CI: [`.github/workflows/release-musl.yml`](.github/workflows/release-musl.yml) builds both targets on `v*` tags (x86_64 and ubuntu-24.04-arm) and attaches the tarballs to the GitHub Release (what binstall downloads).
 
 ### 3. From crates.io (`cargo install`)
 

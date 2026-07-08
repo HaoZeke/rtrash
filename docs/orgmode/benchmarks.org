@@ -15,19 +15,22 @@
 #+begin_src shell
 cargo build --release
 export RTRASH_BIN=$PWD/target/release/rtrash
+# Real Python trash-cli (not multi-call rtrash on PATH):
+export TRASH_CLI_BIN_DIR=$PWD/.venv-bench/bin
 python3 benches/compare_trash_cli.py | tee compare-trash-cli.log
 #+end_src
 
-Fixture: 400 small files + multi-file directory tree; two trials; put then empty with =--trash-dir= pin. trash-cli *0.24.5.26* on the verification host.
+Fixture: 400 small files + multi-file directory tree; two trials; put then empty with =--trash-dir= pin.
+Harness rejects =trash-put= when it is multi-call rtrash.
 
-* Measured results (Linux x86_64, 2026-07-07)
+* Measured results (Linux x86_64, 2026-07-08)
 
 | Tool | put avg (s) | empty avg (s) |
 |------+-------------+---------------|
-| rtrash release | 0.00507 | 0.00267 |
-| trash-cli 0.24.5.26 | 0.0674 | 0.0334 |
-| speedup | ~13× | ~12× |
+| rtrash 0.1.2 release | 0.005449 | 0.002986 |
+| trash-cli 0.24.5.26 | 0.074310 | 0.039565 |
+| speedup | ~13.6× | ~13.3× |
 
 Both tools: =ec=0=, =entries=401= after put, empty leaves =files_left=0= =info_left=0=, =LIST_OK= for a single-file put.
-
-An earlier same-host-class run (2026-07-05) reported about ~19× put / ~13× empty; prefer the 2026-07-07 numbers as current.
+Optional peers trashy/gtrash: missing on the host.
+Earlier 2026-07-07 snapshot (~13× / ~12×) superseded by the 2026-07-08 table.

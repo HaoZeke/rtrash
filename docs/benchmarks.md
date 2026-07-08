@@ -16,37 +16,40 @@ Prefer trash-cli when you only want distro Python packaging and no Rust toolchai
 ```shell
 cargo build --release
 export RTRASH_BIN=$PWD/target/release/rtrash
+# Prefer a real Python trash-cli install; multi-call rtrash on PATH is rejected.
+# Example: python3 -m venv .venv-bench && .venv-bench/bin/pip install 'trash-cli==0.24.5.26'
+export TRASH_CLI_BIN_DIR=$PWD/.venv-bench/bin   # or any dir with trash-put/empty/list
 python3 benches/compare_trash_cli.py | tee compare-trash-cli.log
 ```
 
-Needs system `trash-put` / `trash-empty` / `trash-list` (version from `trash-put --version`).
+The harness refuses `trash-put` when it is an rtrash multi-call link (version string contains `rtrash`).
+Use `TRASH_CLI_BIN_DIR` or a PATH entry that is Python trash-cli.
 
 **Fixture:** 400 small files plus one multi-file directory tree (80 nested files); isolated `XDG_DATA_HOME`; two trials per tool; timed put of the full set, then empty with a `--trash-dir` pin.
 
-Optional peers (trashy, gtrash) run only if present on `PATH`.
-On the 2026-07-07 run they were not installed.
+Optional peers (trashy, gtrash) are reported only if present on `PATH` and not rtrash multi-call.
+On the 2026-07-08 run they were not installed.
 
-## Measured results (Linux x86_64 host, 2026-07-07)
+## Measured results (Linux x86_64, 2026-07-08)
 
-Host class: Linux x86_64.
-Peers: **rtrash 0.1.0** (release build of this tree), **trash-cli 0.24.5.26**.
+Host class: **Linux x86_64** (`sysname=Linux machine=x86_64`, build host for this tree).
+Peers: **rtrash 0.1.2** (release build of this tree), **trash-cli 0.24.5.26** (isolated venv; not multi-call rtrash).
+Optional: trashy **missing**, gtrash **missing**.
 
-From `benches/compare_trash_cli.py` (two warm trials each):
+From `benches/compare_trash_cli.py` (two trials each; log ends with `COMPARE_OK`):
 
 | Tool | put avg (s) | empty avg (s) |
 |------|-------------|----------------|
-| **rtrash** (release) | **0.00507** | **0.00267** |
-| trash-cli 0.24.5.26 | 0.0674 | 0.0334 |
-| **speedup (trash-cli / rtrash)** | **~13×** | **~12×** |
+| **rtrash** (release) | **0.005449** | **0.002986** |
+| trash-cli 0.24.5.26 | 0.074310 | 0.039565 |
+| **speedup (trash-cli / rtrash)** | **~13.6×** | **~13.3×** |
 
 Both tools: `ec=0`, multi-entry trash after put (`entries=401`), empty leaves `files_left=0` and `info_left=0`, `LIST_OK` for a single-file put.
-Harness ended with `COMPARE_OK`.
 
-### Earlier snapshot (same host class, 2026-07-05)
+### Earlier snapshot (same host class, 2026-07-07)
 
-An earlier run reported about ~19× put and ~13× empty versus the same trash-cli version.
-Absolute times vary with load and filesystem state; the order of magnitude for native put/empty is the useful takeaway.
-Prefer the 2026-07-07 table above as the current dated numbers.
+Prior run (rtrash 0.1.0 vs trash-cli 0.24.5.26): put ~0.00507 s / empty ~0.00267 s vs trash-cli ~0.0674 / ~0.0334 (~13× / ~12×).
+Absolute times vary with load and filesystem state; prefer the **2026-07-08** table above as the current dated numbers.
 
 ## Safety (not a timer)
 
