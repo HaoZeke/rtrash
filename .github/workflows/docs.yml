@@ -31,7 +31,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pandoc
 
       - name: Build site
-        run: ./docs/build.sh
+        run: |
+          ./docs/build.sh
+          touch docs/build/.nojekyll
+          echo rtrash.rgoswami.me > docs/build/CNAME
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -48,3 +51,4 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: docs/build
           cname: rtrash.rgoswami.me
+          force_orphan: true
