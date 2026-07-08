@@ -603,8 +603,19 @@ fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let dest_c = std::ffi::CString::new(dest.as_os_str().as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    // RENAME_NOREPLACE = 1 on Linux.
-    let rc = unsafe { libc::renameat2(libc::AT_FDCWD, src_c.as_ptr(), libc::AT_FDCWD, dest_c.as_ptr(), 1) };
+    // RENAME_NOREPLACE = 1 on Linux. Use the renameat2 syscall (available under
+    // both glibc and musl libc crates; renameat2 is not always exported as a
+    // function symbol on musl).
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            src_c.as_ptr(),
+            libc::AT_FDCWD,
+            dest_c.as_ptr(),
+            1usize,
+        )
+    };
     if rc == 0 {
         return Ok(());
     }

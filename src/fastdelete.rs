@@ -126,10 +126,11 @@ pub fn try_btrfs_subvolume_delete(path: &Path) -> io::Result<bool> {
     };
     args.name[..name_bytes.len()].copy_from_slice(name_bytes);
 
+    // musl types ioctl request as c_int; glibc as c_ulong — cast for both.
     let rc = unsafe {
         libc::ioctl(
             parent_fd.as_raw_fd(),
-            BTRFS_IOC_SNAP_DESTROY,
+            BTRFS_IOC_SNAP_DESTROY as _,
             &args as *const _ as *mut libc::c_void,
         )
     };
@@ -306,7 +307,7 @@ fn try_btrfs_subvol_at(parent_fd: RawFd, name: &OsStr) -> io::Result<bool> {
     let rc = unsafe {
         libc::ioctl(
             parent_fd,
-            BTRFS_IOC_SNAP_DESTROY,
+            BTRFS_IOC_SNAP_DESTROY as _,
             &args as *const _ as *mut libc::c_void,
         )
     };
