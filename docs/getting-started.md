@@ -17,6 +17,10 @@ Animated loop (put → list → restore → empty):
 
 ![rtrash quickstart](demo/rtrash-quickstart.gif)
 
+Broader surface (rm flags, multi-call, `rm` globs, dry-run, keys):
+
+![rtrash suite](demo/rtrash-suite.gif)
+
 Regenerate: [`docs/demo/record.sh`](demo/record.sh). Platform: Linux FreeDesktop primary; macOS experimental home FDO trash; Windows system Recycle Bin.
 
 ## When to use what

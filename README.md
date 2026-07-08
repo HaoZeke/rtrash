@@ -18,20 +18,42 @@ No interpreter startup; emptying deletes entries in parallel via [rayon](https:/
 
 ## Demo
 
-**30 seconds:** put → list/status → restore one file → empty the rest. Demo recording pins `--trash-dir=$XDG_DATA_HOME/Trash` in a temp sandbox (volume trash is never discovered).
+Recordings pin `--trash-dir=$XDG_DATA_HOME/Trash` in a temp sandbox (volume trash is never discovered). Regenerate: `./docs/demo/record.sh` · [docs/demo/](docs/demo/).
 
-![rtrash quickstart: put, list, restore, empty](docs/demo/rtrash-quickstart.gif)
+### Quickstart — FreeDesktop loop
 
-Source: [docs/demo/](docs/demo/) — regenerate with `./docs/demo/record.sh` (asciinema + agg, sandboxed `XDG_DATA_HOME`). Asciicast: [rtrash-quickstart.cast](docs/demo/rtrash-quickstart.cast).
+put → list/status → restore → empty
 
-On a TTY, bare `rtrash restore` / `empty` / `put` open multi-select **TUI** browsers (fuzzy filter, customizable keys). Scripts use `--plain`.
+![rtrash quickstart](docs/demo/rtrash-quickstart.gif)
+
+[asciicast](docs/demo/rtrash-quickstart.cast)
+
+### Suite — more of the product surface
+
+rm-shaped flags · multi-call names · `status` · `rm` patterns · `empty --dry-run` · `keys`
+
+![rtrash suite](docs/demo/rtrash-suite.gif)
+
+[asciicast](docs/demo/rtrash-suite.cast)
+
+| Feature | Where |
+| ------- | ----- |
+| FreeDesktop put / list / restore / empty | quickstart GIF |
+| `rtrash -rf` (rm-shaped fallthrough) | suite GIF |
+| Multi-call `trash-put` / `trash-list` / … | suite GIF |
+| `rtrash rm` / `trash-rm` globs | suite GIF |
+| `empty --dry-run` reclaim | suite GIF |
+| Custom TUI keybinds (`rtrash keys`) | suite GIF (dump) |
+| Interactive TUI (fuzzy, multi-select) | **TTY only** — `rtrash restore` / `empty` / `put` |
+| Python `unlink` / `rmtree` (GIL released) | [bindings](docs/bindings.md) |
+| macOS experimental FDO / Windows Recycle Bin | [Platform](#platform) |
 
 ```console
-$ cargo binstall rtrash && rtrash setup   # or: cargo install rtrash / pip install rtrash
-$ rtrash notes.txt                        # put (rm-shaped flags work: -rf, -f, …)
-$ rtrash list && rtrash status
-$ rtrash restore --plain /path/to/notes.txt
-$ rtrash empty --plain
+$ cargo binstall rtrash && rtrash setup   # multi-call links + completions
+$ rtrash -rf build/                       # put (rm-shaped)
+$ trash-list                              # multi-call
+$ rtrash restore                          # TUI on a TTY; --plain for scripts
+$ rtrash keys --sample > ~/.config/rtrash/keys.toml
 ```
 
 ## Documentation

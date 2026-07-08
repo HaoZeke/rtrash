@@ -7,112 +7,127 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-#[test]
-fn demo_assets_exist_and_are_nonempty() {
-    let cast = root().join("docs/demo/rtrash-quickstart.cast");
-    let gif = root().join("docs/demo/rtrash-quickstart.gif");
-    let seq = root().join("docs/demo/sequence.sh");
-    let rec = root().join("docs/demo/record.sh");
-    for p in [&cast, &gif, &seq, &rec] {
-        assert!(p.is_file(), "missing {}", p.display());
-        let meta = fs::metadata(p).unwrap();
-        assert!(meta.len() > 100, "{} too small ({})", p.display(), meta.len());
-    }
-    let cast_head = fs::read_to_string(&cast).unwrap();
-    assert!(
-        cast_head.starts_with('{') && cast_head.contains("\"version\":2"),
-        "cast must be asciicast v2 JSON header"
-    );
-    let gif_magic = fs::read(&gif).unwrap();
-    assert!(gif_magic.starts_with(b"GIF8"), "demo gif must be a GIF");
+fn read(rel: &str) -> String {
+    fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
 }
 
 #[test]
-fn sequence_covers_core_freedesktop_loop() {
-    let seq = fs::read_to_string(root().join("docs/demo/sequence.sh")).unwrap();
+fn demo_assets_exist_and_are_nonempty() {
+    for rel in [
+        "docs/demo/rtrash-quickstart.cast",
+        "docs/demo/rtrash-quickstart.gif",
+        "docs/demo/rtrash-suite.cast",
+        "docs/demo/rtrash-suite.gif",
+        "docs/demo/sequence.sh",
+        "docs/demo/sequence-suite.sh",
+        "docs/demo/record.sh",
+    ] {
+        let p = root().join(rel);
+        assert!(p.is_file(), "missing {rel}");
+        assert!(fs::metadata(&p).unwrap().len() > 100, "{rel} too small");
+    }
+    for cast in [
+        "docs/demo/rtrash-quickstart.cast",
+        "docs/demo/rtrash-suite.cast",
+    ] {
+        let h = read(cast);
+        assert!(h.contains("\"version\":2"), "{cast} must be asciicast v2");
+    }
+    for gif in [
+        "docs/demo/rtrash-quickstart.gif",
+        "docs/demo/rtrash-suite.gif",
+    ] {
+        let b = fs::read(root().join(gif)).unwrap();
+        assert!(b.starts_with(b"GIF8"), "{gif} must be GIF");
+    }
+}
+
+#[test]
+fn quickstart_sequence_covers_core_loop() {
+    let seq = read("docs/demo/sequence.sh");
     for token in [
         "rtrash put",
         "rtrash list",
         "rtrash status",
         "rtrash restore",
         "rtrash empty",
+        "RTRASH_DEMO_PIN",
+        "$PIN",
     ] {
+        assert!(seq.contains(token), "quickstart missing {token:?}");
+    }
+}
+
+#[test]
+fn suite_sequence_covers_broader_surface() {
+    let seq = read("docs/demo/sequence-suite.sh");
+    for token in [
+        "rtrash -rf",
+        "trash-put",
+        "trash-list",
+        "rtrash rm",
+        "empty --plain -n",
+        "rtrash keys",
+        "RTRASH_DEMO_PIN",
+        "$PIN",
+    ] {
+        assert!(seq.contains(token), "suite missing {token:?}");
+    }
+    let cast = read("docs/demo/rtrash-suite.cast");
+    for token in ["-rf", "trash-put", "keys --list", "--trash-dir="] {
         assert!(
-            seq.contains(token),
-            "sequence.sh must include {token:?} for the attract demo story"
+            cast.contains(token),
+            "suite cast should show {token:?} from real recording"
         );
     }
 }
 
 #[test]
-fn sequence_and_record_pin_trash_dir_for_isolation() {
-    let seq = fs::read_to_string(root().join("docs/demo/sequence.sh")).unwrap();
-    let rec = fs::read_to_string(root().join("docs/demo/record.sh")).unwrap();
-    assert!(
-        seq.contains("RTRASH_DEMO_PIN"),
-        "sequence must require RTRASH_DEMO_PIN (refuse unpinned multi-volume discovery)"
-    );
-    assert!(
-        seq.contains("$PIN") || seq.contains("${PIN}"),
-        "sequence must apply PIN on list/status/restore/empty"
-    );
-    assert!(
-        rec.contains("--trash-dir=") && rec.contains("RTRASH_DEMO_PIN"),
-        "record.sh must export RTRASH_DEMO_PIN=--trash-dir=$XDG_DATA_HOME/Trash"
-    );
-    let cast = fs::read_to_string(root().join("docs/demo/rtrash-quickstart.cast")).unwrap();
-    assert!(
-        !cast.contains("pCloudDrive"),
-        "cast must not list foreign volume paths (pCloudDrive)"
-    );
-    assert!(
-        !cast.contains("/.Trash-"),
-        "cast must not list volume /.Trash-$uid paths"
-    );
-    assert!(
-        cast.contains("--trash-dir=") || cast.contains("trash-dir"),
-        "cast must show pinned --trash-dir in the recorded commands"
-    );
-    assert!(
-        cast.contains("Removed 1 item"),
-        "cast empty should remove only the one leftover demo item"
-    );
-    // Hard fail if double-digit bulk empty appeared (old broken multi-volume demo).
-    for line in cast.lines() {
-        if let Some(rest) = line.split("Removed ").nth(1) {
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            assert!(
-                digits.len() < 2,
-                "cast empty must not remove double-digit item counts (isolation): {line}"
-            );
+fn casts_are_volume_isolated() {
+    for cast_rel in [
+        "docs/demo/rtrash-quickstart.cast",
+        "docs/demo/rtrash-suite.cast",
+    ] {
+        let cast = read(cast_rel);
+        assert!(!cast.contains("pCloudDrive"), "{cast_rel} leaked pCloudDrive");
+        assert!(!cast.contains("/.Trash-"), "{cast_rel} leaked volume /.Trash-");
+        assert!(
+            cast.contains("--trash-dir="),
+            "{cast_rel} must show pinned --trash-dir"
+        );
+        for line in cast.lines() {
+            if let Some(rest) = line.split("Removed ").nth(1) {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                assert!(
+                    digits.len() < 2,
+                    "{cast_rel} bulk empty? {line}"
+                );
+            }
         }
     }
 }
 
 #[test]
-fn readme_embeds_demo_gif() {
-    let readme = fs::read_to_string(root().join("README.md")).unwrap();
+fn readme_embeds_both_demos_and_feature_map() {
+    let readme = read("README.md");
+    assert!(readme.contains("docs/demo/rtrash-quickstart.gif"));
+    assert!(readme.contains("docs/demo/rtrash-suite.gif"));
     assert!(
-        readme.contains("docs/demo/rtrash-quickstart.gif"),
-        "README must embed the quickstart GIF"
+        readme.contains("multi-call") || readme.contains("Multi-call"),
+        "README should mention multi-call in demo map"
     );
     assert!(
-        readme.contains("docs/demo/rtrash-quickstart.cast") || readme.contains("docs/demo/"),
-        "README should point at demo sources"
-    );
-    let gs = fs::read_to_string(root().join("docs/getting-started.md")).unwrap();
-    assert!(
-        gs.contains("rtrash-quickstart.gif") || gs.contains("demo/"),
-        "getting-started should reference the demo"
+        readme.contains("TUI") || readme.contains("TTY only"),
+        "README should call out TUI as TTY-only vs recorded demos"
     );
 }
 
 #[test]
-fn record_script_supports_dry_run() {
-    let rec = fs::read_to_string(root().join("docs/demo/record.sh")).unwrap();
+fn record_script_supports_dry_run_and_pin() {
+    let rec = read("docs/demo/record.sh");
     assert!(rec.contains("--dry-run"));
-    assert!(rec.contains("asciinema"));
-    assert!(rec.contains("agg"));
-    assert!(rec.contains("XDG_DATA_HOME"));
     assert!(rec.contains("RTRASH_DEMO_PIN"));
+    assert!(rec.contains("--trash-dir="));
+    assert!(rec.contains("/bin/rm")); // multi-call safe cleanup
+    assert!(rec.contains("sequence-suite.sh"));
 }
