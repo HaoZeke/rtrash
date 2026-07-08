@@ -18,8 +18,7 @@ This does *not* monkey-patch =os= or =pathlib= globally.
 
 #+begin_src shell
 pip install rtrash
-# dev checkout: pip install maturin && maturin develop --features python
-# from repo root; needs a Rust toolchain
+# dev checkout (needs Rust): pip install maturin && maturin develop --features python
 #+end_src
 
 * API
