@@ -7,9 +7,9 @@ tag_prefix = "v"
 
 # Keep Cargo.toml, pyproject.toml, and Sphinx release in lockstep.
 pre_bump_hooks = [
-    "sed -i '0,/^version = /s/^version = \".*\"/version = \"{{version}}\"/' Cargo.toml",
-    "sed -i '0,/^version = /s/^version = \".*\"/version = \"{{version}}\"/' pyproject.toml",
-    "sed -i 's/^release = \".*\"/release = \"{{version}}\"/' docs/source/conf.py",
+  "sed -i '0,/^version = /s/^version = \".*\"/version = \"{{version}}\"/' Cargo.toml",
+  "sed -i '0,/^version = /s/^version = \".*\"/version = \"{{version}}\"/' pyproject.toml",
+  "sed -i 's/^release = \".*\"/release = \"{{version}}\"/' docs/source/conf.py",
 ]
 
 [commit_types]
