@@ -113,8 +113,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let payload = entry.dir.files().join(&entry.name);
         let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
         if dry_run {
-            let sz = crate::fastdelete::disk_usage(&payload)
-                + crate::fastdelete::disk_usage(&info_path);
+            let sz =
+                crate::fastdelete::disk_usage(&payload) + crate::fastdelete::disk_usage(&info_path);
             bytes = bytes.saturating_add(sz);
             if verbose {
                 println!(
@@ -129,19 +129,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             continue;
         }
         if let Err(e) = trashdir::remove_any_path(&payload) {
-            eprintln!(
-                "{prog}: cannot remove '{}': {e}",
-                payload.display()
-            );
+            eprintln!("{prog}: cannot remove '{}': {e}", payload.display());
             status = 1;
             continue;
         }
         if let Err(e) = std::fs::remove_file(&info_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!(
-                    "{prog}: cannot remove '{}': {e}",
-                    info_path.display()
-                );
+                eprintln!("{prog}: cannot remove '{}': {e}", info_path.display());
                 status = 1;
                 continue;
             }

@@ -290,14 +290,20 @@ fn directorysizes_atomic_rewrite_survives_put() {
     let cache = sb.trash().join("directorysizes");
     assert!(cache.is_file());
     let body = fs::read_to_string(&cache).unwrap();
-    assert!(body.contains(" d\n") || body.ends_with(" d") || body.split_whitespace().any(|t| t == "d"), "{body}");
+    assert!(
+        body.contains(" d\n") || body.ends_with(" d") || body.split_whitespace().any(|t| t == "d"),
+        "{body}"
+    );
     // No leftover temp files from atomic write.
     let leftovers: Vec<_> = fs::read_dir(sb.trash())
         .unwrap()
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
         .collect();
-    assert!(leftovers.is_empty(), "atomic write left temps: {leftovers:?}");
+    assert!(
+        leftovers.is_empty(),
+        "atomic write left temps: {leftovers:?}"
+    );
 }
 
 #[test]
@@ -571,7 +577,10 @@ fn trash_rm_removes_match_keeps_other() {
     sb.touch("keep.dat");
     sb.touch("drop.o");
     sb.touch("also.o");
-    assert!(sb.run(&["put", "keep.dat", "drop.o", "also.o"]).status.success());
+    assert!(sb
+        .run(&["put", "keep.dat", "drop.o", "also.o"])
+        .status
+        .success());
     assert_eq!(trash_names(&sb).len(), 3);
 
     let out = sb.run(&["rm", "*.o"]);
@@ -676,7 +685,10 @@ fn volume_trash_pin_resolves_relative_path() {
 
     let out = sb.run(&["restore", &pin, &expect_s]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(expect_abs.is_file(), "restore must land at absolute original");
+    assert!(
+        expect_abs.is_file(),
+        "restore must land at absolute original"
+    );
     assert_eq!(fs::read(&expect_abs).unwrap(), b"vol-payload");
     assert!(!trash_root.join("files/rel.txt").exists());
 
@@ -727,10 +739,7 @@ fn directory_put_writes_directorysizes_empty_prunes() {
     // FreeDesktop: "size mtime percent-encoded-name"
     let line = body.lines().next().expect("at least one cache line");
     let parts: Vec<&str> = line.split_whitespace().collect();
-    assert!(
-        parts.len() >= 3,
-        "expected size mtime name, got {line:?}"
-    );
+    assert!(parts.len() >= 3, "expected size mtime name, got {line:?}");
     let size: u64 = parts[0].parse().expect("size");
     assert_eq!(size, 12, "4+8 payload bytes");
     assert_eq!(parts[parts.len() - 1], "tree");
@@ -807,11 +816,7 @@ fn setup_installs_under_prefix() {
         .args(["setup", &format!("--prefix={prefix_s}"), "-f", "-v"])
         .output()
         .unwrap();
-    assert!(
-        out.status.success(),
-        "setup failed: {}",
-        stderr_of(&out)
-    );
+    assert!(out.status.success(), "setup failed: {}", stderr_of(&out));
     let bash = prefix.join("share/bash-completion/completions/rtrash");
     let zsh = prefix.join("share/zsh/site-functions/_rtrash");
     let man = prefix.join("share/man/man1/rtrash.1");
@@ -885,10 +890,7 @@ fn status_uses_directorysizes_cache_when_valid() {
         s.contains("MiB") || s.contains("GiB") || s.contains("777"),
         "status must reflect huge directorysizes cache line: {s}"
     );
-    assert!(
-        !s.contains("Total: 0 items"),
-        "{s}"
-    );
+    assert!(!s.contains("Total: 0 items"), "{s}");
     // Corrupt mtime → fallback walk; total should shrink below the forged cache.
     fs::write(
         sb.trash().join("directorysizes"),

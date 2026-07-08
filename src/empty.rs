@@ -75,7 +75,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 
     let dirs: Vec<TrashDir> = trashdir::resolve_dirs_opts(&opts.trash_dirs, opts.home_only);
     if dirs.is_empty() && !opts.trash_dirs.is_empty() {
-        eprintln!("{prog}: no valid --trash-dir pins (need non-symlink files/ and info/ directories)");
+        eprintln!(
+            "{prog}: no valid --trash-dir pins (need non-symlink files/ and info/ directories)"
+        );
         return 2;
     }
 
@@ -89,10 +91,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let _lock = match trashdir::TrashLock::acquire(&dir.root) {
             Ok(l) => l,
             Err(e) => {
-                eprintln!(
-                    "{prog}: cannot lock trash '{}': {e}",
-                    dir.root.display()
-                );
+                eprintln!("{prog}: cannot lock trash '{}': {e}", dir.root.display());
                 errors.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
@@ -269,12 +268,7 @@ fn empty_one(
 /// Dry-run inventory matching full wipe: every top-level child of `files/` and
 /// non-counted-as-item names under `info/` still contribute reclaim size; item
 /// count is top-level `files/` children (same as live wipe `n_files`).
-fn full_empty_dry_run(
-    dir: &TrashDir,
-    opts: &Opts,
-    removed: &AtomicU64,
-    bytes: &AtomicU64,
-) {
+fn full_empty_dry_run(dir: &TrashDir, opts: &Opts, removed: &AtomicU64, bytes: &AtomicU64) {
     let files_dir = dir.files();
     let info_dir = dir.info();
     let mut n_files = 0u64;

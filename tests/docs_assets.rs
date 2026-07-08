@@ -20,10 +20,7 @@ fn assert_contains(hay: &str, needles: &[&str], label: &str) {
             missing.push(*n);
         }
     }
-    assert!(
-        missing.is_empty(),
-        "{label}: missing tokens: {missing:?}"
-    );
+    assert!(missing.is_empty(), "{label}: missing tokens: {missing:?}");
 }
 
 #[test]
@@ -196,7 +193,10 @@ fn package_release_script_stages_fish_multicall() {
         "trash-rm.fish",
     ] {
         assert!(
-            s.contains(name) || (s.contains("trash-put") && s.contains(".fish") && s.contains("ln -sf rtrash.fish")),
+            s.contains(name)
+                || (s.contains("trash-put")
+                    && s.contains(".fish")
+                    && s.contains("ln -sf rtrash.fish")),
             "package-release must stage fish multi-call file for {name}"
         );
     }

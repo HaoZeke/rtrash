@@ -85,7 +85,13 @@ fn ensure_dir(path: &Path, dry_run: bool, verbose: bool) -> io::Result<()> {
     Ok(())
 }
 
-fn write_file(path: &Path, data: &str, force: bool, dry_run: bool, verbose: bool) -> io::Result<()> {
+fn write_file(
+    path: &Path,
+    data: &str,
+    force: bool,
+    dry_run: bool,
+    verbose: bool,
+) -> io::Result<()> {
     if path.exists() && !force {
         // Same content → success; different → error unless --force
         if let Ok(existing) = fs::read_to_string(path) {
@@ -98,10 +104,7 @@ fn write_file(path: &Path, data: &str, force: bool, dry_run: bool, verbose: bool
         }
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
-            format!(
-                "{} exists (use --force to replace)",
-                path.display()
-            ),
+            format!("{} exists (use --force to replace)", path.display()),
         ));
     }
     if verbose || dry_run {
@@ -416,7 +419,10 @@ fn run_setup(args: &[String]) -> i32 {
     println!("    ~/.local/share/bash-completion/completions automatically");
     println!("    on most setups that enable bash-completion.");
     println!("  • zsh: ensure the site-functions dir is on fpath, e.g. in ~/.zshrc:");
-    println!("      fpath=({}/zsh/site-functions $fpath)", share.display());
+    println!(
+        "      fpath=({}/zsh/site-functions $fpath)",
+        share.display()
+    );
     println!("      autoload -Uz compinit && compinit");
     println!("  • fish: user completions are loaded from");
     println!("    ~/.config/fish/completions (default setup target) or");
@@ -536,10 +542,7 @@ mod tests {
     #[test]
     fn setup_dry_run_prefix_ok() {
         let prefix = tmp_prefix();
-        let code = run_setup(&[
-            format!("--prefix={}", prefix.display()),
-            "--dry-run".into(),
-        ]);
+        let code = run_setup(&[format!("--prefix={}", prefix.display()), "--dry-run".into()]);
         assert_eq!(code, 0);
         assert!(!prefix.exists() || fs::read_dir(&prefix).map(|d| d.count()).unwrap_or(0) == 0);
     }
@@ -554,12 +557,15 @@ mod tests {
             "-v".into(),
         ]);
         assert_eq!(code, 0, "setup failed");
-        assert!(prefix.join("share/bash-completion/completions/rtrash").is_file());
+        assert!(prefix
+            .join("share/bash-completion/completions/rtrash")
+            .is_file());
         assert!(prefix.join("share/zsh/site-functions/_rtrash").is_file());
         let fish_main = prefix.join("share/fish/vendor_completions.d/rtrash.fish");
         assert!(fish_main.is_file());
         assert!(prefix.join("share/man/man1/rtrash.1").is_file());
-        let bash = fs::read_to_string(prefix.join("share/bash-completion/completions/rtrash")).unwrap();
+        let bash =
+            fs::read_to_string(prefix.join("share/bash-completion/completions/rtrash")).unwrap();
         assert!(bash.contains("--home-only"));
         let fish = fs::read_to_string(&fish_main).unwrap();
         assert!(fish.contains("dry-run"));
@@ -572,7 +578,10 @@ mod tests {
                 "missing fish multi-call completion {p:?}"
             );
             // Symlink (or same content) must resolve to the shared script.
-            if p.symlink_metadata().ok().is_some_and(|m| m.file_type().is_symlink()) {
+            if p.symlink_metadata()
+                .ok()
+                .is_some_and(|m| m.file_type().is_symlink())
+            {
                 let dest = fs::read_link(&p).unwrap();
                 assert_eq!(dest.as_os_str(), "rtrash.fish");
             }

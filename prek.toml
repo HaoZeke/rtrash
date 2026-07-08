@@ -54,5 +54,9 @@ hooks = [
     "-c",
     "test -f towncrier.toml && test -d docs/newsfragments && test -f CHANGELOG.md",
   ] },
+  { id = "cargo-lock-present", name = "Cargo.lock present for binary crate", entry = "bash", language = "system", pass_filenames = false, files = '^(Cargo\.toml|Cargo\.lock)$', args = [
+    "-c",
+    "test -f Cargo.lock",
+  ] },
   { id = "cargo-toml-pyproject-version-lockstep", name = "Cargo.toml and pyproject.toml versions match", entry = "scripts/check-version-lockstep.sh", language = "system", pass_filenames = false, files = "^(Cargo\\.toml|pyproject\\.toml)$" },
 ]

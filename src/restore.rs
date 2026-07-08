@@ -144,7 +144,7 @@ fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
     let dest = &entry.original;
 
     // Never destroy the live destination until the trash payload is known good.
-    if !src.symlink_metadata().is_ok() {
+    if src.symlink_metadata().is_err() {
         eprintln!(
             "{prog}: trash payload missing for '{}' (stale .trashinfo?)",
             entry.name
@@ -193,10 +193,7 @@ fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
     if dest_exists {
         // Payload is durable under `staged`; only now remove the blocker.
         if let Err(e) = trashdir::remove_any_path(dest) {
-            eprintln!(
-                "{prog}: cannot remove existing '{}': {e}",
-                dest.display()
-            );
+            eprintln!("{prog}: cannot remove existing '{}': {e}", dest.display());
             // Best-effort: put payload back into the trash name.
             let _ = trashdir::relocate(&staged, &src);
             return 1;

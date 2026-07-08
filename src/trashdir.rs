@@ -155,8 +155,7 @@ pub fn longest_mount_prefix(path: &Path, mounts: &[PathBuf]) -> PathBuf {
                 None => true,
                 Some(b) => {
                     let bc = b.components().count();
-                    comps > bc
-                        || (comps == bc && m.as_os_str().len() > b.as_os_str().len())
+                    comps > bc || (comps == bc && m.as_os_str().len() > b.as_os_str().len())
                 }
             };
             if better {
@@ -249,10 +248,7 @@ pub fn infer_topdir(root: &Path) -> Option<PathBuf> {
 
     // $topdir/.Trash/$uid
     let parent_name = parent.file_name()?.to_string_lossy();
-    if parent_name == ".Trash"
-        && !name.is_empty()
-        && name.chars().all(|c| c.is_ascii_digit())
-    {
+    if parent_name == ".Trash" && !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()) {
         return parent.parent().map(|p| p.to_path_buf());
     }
 
@@ -380,6 +376,7 @@ impl TrashLock {
         let path = root.join(".rtrash.lock");
         let file = fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)?;
@@ -658,7 +655,12 @@ fn info_mtime_secs(path: &Path) -> io::Result<i64> {
 
 /// Insert or replace a `directorysizes` line: `size mtime percent-encoded-name`.
 /// Writes via temp file + rename (FreeDesktop: avoid concurrent cache corruption).
-pub fn directorysizes_upsert(trash: &TrashDir, name: &str, size: u64, mtime: i64) -> io::Result<()> {
+pub fn directorysizes_upsert(
+    trash: &TrashDir,
+    name: &str,
+    size: u64,
+    mtime: i64,
+) -> io::Result<()> {
     use crate::util::url_encode;
     let path = trash.root.join("directorysizes");
     let enc = url_encode(name.as_bytes());
@@ -835,6 +837,88 @@ pub fn relocate(src: &Path, dest: &Path) -> io::Result<()> {
     }
 }
 
+/// Cross-device fallback: copy preserving symlinks-as-links, content, mode, and mtime.
+/// Shared by put (EXDEV into trash) and restore (`relocate`).
+pub fn copy_recursive(src: &Path, dst: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    let ftype = meta.file_type();
+    if ftype.is_symlink() {
+        let target = fs::read_link(src)?;
+        std::os::unix::fs::symlink(&target, dst)?;
+        // Symlink mtime: best-effort via lutimes/utimensat AT_SYMLINK_NOFOLLOW.
+        let _ = set_times_nofollow(dst, meta);
+        Ok(())
+    } else if ftype.is_dir() {
+        fs::create_dir(dst)?;
+        fs::set_permissions(dst, meta.permissions())?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let emeta = fs::symlink_metadata(entry.path())?;
+            copy_recursive(&entry.path(), &dst.join(entry.file_name()), &emeta)?;
+        }
+        set_times(dst, meta)?;
+        Ok(())
+    } else {
+        fs::copy(src, dst)?;
+        fs::set_permissions(dst, meta.permissions())?;
+        set_times(dst, meta)?;
+        Ok(())
+    }
+}
+
+fn set_times(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    let modified = meta.modified()?;
+    let accessed = meta.accessed().unwrap_or(modified);
+    if meta.is_dir() {
+        return set_times_path(path, accessed, modified, false);
+    }
+    match fs::OpenOptions::new().write(true).open(path) {
+        Ok(f) => {
+            let times = fs::FileTimes::new()
+                .set_accessed(accessed)
+                .set_modified(modified);
+            f.set_times(times)
+        }
+        Err(_) => set_times_path(path, accessed, modified, false),
+    }
+}
+
+fn set_times_nofollow(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    let modified = meta.modified()?;
+    let accessed = meta.accessed().unwrap_or(modified);
+    set_times_path(path, accessed, modified, true)
+}
+
+fn set_times_path(
+    path: &Path,
+    accessed: std::time::SystemTime,
+    modified: std::time::SystemTime,
+    nofollow: bool,
+) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::time::UNIX_EPOCH;
+    let to_timespec = |t: std::time::SystemTime| -> libc::timespec {
+        let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
+        libc::timespec {
+            tv_sec: d.as_secs() as libc::time_t,
+            tv_nsec: d.subsec_nanos() as libc::c_long,
+        }
+    };
+    let times = [to_timespec(accessed), to_timespec(modified)];
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let flags = if nofollow {
+        libc::AT_SYMLINK_NOFOLLOW
+    } else {
+        0
+    };
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), flags) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -864,19 +948,13 @@ mod tests {
     #[test]
     fn infer_topdir_trash_dash_uid() {
         let root = PathBuf::from("/mnt/usb/.Trash-1000");
-        assert_eq!(
-            infer_topdir(&root).as_deref(),
-            Some(Path::new("/mnt/usb"))
-        );
+        assert_eq!(infer_topdir(&root).as_deref(), Some(Path::new("/mnt/usb")));
     }
 
     #[test]
     fn infer_topdir_shared_trash_uid() {
         let root = PathBuf::from("/mnt/usb/.Trash/1000");
-        assert_eq!(
-            infer_topdir(&root).as_deref(),
-            Some(Path::new("/mnt/usb"))
-        );
+        assert_eq!(infer_topdir(&root).as_deref(), Some(Path::new("/mnt/usb")));
     }
 
     #[test]
@@ -898,7 +976,7 @@ mod tests {
         let pin = root.join("vol/.Trash-42");
         fs::create_dir_all(pin.join("files")).unwrap();
         fs::create_dir_all(pin.join("info")).unwrap();
-        let dirs = resolve_dirs(&[pin.clone()]);
+        let dirs = resolve_dirs(std::slice::from_ref(&pin));
         assert_eq!(dirs.len(), 1);
         assert_eq!(dirs[0].root, pin);
         assert_eq!(dirs[0].topdir.as_deref(), Some(root.join("vol").as_path()));
@@ -997,7 +1075,11 @@ proc /proc proc rw 0 0
         std::os::unix::fs::symlink("target-name", &link).unwrap();
         let lmeta = fs::symlink_metadata(&link).unwrap();
         copy_recursive(&link, &link_dst, &lmeta).unwrap();
-        assert!(link_dst.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(link_dst
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(fs::read_link(&link_dst).unwrap(), Path::new("target-name"));
         let _ = fs::remove_dir_all(&root);
     }
@@ -1143,87 +1225,5 @@ proc /proc proc rw 0 0
             "file payloads must not use directorysizes"
         );
         let _ = fs::remove_dir_all(&root);
-    }
-}
-
-/// Cross-device fallback: copy preserving symlinks-as-links, content, mode, and mtime.
-/// Shared by put (EXDEV into trash) and restore (`relocate`).
-pub fn copy_recursive(src: &Path, dst: &Path, meta: &fs::Metadata) -> io::Result<()> {
-    let ftype = meta.file_type();
-    if ftype.is_symlink() {
-        let target = fs::read_link(src)?;
-        std::os::unix::fs::symlink(&target, dst)?;
-        // Symlink mtime: best-effort via lutimes/utimensat AT_SYMLINK_NOFOLLOW.
-        let _ = set_times_nofollow(dst, meta);
-        Ok(())
-    } else if ftype.is_dir() {
-        fs::create_dir(dst)?;
-        fs::set_permissions(dst, meta.permissions())?;
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            let emeta = fs::symlink_metadata(entry.path())?;
-            copy_recursive(&entry.path(), &dst.join(entry.file_name()), &emeta)?;
-        }
-        set_times(dst, meta)?;
-        Ok(())
-    } else {
-        fs::copy(src, dst)?;
-        fs::set_permissions(dst, meta.permissions())?;
-        set_times(dst, meta)?;
-        Ok(())
-    }
-}
-
-fn set_times(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
-    let modified = meta.modified()?;
-    let accessed = meta.accessed().unwrap_or(modified);
-    if meta.is_dir() {
-        return set_times_path(path, accessed, modified, false);
-    }
-    match fs::OpenOptions::new().write(true).open(path) {
-        Ok(f) => {
-            let times = fs::FileTimes::new()
-                .set_accessed(accessed)
-                .set_modified(modified);
-            f.set_times(times)
-        }
-        Err(_) => set_times_path(path, accessed, modified, false),
-    }
-}
-
-fn set_times_nofollow(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
-    let modified = meta.modified()?;
-    let accessed = meta.accessed().unwrap_or(modified);
-    set_times_path(path, accessed, modified, true)
-}
-
-fn set_times_path(
-    path: &Path,
-    accessed: std::time::SystemTime,
-    modified: std::time::SystemTime,
-    nofollow: bool,
-) -> io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    use std::time::UNIX_EPOCH;
-    let to_timespec = |t: std::time::SystemTime| -> libc::timespec {
-        let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
-        libc::timespec {
-            tv_sec: d.as_secs() as libc::time_t,
-            tv_nsec: d.subsec_nanos() as libc::c_long,
-        }
-    };
-    let times = [to_timespec(accessed), to_timespec(modified)];
-    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let flags = if nofollow {
-        libc::AT_SYMLINK_NOFOLLOW
-    } else {
-        0
-    };
-    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), flags) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
     }
 }

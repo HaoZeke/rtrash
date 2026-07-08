@@ -240,12 +240,7 @@ fn unlinkat_file(dirfd: RawFd, name_c: &CString) -> io::Result<()> {
     Ok(())
 }
 
-fn remove_dir_child(
-    dirfd: RawFd,
-    name: &OsStr,
-    name_c: &CString,
-    depth: u32,
-) -> io::Result<()> {
+fn remove_dir_child(dirfd: RawFd, name: &OsStr, name_c: &CString, depth: u32) -> io::Result<()> {
     // Subvolume destroy only at the first level of a tree (cheap for the common
     // non-subvolume case: one failed/skipped ioctl path per top-level payload,
     // not per nested directory).
@@ -287,8 +282,14 @@ fn try_btrfs_subvol_at(parent_fd: RawFd, name: &OsStr) -> io::Result<bool> {
     let name_c = CString::new(name.as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let rc =
-        unsafe { libc::fstatat(parent_fd, name_c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+    let rc = unsafe {
+        libc::fstatat(
+            parent_fd,
+            name_c.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
     if rc != 0 {
         return Ok(false);
     }
@@ -390,10 +391,7 @@ pub fn format_bytes(n: u64) -> String {
 /// Wipe every top-level child of `dir` in parallel. Missing `dir` is success.
 /// Returns the number of top-level children removed.
 pub fn wipe_children_parallel(dir: &Path) -> io::Result<u64> {
-    let dir_c = match cstring_path(dir) {
-        Ok(c) => c,
-        Err(e) => return Err(e),
-    };
+    let dir_c = cstring_path(dir)?;
     // Never follow a symlink posing as files/ or info/ (full-empty footgun).
     let fd = unsafe {
         libc::open(

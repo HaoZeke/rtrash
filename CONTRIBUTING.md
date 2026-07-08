@@ -1,5 +1,22 @@
 # Contributing
 
+## Rust quality bar (matches CI)
+
+CI (`.github/workflows/ci.yml`) runs the same commands on `main`/PRs. Prefer **`rg.terra`** or CI for compile-heavy steps (do not thrash a laptop with full `cargo test` loops).
+
+```shell
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo deny check          # needs cargo-deny; policy in deny.toml
+```
+
+Or: `./scripts/quality.sh` (fmt → clippy → test → deny when available).
+
+`Cargo.lock` is **committed** for this binary crate; use `--locked` so CI and local builds resolve the same graph.
+
+`prek` covers fast hygiene (whitespace, yaml/toml, large files, codespell). It does **not** compile the crate on every commit.
+
 ## Changelog fragments (towncrier)
 
 User-visible changes need a fragment under `docs/newsfragments/`:
