@@ -18,6 +18,16 @@ Files are *moved* into the same trash layout used by GNOME/KDE/Xfce file manager
 Atomic reservation: create-new on =.trashinfo= *before* moving the payload (spec requirement).
 Collisions become =name.2=, =name.3=, …
 
+* Platform backends
+
+| OS | Backend |
+|----+---------|
+| Linux | Full FreeDesktop (home + volume trash) |
+| macOS (experimental) | FreeDesktop *home* trash only — *not* Finder Trash |
+| Windows | System *Recycle Bin* (shell APIs) — *not* FreeDesktop on-disk layout |
+
+Linux remains the primary multi-call / musl-release niche.
+
 * Safer than permanent delete (=os.remove= / =rm= without trash)
 
 | Risk | =os.remove= / =Path.unlink= / =rm= | rtrash put |

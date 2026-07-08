@@ -58,9 +58,13 @@ Markdown mirrors under `docs/*.md` remain for quick GitHub reading; the site is 
 
 ## Platform
 
-**Platform:** Linux FreeDesktop trash only (home trash + per-mount trash dirs).
-Not a Windows Recycle Bin or macOS Finder Trash wrapper.
-On a TTY, bare `rtrash restore` opens the **interactive restore browser** (ratatui).
+| OS | Backend | Notes |
+| -- | ------- | ----- |
+| **Linux** | FreeDesktop home + per-mount trash | Primary niche; multi-call `setup`, musl releases, full suite tests |
+| **macOS** | FreeDesktop **home** trash only (experimental) | `$XDG_DATA_HOME/Trash` or `~/.local/share/Trash`. **Not** Finder / system Trash |
+| **Windows** | System **Recycle Bin** (shell APIs) | put/list/restore/empty/rm/status. **Not** FreeDesktop on-disk layout. Multi-call `setup` is Unix-oriented |
+
+On Linux/macOS TTY, bare `rtrash restore` opens the **interactive restore browser** (ratatui). Windows uses numbered restore selection (no TUI).
 
 ## Install
 
@@ -95,8 +99,7 @@ does **not** look for a non-existent `*-linux-gnu*.tar.gz` on x86_64 or aarch64 
 
 Naming matches `[package.metadata.binstall]` in `Cargo.toml` / `scripts/package-release.sh`.
 
-macOS and Windows have no prebuilt FreeDesktop assets (and Windows system trash is out of scope for this tool's niche).
-Use from-source only where the Linux FreeDesktop code path applies.
+Prebuilt musl tarballs are **Linux-only**. macOS (experimental FreeDesktop home trash) and Windows (Recycle Bin backend) are **from-source** (`cargo install rtrash`); there are no Finder Trash or FreeDesktop-as-Recycle-Bin assets.
 
 ### 2. Manual musl tarball (no cargo at all)
 
@@ -291,7 +294,7 @@ Previously deferred items are implemented in the shipped put/empty path:
 
 ## Limitations
 
-- **Platform:** Linux FreeDesktop trash only — no Windows Recycle Bin / macOS Finder Trash backends.
+- **Platform:** Linux FreeDesktop is the primary niche. macOS is experimental FreeDesktop **home** trash (not Finder). Windows uses the system Recycle Bin (not FreeDesktop layout).
 - **Restore UI:** bare `rtrash restore` on a TTY opens the **ratatui restore browser** (filter, navigate, multi-restore). Use `--plain` or a piped index for non-interactive selection. Scripts and path restore stay first-class.
 - **Not a general soft-delete database:** only the FreeDesktop on-disk layout.
 - **EXDEV does not re-create xattrs/ACLs/hardlinks** (mode+mtime+symlink+bytes only).

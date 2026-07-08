@@ -100,16 +100,10 @@ pub fn uid() -> u32 {
 }
 
 pub fn home_trash() -> PathBuf {
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default();
-            home.join(".local/share")
-        });
-    data.join("Trash")
+    crate::platform::home_trash_from(
+        std::env::var_os("XDG_DATA_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
 }
 
 fn dev_of(path: &Path) -> Option<u64> {
@@ -190,9 +184,23 @@ fn sticky_and_dir(meta: &fs::Metadata) -> bool {
 /// (put then copies across devices).
 ///
 /// Volume `top` is the **mount point** of `abs` (longest `/proc/self/mounts`
-/// prefix), not a pure `st_dev` walk — required when btrfs subvolumes share one
-/// device id.
+/// prefix on Linux), not a pure `st_dev` walk — required when btrfs subvolumes
+/// share one device id.
+///
+/// **macOS (experimental):** always the FreeDesktop home trash under
+/// `$XDG_DATA_HOME/Trash` or `~/.local/share/Trash`. This is **not** Finder Trash;
+/// volume `.Trash-$uid` discovery is disabled for the experimental path.
 pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
+    if crate::platform::is_macos_fdo_experimental() {
+        let _ = (abs, dev);
+        let home = TrashDir {
+            root: home_trash(),
+            topdir: None,
+        };
+        home.ensure()?;
+        return Ok(home);
+    }
+
     let home = TrashDir {
         root: home_trash(),
         topdir: None,
@@ -437,14 +445,28 @@ fn unescape_mount(s: &str) -> PathBuf {
     PathBuf::from(std::ffi::OsString::from_vec(out))
 }
 
-/// Non-pseudo mount points from `/proc/self/mounts`, **including `/`**, for
-/// trash-cli-compatible multi-volume discovery (home + every mount that may
-/// host `.Trash-$uid` / `.Trash/$uid`).
+/// Non-pseudo mount points for multi-volume FreeDesktop discovery.
+///
+/// - **Linux:** `/proc/self/mounts` (including `/`).
+/// - **macOS experimental / other non-Linux Unix:** empty list so [`all`] stays
+///   home-only; [`mount_top_of_path`] still falls back to an `st_dev` parent walk
+///   when put needs a mount top on non-experimental builds.
 pub fn mount_points() -> Vec<PathBuf> {
-    let Ok(content) = fs::read_to_string("/proc/self/mounts") else {
-        return vec![PathBuf::from("/")];
-    };
-    mount_points_from_table(&content)
+    if !crate::platform::volume_trash_discovery() {
+        return Vec::new();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(content) = fs::read_to_string("/proc/self/mounts") else {
+            return vec![PathBuf::from("/")];
+        };
+        mount_points_from_table(&content)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No /proc: home-only discovery; st_dev walk remains available for select.
+        Vec::new()
+    }
 }
 
 /// Parse an fstab/mounts-style table into non-pseudo mount points (testable).
@@ -593,35 +615,44 @@ fn sync_dir(path: &Path) -> io::Result<()> {
 }
 
 /// `rename(2)` that refuses to replace an existing path when the kernel supports
-/// `RENAME_NOREPLACE` (Linux); falls back to plain `rename` otherwise.
+/// `RENAME_NOREPLACE` (Linux); falls back to plain `rename` otherwise (macOS/BSD).
 fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let src_c = std::ffi::CString::new(src.as_os_str().as_bytes())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let dest_c = std::ffi::CString::new(dest.as_os_str().as_bytes())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    // RENAME_NOREPLACE = 1 on Linux. Use the renameat2 syscall (available under
-    // both glibc and musl libc crates; renameat2 is not always exported as a
-    // function symbol on musl).
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            src_c.as_ptr(),
-            libc::AT_FDCWD,
-            dest_c.as_ptr(),
-            1usize,
-        )
-    };
-    if rc == 0 {
-        return Ok(());
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let src_c = std::ffi::CString::new(src.as_os_str().as_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let dest_c = std::ffi::CString::new(dest.as_os_str().as_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        // RENAME_NOREPLACE = 1 on Linux. Use the renameat2 syscall (available under
+        // both glibc and musl libc crates; renameat2 is not always exported as a
+        // function symbol on musl).
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                src_c.as_ptr(),
+                libc::AT_FDCWD,
+                dest_c.as_ptr(),
+                1usize,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        // Older kernels: fall back (orphan pre-check still applies).
+        if err.raw_os_error() == Some(libc::EINVAL) || err.raw_os_error() == Some(libc::ENOSYS) {
+            return fs::rename(src, dest);
+        }
+        Err(err)
     }
-    let err = io::Error::last_os_error();
-    // Older kernels / non-Linux: fall back (orphan pre-check still applies).
-    if err.raw_os_error() == Some(libc::EINVAL) || err.raw_os_error() == Some(libc::ENOSYS) {
-        return fs::rename(src, dest);
+    #[cfg(not(target_os = "linux"))]
+    {
+        // macOS/BSD: no RENAME_NOREPLACE in this path; collision handled by
+        // O_EXCL .trashinfo reservation before the payload rename.
+        fs::rename(src, dest)
     }
-    Err(err)
 }
 
 /// Total byte size of a directory tree (symlink targets not followed).

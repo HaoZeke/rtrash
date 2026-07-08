@@ -2,7 +2,8 @@ use rtrash::{empty, list, put, restore, rm, setup, status};
 
 const HELP: &str = "\
 Usage: rtrash <COMMAND> [ARGS]...
-Fast freedesktop.org trash tool with an rm-compatible interface.
+Fast trash tool: FreeDesktop on Linux (and experimental macOS home trash);
+Windows uses the system Recycle Bin. rm-compatible put interface.
 
 Commands:
   put [OPTION]... FILE...     move files to the trash (accepts rm(1) flags)

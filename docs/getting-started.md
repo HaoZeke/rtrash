@@ -10,7 +10,8 @@ Docs: <https://rtrash.rgoswami.me>
 | Safer than `os.remove` in Python | `import rtrash; rtrash.unlink(path)` |
 | Drop-in mental model for `rm` | `rtrash -rf path` or symlink `rm` → put |
 | Permanent purge of trash entries | `rtrash empty` / `rtrash rm PATTERN` |
-| Windows / macOS system trash | **Not supported** (Linux FreeDesktop only) |
+| Windows system Recycle Bin | `rtrash put/list/restore/empty` (from source; not FreeDesktop layout) |
+| macOS Finder Trash | **Not supported** — experimental FreeDesktop **home** trash only |
 
 - [architecture.md](architecture.md) — FreeDesktop placement, fail-safes
 - [benchmarks.md](benchmarks.md) — measured comparison vs trash-cli

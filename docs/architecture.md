@@ -16,6 +16,16 @@ Files are **moved** into the same trash layout used by desktop file managers, no
 
 Atomic reservation: create-new on `.trashinfo` **before** moving the payload.
 
+## Platform backends
+
+| OS | Backend |
+|----|---------|
+| Linux | Full FreeDesktop (home + volume trash) |
+| macOS (experimental) | FreeDesktop **home** trash only — **not** Finder Trash |
+| Windows | System **Recycle Bin** (shell APIs) — **not** FreeDesktop on-disk layout |
+
+Linux remains the primary multi-call / musl-release niche.
+
 ## Safer than permanent delete (`os.remove` / `rm`)
 
 | Risk | `os.remove` / `Path.unlink` / `rm` | rtrash put |

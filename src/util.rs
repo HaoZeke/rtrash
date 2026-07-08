@@ -65,7 +65,8 @@ pub fn confirm(prompt: &str) -> bool {
 }
 
 pub fn stdin_is_tty() -> bool {
-    unsafe { libc::isatty(libc::STDIN_FILENO) == 1 }
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
 }
 
 /// Shell-style glob match (`*`, `?`, `[…]` / `[!…]`), as used by trash-cli `trash-rm`.
