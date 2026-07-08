@@ -13,6 +13,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use crate::list::Entry;
 use crate::restore;
 use crate::tui_fuzzy;
+use crate::tui_keys;
+use crate::tui_list;
 use crate::tui_select::Selection;
 use crate::tui_term;
 
@@ -30,6 +32,7 @@ pub fn filter_indices(entries: &[&Entry], query: &str) -> Vec<usize> {
 enum Mode {
     Browse,
     Filter,
+    Help,
     ConfirmOverwrite,
     ConfirmBulk,
 }
@@ -47,6 +50,8 @@ struct App<'a> {
     status: String,
     quit: bool,
     pending_idxs: Vec<usize>,
+    /// Inner list rows from last draw (for PageUp/Down).
+    viewport_rows: usize,
 }
 
 impl<'a> App<'a> {
@@ -67,26 +72,39 @@ impl<'a> App<'a> {
             filter: String::new(),
             filter_draft: String::new(),
             status: format!(
-                "{n} item(s) · Space mark · a/A all/none · Enter restore · / fuzzy · q quit"
+                "{n} item(s) · {} ",
+                tui_keys::browse_footer("restore", "f force")
             ),
             quit: false,
             pending_idxs: Vec::new(),
+            viewport_rows: 10,
         };
-        app.refilter();
+        app.refilter_query(&app.filter.clone());
         app
     }
 
     fn refilter(&mut self) {
+        let q = self.filter.clone();
+        self.refilter_query(&q);
+    }
+
+    /// Live or applied filter: rebuild visible indices from `query`.
+    fn refilter_query(&mut self, query: &str) {
         let prev = self.selected_entry_idx();
-        self.filtered = filter_indices(&self.entries, &self.filter);
-        let new_sel = prev
-            .and_then(|ei| self.filtered.iter().position(|&i| i == ei))
-            .or(if self.filtered.is_empty() {
-                None
-            } else {
-                Some(0)
-            });
+        self.filtered = filter_indices(&self.entries, query);
+        let new_sel = tui_list::reselect_after_filter(prev, &self.filtered);
         self.list_state.select(new_sel);
+        self.ensure_scroll();
+    }
+
+    fn ensure_scroll(&mut self) {
+        let off = tui_list::scroll_offset(
+            self.list_state.selected(),
+            self.filtered.len(),
+            self.viewport_rows.max(1),
+            self.list_state.offset(),
+        );
+        *self.list_state.offset_mut() = off;
     }
 
     fn selected_entry_idx(&self) -> Option<usize> {
@@ -100,18 +118,20 @@ impl<'a> App<'a> {
     }
 
     fn move_sel(&mut self, delta: isize) {
-        let len = self.filtered.len();
-        if len == 0 {
-            self.list_state.select(None);
-            return;
-        }
-        let cur = self.list_state.selected().unwrap_or(0) as isize;
-        let next = (cur + delta).rem_euclid(len as isize) as usize;
-        self.list_state.select(Some(next));
+        let next = tui_list::move_selected(self.list_state.selected(), self.filtered.len(), delta);
+        self.list_state.select(next);
+        self.ensure_scroll();
     }
 
     fn page(&mut self, down: bool) {
-        self.move_sel(if down { 10 } else { -10 });
+        let next = tui_list::page_selected(
+            self.list_state.selected(),
+            self.filtered.len(),
+            self.viewport_rows.max(1),
+            down,
+        );
+        self.list_state.select(next);
+        self.ensure_scroll();
     }
 
     fn targets_for_action(&self) -> Vec<usize> {
@@ -192,38 +212,52 @@ impl<'a> App<'a> {
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         match self.mode {
             Mode::Filter => self.on_key_filter(code),
+            Mode::Help => self.on_key_help(code),
             Mode::ConfirmOverwrite | Mode::ConfirmBulk => self.on_key_confirm(code),
             Mode::Browse => self.on_key_browse(code, mods),
+        }
+    }
+
+    fn on_key_help(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
+                self.mode = Mode::Browse;
+                self.status = "help closed".into();
+            }
+            _ => {}
         }
     }
 
     fn on_key_filter(&mut self, code: KeyCode) {
         match code {
             KeyCode::Esc => {
-                self.filter_draft.clear();
+                // Restore prior applied filter (discard draft).
+                let applied = self.filter.clone();
+                self.filter_draft = applied.clone();
+                self.refilter_query(&applied);
                 self.mode = Mode::Browse;
-                self.status = "filter cancelled".into();
+                self.status = tui_keys::status_filter_cancelled().into();
             }
             KeyCode::Enter => {
                 self.filter = self.filter_draft.clone();
                 self.mode = Mode::Browse;
-                self.refilter();
-                self.status = if self.filter.is_empty() {
-                    "filter cleared".into()
-                } else {
-                    format!(
-                        "fuzzy {:?} · {} match(es)",
-                        self.filter,
-                        self.filtered.len()
-                    )
-                };
+                self.status =
+                    tui_keys::status_filter_committed(&self.filter, self.filtered.len());
             }
             KeyCode::Backspace => {
                 self.filter_draft.pop();
+                let d = self.filter_draft.clone();
+                self.refilter_query(&d);
+                self.status = tui_keys::status_filter_live(&d, self.filtered.len());
             }
             KeyCode::Char(c) if !c.is_control() => {
                 self.filter_draft.push(c);
+                let d = self.filter_draft.clone();
+                self.refilter_query(&d);
+                self.status = tui_keys::status_filter_live(&d, self.filtered.len());
             }
+            KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
             _ => {}
         }
     }
@@ -254,31 +288,39 @@ impl<'a> App<'a> {
             KeyCode::Home | KeyCode::Char('g') => {
                 if !self.filtered.is_empty() {
                     self.list_state.select(Some(0));
+                    self.ensure_scroll();
                 }
             }
             KeyCode::End | KeyCode::Char('G') => {
                 if !self.filtered.is_empty() {
                     self.list_state.select(Some(self.filtered.len() - 1));
+                    self.ensure_scroll();
                 }
             }
             KeyCode::Char(' ') => {
                 if let Some(ei) = self.selected_entry_idx() {
                     self.sel.toggle(ei);
-                    self.status = format!("marked {}", self.sel.len());
+                    self.status = tui_keys::status_marked(self.sel.len());
                 }
             }
             KeyCode::Char('a') => {
                 self.sel.mark_all(self.filtered.iter().copied());
-                self.status = format!("marked all visible ({})", self.sel.len());
+                self.status = tui_keys::status_marked_all(self.sel.len());
             }
             KeyCode::Char('A') => {
                 self.sel.clear();
-                self.status = "cleared marks".into();
+                self.status = tui_keys::status_cleared().into();
             }
             KeyCode::Char('/') => {
                 self.mode = Mode::Filter;
                 self.filter_draft = self.filter.clone();
-                self.status = "fuzzy filter · Enter apply · Esc cancel".into();
+                let d = self.filter_draft.clone();
+                self.refilter_query(&d);
+                self.status = tui_keys::status_filter_live(&d, self.filtered.len());
+            }
+            KeyCode::Char('?') => {
+                self.mode = Mode::Help;
+                self.status = "help · ? or Esc to close".into();
             }
             KeyCode::Char('f') => {
                 self.force = !self.force;
@@ -307,8 +349,12 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         ])
         .split(f.area());
 
+    // Inner list height (minus borders) drives PageUp/Down and scroll clamp.
+    app.viewport_rows = chunks[1].height.saturating_sub(2) as usize;
+    app.ensure_scroll();
+
     let filter_show = if app.mode == Mode::Filter {
-        format!("/{}", app.filter_draft)
+        format!(" /{}", app.filter_draft)
     } else if app.filter.is_empty() {
         String::new()
     } else {
@@ -349,13 +395,18 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
     f.render_stateful_widget(list, chunks[1], &mut app.list_state);
 
     let keys = match app.mode {
-        Mode::Browse => "↑↓/jk  Space mark  a/A all/none  / fuzzy  Enter restore  f force  q quit",
-        Mode::Filter => "typing fuzzy…  Enter apply  Esc cancel",
-        Mode::ConfirmOverwrite | Mode::ConfirmBulk => "y confirm  n cancel",
+        Mode::Browse => tui_keys::browse_footer("restore", "f force"),
+        Mode::Filter => tui_keys::FILTER_HINT.to_string(),
+        Mode::Help => tui_keys::HELP_HINT.to_string(),
+        Mode::ConfirmOverwrite | Mode::ConfirmBulk => tui_keys::CONFIRM_HINT.to_string(),
     };
     let footer = Paragraph::new(vec![Line::from(keys), Line::from(app.status.as_str())])
-        .block(Block::default().borders(Borders::ALL).title("keys"));
+        .block(Block::default().borders(Borders::ALL).title("keys · ? help"));
     f.render_widget(footer, chunks[2]);
+
+    if app.mode == Mode::Help {
+        draw_help(f, &["Browser-specific: f toggle force overwrite"]);
+    }
 
     if matches!(app.mode, Mode::ConfirmOverwrite | Mode::ConfirmBulk) {
         if let Some(e) = app.selected_entry() {
@@ -364,6 +415,44 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
             draw_confirm_bulk(f, app.pending_idxs.len());
         }
     }
+}
+
+fn draw_help(f: &mut ratatui::Frame, extras: &[&str]) {
+    let area = {
+        let r = f.area();
+        let v = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(10),
+                Constraint::Percentage(80),
+                Constraint::Percentage(10),
+            ])
+            .split(r);
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(10),
+                Constraint::Percentage(80),
+                Constraint::Percentage(10),
+            ])
+            .split(v[1])[1]
+    };
+    f.render_widget(Clear, area);
+    let mut lines: Vec<Line> = tui_keys::core_help_lines()
+        .iter()
+        .map(|s| Line::from(*s))
+        .collect();
+    if !extras.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from("This browser"));
+        for e in extras {
+            lines.push(Line::from(format!("  {e}")));
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" help ")),
+        area,
+    );
 }
 
 fn draw_confirm(f: &mut ratatui::Frame, dest: &Path, n: usize) {

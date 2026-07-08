@@ -265,11 +265,13 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
 | Single match | Restores immediately without prompting |
 
-**TUI keys (restore):** `↑↓/jk` move · `Space` mark · `a`/`A` mark all / none · `/` fuzzy filter · `Enter` restore marked (or cursor) · `f` force · `q` quit.
+**TUI keys (shared by restore / empty / put):** `↑↓`/`jk` move · `PgUp`/`PgDn` page · `g`/`G` first/last · `Space` mark · `a`/`A` mark all visible / clear · `/` **live** fuzzy filter (Enter commit, Esc cancel) · `?` help · `Enter` primary action · `q`/`Esc` quit.
 
-**TUI empty:** bare `rtrash empty` on a TTY opens a multi-select permanent-delete browser (`--plain` or non-TTY keeps classic empty).
+Browser-specific: restore `f` force · empty `n` dry-run · put `r` recursive / `f` force.
 
-**TUI put:** bare `rtrash put` on a TTY opens a multi-select path browser for the current directory (`--plain` or FILE operands keep classic put).
+**TUI empty:** bare `rtrash empty` on a TTY opens the multi-select permanent-delete browser (`--plain` or non-TTY keeps classic empty).
+
+**TUI put:** bare `rtrash put` on a TTY opens the multi-select path browser for the current directory (`--plain` or FILE operands keep classic put).
 
 Existing paths at the destination are preserved unless `-f` / `--force` is given; with `-f`, a blocking destination is removed first.
 Same-filesystem restore uses `rename`; cross-device restore copies then deletes the trash payload (needed when put fell back to the home trash).

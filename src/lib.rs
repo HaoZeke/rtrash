@@ -40,6 +40,10 @@ pub mod trashdir;
 #[cfg(all(unix, feature = "tui"))]
 pub mod tui_fuzzy;
 #[cfg(all(unix, feature = "tui"))]
+pub mod tui_keys;
+#[cfg(all(unix, feature = "tui"))]
+pub mod tui_list;
+#[cfg(all(unix, feature = "tui"))]
 pub mod tui_select;
 #[cfg(all(unix, feature = "tui"))]
 pub mod tui_term;

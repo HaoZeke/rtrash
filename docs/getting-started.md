@@ -69,16 +69,22 @@ rtrash empty --trash-dir="$XDG_DATA_HOME/Trash"
 On a TTY, bare `rtrash restore` opens the **ratatui restore browser** — intentional
 product UX, not a script-only fallback.
 
+Shared keys for **restore**, **empty**, and **put** TUI browsers:
+
 | Key | Action |
 |-----|--------|
 | `↑` `↓` / `j` `k` | Move selection |
+| `PgUp` / `PgDn` | Page by viewport |
+| `g` / `G` (or Home/End) | First / last item |
 | `Space` | Toggle mark (multi-select) |
 | `a` / `A` | Mark all visible / clear marks |
-| `/` | **Fuzzy** filter by original path |
-| `Enter` | Restore marked items (or cursor if none marked) |
-| `f` | Toggle force overwrite |
-| `y` / `n` | Confirm overwrite / bulk restore |
-| `q` / `Esc` | Quit |
+| `/` | **Live fuzzy** filter (refilters each keystroke; Enter commit, Esc restore prior) |
+| `?` | Help overlay (same core map in every browser) |
+| `Enter` | Primary action: restore / purge / put (marked, or cursor if none) |
+| `y` / `n` | Confirm / cancel bulk destructive actions |
+| `q` / `Esc` | Quit (browse mode) |
+
+Browser-specific: restore `f` force · empty `n` dry-run · put `r` recursive / `f` force.
 
 Also: **`rtrash empty`** (TTY) multi-select permanent delete; **`rtrash put`** (TTY, no files) multi-select put from the current directory. Use `--plain` to force classic CLI behavior.
 
