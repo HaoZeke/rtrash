@@ -1,4 +1,5 @@
-# Build Sphinx docs and publish to GitHub Pages (rtrash.rgoswami.me).
+# Build Sphinx docs and publish to Cloudflare Pages (rtrash.rgoswami.me).
+# DNS: rtrash.rgoswami.me → rtrash.pages.dev (single host; no gh-pages dual publish).
 name: Build and Deploy Documentation
 
 on:
@@ -17,7 +18,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build_and_deploy:
@@ -37,7 +38,6 @@ jobs:
         run: |
           ./docs/build.sh
           touch docs/build/.nojekyll
-          echo rtrash.rgoswami.me > docs/build/CNAME
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -45,18 +45,6 @@ jobs:
           name: documentation
           path: docs/build
 
-      - name: Deploy to GitHub Pages
-        if: >-
-          (github.event_name == 'push' && github.ref_name == 'main') ||
-          github.event_name == 'workflow_dispatch'
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: docs/build
-          cname: rtrash.rgoswami.me
-          force_orphan: true
-
-      # Custom domain rtrash.rgoswami.me CNAMEs to rtrash.pages.dev (Cloudflare Pages).
       - name: Ensure Cloudflare Pages project exists
         if: >-
           (github.event_name == 'push' && github.ref_name == 'main') ||

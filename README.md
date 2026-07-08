@@ -33,7 +33,7 @@ $ pip install rtrash
 
 ## Docs site
 
-Published at **https://rtrash.rgoswami.me** (GitHub Pages).
+Published at **https://rtrash.rgoswami.me** (Cloudflare Pages).
 
 
 Project documentation is authored in **orgmode** under [`docs/orgmode/`](docs/orgmode/) and built to a **Sphinx + Shibuya** static site (readcon-style: org → RST → HTML).
