@@ -41,15 +41,15 @@ Desktop environments already share a FreeDesktop trash layout — *rtrash* is a 
 ** CLI
 
 #+begin_src shell
-cargo install --git https://github.com/HaoZeke/rtrash
+cargo install rtrash
+# or: cargo binstall rtrash   # prebuilt musl on x86_64 / aarch64 Linux
 rtrash setup   # multi-call links + completions + man under ~/.local
 #+end_src
 
 ** Python
 
 #+begin_src shell
-pip install maturin
-maturin develop --features python   # from a checkout
+pip install rtrash
 python -c "import rtrash; rtrash.unlink('scratch.txt')"
 #+end_src
 

@@ -17,27 +17,32 @@ Python API detail: [[file:bindings.org][bindings.org]].
 
 * Install
 
+Published on [[https://crates.io/crates/rtrash][crates.io]] and [[https://pypi.org/project/rtrash/][PyPI]].
+
 ** CLI (Rust)
 
 #+begin_src shell
-cargo install --git https://github.com/HaoZeke/rtrash
+cargo install rtrash          # from crates.io (needs Rust toolchain)
+# or prebuilt musl on x86_64 / aarch64 Linux:
+cargo binstall rtrash
 rtrash setup
 #+end_src
 
-~rtrash setup~ installs multi-call links, bash/zsh completions, and the man page under =~/.local= from assets *embedded in the binary* (no source checkout). Flags: ~--dry-run~, ~--force~ (after upgrades), ~--with-rm~, ~--prefix=DIR~. Packagers: ~rtrash completions bash|zsh~, ~rtrash man~, or ~rtrash setup --prefix=/usr~.
+~rtrash setup~ installs multi-call links, bash/zsh/fish completions, and the man page under =~/.local= from assets *embedded in the binary* (no source checkout). Flags: ~--dry-run~, ~--force~ (after upgrades), ~--with-rm~, ~--prefix=DIR~. Packagers: ~rtrash completions bash|zsh|fish~, ~rtrash man~, or ~rtrash setup --prefix=/usr~.
 
 MSRV *1.77*.
-Default install is a normal dynamically linked Linux binary.
+Default =cargo install= is a normal dynamically linked Linux binary.
+Tip of main: =cargo install --git https://github.com/HaoZeke/rtrash=.
 
-** Python (maturin / PyO3)
+** Python
 
 #+begin_src shell
-# from a checkout, on a machine with Rust + maturin:
-pip install maturin
-maturin develop --features python
-# or: pip install .   # uses pyproject.toml / maturin backend
+pip install rtrash
 python -c "import rtrash; print(rtrash.version())"
 #+end_src
+
+Linux x86_64 wheels for CPython 3.10–3.14.
+Dev checkout: =pip install maturin && maturin develop --features python=.
 
 * Shortest CLI path
 

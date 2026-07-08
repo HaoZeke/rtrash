@@ -18,35 +18,38 @@ Docs: <https://rtrash.rgoswami.me>
 
 ## Install
 
+Published on **[crates.io](https://crates.io/crates/rtrash)** and **[PyPI](https://pypi.org/project/rtrash/)**.
+
 ### CLI (Rust)
 
-**Preferred** on **x86_64 or aarch64 Linux** when a GitHub Release for this version exists (tag `v*`, musl assets `rtrash-<version>-{x86_64,aarch64}-unknown-linux-musl.tar.gz`):
-
 ```shell
+cargo install rtrash          # from crates.io (needs Rust toolchain)
+# or prebuilt musl on x86_64 / aarch64 Linux:
 cargo binstall rtrash
-# or: cargo binstall --git https://github.com/HaoZeke/rtrash rtrash
 rtrash setup
 ```
 
-Metadata remaps typical glibc hosts (`*-unknown-linux-gnu`) on those arches to the matching musl static tarball (no `--target` / `--pkg-url` required).
+`cargo binstall` pulls GitHub Release musl assets (`rtrash-<version>-{x86_64,aarch64}-unknown-linux-musl.tar.gz`).
+Metadata remaps typical glibc hosts (`*-unknown-linux-gnu`) on those arches to the matching musl tarball.
 Always finish with **`rtrash setup`** (multi-call links, bash/zsh/fish completions, man under `~/.local`).
 
 **Manual tarball:** download the Release asset or run `./scripts/package-release.sh`, then `rtrash setup`.
 
-**From source** (no release asset yet):
+**Tip of main:**
 
 ```shell
 cargo install --git https://github.com/HaoZeke/rtrash
 rtrash setup
 ```
 
-### Python (maturin / PyO3)
+### Python
 
 ```shell
-pip install maturin
-maturin develop --features python
+pip install rtrash
 python -c "import rtrash; print(rtrash.version())"
 ```
+
+Linux **x86_64** wheels for CPython **3.10–3.14**. Dev checkout: `pip install maturin && maturin develop --features python`.
 
 ## Shortest CLI path
 

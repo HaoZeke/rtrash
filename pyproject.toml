@@ -22,7 +22,7 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/HaoZeke/rtrash"
 Repository = "https://github.com/HaoZeke/rtrash"
-Documentation = "https://github.com/HaoZeke/rtrash/tree/main/docs"
+Documentation = "https://rtrash.rgoswami.me"
 
 [tool.maturin]
 features = ["python"]

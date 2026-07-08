@@ -26,7 +26,7 @@ rtrash.rmtree("build/")      # not shutil.rmtree
 ```
 
 ```console
-$ pip install maturin && maturin develop --features python
+$ pip install rtrash
 ```
 
 
@@ -62,46 +62,39 @@ Not a Windows/macOS system-trash wrapper, and not a colored TUI.
 
 ## Install
 
-Recommended order when a **GitHub Release** for this version exists (tag `v0.1.0` style).
-Prebuilt Linux **musl static** assets:
+**Registry (primary):** published on [crates.io/crates/rtrash](https://crates.io/crates/rtrash) and [pypi.org/project/rtrash](https://pypi.org/project/rtrash/).
+
+```console
+$ cargo install rtrash          # CLI from crates.io (needs Rust toolchain)
+$ cargo binstall rtrash         # CLI prebuilt musl (x86_64 / aarch64 Linux)
+$ pip install rtrash            # Python bindings (Linux x86_64 wheels, CPython 3.10–3.14)
+$ rtrash setup                  # multi-call links, completions, man under ~/.local
+```
+
+Always run **`rtrash setup`** after the CLI binary lands on `PATH` (override with `--prefix=DIR`).
+
+### 1. `cargo binstall` (preferred binary install)
+
+Uses [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) to download the prebuilt **Linux musl static** tarball for your CPU (no local compile).
+GitHub Releases ship **x86_64** and **aarch64** musl assets for tag `v*`.
+Crate metadata remaps typical glibc hosts (`*-unknown-linux-gnu`) to the matching musl tarball, so a normal:
+
+```console
+$ cargo binstall rtrash
+$ rtrash setup
+```
+
+does **not** look for a non-existent `*-linux-gnu*.tar.gz` on x86_64 or aarch64 Linux.
 
 | Arch | Asset basename |
 | ---- | -------------- |
 | x86_64 | `rtrash-<version>-x86_64-unknown-linux-musl.tar.gz` |
 | aarch64 (ARM64) | `rtrash-<version>-aarch64-unknown-linux-musl.tar.gz` |
 
-Naming matches `[package.metadata.binstall]` in `Cargo.toml` / `scripts/package-release.sh`:
-
-### 1. `cargo binstall` (preferred binary install)
-
-Uses [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) to download the prebuilt **Linux musl static** tarball for your CPU (no local compile).
-CI ships **x86_64** and **aarch64** musl assets.
-Crate metadata remaps typical glibc hosts (`*-unknown-linux-gnu`) to the matching musl tarball, so a normal:
-
-```console
-$ cargo binstall rtrash
-```
-
-does **not** look for a non-existent `*-linux-gnu*.tar.gz` on x86_64 or aarch64 Linux.
-You do not need `--pkg-url` or `--target` on those hosts.
-Requires a published GitHub Release for this version (tag `v*`).
-
-```console
-# one-time: install cargo-binstall itself (see upstream docs)
-$ cargo binstall cargo-binstall
-
-# once this version has a GitHub Release asset (x86_64 or aarch64 Linux):
-$ cargo binstall rtrash
-# or before crates.io publish, from this repo's metadata:
-$ cargo binstall --git https://github.com/HaoZeke/rtrash rtrash
-
-$ rtrash setup
-```
+Naming matches `[package.metadata.binstall]` in `Cargo.toml` / `scripts/package-release.sh`.
 
 macOS and Windows have no prebuilt FreeDesktop assets (and Windows system trash is out of scope for this tool's niche).
-Use from-source only where the Linux FreeDesktop code path applies, or track the open port work separately.
-
-Always run **`rtrash setup`** after the binary lands on `PATH` so multi-call links, shell completions (bash/zsh/fish), and the man page are installed under `~/.local` (override with `--prefix=DIR`).
+Use from-source only where the Linux FreeDesktop code path applies.
 
 ### 2. Manual musl tarball (no cargo at all)
 
@@ -119,15 +112,33 @@ $ ./scripts/package-release.sh --all
 
 CI: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds both targets on `v*` tags (x86_64 and ubuntu-24.04-arm) and attaches the tarballs to the GitHub Release (what binstall downloads).
 
-### 3. From source (`cargo install`)
+### 3. From crates.io (`cargo install`)
 
 Requires a Rust toolchain (MSRV **1.77**).
-Dynamically linked glibc binary by default.
+Dynamically linked glibc binary by default (compiles on the install host).
+
+```console
+$ cargo install rtrash
+$ rtrash setup
+```
+
+Tip of `main` without waiting for a release:
 
 ```console
 $ cargo install --git https://github.com/HaoZeke/rtrash
 $ rtrash setup
 ```
+
+### 4. Python (`pip install rtrash`)
+
+Prebuilt **manylinux** wheels for **CPython 3.10–3.14** on **Linux x86_64** (FreeDesktop only).
+
+```console
+$ pip install rtrash
+$ python -c "import rtrash; print(rtrash.version())"
+```
+
+From a checkout (dev): `pip install maturin && maturin develop --features python`.
 
 ### What `rtrash setup` installs
 

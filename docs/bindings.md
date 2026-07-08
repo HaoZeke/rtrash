@@ -13,9 +13,10 @@ Does **not** monkey-patch `os` or `pathlib`.
 ## Install
 
 ```shell
-pip install maturin
-maturin develop --features python
+pip install rtrash
 ```
+
+Dev checkout: `pip install maturin && maturin develop --features python`.
 
 ## API
 
