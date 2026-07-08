@@ -3,11 +3,11 @@ exclude_loopback = true
 max_concurrency = 16
 
 exclude = [
-    'analytics.turtletech.us',
-    'localhost',
-    '127.0.0.1',
-    # GitHub may rate-limit anonymous link checks in CI.
-    'github.com/.*/issues/\\d+',
+  'analytics.turtletech.us',
+  'localhost',
+  '127.0.0.1',
+  # GitHub may rate-limit anonymous link checks in CI.
+  'github.com/.*/issues/\\d+',
 ]
 
 include_verbatim = true

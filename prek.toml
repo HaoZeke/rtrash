@@ -22,16 +22,16 @@ hooks = [
   { id = "check-yaml" },
   { id = "check-toml" },
   { id = "check-merge-conflict" },
-  { id = "check-added-large-files", args = ["--maxkb=1000"] },
+  { id = "check-added-large-files", args = [
+    "--maxkb=1000",
+  ] },
   { id = "detect-private-key" },
 ]
 
 [[repos]]
 repo = "https://github.com/pre-commit/pre-commit-hooks"
 rev = "v6.0.0"
-hooks = [
-  { id = "check-case-conflict" },
-]
+hooks = [{ id = "check-case-conflict" }]
 
 [[repos]]
 repo = "https://github.com/ComPWA/taplo-pre-commit"
