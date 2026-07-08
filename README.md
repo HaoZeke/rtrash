@@ -18,7 +18,7 @@ No interpreter startup; emptying deletes entries in parallel via [rayon](https:/
 
 ## Demo
 
-**30 seconds:** put → list/status → restore one file → empty the rest (isolated FreeDesktop trash).
+**30 seconds:** put → list/status → restore one file → empty the rest. Demo recording pins `--trash-dir=$XDG_DATA_HOME/Trash` in a temp sandbox (volume trash is never discovered).
 
 ![rtrash quickstart: put, list, restore, empty](docs/demo/rtrash-quickstart.gif)
 

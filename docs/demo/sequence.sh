@@ -2,7 +2,15 @@
 # Fixed demo command sequence for docs/demo recording.
 # Invoked by record.sh inside an isolated XDG trash sandbox.
 # Do not edit the GIF by hand — regenerate via ./docs/demo/record.sh
+#
+# Isolation: every rtrash subcommand that discovers trash is pinned with
+# RTRASH_DEMO_PIN (set by record.sh to --trash-dir=$XDG_DATA_HOME/Trash).
+# Unpinned list/status/empty would scan volume mounts and can wipe real trash.
 set -euo pipefail
+
+: "${RTRASH_DEMO_WORK:?RTRASH_DEMO_WORK not set}"
+: "${RTRASH_DEMO_PIN:?RTRASH_DEMO_PIN not set — refuse unpinned demo (volume discovery is unsafe)}"
+: "${XDG_DATA_HOME:?XDG_DATA_HOME not set}"
 
 # Pretty prompt + slow enough pacing for a readable cast/GIF.
 run() {
@@ -19,30 +27,33 @@ banner() {
   sleep 0.25
 }
 
-cd "${RTRASH_DEMO_WORK:?RTRASH_DEMO_WORK not set}"
+cd "$RTRASH_DEMO_WORK"
 
-banner "rm-compatible put → FreeDesktop trash"
+# Pin for list/status/restore/empty (suite commands that scan trash roots).
+# put uses XDG home trash for files on this sandbox FS; still pass pin via env
+# only where the CLI accepts --trash-dir / --home-only.
+PIN="$RTRASH_DEMO_PIN"
+
+banner "rm-compatible put → FreeDesktop trash (sandbox pin: $PIN)"
 printf 'payload for demos\n' > notes.txt
 printf 'build artifact\n' > stale.o
 run 'ls -1'
 run 'rtrash put notes.txt stale.o'
 run 'ls -1'
-run 'rtrash list'
-run 'rtrash status'
+run "rtrash list $PIN"
+run "rtrash status $PIN"
 
 banner "restore one file (exact original path)"
-run 'rtrash restore --plain "$(pwd)/notes.txt"'
+run "rtrash restore --plain $PIN \"\$(pwd)/notes.txt\""
 run 'ls -1'
 run 'cat notes.txt'
 
-banner "empty the rest permanently"
-run 'rtrash empty --plain'
-run 'rtrash list'
-run 'rtrash status'
+banner "empty the rest permanently (pinned — only sandbox trash)"
+run "rtrash empty --plain $PIN"
+run "rtrash list $PIN"
+run "rtrash status $PIN"
 
 banner "Python: replace os.remove / shutil.rmtree"
-printf 'import rtrash\nprint("rtrash", rtrash.version())\n' > /tmp/rtrash-demo-py.py 2>/dev/null || true
-# Keep Python optional — CLI story is enough if import missing.
 if python3 -c 'import rtrash' 2>/dev/null; then
   run 'python3 -c "import rtrash; print(rtrash.version())"'
 else
