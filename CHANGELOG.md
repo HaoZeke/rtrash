@@ -11,6 +11,13 @@ Name fragments `+slug.<type>.md` (no issue) or `<issue>.<type>.md` (links to Git
 
 <!-- towncrier release notes start -->
 
+## [0.1.2](https://github.com/HaoZeke/rtrash/tree/v0.1.2) - 2026-07-08
+
+### Fixed
+
+- Bump optional PyO3 dependency to 0.29 (RUSTSEC-2026-0176 / RUSTSEC-2026-0177); cargo-deny CI green on GitHub Actions.
+
+
 ## [0.1.1](https://github.com/HaoZeke/rtrash/tree/v0.1.1) - 2026-07-08
 
 ### Developer
