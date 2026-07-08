@@ -69,8 +69,7 @@ Prebuilt Linux **musl static** assets:
 
 Naming matches `[package.metadata.binstall]` in `Cargo.toml` / `scripts/package-release.sh`:
 
-### 1.
-`cargo binstall` (preferred binary install)
+### 1. `cargo binstall` (preferred binary install)
 
 Uses [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) to download the prebuilt **Linux musl static** tarball for your CPU (no local compile).
 CI ships **x86_64** and **aarch64** musl assets.
@@ -101,8 +100,7 @@ Use from-source only where the Linux FreeDesktop code path applies, or track the
 
 Always run **`rtrash setup`** after the binary lands on `PATH` so multi-call links, shell completions (bash/zsh/fish), and the man page are installed under `~/.local` (override with `--prefix=DIR`).
 
-### 2.
-Manual musl tarball (no cargo at all)
+### 2. Manual musl tarball (no cargo at all)
 
 When a Release exists, download the matching asset from the repository Releases page, extract, put `bin/` on `PATH`, then `rtrash setup --force` (or follow `INSTALL.txt` in the tarball).
 
@@ -118,8 +116,7 @@ $ ./scripts/package-release.sh --all
 
 CI: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds both targets on `v*` tags (x86_64 and ubuntu-24.04-arm) and attaches the tarballs to the GitHub Release (what binstall downloads).
 
-### 3.
-From source (`cargo install`)
+### 3. From source (`cargo install`)
 
 Requires a Rust toolchain (MSRV **1.77**).
 Dynamically linked glibc binary by default.
