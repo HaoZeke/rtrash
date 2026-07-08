@@ -218,8 +218,10 @@ restore the item originally at
 (exact original-path match).
 Without
 .IR PATH ,
-list every trashed item in scope (numbered, trash-cli style) and read an
-index from stdin (TTY or pipe).
+on a TTY open the interactive restore browser (filter, navigate, restore);
+without a TTY (or with
+.BR \-\-plain )
+print a numbered list and read an index from stdin.
 Pass
 .B \-\-cwd\-only
 to limit bare restore to originals under the current directory.
@@ -230,6 +232,9 @@ Overwrite an existing file at the original location.
 .TP
 .B \-\-cwd\-only
 Without PATH, only items trashed from under the current directory.
+.TP
+.B \-\-plain
+Force numbered line selection even on a TTY (skip the TUI browser).
 .TP
 .B \-\-home\-only
 Only the home trash (skip volume trash).

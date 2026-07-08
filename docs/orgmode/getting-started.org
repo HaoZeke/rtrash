@@ -85,10 +85,14 @@ assert p.read_text() == "data"
 
 * Interactive restore
 
+On a TTY, =rtrash restore= opens a ratatui browser (filter with =/=, navigate, Enter to restore, =q= quit).
+Use =--plain= or a piped index for non-TUI selection.
+
 #+begin_src shell
 rtrash a.txt b.txt
-rtrash restore              # numbered full-trash pick (type an index)
-rtrash restore --cwd-only   # only originals under $PWD
+rtrash restore              # TUI on TTY
+rtrash restore --cwd-only
+rtrash restore --plain
 #+end_src
 
 * Changelog

@@ -48,7 +48,9 @@ name = "rtrash"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["tui"]
+# Interactive restore browser (ratatui). Disable with --no-default-features for a thinner binary.
+tui = ["dep:ratatui", "dep:crossterm"]
 # Build the PyO3 extension module (maturin --features python).
 python = ["dep:pyo3"]
 
@@ -56,6 +58,10 @@ python = ["dep:pyo3"]
 libc = "0.2"
 rayon = "1.10"
 pyo3 = { version = "0.29", optional = true, features = ["extension-module"] }
+ratatui = { version = "0.29", optional = true, default-features = false, features = [
+  "crossterm",
+] }
+crossterm = { version = "0.28", optional = true }
 
 [profile.release]
 lto = true

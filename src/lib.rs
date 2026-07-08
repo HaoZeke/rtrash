@@ -10,6 +10,8 @@ pub mod info;
 pub mod list;
 pub mod put;
 pub mod restore;
+#[cfg(feature = "tui")]
+pub mod restore_tui;
 pub mod rm;
 pub mod setup;
 pub mod status;

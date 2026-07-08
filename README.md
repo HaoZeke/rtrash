@@ -255,8 +255,10 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 | Invocation | Behavior |
 |------------|----------|
 | `rtrash restore PATH` | Restore the item whose original path was `PATH` (exact match) |
-| `rtrash restore` | **Interactive:** number every trashed item in scope (trash-cli style); type an index (TTY or `printf '0\n' \| rtrash restore`) |
-| `rtrash restore --cwd-only` | Interactive, but only originals under the current directory |
+| `rtrash restore` | **TUI** (TTY): ratatui browser — filter, navigate, restore; multi-session until `q` |
+| `rtrash restore --plain` | Numbered line list + index (scripts / no TUI) |
+| `printf '0\n' \| rtrash restore` | Piped index without TUI |
+| `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
 | Single match | Restores immediately without prompting |
 
 Existing paths at the destination are preserved unless `-f` / `--force` is given; with `-f`, a blocking destination is removed first.
@@ -282,7 +284,7 @@ Previously deferred items are implemented in the shipped put/empty path:
 
 ## Limitations and non-goals
 
-- **No pretty TUI:** no colored tables or fuzzy restore (see trashy/gtrash).
+- **Restore TUI:** bare `rtrash restore` on a TTY uses a ratatui browser (not a full trashy/gtrash product).
 - **Linux FreeDesktop only:** no Windows Recycle Bin / macOS Trash backends.
 - **Not a general soft-delete database:** only the FreeDesktop on-disk layout.
 - **EXDEV does not re-create xattrs/ACLs/hardlinks** (mode+mtime+symlink+bytes only).

@@ -11,15 +11,17 @@ Usage: {prog} [OPTION]... [PATH]
 Restore a trashed item to its original location.
 
 With PATH, restore the item originally at PATH (exact original path match).
-Without PATH, list candidates for interactive selection (numbered, trash-cli
-style). By default every trashed item in scope is listed; pass --cwd-only to
-limit to items whose original path is under the current directory.
+Without PATH on a TTY, open the interactive restore browser (ratatui): filter,
+navigate, restore one or more items. Without a TTY (or with a piped index),
+print a numbered table and read a selection from stdin.
 
-A single match restores immediately; multiple matches print an index table and
-read a selection from stdin (TTY or piped number).
+By default every trashed item in scope is listed; pass --cwd-only to limit to
+items whose original path is under the current directory. A single match
+restores immediately.
 
   -f, --force     overwrite an existing file at the original location
       --cwd-only  without PATH, only items trashed from under the current directory
+      --plain     force numbered line selection even on a TTY (no TUI)
       --home-only  only the home trash (skip volume trash)
       --trash-dir=PATH  only consider this trash directory (repeatable)
       --help      display this help and exit
@@ -30,6 +32,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut force = false;
     let mut home_only = false;
     let mut cwd_only = false;
+    let mut plain = false;
     let mut target: Option<PathBuf> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     for arg in args {
@@ -37,6 +40,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "-f" | "--force" => force = true,
             "--home-only" => home_only = true,
             "--cwd-only" => cwd_only = true,
+            "--plain" => plain = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -89,6 +93,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 1;
     }
 
+    // TTY + multi-item: prefer ratatui browser when built with `tui` (unless --plain).
+    #[cfg(feature = "tui")]
+    if !plain && target.is_none() && matches.len() > 1 && stdin_is_tty() {
+        return crate::restore_tui::run(prog, matches, force);
+    }
+    #[cfg(not(feature = "tui"))]
+    let _ = plain;
+
     let chosen: &list::Entry = if matches.len() == 1 {
         matches[0]
     } else {
@@ -100,7 +112,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 e.original.display()
             );
         }
-        // Allow TTY pick or piped index (scripts / tests): `printf '0\n' | rtrash restore`.
+        // Piped index for scripts / tests: `printf '0\n' | rtrash restore`.
         if stdin_is_tty() {
             eprint!("What file to restore [0..{}]: ", matches.len() - 1);
             io::stderr().flush().ok();
@@ -154,7 +166,8 @@ fn lexical_clean(p: &Path) -> PathBuf {
     out
 }
 
-fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
+/// Restore one entry to its original path. Shared by CLI, piped pick, and TUI.
+pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
     let src = entry.dir.files().join(&entry.name);
     let dest = &entry.original;
 

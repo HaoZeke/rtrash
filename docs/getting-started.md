@@ -65,12 +65,27 @@ rtrash empty --trash-dir="$XDG_DATA_HOME/Trash"
 
 ### Interactive restore
 
+On a TTY, bare `rtrash restore` opens a **ratatui** browser:
+
+| Key | Action |
+|-----|--------|
+| `↑` `↓` / `j` `k` | Move selection |
+| `/` | Filter by original path (substring) |
+| `Enter` | Restore selected item (stay open for more) |
+| `f` | Toggle force overwrite |
+| `y` / `n` | Confirm overwrite when destination exists |
+| `q` / `Esc` | Quit |
+
+Without a TTY (or with `--plain`), you get a numbered list and type an index (`printf '0
+' | rtrash restore`).
+
 ```shell
 rtrash a.txt b.txt
-rtrash restore              # prints numbered table of all trash items
-# type: 0   (or: printf '1\n' | rtrash restore)
+rtrash restore              # TUI on TTY
 rtrash restore --cwd-only   # only originals under $PWD
+rtrash restore --plain      # line mode even on TTY
 ```
+
 
 ## Shortest Python path
 
