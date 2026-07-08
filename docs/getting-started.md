@@ -1,5 +1,7 @@
 # Getting started
 
+Docs: <https://rtrash.rgoswami.me>
+
 ## When to use what
 
 | Need | Use |
