@@ -24,13 +24,10 @@ cargo install --git https://github.com/HaoZeke/rtrash
 rtrash setup
 #+end_src
 
-~rtrash setup~ installs multi-call links, bash/zsh completions, and the man
-page under =~/.local= from assets *embedded in the binary* (no source checkout).
-Flags: ~--dry-run~, ~--force~ (after upgrades), ~--with-rm~, ~--prefix=DIR~.
-Packagers: ~rtrash completions bash|zsh~, ~rtrash man~, or
-~rtrash setup --prefix=/usr~.
+~rtrash setup~ installs multi-call links, bash/zsh completions, and the man page under =~/.local= from assets *embedded in the binary* (no source checkout). Flags: ~--dry-run~, ~--force~ (after upgrades), ~--with-rm~, ~--prefix=DIR~. Packagers: ~rtrash completions bash|zsh~, ~rtrash man~, or ~rtrash setup --prefix=/usr~.
 
-MSRV *1.77*. Default install is a normal dynamically linked Linux binary.
+MSRV *1.77*.
+Default install is a normal dynamically linked Linux binary.
 
 ** Python (maturin / PyO3)
 

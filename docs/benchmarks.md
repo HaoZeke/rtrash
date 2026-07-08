@@ -4,12 +4,12 @@
 
 | Question | Verdict |
 |----------|---------|
-| **Safer** than permanent `os.remove` / bare `rm`? | **Yes** — FreeDesktop trash + rm-shaped fail-safes; recoverable until empty |
-| **Safer** than trash-cli? | **Roughly equivalent** on FreeDesktop correctness; rtrash adds stronger GNU-style put fail-safes (`-f`/`-i` last-wins, preserve-root, …) |
-| **Better** for this niche? | **Yes** if you want one native multi-call binary **and** in-process Python (`import rtrash`) without spawning trash-cli |
-| **Faster**? | **Yes on the measured fixtures** (below) — not a claim for every hardware/size |
+| **Safer** than permanent `os.remove` / bare `rm`? | **Yes** — FreeDesktop trash and rm-shaped fail-safes; recoverable until empty |
+| **Safer** than trash-cli? | **Roughly equivalent** FreeDesktop correctness; rtrash has stronger GNU-style put fail-safes (`-f`/`-i` last-wins, preserve-root, and related flags) |
+| **Better** for this niche? | **Yes** if you want one native multi-call binary and in-process Python (`import rtrash`) without spawning trash-cli |
+| **Faster**? | **Yes on the measured fixtures** below — not a claim for every machine or trash size |
 
-trash-cli remains preferable when you only want distro Python packaging and no Rust toolchain.
+Prefer trash-cli when you only want distro Python packaging and no Rust toolchain.
 
 ## Reproduce
 
@@ -19,26 +19,19 @@ export RTRASH_BIN=$PWD/target/release/rtrash
 python3 benches/compare_trash_cli.py | tee compare-trash-cli.log
 ```
 
-Requires system `trash-put` / `trash-empty` / `trash-list` (trash-cli version
-printed by `trash-put --version` on the host).
+Needs system `trash-put` / `trash-empty` / `trash-list` (version from `trash-put --version`).
 
-**Fixture class:** 400 small files + one multi-file directory tree (80 nested
-files); isolated `XDG_DATA_HOME`; two trials per tool; timed put of the whole
-set then empty with `--trash-dir` pin.
+**Fixture:** 400 small files plus one multi-file directory tree (80 nested files); isolated `XDG_DATA_HOME`; two trials per tool; timed put of the full set, then empty with a `--trash-dir` pin.
 
-Optional peers (trashy, gtrash) are measured only when present on `PATH`; the
-last refresh noted them as **unavailable** on the verification host (see table
-notes).
+Optional peers (trashy, gtrash) run only if present on `PATH`.
+On the 2026-07-07 run they were not installed.
 
-## Measured results (rg.terra / `rgam5terra`, 2026-07-07)
+## Measured results (Linux x86_64 host, 2026-07-07)
 
-Host: Linux `rgam5terra`, kernel `7.0.13-arch1-1-rg`, x86_64. UTC stamp:
-`2026-07-07T21:01:52Z`. Peers: **rtrash 0.1.0** (release build of this tree),
-**trash-cli 0.24.5.26**. **trashy** and **gtrash**: not installed on the host
-(no timings invented).
+Host class: Linux x86_64.
+Peers: **rtrash 0.1.0** (release build of this tree), **trash-cli 0.24.5.26**.
 
-From `benches/compare_trash_cli.py` (two warm trials each; full log in
-verification `bench-refresh.log`):
+From `benches/compare_trash_cli.py` (two warm trials each):
 
 | Tool | put avg (s) | empty avg (s) |
 |------|-------------|----------------|
@@ -46,19 +39,16 @@ verification `bench-refresh.log`):
 | trash-cli 0.24.5.26 | 0.0674 | 0.0334 |
 | **speedup (trash-cli / rtrash)** | **~13×** | **~12×** |
 
-Per-trial post-conditions for **both** tools: `ec=0`, multi-entry trash after
-put (`entries=401` including deep tree), `files_left=0` and `info_left=0` after
-empty. `LIST_OK` for a single-file put on both tools. Harness footer:
-`COMPARE_OK`.
+Both tools: `ec=0`, multi-entry trash after put (`entries=401`), empty leaves `files_left=0` and `info_left=0`, `LIST_OK` for a single-file put.
+Harness ended with `COMPARE_OK`.
 
-### Prior snapshot (same host class, 2026-07-05)
+### Earlier snapshot (same host class, 2026-07-05)
 
-Earlier run on the same host class reported ~19× put / ~13× empty vs the same
-trash-cli version. Absolute times vary with load and filesystem state; the
-**order-of-magnitude** advantage for native put/empty remains. Prefer the
-**2026-07-07** table above as the current dated evidence.
+An earlier run reported about ~19× put and ~13× empty versus the same trash-cli version.
+Absolute times vary with load and filesystem state; the order of magnitude for native put/empty is the useful takeaway.
+Prefer the 2026-07-07 table above as the current dated numbers.
 
-## Safety / “better” (not a timer)
+## Safety (not a timer)
 
 | Property | rtrash | trash-cli | permanent `os.remove` |
 |----------|--------|-----------|------------------------|
@@ -71,20 +61,18 @@ trash-cli version. Absolute times vary with load and filesystem state; the
 
 ## Prior empty microbench (rtrash-only)
 
-An earlier same-host empty microbench (2001 top-level entries) measured
-bulk-unlink empty ~1.35× vs the pre-fastdelete rtrash binary. That is **rtrash
-evolution**, not trash-cli. Prefer this document’s harness for cross-tool claims.
+An earlier same-host empty microbench (2001 top-level entries) measured bulk unlink empty about ~1.35× versus a pre-fastdelete rtrash binary.
+That is rtrash evolution, not a trash-cli comparison.
+Prefer the harness above for cross-tool claims.
 
-## Large full-empty (rtrash vs prior rtrash, same host)
+## Large full-empty (rtrash vs prior rtrash)
 
-Fixture on **rg.terra** btrfs `/home` (2026-07-05): **8000** small top-level
-files + one deep tree (1000 nested files + 250 wide dirs) → **8001** top-level
-trash entries. Timed `rtrash empty --trash-dir=…` only; **7 trials** each after
-warm-up.
+Fixture on a Linux x86_64 btrfs home (2026-07-05): **8000** small top-level files plus one deep tree (1000 nested files and 250 wide dirs) → **8001** top-level trash entries.
+Timed `rtrash empty --trash-dir=…` only; **7 trials** each after warm-up.
 
 | Binary | avg wall (ms) | best | median | trimmed avg |
 |--------|---------------|------|--------|-------------|
-| Prior release (`fc7272f` baseline binary) | 274.4 | 236 | 286 | 275.0 |
+| Prior release (`fc7272f` baseline) | 274.4 | 236 | 286 | 275.0 |
 | Post-fastdelete empty path (2026-07-05) | **144.0** | **138** | **143** | **143.8** |
 | speedup | **~1.91×** | ~1.71× | **~2.00×** | **~1.91×** |
 

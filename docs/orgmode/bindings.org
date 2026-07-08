@@ -39,8 +39,7 @@ rtrash.home_trash()  # Path to $XDG_DATA_HOME/Trash
 rtrash.version()
 #+end_src
 
-All operations honor =XDG_DATA_HOME= / FreeDesktop placement from the Rust
-core (same as the CLI).
+All operations honor =XDG_DATA_HOME= / FreeDesktop placement from the Rust core (same as the CLI).
 
 * Testing
 
@@ -49,11 +48,8 @@ maturin develop --features python
 python -m unittest tests.python.test_rtrash -v
 #+end_src
 
-Tests set =XDG_DATA_HOME= to a temporary directory so they never touch the
-host trash.
+Tests set =XDG_DATA_HOME= to a temporary directory so they never touch the host trash.
 
 * Errors
 
-Failed put/empty/restore surfaces as =OSError= (operation failed) or
-=ValueError= (bad arguments), mapped from the CLI-layer exit codes of the
-shared Rust entry points.
+Failed put/empty/restore surfaces as =OSError= (operation failed) or =ValueError= (bad arguments), mapped from the CLI-layer exit codes of the shared Rust entry points.

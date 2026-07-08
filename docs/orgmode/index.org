@@ -26,11 +26,8 @@
 
 * Why rtrash
 
-Permanent =os.remove= / bare =rm= is instant and unforgiving. Desktop environments
-already share a FreeDesktop trash layout — *rtrash* is a single Rust binary (and
-library) that puts files there with *GNU rm–shaped* flags, then lists, restores,
-empties, and selectively purges like the trash-cli suite — without CPython
-startup on every call.
+Permanent =os.remove= / bare =rm= is instant and unforgiving.
+Desktop environments already share a FreeDesktop trash layout — *rtrash* is a single Rust binary (and library) that puts files there with *GNU rm–shaped* flags, then lists, restores, empties, and selectively purges like the trash-cli suite — without CPython startup on every call.
 
 | Need | Use |
 |------+-----|
@@ -67,9 +64,8 @@ Details, multi-call symlinks, and MSRV: [[file:getting-started.org][Getting star
 - *Dry-run reclaim*: =empty -n= reports approximate space that would be freed
 - *Python*: in-process =unlink= / =rmtree= over the same core as the CLI
 
-Honest comparison to trash-cli (measured on the project build host):
-[[file:benchmarks.org][Benchmarks]]. Safety model vs permanent delete:
-[[file:architecture.org][Architecture]].
+Honest comparison to trash-cli (measured on the project build host): [[file:benchmarks.org][Benchmarks]].
+Safety model vs permanent delete: [[file:architecture.org][Architecture]].
 
 * Documentation map
 

@@ -3,9 +3,8 @@
 
 * What rtrash is
 
-A *native* FreeDesktop trash implementation: one Rust library driving the
-=rtrash= multi-call CLI and optional Python bindings. Files are *moved* into
-the same trash layout used by GNOME/KDE/Xfce file managers, not unlinked.
+A *native* FreeDesktop trash implementation: one Rust library driving the =rtrash= multi-call CLI and optional Python bindings.
+Files are *moved* into the same trash layout used by GNOME/KDE/Xfce file managers, not unlinked.
 
 * FreeDesktop layout
 
@@ -16,8 +15,8 @@ the same trash layout used by GNOME/KDE/Xfce file managers, not unlinked.
 | =$top/.Trash-$uid= | Per-mount private trash |
 | =files/= + =info/*.trashinfo= | Payload + =Path= / =DeletionDate= metadata |
 
-Atomic reservation: create-new on =.trashinfo= *before* moving the payload
-(spec requirement). Collisions become =name.2=, =name.3=, …
+Atomic reservation: create-new on =.trashinfo= *before* moving the payload (spec requirement).
+Collisions become =name.2=, =name.3=, …
 
 * Safer than permanent delete (=os.remove= / =rm= without trash)
 
@@ -28,11 +27,9 @@ Atomic reservation: create-new on =.trashinfo= *before* moving the payload
 | Accidental =rm -rf= of work tree | Permanent | Recover with =restore= |
 | Cross-device | Unlink only | Copy-into-home-trash fallback |
 
-rtrash put also applies *rm-shaped fail-safes*: refuse =.= / =..= / =/=
-(with preserve-root), require =-r= for directories, GNU-style last-wins for
-=-f= / =-i= / =-I=, exit codes 0/1/2.
+rtrash put also applies *rm-shaped fail-safes*: refuse =.= / =..= / =/= (with preserve-root), require =-r= for directories, GNU-style last-wins for =-f= / =-i= / =-I=, exit codes 0/1/2.
 
-* Safer than a naive “mv to ~/.Trash” script
+* Safer than a naive “mv to ~/. Trash” script
 
 - Correct =.trashinfo= encoding (percent-encoded =Path=)
 - Mount-aware placement (not only home trash)
@@ -56,18 +53,15 @@ rtrash put also applies *rm-shaped fail-safes*: refuse =.= / =..= / =/=
 - Non-Linux platforms (use OS trash APIs, not this crate)
 - You must delete *inside* the trash by policy that forbids recoverability
 
-Use =rtrash empty= / =trash-rm= only after accepting permanent loss of those
-entries.
+Use =rtrash empty= / =trash-rm= only after accepting permanent loss of those entries.
 
 * Durability and multi-volume (shipped)
 
 - Put fsyncs the reserved =.trashinfo= before the payload move.
 - Cross-device (EXDEV) put/restore preserve content, symlink targets, mode, and mtime.
 - Each trash root uses an exclusive =flock= on =.rtrash.lock= for put and empty.
-- Volume topdir is the longest matching mount point from =/proc/self/mounts=
-  (btrfs multi-subvol safe; not pure =st_dev= parent walk alone).
-- Default empty/list/restore/rm scan home trash plus existing trash on every
-  non-pseudo mount (trash-cli multi-volume parity), including =/=.
+- Volume topdir is the longest matching mount point from =/proc/self/mounts= (btrfs multi-subvol safe; not pure =st_dev= parent walk alone).
+- Default empty/list/restore/rm scan home trash plus existing trash on every non-pseudo mount (trash-cli multi-volume parity), including =/=.
 
 * Library layout
 
@@ -81,5 +75,4 @@ src/list.rs restore.rs rm.rs trashdir.rs info.rs util.rs
 src/python.rs       PyO3 (feature = python)
 #+end_src
 
-CLI and Python call the *same* put/empty/list/restore entry points—no second
-filesystem model.
+CLI and Python call the *same* put/empty/list/restore entry points—no second filesystem model.

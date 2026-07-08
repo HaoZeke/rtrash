@@ -2,9 +2,8 @@
 
 ## What rtrash is
 
-A **native** FreeDesktop trash implementation: one Rust library driving the
-`rtrash` multi-call CLI and optional Python bindings. Files are **moved** into
-the same trash layout used by desktop file managers, not unlinked.
+A **native** FreeDesktop trash implementation: one Rust library driving the `rtrash` multi-call CLI and optional Python bindings.
+Files are **moved** into the same trash layout used by desktop file managers, not unlinked.
 
 ## FreeDesktop layout
 
@@ -26,8 +25,7 @@ Atomic reservation: create-new on `.trashinfo` **before** moving the payload.
 | Accidental tree delete | Permanent | `restore` |
 | Cross-device | Unlink only | Home-trash copy fallback |
 
-rm-shaped fail-safes: refuse `.` / `..` / `/` (preserve-root), require `-r` for
-directories, last-wins `-f`/`-i`/`-I`, exit codes 0/1/2.
+rm-shaped fail-safes: refuse `.` / `..` / `/` (preserve-root), require `-r` for directories, last-wins `-f`/`-i`/`-I`, exit codes 0/1/2.
 
 ## Versus Python trash-cli
 

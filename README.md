@@ -1,15 +1,10 @@
 # rtrash
 
-<p align="center">
-  <img src="docs/source/_static/logo.svg" width="280" alt="rtrash logo" />
-</p>
+<p align="center"> <img src="docs/source/_static/logo.svg" width="280" alt="rtrash logo" /> </p>
 
-Native Rust FreeDesktop trash for Linux: an rm-compatible put path and the
-everyday trash-cli suite (`trash-put`, `trash-empty`, `trash-list`,
-`trash-restore`, `trash-rm`) as one multi-call binary. Implements the
-[freedesktop.org Trash specification](https://specifications.freedesktop.org/trash-spec/trashspec-latest.html).
-No interpreter startup; emptying deletes entries in parallel via
-[rayon](https://crates.io/crates/rayon).
+Native Rust FreeDesktop trash for Linux: an rm-compatible put path and the everyday trash-cli suite (`trash-put`, `trash-empty`, `trash-list`, `trash-restore`, `trash-rm`) as one multi-call binary.
+Implements the [freedesktop.org Trash specification](https://specifications.freedesktop.org/trash-spec/trashspec-latest.html).
+No interpreter startup; emptying deletes entries in parallel via [rayon](https://crates.io/crates/rayon).
 
 ## Documentation
 
@@ -37,9 +32,7 @@ $ pip install maturin && maturin develop --features python
 
 ## Docs site
 
-Project documentation is authored in **orgmode** under
-[`docs/orgmode/`](docs/orgmode/) and built to a **Sphinx + Shibuya** static site
-(readcon-style: org → RST → HTML).
+Project documentation is authored in **orgmode** under [`docs/orgmode/`](docs/orgmode/) and built to a **Sphinx + Shibuya** static site (readcon-style: org → RST → HTML).
 
 ```shell
 # needs: pandoc (or emacs + ox-rst), python3, venv
@@ -56,19 +49,18 @@ python3 -m http.server -d docs/build 8000
 | Benchmarks | `docs/orgmode/benchmarks.org` |
 | Python bindings | `docs/orgmode/bindings.org` |
 
-Markdown mirrors under `docs/*.md` remain for quick GitHub reading; the site is
-the structured presentation of the same material.
+Markdown mirrors under `docs/*.md` remain for quick GitHub reading; the site is the structured presentation of the same material.
 
 
 ## Platform
 
-**Platform:** Linux FreeDesktop trash only (home trash + per-mount trash
-dirs). Not a Windows/macOS system-trash wrapper, and not a colored TUI.
+**Platform:** Linux FreeDesktop trash only (home trash + per-mount trash dirs).
+Not a Windows/macOS system-trash wrapper, and not a colored TUI.
 
 ## Install
 
-Recommended order when a **GitHub Release** for this version exists
-(tag `v0.1.0` style). Prebuilt Linux **musl static** assets:
+Recommended order when a **GitHub Release** for this version exists (tag `v0.1.0` style).
+Prebuilt Linux **musl static** assets:
 
 | Arch | Asset basename |
 | ---- | -------------- |
@@ -77,19 +69,19 @@ Recommended order when a **GitHub Release** for this version exists
 
 Naming matches `[package.metadata.binstall]` in `Cargo.toml` / `scripts/package-release.sh`:
 
-### 1. `cargo binstall` (preferred binary install)
+### 1.
+`cargo binstall` (preferred binary install)
 
-Uses [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) to download
-the prebuilt **Linux musl static** tarball for your CPU (no local compile).
-CI ships **x86_64** and **aarch64** musl assets. Crate metadata remaps typical
-glibc hosts (`*-unknown-linux-gnu`) to the matching musl tarball, so a normal:
+Uses [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) to download the prebuilt **Linux musl static** tarball for your CPU (no local compile).
+CI ships **x86_64** and **aarch64** musl assets.
+Crate metadata remaps typical glibc hosts (`*-unknown-linux-gnu`) to the matching musl tarball, so a normal:
 
 ```console
 $ cargo binstall rtrash
 ```
 
-does **not** look for a non-existent `*-linux-gnu*.tar.gz` on x86_64 or
-aarch64 Linux. You do not need `--pkg-url` or `--target` on those hosts.
+does **not** look for a non-existent `*-linux-gnu*.tar.gz` on x86_64 or aarch64 Linux.
+You do not need `--pkg-url` or `--target` on those hosts.
 Requires a published GitHub Release for this version (tag `v*`).
 
 ```console
@@ -104,19 +96,15 @@ $ cargo binstall --git https://github.com/HaoZeke/rtrash rtrash
 $ rtrash setup
 ```
 
-macOS and Windows have no prebuilt FreeDesktop assets (and Windows system
-trash is out of scope for this tool's niche). Use from-source only where the
-Linux FreeDesktop code path applies, or track the open port work separately.
+macOS and Windows have no prebuilt FreeDesktop assets (and Windows system trash is out of scope for this tool's niche).
+Use from-source only where the Linux FreeDesktop code path applies, or track the open port work separately.
 
-Always run **`rtrash setup`** after the binary lands on `PATH` so multi-call
-links, shell completions (bash/zsh/fish), and the man page are installed under
-`~/.local` (override with `--prefix=DIR`).
+Always run **`rtrash setup`** after the binary lands on `PATH` so multi-call links, shell completions (bash/zsh/fish), and the man page are installed under `~/.local` (override with `--prefix=DIR`).
 
-### 2. Manual musl tarball (no cargo at all)
+### 2.
+Manual musl tarball (no cargo at all)
 
-When a Release exists, download the matching asset from the repository Releases
-page, extract, put `bin/` on `PATH`, then `rtrash setup --force` (or follow
-`INSTALL.txt` in the tarball).
+When a Release exists, download the matching asset from the repository Releases page, extract, put `bin/` on `PATH`, then `rtrash setup --force` (or follow `INSTALL.txt` in the tarball).
 
 Build the **same** artifact yourself (builder host with musl target):
 
@@ -128,14 +116,13 @@ $ ./scripts/package-release.sh --all
 # → dist/rtrash-<version>-{x86_64,aarch64}-unknown-linux-musl.tar.gz
 ```
 
-CI: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds
-both targets on `v*` tags (x86_64 and ubuntu-24.04-arm) and attaches the
-tarballs to the GitHub Release (what binstall downloads).
+CI: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds both targets on `v*` tags (x86_64 and ubuntu-24.04-arm) and attaches the tarballs to the GitHub Release (what binstall downloads).
 
-### 3. From source (`cargo install`)
+### 3.
+From source (`cargo install`)
 
-Requires a Rust toolchain (MSRV **1.77**). Dynamically linked glibc binary by
-default.
+Requires a Rust toolchain (MSRV **1.77**).
+Dynamically linked glibc binary by default.
 
 ```console
 $ cargo install --git https://github.com/HaoZeke/rtrash
@@ -152,11 +139,9 @@ $ rtrash setup
 | fish completion | `~/.config/fish/completions/rtrash.fish` (+ multi-call `*.fish` links) |
 | man page | `~/.local/share/man/man1/rtrash.1` |
 
-Useful flags: `rtrash setup --dry-run`, `--force` (refresh after upgrade),
-`--with-rm` (also link `rm` → put into trash), `--prefix=/usr/local`.
+Useful flags: `rtrash setup --dry-run`, `--force` (refresh after upgrade), `--with-rm` (also link `rm` → put into trash), `--prefix=/usr/local`.
 
-Subcommands work without multi-call names:
-`rtrash put|empty|list|status|restore|rm …`.
+Subcommands work without multi-call names: `rtrash put|empty|list|status|restore|rm …`.
 
 | Multi-call name | Meaning |
 | --------------- | ------- |
@@ -166,13 +151,12 @@ Subcommands work without multi-call names:
 | `trash-empty` | empty |
 | `trash-rm` | permanently delete matching **trash** entries |
 
-Subcommand `rtrash rm PATTERN` is the same as multi-call `trash-rm` (not the
-same as multi-call `rm`, which puts).
+Subcommand `rtrash rm PATTERN` is the same as multi-call `trash-rm` (not the same as multi-call `rm`, which puts).
 
 ### Packagers and custom layouts
 
-Sources also live in-tree for packaging (`completions/`, `man/rtrash.1`). From
-any installed binary:
+Sources also live in-tree for packaging (`completions/`, `man/rtrash.1`).
+From any installed binary:
 
 ```console
 $ rtrash completions bash > rtrash.bash
@@ -206,98 +190,67 @@ $ rtrash rm '*.o'          # quote globs; removes a.o from trash only
 $ rtrash list              # b.c still listed
 ```
 
-`rtrash FILE` with no subcommand behaves like `rm`, so shell habits carry
-over: `rtrash -rf build/` moves `build/` to the trash instead of unlinking
-it.
+`rtrash FILE` with no subcommand behaves like `rm`, so shell habits carry over: `rtrash -rf build/` moves `build/` to the trash instead of unlinking it.
 
-**Scripts / tests:** pin with `--trash-dir=…` and/or isolate
-`XDG_DATA_HOME` so list/empty/restore/rm do not walk every mount’s trash.
+**Scripts / tests:** pin with `--trash-dir=…` and/or isolate `XDG_DATA_HOME` so list/empty/restore/rm do not walk every mount’s trash.
 
 ## Reference
 
 ### `rtrash put` (also `rm`, `trash`, `trash-put`, or bare `rtrash`)
 
-Accepts the common `rm(1)` flags with the same semantics, except that files
-move to the trash: `-f`, `-i`, `-I`, `--interactive[=WHEN]`, `-r`/`-R`, `-d`,
-`-v`, `--one-file-system` (accepted for rm compatibility; no-op because
-entries move whole and are never walked like `rm -x`), `--preserve-root`
-(default), `--no-preserve-root`, `--`. Directories need `-r` (or `-d` when
-empty), `.`/`..`/`/` are refused (unless `--no-preserve-root` for `/`), and
-exit codes mirror rm (0 success, 1 failure, 2 usage error).
+Accepts the common `rm(1)` flags with the same semantics, except that files move to the trash: `-f`, `-i`, `-I`, `--interactive[=WHEN]`, `-r`/`-R`, `-d`, `-v`, `--one-file-system` (accepted for rm compatibility; no-op because entries move whole and are never walked like `rm -x`), `--preserve-root` (default), `--no-preserve-root`, `--`. Directories need `-r` (or `-d` when empty), `.`/`..`/`/` are refused (unless `--no-preserve-root` for `/`), and exit codes mirror rm (0 success, 1 failure, 2 usage error).
 
-As with GNU rm, **the last of `-f` / `-i` / `-I` (and the matching long
-forms) wins** for prompt vs force behavior. `-f` also ignores missing paths.
+As with GNU rm, **the last of `-f` / `-i` / `-I` (and the matching long forms) wins** for prompt vs force behavior.
+`-f` also ignores missing paths.
 
-Trash placement follows the spec: the home trash
-(`$XDG_DATA_HOME/Trash`, defaulting under `~/.local/share`) for same-filesystem
-files, `$top/.Trash/$uid` (must be a sticky non-symlink directory) or
-`$top/.Trash-$uid` on other mounts, with a copy-into-home-trash fallback when
-the volume cannot host a trash directory. Names are reserved atomically
-(create-new / `O_EXCL` on the `.trashinfo`), so concurrent invocations never
-clobber each other; collisions get `name.2`, `name.3`, ...
+Trash placement follows the spec: the home trash (`$XDG_DATA_HOME/Trash`, defaulting under `~/.local/share`) for same-filesystem files, `$top/.Trash/$uid` (must be a sticky non-symlink directory) or `$top/.Trash-$uid` on other mounts, with a copy-into-home-trash fallback when the volume cannot host a trash directory.
+Names are reserved atomically (create-new / `O_EXCL` on the `.trashinfo`), so concurrent invocations never clobber each other; collisions get `name.2`, `name.3`, ...
 
-Putting a **directory** updates that trash dir’s FreeDesktop `directorysizes`
-cache (`size mtime percent-encoded-name`). Putting ordinary files does not
-add directory lines.
+Putting a **directory** updates that trash dir’s FreeDesktop `directorysizes` cache (`size mtime percent-encoded-name`).
+Putting ordinary files does not add directory lines.
 
 ### `rtrash empty [DAYS]` (also `trash-empty`)
 
-Purges every trash directory visible to the user (home trash plus mounted
-volumes). With `DAYS`, only items trashed more than `DAYS` days ago go.
-Entries are removed in parallel. Orphaned `files/` entries (no
-`.trashinfo`) and entries with broken metadata are purged on a full empty,
-and the `directorysizes` cache is pruned when present. Options: `-n`/`--dry-run`
-(also prints an approximate **reclaimable** size via a fast in-process walk of
-the victims, like a small `du` of what would go away), `-v`/`--verbose`,
-`--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility;
-emptying never prompts).
+Purges every trash directory visible to the user (home trash plus mounted volumes).
+With `DAYS`, only items trashed more than `DAYS` days ago go.
+Entries are removed in parallel.
+Orphaned `files/` entries (no `.trashinfo`) and entries with broken metadata are purged on a full empty, and the `directorysizes` cache is pruned when present.
+Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts).
 
 ### `rtrash status`
 
-Prints per-trash-root and total **item count** plus approximate **reclaimable size** (same disk-usage walk as empty dry-run). Accepts `--home-only` and `--trash-dir`.
+Prints per-trash-root and total **item count** plus approximate **reclaimable size** (same disk-usage walk as empty dry-run).
+Accepts `--home-only` and `--trash-dir`.
 
 ### `rtrash list` (also `trash-list`)
 
-Prints `DELETION-DATE ORIGINAL-PATH` per item, oldest first, in the
-`trash-list` output format (`YYYY-MM-DD HH:MM:SS` plus the original path).
-Scans the home trash and per-mount trash directories owned by the current
-user, or only the directories given with `--trash-dir=PATH` (repeatable).
+Prints `DELETION-DATE ORIGINAL-PATH` per item, oldest first, in the `trash-list` output format (`YYYY-MM-DD HH:MM:SS` plus the original path).
+Scans the home trash and per-mount trash directories owned by the current user, or only the directories given with `--trash-dir=PATH` (repeatable).
 
 ### `rtrash restore [PATH]` (also `trash-restore`)
 
-Restores the item trashed from `PATH` (or picks among items trashed from
-under the current directory when `PATH` is omitted). A single match restores
-directly; multiple matches list with indices for interactive selection
-(requires a TTY on stdin). Existing paths at the destination are preserved
-unless `-f` / `--force` is given; with `-f`, a blocking destination is
-removed first. Same-filesystem restore uses `rename`; cross-device restore
-copies then deletes the trash payload (needed when put fell back to the home
-trash). Options: `--trash-dir=PATH` (repeatable).
+Restores the item trashed from `PATH` (or picks among items trashed from under the current directory when `PATH` is omitted).
+A single match restores directly; multiple matches list with indices for interactive selection (requires a TTY on stdin).
+Existing paths at the destination are preserved unless `-f` / `--force` is given; with `-f`, a blocking destination is removed first.
+Same-filesystem restore uses `rename`; cross-device restore copies then deletes the trash payload (needed when put fell back to the home trash).
+Options: `--trash-dir=PATH` (repeatable).
 
 ### `rtrash rm PATTERN...` (also `trash-rm`)
 
-Permanently deletes trash entries whose original path, basename, or trash
-name matches a shell-style glob `PATTERN` (quote globs from the shell).
-Matching `files/` payloads and `.trashinfo` files are removed; non-matches
-stay. Does **not** restore. Options: `-v`/`--verbose`,
-`--trash-dir=PATH` (repeatable).
+Permanently deletes trash entries whose original path, basename, or trash name matches a shell-style glob `PATTERN` (quote globs from the shell).
+Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
+Does **not** restore.
+Options: `-v`/`--verbose`, `--trash-dir=PATH` (repeatable).
 
 ## FreeDesktop durability notes
 
 Previously deferred items are implemented in the shipped put/empty path:
 
-- **Durable `.trashinfo`:** put `fsync`s the reserved info file (and best-effort
-  the `info/` dir) before moving the payload.
-- **EXDEV fidelity:** cross-device put/restore copies preserve content,
-  symlink-as-link, mode, and mtime (not a bare content-only copy).
-- **Put/empty exclusion:** each trash root takes an exclusive `flock` on
-  `.rtrash.lock` for put and empty so the pair cannot tear mid-operation.
-- **Btrfs multi-subvol topdir:** volume topdir is the **longest mount-point
-  prefix** from `/proc/self/mounts`, not a pure `st_dev` parent walk.
-- **Default multi-volume empty:** with no `--trash-dir`, empty/list/restore/rm
-  discover home trash plus existing user trash on every non-pseudo mount
-  (including `/`), matching trash-cli’s multi-volume default. Pin with
-  `--trash-dir` in scripts.
+- **Durable `.trashinfo`:** put `fsync`s the reserved info file (and best-effort the `info/` dir) before moving the payload.
+- **EXDEV fidelity:** cross-device put/restore copies preserve content, symlink-as-link, mode, and mtime (not a bare content-only copy).
+- **Put/empty exclusion:** each trash root takes an exclusive `flock` on `.rtrash.lock` for put and empty so the pair cannot tear mid-operation.
+- **Btrfs multi-subvol topdir:** volume topdir is the **longest mount-point prefix** from `/proc/self/mounts`, not a pure `st_dev` parent walk.
+- **Default multi-volume empty:** with no `--trash-dir`, empty/list/restore/rm discover home trash plus existing user trash on every non-pseudo mount (including `/`), matching trash-cli’s multi-volume default. Pin with `--trash-dir` in scripts.
 
 ## Limitations and non-goals
 
@@ -309,11 +262,8 @@ Previously deferred items are implemented in the shipped put/empty path:
 
 ## Performance
 
-Historical single-machine comparison against trash-cli **0.24.5.26**
-(CPython 3) on an NVMe-backed Linux host, best of warm runs. These numbers
-are **not continuously re-verified in CI** and will vary by filesystem,
-core count, and trash layout; treat them as order-of-magnitude evidence that
-native startup and parallel empty help, not as a live leaderboard.
+Historical single-machine comparison against trash-cli **0.24.5.26** (CPython 3) on an NVMe-backed Linux host, best of warm runs.
+These numbers are **not continuously re-verified in CI** and will vary by filesystem, core count, and trash layout; treat them as order-of-magnitude evidence that native startup and parallel empty help, not as a live leaderboard.
 
 | Operation                  | trash-cli | rtrash | ratio |
 | -------------------------- | --------- | ------ | ----- |
@@ -321,13 +271,9 @@ native startup and parallel empty help, not as a live leaderboard.
 | `empty`, 20 000 entries    | 0.21 s    | 0.07 s | 3x    |
 | `put`, one file            | 52 ms     | 1 ms   | 52x   |
 
-Full empty was further optimized for large trashcans: no pre-scan when not
-verbose, `d_type`-fast `unlinkat` for regular files, and **serial** wipes of the
-`files/` then `info/` roots with **parallel children** inside each. Emptying
-uses an in-process bulk tree
-delete (readdir/`unlinkat` walk inspired by empty-source `rsync --delete`,
-not a shell-out to rsync). On btrfs, if a trash payload is a real subvolume
-root, empty uses `BTRFS_IOC_SNAP_DESTROY` instead of walking the tree.
+Full empty was further optimized for large trashcans: no pre-scan when not verbose, `d_type`-fast `unlinkat` for regular files, and **serial** wipes of the `files/` then `info/` roots with **parallel children** inside each.
+Emptying uses an in-process bulk tree delete (readdir/`unlinkat` walk inspired by empty-source `rsync --delete`, not a shell-out to rsync).
+On btrfs, if a trash payload is a real subvolume root, empty uses `BTRFS_IOC_SNAP_DESTROY` instead of walking the tree.
 Interactive `put` mainly wins on process startup versus trash-cli.
 
 ## Development
@@ -336,9 +282,7 @@ Interactive `put` mainly wins on process startup versus trash-cli.
 $ cargo test
 ```
 
-Integration tests isolate trash under a temporary `XDG_DATA_HOME` and pin
-`empty` / list / restore / `rm` with `--trash-dir=…` so they never clear the
-host trash.
+Integration tests isolate trash under a temporary `XDG_DATA_HOME` and pin `empty` / list / restore / `rm` with `--trash-dir=…` so they never clear the host trash.
 
 ## Citation
 
