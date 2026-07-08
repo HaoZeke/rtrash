@@ -80,17 +80,17 @@ pub fn status_filter_cancelled() -> &'static str {
     "filter cancelled (prior filter restored)"
 }
 
-/// Strings every TUI source must bind (structural tests).
+/// Strings every TUI source must use for configurable keybinds (structural tests).
 pub fn required_key_tokens() -> &'static [&'static str] {
     &[
-        "KeyCode::Char(' ')",
-        "KeyCode::Char('a')",
-        "KeyCode::Char('A')",
-        "KeyCode::Char('/')",
-        "KeyCode::Char('?')",
-        "KeyCode::Char('q')",
-        "KeyCode::PageDown",
-        "KeyCode::PageUp",
+        "Keymap::load",
+        "resolve_browse",
+        "resolve_filter",
+        "resolve_confirm",
+        "Action::ToggleMark",
+        "Action::OpenFilter",
+        "Action::Help",
+        "Action::Quit",
         "live",
     ]
 }

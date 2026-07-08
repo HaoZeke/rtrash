@@ -38,6 +38,8 @@ pub mod status;
 #[cfg(unix)]
 pub mod trashdir;
 #[cfg(all(unix, feature = "tui"))]
+pub mod tui_binds;
+#[cfg(all(unix, feature = "tui"))]
 pub mod tui_fuzzy;
 #[cfg(all(unix, feature = "tui"))]
 pub mod tui_keys;

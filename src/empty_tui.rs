@@ -11,6 +11,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::list::Entry;
 use crate::trashdir;
+use crate::tui_binds::{Action, Keymap};
 use crate::tui_fuzzy;
 use crate::tui_keys;
 use crate::tui_list;
@@ -103,6 +104,7 @@ struct App<'a> {
     quit: bool,
     dry_run: bool,
     viewport_rows: usize,
+    keys: Keymap,
 }
 
 impl<'a> App<'a> {
@@ -112,6 +114,8 @@ impl<'a> App<'a> {
             list_state.select(Some(0));
         }
         let n = entries.len();
+        let keys = Keymap::load();
+        let dry_hint = format!("{} dry-run", keys.display_chords(Action::ToggleDryRun));
         let mut app = Self {
             prog,
             entries,
@@ -121,13 +125,11 @@ impl<'a> App<'a> {
             mode: Mode::Browse,
             filter: String::new(),
             filter_draft: String::new(),
-            status: format!(
-                "{n} item(s) · {} ",
-                tui_keys::browse_footer("purge", "n dry-run")
-            ),
+            status: format!("{n} item(s) · {} ", keys.browse_footer("purge", &dry_hint)),
             quit: false,
             dry_run,
             viewport_rows: 10,
+            keys,
         };
         app.refilter_query(&app.filter.clone());
         app
@@ -239,100 +241,104 @@ impl<'a> App<'a> {
 
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         match self.mode {
-            Mode::Help => match code {
-                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
+            Mode::Help => match self.keys.resolve_help(code, mods) {
+                Some(Action::Help | Action::Quit | Action::FilterCancel) => {
                     self.mode = Mode::Browse;
                     self.status = "help closed".into();
                 }
+                Some(Action::QuitHard) => self.quit = true,
                 _ => {}
             },
-            Mode::Filter => match code {
-                KeyCode::Esc => {
+            Mode::Filter => match self.keys.resolve_filter(code, mods) {
+                Some(Action::FilterCancel) => {
                     let applied = self.filter.clone();
                     self.filter_draft = applied.clone();
                     self.refilter_query(&applied);
                     self.mode = Mode::Browse;
                     self.status = tui_keys::status_filter_cancelled().into();
                 }
-                KeyCode::Enter => {
+                Some(Action::FilterCommit) => {
                     self.filter = self.filter_draft.clone();
                     self.mode = Mode::Browse;
                     self.status =
                         tui_keys::status_filter_committed(&self.filter, self.filtered.len());
                 }
-                KeyCode::Backspace => {
-                    self.filter_draft.pop();
-                    let d = self.filter_draft.clone();
-                    self.refilter_query(&d);
-                    self.status = tui_keys::status_filter_live(&d, self.filtered.len());
+                Some(Action::MoveDown) => self.move_sel(1),
+                Some(Action::MoveUp) => self.move_sel(-1),
+                Some(Action::QuitHard) => self.quit = true,
+                _ => {
+                    if code == KeyCode::Backspace {
+                        self.filter_draft.pop();
+                        let d = self.filter_draft.clone();
+                        self.refilter_query(&d);
+                        self.status = tui_keys::status_filter_live(&d, self.filtered.len());
+                    } else if let KeyCode::Char(c) = code {
+                        if !c.is_control() && !mods.contains(KeyModifiers::CONTROL) {
+                            self.filter_draft.push(c);
+                            let d = self.filter_draft.clone();
+                            self.refilter_query(&d);
+                            self.status = tui_keys::status_filter_live(&d, self.filtered.len());
+                        }
+                    }
                 }
-                KeyCode::Char(c) if !c.is_control() => {
-                    self.filter_draft.push(c);
-                    let d = self.filter_draft.clone();
-                    self.refilter_query(&d);
-                    self.status = tui_keys::status_filter_live(&d, self.filtered.len());
-                }
-                KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
-                KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
-                _ => {}
             },
-            Mode::Confirm => match code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => self.do_purge(),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            Mode::Confirm => match self.keys.resolve_confirm(code, mods) {
+                Some(Action::ConfirmYes) => self.do_purge(),
+                Some(Action::ConfirmNo) => {
                     self.mode = Mode::Browse;
                     self.status = "purge cancelled".into();
                 }
+                Some(Action::QuitHard) => self.quit = true,
                 _ => {}
             },
-            Mode::Browse => match code {
-                KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
-                KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.quit = true,
-                KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
-                KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
-                KeyCode::PageDown => self.page(true),
-                KeyCode::PageUp => self.page(false),
-                KeyCode::Home | KeyCode::Char('g') => {
+            Mode::Browse => match self.keys.resolve_browse(code, mods) {
+                Some(Action::Quit | Action::QuitHard) => self.quit = true,
+                Some(Action::MoveDown) => self.move_sel(1),
+                Some(Action::MoveUp) => self.move_sel(-1),
+                Some(Action::PageDown) => self.page(true),
+                Some(Action::PageUp) => self.page(false),
+                Some(Action::First) => {
                     if !self.filtered.is_empty() {
                         self.list_state.select(Some(0));
                         self.ensure_scroll();
                     }
                 }
-                KeyCode::End | KeyCode::Char('G') => {
+                Some(Action::Last) => {
                     if !self.filtered.is_empty() {
                         self.list_state.select(Some(self.filtered.len() - 1));
                         self.ensure_scroll();
                     }
                 }
-                KeyCode::Char(' ') => {
+                Some(Action::ToggleMark) => {
                     if let Some(ei) = self.selected_entry_idx() {
                         self.sel.toggle(ei);
                         self.status = tui_keys::status_marked(self.sel.len());
                     }
                 }
-                KeyCode::Char('a') => {
+                Some(Action::MarkAll) => {
                     self.sel.mark_all(self.filtered.iter().copied());
                     self.status = tui_keys::status_marked_all(self.sel.len());
                 }
-                KeyCode::Char('A') => {
+                Some(Action::ClearMarks) => {
                     self.sel.clear();
                     self.status = tui_keys::status_cleared().into();
                 }
-                KeyCode::Char('/') => {
+                Some(Action::OpenFilter) => {
                     self.mode = Mode::Filter;
                     self.filter_draft = self.filter.clone();
                     let d = self.filter_draft.clone();
                     self.refilter_query(&d);
                     self.status = tui_keys::status_filter_live(&d, self.filtered.len());
                 }
-                KeyCode::Char('?') => {
+                Some(Action::Help) => {
                     self.mode = Mode::Help;
-                    self.status = "help · ? or Esc to close".into();
+                    self.status = format!("help · {} close", self.keys.display_chords(Action::Help));
                 }
-                KeyCode::Char('n') => {
+                Some(Action::ToggleDryRun) => {
                     self.dry_run = !self.dry_run;
                     self.status = format!("dry_run={}", self.dry_run);
                 }
-                KeyCode::Enter => self.try_purge(),
+                Some(Action::Action) => self.try_purge(),
                 _ => {}
             },
         }
@@ -397,19 +403,40 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         chunks[1],
         &mut app.list_state,
     );
+    let dry_hint = format!(
+        "{} dry-run",
+        app.keys.display_chords(Action::ToggleDryRun)
+    );
     let keys = match app.mode {
-        Mode::Browse => tui_keys::browse_footer("purge", "n dry-run"),
-        Mode::Filter => tui_keys::FILTER_HINT.to_string(),
-        Mode::Help => tui_keys::HELP_HINT.to_string(),
-        Mode::Confirm => tui_keys::CONFIRM_HINT.to_string(),
+        Mode::Browse => app.keys.browse_footer("purge", &dry_hint),
+        Mode::Filter => format!(
+            "live fuzzy…  {} commit  {} cancel",
+            app.keys.display_chords(Action::FilterCommit),
+            app.keys.display_chords(Action::FilterCancel)
+        ),
+        Mode::Help => format!(
+            "{} or {} close help",
+            app.keys.display_chords(Action::Help),
+            app.keys.display_chords(Action::Quit)
+        ),
+        Mode::Confirm => format!(
+            "{} confirm  {} cancel",
+            app.keys.display_chords(Action::ConfirmYes),
+            app.keys.display_chords(Action::ConfirmNo)
+        ),
     };
+    let help_title = format!("keys · {} help", app.keys.display_chords(Action::Help));
     f.render_widget(
         Paragraph::new(vec![Line::from(keys), Line::from(app.status.as_str())])
-            .block(Block::default().borders(Borders::ALL).title("keys · ? help")),
+            .block(Block::default().borders(Borders::ALL).title(help_title)),
         chunks[2],
     );
     if app.mode == Mode::Help {
-        draw_help_overlay(f, &["Browser-specific: n toggle dry-run (no delete)"]);
+        draw_help_overlay(
+            f,
+            &app.keys,
+            &["toggle_dry_run — report only, no permanent delete"],
+        );
     }
     if app.mode == Mode::Confirm {
         let area = {
@@ -443,31 +470,28 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
     }
 }
 
-fn draw_help_overlay(f: &mut ratatui::Frame, extras: &[&str]) {
+fn draw_help_overlay(f: &mut ratatui::Frame, keys: &Keymap, extras: &[&str]) {
     let area = {
         let r = f.area();
         let v = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(10),
-                Constraint::Percentage(80),
-                Constraint::Percentage(10),
+                Constraint::Percentage(5),
+                Constraint::Percentage(90),
+                Constraint::Percentage(5),
             ])
             .split(r);
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(10),
-                Constraint::Percentage(80),
-                Constraint::Percentage(10),
+                Constraint::Percentage(8),
+                Constraint::Percentage(84),
+                Constraint::Percentage(8),
             ])
             .split(v[1])[1]
     };
     f.render_widget(Clear, area);
-    let mut lines: Vec<Line> = tui_keys::core_help_lines()
-        .iter()
-        .map(|s| Line::from(*s))
-        .collect();
+    let mut lines: Vec<Line> = keys.help_lines().into_iter().map(Line::from).collect();
     if !extras.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from("This browser"));

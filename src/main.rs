@@ -1,4 +1,6 @@
 use rtrash::{empty, list, put, restore, rm, setup, status};
+#[cfg(all(unix, feature = "tui"))]
+use rtrash::tui_binds;
 
 const HELP: &str = "\
 Usage: rtrash <COMMAND> [ARGS]...
@@ -13,6 +15,7 @@ Commands:
   restore [OPTION]... [PATH]  restore a trashed item
   rm PATTERN...               permanently delete matching trash entries
   setup [OPTION]...           install multi-call links, completions, man page
+  keys [OPTION]...            show/sample TUI keybind config (customizable)
   completions {bash|zsh|fish} print embedded shell completion script
   man                         print embedded man(1) page to stdout
 
@@ -52,6 +55,13 @@ fn main() {
             Some("restore") => restore::run(&argv0, &rest[1..]),
             Some("rm") => rm::run(&argv0, &rest[1..]),
             Some("setup") => setup::run("setup", &rest[1..]),
+            #[cfg(all(unix, feature = "tui"))]
+            Some("keys") => tui_binds::run_cli(&argv0, &rest[1..]),
+            #[cfg(not(all(unix, feature = "tui")))]
+            Some("keys") => {
+                eprintln!("{argv0}: keys requires the TUI feature on Unix");
+                1
+            }
             Some("completions") => setup::run("completions", &rest[1..]),
             Some("man") => setup::run("man", &rest[1..]),
             Some("-h") | Some("--help") | Some("help") | None => {

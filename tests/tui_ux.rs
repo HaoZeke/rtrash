@@ -92,3 +92,32 @@ fn live_fuzzy_rank_shrinks_via_shipped_fuzzy() {
         prev = cur;
     }
 }
+
+
+#[test]
+fn keybinds_config_partial_override_via_shipped_api() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use rtrash::tui_binds::{Action, Keymap};
+    let mut m = Keymap::builtin();
+    m.apply_config_text("toggle_mark = m\nhelp = h\n").unwrap();
+    assert_eq!(
+        m.resolve_browse(KeyCode::Char('m'), KeyModifiers::NONE),
+        Some(Action::ToggleMark)
+    );
+    assert_eq!(
+        m.resolve_browse(KeyCode::Char(' '), KeyModifiers::NONE),
+        None
+    );
+    assert_eq!(
+        m.resolve_browse(KeyCode::Char('h'), KeyModifiers::NONE),
+        Some(Action::Help)
+    );
+}
+
+#[test]
+fn keybinds_sample_is_valid_config() {
+    let sample = rtrash::tui_binds::Keymap::sample_config();
+    let mut m = rtrash::tui_binds::Keymap::builtin();
+    m.apply_config_text(&sample).unwrap();
+    assert!(!m.format_table().is_empty());
+}
