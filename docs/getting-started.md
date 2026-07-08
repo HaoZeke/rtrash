@@ -57,9 +57,19 @@ Linux **x86_64** wheels for CPython **3.10–3.14**. Dev checkout: `pip install 
 echo data > scratch.txt
 rtrash scratch.txt
 rtrash list
-rtrash restore scratch.txt
+rtrash restore scratch.txt          # by original path
+# or interactive (trash-cli style): rtrash restore   then type an index
 rtrash scratch.txt
 rtrash empty --trash-dir="$XDG_DATA_HOME/Trash"
+```
+
+### Interactive restore
+
+```shell
+rtrash a.txt b.txt
+rtrash restore              # prints numbered table of all trash items
+# type: 0   (or: printf '1\n' | rtrash restore)
+rtrash restore --cwd-only   # only originals under $PWD
 ```
 
 ## Shortest Python path

@@ -252,11 +252,16 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 
 ### `rtrash restore [PATH]` (also `trash-restore`)
 
-Restores the item trashed from `PATH` (or picks among items trashed from under the current directory when `PATH` is omitted).
-A single match restores directly; multiple matches list with indices for interactive selection (requires a TTY on stdin).
+| Invocation | Behavior |
+|------------|----------|
+| `rtrash restore PATH` | Restore the item whose original path was `PATH` (exact match) |
+| `rtrash restore` | **Interactive:** number every trashed item in scope (trash-cli style); type an index (TTY or `printf '0\n' \| rtrash restore`) |
+| `rtrash restore --cwd-only` | Interactive, but only originals under the current directory |
+| Single match | Restores immediately without prompting |
+
 Existing paths at the destination are preserved unless `-f` / `--force` is given; with `-f`, a blocking destination is removed first.
 Same-filesystem restore uses `rename`; cross-device restore copies then deletes the trash payload (needed when put fell back to the home trash).
-Options: `--trash-dir=PATH` (repeatable).
+Options: `--trash-dir=PATH` (repeatable), `--home-only`, `--cwd-only`.
 
 ### `rtrash rm PATTERN...` (also `trash-rm`)
 

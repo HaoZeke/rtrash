@@ -82,6 +82,15 @@ assert p.read_text() == "data"
 - [[file:benchmarks.org][benchmarks.org]] — safer / better / faster vs trash-cli (measured)
 - [[file:bindings.org][bindings.org]] — full Python surface
 
+
+* Interactive restore
+
+#+begin_src shell
+rtrash a.txt b.txt
+rtrash restore              # numbered full-trash pick (type an index)
+rtrash restore --cwd-only   # only originals under $PWD
+#+end_src
+
 * Changelog
 
 Release notes: [[https://github.com/HaoZeke/rtrash/blob/main/CHANGELOG.md][CHANGELOG.md]].

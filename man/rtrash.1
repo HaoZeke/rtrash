@@ -214,13 +214,22 @@ Also multi-call
 Restore a trashed item to its original location. With
 .IR PATH ,
 restore the item originally at
-.IR PATH ;
-without, choose among items trashed from under the current directory.
-A single match restores directly; multiple matches are listed for
-interactive selection.
+.IR PATH
+(exact original-path match).
+Without
+.IR PATH ,
+list every trashed item in scope (numbered, trash-cli style) and read an
+index from stdin (TTY or pipe).
+Pass
+.B \-\-cwd\-only
+to limit bare restore to originals under the current directory.
+A single match restores directly; multiple matches require a selection.
 .TP
 .BR \-f ", " \-\-force
 Overwrite an existing file at the original location.
+.TP
+.B \-\-cwd\-only
+Without PATH, only items trashed from under the current directory.
 .TP
 .B \-\-home\-only
 Only the home trash (skip volume trash).

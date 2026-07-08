@@ -8,12 +8,18 @@ use crate::util::stdin_is_tty;
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [PATH]
-Restore a trashed item to its original location. With PATH, restore the item
-originally at PATH; without, choose among items trashed from under the
-current directory. A single match restores directly; multiple matches are
-listed for interactive selection.
+Restore a trashed item to its original location.
+
+With PATH, restore the item originally at PATH (exact original path match).
+Without PATH, list candidates for interactive selection (numbered, trash-cli
+style). By default every trashed item in scope is listed; pass --cwd-only to
+limit to items whose original path is under the current directory.
+
+A single match restores immediately; multiple matches print an index table and
+read a selection from stdin (TTY or piped number).
 
   -f, --force     overwrite an existing file at the original location
+      --cwd-only  without PATH, only items trashed from under the current directory
       --home-only  only the home trash (skip volume trash)
       --trash-dir=PATH  only consider this trash directory (repeatable)
       --help      display this help and exit
@@ -23,12 +29,14 @@ listed for interactive selection.
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut force = false;
     let mut home_only = false;
+    let mut cwd_only = false;
     let mut target: Option<PathBuf> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     for arg in args {
         match arg.as_str() {
             "-f" | "--force" => force = true,
             "--home-only" => home_only = true,
+            "--cwd-only" => cwd_only = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -65,13 +73,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             let abs = absolutize(t);
             entries.iter().filter(|e| e.original == abs).collect()
         }
-        None => {
+        None if cwd_only => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
             entries
                 .iter()
                 .filter(|e| e.original.starts_with(&cwd))
                 .collect()
         }
+        // trash-cli parity: bare `restore` offers every item in scope.
+        None => entries.iter().collect(),
     };
 
     if matches.is_empty() {
@@ -90,17 +100,22 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 e.original.display()
             );
         }
-        if !stdin_is_tty() {
-            eprintln!(
-                "{prog}: {} matches; stdin is not a terminal, cannot select interactively",
-                matches.len()
-            );
-            return 1;
+        // Allow TTY pick or piped index (scripts / tests): `printf '0\n' | rtrash restore`.
+        if stdin_is_tty() {
+            eprint!("What file to restore [0..{}]: ", matches.len() - 1);
+            io::stderr().flush().ok();
         }
-        eprint!("What file to restore [0..{}]: ", matches.len() - 1);
-        io::stderr().flush().ok();
         let mut line = String::new();
         if io::stdin().lock().read_line(&mut line).is_err() {
+            eprintln!("{prog}: failed to read selection from stdin");
+            return 1;
+        }
+        if line.trim().is_empty() {
+            eprintln!(
+                "{prog}: {} matches; provide an index 0..{} on stdin",
+                matches.len(),
+                matches.len() - 1
+            );
             return 1;
         }
         match line.trim().parse::<usize>() {

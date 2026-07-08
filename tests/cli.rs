@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_rtrash")
@@ -36,6 +37,25 @@ impl Sandbox {
             .env("HOME", &self.root)
             .output()
             .expect("failed to run rtrash")
+    }
+
+    /// Like `run`, but feeds `stdin` to the child (interactive restore selection).
+    fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Output {
+        let mut child = Command::new(bin())
+            .args(args)
+            .current_dir(self.work())
+            .env("XDG_DATA_HOME", self.root.join("xdg"))
+            .env("HOME", &self.root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn rtrash");
+        {
+            let mut w = child.stdin.take().expect("stdin");
+            w.write_all(stdin.as_bytes()).unwrap();
+        }
+        child.wait_with_output().expect("failed to wait rtrash")
     }
 
     fn touch(&self, name: &str) -> PathBuf {
@@ -475,6 +495,61 @@ fn restore_single_match_roundtrip() {
     assert_eq!(fs::read(&f).unwrap(), b"payload");
     assert!(trash_names(&sb).is_empty());
     assert!(!sb.trash().join("info/back.txt.trashinfo").exists());
+}
+
+#[test]
+fn restore_interactive_picks_by_index_from_full_trash() {
+    let sb = Sandbox::new("restore-pick");
+    let a = sb.touch("a.txt");
+    let b = sb.touch("b.txt");
+    assert!(sb.run(&["put", "a.txt"]).status.success());
+    assert!(sb.run(&["put", "b.txt"]).status.success());
+    assert!(!a.exists() && !b.exists());
+
+    // Bare `restore` lists every trashed item; pick index 0 via piped stdin.
+    let list = sb.run(&["list"]);
+    assert!(list.status.success(), "{}", stderr_of(&list));
+    let list_out = stdout_of(&list);
+    let n_lines = list_out.lines().filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(n_lines, 2, "list: {list_out}");
+
+    let out = sb.run_with_stdin(&["restore"], "0\n");
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        stdout_of(&out),
+        stderr_of(&out)
+    );
+    assert!(stdout_of(&out).contains("restored"), "{}", stdout_of(&out));
+    let restored = a.exists() as u8 + b.exists() as u8;
+    assert_eq!(restored, 1, "exactly one file restored after pick 0");
+    assert_eq!(trash_names(&sb).len(), 1);
+}
+
+#[test]
+fn restore_cwd_only_skips_items_outside_cwd() {
+    let sb = Sandbox::new("restore-cwd");
+    let in_work = sb.touch("local.txt");
+    let outer = sb.root.join("outside.txt");
+    fs::write(&outer, b"outer").unwrap();
+    assert!(sb.run(&["put", "local.txt"]).status.success());
+    // Absolute path so original is outside work/.
+    assert!(Command::new(bin())
+        .args(["put", outer.to_str().unwrap()])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("HOME", &sb.root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(!in_work.exists());
+    assert!(!outer.exists());
+
+    // --cwd-only: only local.txt (under work/) is selectable → single match auto-restores.
+    let out = sb.run(&["restore", "--cwd-only"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(in_work.exists(), "local restored");
+    assert!(!outer.exists(), "outer still trashed with --cwd-only");
 }
 
 #[test]
