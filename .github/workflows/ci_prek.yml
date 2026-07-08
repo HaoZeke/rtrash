@@ -1,0 +1,34 @@
+name: Link check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 6 1 * *"
+
+concurrency:
+  group: lychee-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  lychee:
+    name: lychee
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --config .lychee.toml
+            --no-progress
+            README.md
+            CHANGELOG.md
+            docs/**/*.md
+            docs/orgmode/**/*.org
+          # Do not fail the tree on flaky external hosts; report only.
+          fail: false

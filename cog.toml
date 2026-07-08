@@ -1,0 +1,25 @@
+from_latest_tag = false
+ignore_merge_commits = true
+# Towncrier owns CHANGELOG.md; cog only orchestrates version bumps.
+disable_changelog = true
+generate_mono_repository_global_tag = true
+tag_prefix = "v"
+
+# Keep Cargo.toml, pyproject.toml, and Sphinx release in lockstep.
+pre_bump_hooks = [
+    "sed -i '0,/^version = /s/^version = \".*\"/version = \"{{version}}\"/' Cargo.toml",
+    "sed -i '0,/^version = /s/^version = \".*\"/version = \"{{version}}\"/' pyproject.toml",
+    "sed -i 's/^release = \".*\"/release = \"{{version}}\"/' docs/source/conf.py",
+]
+
+[commit_types]
+feat = { changelog_title = "Features" }
+fix = { changelog_title = "Bug Fixes" }
+docs = { changelog_title = "Documentation" }
+style = { changelog_title = "Styles" }
+refactor = { changelog_title = "Refactoring" }
+perf = { changelog_title = "Performance" }
+test = { changelog_title = "Tests" }
+build = { changelog_title = "Build" }
+ci = { changelog_title = "CI" }
+chore = { changelog_title = "Chores" }

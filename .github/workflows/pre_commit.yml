@@ -1,0 +1,29 @@
+name: pre-commit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: prek-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run prek
+        run: |
+          pipx run prek run -a
+
+      - name: Audit for large files
+        uses: HaoZeke/large-file-auditor@v0.1.0
+        with:
+          file-size-threshold: "1M"

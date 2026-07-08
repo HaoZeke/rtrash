@@ -1,5 +1,5 @@
 # Build Sphinx docs and publish to GitHub Pages (rtrash.rgoswami.me).
-name: docs
+name: Build and Deploy Documentation
 
 on:
   push:
@@ -11,6 +11,9 @@ on:
   pull_request:
     paths:
       - "docs/**"
+      - "README.md"
+      - "CHANGELOG.md"
+      - "towncrier.toml"
   workflow_dispatch:
 
 permissions:

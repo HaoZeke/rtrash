@@ -73,3 +73,7 @@ p.write_text("data")
 rtrash.unlink(p)          # was: p.unlink() / os.remove(p)
 rtrash.restore_path(p)
 ```
+
+## Changelog
+
+Release notes: [CHANGELOG.md](../CHANGELOG.md). For unreleased work, add a towncrier fragment under `docs/newsfragments/` (see README *Contributing and releases*).

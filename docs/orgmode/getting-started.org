@@ -81,3 +81,8 @@ assert p.read_text() == "data"
 - [[file:architecture.org][architecture.org]] — FreeDesktop placement, fail-safes vs =rm= / =os.remove=
 - [[file:benchmarks.org][benchmarks.org]] — safer / better / faster vs trash-cli (measured)
 - [[file:bindings.org][bindings.org]] — full Python surface
+
+* Changelog
+
+Release notes: [[https://github.com/HaoZeke/rtrash/blob/main/CHANGELOG.md][CHANGELOG.md]].
+Unreleased fragments: =docs/newsfragments/= (towncrier). See the repository README for =prek= / =cog= / release lockstep.

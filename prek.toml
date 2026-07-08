@@ -1,0 +1,72 @@
+#:schema https://www.schemastore.org/prek.json
+# Git hooks via `prek` (https://prek.j178.dev) — Rust drop-in for pre-commit.
+# Install: `prek install`
+# Run all: `prek run -a`
+
+minimum_prek_version = "0.3.0"
+
+exclude = """(?x)(
+    ^\\.venv/|
+    ^\\.venv-docs/|
+    ^docs/build/|
+    ^target/|
+    ^dist/
+)"""
+
+# Fast native implementations (no clone / no Python env).
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "trailing-whitespace" },
+  { id = "end-of-file-fixer" },
+  { id = "check-yaml" },
+  { id = "check-toml" },
+  { id = "check-merge-conflict" },
+  { id = "check-added-large-files", args = ["--maxkb=1000"] },
+  { id = "detect-private-key" },
+]
+
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev = "v6.0.0"
+hooks = [
+  { id = "check-case-conflict" },
+]
+
+[[repos]]
+repo = "https://github.com/ComPWA/taplo-pre-commit"
+rev = "v0.9.3"
+hooks = [{ id = "taplo-format" }]
+
+[[repos]]
+repo = "https://github.com/codespell-project/codespell"
+rev = "v2.4.1"
+hooks = [
+  { id = "codespell", args = ["--skip=*.lock,*.svg,CHANGELOG.md,completions/*,man/*,benches/*"] },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  {
+    id = "towncrier-config",
+    name = "towncrier config present",
+    entry = "bash",
+    language = "system",
+    pass_filenames = false,
+    files = '^(towncrier\\.toml|docs/newsfragments/|CHANGELOG\\.md)',
+    args = ["-c", "test -f towncrier.toml && test -d docs/newsfragments && test -f CHANGELOG.md"],
+  },
+  {
+    id = "cargo-toml-pyproject-version-lockstep",
+    name = "Cargo.toml and pyproject.toml versions match",
+    entry = "bash",
+    language = "system",
+    pass_filenames = false,
+    files = '^(Cargo\\.toml|pyproject\\.toml)$',
+    args = [
+      "-c",
+      "c=$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -1); p=$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' pyproject.toml | head -1); test -n \"$c\" && test \"$c\" = \"$p\"",
+    ],
+  },
+]

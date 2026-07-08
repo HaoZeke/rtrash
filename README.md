@@ -14,6 +14,7 @@ No interpreter startup; emptying deletes entries in parallel via [rayon](https:/
 | [docs/architecture.md](docs/architecture.md) | FreeDesktop layout, safety vs `rm` / `os.remove` / trash-cli |
 | [docs/benchmarks.md](docs/benchmarks.md) | Measured safer/better/faster vs trash-cli |
 | [docs/bindings.md](docs/bindings.md) | Maturin/PyO3 API (`unlink` / `rmtree` replacements) |
+| [CHANGELOG.md](CHANGELOG.md) | Release notes (towncrier fragments in `docs/newsfragments/`) |
 
 Org-mode sources (readcon-core style): [docs/orgmode/](docs/orgmode/).
 
@@ -176,6 +177,17 @@ $ rtrash completions fish > rtrash.fish
 $ rtrash man              > rtrash.1
 $ rtrash setup --prefix=/usr --force    # system prefix when packaging
 ```
+
+
+
+## Contributing and releases
+
+- **Changelog:** add a towncrier fragment under `docs/newsfragments/` for user-visible changes:
+  - `towncrier create -c "Short description." +slug.added.md` (or `.fixed.md`, `.changed.md`, …)
+  - At release: `towncrier build --version X.Y.Z --yes` then tag `vX.Y.Z`
+- **Version lockstep:** cocogitto (`cog.toml`) bumps `Cargo.toml`, `pyproject.toml`, and `docs/source/conf.py` together (`disable_changelog = true`; towncrier owns `CHANGELOG.md`).
+- **Hooks:** `prek install` then `prek run -a` (builtin large-file check, yaml/toml, codespell, version lockstep). CI also runs [HaoZeke/large-file-auditor](https://github.com/HaoZeke/large-file-auditor) and [lychee](https://github.com/lycheeverse/lychee).
+- **Docs PRs:** the documentation workflow uploads a `documentation` artifact; [HaoZeke/doc-previewer](https://github.com/HaoZeke/doc-previewer) comments a preview link on the PR.
 
 ## Tutorial
 
