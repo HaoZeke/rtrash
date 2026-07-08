@@ -13,7 +13,7 @@ _ROOT = _DOCS.parent.parent
 project = "rtrash"
 copyright = "2026, Rohit Goswami"
 author = "Rohit Goswami"
-release = "0.1.2"
+release = "0.1.3"
 version = "0.1"
 
 extensions = [

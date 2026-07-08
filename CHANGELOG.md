@@ -11,6 +11,30 @@ Name fragments `+slug.<type>.md` (no issue) or `<issue>.<type>.md` (links to Git
 
 <!-- towncrier release notes start -->
 
+## [0.1.3](https://github.com/HaoZeke/rtrash/tree/v0.1.3) - 2026-07-08
+
+### Added
+
+- Add a ratatui restore browser on TTY (`rtrash restore`): filter, navigate, multi-restore session, force/confirm overwrite; `--plain` keeps line-mode selection.
+- Interactive restore lists the full trash (trash-cli style) when PATH is omitted; add `--cwd-only` for the previous cwd-scoped pick; accept piped index selection without a TTY.
+- Restore TUI: multi-select and fuzzy filter; add empty and put TUI browsers on TTY (multi-select, confirm); `--plain` skips TUI.
+- TUI keybinds fully customizable via TOML (`keys.toml` / `RTRASH_KEYS`); `rtrash keys` CLI.
+- Windows: system Recycle Bin backend for put/list/restore/empty (not FreeDesktop on-disk fiction).
+- macOS: experimental FreeDesktop home trash (`$XDG_DATA_HOME/Trash`), not Finder Trash.
+
+### Developer
+
+- Refresh dated trash-cli comparison in docs/benchmarks.md (2026-07-08); harden benches/compare_trash_cli.py to reject multi-call rtrash as trash-cli.
+
+### Changed
+
+- TUI: live fuzzy filter, shared keys + ? help, viewport paging across restore/empty/put.
+
+### Fixed
+
+- Python bindings release the GIL around put/empty/restore/list I/O (PyO3 `detach`); force `--plain` (no TUI).
+
+
 ## [0.1.2](https://github.com/HaoZeke/rtrash/tree/v0.1.2) - 2026-07-08
 
 ### Fixed
