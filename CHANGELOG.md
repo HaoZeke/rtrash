@@ -11,6 +11,15 @@ Name fragments `+slug.<type>.md` (no issue) or `<issue>.<type>.md` (links to Git
 
 <!-- towncrier release notes start -->
 
+## [0.1.1](https://github.com/HaoZeke/rtrash/tree/v0.1.1) - 2026-07-08
+
+### Developer
+
+- Add CI quality bar (`cargo fmt --check`, `clippy -D warnings`, `test --locked`), commit `Cargo.lock`, and `cargo-deny` policy (`deny.toml`) with matching CONTRIBUTING/`scripts/quality.sh` docs.
+- Add towncrier (`CHANGELOG.md` / `docs/newsfragments/`), cocogitto (`cog.toml` version lockstep), `prek.toml` (large-file guard, toml/yaml hygiene), lychee link check, `large-file-auditor` CI, and HaoZeke/doc-previewer PR comments for the Sphinx site.
+- Adopt cargo-nextest (CI profile), cargo-dist (Linux musl releases + shell installer), and ASV PR benchmarks with asv-spyglass + HaoZeke/asv-perch comments (eOn-style).
+
+
 ## [0.1.0](https://github.com/HaoZeke/rtrash/tree/v0.1.0) - 2026-07-08
 
 ### Added

@@ -1,1 +1,0 @@
-Add towncrier (`CHANGELOG.md` / `docs/newsfragments/`), cocogitto (`cog.toml` version lockstep), `prek.toml` (large-file guard, toml/yaml hygiene), lychee link check, `large-file-auditor` CI, and HaoZeke/doc-previewer PR comments for the Sphinx site.

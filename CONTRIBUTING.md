@@ -15,7 +15,7 @@ Or: `./scripts/quality.sh` (fmt → clippy → nextest/test → deny when availa
 
 `Cargo.lock` is **committed** for this binary crate; use `--locked` so CI and local builds resolve the same graph.
 
-**Release packaging:** [cargo-dist](https://opensource.axo.dev/cargo-dist/) (`dist-workspace.toml`, Linux musl targets + shell installer; tag-driven `.github/workflows/release.yml`). Hand-written musl tarballs for `cargo-binstall` remain in `scripts/package-release.sh` / `Release musl package` workflow.
+**Release packaging:** tag releases are **`Release musl package`** (`scripts/package-release.sh` → versioned tarballs for `cargo-binstall`). [cargo-dist](https://opensource.axo.dev/cargo-dist/) (`dist-workspace.toml`) runs **PR-only** `dist plan` (`.github/workflows/release.yml`); after `dist generate --mode ci` run `./scripts/dist-pr-only-release-yml.sh`.
 
 **Benchmarks on PRs:** ASV suite under `benchmarks/` (`asv.conf.json`). Workflow `Benchmark PR` builds release `rtrash` for base and head SHAs, runs `asv run --quick`, compares with asv-spyglass, and `HaoZeke/asv-perch` comments on the PR. Local:
 

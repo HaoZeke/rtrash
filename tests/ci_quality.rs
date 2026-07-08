@@ -94,7 +94,8 @@ fn cargo_dist_and_asv_layout_exist() {
     assert!(root.join("benchmarks/trash_ops.py").is_file());
     let bench_ci = fs::read_to_string(root.join(".github/workflows/ci_benchmark.yml")).unwrap();
     assert!(bench_ci.contains("asv run") || bench_ci.contains("asv-spyglass"));
-    let comment = fs::read_to_string(root.join(".github/workflows/ci_bench_commenter.yml")).unwrap();
+    let comment =
+        fs::read_to_string(root.join(".github/workflows/ci_bench_commenter.yml")).unwrap();
     assert!(comment.contains("asv-perch"));
     assert!(root.join(".config/nextest.toml").is_file());
 }
