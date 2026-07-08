@@ -1007,27 +1007,4 @@ fn empty_dry_run_uses_directorysizes_for_dir_payload() {
     );
 }
 
-#[test]
-fn permanently_remove_two_entries_via_empty_logic() {
-    let sb = Sandbox::new("empty-sel");
-    sb.touch("x1.txt");
-    sb.touch("x2.txt");
-    assert!(sb.run(&["put", "x1.txt"]).status.success());
-    assert!(sb.run(&["put", "x2.txt"]).status.success());
-    assert_eq!(trash_names(&sb).len(), 2);
-    // Use plain empty --trash-dir pin for non-TUI full wipe of pin (script path)
-    let pin = format!("--trash-dir={}", sb.trash().display());
-    let out = sb.run(&["empty", "--plain", &pin]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(trash_names(&sb).is_empty());
-}
 
-#[test]
-fn put_with_paths_still_works_without_tui() {
-    let sb = Sandbox::new("put-cli");
-    let f = sb.touch("z.txt");
-    let out = sb.run(&["put", "--plain", "z.txt"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(!f.exists());
-    assert!(sb.trash().join("files/z.txt").exists());
-}

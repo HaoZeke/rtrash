@@ -166,35 +166,19 @@ impl<'a> App<'a> {
     }
 
     fn perform_restores_tracked(&mut self, idxs: &[usize], force: bool) {
-        let mut sorted = idxs.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        let mut succeeded: Vec<usize> = Vec::new();
-        let mut fail = 0u32;
-        for &ei in sorted.iter().rev() {
-            if ei >= self.entries.len() {
-                continue;
-            }
-            let entry = self.entries[ei];
-            let code = restore::restore_entry(self.prog, entry, force);
-            if code == 0 {
-                succeeded.push(ei);
-            } else {
-                fail += 1;
-            }
-        }
-        succeeded.sort_unstable();
-        // Remove from high to low
-        for &ei in succeeded.iter().rev() {
+        let result = restore_selection(self.prog, &self.entries, idxs, force);
+        // Only drop UI rows that actually restored (failed stay visible).
+        for &ei in result.succeeded_idxs.iter().rev() {
             if ei < self.entries.len() {
                 self.entries.remove(ei);
             }
         }
-        self.sel.remap_after_removals(&succeeded);
+        self.sel.remap_after_removals(&result.succeeded_idxs);
         self.mode = Mode::Browse;
         self.pending_idxs.clear();
         self.refilter();
-        let ok = succeeded.len();
+        let ok = result.ok_count();
+        let fail = result.fail_count;
         if self.entries.is_empty() {
             self.status = format!("restored {ok} · trash empty · q quit");
         } else {
@@ -478,32 +462,50 @@ pub fn run(prog: &str, entries: Vec<&Entry>, force: bool) -> i32 {
     0
 }
 
-/// Restore a set of entry indices (high-level logic for tests).
-/// `entries` is the full list; `idxs` are indices into it. Restores high→low.
-/// Returns (ok_count, fail_count). Mutates nothing in entries slice; caller drops ok ones.
+/// Result of multi-select restore: which input indices were restored.
+#[derive(Debug, Clone)]
+pub struct RestoreSelectionResult {
+    /// Indices into the input `entries` slice that restored successfully.
+    pub succeeded_idxs: Vec<usize>,
+    pub fail_count: u32,
+}
+
+impl RestoreSelectionResult {
+    pub fn ok_count(&self) -> u32 {
+        self.succeeded_idxs.len() as u32
+    }
+}
+
+/// Restore a set of entry indices via the real `restore_entry` path.
+/// `entries` is the full list; `idxs` are indices into it. Restores high→low
+/// so callers can remove succeeded indices afterward. Does not mutate `entries`.
 pub fn restore_selection(
     prog: &str,
     entries: &[&Entry],
     idxs: &[usize],
     force: bool,
-) -> (u32, u32) {
+) -> RestoreSelectionResult {
     let mut sorted: Vec<usize> = idxs.to_vec();
     sorted.sort_unstable();
     sorted.dedup();
-    let mut ok = 0u32;
-    let mut fail = 0u32;
+    let mut succeeded_idxs = Vec::new();
+    let mut fail_count = 0u32;
     for &ei in sorted.iter().rev() {
         if ei >= entries.len() {
-            fail += 1;
+            fail_count += 1;
             continue;
         }
         if restore::restore_entry(prog, entries[ei], force) == 0 {
-            ok += 1;
+            succeeded_idxs.push(ei);
         } else {
-            fail += 1;
+            fail_count += 1;
         }
     }
-    (ok, fail)
+    succeeded_idxs.sort_unstable();
+    RestoreSelectionResult {
+        succeeded_idxs,
+        fail_count,
+    }
 }
 
 #[cfg(test)]

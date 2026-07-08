@@ -24,39 +24,60 @@ pub fn filter_indices(entries: &[&Entry], query: &str) -> Vec<usize> {
     tui_fuzzy::rank_indices(&refs, query)
 }
 
-/// Permanently remove the given trash entries. Returns (ok, fail, reclaim_bytes dry).
+/// Result of a permanent-remove batch: per-input success flags + dry-run bytes.
+#[derive(Debug, Clone)]
+pub struct RemoveBatchResult {
+    /// `true` iff the entry at the same index in the input slice was removed
+    /// (or counted in dry-run).
+    pub succeeded: Vec<bool>,
+    pub reclaim_bytes: u64,
+}
+
+impl RemoveBatchResult {
+    pub fn ok_count(&self) -> u32 {
+        self.succeeded.iter().filter(|&&s| s).count() as u32
+    }
+    pub fn fail_count(&self) -> u32 {
+        self.succeeded.iter().filter(|&&s| !s).count() as u32
+    }
+}
+
+/// Permanently remove the given trash entries (real FreeDesktop paths).
+/// Does not reimplement wipe logic: uses `trashdir::remove_any_path` + info unlink.
 pub fn permanently_remove_entries(
     prog: &str,
     entries: &[&Entry],
     dry_run: bool,
-) -> (u32, u32, u64) {
-    let mut ok = 0u32;
-    let mut fail = 0u32;
+) -> RemoveBatchResult {
+    let mut succeeded = Vec::with_capacity(entries.len());
     let mut bytes = 0u64;
     for entry in entries {
         let payload = entry.dir.files().join(&entry.name);
         let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
         if dry_run {
             bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes(&entry.dir, &entry.name));
-            ok += 1;
+            succeeded.push(true);
             continue;
         }
         if let Err(e) = trashdir::remove_any_path(&payload) {
             eprintln!("{prog}: cannot remove '{}': {e}", payload.display());
-            fail += 1;
+            succeeded.push(false);
             continue;
         }
         if let Err(e) = std::fs::remove_file(&info_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 eprintln!("{prog}: cannot remove '{}': {e}", info_path.display());
-                fail += 1;
+                succeeded.push(false);
                 continue;
             }
         }
         trashdir::directorysizes_remove(&entry.dir, &entry.name);
-        ok += 1;
+        succeeded.push(true);
     }
-    (ok, fail, bytes)
+    RemoveBatchResult {
+        succeeded,
+        reclaim_bytes: bytes,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -164,23 +185,30 @@ impl<'a> App<'a> {
     fn do_purge(&mut self) {
         let idxs = self.targets();
         let batch: Vec<&Entry> = idxs.iter().map(|&i| self.entries[i]).collect();
-        let (ok, fail, bytes) = permanently_remove_entries(self.prog, &batch, self.dry_run);
+        let result = permanently_remove_entries(self.prog, &batch, self.dry_run);
+        let ok = result.ok_count();
+        let fail = result.fail_count();
         if !self.dry_run {
-            let mut sorted = idxs;
-            sorted.sort_unstable();
-            for &ei in sorted.iter().rev() {
+            // Only drop UI rows that actually succeeded (failed stay visible).
+            let mut removed_entry_idxs: Vec<usize> = idxs
+                .iter()
+                .zip(result.succeeded.iter())
+                .filter_map(|(&ei, &ok)| ok.then_some(ei))
+                .collect();
+            removed_entry_idxs.sort_unstable();
+            for &ei in removed_entry_idxs.iter().rev() {
                 if ei < self.entries.len() {
                     self.entries.remove(ei);
                 }
             }
-            self.sel.remap_after_removals(&sorted);
+            self.sel.remap_after_removals(&removed_entry_idxs);
             self.refilter();
         }
         self.mode = Mode::Browse;
         self.status = if self.dry_run {
             format!(
                 "would remove {ok} ({}) · fail {fail}",
-                crate::fastdelete::format_bytes(bytes)
+                crate::fastdelete::format_bytes(result.reclaim_bytes)
             )
         } else {
             format!("removed {ok} · fail {fail} · {} left", self.entries.len())
