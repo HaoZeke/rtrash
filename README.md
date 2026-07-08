@@ -1,60 +1,73 @@
 # rtrash
 
-<p align="center"> <img src="docs/source/_static/logo.svg" width="280" alt="rtrash logo" /> </p>
-
 <p align="center">
-<strong>Native FreeDesktop trash</strong> — rm-compatible put, full trash-cli suite, optional Python bindings.<br/>
-One multi-call binary. Recoverable by design. Parallel empty.
+  <img src="docs/source/_static/logo.svg" width="240" alt="rtrash logo" />
 </p>
 
 <p align="center">
-<a href="https://crates.io/crates/rtrash"><img src="https://img.shields.io/crates/v/rtrash.svg" alt="crates.io" /></a>
-<a href="https://pypi.org/project/rtrash/"><img src="https://img.shields.io/pypi/v/rtrash.svg" alt="PyPI" /></a>
-<a href="https://rtrash.rgoswami.me"><img src="https://img.shields.io/badge/docs-rtrash.rgoswami.me-blue" alt="docs" /></a>
+  <strong>Native FreeDesktop trash</strong> — rm-compatible put, full trash-cli suite, Python bindings.<br/>
+  One multi-call binary · recoverable by design · parallel empty
 </p>
 
-Implements the [freedesktop.org Trash specification](https://specifications.freedesktop.org/trash-spec/trashspec-latest.html).
-No interpreter startup; emptying deletes entries in parallel via [rayon](https://crates.io/crates/rayon).
+<p align="center">
+  <a href="https://crates.io/crates/rtrash"><img src="https://img.shields.io/crates/v/rtrash.svg" alt="crates.io" /></a>
+  <a href="https://pypi.org/project/rtrash/"><img src="https://img.shields.io/pypi/v/rtrash.svg" alt="PyPI" /></a>
+  <a href="https://rtrash.rgoswami.me"><img src="https://img.shields.io/badge/docs-rtrash.rgoswami.me-blue" alt="docs" /></a>
+</p>
 
-## Demo
+<!-- Absolute raw URLs so the GIF embeds on GitHub *and* crates.io (relative paths often break on crates.io). -->
+<p align="center">
+  <a href="https://github.com/HaoZeke/rtrash/blob/main/docs/demo/rtrash-quickstart.cast">
+    <img
+      src="https://raw.githubusercontent.com/HaoZeke/rtrash/main/docs/demo/rtrash-quickstart.gif"
+      alt="Terminal demo: rtrash put → list → restore → empty in a pinned sandbox trash"
+      width="720"
+    />
+  </a>
+</p>
 
-Recordings pin `--trash-dir=$XDG_DATA_HOME/Trash` in a temp sandbox (volume trash is never discovered). Regenerate: `./docs/demo/record.sh` · [docs/demo/](docs/demo/).
-
-### Quickstart — FreeDesktop loop
-
-put → list/status → restore → empty
-
-![rtrash quickstart](docs/demo/rtrash-quickstart.gif)
-
-[asciicast](docs/demo/rtrash-quickstart.cast)
-
-### Suite — more of the product surface
-
-rm-shaped flags · multi-call names · `status` · `rm` patterns · `empty --dry-run` · `keys`
-
-![rtrash suite](docs/demo/rtrash-suite.gif)
-
-[asciicast](docs/demo/rtrash-suite.cast)
-
-| Feature | Where |
-| ------- | ----- |
-| FreeDesktop put / list / restore / empty | quickstart GIF |
-| `rtrash -rf` (rm-shaped fallthrough) | suite GIF |
-| Multi-call `trash-put` / `trash-list` / … | suite GIF |
-| `rtrash rm` / `trash-rm` globs | suite GIF |
-| `empty --dry-run` reclaim | suite GIF |
-| Custom TUI keybinds (`rtrash keys`) | suite GIF (dump) |
-| Interactive TUI (fuzzy, multi-select) | **TTY only** — `rtrash restore` / `empty` / `put` |
-| Python `unlink` / `rmtree` (GIL released) | [bindings](docs/bindings.md) |
-| macOS experimental FDO / Windows Recycle Bin | [Platform](#platform) |
+<p align="center">
+  <em>put → list/status → restore → empty</em>
+  · <a href="https://raw.githubusercontent.com/HaoZeke/rtrash/main/docs/demo/rtrash-quickstart.cast">asciicast</a>
+  · <a href="https://rtrash.rgoswami.me/">docs site</a>
+</p>
 
 ```console
-$ cargo binstall rtrash && rtrash setup   # multi-call links + completions
-$ rtrash -rf build/                       # put (rm-shaped)
-$ trash-list                              # multi-call
-$ rtrash restore                          # TUI on a TTY; --plain for scripts
-$ rtrash keys --sample > ~/.config/rtrash/keys.toml
+$ cargo binstall rtrash && rtrash setup
+$ rtrash notes.txt                 # put (also: rtrash -rf dir, multi-call trash-put)
+$ rtrash list && rtrash status
+$ rtrash restore                   # TUI on a TTY; --plain for scripts
+$ rtrash empty --plain
 ```
+
+<details>
+<summary><strong>More of the surface</strong> (rm-flags, multi-call, trash-rm, dry-run, keys)</summary>
+
+<p align="center">
+  <a href="https://github.com/HaoZeke/rtrash/blob/main/docs/demo/rtrash-suite.cast">
+    <img
+      src="https://raw.githubusercontent.com/HaoZeke/rtrash/main/docs/demo/rtrash-suite.gif"
+      alt="Terminal demo: rtrash -rf, multi-call, rm globs, empty --dry-run, keys"
+      width="720"
+    />
+  </a>
+</p>
+
+| Feature | Demo |
+| ------- | ---- |
+| FreeDesktop put / list / restore / empty | quickstart GIF above |
+| `rtrash -rf` rm-shaped put | suite GIF |
+| Multi-call `trash-put` / `trash-list` / … | suite GIF |
+| `rtrash rm` / `trash-rm` globs | suite GIF |
+| `empty --dry-run` | suite GIF |
+| Custom keys (`rtrash keys`, `keys.toml`) | suite GIF |
+| Interactive TUI (fuzzy, multi-select, `?`) | **TTY** — not in the GIF; run `rtrash restore` |
+| Python `unlink` / `rmtree` | [bindings](docs/bindings.md) |
+
+Demos are regenerable: `./docs/demo/record.sh` (pinned `--trash-dir` sandbox — safe).
+Source: [docs/demo/](docs/demo/).
+
+</details>
 
 ## Documentation
 

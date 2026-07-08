@@ -110,15 +110,33 @@ fn casts_are_volume_isolated() {
 #[test]
 fn readme_embeds_both_demos_and_feature_map() {
     let readme = read("README.md");
-    assert!(readme.contains("docs/demo/rtrash-quickstart.gif"));
-    assert!(readme.contains("docs/demo/rtrash-suite.gif"));
+    // Absolute raw.githubusercontent.com URLs: render on GitHub *and* crates.io.
     assert!(
-        readme.contains("multi-call") || readme.contains("Multi-call"),
-        "README should mention multi-call in demo map"
+        readme.contains(
+            "raw.githubusercontent.com/HaoZeke/rtrash/main/docs/demo/rtrash-quickstart.gif"
+        ),
+        "README must embed quickstart GIF via absolute raw.githubusercontent.com URL"
     );
     assert!(
-        readme.contains("TUI") || readme.contains("TTY only"),
-        "README should call out TUI as TTY-only vs recorded demos"
+        readme.contains(
+            "raw.githubusercontent.com/HaoZeke/rtrash/main/docs/demo/rtrash-suite.gif"
+        ),
+        "README must embed suite GIF via absolute raw URL"
+    );
+    assert!(
+        readme.contains("width=\"720\""),
+        "hero GIF should set width for readable embed"
+    );
+    assert!(
+        readme.contains("align=\"center\""),
+        "hero should be centered"
+    );
+    assert!(readme.contains("multi-call") || readme.contains("Multi-call"));
+    assert!(readme.contains("TUI") || readme.contains("TTY"));
+    // Docs site static copies for Sphinx embed
+    assert!(
+        root().join("docs/source/_static/demo/rtrash-quickstart.gif").is_file(),
+        "Sphinx _static/demo must hold quickstart GIF for the docs site"
     );
 }
 

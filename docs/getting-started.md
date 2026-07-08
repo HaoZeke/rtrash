@@ -15,11 +15,15 @@ Docs: <https://rtrash.rgoswami.me>
 
 Animated loop (put → list → restore → empty):
 
-![rtrash quickstart](demo/rtrash-quickstart.gif)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/HaoZeke/rtrash/main/docs/demo/rtrash-quickstart.gif" width="720" alt="rtrash quickstart demo" />
+</p>
 
 Broader surface (rm flags, multi-call, `rm` globs, dry-run, keys):
 
-![rtrash suite](demo/rtrash-suite.gif)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/HaoZeke/rtrash/main/docs/demo/rtrash-suite.gif" width="720" alt="rtrash suite demo" />
+</p>
 
 Regenerate: [`docs/demo/record.sh`](demo/record.sh). Platform: Linux FreeDesktop primary; macOS experimental home FDO trash; Windows system Recycle Bin.
 

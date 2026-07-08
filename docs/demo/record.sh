@@ -133,6 +133,11 @@ record_one() {
   agg --cols "$COLS" --font-size 14 --speed 1.2 "$cast" "$gif"
   echo "wrote $cast"
   echo "wrote $gif"
+
+  # Keep Sphinx/static copies in sync for the docs site embeds.
+  STATIC_DEMO="$ROOT/docs/source/_static/demo"
+  mkdir -p "$STATIC_DEMO"
+  cp -f "$cast" "$gif" "$STATIC_DEMO/"
   ls -la "$cast" "$gif"
   trap - EXIT
   cleanup

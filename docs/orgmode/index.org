@@ -21,6 +21,17 @@
        <span>Linux</span>
        <span>Rust + Python</span>
      </div>
+     <p class="rt-hero-demo-caption">put → list → restore → empty</p>
+     <a class="rt-hero-demo" href="_static/demo/rtrash-quickstart.cast">
+       <img class="rt-hero-demo-gif"
+            src="_static/demo/rtrash-quickstart.gif"
+            width="720"
+            alt="Terminal demo: rtrash put, list, restore, empty" />
+     </a>
+     <p class="rt-hero-demo-links">
+       <a href="_static/demo/rtrash-suite.gif">suite demo</a>
+       · <a href="https://github.com/HaoZeke/rtrash/tree/main/docs/demo">source / re-record</a>
+     </p>
    </div>
 #+end_export
 
@@ -35,9 +46,6 @@ Desktop environments already share a FreeDesktop trash layout — *rtrash* is a 
 | Scripts / tests | pin with =--trash-dir= ; isolate =XDG_DATA_HOME= |
 | Python instead of permanent unlink | =rtrash.unlink(path)= after =import rtrash= |
 | See reclaim before empty | =rtrash empty --dry-run= |
-
-Terminal demo (put → list → restore → empty): see the GIF and cast under
-=docs/demo/= on GitHub (regenerate with =./docs/demo/record.sh=).
 
 * Install (shortest path)
 
