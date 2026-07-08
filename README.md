@@ -59,7 +59,8 @@ Markdown mirrors under `docs/*.md` remain for quick GitHub reading; the site is 
 ## Platform
 
 **Platform:** Linux FreeDesktop trash only (home trash + per-mount trash dirs).
-Not a Windows/macOS system-trash wrapper, and not a colored TUI.
+Not a Windows Recycle Bin or macOS Finder Trash wrapper.
+On a TTY, bare `rtrash restore` opens the **interactive restore browser** (ratatui).
 
 ## Install
 
@@ -282,10 +283,10 @@ Previously deferred items are implemented in the shipped put/empty path:
 - **Btrfs multi-subvol topdir:** volume topdir is the **longest mount-point prefix** from `/proc/self/mounts`, not a pure `st_dev` parent walk.
 - **Default multi-volume empty:** with no `--trash-dir`, empty/list/restore/rm discover home trash plus existing user trash on every non-pseudo mount (including `/`), matching trash-cli’s multi-volume default. Pin with `--trash-dir` in scripts.
 
-## Limitations and non-goals
+## Limitations
 
-- **Restore TUI:** bare `rtrash restore` on a TTY uses a ratatui browser (not a full trashy/gtrash product).
-- **Linux FreeDesktop only:** no Windows Recycle Bin / macOS Trash backends.
+- **Platform:** Linux FreeDesktop trash only — no Windows Recycle Bin / macOS Finder Trash backends.
+- **Restore UI:** bare `rtrash restore` on a TTY opens the **ratatui restore browser** (filter, navigate, multi-restore). Use `--plain` or a piped index for non-interactive selection. Scripts and path restore stay first-class.
 - **Not a general soft-delete database:** only the FreeDesktop on-disk layout.
 - **EXDEV does not re-create xattrs/ACLs/hardlinks** (mode+mtime+symlink+bytes only).
 - **Locks are local `flock`** (advisory on some network FS).

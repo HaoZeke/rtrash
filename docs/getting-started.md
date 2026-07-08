@@ -58,26 +58,26 @@ echo data > scratch.txt
 rtrash scratch.txt
 rtrash list
 rtrash restore scratch.txt          # by original path
-# or interactive (trash-cli style): rtrash restore   then type an index
+# or: rtrash restore   # TUI picker on a TTY
 rtrash scratch.txt
 rtrash empty --trash-dir="$XDG_DATA_HOME/Trash"
 ```
 
-### Interactive restore
+### Interactive restore (first-class)
 
-On a TTY, bare `rtrash restore` opens a **ratatui** browser:
+On a TTY, bare `rtrash restore` opens the **ratatui restore browser** — intentional
+product UX, not a script-only fallback.
 
 | Key | Action |
 |-----|--------|
 | `↑` `↓` / `j` `k` | Move selection |
 | `/` | Filter by original path (substring) |
-| `Enter` | Restore selected item (stay open for more) |
+| `Enter` | Restore selected item (session stays open) |
 | `f` | Toggle force overwrite |
 | `y` / `n` | Confirm overwrite when destination exists |
 | `q` / `Esc` | Quit |
 
-Without a TTY (or with `--plain`), you get a numbered list and type an index (`printf '0
-' | rtrash restore`).
+For automation: `--plain` or pipe an index (`printf '0\n' | rtrash restore`).
 
 ```shell
 rtrash a.txt b.txt

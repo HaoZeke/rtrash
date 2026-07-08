@@ -1,16 +1,16 @@
 //! Interactive restore browser (ratatui).
 //!
-//! Design notes:
-//! - **Purpose:** pick one (or several, sequentially) trashed items when a TTY
-//!   is available. Scripts keep path restore and piped index selection.
+//! First-class TTY UX for `rtrash restore` without a path. Scope is product-
+//! driven (user/vault), not peer-identity: expand here when useful.
+//!
+//! - **Purpose:** browse, filter, and restore trashed items on a TTY. Scripts keep
+//!   path restore and piped/`--plain` index selection.
 //! - **Layout:** header (title + filter), scrollable table, footer (keys + status).
 //! - **Keys:** ↑↓/jk navigate, PgUp/PgDn, g/G, `/` filter, Enter restore,
 //!   `f` force, `y`/`n` confirm overwrite, `q`/Esc quit.
-//! - **Filter:** case-insensitive substring on original path (live while typing
-//!   after `/`; Enter accepts, Esc clears draft and exits filter mode).
-//! - **After restore:** remove row, keep session open (multi-restore); status line
-//!   reports result. No full-screen app for put/empty — restore is the high-value
-//!   interactive surface.
+//! - **Filter:** case-insensitive substring on original path (draft after `/`;
+//!   Enter applies, Esc cancels filter mode).
+//! - **After restore:** drop the row and stay open for multi-restore.
 
 use std::io::{self, stdout};
 use std::path::Path;
