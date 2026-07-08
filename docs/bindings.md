@@ -40,3 +40,11 @@ rtrash.version()
 maturin develop --features python
 python -m unittest tests.python.test_rtrash -v
 ```
+
+## Concurrency (GIL)
+
+`put` / `put_paths` / `unlink` / `rmtree` / `empty_trash` / `restore_path` / `list_trash`
+**release the GIL** for FreeDesktop I/O (`PyO3` `detach`), so other Python
+threads can run during large tree puts or bulk empty. The API always passes
+`--plain` (never opens the CLI TUI).
+
