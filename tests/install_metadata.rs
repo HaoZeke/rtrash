@@ -68,7 +68,9 @@ fn musl_asset(name: &str, version: &str, arch: &str) -> (String, String) {
 fn binstall_metadata_matches_package_release_basename() {
     let cargo = read("Cargo.toml");
     let script = read("scripts/package-release.sh");
-    let workflow = read(".github/workflows/release.yml");
+    // Hand-written binstall-aligned musl job (cargo-dist owns release.yml).
+    let musl_workflow = read(".github/workflows/release-musl.yml");
+    let dist_ws = read("dist-workspace.toml");
 
     assert!(cargo.contains("[package.metadata.binstall]"));
     assert!(cargo.contains("pkg-fmt = \"tgz\"") || cargo.contains("pkg-fmt = \"tar.gz\""));
@@ -95,12 +97,17 @@ fn binstall_metadata_matches_package_release_basename() {
     );
 
     assert!(
-        workflow.contains("aarch64-unknown-linux-musl"),
-        "release workflow must build aarch64 musl"
+        musl_workflow.contains("aarch64-unknown-linux-musl"),
+        "release-musl workflow must build aarch64 musl"
     );
     assert!(
-        workflow.contains("x86_64-unknown-linux-musl"),
-        "release workflow must build x86_64 musl"
+        musl_workflow.contains("x86_64-unknown-linux-musl"),
+        "release-musl workflow must build x86_64 musl"
+    );
+    assert!(
+        dist_ws.contains("x86_64-unknown-linux-musl")
+            && dist_ws.contains("aarch64-unknown-linux-musl"),
+        "cargo-dist must target both Linux musl arches"
     );
 
     let (x86_base, x86_bin) = musl_asset(name, version, "x86_64");

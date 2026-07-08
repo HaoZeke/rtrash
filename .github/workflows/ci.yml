@@ -1,4 +1,4 @@
-# Quality bar: fmt, clippy (-D warnings), locked tests, supply-chain (cargo-deny).
+# Quality bar: fmt, clippy (-D warnings), nextest (locked), supply-chain (cargo-deny).
 name: CI
 
 on:
@@ -15,7 +15,7 @@ permissions: read-all
 
 jobs:
   check:
-    name: fmt · clippy · test
+    name: fmt · clippy · nextest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,8 +32,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Test (locked)
-        run: cargo test --locked
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Test (nextest, locked, ci profile)
+        run: cargo nextest run --locked --profile ci
 
   deny:
     name: cargo-deny

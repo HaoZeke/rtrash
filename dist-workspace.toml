@@ -1,0 +1,18 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist' (https://opensource.axo.dev/cargo-dist/)
+[dist]
+cargo-dist-version = "0.28.0"
+ci = "github"
+# Linux FreeDesktop only — do not ship darwin/windows stubs.
+installers = ["shell"]
+targets = [
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+]
+unix-archive = ".tar.gz"
+# On PRs, only run `dist plan` (no full multi-target build noise).
+pr-run-mode = "plan"
+# Prefer creating a GitHub Release on tags.
+create-release = true

@@ -7,13 +7,24 @@ CI (`.github/workflows/ci.yml`) runs the same commands on `main`/PRs. Prefer **`
 ```shell
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-cargo deny check          # needs cargo-deny; policy in deny.toml
+cargo nextest run --locked --profile ci   # or: cargo test --locked
+cargo deny check                          # needs cargo-deny; policy in deny.toml
 ```
 
-Or: `./scripts/quality.sh` (fmt → clippy → test → deny when available).
+Or: `./scripts/quality.sh` (fmt → clippy → nextest/test → deny when available).
 
 `Cargo.lock` is **committed** for this binary crate; use `--locked` so CI and local builds resolve the same graph.
+
+**Release packaging:** [cargo-dist](https://opensource.axo.dev/cargo-dist/) (`dist-workspace.toml`, Linux musl targets + shell installer; tag-driven `.github/workflows/release.yml`). Hand-written musl tarballs for `cargo-binstall` remain in `scripts/package-release.sh` / `Release musl package` workflow.
+
+**Benchmarks on PRs:** ASV suite under `benchmarks/` (`asv.conf.json`). Workflow `Benchmark PR` builds release `rtrash` for base and head SHAs, runs `asv run --quick`, compares with asv-spyglass, and `HaoZeke/asv-perch` comments on the PR. Local:
+
+```shell
+cargo build --release --bin rtrash
+export RTRASH_BIN=$PWD/target/release/rtrash
+asv machine --yes
+asv run -E existing:$(command -v python3) --quick
+```
 
 `prek` covers fast hygiene (whitespace, yaml/toml, large files, codespell). It does **not** compile the crate on every commit.
 

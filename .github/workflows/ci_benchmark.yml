@@ -1,0 +1,129 @@
+name: Benchmark PR
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "benchmarks/**"
+      - "asv.conf.json"
+      - "benches/**"
+      - ".github/workflows/ci_benchmark.yml"
+
+permissions: read-all
+
+jobs:
+  benchmark:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: main
+            sha: ${{ github.event.pull_request.base.sha }}
+          - label: pr
+            sha: ${{ github.event.pull_request.head.sha }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout target commit (preserve ASV suite from PR head)
+        run: |
+          mkdir -p /tmp/_bench_preserve
+          cp -a benchmarks asv.conf.json /tmp/_bench_preserve/
+          git checkout -f ${{ matrix.sha }}
+          git clean -fd
+          rm -rf benchmarks asv.conf.json
+          cp -a /tmp/_bench_preserve/benchmarks .
+          cp /tmp/_bench_preserve/asv.conf.json .
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-${{ matrix.label }}
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Build release rtrash
+        run: |
+          cargo build --locked --release --bin rtrash
+          echo "RTRASH_BIN=${{ github.workspace }}/target/release/rtrash" >> "$GITHUB_ENV"
+          ./target/release/rtrash --version
+
+      - name: Run ASV (quick, record samples)
+        run: |
+          # asv discover runs under the *existing* interpreter; that env must
+          # have asv_runner (uvx alone leaves system python without it).
+          uv venv .asv-venv
+          uv pip install --python .asv-venv asv
+          printf "\n\n\n\n\n\n" | .asv-venv/bin/asv machine --yes
+          .asv-venv/bin/asv run -E "existing:${{ github.workspace }}/.asv-venv/bin/python" \
+            --set-commit-hash ${{ matrix.sha }} \
+            --record-samples --quick
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.label }}
+          path: .asv/results/
+          retention-days: 7
+
+  combine:
+    needs: benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Download main results
+        uses: actions/download-artifact@v4
+        with:
+          name: bench-main
+          path: results/
+
+      - name: Download PR results
+        uses: actions/download-artifact@v4
+        with:
+          name: bench-pr
+          path: results/
+
+      - name: Compare with asv-spyglass
+        run: |
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          PR_SHA="${{ github.event.pull_request.head.sha }}"
+          BASE_PREFIX="${BASE_SHA:0:8}"
+          PR_PREFIX="${PR_SHA:0:8}"
+          BASE_FILE=$(find results -name "${BASE_PREFIX}*.json" ! -name 'benchmarks.json' | head -1)
+          PR_FILE=$(find results -name "${PR_PREFIX}*.json" ! -name 'benchmarks.json' | head -1)
+          BCONF=$(find results -name "benchmarks.json" | head -1)
+          echo "Base file: $BASE_FILE"
+          echo "PR file: $PR_FILE"
+          BCONF_ARG=""
+          if [ -n "$BCONF" ]; then BCONF_ARG="$BCONF"; fi
+          # Exit 1 = regressions flagged; still produce comparison text.
+          uvx --from "git+https://github.com/airspeed-velocity/asv_spyglass.git" \
+            asv-spyglass compare "$BASE_FILE" "$PR_FILE" $BCONF_ARG \
+            --label-before main --label-after pr \
+            > results/comparison.txt || true
+          if [ ! -s results/comparison.txt ]; then
+            echo "::error::asv-spyglass compare produced no output"
+            exit 1
+          fi
+          cat results/comparison.txt
+
+      - name: Write metadata
+        run: |
+          echo "main_sha=${{ github.event.pull_request.base.sha }}" > results/metadata.txt
+          echo "pr_sha=${{ github.event.pull_request.head.sha }}" >> results/metadata.txt
+
+      - name: Upload combined results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: results/
+          retention-days: 7

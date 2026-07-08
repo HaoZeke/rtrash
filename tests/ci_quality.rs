@@ -30,7 +30,7 @@ fn ci_workflow_runs_fmt_clippy_locked_tests() {
         "cargo fmt --check",
         "cargo clippy",
         "-D warnings",
-        "cargo test --locked",
+        "nextest",
         "pull_request",
     ] {
         assert!(
@@ -67,7 +67,7 @@ fn contributing_documents_quality_bar() {
     for needle in [
         "cargo fmt --check",
         "cargo clippy",
-        "cargo test --locked",
+        "nextest",
         "Cargo.lock",
         "deny",
     ] {
@@ -76,4 +76,25 @@ fn contributing_documents_quality_bar() {
             "CONTRIBUTING.md must document {needle:?}"
         );
     }
+}
+
+#[test]
+fn cargo_dist_and_asv_layout_exist() {
+    let root = workspace_root();
+    assert!(
+        root.join("dist-workspace.toml").is_file(),
+        "dist-workspace.toml (cargo-dist) required"
+    );
+    let dist = fs::read_to_string(root.join("dist-workspace.toml")).unwrap();
+    assert!(
+        dist.contains("unknown-linux-musl"),
+        "cargo-dist targets should include Linux musl for FreeDesktop binaries"
+    );
+    assert!(root.join("asv.conf.json").is_file());
+    assert!(root.join("benchmarks/trash_ops.py").is_file());
+    let bench_ci = fs::read_to_string(root.join(".github/workflows/ci_benchmark.yml")).unwrap();
+    assert!(bench_ci.contains("asv run") || bench_ci.contains("asv-spyglass"));
+    let comment = fs::read_to_string(root.join(".github/workflows/ci_bench_commenter.yml")).unwrap();
+    assert!(comment.contains("asv-perch"));
+    assert!(root.join(".config/nextest.toml").is_file());
 }

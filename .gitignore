@@ -33,3 +33,8 @@ docs/build/
 # docs/source/*.rst are generated; conf.py and _static stay
 docs/source/*.rst
 !docs/source/conf.py
+
+# ASV local results/html
+.asv/
+
+.asv-venv/
