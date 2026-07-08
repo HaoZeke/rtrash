@@ -36,6 +36,9 @@ Desktop environments already share a FreeDesktop trash layout — *rtrash* is a 
 | Python instead of permanent unlink | =rtrash.unlink(path)= after =import rtrash= |
 | See reclaim before empty | =rtrash empty --dry-run= |
 
+Terminal demo (put → list → restore → empty): see the GIF and cast under
+=docs/demo/= on GitHub (regenerate with =./docs/demo/record.sh=).
+
 * Install (shortest path)
 
 ** CLI

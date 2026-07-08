@@ -47,4 +47,3 @@ python -m unittest tests.python.test_rtrash -v
 **release the GIL** for FreeDesktop I/O (`PyO3` `detach`), so other Python
 threads can run during large tree puts or bulk empty. The API always passes
 `--plain` (never opens the CLI TUI).
-

@@ -2,59 +2,62 @@
 
 <p align="center"> <img src="docs/source/_static/logo.svg" width="280" alt="rtrash logo" /> </p>
 
-Native Rust FreeDesktop trash for Linux: an rm-compatible put path and the everyday trash-cli suite (`trash-put`, `trash-empty`, `trash-list`, `trash-restore`, `trash-rm`) as one multi-call binary.
+<p align="center">
+<strong>Native FreeDesktop trash</strong> — rm-compatible put, full trash-cli suite, optional Python bindings.<br/>
+One multi-call binary. Recoverable by design. Parallel empty.
+</p>
+
+<p align="center">
+<a href="https://crates.io/crates/rtrash"><img src="https://img.shields.io/crates/v/rtrash.svg" alt="crates.io" /></a>
+<a href="https://pypi.org/project/rtrash/"><img src="https://img.shields.io/pypi/v/rtrash.svg" alt="PyPI" /></a>
+<a href="https://rtrash.rgoswami.me"><img src="https://img.shields.io/badge/docs-rtrash.rgoswami.me-blue" alt="docs" /></a>
+</p>
+
 Implements the [freedesktop.org Trash specification](https://specifications.freedesktop.org/trash-spec/trashspec-latest.html).
 No interpreter startup; emptying deletes entries in parallel via [rayon](https://crates.io/crates/rayon).
+
+## Demo
+
+**30 seconds:** put → list/status → restore one file → empty the rest (isolated FreeDesktop trash).
+
+![rtrash quickstart: put, list, restore, empty](docs/demo/rtrash-quickstart.gif)
+
+Source: [docs/demo/](docs/demo/) — regenerate with `./docs/demo/record.sh` (asciinema + agg, sandboxed `XDG_DATA_HOME`). Asciicast: [rtrash-quickstart.cast](docs/demo/rtrash-quickstart.cast).
+
+On a TTY, bare `rtrash restore` / `empty` / `put` open multi-select **TUI** browsers (fuzzy filter, customizable keys). Scripts use `--plain`.
+
+```console
+$ cargo binstall rtrash && rtrash setup   # or: cargo install rtrash / pip install rtrash
+$ rtrash notes.txt                        # put (rm-shaped flags work: -rf, -f, …)
+$ rtrash list && rtrash status
+$ rtrash restore --plain /path/to/notes.txt
+$ rtrash empty --plain
+```
 
 ## Documentation
 
 | Doc | Contents |
 | --- | --- |
 | [docs/getting-started.md](docs/getting-started.md) | Install CLI + Python, shortest paths |
+| [docs/demo/](docs/demo/) | Terminal demo cast/GIF + recorder |
 | [docs/architecture.md](docs/architecture.md) | FreeDesktop layout, safety vs `rm` / `os.remove` / trash-cli |
 | [docs/benchmarks.md](docs/benchmarks.md) | Measured safer/better/faster vs trash-cli |
 | [docs/bindings.md](docs/bindings.md) | Maturin/PyO3 API (`unlink` / `rmtree` replacements) |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes (towncrier fragments in `docs/newsfragments/`) |
 
-Org-mode sources (readcon-core style): [docs/orgmode/](docs/orgmode/).
+Site: **https://rtrash.rgoswami.me** · Org sources: [docs/orgmode/](docs/orgmode/).
 
 ### Python: replace permanent delete
 
 ```python
 import rtrash
-rtrash.unlink("file.txt")    # not os.remove
+rtrash.unlink("file.txt")    # not os.remove — GIL released during I/O
 rtrash.rmtree("build/")      # not shutil.rmtree
 ```
 
 ```console
 $ pip install rtrash
 ```
-
-
-## Docs site
-
-Published at **https://rtrash.rgoswami.me** (Cloudflare Pages).
-
-
-Project documentation is authored in **orgmode** under [`docs/orgmode/`](docs/orgmode/) and built to a **Sphinx + Shibuya** static site (readcon-style: org → RST → HTML).
-
-```shell
-# needs: pandoc (or emacs + ox-rst), python3, venv
-./docs/build.sh
-# HTML → docs/build/index.html
-python3 -m http.server -d docs/build 8000
-```
-
-| Page | Source |
-|------|--------|
-| Landing | `docs/orgmode/index.org` |
-| Getting started | `docs/orgmode/getting-started.org` |
-| Architecture | `docs/orgmode/architecture.org` |
-| Benchmarks | `docs/orgmode/benchmarks.org` |
-| Python bindings | `docs/orgmode/bindings.org` |
-
-Markdown mirrors under `docs/*.md` remain for quick GitHub reading; the site is the structured presentation of the same material.
-
 
 ## Platform
 

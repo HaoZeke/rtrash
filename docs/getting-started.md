@@ -2,6 +2,23 @@
 
 Docs: <https://rtrash.rgoswami.me>
 
+## 30-second story
+
+| Step | Command |
+|------|---------|
+| Install | `cargo binstall rtrash && rtrash setup` (or `cargo install` / `pip install rtrash`) |
+| Trash files | `rtrash file` or `rtrash put -rf dir` (rm-shaped flags) |
+| See trash | `rtrash list` · `rtrash status` |
+| Bring back | `rtrash restore` (TUI on TTY) or `rtrash restore --plain PATH` |
+| Wipe | `rtrash empty` (TUI) or `rtrash empty --plain` |
+| Scripts | always prefer `--plain` / non-TTY; pin `--trash-dir=` or isolate `XDG_DATA_HOME` |
+
+Animated loop (put → list → restore → empty):
+
+![rtrash quickstart](demo/rtrash-quickstart.gif)
+
+Regenerate: [`docs/demo/record.sh`](demo/record.sh). Platform: Linux FreeDesktop primary; macOS experimental home FDO trash; Windows system Recycle Bin.
+
 ## When to use what
 
 | Need | Use |
@@ -16,6 +33,7 @@ Docs: <https://rtrash.rgoswami.me>
 - [architecture.md](architecture.md) — FreeDesktop placement, fail-safes
 - [benchmarks.md](benchmarks.md) — measured comparison vs trash-cli
 - [bindings.md](bindings.md) — Python API
+- [demo/](demo/) — terminal cast/GIF for README
 
 ## Install
 

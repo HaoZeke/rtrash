@@ -1006,5 +1006,3 @@ fn empty_dry_run_uses_directorysizes_for_dir_payload() {
         "dry-run reclaim must use directorysizes when valid: {err}"
     );
 }
-
-
