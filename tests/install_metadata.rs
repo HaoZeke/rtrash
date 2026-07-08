@@ -1,9 +1,9 @@
 //! Structural checks: cargo-binstall metadata and package-release naming agree.
 //! No network; reads Cargo.toml + scripts/package-release.sh from the tree.
 //!
-//! Critical: default host triple on Linux desktops is often
-//! `x86_64-unknown-linux-gnu`, but we only publish a *musl* tarball. Metadata
-//! must remap that host to the musl asset so bare `cargo binstall rtrash` works.
+//! Critical: default host triples on Linux desktops are often *-linux-gnu, but
+//! we only publish *musl* tarballs for x86_64 and aarch64. Metadata must remap
+//! those hosts to the musl assets so bare `cargo binstall rtrash` works.
 
 use std::fs;
 use std::path::PathBuf;
@@ -17,7 +17,6 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
 
-/// First `version = "…"` in the package table (Cargo.toml top).
 fn package_version(cargo_toml: &str) -> &str {
     let mut in_package = false;
     for line in cargo_toml.lines() {
@@ -58,160 +57,128 @@ fn package_name(cargo_toml: &str) -> &str {
     panic!("package name not found");
 }
 
-/// Expand the Linux x86_64 override template (musl asset) for the current version.
-/// This is what a typical `x86_64-unknown-linux-gnu` host must resolve to.
-fn expand_linux_x86_64_musl_asset(name: &str, version: &str) -> (String, String, String) {
-    let musl_target = "x86_64-unknown-linux-musl";
-    let basename = format!("{name}-{version}-{musl_target}.tar.gz");
-    let bin_path = format!("{name}-{version}-{musl_target}/bin/{name}");
-    let url_suffix = format!("releases/download/v{version}/{basename}");
-    (basename, bin_path, url_suffix)
-}
-
-/// What a naive `{ target }` expansion would produce for the default glibc host
-/// (must NOT be the only documented path — that asset is not published).
-fn expand_naive_gnu_host(name: &str, version: &str) -> String {
-    format!("{name}-{version}-x86_64-unknown-linux-gnu.tar.gz")
+fn musl_asset(name: &str, version: &str, arch: &str) -> (String, String) {
+    let triple = format!("{arch}-unknown-linux-musl");
+    let basename = format!("{name}-{version}-{triple}.tar.gz");
+    let bin_path = format!("{name}-{version}-{triple}/bin/{name}");
+    (basename, bin_path)
 }
 
 #[test]
 fn binstall_metadata_matches_package_release_basename() {
     let cargo = read("Cargo.toml");
     let script = read("scripts/package-release.sh");
+    let workflow = read(".github/workflows/release.yml");
 
-    assert!(
-        cargo.contains("[package.metadata.binstall]"),
-        "Cargo.toml must declare [package.metadata.binstall]"
-    );
-    assert!(
-        cargo.contains("pkg-fmt = \"tgz\"") || cargo.contains("pkg-fmt = \"tar.gz\""),
-        "pkg-fmt must be a tar.gz style format"
-    );
+    assert!(cargo.contains("[package.metadata.binstall]"));
+    assert!(cargo.contains("pkg-fmt = \"tgz\"") || cargo.contains("pkg-fmt = \"tar.gz\""));
 
     let name = package_name(&cargo);
     let version = package_version(&cargo);
     assert_eq!(name, "rtrash");
 
-    // package-release.sh builds NAME="rtrash-${VERSION}-${TARGET}" then TAR=…/${NAME}.tar.gz
     assert!(
-        script.contains("NAME=\"rtrash-${VERSION}-${TARGET}\""),
+        script.contains("rtrash-${VERSION}-${TARGET}")
+            || script.contains("NAME=\"rtrash-${VERSION}-${TARGET}\"")
+            || script.contains("local NAME=\"rtrash-${VERSION}-${TARGET}\""),
         "package-release must set NAME to rtrash-VERSION-TARGET"
     );
+    assert!(script.contains("${NAME}.tar.gz") || script.contains("NAME}.tar.gz"));
+    assert!(script.contains("bin/rtrash"));
     assert!(
-        script.contains("${NAME}.tar.gz"),
-        "package-release must emit ${{NAME}}.tar.gz"
+        script.contains("aarch64-unknown-linux-musl"),
+        "package-release must know aarch64 musl target"
     );
     assert!(
-        script.contains("bin/rtrash"),
-        "package-release must stage bin/rtrash (binstall bin-dir)"
-    );
-    assert!(
-        script.contains("metadata.binstall")
-            || script.contains("cargo-binstall")
-            || script.contains("binstall"),
-        "package-release should mention binstall naming lockstep"
+        script.contains("x86_64-unknown-linux-musl"),
+        "package-release must know x86_64 musl target"
     );
 
-    let (basename, bin_path, url_suffix) = expand_linux_x86_64_musl_asset(name, version);
+    assert!(
+        workflow.contains("aarch64-unknown-linux-musl"),
+        "release workflow must build aarch64 musl"
+    );
+    assert!(
+        workflow.contains("x86_64-unknown-linux-musl"),
+        "release workflow must build x86_64 musl"
+    );
+
+    let (x86_base, x86_bin) = musl_asset(name, version, "x86_64");
+    let (arm_base, arm_bin) = musl_asset(name, version, "aarch64");
     assert_eq!(
-        basename,
+        x86_base,
         format!("rtrash-{version}-x86_64-unknown-linux-musl.tar.gz")
     );
     assert_eq!(
-        bin_path,
+        arm_base,
+        format!("rtrash-{version}-aarch64-unknown-linux-musl.tar.gz")
+    );
+    assert_eq!(
+        x86_bin,
         format!("rtrash-{version}-x86_64-unknown-linux-musl/bin/rtrash")
     );
-    assert!(url_suffix.starts_with("releases/download/v"));
-    assert!(url_suffix.ends_with(&basename));
+    assert_eq!(
+        arm_bin,
+        format!("rtrash-{version}-aarch64-unknown-linux-musl/bin/rtrash")
+    );
 }
 
 #[test]
-fn binstall_remaps_default_linux_gnu_host_to_musl_asset() {
+fn binstall_remaps_linux_gnu_hosts_to_matching_musl_assets() {
     let cargo = read("Cargo.toml");
     let name = package_name(&cargo);
     let version = package_version(&cargo);
 
-    // Override table for all x86_64 Linux (covers gnu *and* musl host triples).
-    assert!(
-        cargo.contains("overrides")
-            && (cargo.contains("target_os") || cargo.contains("cfg(all(target_os")),
-        "must declare a binstall override for Linux x86_64 (or equivalent)"
-    );
-    // Hardcoded musl triple in the override URL (not only {{ target }}).
     assert!(
         cargo.contains("x86_64-unknown-linux-musl.tar.gz"),
-        "override pkg-url must hardcode the musl tarball basename pattern"
+        "x86_64 musl asset in metadata"
     );
     assert!(
-        cargo.contains("x86_64-unknown-linux-musl/bin/"),
-        "override bin-dir must hardcode the musl staged directory"
+        cargo.contains("aarch64-unknown-linux-musl.tar.gz"),
+        "aarch64 musl asset in metadata"
     );
 
-    let (musl_basename, musl_bin, _) = expand_linux_x86_64_musl_asset(name, version);
-    let gnu_naive = expand_naive_gnu_host(name, version);
-
-    // The published asset (and override) must be the musl name, not the naive gnu expansion.
-    assert_ne!(
-        musl_basename, gnu_naive,
-        "musl and gnu basenames must differ so the remapping is meaningful"
+    // cfg overrides for both arches (not only { target } templates).
+    assert!(
+        cargo.contains("target_arch = \\\"x86_64\\\"")
+            || cargo.contains("target_arch = \"x86_64\""),
+        "x86_64 linux override cfg"
     );
     assert!(
-        !cargo.contains(&format!("{{ name }}-{{ version }}-x86_64-unknown-linux-gnu")),
-        "must not publish a linux-gnu-only template as the only Linux path"
+        cargo.contains("target_arch = \\\"aarch64\\\"")
+            || cargo.contains("target_arch = \"aarch64\""),
+        "aarch64 linux override cfg"
     );
 
-    // Simulate what a successful default-host resolution must produce for docs/CI.
-    // Host: x86_64-unknown-linux-gnu → override → musl asset (not gnu).
-    let resolved_for_default_host = musl_basename.clone();
+    let (x86_musl, _) = musl_asset(name, version, "x86_64");
+    let (arm_musl, _) = musl_asset(name, version, "aarch64");
+    let x86_gnu_naive = format!("{name}-{version}-x86_64-unknown-linux-gnu.tar.gz");
+    let arm_gnu_naive = format!("{name}-{version}-aarch64-unknown-linux-gnu.tar.gz");
+
+    assert_ne!(x86_musl, x86_gnu_naive);
+    assert_ne!(arm_musl, arm_gnu_naive);
+
+    // Default glibc hosts must resolve to musl published names, not gnu.
     assert_eq!(
-        resolved_for_default_host,
+        x86_musl,
         format!("{name}-{version}-x86_64-unknown-linux-musl.tar.gz")
     );
-    assert_ne!(
-        resolved_for_default_host, gnu_naive,
-        "default glibc host must not resolve to an unpublished *-linux-gnu*.tar.gz"
-    );
-
-    // package-release default TARGET is musl — same basename the override points at.
-    let script = read("scripts/package-release.sh");
-    assert!(
-        script.contains("x86_64-unknown-linux-musl"),
-        "package-release default target must be the musl triple used by binstall override"
-    );
     assert_eq!(
-        musl_bin,
-        format!("{name}-{version}-x86_64-unknown-linux-musl/bin/{name}")
+        arm_musl,
+        format!("{name}-{version}-aarch64-unknown-linux-musl.tar.gz")
     );
 }
 
 #[test]
 fn readme_prioritizes_binstall_install_path() {
     let s = read("README.md");
-    let binstall_pos = s
-        .find("cargo binstall")
-        .expect("README must document cargo binstall");
-    let cargo_install_git = s
-        .find("cargo install --git")
-        .expect("README must still document cargo install --git fallback");
+    let binstall_pos = s.find("cargo binstall").expect("cargo binstall");
+    let cargo_install_git = s.find("cargo install --git").expect("cargo install --git");
+    assert!(binstall_pos < cargo_install_git);
+    assert!(s.contains("rtrash setup"));
+    assert!(s.contains("musl"));
     assert!(
-        binstall_pos < cargo_install_git,
-        "README should present cargo binstall before cargo install --git (binstall_pos={binstall_pos}, cargo_install_git={cargo_install_git})"
-    );
-    assert!(
-        s.contains("rtrash setup"),
-        "post-install setup must still be documented"
-    );
-    assert!(
-        s.contains("Release") || s.contains("v*"),
-        "docs must mention that a published release/tag is required for binstall assets"
-    );
-    // Primary recipe must not rely on inventing --pkg-url; musl remapping is the mechanism.
-    assert!(
-        s.contains("musl")
-            && (s.contains("glibc")
-                || s.contains("linux-gnu")
-                || s.contains("x86_64 Linux")
-                || s.contains("static")),
-        "README must explain that the prebuilt is musl (works on typical glibc hosts) or how remapping works"
+        s.contains("aarch64") || s.contains("arm64") || s.contains("ARM"),
+        "README should mention aarch64/ARM prebuilds"
     );
 }

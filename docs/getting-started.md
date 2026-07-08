@@ -18,8 +18,9 @@
 
 ### CLI (Rust)
 
-**Preferred** on **x86_64 Linux** when a GitHub Release for this version exists
-(tag `v*`, asset `rtrash-<version>-x86_64-unknown-linux-musl.tar.gz`):
+**Preferred** on **x86_64 or aarch64 Linux** when a GitHub Release for this
+version exists (tag `v*`, musl assets
+`rtrash-<version>-{x86_64,aarch64}-unknown-linux-musl.tar.gz`):
 
 ```shell
 cargo binstall rtrash
@@ -27,10 +28,10 @@ cargo binstall rtrash
 rtrash setup
 ```
 
-Metadata remaps typical glibc hosts (`x86_64-unknown-linux-gnu`) to that musl
-static tarball (no `--target` / `--pkg-url` required). Always finish with
-**`rtrash setup`** (multi-call links, bash/zsh/fish completions, man under
-`~/.local`).
+Metadata remaps typical glibc hosts (`*-unknown-linux-gnu`) on those arches to
+the matching musl static tarball (no `--target` / `--pkg-url` required). Always
+finish with **`rtrash setup`** (multi-call links, bash/zsh/fish completions,
+man under `~/.local`).
 
 **Manual tarball:** download the Release asset or run
 `./scripts/package-release.sh`, then `rtrash setup`.

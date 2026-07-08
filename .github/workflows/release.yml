@@ -1,5 +1,5 @@
-# Build a musl release tarball on tag pushes (v*).
-# Users can also build the same artifact locally with scripts/package-release.sh.
+# Build musl release tarballs on tag pushes (v*) for Linux x86_64 and aarch64.
+# Users can also build the same artifacts locally with scripts/package-release.sh.
 name: release
 
 on:
@@ -13,26 +13,37 @@ permissions:
 
 jobs:
   package:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            # Native ARM runner so we do not need a musl cross-linker on x86.
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.target }}
       - name: musl tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: package
         env:
-          SKIP_TEST: "0"
-        run: ./scripts/package-release.sh x86_64-unknown-linux-musl
+          # Host tests already run on PRs; packaging job focuses on the artifact.
+          SKIP_TEST: "1"
+        run: ./scripts/package-release.sh ${{ matrix.target }}
       - name: upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rtrash-musl
+          name: rtrash-${{ matrix.target }}
           path: dist/*.tar.gz
-      - name: attach to GitHub Release (tags only)
+      - name: upload release assets (tags only)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.tar.gz
           generate_release_notes: true
+          fail_on_unmatched_files: true

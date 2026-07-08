@@ -68,32 +68,35 @@ dirs). Not a Windows/macOS system-trash wrapper, and not a colored TUI.
 ## Install
 
 Recommended order when a **GitHub Release** for this version exists
-(tag `v0.1.0` style, asset
-`rtrash-<version>-x86_64-unknown-linux-musl.tar.gz` — same pattern as
-`[package.metadata.binstall]` in `Cargo.toml`):
+(tag `v0.1.0` style). Prebuilt Linux **musl static** assets:
+
+| Arch | Asset basename |
+| ---- | -------------- |
+| x86_64 | `rtrash-<version>-x86_64-unknown-linux-musl.tar.gz` |
+| aarch64 (ARM64) | `rtrash-<version>-aarch64-unknown-linux-musl.tar.gz` |
+
+Naming matches `[package.metadata.binstall]` in `Cargo.toml` / `scripts/package-release.sh`:
 
 ### 1. `cargo binstall` (preferred binary install)
 
 Uses [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) to download
-the prebuilt **x86_64 Linux musl static** tarball from Releases (no local
-compile). The release workflow only ships that musl asset today. Crate
-metadata remaps **both** `x86_64-unknown-linux-gnu` (typical glibc desktops)
-and `x86_64-unknown-linux-musl` hosts to
-`rtrash-<version>-x86_64-unknown-linux-musl.tar.gz`, so a normal:
+the prebuilt **Linux musl static** tarball for your CPU (no local compile).
+CI ships **x86_64** and **aarch64** musl assets. Crate metadata remaps typical
+glibc hosts (`*-unknown-linux-gnu`) to the matching musl tarball, so a normal:
 
 ```console
 $ cargo binstall rtrash
 ```
 
-does **not** look for a non-existent `*-linux-gnu*.tar.gz`. You do not need
-`--pkg-url` or `--target` on x86_64 Linux. Requires a published GitHub Release
-for this version (tag `v*`).
+does **not** look for a non-existent `*-linux-gnu*.tar.gz` on x86_64 or
+aarch64 Linux. You do not need `--pkg-url` or `--target` on those hosts.
+Requires a published GitHub Release for this version (tag `v*`).
 
 ```console
 # one-time: install cargo-binstall itself (see upstream docs)
 $ cargo binstall cargo-binstall
 
-# once this version has a GitHub Release asset (x86_64 Linux):
+# once this version has a GitHub Release asset (x86_64 or aarch64 Linux):
 $ cargo binstall rtrash
 # or before crates.io publish, from this repo's metadata:
 $ cargo binstall --git https://github.com/HaoZeke/rtrash rtrash
@@ -101,8 +104,9 @@ $ cargo binstall --git https://github.com/HaoZeke/rtrash rtrash
 $ rtrash setup
 ```
 
-Other OS/arch combos have no prebuilt asset yet — use from-source install
-below (or wait for multi-arch release assets).
+macOS and Windows have no prebuilt FreeDesktop assets (and Windows system
+trash is out of scope for this tool's niche). Use from-source only where the
+Linux FreeDesktop code path applies, or track the open port work separately.
 
 Always run **`rtrash setup`** after the binary lands on `PATH` so multi-call
 links, shell completions (bash/zsh/fish), and the man page are installed under
@@ -118,12 +122,15 @@ Build the **same** artifact yourself (builder host with musl target):
 
 ```console
 $ ./scripts/package-release.sh x86_64-unknown-linux-musl
-# → dist/rtrash-<version>-x86_64-unknown-linux-musl.tar.gz
+$ ./scripts/package-release.sh aarch64-unknown-linux-musl
+# or, on a host that can build both:
+$ ./scripts/package-release.sh --all
+# → dist/rtrash-<version>-{x86_64,aarch64}-unknown-linux-musl.tar.gz
 ```
 
-CI: [`.github/workflows/release.yml`](.github/workflows/release.yml) runs that
-script on `v*` tags and attaches the tarball to the GitHub Release (what
-binstall downloads).
+CI: [`.github/workflows/release.yml`](.github/workflows/release.yml) builds
+both targets on `v*` tags (x86_64 and ubuntu-24.04-arm) and attaches the
+tarballs to the GitHub Release (what binstall downloads).
 
 ### 3. From source (`cargo install`)
 
