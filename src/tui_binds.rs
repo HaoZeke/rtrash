@@ -1,25 +1,27 @@
 //! Configurable TUI keybinds for restore / empty / put browsers.
 //!
 //! Defaults match the shipped keymap. Override any action in
-//! `$XDG_CONFIG_HOME/rtrash/keys.conf` (or `$HOME/.config/rtrash/keys.conf`),
-//! or point `RTRASH_KEYS` at a file. Format:
+//! `$XDG_CONFIG_HOME/rtrash/keys.toml` (or `$HOME/.config/rtrash/keys.toml`),
+//! or point `RTRASH_KEYS` at a file. TOML format:
 //!
-//! ```text
-//! # action = key [key ...]
-//! move_down = down j
-//! quit = q esc
-//! toggle_mark = space
+//! ```toml
+//! [keys]
+//! move_down = ["down", "j"]
+//! quit = ["q", "esc"]
+//! toggle_mark = "space"          # string or array
+//! help = []                      # clear (unbind)
 //! ```
 //!
-//! Unlisted actions keep defaults. `action =` with no keys clears that action's
-//! defaults (leave at least quit bound).
+//! Unlisted actions keep defaults. Empty array clears that action's defaults
+//! (leave at least quit bound).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyModifiers};
+use serde::Deserialize;
 
 /// Bindable roles shared across browsers (mode filters which apply).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -475,35 +477,26 @@ impl Keymap {
             .join("/")
     }
 
-    /// Apply overrides from a config file body (partial merge onto self).
+    /// Apply overrides from a TOML config body (partial merge onto self).
     pub fn apply_config_text(&mut self, text: &str) -> Result<Vec<String>, String> {
+        let file: KeysFile = toml::from_str(text).map_err(|e| format!("toml: {e}"))?;
         let mut notes = Vec::new();
-        for (lineno, raw) in text.lines().enumerate() {
-            let line = raw.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some((name, rest)) = line.split_once('=') else {
-                return Err(format!("line {}: expected action = keys", lineno + 1));
-            };
-            let name = name.trim();
-            let Some(action) = Action::from_name(name) else {
+        for (name, spec) in file.keys {
+            let Some(action) = Action::from_name(&name) else {
                 return Err(format!(
-                    "line {}: unknown action `{name}` (see rtrash keys --list)",
-                    lineno + 1
+                    "unknown action `{name}` under [keys] (see rtrash keys --list)"
                 ));
             };
-            let rest = rest.trim();
-            if rest.is_empty() {
+            let tokens = spec.into_tokens();
+            if tokens.is_empty() {
                 self.binds.insert(action, Vec::new());
                 notes.push(format!("cleared binds for {}", action.name()));
                 continue;
             }
-            let mut chords = Vec::new();
-            for tok in rest.split_whitespace() {
+            let mut chords = Vec::with_capacity(tokens.len());
+            for tok in &tokens {
                 chords.push(
-                    Chord::parse(tok)
-                        .map_err(|e| format!("line {}: key `{tok}`: {e}", lineno + 1))?,
+                    Chord::parse(tok).map_err(|e| format!("key `{tok}` for `{name}`: {e}"))?,
                 );
             }
             self.binds.insert(action, chords);
@@ -539,24 +532,26 @@ impl Keymap {
         Self::builtin()
     }
 
-    /// Default sample file body (comments + all actions).
+    /// Default sample TOML body (comments + all actions).
     pub fn sample_config() -> String {
         let mut out = String::from(
-            "# rtrash TUI keybinds — copy to $XDG_CONFIG_HOME/rtrash/keys.conf\n\
-             # Override any action; unlisted actions keep built-in defaults.\n\
-             # Keys: j, space, enter, esc, up, down, pgup, pgdn, home, end,\n\
-             #       ctrl-c, alt-x, f1..f12. Multiple keys: space-separated.\n\
-             # Clear an action:  help =\n\n",
+            "# rtrash TUI keybinds — copy to $XDG_CONFIG_HOME/rtrash/keys.toml\n\
+             # Override any action under [keys]; unlisted actions keep defaults.\n\
+             # Each value is a string or array of key names:\n\
+             #   j, space, enter, esc, up, down, pgup, pgdn, home, end,\n\
+             #   ctrl-c, alt-x, f1..f12\n\
+             # Clear an action:  help = []\n\n\
+             [keys]\n",
         );
         let builtin = Self::builtin();
         for &a in Action::ALL {
-            let keys = builtin
-                .chords(a)
+            let keys: Vec<String> = builtin.chords(a).iter().map(|c| c.display()).collect();
+            let arr = keys
                 .iter()
-                .map(|c| c.display())
+                .map(|k| format!("\"{k}\""))
                 .collect::<Vec<_>>()
-                .join(" ");
-            out.push_str(&format!("# {}\n{} = {}\n", a.doc(), a.name(), keys));
+                .join(", ");
+            out.push_str(&format!("# {}\n{} = [{arr}]\n", a.doc(), a.name()));
         }
         out
     }
@@ -606,14 +601,14 @@ impl Keymap {
 
     pub fn help_lines(&self) -> Vec<String> {
         let mut lines = vec![
-            "Keybinds (fully customizable)".into(),
+            "Keybinds (fully customizable TOML)".into(),
             format!(
                 "  config: {}",
                 default_keys_path()
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "~/.config/rtrash/keys.conf".into())
+                    .unwrap_or_else(|| "~/.config/rtrash/keys.toml".into())
             ),
-            "  dump:   rtrash keys --sample > ~/.config/rtrash/keys.conf".into(),
+            "  dump:   rtrash keys --sample > ~/.config/rtrash/keys.toml".into(),
             "  list:   rtrash keys --list".into(),
         ];
         if let Some(ref s) = self.source {
@@ -638,15 +633,42 @@ impl fmt::Display for Keymap {
     }
 }
 
-/// `$XDG_CONFIG_HOME/rtrash/keys.conf` or `~/.config/rtrash/keys.conf`.
+/// Deserialized `keys.toml` root.
+#[derive(Debug, Default, Deserialize)]
+struct KeysFile {
+    #[serde(default)]
+    keys: BTreeMap<String, KeySpec>,
+}
+
+/// One action value: `"j"`, `["down", "j"]`, or `[]` to clear.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum KeySpec {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl KeySpec {
+    fn into_tokens(self) -> Vec<String> {
+        match self {
+            KeySpec::One(s) => {
+                // Allow a single string with spaces as multiple keys for convenience.
+                s.split_whitespace().map(|t| t.to_string()).collect()
+            }
+            KeySpec::Many(v) => v,
+        }
+    }
+}
+
+/// `$XDG_CONFIG_HOME/rtrash/keys.toml` or `~/.config/rtrash/keys.toml`.
 pub fn default_keys_path() -> Option<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("rtrash/keys.conf"));
+            return Some(PathBuf::from(xdg).join("rtrash/keys.toml"));
         }
     }
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".config/rtrash/keys.conf"))
+    Some(PathBuf::from(home).join(".config/rtrash/keys.toml"))
 }
 
 /// CLI: `rtrash keys [--list|--sample|--path]`.
@@ -662,16 +684,23 @@ pub fn run_cli(prog: &str, args: &[String]) -> i32 {
                 print!(
                     "\
 Usage: {prog} keys [OPTION]
-Show or generate TUI keybind configuration.
+Show or generate TUI keybind configuration (TOML).
 
   --list, -l   print resolved keymap (default)
-  --sample     print a full sample keys.conf to stdout
+  --sample     print a full sample keys.toml to stdout
   --path       print the default config path
   --help       this help
 
-Config file: $XDG_CONFIG_HOME/rtrash/keys.conf
-             (fallback: ~/.config/rtrash/keys.conf)
-Override:    RTRASH_KEYS=/path/to/keys.conf
+Config file: $XDG_CONFIG_HOME/rtrash/keys.toml
+             (fallback: ~/.config/rtrash/keys.toml)
+Override:    RTRASH_KEYS=/path/to/keys.toml
+
+Example:
+
+  [keys]
+  move_down = [\"down\", \"j\"]
+  toggle_mark = \"space\"
+  help = []                 # unbind
 
 Every bindable action can be remapped; unlisted actions keep defaults.
 Modes use separate action sets so the same key can mean confirm_yes in
@@ -765,8 +794,14 @@ mod tests {
     #[test]
     fn partial_override_merges() {
         let mut m = Keymap::builtin();
-        m.apply_config_text("move_down = down\ntoggle_mark = x\n")
-            .unwrap();
+        m.apply_config_text(
+            r#"
+[keys]
+move_down = ["down"]
+toggle_mark = "x"
+"#,
+        )
+        .unwrap();
         assert_eq!(
             m.resolve_browse(KeyCode::Char('j'), KeyModifiers::NONE),
             None
@@ -788,7 +823,7 @@ mod tests {
     #[test]
     fn clear_action() {
         let mut m = Keymap::builtin();
-        m.apply_config_text("help =\n").unwrap();
+        m.apply_config_text("[keys]\nhelp = []\n").unwrap();
         assert!(m.chords(Action::Help).is_empty());
         assert_eq!(
             m.resolve_browse(KeyCode::Char('?'), KeyModifiers::NONE),
@@ -799,7 +834,9 @@ mod tests {
     #[test]
     fn unknown_action_errors() {
         let mut m = Keymap::builtin();
-        assert!(m.apply_config_text("nope = x\n").is_err());
+        assert!(m
+            .apply_config_text("[keys]\nnope = \"x\"\n")
+            .is_err());
     }
 
     #[test]
@@ -814,6 +851,27 @@ mod tests {
     }
 
     #[test]
+    fn string_or_array_values() {
+        let mut m = Keymap::builtin();
+        m.apply_config_text(
+            r#"
+[keys]
+move_up = "k"
+move_down = ["down", "j", "J"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            m.resolve_browse(KeyCode::Char('J'), KeyModifiers::NONE),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            m.resolve_browse(KeyCode::Char('k'), KeyModifiers::NONE),
+            Some(Action::MoveUp)
+        );
+    }
+
+    #[test]
     fn load_file_from_disk() {
         let dir = std::env::temp_dir().join(format!(
             "rtrash-keys-test-{}-{}",
@@ -824,8 +882,16 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("keys.conf");
-        fs::write(&path, "move_down = J\nquit = Q\n").unwrap();
+        let path = dir.join("keys.toml");
+        fs::write(
+            &path,
+            r#"
+[keys]
+move_down = ["J"]
+quit = ["Q"]
+"#,
+        )
+        .unwrap();
         let m = Keymap::load_file(&path).unwrap();
         assert_eq!(
             m.resolve_browse(KeyCode::Char('J'), KeyModifiers::NONE),

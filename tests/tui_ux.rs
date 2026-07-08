@@ -99,7 +99,8 @@ fn keybinds_config_partial_override_via_shipped_api() {
     use crossterm::event::{KeyCode, KeyModifiers};
     use rtrash::tui_binds::{Action, Keymap};
     let mut m = Keymap::builtin();
-    m.apply_config_text("toggle_mark = m\nhelp = h\n").unwrap();
+    m.apply_config_text("[keys]\ntoggle_mark = \"m\"\nhelp = \"h\"\n")
+        .unwrap();
     assert_eq!(
         m.resolve_browse(KeyCode::Char('m'), KeyModifiers::NONE),
         Some(Action::ToggleMark)

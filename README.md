@@ -267,7 +267,7 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 
 **TUI keys (shared by restore / empty / put):** defaults `↑↓`/`jk` move · `PgUp`/`PgDn` page · `g`/`G` first/last · `Space` mark · `a`/`A` all/clear · `/` live fuzzy · `?` help · `Enter` action · `q`/`Esc` quit.
 
-**Fully customizable:** every action can be remapped in `$XDG_CONFIG_HOME/rtrash/keys.conf` (or `RTRASH_KEYS=path`). `rtrash keys --list` shows the resolved map; `rtrash keys --sample` prints a full template. Help (`?`) reflects the live map.
+**Fully customizable:** every action can be remapped in `$XDG_CONFIG_HOME/rtrash/keys.toml` (or `RTRASH_KEYS=path`). TOML under `[keys]`; `rtrash keys --list` shows the resolved map; `rtrash keys --sample` prints a full template. Help (`?`) reflects the live map.
 
 Browser-specific actions (also remappable): restore `toggle_force` · empty `toggle_dry_run` · put `toggle_recursive` / `toggle_force`.
 

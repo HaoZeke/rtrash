@@ -92,13 +92,15 @@ All TUI actions are remappable:
 
 ```shell
 mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/rtrash"
-rtrash keys --sample > "${XDG_CONFIG_HOME:-$HOME/.config}/rtrash/keys.conf"
-# edit keys.conf — e.g.  move_down = down j J
-#                       toggle_mark = space x
+rtrash keys --sample > "${XDG_CONFIG_HOME:-$HOME/.config}/rtrash/keys.toml"
+# edit keys.toml, e.g.:
+#   [keys]
+#   move_down = ["down", "j", "J"]
+#   toggle_mark = ["space", "x"]
 rtrash keys --list    # show resolved map
 ```
 
-Override path with `RTRASH_KEYS=/path/to/keys.conf`. Unlisted actions keep defaults.
+Override path with `RTRASH_KEYS=/path/to/keys.toml`. Unlisted actions keep defaults.
 
 Also: **`rtrash empty`** (TTY) multi-select permanent delete; **`rtrash put`** (TTY, no files) multi-select put from the current directory. Use `--plain` to force classic CLI behavior.
 
