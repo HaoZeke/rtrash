@@ -13,6 +13,10 @@ no-default-features = false
 [advisories]
 version = 2
 yanked = "warn"
+# ratatui 0.29 still pulls unmaintained `paste` (RUSTSEC-2024-0436); no safe upgrade in-tree.
+ignore = [
+  { id = "RUSTSEC-2024-0436", reason = "transitive via ratatui; no maintained drop-in in our graph yet" },
+]
 
 [licenses]
 version = 2
