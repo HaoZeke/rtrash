@@ -58,7 +58,9 @@ rtrash setup
 
 `cargo binstall` pulls GitHub Release musl assets (`rtrash-<version>-{x86_64,aarch64}-unknown-linux-musl.tar.gz`).
 Metadata remaps typical glibc hosts (`*-unknown-linux-gnu`) on those arches to the matching musl tarball.
-Always finish with **`rtrash setup`** (multi-call links, bash/zsh/fish completions, man under `~/.local`).
+Always finish with **`rtrash setup`** (multi-call links, bash/zsh/fish completions, man, and a Midnight Commander menu sample under `~/.local`).
+
+Scripts: `rtrash list --json`, `rtrash list --older-than=30`, `rtrash status --json`.
 
 **Manual tarball:** download the Release asset or run `./scripts/package-release.sh`, then `rtrash setup`.
 

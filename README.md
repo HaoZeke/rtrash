@@ -192,6 +192,7 @@ From a checkout (dev): `pip install maturin && maturin develop --features python
 | zsh completion | `~/.local/share/zsh/site-functions/_rtrash` |
 | fish completion | `~/.config/fish/completions/rtrash.fish` (+ multi-call `*.fish` links) |
 | man page | `~/.local/share/man/man1/rtrash.1` |
+| Midnight Commander menu sample (optional) | `~/.local/share/rtrash/mc.menu.sample` — append into `~/.config/mc/menu` by hand; setup never overwrites your menu |
 
 Useful flags: `rtrash setup --dry-run`, `--force` (refresh after upgrade), `--with-rm` (also link `rm` → put into trash), `--prefix=/usr/local`.
 
@@ -282,15 +283,21 @@ Entries are removed in parallel.
 Orphaned `files/` entries (no `.trashinfo`) and entries with broken metadata are purged on a full empty, and the `directorysizes` cache is pruned when present.
 Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts).
 
-### `rtrash status`
-
-Prints per-trash-root and total **item count** plus approximate **reclaimable size** (same disk-usage walk as empty dry-run).
-Accepts `--home-only` and `--trash-dir`.
-
 ### `rtrash list` (also `trash-list`)
 
 Prints `DELETION-DATE ORIGINAL-PATH` per item, oldest first, in the `trash-list` output format (`YYYY-MM-DD HH:MM:SS` plus the original path).
 Scans the home trash and per-mount trash directories owned by the current user, or only the directories given with `--trash-dir=PATH` (repeatable).
+
+| Flag | Meaning |
+|------|---------|
+| `--json` | JSON array of `{deletion_date, original, name, trash_dir}` |
+| `--older-than=DAYS` | Only items trashed more than DAYS days ago (same cutoff as `empty DAYS`) |
+| `--newer-than=DAYS` | Only items trashed within the last DAYS days |
+| `--home-only` | Home trash only |
+
+### `rtrash status`
+
+Per-root item count and reclaimable size (uses `directorysizes` when valid). Same discovery pins as list. Also accepts `--json`, `--older-than=DAYS`, `--newer-than=DAYS`.
 
 ### `rtrash restore [PATH]` (also `trash-restore`)
 

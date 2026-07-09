@@ -179,6 +179,21 @@ Only the home trash
 List only this trash directory (repeatable); default is the home trash
 plus every mounted volume.
 .TP
+.BI \-\-older\-than =DAYS
+Only items trashed more than
+.I DAYS
+days ago (same cutoff model as
+.BR "empty DAYS" ).
+.TP
+.BI \-\-newer\-than =DAYS
+Only items trashed within the last
+.I DAYS
+days.
+.TP
+.B \-\-json
+Emit a JSON array of objects
+(\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR).
+.TP
 .B \-\-help
 Display help and exit.
 .TP
@@ -198,6 +213,20 @@ Only the home trash
 .TP
 .BI \-\-trash\-dir =PATH
 Only this trash directory (repeatable).
+.TP
+.BI \-\-older\-than =DAYS
+Only count items trashed more than
+.I DAYS
+days ago.
+.TP
+.BI \-\-newer\-than =DAYS
+Only count items trashed within the last
+.I DAYS
+days.
+.TP
+.B \-\-json
+Emit a JSON object
+(\fIroots\fR, \fItotal_items\fR, \fItotal_bytes\fR).
 .TP
 .B \-\-help
 Display help and exit.

@@ -17,11 +17,11 @@ _rtrash_empty_opts=(
 )
 
 _rtrash_list_opts=(
-  --home-only --trash-dir= --help --version
+  --home-only --trash-dir= --older-than= --newer-than= --json --help --version
 )
 
 _rtrash_status_opts=(
-  --home-only --trash-dir= --help --version
+  --home-only --trash-dir= --older-than= --newer-than= --json --help --version
 )
 
 _rtrash_restore_opts=(

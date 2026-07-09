@@ -34,6 +34,9 @@ empty_opts=(
 list_opts=(
   '--home-only[only the home trash]'
   '*--trash-dir=[list only this trash directory]:path:_files -/'
+  '--older-than=[only items trashed more than DAYS days ago]:days:'
+  '--newer-than=[only items trashed within the last DAYS days]:days:'
+  '--json[emit a JSON array]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
 )
@@ -41,6 +44,9 @@ list_opts=(
 status_opts=(
   '--home-only[only the home trash]'
   '*--trash-dir=[only this trash directory]:path:_files -/'
+  '--older-than=[only count items trashed more than DAYS days ago]:days:'
+  '--newer-than=[only count items trashed within the last DAYS days]:days:'
+  '--json[emit a JSON object]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
 )

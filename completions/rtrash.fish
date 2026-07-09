@@ -52,6 +52,9 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l home
 for sub in list status
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l home-only -d 'only the home trash'
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l trash-dir -d 'only this trash directory' -r
+    complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l older-than -d 'only items older than DAYS days' -r
+    complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l newer-than -d 'only items within last DAYS days' -r
+    complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l json -d 'JSON output'
 end
 
 # restore
@@ -99,6 +102,9 @@ complete -c trash-empty -l version
 
 complete -c trash-list -l home-only
 complete -c trash-list -l trash-dir -r
+complete -c trash-list -l older-than -r
+complete -c trash-list -l newer-than -r
+complete -c trash-list -l json
 complete -c trash-list -l help
 complete -c trash-list -l version
 

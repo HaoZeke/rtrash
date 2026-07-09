@@ -67,6 +67,8 @@ fn bash_completion_covers_surface() {
             "rm",
             "--home-only",
             "--trash-dir=",
+            "--json",
+            "older-than",
             "--dry-run",
             "trash-put",
             "trash-empty",

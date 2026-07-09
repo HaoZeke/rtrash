@@ -13,6 +13,7 @@ const BASH_COMPLETION: &str = include_str!("../completions/rtrash.bash");
 const ZSH_COMPLETION: &str = include_str!("../completions/_rtrash");
 const FISH_COMPLETION: &str = include_str!("../completions/rtrash.fish");
 const MAN_PAGE: &str = include_str!("../man/rtrash.1");
+const MC_MENU: &str = include_str!("../contrib/mc/menu.rtrash");
 
 const MULTICALL: &[&str] = &[
     "trash",
@@ -29,8 +30,9 @@ Usage: rtrash setup [OPTION]...
        rtrash man
 
 After `cargo install`, run `rtrash setup` once to install multi-call
-symlinks, bash/zsh/fish completions, and the man page under a user prefix
-(default: ~/.local). No source tree required — assets are embedded.
+symlinks, bash/zsh/fish completions, the man page, and an optional Midnight
+Commander menu sample under a user prefix (default: ~/.local). Assets are
+embedded (no source tree required).
 
 setup options:
       --prefix=DIR   install root (default: $HOME/.local, or $PREFIX if set)
@@ -392,6 +394,17 @@ fn run_setup(args: &[String]) -> i32 {
         opts.verbose,
     ));
 
+    // Optional Midnight Commander user-menu sample (never overwrites ~/.config/mc/menu).
+    let mc_dir = share.join("rtrash");
+    ok &= absorb(ensure_dir(&mc_dir, opts.dry_run, opts.verbose));
+    ok &= absorb(write_file(
+        &mc_dir.join("mc.menu.sample"),
+        MC_MENU,
+        opts.force,
+        opts.dry_run,
+        opts.verbose,
+    ));
+
     if !ok {
         return 1;
     }
@@ -409,6 +422,10 @@ fn run_setup(args: &[String]) -> i32 {
         fish_dir.display()
     );
     println!("  man page         → {}/rtrash.1", man_dir.display());
+    println!(
+        "  mc menu sample   → {}/mc.menu.sample",
+        mc_dir.display()
+    );
     println!();
     println!("Shell notes (once per machine/login config):");
     println!("  • PATH must include {}", bin_dir.display());
@@ -432,6 +449,12 @@ fn run_setup(args: &[String]) -> i32 {
         "      export MANPATH=\"{}:${{MANPATH:-}}\"",
         manpath.display()
     );
+    println!("  • midnight commander: append lines from");
+    println!(
+        "      {}/mc.menu.sample",
+        mc_dir.display()
+    );
+    println!("    into ~/.config/mc/menu (optional; never auto-merged).");
     if !opts.with_rm {
         println!();
         println!("Optional: rtrash setup --with-rm   # also link rm → put into trash");
@@ -537,6 +560,14 @@ mod tests {
         assert!(FISH_COMPLETION.contains("dry-run"));
         assert!(FISH_COMPLETION.contains("put"));
         assert!(MAN_PAGE.contains(".TH RTRASH 1"));
+        assert!(MC_MENU.contains("rtrash put"));
+        assert!(BASH_COMPLETION.contains("--json"));
+        assert!(BASH_COMPLETION.contains("older-than"));
+        assert!(FISH_COMPLETION.contains("older-than") || FISH_COMPLETION.contains("json"));
+        assert!(
+            (MAN_PAGE.contains("older") && MAN_PAGE.contains("json"))
+                || MAN_PAGE.contains("JSON")
+        );
     }
 
     #[test]
@@ -564,6 +595,8 @@ mod tests {
         let fish_main = prefix.join("share/fish/vendor_completions.d/rtrash.fish");
         assert!(fish_main.is_file());
         assert!(prefix.join("share/man/man1/rtrash.1").is_file());
+        assert!(prefix.join("share/rtrash/mc.menu.sample").is_file());
+        assert!(fs::read_to_string(prefix.join("share/rtrash/mc.menu.sample")).unwrap().contains("rtrash put"));
         let bash =
             fs::read_to_string(prefix.join("share/bash-completion/completions/rtrash")).unwrap();
         assert!(bash.contains("--home-only"));

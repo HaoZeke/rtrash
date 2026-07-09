@@ -1,0 +1,25 @@
+# Midnight Commander user-menu snippets for rtrash.
+# Append to ~/.config/mc/menu (or merge by hand). Do not replace your whole menu.
+# Docs: https://midnight-commander.org/wiki/doc/Menu
+#
+# %f  current file   %s  selected files   %d  current directory
+
++ t r
+e       Trash current file (rtrash put)
+        rtrash put %f
+
++ t r
+t       Trash selected files
+        rtrash put %s
+
++ t r
+l       List trash (home)
+        rtrash list --home-only | less
+
++ t r
+s       Trash status (home)
+        rtrash status --home-only
+
++ t r
+j       List trash as JSON (home)
+        rtrash list --home-only --json | less
