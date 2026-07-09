@@ -332,7 +332,8 @@ impl<'a> App<'a> {
                 }
                 Some(Action::Help) => {
                     self.mode = Mode::Help;
-                    self.status = format!("help · {} close", self.keys.display_chords(Action::Help));
+                    self.status =
+                        format!("help · {} close", self.keys.display_chords(Action::Help));
                 }
                 Some(Action::ToggleDryRun) => {
                     self.dry_run = !self.dry_run;
@@ -403,10 +404,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         chunks[1],
         &mut app.list_state,
     );
-    let dry_hint = format!(
-        "{} dry-run",
-        app.keys.display_chords(Action::ToggleDryRun)
-    );
+    let dry_hint = format!("{} dry-run", app.keys.display_chords(Action::ToggleDryRun));
     let keys = match app.mode {
         Mode::Browse => app.keys.browse_footer("purge", &dry_hint),
         Mode::Filter => format!(

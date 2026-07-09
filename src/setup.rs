@@ -422,10 +422,7 @@ fn run_setup(args: &[String]) -> i32 {
         fish_dir.display()
     );
     println!("  man page         → {}/rtrash.1", man_dir.display());
-    println!(
-        "  mc menu sample   → {}/mc.menu.sample",
-        mc_dir.display()
-    );
+    println!("  mc menu sample   → {}/mc.menu.sample", mc_dir.display());
     println!();
     println!("Shell notes (once per machine/login config):");
     println!("  • PATH must include {}", bin_dir.display());
@@ -450,10 +447,7 @@ fn run_setup(args: &[String]) -> i32 {
         manpath.display()
     );
     println!("  • midnight commander: append lines from");
-    println!(
-        "      {}/mc.menu.sample",
-        mc_dir.display()
-    );
+    println!("      {}/mc.menu.sample", mc_dir.display());
     println!("    into ~/.config/mc/menu (optional; never auto-merged).");
     if !opts.with_rm {
         println!();
@@ -565,8 +559,7 @@ mod tests {
         assert!(BASH_COMPLETION.contains("older-than"));
         assert!(FISH_COMPLETION.contains("older-than") || FISH_COMPLETION.contains("json"));
         assert!(
-            (MAN_PAGE.contains("older") && MAN_PAGE.contains("json"))
-                || MAN_PAGE.contains("JSON")
+            (MAN_PAGE.contains("older") && MAN_PAGE.contains("json")) || MAN_PAGE.contains("JSON")
         );
     }
 
@@ -596,7 +589,11 @@ mod tests {
         assert!(fish_main.is_file());
         assert!(prefix.join("share/man/man1/rtrash.1").is_file());
         assert!(prefix.join("share/rtrash/mc.menu.sample").is_file());
-        assert!(fs::read_to_string(prefix.join("share/rtrash/mc.menu.sample")).unwrap().contains("rtrash put"));
+        assert!(
+            fs::read_to_string(prefix.join("share/rtrash/mc.menu.sample"))
+                .unwrap()
+                .contains("rtrash put")
+        );
         let bash =
             fs::read_to_string(prefix.join("share/bash-completion/completions/rtrash")).unwrap();
         assert!(bash.contains("--home-only"));

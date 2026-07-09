@@ -1,6 +1,6 @@
-use rtrash::{empty, list, put, restore, rm, setup, status};
 #[cfg(all(unix, feature = "tui"))]
 use rtrash::tui_binds;
+use rtrash::{empty, list, put, restore, rm, setup, status};
 
 const HELP: &str = "\
 Usage: rtrash <COMMAND> [ARGS]...

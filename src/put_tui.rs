@@ -325,7 +325,8 @@ impl App {
                 }
                 Some(Action::Help) => {
                     self.mode = Mode::Help;
-                    self.status = format!("help · {} close", self.keys.display_chords(Action::Help));
+                    self.status =
+                        format!("help · {} close", self.keys.display_chords(Action::Help));
                 }
                 Some(Action::ToggleRecursive) => {
                     self.recursive = !self.recursive;

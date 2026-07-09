@@ -594,10 +594,7 @@ On Windows, invoke `rtrash put|list|restore|empty|rm|status` directly.
         eprintln!(
             "{prog}: setup multi-call install is Unix-oriented; on Windows use subcommands directly"
         );
-        eprintln!(
-            "{prog}: trash backend: {}",
-            platform::trash_backend_label()
-        );
+        eprintln!("{prog}: trash backend: {}", platform::trash_backend_label());
         0
     }
 }

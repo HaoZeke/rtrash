@@ -40,7 +40,9 @@ pub const fn trash_backend() -> TrashBackend {
 pub fn trash_backend_label() -> &'static str {
     match trash_backend() {
         TrashBackend::FreeDesktop => "FreeDesktop",
-        TrashBackend::MacosFdoExperimental => "macOS FreeDesktop home (experimental; not Finder Trash)",
+        TrashBackend::MacosFdoExperimental => {
+            "macOS FreeDesktop home (experimental; not Finder Trash)"
+        }
         TrashBackend::WindowsRecycleBin => "Windows Recycle Bin",
     }
 }

@@ -75,7 +75,10 @@ impl<'a> App<'a> {
             mode: Mode::Browse,
             filter: String::new(),
             filter_draft: String::new(),
-            status: format!("{n} item(s) · {} ", keys.browse_footer("restore", &force_hint)),
+            status: format!(
+                "{n} item(s) · {} ",
+                keys.browse_footer("restore", &force_hint)
+            ),
             quit: false,
             pending_idxs: Vec::new(),
             viewport_rows: 10,
@@ -243,8 +246,7 @@ impl<'a> App<'a> {
             Some(Action::FilterCommit) => {
                 self.filter = self.filter_draft.clone();
                 self.mode = Mode::Browse;
-                self.status =
-                    tui_keys::status_filter_committed(&self.filter, self.filtered.len());
+                self.status = tui_keys::status_filter_committed(&self.filter, self.filtered.len());
             }
             Some(Action::MoveDown) => self.move_sel(1),
             Some(Action::MoveUp) => self.move_sel(-1),
@@ -326,10 +328,7 @@ impl<'a> App<'a> {
             }
             Some(Action::Help) => {
                 self.mode = Mode::Help;
-                self.status = format!(
-                    "help · {} close",
-                    self.keys.display_chords(Action::Help)
-                );
+                self.status = format!("help · {} close", self.keys.display_chords(Action::Help));
             }
             Some(Action::ToggleForce) => {
                 self.force = !self.force;
@@ -403,10 +402,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         .highlight_symbol("▸ ");
     f.render_stateful_widget(list, chunks[1], &mut app.list_state);
 
-    let force_hint = format!(
-        "{} force",
-        app.keys.display_chords(Action::ToggleForce)
-    );
+    let force_hint = format!("{} force", app.keys.display_chords(Action::ToggleForce));
     let keys = match app.mode {
         Mode::Browse => app.keys.browse_footer("restore", &force_hint),
         Mode::Filter => format!(

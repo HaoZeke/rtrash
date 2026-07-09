@@ -107,14 +107,15 @@ impl Action {
         Action::QuitHard,
     ];
 
-    pub const CONFIRM: &'static [Action] = &[
-        Action::ConfirmYes,
-        Action::ConfirmNo,
+    pub const CONFIRM: &'static [Action] =
+        &[Action::ConfirmYes, Action::ConfirmNo, Action::QuitHard];
+
+    pub const HELP: &'static [Action] = &[
+        Action::Help,
+        Action::Quit,
+        Action::FilterCancel,
         Action::QuitHard,
     ];
-
-    pub const HELP: &'static [Action] =
-        &[Action::Help, Action::Quit, Action::FilterCancel, Action::QuitHard];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -495,9 +496,8 @@ impl Keymap {
             }
             let mut chords = Vec::with_capacity(tokens.len());
             for tok in &tokens {
-                chords.push(
-                    Chord::parse(tok).map_err(|e| format!("key `{tok}` for `{name}`: {e}"))?,
-                );
+                chords
+                    .push(Chord::parse(tok).map_err(|e| format!("key `{tok}` for `{name}`: {e}"))?);
             }
             self.binds.insert(action, chords);
         }
@@ -834,9 +834,7 @@ toggle_mark = "x"
     #[test]
     fn unknown_action_errors() {
         let mut m = Keymap::builtin();
-        assert!(m
-            .apply_config_text("[keys]\nnope = \"x\"\n")
-            .is_err());
+        assert!(m.apply_config_text("[keys]\nnope = \"x\"\n").is_err());
     }
 
     #[test]

@@ -63,8 +63,13 @@ fn readme_documents_platform_matrix() {
     );
     assert!(
         readme.contains("Recycle Bin")
-            && (readme.contains("not FreeDesktop") || readme.contains("Not** FreeDesktop") || readme.contains("**Not** FreeDesktop")),
+            && (readme.contains("not FreeDesktop")
+                || readme.contains("Not** FreeDesktop")
+                || readme.contains("**Not** FreeDesktop")),
         "README must refuse FreeDesktop-as-Recycle-Bin fiction"
     );
-    assert!(readme.contains("Linux"), "README platform matrix mentions Linux");
+    assert!(
+        readme.contains("Linux"),
+        "README platform matrix mentions Linux"
+    );
 }

@@ -107,7 +107,12 @@ fn restore_selection_restores_two_of_three() {
     let ib = idx_of("b.txt");
 
     let result = restore_tui::restore_selection("rtrash", &refs, &[ia, ic], true);
-    assert_eq!(result.ok_count(), 2, "succeeded={:?}", result.succeeded_idxs);
+    assert_eq!(
+        result.ok_count(),
+        2,
+        "succeeded={:?}",
+        result.succeeded_idxs
+    );
     assert_eq!(result.fail_count, 0);
     assert!(result.succeeded_idxs.contains(&ia));
     assert!(result.succeeded_idxs.contains(&ic));
@@ -142,7 +147,11 @@ fn permanently_remove_entries_subset_leaves_others() {
         .iter()
         .enumerate()
         .filter(|(_, e)| {
-            let n = e.original.file_name().and_then(|f| f.to_str()).unwrap_or("");
+            let n = e
+                .original
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("");
             n.starts_with("drop")
         })
         .map(|(i, _)| i)
@@ -202,10 +211,7 @@ fn put_selection_trashes_two_paths() {
 
 #[test]
 fn put_list_dir_rows_and_filter() {
-    let dir = std::env::temp_dir().join(format!(
-        "rtrash-put-list-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("rtrash-put-list-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("alpha.txt"), b"a").unwrap();
@@ -215,11 +221,7 @@ fn put_list_dir_rows_and_filter() {
     assert!(rows.len() >= 3);
     let idxs = put_tui::filter_indices(&rows, "alp");
     assert!(!idxs.is_empty());
-    let name = rows[idxs[0]]
-        .path
-        .file_name()
-        .unwrap()
-        .to_string_lossy();
+    let name = rows[idxs[0]].path.file_name().unwrap().to_string_lossy();
     assert!(name.to_lowercase().contains('a'), "{name}");
     let _ = fs::remove_dir_all(&dir);
 }

@@ -63,7 +63,10 @@ pub fn scroll_offset(
 
 /// After a filter rebuild, map the previous *entry* index to a position in
 /// `new_filtered` (list of entry indices). Falls back to first match / `None`.
-pub fn reselect_after_filter(prev_entry_idx: Option<usize>, new_filtered: &[usize]) -> Option<usize> {
+pub fn reselect_after_filter(
+    prev_entry_idx: Option<usize>,
+    new_filtered: &[usize],
+) -> Option<usize> {
     if new_filtered.is_empty() {
         return None;
     }

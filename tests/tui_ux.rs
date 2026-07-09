@@ -43,7 +43,10 @@ fn docs_document_shared_tui_keys() {
     let readme = fs::read_to_string(root.join("README.md")).unwrap();
     let gs = fs::read_to_string(root.join("docs/getting-started.md")).unwrap();
     for doc in [&readme, &gs] {
-        assert!(doc.contains('?') || doc.contains("help"), "docs mention help");
+        assert!(
+            doc.contains('?') || doc.contains("help"),
+            "docs mention help"
+        );
         assert!(doc.contains("Space") || doc.contains("`Space`"));
         assert!(doc.contains("fuzzy") || doc.contains("Fuzzy"));
         assert!(
@@ -92,7 +95,6 @@ fn live_fuzzy_rank_shrinks_via_shipped_fuzzy() {
         prev = cur;
     }
 }
-
 
 #[test]
 fn keybinds_config_partial_override_via_shipped_api() {

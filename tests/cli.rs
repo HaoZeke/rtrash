@@ -1018,7 +1018,8 @@ fn list_json_and_age_filters() {
     assert!(sb.run(&["put", "old.txt"]).status.success());
     let info = sb.trash().join("info/old.txt.trashinfo");
     let body = fs::read_to_string(&info).unwrap();
-    let body = body.lines()
+    let body = body
+        .lines()
         .map(|l| {
             if l.starts_with("DeletionDate=") {
                 "DeletionDate=2001-01-01T00:00:00".to_string()
@@ -1042,13 +1043,19 @@ fn list_json_and_age_filters() {
     assert!(old_only.status.success(), "{}", stderr_of(&old_only));
     let o = stdout_of(&old_only);
     assert!(o.contains("old.txt"), "expected old.txt in older-than: {o}");
-    assert!(!o.contains("new.txt"), "new.txt should not match older-than=30: {o}");
+    assert!(
+        !o.contains("new.txt"),
+        "new.txt should not match older-than=30: {o}"
+    );
 
     let new_only = sb.run(&["list", &pin, "--newer-than=30"]);
     assert!(new_only.status.success(), "{}", stderr_of(&new_only));
     let n = stdout_of(&new_only);
     assert!(n.contains("new.txt"), "expected new.txt in newer-than: {n}");
-    assert!(!n.contains("old.txt"), "old.txt should not match newer-than=30: {n}");
+    assert!(
+        !n.contains("old.txt"),
+        "old.txt should not match newer-than=30: {n}"
+    );
 }
 
 #[test]
@@ -1063,7 +1070,7 @@ fn status_json_and_age_filter() {
     assert!(s.contains("\"total_items\""), "{s}");
     assert!(s.contains("\"total_bytes\""), "{s}");
     assert!(s.contains("\"roots\""), "{s}");
-    // recent item: older-than large window still counts; older-than=0 with future? 
+    // recent item: older-than large window still counts; older-than=0 with future?
     // older-than=0 means cutoff=now, so items with t<=now are old (all real past items).
     let filtered = sb.run(&["status", &pin, "--json", "--newer-than=0"]);
     assert!(filtered.status.success(), "{}", stderr_of(&filtered));
@@ -1072,5 +1079,8 @@ fn status_json_and_age_filter() {
     let recent = sb.run(&["status", &pin, "--json", "--newer-than=36500"]);
     assert!(recent.status.success(), "{}", stderr_of(&recent));
     let r = stdout_of(&recent);
-    assert!(r.contains("\"total_items\": 1") || r.contains("\"total_items\":1"), "{r}");
+    assert!(
+        r.contains("\"total_items\": 1") || r.contains("\"total_items\":1"),
+        "{r}"
+    );
 }

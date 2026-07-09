@@ -89,8 +89,14 @@ fn casts_are_volume_isolated() {
         "docs/demo/rtrash-suite.cast",
     ] {
         let cast = read(cast_rel);
-        assert!(!cast.contains("pCloudDrive"), "{cast_rel} leaked pCloudDrive");
-        assert!(!cast.contains("/.Trash-"), "{cast_rel} leaked volume /.Trash-");
+        assert!(
+            !cast.contains("pCloudDrive"),
+            "{cast_rel} leaked pCloudDrive"
+        );
+        assert!(
+            !cast.contains("/.Trash-"),
+            "{cast_rel} leaked volume /.Trash-"
+        );
         assert!(
             cast.contains("--trash-dir="),
             "{cast_rel} must show pinned --trash-dir"
@@ -98,10 +104,7 @@ fn casts_are_volume_isolated() {
         for line in cast.lines() {
             if let Some(rest) = line.split("Removed ").nth(1) {
                 let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                assert!(
-                    digits.len() < 2,
-                    "{cast_rel} bulk empty? {line}"
-                );
+                assert!(digits.len() < 2, "{cast_rel} bulk empty? {line}");
             }
         }
     }
@@ -118,9 +121,7 @@ fn readme_embeds_both_demos_and_feature_map() {
         "README must embed quickstart GIF via absolute raw.githubusercontent.com URL"
     );
     assert!(
-        readme.contains(
-            "raw.githubusercontent.com/HaoZeke/rtrash/main/docs/demo/rtrash-suite.gif"
-        ),
+        readme.contains("raw.githubusercontent.com/HaoZeke/rtrash/main/docs/demo/rtrash-suite.gif"),
         "README must embed suite GIF via absolute raw URL"
     );
     assert!(
@@ -135,7 +136,9 @@ fn readme_embeds_both_demos_and_feature_map() {
     assert!(readme.contains("TUI") || readme.contains("TTY"));
     // Docs site static copies for Sphinx embed
     assert!(
-        root().join("docs/source/_static/demo/rtrash-quickstart.gif").is_file(),
+        root()
+            .join("docs/source/_static/demo/rtrash-quickstart.gif")
+            .is_file(),
         "Sphinx _static/demo must hold quickstart GIF for the docs site"
     );
 }
