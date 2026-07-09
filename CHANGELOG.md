@@ -11,6 +11,15 @@ Name fragments `+slug.<type>.md` (no issue) or `<issue>.<type>.md` (links to Git
 
 <!-- towncrier release notes start -->
 
+## [0.1.4](https://github.com/HaoZeke/rtrash/tree/v0.1.4) - 2026-07-09
+
+### Added
+
+- README terminal demo (asciinema cast + GIF) with regenerable docs/demo/record.sh.
+- list/status: --json and --older-than/--newer-than age filters (empty DAYS cutoff model).
+- setup installs an optional Midnight Commander user-menu sample (share/rtrash/mc.menu.sample).
+
+
 ## [0.1.3](https://github.com/HaoZeke/rtrash/tree/v0.1.3) - 2026-07-08
 
 ### Added
