@@ -40,6 +40,9 @@ complete -c rtrash -n $put_cond -s v -l verbose -d 'explain what is being done'
 complete -c rtrash -n $put_cond -l one-file-system -d 'accepted for rm compatibility (no-op)'
 complete -c rtrash -n $put_cond -l preserve-root -d 'do not remove / (default)'
 complete -c rtrash -n $put_cond -l no-preserve-root -d 'do not treat / specially'
+complete -c rtrash -n $put_cond -l trash-dir -d 'put into this trash root' -r
+complete -c rtrash -n $put_cond -l home-only -d 'always use the home trash'
+complete -c rtrash -n $put_cond -l plain -d 'skip TUI; require file operands'
 
 # empty
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s n -l dry-run -d 'report what would be removed; show reclaimable size'
@@ -47,6 +50,9 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s v -l
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s f -l force -d 'accepted for trash-cli compatibility'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l trash-dir -d 'empty only this trash directory' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l home-only -d 'only the home trash'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l older-than -d 'only items older than DAYS days' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l json -d 'JSON summary'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l plain -d 'skip TUI'
 
 # list / status
 for sub in list status
@@ -65,9 +71,12 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l tr
 # rm (trash-rm)
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l trash-dir -d 'only this trash directory' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l home-only -d 'only the home trash'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l older-than -d 'only match items older than DAYS days' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l newer-than -d 'only match items within last DAYS days' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s n -l dry-run -d 'list matches and reclaimable size; do not delete'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s f -l force -d 'allow mass patterns that match everything'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s v -l verbose -d 'print each permanently removed original path'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l json -d 'JSON summary with matches'
 
 # setup
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -l prefix -d 'install root' -r

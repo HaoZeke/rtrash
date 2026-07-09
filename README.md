@@ -272,16 +272,18 @@ As with GNU rm, **the last of `-f` / `-i` / `-I` (and the matching long forms) w
 Trash placement follows the spec: the home trash (`$XDG_DATA_HOME/Trash`, defaulting under `~/.local/share`) for same-filesystem files, `$top/.Trash/$uid` (must be a sticky non-symlink directory) or `$top/.Trash-$uid` on other mounts, with a copy-into-home-trash fallback when the volume cannot host a trash directory.
 Names are reserved atomically (create-new / `O_EXCL` on the `.trashinfo`), so concurrent invocations never clobber each other; collisions get `name.2`, `name.3`, ...
 
+**Script pins:** `--trash-dir=PATH` puts into that FreeDesktop root (creates `files/` and `info/` if needed); `--home-only` always uses the home trash.
+
 Putting a **directory** updates that trash dir’s FreeDesktop `directorysizes` cache (`size mtime percent-encoded-name`).
 Putting ordinary files does not add directory lines.
 
 ### `rtrash empty [DAYS]` (also `trash-empty`)
 
 Purges every trash directory visible to the user (home trash plus mounted volumes).
-With `DAYS`, only items trashed more than `DAYS` days ago go.
+With `DAYS` (or `--older-than=DAYS`), only items trashed more than `DAYS` days ago go.
 Entries are removed in parallel.
 Orphaned `files/` entries (no `.trashinfo`) and entries with broken metadata are purged on a full empty, and the `directorysizes` cache is pruned when present.
-Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts).
+Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts), `--json` (summary: `dry_run`, `removed`, `bytes`, `days`).
 
 ### `rtrash list` (also `trash-list`)
 
@@ -329,7 +331,7 @@ Options: `--trash-dir=PATH` (repeatable), `--home-only`, `--cwd-only`.
 Permanently deletes trash entries whose original path, basename, or trash name matches a shell-style glob `PATTERN` (quote globs from the shell).
 Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
 Does **not** restore.
-Options: `-v`/`--verbose`, `--trash-dir=PATH` (repeatable).
+Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-f`/`--force` (mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--json` (summary + `matches` array).
 
 ## FreeDesktop durability notes
 

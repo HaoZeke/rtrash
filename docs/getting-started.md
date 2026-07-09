@@ -60,7 +60,7 @@ rtrash setup
 Metadata remaps typical glibc hosts (`*-unknown-linux-gnu`) on those arches to the matching musl tarball.
 Always finish with **`rtrash setup`** (multi-call links, bash/zsh/fish completions, man, and a Midnight Commander menu sample under `~/.local`).
 
-Scripts: `rtrash list --json`, `rtrash list --older-than=30`, `rtrash status --json`.
+Scripts: `rtrash put --trash-dir=… file`, `rtrash list --json`, `rtrash empty -n --json`, `rtrash rm -n --json '*.o'`.
 
 **Manual tarball:** download the Release asset or run `./scripts/package-release.sh`, then `rtrash setup`.
 

@@ -18,9 +18,12 @@ matching *trash* entries — not a synonym for put.
 
       --trash-dir=PATH  only consider this trash directory (repeatable)
       --home-only  only the home trash (skip volume trash)
+      --older-than=DAYS only match items trashed more than DAYS days ago
+      --newer-than=DAYS only match items trashed within the last DAYS days
   -n, --dry-run    list matches and reclaimable size; do not delete
   -f, --force      allow mass patterns that match everything (e.g. '*')
   -v, --verbose    print each permanently removed original path
+      --json       emit a JSON summary (and matched originals array)
       --help       display this help and exit
       --version    output version information and exit
 
@@ -31,20 +34,38 @@ Examples:
   {prog} /home/you/old-project
 ";
 
+fn parse_nonneg_days(s: &str) -> Result<i64, String> {
+    s.parse::<i64>()
+        .map_err(|_| format!("invalid DAYS '{s}'"))
+        .and_then(|d| {
+            if d < 0 {
+                Err(format!("DAYS must be >= 0 (got {d})"))
+            } else {
+                Ok(d)
+            }
+        })
+}
+
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut verbose = false;
     let mut force = false;
     let mut dry_run = false;
     let mut home_only = false;
+    let mut json = false;
+    let mut older_than: Option<i64> = None;
+    let mut newer_than: Option<i64> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut patterns: Vec<String> = Vec::new();
 
-    for arg in args {
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = &args[i];
         match arg.as_str() {
             "-v" | "--verbose" => verbose = true,
             "-f" | "--force" => force = true,
             "-n" | "--dry-run" => dry_run = true,
             "--home-only" => home_only = true,
+            "--json" => json = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -56,6 +77,40 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             a if a.starts_with("--trash-dir=") => {
                 trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
             }
+            a if a.starts_with("--older-than=") => {
+                match parse_nonneg_days(&a["--older-than=".len()..]) {
+                    Ok(d) => older_than = Some(d),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
+            a if a.starts_with("--newer-than=") => {
+                match parse_nonneg_days(&a["--newer-than=".len()..]) {
+                    Ok(d) => newer_than = Some(d),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
+            "--older-than" | "--newer-than" => {
+                let name = arg.as_str();
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    eprintln!("{prog}: {name} requires DAYS");
+                    return 2;
+                };
+                match parse_nonneg_days(val) {
+                    Ok(d) if name == "--older-than" => older_than = Some(d),
+                    Ok(d) => newer_than = Some(d),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
                 eprintln!("Try '{prog} --help' for more information.");
@@ -63,6 +118,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
             a => patterns.push(a.to_string()),
         }
+        i += 1;
     }
 
     if patterns.is_empty() {
@@ -90,10 +146,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: no valid --trash-dir pins");
         return 2;
     }
-    let entries = list::collect(&dirs);
+    let entries = list::filter_age(list::collect(&dirs), older_than, newer_than);
     let mut status = 0i32;
     let mut removed = 0u64;
     let mut bytes = 0u64;
+    let mut matched_paths: Vec<String> = Vec::new();
 
     for entry in &entries {
         let path_s = entry.original.to_string_lossy();
@@ -112,19 +169,22 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         let payload = entry.dir.files().join(&entry.name);
         let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
+        let sz =
+            crate::fastdelete::disk_usage(&payload) + crate::fastdelete::disk_usage(&info_path);
         if dry_run {
-            let sz =
-                crate::fastdelete::disk_usage(&payload) + crate::fastdelete::disk_usage(&info_path);
             bytes = bytes.saturating_add(sz);
-            if verbose {
-                println!(
-                    "would permanently remove {} ({})",
-                    entry.original.display(),
-                    crate::fastdelete::format_bytes(sz)
-                );
-            } else {
-                println!("{}", entry.original.display());
+            if !json {
+                if verbose {
+                    println!(
+                        "would permanently remove {} ({})",
+                        entry.original.display(),
+                        crate::fastdelete::format_bytes(sz)
+                    );
+                } else {
+                    println!("{}", entry.original.display());
+                }
             }
+            matched_paths.push(entry.original.to_string_lossy().into_owned());
             removed += 1;
             continue;
         }
@@ -140,15 +200,35 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 continue;
             }
         }
-        // Drop directorysizes line for this trash name if present.
         trashdir::directorysizes_remove(&entry.dir, &entry.name);
-        if verbose {
+        bytes = bytes.saturating_add(sz);
+        if !json && verbose {
             println!("removed '{}'", entry.original.display());
         }
+        matched_paths.push(entry.original.to_string_lossy().into_owned());
         removed += 1;
     }
 
-    if dry_run {
+    if json {
+        let mut out = String::from("{\n");
+        out.push_str(&format!(
+            "  \"dry_run\": {},\n  \"removed\": {},\n  \"bytes\": {},\n  \"matches\": [\n",
+            if dry_run { "true" } else { "false" },
+            removed,
+            bytes
+        ));
+        for (i, path) in matched_paths.iter().enumerate() {
+            if i > 0 {
+                out.push_str(",\n");
+            }
+            out.push_str(&format!("    \"{}\"", list::json_escape(path)));
+        }
+        if !matched_paths.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("  ]\n}\n");
+        print!("{out}");
+    } else if dry_run {
         let noun = if removed == 1 { "item" } else { "items" };
         eprintln!(
             "Would permanently remove {removed} {noun} ({}, approximately reclaimable)",

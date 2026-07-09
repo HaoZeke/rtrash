@@ -1008,6 +1008,86 @@ fn empty_dry_run_uses_directorysizes_for_dir_payload() {
 }
 
 #[test]
+fn put_trash_dir_pin_creates_layout_and_isolates() {
+    let sb = Sandbox::new("put-pin");
+    // Fresh pin path under sandbox (not yet a trash root).
+    let pin_root = sb.root.join("custom-trash");
+    let pin = format!("--trash-dir={}", pin_root.display());
+    sb.touch("pinned.txt");
+    let out = sb.run(&["put", &pin, "pinned.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(pin_root.join("files/pinned.txt").is_file());
+    assert!(pin_root.join("info/pinned.txt.trashinfo").is_file());
+    // Home XDG trash in this sandbox must stay empty for this put.
+    let home_files = sb.trash().join("files");
+    let home_count = fs::read_dir(&home_files).map(|rd| rd.count()).unwrap_or(0);
+    assert_eq!(home_count, 0, "home trash should be empty after pin put");
+    let listed = sb.run(&["list", &pin]);
+    assert!(listed.status.success(), "{}", stderr_of(&listed));
+    assert!(
+        stdout_of(&listed).contains("pinned.txt"),
+        "{}",
+        stdout_of(&listed)
+    );
+}
+
+#[test]
+fn empty_json_and_older_than_flag() {
+    let sb = Sandbox::new("empty-json");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("e.txt");
+    assert!(sb.run(&["put", "e.txt"]).status.success());
+    let dry = sb.run(&["empty", &pin, "--dry-run", "--json"]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    let s = stdout_of(&dry);
+    assert!(
+        s.contains("\"dry_run\":true") || s.contains("\"dry_run\": true"),
+        "{s}"
+    );
+    assert!(
+        s.contains("\"removed\":1") || s.contains("\"removed\": 1"),
+        "{s}"
+    );
+    assert!(s.contains("\"bytes\":"), "{s}");
+    // Still present after dry-run.
+    assert!(sb.trash().join("files/e.txt").is_file());
+    let real = sb.run(&["empty", &pin, "--json", "--older-than=0"]);
+    assert!(real.status.success(), "{}", stderr_of(&real));
+    let r = stdout_of(&real);
+    assert!(
+        r.contains("\"dry_run\":false") || r.contains("\"dry_run\": false"),
+        "{r}"
+    );
+    assert!(r.contains("\"days\":0") || r.contains("\"days\": 0"), "{r}");
+    assert!(!sb.trash().join("files/e.txt").exists());
+}
+
+#[test]
+fn rm_json_and_age_filters() {
+    let sb = Sandbox::new("rm-json");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("keep.c");
+    sb.touch("drop.o");
+    assert!(sb.run(&["put", "keep.c"]).status.success());
+    assert!(sb.run(&["put", "drop.o"]).status.success());
+    let j = sb.run(&["rm", &pin, "--json", "-n", "*.o"]);
+    assert!(j.status.success(), "{}", stderr_of(&j));
+    let s = stdout_of(&j);
+    assert!(
+        s.contains("\"removed\":1") || s.contains("\"removed\": 1"),
+        "{s}"
+    );
+    assert!(s.contains("drop.o"), "{s}");
+    assert!(!s.contains("keep.c"), "{s}");
+    // dry-run keeps files
+    assert!(sb.trash().join("files/drop.o").is_file());
+    let gone = sb.run(&["rm", &pin, "--json", "*.o"]);
+    assert!(gone.status.success(), "{}", stderr_of(&gone));
+    assert!(!sb.trash().join("files/drop.o").exists());
+    assert!(sb.trash().join("files/keep.c").is_file());
+}
+
+#[test]
 fn list_json_and_age_filters() {
     let sb = Sandbox::new("list-json");
     let pin = format!("--trash-dir={}", sb.trash().display());

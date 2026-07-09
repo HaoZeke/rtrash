@@ -8,12 +8,14 @@ _rtrash_put_opts=(
   -f --force -i -I --interactive
   -r -R --recursive -d --dir -v --verbose
   --one-file-system --preserve-root --no-preserve-root
+  --trash-dir= --home-only --plain
   --help --version
 )
 
 _rtrash_empty_opts=(
   -n --dry-run -v --verbose -f --force
-  --trash-dir= --home-only --help --version
+  --trash-dir= --home-only --plain --older-than= --json
+  --help --version
 )
 
 _rtrash_list_opts=(
@@ -30,6 +32,7 @@ _rtrash_restore_opts=(
 
 _rtrash_rm_opts=(
   --trash-dir= --home-only -n --dry-run -f --force -v --verbose
+  --older-than= --newer-than= --json
   --help --version
 )
 

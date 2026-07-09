@@ -22,6 +22,8 @@ permanent delete). Use --plain to skip the TUI.
   -v, --verbose    print each removed item
   -f, --force      accepted for trash-cli compatibility (emptying never prompts)
       --plain      skip TUI; non-interactive empty (also used when stdin is not a TTY)
+      --older-than=DAYS  same as positional DAYS (list/status flag style)
+      --json       emit a JSON summary on stdout ({dry_run, removed, bytes, days})
       --trash-dir=PATH  empty only this trash directory (repeatable);
                      default is the home trash plus every mounted volume
       --home-only  only the home trash (skip volume trash discovery)
@@ -36,6 +38,7 @@ struct Opts {
     home_only: bool,
     trash_dirs: Vec<PathBuf>,
     plain: bool,
+    json: bool,
 }
 
 fn usage_err(prog: &str, msg: &str) -> i32 {
@@ -52,6 +55,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         home_only: false,
         trash_dirs: Vec::new(),
         plain: false,
+        json: false,
     };
     for arg in args {
         match arg.as_str() {
@@ -59,6 +63,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "-v" | "--verbose" => opts.verbose = true,
             "-f" | "--force" => {}
             "--plain" => opts.plain = true,
+            "--json" => opts.json = true,
             "--home-only" => opts.home_only = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
@@ -71,6 +76,18 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             a if a.starts_with("--trash-dir=") => {
                 opts.trash_dirs
                     .push(PathBuf::from(&a["--trash-dir=".len()..]));
+            }
+            a if a.starts_with("--older-than=") => {
+                match a["--older-than=".len()..].parse::<i64>() {
+                    Ok(d) if d >= 0 => opts.days = Some(d),
+                    Ok(d) => return usage_err(prog, &format!("DAYS must be >= 0 (got {d})")),
+                    Err(_) => {
+                        return usage_err(prog, &format!("invalid DAYS in '{a}'"));
+                    }
+                }
+            }
+            "--older-than" => {
+                return usage_err(prog, "--older-than requires DAYS (use --older-than=DAYS)");
             }
             a if !a.starts_with('-') => match a.parse::<i64>() {
                 Ok(d) if d >= 0 => opts.days = Some(d),
@@ -89,8 +106,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
 
     // TTY empty browser when no age filter (full interactive review).
+    // --json implies non-interactive (scripts).
     #[cfg(feature = "tui")]
-    if !opts.plain && opts.days.is_none() && stdin_is_tty() {
+    if !opts.plain && !opts.json && opts.days.is_none() && stdin_is_tty() {
         let entries = list::collect(&dirs);
         let refs: Vec<&list::Entry> = entries.iter().collect();
         return crate::empty_tui::run(prog, refs, opts.dry_run);
@@ -116,21 +134,35 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 
     let n = removed.load(Ordering::Relaxed);
     let b = bytes.load(Ordering::Relaxed);
-    let verb = if opts.dry_run {
-        "Would remove"
+    if opts.json {
+        let days = match opts.days {
+            Some(d) => d.to_string(),
+            None => "null".into(),
+        };
+        println!(
+            "{{\"dry_run\":{},\"removed\":{},\"bytes\":{},\"days\":{}}}",
+            if opts.dry_run { "true" } else { "false" },
+            n,
+            b,
+            days
+        );
     } else {
-        "Removed"
-    };
-    let noun = if n == 1 { "item" } else { "items" };
-    if opts.verbose || opts.dry_run || n > 0 {
-        if opts.dry_run {
-            // Always show reclaim estimate on dry-run (the main reason to use -n).
-            eprintln!(
-                "{verb} {n} {noun} ({}, approximately reclaimable)",
-                crate::fastdelete::format_bytes(b)
-            );
+        let verb = if opts.dry_run {
+            "Would remove"
         } else {
-            eprintln!("{verb} {n} {noun}");
+            "Removed"
+        };
+        let noun = if n == 1 { "item" } else { "items" };
+        if opts.verbose || opts.dry_run || n > 0 {
+            if opts.dry_run {
+                // Always show reclaim estimate on dry-run (the main reason to use -n).
+                eprintln!(
+                    "{verb} {n} {noun} ({}, approximately reclaimable)",
+                    crate::fastdelete::format_bytes(b)
+                );
+            } else {
+                eprintln!("{verb} {n} {noun}");
+            }
         }
     }
     if errors.load(Ordering::Relaxed) > 0 {

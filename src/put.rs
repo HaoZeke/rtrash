@@ -21,6 +21,10 @@ pub(crate) struct Opts {
     pub verbose: bool,
     pub interactive: Interactive,
     pub preserve_root: bool,
+    /// Explicit FreeDesktop trash root (`files/` + `info/`); created if needed.
+    pub trash_pin: Option<PathBuf>,
+    /// Prefer home trash only (skip volume selection). Ignored when `trash_pin` is set.
+    pub home_only: bool,
 }
 
 impl Default for Opts {
@@ -32,6 +36,8 @@ impl Default for Opts {
             verbose: false,
             interactive: Interactive::Never,
             preserve_root: true,
+            trash_pin: None,
+            home_only: false,
         }
     }
 }
@@ -55,6 +61,9 @@ to require CLI operands even on a TTY.
                           moved whole, never traversed)
       --preserve-root   do not remove '/' (default)
       --no-preserve-root  do not treat '/' specially
+      --trash-dir=PATH  put into this trash root (creates files/ and info/ if
+                          needed); scripts/tests pin instead of XDG discovery
+      --home-only       always use the home trash (skip volume trash)
       --help            display this help and exit
       --version         output version information and exit
 
@@ -93,6 +102,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--one-file-system" => {}
             "--preserve-root" => opts.preserve_root = true,
             "--no-preserve-root" => opts.preserve_root = false,
+            "--home-only" => opts.home_only = true,
             "--interactive" => {
                 opts.force = false;
                 opts.interactive = Interactive::Always;
@@ -115,6 +125,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--version" => {
                 println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                 return 0;
+            }
+            a if a.starts_with("--trash-dir=") => {
+                if opts.trash_pin.is_some() {
+                    return usage_err(prog, "put accepts only one --trash-dir=PATH");
+                }
+                opts.trash_pin = Some(PathBuf::from(&a["--trash-dir=".len()..]));
             }
             long if long.starts_with("--") => {
                 return usage_err(prog, &format!("unrecognized option '{long}'"));
@@ -256,7 +272,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
             return Err(1);
         }
     };
-    let trash = match trashdir::select(&abs, meta.dev()) {
+    let trash = match resolve_put_trash(opts, &abs, &meta) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{prog}: cannot trash '{name}': {e}");
@@ -279,4 +295,34 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
             Err(1)
         }
     }
+}
+
+/// Pick destination trash: explicit pin (created if needed), home-only, or auto-select.
+fn resolve_put_trash(
+    opts: &Opts,
+    abs: &Path,
+    meta: &fs::Metadata,
+) -> io::Result<trashdir::TrashDir> {
+    if let Some(pin) = &opts.trash_pin {
+        let root = if pin.is_absolute() {
+            pin.clone()
+        } else {
+            std::env::current_dir()?.join(pin)
+        };
+        let td = trashdir::TrashDir {
+            root: root.clone(),
+            topdir: trashdir::infer_topdir(&root),
+        };
+        td.ensure()?;
+        return Ok(td);
+    }
+    if opts.home_only {
+        let td = trashdir::TrashDir {
+            root: trashdir::home_trash(),
+            topdir: None,
+        };
+        td.ensure()?;
+        return Ok(td);
+    }
+    trashdir::select(abs, meta.dev())
 }

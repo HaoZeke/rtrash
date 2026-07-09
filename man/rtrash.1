@@ -120,6 +120,16 @@ Do not treat
 .RB \(oq / \(cq
 specially.
 .TP
+.BI \-\-trash\-dir =PATH
+Put into this FreeDesktop trash root (creates
+.B files/
+and
+.B info/
+if needed). Scripts and tests use this instead of XDG discovery.
+.TP
+.B \-\-home\-only
+Always use the home trash (skip volume trash selection).
+.TP
 .B \-\-help
 Display help and exit.
 .TP
@@ -154,6 +164,15 @@ plus every mounted volume.
 .TP
 .B \-\-home\-only
 Only the home trash (skip volume trash discovery).
+.TP
+.BI \-\-older\-than =DAYS
+Same as positional
+.I DAYS
+(list/status flag style).
+.TP
+.B \-\-json
+Emit a JSON summary on stdout
+(\fIdry_run\fR, \fIremoved\fR, \fIbytes\fR, \fIdays\fR).
 .TP
 .B \-\-help
 Display help and exit.
@@ -358,6 +377,16 @@ Only consider this trash directory (repeatable).
 .B \-\-home\-only
 Only the home trash (skip volume trash).
 .TP
+.BI \-\-older\-than =DAYS
+Only match items trashed more than
+.I DAYS
+days ago.
+.TP
+.BI \-\-newer\-than =DAYS
+Only match items trashed within the last
+.I DAYS
+days.
+.TP
 .BR \-n ", " \-\-dry\-run
 List matches and reclaimable size; do not delete.
 .TP
@@ -367,6 +396,11 @@ Allow mass patterns that match everything (e.g.
 .TP
 .BR \-v ", " \-\-verbose
 Print each permanently removed original path.
+.TP
+.B \-\-json
+Emit a JSON summary with a
+.B matches
+array.
 .TP
 .B \-\-help
 Display help and exit.
