@@ -106,7 +106,7 @@ fn restore_selection_restores_two_of_three() {
     let ic = idx_of("c.txt");
     let ib = idx_of("b.txt");
 
-    let result = restore_tui::restore_selection("rtrash", &refs, &[ia, ic], true);
+    let result = restore_tui::restore_selection("rtrash", &refs, &[ia, ic], true, None);
     assert_eq!(
         result.ok_count(),
         2,

@@ -719,6 +719,128 @@ fn force_interactive_last_wins_like_gnu_rm() {
 }
 
 #[test]
+fn restore_group_after_put_abc() {
+    let sb = Sandbox::new("restore-group");
+    let a = sb.touch("a.txt");
+    let b = sb.touch("b.txt");
+    let c = sb.touch("c.txt");
+    assert!(sb.run(&["put", "a.txt", "b.txt", "c.txt"]).status.success());
+    assert!(!a.exists() && !b.exists() && !c.exists());
+    set_deletion_date(&sb, "a.txt", "2020-01-01T00:00:00");
+    set_deletion_date(&sb, "b.txt", "2020-01-01T00:00:00");
+    set_deletion_date(&sb, "c.txt", "2020-01-01T00:00:00");
+
+    let out = sb.run(&["restore", "--group"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(a.exists() && b.exists() && c.exists());
+    assert!(trash_names(&sb).is_empty());
+
+    // A later put (different DeletionDate second) stays when --group
+    // restores the newest batch only.
+    assert!(sb.run(&["put", "a.txt", "b.txt", "c.txt"]).status.success());
+    let later = sb.touch("later.txt");
+    assert!(sb.run(&["put", "later.txt"]).status.success());
+    set_deletion_date(&sb, "later.txt", "2099-01-01T00:00:00");
+    let out = sb.run(&["restore", "--group"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(later.exists(), "newest group (later.txt) restored");
+    assert!(!a.exists() && !b.exists() && !c.exists(), "older put stays");
+
+    // One PATH: group is that PATH's second, not the newest in scope.
+    set_deletion_date(&sb, "a.txt", "2001-01-01T00:00:00");
+    set_deletion_date(&sb, "b.txt", "2001-01-01T00:00:00");
+    set_deletion_date(&sb, "c.txt", "2001-01-01T00:00:00");
+    let out = sb.run(&["restore", "--group", "a.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(a.exists() && b.exists() && c.exists());
+}
+
+#[test]
+fn restore_to_relocates_basename_and_overwrite() {
+    let sb = Sandbox::new("restore-to");
+    sb.touch("dest.txt");
+    assert!(sb.run(&["put", "dest.txt"]).status.success());
+    let recovered = sb.work().join("recovered");
+    fs::create_dir(&recovered).unwrap();
+
+    let out = sb.run(&["restore", "--restore-to", recovered.to_str().unwrap(), "dest.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("dest.txt").exists());
+    assert_eq!(fs::read(recovered.join("dest.txt")).unwrap(), b"payload");
+    assert!(trash_names(&sb).is_empty());
+
+    sb.touch("dest.txt");
+    assert!(sb.run(&["put", "dest.txt"]).status.success());
+    fs::write(recovered.join("dest.txt"), b"newer").unwrap();
+    let out = sb.run(&["restore", "--restore-to", recovered.to_str().unwrap(), "dest.txt"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("refusing to overwrite"));
+    assert_eq!(fs::read(recovered.join("dest.txt")).unwrap(), b"newer");
+
+    let out = sb.run(&[
+        "restore",
+        "--overwrite",
+        "--restore-to",
+        recovered.to_str().unwrap(),
+        "dest.txt",
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(fs::read(recovered.join("dest.txt")).unwrap(), b"payload");
+}
+
+#[test]
+fn restore_plain_range_indexes() {
+    let sb = Sandbox::new("restore-plain-range");
+    let a = sb.touch("a.txt");
+    let b = sb.touch("b.txt");
+    let c = sb.touch("c.txt");
+    assert!(sb.run(&["put", "a.txt", "b.txt", "c.txt"]).status.success());
+
+    let out = sb.run_with_stdin(&["restore", "--plain"], "0-1\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let restored = a.exists() as u8 + b.exists() as u8 + c.exists() as u8;
+    assert_eq!(restored, 2, "0-1 restores two of three");
+    assert_eq!(trash_names(&sb).len(), 1);
+}
+
+#[test]
+fn restore_all_and_multi_path() {
+    let sb = Sandbox::new("restore-all-multi");
+    let a = sb.touch("a.txt");
+    let b = sb.touch("b.txt");
+    let c = sb.touch("c.txt");
+    assert!(sb.run(&["put", "a.txt", "b.txt", "c.txt"]).status.success());
+
+    let out = sb.run(&["restore", "a.txt", "c.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(a.exists() && c.exists());
+    assert!(!b.exists());
+
+    let out = sb.run(&["restore", "--all"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(b.exists());
+    assert!(trash_names(&sb).is_empty());
+}
+
+fn set_deletion_date(sb: &Sandbox, trash_name: &str, date: &str) {
+    let info = sb.trash().join(format!("info/{trash_name}.trashinfo"));
+    let body = fs::read_to_string(&info).unwrap();
+    let rewritten: String = body
+        .lines()
+        .map(|line| {
+            if line.starts_with("DeletionDate=") {
+                format!("DeletionDate={date}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&info, rewritten).unwrap();
+}
+
+#[test]
 fn restore_force_replaces_directory_at_dest() {
     let sb = Sandbox::new("restore-force-dir");
     sb.touch("x");
@@ -1534,4 +1656,54 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
     assert_eq!(bad.status.code(), Some(2), "{}", stderr_of(&bad));
     let bad_list = sb.run(&["list", &pin, "--larger-than=nope"]);
     assert_eq!(bad_list.status.code(), Some(2), "{}", stderr_of(&bad_list));
+}
+
+#[test]
+fn restore_group_all_and_restore_to() {
+    let sb = Sandbox::new("restore-group");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("a.txt");
+    sb.touch("b.txt");
+    sb.touch("c.txt");
+    assert!(sb
+        .run(&["put", &pin, "a.txt", "b.txt", "c.txt"])
+        .status
+        .success());
+    let out = sb.run(&["restore", &pin, "--plain", "--group"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(sb.work().join("a.txt").is_file());
+    assert!(sb.work().join("b.txt").is_file());
+    assert!(sb.work().join("c.txt").is_file());
+
+    sb.touch("d.txt");
+    assert!(sb.run(&["put", &pin, "d.txt"]).status.success());
+    let dest = sb.root.join("out");
+    fs::create_dir_all(&dest).unwrap();
+    let to = sb.run(&[
+        "restore",
+        &pin,
+        "--plain",
+        "--restore-to",
+        dest.to_str().unwrap(),
+        "d.txt",
+    ]);
+    assert!(to.status.success(), "{}", stderr_of(&to));
+    assert!(dest.join("d.txt").is_file());
+}
+
+#[test]
+fn restore_plain_index_range() {
+    let sb = Sandbox::new("restore-range");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("x1");
+    sb.touch("x2");
+    sb.touch("x3");
+    assert!(sb.run(&["put", &pin, "x1", "x2", "x3"]).status.success());
+    let out = sb.run_with_stdin(&["restore", &pin, "--plain"], "0-1\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let back = [sb.work().join("x1").exists(), sb.work().join("x2").exists(), sb.work().join("x3").exists()]
+        .iter()
+        .filter(|b| **b)
+        .count();
+    assert_eq!(back, 2, "range 0-1 should restore two of three");
 }

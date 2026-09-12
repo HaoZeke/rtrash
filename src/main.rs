@@ -12,7 +12,7 @@ Commands:
   empty [OPTION]... [DAYS]    purge trashed items, optionally older than DAYS
   list [OPTION]...            list trashed items
   status [OPTION]...          item count and reclaimable size summary
-  restore [OPTION]... [PATH]  restore a trashed item
+  restore [OPTION]... [PATH]...  restore trashed items
   rm PATTERN...               permanently delete matching trash entries
   setup [OPTION]...           install multi-call links, completions, man page
   keys [OPTION]...            show/sample TUI keybind config (customizable)

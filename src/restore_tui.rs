@@ -47,6 +47,7 @@ struct App<'a> {
     list_state: ListState,
     sel: Selection,
     force: bool,
+    restore_to: Option<std::path::PathBuf>,
     mode: Mode,
     filter: String,
     filter_draft: String,
@@ -59,7 +60,12 @@ struct App<'a> {
 }
 
 impl<'a> App<'a> {
-    fn new(prog: &'a str, entries: Vec<&'a Entry>, force: bool) -> Self {
+    fn new(
+        prog: &'a str,
+        entries: Vec<&'a Entry>,
+        force: bool,
+        restore_to: Option<std::path::PathBuf>,
+    ) -> Self {
         let mut list_state = ListState::default();
         if !entries.is_empty() {
             list_state.select(Some(0));
@@ -76,6 +82,7 @@ impl<'a> App<'a> {
             list_state,
             sel: Selection::new(),
             force,
+            restore_to,
             mode: Mode::Browse,
             filter: String::new(),
             filter_draft: String::new(),
@@ -169,13 +176,14 @@ impl<'a> App<'a> {
         if targets.len() == 1 {
             let ei = targets[0];
             let entry = self.entries[ei];
-            let dest_exists = entry.original.symlink_metadata().is_ok();
+            let dest = restore::dest_path(entry, self.restore_to.as_deref());
+            let dest_exists = dest.symlink_metadata().is_ok();
             if dest_exists && !self.force {
                 self.mode = Mode::ConfirmOverwrite;
                 self.pending_idxs = vec![ei];
                 self.status = format!(
                     "overwrite existing '{}' ?  y confirm · n cancel",
-                    entry.original.display()
+                    dest.display()
                 );
                 return;
             }
@@ -184,9 +192,11 @@ impl<'a> App<'a> {
         }
         // Bulk: confirm when any dest exists without force.
         let need_confirm = !self.force
-            && targets
-                .iter()
-                .any(|&ei| self.entries[ei].original.symlink_metadata().is_ok());
+            && targets.iter().any(|&ei| {
+                restore::dest_path(self.entries[ei], self.restore_to.as_deref())
+                    .symlink_metadata()
+                    .is_ok()
+            });
         if need_confirm {
             self.mode = Mode::ConfirmBulk;
             self.pending_idxs = targets;
@@ -200,7 +210,13 @@ impl<'a> App<'a> {
     }
 
     fn perform_restores_tracked(&mut self, idxs: &[usize], force: bool) {
-        let result = restore_selection(self.prog, &self.entries, idxs, force);
+        let result = restore_selection(
+            self.prog,
+            &self.entries,
+            idxs,
+            force,
+            self.restore_to.as_deref(),
+        );
         // Only drop UI rows that actually restored (failed stay visible).
         for &ei in result.succeeded_idxs.iter().rev() {
             if ei < self.entries.len() {
@@ -547,13 +563,18 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
 }
 
 /// Run the restore TUI. Returns process exit code.
-pub fn run(prog: &str, entries: Vec<&Entry>, force: bool) -> i32 {
+pub fn run(
+    prog: &str,
+    entries: Vec<&Entry>,
+    force: bool,
+    restore_to: Option<std::path::PathBuf>,
+) -> i32 {
     if entries.is_empty() {
         eprintln!("{prog}: no trashed files match");
         return 1;
     }
     if entries.len() == 1 {
-        return restore::restore_entry(prog, entries[0], force);
+        return restore::restore_entry(prog, entries[0], force, restore_to.as_deref());
     }
 
     let mut terminal = match tui_term::enter() {
@@ -564,7 +585,7 @@ pub fn run(prog: &str, entries: Vec<&Entry>, force: bool) -> i32 {
         }
     };
 
-    let mut app = App::new(prog, entries, force);
+    let mut app = App::new(prog, entries, force, restore_to);
     let result = (|| -> io::Result<()> {
         loop {
             terminal.draw(|f| ui(f, &mut app))?;
@@ -612,6 +633,7 @@ pub fn restore_selection(
     entries: &[&Entry],
     idxs: &[usize],
     force: bool,
+    restore_to: Option<&Path>,
 ) -> RestoreSelectionResult {
     let mut sorted: Vec<usize> = idxs.to_vec();
     sorted.sort_unstable();
@@ -623,7 +645,7 @@ pub fn restore_selection(
             fail_count += 1;
             continue;
         }
-        if restore::restore_entry(prog, entries[ei], force) == 0 {
+        if restore::restore_entry(prog, entries[ei], force, restore_to) == 0 {
             succeeded_idxs.push(ei);
         } else {
             fail_count += 1;

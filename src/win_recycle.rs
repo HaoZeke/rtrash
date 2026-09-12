@@ -347,7 +347,9 @@ on the Recycle Bin backend.
         let mut force = false;
         let mut plain = true; // no TUI on Windows recycle path
         let mut if_unique = false;
-        let mut target: Option<PathBuf> = None;
+        let mut restore_all = false;
+        let mut restore_group = false;
+        let mut targets: Vec<PathBuf> = Vec::new();
         let mut it = args.iter().peekable();
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -356,19 +358,32 @@ on the Recycle Bin backend.
                         let _ = it.next();
                     }
                 }
-                "-f" | "--force" => force = true,
+                a if a == "--restore-to" || a.starts_with("--restore-to=") => {
+                    if a == "--restore-to" {
+                        let _ = it.next();
+                    }
+                    eprintln!("{prog}: --restore-to is not supported on Windows Recycle Bin");
+                    return 2;
+                }
+                "-f" | "--force" | "--overwrite" => force = true,
                 "--plain" | "--cwd-only" | "--home-only" => plain = true,
                 "--if-unique" => if_unique = true,
+                "--all" => restore_all = true,
+                "--group" => restore_group = true,
                 "--help" => {
                     print!(
                         "\
-Usage: {prog} [OPTION]... [PATH]
-Restore an item from the Windows Recycle Bin to its original location.
+Usage: {prog} [OPTION]... [PATH]...
+Restore items from the Windows Recycle Bin to their original location.
 
-With PATH, restore the item whose original path equals PATH.
-Without PATH, print a numbered list and read an index from stdin.
+With PATH (repeatable), restore items whose original path equals PATH.
+Without PATH, print a numbered list and read an index from stdin
+(trash-cli ranges: 0-2, 3).
 
-  -f, --force    overwrite when the destination exists (best-effort)
+  -f, --force, --overwrite  overwrite when the destination exists (best-effort)
+      --all      restore every item in the Recycle Bin
+      --group    restore every item sharing the deletion second of the
+                    newest match (or of PATH, if one PATH is given)
       --plain    numbered selection (default on Windows)
       --if-unique  restore only when exactly one item matches; otherwise
                      exit 1 without prompting
@@ -387,13 +402,7 @@ Without PATH, print a numbered list and read an index from stdin.
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return 2;
                 }
-                a => {
-                    if target.is_some() {
-                        eprintln!("{prog}: only one PATH may be given");
-                        return 2;
-                    }
-                    target = Some(PathBuf::from(a));
-                }
+                a => targets.push(PathBuf::from(a)),
             }
         }
         let items = match os_limited::list() {
@@ -403,16 +412,31 @@ Without PATH, print a numbered list and read an index from stdin.
                 return 1;
             }
         };
-        let matches: Vec<TrashItem> = match &target {
-            Some(t) => {
-                let abs = std::fs::canonicalize(t).unwrap_or_else(|_| t.clone());
-                items
-                    .into_iter()
-                    .filter(|i| i.original_path() == abs || i.original_path() == *t)
-                    .collect()
-            }
-            None => items,
+        let mut matches: Vec<TrashItem> = if restore_all {
+            items
+        } else if !targets.is_empty() {
+            let abs: Vec<PathBuf> = targets
+                .iter()
+                .map(|t| std::fs::canonicalize(t).unwrap_or_else(|_| t.clone()))
+                .collect();
+            items
+                .into_iter()
+                .filter(|i| {
+                    abs.iter()
+                        .any(|t| i.original_path() == *t || targets.iter().any(|raw| i.original_path() == *raw))
+                })
+                .collect()
+        } else {
+            items
         };
+        if restore_group && !restore_all {
+            if matches.is_empty() {
+                eprintln!("{prog}: no trashed files match");
+                return 1;
+            }
+            let newest = matches.iter().map(|i| i.time_deleted).max().unwrap_or(0);
+            matches.retain(|i| i.time_deleted == newest);
+        }
         if matches.is_empty() {
             eprintln!("{prog}: no trashed files match");
             return 1;
@@ -424,10 +448,11 @@ Without PATH, print a numbered list and read an index from stdin.
             );
             return 1;
         }
-        if matches.len() == 1 {
+        let batch = restore_all || restore_group || targets.len() > 1;
+        if matches.len() == 1 || batch {
             return restore_one(prog, matches, force);
         }
-        // Numbered pick.
+        // Numbered pick (single index or trash-cli ranges).
         for (i, it) in matches.iter().enumerate() {
             let date = platform::epoch_to_iso_utc(it.time_deleted);
             println!(
@@ -440,16 +465,55 @@ Without PATH, print a numbered list and read an index from stdin.
         if std::io::stdin().read_line(&mut line).is_err() {
             return 1;
         }
-        let Ok(idx) = line.trim().parse::<usize>() else {
-            eprintln!("{prog}: invalid index");
-            return 1;
+        let idxs = match parse_win_restore_indexes(line.trim(), matches.len()) {
+            Ok(v) => v,
+            Err(()) => {
+                eprintln!("{prog}: invalid index");
+                return 1;
+            }
         };
-        if idx >= matches.len() {
-            eprintln!("{prog}: index out of range");
-            return 1;
+        let selected: Vec<TrashItem> = matches
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, it)| idxs.contains(&i).then_some(it))
+            .collect();
+        restore_one(prog, selected, force)
+    }
+
+    fn parse_win_restore_indexes(input: &str, n: usize) -> Result<Vec<usize>, ()> {
+        if n == 0 || input.is_empty() {
+            return Err(());
         }
-        let item = matches.into_iter().nth(idx).unwrap();
-        restore_one(prog, vec![item], force)
+        let mut out = Vec::new();
+        for raw in input.split(',') {
+            let part = raw.trim();
+            if part.is_empty() {
+                return Err(());
+            }
+            if let Some((a, b)) = part.split_once('-') {
+                if a.trim().is_empty() || b.trim().is_empty() {
+                    return Err(());
+                }
+                let start: usize = a.trim().parse().map_err(|_| ())?;
+                let stop: usize = b.trim().parse().map_err(|_| ())?;
+                if start > stop {
+                    return Err(());
+                }
+                for i in start..=stop {
+                    if i >= n {
+                        return Err(());
+                    }
+                    out.push(i);
+                }
+            } else {
+                let i: usize = part.parse().map_err(|_| ())?;
+                if i >= n {
+                    return Err(());
+                }
+                out.push(i);
+            }
+        }
+        Ok(out)
     }
 
     fn restore_one(prog: &str, items: Vec<TrashItem>, force: bool) -> i32 {

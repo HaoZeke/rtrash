@@ -7,20 +7,27 @@ use crate::trashdir;
 use crate::util::stdin_is_tty;
 
 const HELP: &str = "\
-Usage: {prog} [OPTION]... [PATH]
-Restore a trashed item to its original location.
+Usage: {prog} [OPTION]... [PATH]...
+Restore trashed items to their original location (or --restore-to DIR).
 
-With PATH, restore the item originally at PATH (exact original path match).
+With PATH (repeatable), restore items originally at those paths (exact
+original-path match). Several PATH operands restore each unique match.
 Without PATH on a TTY, open the interactive restore browser (ratatui): filter,
 navigate, restore one or more items. Without a TTY (or with a piped index),
-print a numbered table and read a selection from stdin.
+print a numbered table and read a selection from stdin. Numbered pick accepts
+trash-cli indexes: `0-2, 3`.
 
 By default every trashed item in scope is listed; pass --cwd-only to limit to
 items whose original path is under the current directory. A single match
 restores immediately. --if-unique makes any other count an error (exit 1)
 instead of printing a numbered table or reading stdin.
 
-  -f, --force     overwrite an existing file at the original location
+  -f, --force, --overwrite  overwrite an existing file at the destination
+      --all       restore every item in the current scope
+      --group     restore every item sharing the DeletionDate second of the
+                     newest match (or of PATH, if one PATH is given)
+      --restore-to DIR  relocate payloads into DIR (keep basename);
+                     `--restore-to=DIR` also accepted
       --cwd-only  without PATH, only items trashed from under the current directory
       --plain     force numbered line selection even on a TTY (no TUI)
       --if-unique  restore only when exactly one item matches; otherwise
@@ -38,17 +45,22 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut cwd_only = false;
     let mut plain = false;
     let mut if_unique = false;
-    let mut target: Option<PathBuf> = None;
+    let mut restore_all = false;
+    let mut restore_group = false;
+    let mut restore_to: Option<PathBuf> = None;
+    let mut targets: Vec<PathBuf> = Vec::new();
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut i = 0usize;
     while i < args.len() {
         let arg = &args[i];
         match arg.as_str() {
-            "-f" | "--force" => force = true,
+            "-f" | "--force" | "--overwrite" => force = true,
             "--home-only" => home_only = true,
             "--cwd-only" => cwd_only = true,
             "--plain" => plain = true,
             "--if-unique" => if_unique = true,
+            "--all" => restore_all = true,
+            "--group" => restore_group = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -66,20 +78,23 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     }
                 }
             }
+            a if is_restore_to_flag(a) => match take_restore_to_value(args, &mut i) {
+                Ok(p) => restore_to = Some(p),
+                Err(e) => {
+                    eprintln!("{prog}: {e}");
+                    return 2;
+                }
+            },
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
                 return 2;
             }
-            a => {
-                if target.is_some() {
-                    eprintln!("{prog}: only one PATH may be given");
-                    return 2;
-                }
-                target = Some(PathBuf::from(a));
-            }
+            a => targets.push(PathBuf::from(a)),
         }
         i += 1;
     }
+
+    let restore_to = restore_to.map(|p| absolutize(&p));
 
     let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);
     if dirs.is_empty() && !trash_dirs.is_empty() {
@@ -89,26 +104,52 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let entries = list::collect(&dirs);
     // Orphans have no Path=; never offer them as restore targets.
     let restorable: Vec<&list::Entry> = entries.iter().filter(|e| !e.orphan).collect();
-    let matches: Vec<&list::Entry> = match &target {
-        Some(t) => {
-            let abs = absolutize(t);
-            restorable
-                .iter()
-                .copied()
-                .filter(|e| e.original == abs)
-                .collect()
-        }
-        None if cwd_only => {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-            restorable
-                .iter()
-                .copied()
-                .filter(|e| e.original.starts_with(&cwd))
-                .collect()
-        }
-        // trash-cli parity: bare `restore` offers every restorable item in scope.
-        None => restorable,
+    let scoped: Vec<&list::Entry> = if cwd_only {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        restorable
+            .iter()
+            .copied()
+            .filter(|e| e.original.starts_with(&cwd))
+            .collect()
+    } else {
+        restorable
     };
+
+    let mut matches: Vec<&list::Entry> = if restore_all {
+        scoped.clone()
+    } else if !targets.is_empty() {
+        let abs: Vec<PathBuf> = targets.iter().map(|t| absolutize(t)).collect();
+        for (raw, want) in targets.iter().zip(abs.iter()) {
+            if !scoped.iter().any(|e| e.original == *want) {
+                eprintln!("{prog}: no trashed files match '{}'", raw.display());
+                return 1;
+            }
+        }
+        scoped
+            .iter()
+            .copied()
+            .filter(|e| abs.iter().any(|t| e.original == *t))
+            .collect()
+    } else {
+        scoped.clone()
+    };
+
+    if restore_group && !restore_all {
+        let Some(newest) = matches.iter().max_by(|a, b| {
+            a.epoch
+                .cmp(&b.epoch)
+                .then_with(|| a.original.cmp(&b.original))
+        }) else {
+            eprintln!("{prog}: no trashed files match");
+            return 1;
+        };
+        let epoch = newest.epoch;
+        matches = scoped
+            .iter()
+            .copied()
+            .filter(|e| e.epoch == epoch)
+            .collect();
+    }
 
     if matches.is_empty() {
         eprintln!("{prog}: no trashed files match");
@@ -123,53 +164,151 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 1;
     }
 
+    let batch = restore_all || restore_group || targets.len() > 1;
+
     // TTY + multi-item: prefer ratatui browser when built with `tui` (unless --plain).
     #[cfg(feature = "tui")]
-    if !plain && target.is_none() && matches.len() > 1 && stdin_is_tty() {
-        return crate::restore_tui::run(prog, matches, force);
+    if !plain && !batch && targets.is_empty() && matches.len() > 1 && stdin_is_tty() {
+        return crate::restore_tui::run(prog, matches, force, restore_to);
     }
     #[cfg(not(feature = "tui"))]
     let _ = plain;
 
-    let chosen: &list::Entry = if matches.len() == 1 {
-        matches[0]
-    } else {
-        for (i, e) in matches.iter().enumerate() {
-            let date = e.date.as_deref().unwrap_or("????-??-??T??:??:??");
-            println!(
-                "{i:4}  {}  {}",
-                date.replacen('T', " ", 1),
-                e.original.display()
-            );
-        }
-        // Piped index for scripts / tests: `printf '0\n' | rtrash restore`.
-        if stdin_is_tty() {
-            eprint!("What file to restore [0..{}]: ", matches.len() - 1);
-            io::stderr().flush().ok();
-        }
-        let mut line = String::new();
-        if io::stdin().lock().read_line(&mut line).is_err() {
-            eprintln!("{prog}: failed to read selection from stdin");
+    if matches.len() == 1 || batch {
+        return restore_entries(prog, &matches, force, restore_to.as_deref());
+    }
+
+    for (i, e) in matches.iter().enumerate() {
+        let date = e.date.as_deref().unwrap_or("????-??-??T??:??:??");
+        println!(
+            "{i:4}  {}  {}",
+            date.replacen('T', " ", 1),
+            e.original.display()
+        );
+    }
+    // Piped index for scripts / tests: `printf '0\n' | rtrash restore`.
+    // trash-cli ranges: `printf '0-1\n' | rtrash restore --plain`.
+    if stdin_is_tty() {
+        eprint!("What file to restore [0..{}]: ", matches.len() - 1);
+        io::stderr().flush().ok();
+    }
+    let mut line = String::new();
+    if io::stdin().lock().read_line(&mut line).is_err() {
+        eprintln!("{prog}: failed to read selection from stdin");
+        return 1;
+    }
+    if line.trim().is_empty() {
+        eprintln!(
+            "{prog}: {} matches; provide an index 0..{} on stdin",
+            matches.len(),
+            matches.len() - 1
+        );
+        return 1;
+    }
+    let idxs = match parse_restore_indexes(line.trim(), matches.len()) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("{prog}: invalid selection");
             return 1;
-        }
-        if line.trim().is_empty() {
-            eprintln!(
-                "{prog}: {} matches; provide an index 0..{} on stdin",
-                matches.len(),
-                matches.len() - 1
-            );
-            return 1;
-        }
-        match line.trim().parse::<usize>() {
-            Ok(i) if i < matches.len() => matches[i],
-            _ => {
-                eprintln!("{prog}: invalid selection");
-                return 1;
-            }
         }
     };
+    let chosen: Vec<&list::Entry> = idxs.into_iter().map(|i| matches[i]).collect();
+    restore_entries(prog, &chosen, force, restore_to.as_deref())
+}
 
-    restore_entry(prog, chosen, force)
+fn is_restore_to_flag(arg: &str) -> bool {
+    arg == "--restore-to" || arg.starts_with("--restore-to=")
+}
+
+fn take_restore_to_value(args: &[String], i: &mut usize) -> Result<PathBuf, &'static str> {
+    let arg = args
+        .get(*i)
+        .map(String::as_str)
+        .ok_or("--restore-to requires DIR")?;
+    if let Some(rest) = arg.strip_prefix("--restore-to=") {
+        if rest.is_empty() {
+            return Err("--restore-to requires DIR");
+        }
+        return Ok(PathBuf::from(rest));
+    }
+    if arg == "--restore-to" {
+        *i += 1;
+        return args
+            .get(*i)
+            .filter(|s| !s.is_empty())
+            .map(|s| PathBuf::from(s))
+            .ok_or("--restore-to requires DIR");
+    }
+    Err("--restore-to requires DIR")
+}
+
+/// trash-cli numbered pick: `0`, `0-2`, `0-2, 3`.
+fn parse_restore_indexes(input: &str, n: usize) -> Result<Vec<usize>, ()> {
+    if n == 0 {
+        return Err(());
+    }
+    let mut out = Vec::new();
+    for raw in input.split(',') {
+        let part = raw.trim();
+        if part.is_empty() {
+            return Err(());
+        }
+        if let Some((a, b)) = part.split_once('-') {
+            if a.trim().is_empty() || b.trim().is_empty() {
+                return Err(());
+            }
+            let start: isize = a.trim().parse().map_err(|_| ())?;
+            let stop: isize = b.trim().parse().map_err(|_| ())?;
+            if start < 0 || stop < 0 {
+                return Err(());
+            }
+            if start > stop {
+                return Err(());
+            }
+            for i in start as usize..=stop as usize {
+                if i >= n {
+                    return Err(());
+                }
+                out.push(i);
+            }
+        } else {
+            let i: usize = part.parse().map_err(|_| ())?;
+            if i >= n {
+                return Err(());
+            }
+            out.push(i);
+        }
+    }
+    let mut seen = vec![false; n];
+    out.retain(|&i| {
+        if seen[i] {
+            false
+        } else {
+            seen[i] = true;
+            true
+        }
+    });
+    if out.is_empty() {
+        Err(())
+    } else {
+        Ok(out)
+    }
+}
+
+fn restore_entries(
+    prog: &str,
+    chosen: &[&list::Entry],
+    force: bool,
+    restore_to: Option<&Path>,
+) -> i32 {
+    let mut rc = 0;
+    for e in chosen {
+        let code = restore_entry(prog, e, force, restore_to);
+        if code != 0 {
+            rc = code;
+        }
+    }
+    rc
 }
 
 fn absolutize(p: &Path) -> PathBuf {
@@ -196,8 +335,28 @@ fn lexical_clean(p: &Path) -> PathBuf {
     out
 }
 
-/// Restore one entry to its original path. Shared by CLI, piped pick, and TUI.
-pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
+/// Destination path for a restore: original location, or `DIR/basename`.
+pub(crate) fn dest_path(entry: &list::Entry, restore_to: Option<&Path>) -> PathBuf {
+    match restore_to {
+        Some(dir) => {
+            let base = entry
+                .original
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new(entry.name.as_str()));
+            dir.join(base)
+        }
+        None => entry.original.clone(),
+    }
+}
+
+/// Restore one entry to its original path (or `--restore-to`). Shared by CLI,
+/// piped pick, and TUI.
+pub(crate) fn restore_entry(
+    prog: &str,
+    entry: &list::Entry,
+    force: bool,
+    restore_to: Option<&Path>,
+) -> i32 {
     if entry.orphan {
         eprintln!(
             "{prog}: cannot restore orphan '{}' (no .trashinfo; no original Path=)",
@@ -216,7 +375,7 @@ pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32
         }
     };
     let src = entry.dir.files().join(&entry.name);
-    let dest = &entry.original;
+    let dest = dest_path(entry, restore_to);
 
     // Never destroy the live destination until the trash payload is known good.
     if src.symlink_metadata().is_err() {
@@ -267,7 +426,7 @@ pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32
 
     if dest_exists {
         // Payload is durable under `staged`; only now remove the blocker.
-        if let Err(e) = trashdir::remove_any_path(dest) {
+        if let Err(e) = trashdir::remove_any_path(&dest) {
             eprintln!("{prog}: cannot remove existing '{}': {e}", dest.display());
             // Best-effort: put payload back into the trash name.
             let _ = trashdir::relocate(&staged, &src);
@@ -275,7 +434,7 @@ pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32
         }
     }
 
-    if let Err(e) = fs::rename(&staged, dest) {
+    if let Err(e) = fs::rename(&staged, &dest) {
         // Same-FS rename of staged→dest; EXDEV should not happen (same parent).
         eprintln!(
             "{prog}: cannot place restored file at '{}': {e}",
@@ -295,4 +454,33 @@ pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32
     trashdir::directorysizes_remove(&entry.dir, &entry.name);
     println!("restored '{}'", dest.display());
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_restore_indexes;
+
+    #[test]
+    fn parse_indexes_single() {
+        assert_eq!(parse_restore_indexes("0", 4), Ok(vec![0]));
+        assert_eq!(parse_restore_indexes(" 3 ", 4), Ok(vec![3]));
+    }
+
+    #[test]
+    fn parse_indexes_range_and_comma() {
+        assert_eq!(parse_restore_indexes("0-2, 3", 4), Ok(vec![0, 1, 2, 3]));
+        assert_eq!(parse_restore_indexes("0-1", 3), Ok(vec![0, 1]));
+        assert_eq!(parse_restore_indexes("1,3", 4), Ok(vec![1, 3]));
+    }
+
+    #[test]
+    fn parse_indexes_rejects_bad() {
+        assert!(parse_restore_indexes("", 3).is_err());
+        assert!(parse_restore_indexes("0-", 3).is_err());
+        assert!(parse_restore_indexes("-1", 3).is_err());
+        assert!(parse_restore_indexes("2-0", 3).is_err());
+        assert!(parse_restore_indexes("9", 3).is_err());
+        assert!(parse_restore_indexes("0-9", 3).is_err());
+        assert!(parse_restore_indexes("x", 3).is_err());
+    }
 }
