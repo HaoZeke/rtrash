@@ -1511,30 +1511,6 @@ fn status_json_and_age_filter() {
     );
 }
 
-#[test]
-fn empty_max_bytes_drops_largest_first() {
-    let sb = Sandbox::new("empty-maxb");
-    let pin = format!("--trash-dir={}", sb.trash().display());
-    fs::write(sb.work().join("big.bin"), vec![b'x'; 20 * 1024]).unwrap();
-    sb.touch("tiny1");
-    sb.touch("tiny2");
-    assert!(sb.run(&["put", &pin, "big.bin", "tiny1", "tiny2"]).status.success());
-    let out = sb.run(&["empty", &pin, "--plain", "--json", "--max-bytes=10k"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    let s = stdout_of(&out);
-    assert!(s.contains("\"removed\":1") || s.contains("\"removed\": 1"), "{s}");
-    assert!(!sb.trash().join("files/big.bin").exists());
-    assert!(sb.trash().join("files/tiny1").is_file());
-    assert!(sb.trash().join("files/tiny2").is_file());
-    let listed = sb.run(&["list", &pin, "--json", "--larger-than=1k"]);
-    assert!(listed.status.success(), "{}", stderr_of(&listed));
-    assert!(
-        !stdout_of(&listed).contains("big.bin"),
-        "{}",
-        stdout_of(&listed)
-    );
-}
-
 fn json_field<'a>(obj: &'a str, key: &str) -> Option<&'a str> {
     let pat = format!("\"{key}\":");
     let rest = obj.split_once(&pat)?.1.trim_start();
@@ -1661,7 +1637,7 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
 
 #[test]
 fn restore_group_all_and_restore_to() {
-    let sb = Sandbox::new("restore-group");
+    let sb = Sandbox::new("restore-group-to");
     let pin = format!("--trash-dir={}", sb.trash().display());
     sb.touch("a.txt");
     sb.touch("b.txt");
