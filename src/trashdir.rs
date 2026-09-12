@@ -609,9 +609,9 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
     let dest = trash.files().join(&name);
     let moved = match rename_noreplace(abs, &dest) {
         Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            copy_recursive(abs, &dest, meta).and_then(|_| remove_any(abs, meta))
-        }
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => copy_recursive(abs, &dest, meta)
+            .and_then(|_| sync_copied_tree(&dest, meta))
+            .and_then(|_| remove_any(abs, meta)),
         Err(e) => Err(e),
     };
     if let Err(e) = moved {
@@ -902,7 +902,9 @@ pub fn relocate(src: &Path, dest: &Path) -> io::Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             let meta = fs::symlink_metadata(src)?;
-            copy_recursive(src, dest, &meta).and_then(|_| remove_any(src, &meta))
+            copy_recursive(src, dest, &meta)
+                .and_then(|_| sync_copied_tree(dest, &meta))
+                .and_then(|_| remove_any(src, &meta))
         }
         Err(e) => Err(e),
     }
@@ -932,8 +934,22 @@ pub fn copy_recursive(src: &Path, dst: &Path, meta: &fs::Metadata) -> io::Result
         fs::copy(src, dst)?;
         fs::set_permissions(dst, meta.permissions())?;
         set_times(dst, meta)?;
+        let mut f = fs::File::open(dst)?;
+        sync_file(&mut f)?;
         Ok(())
     }
+}
+
+/// Durable the EXDEV destination (file data already synced in copy_recursive;
+/// directories and the parent `files/` dir need a dir fsync) before unlink.
+fn sync_copied_tree(dest: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    if meta.is_dir() {
+        let _ = sync_dir(dest);
+    }
+    if let Some(parent) = dest.parent() {
+        let _ = sync_dir(parent);
+    }
+    Ok(())
 }
 
 fn set_times(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
@@ -1102,6 +1118,23 @@ proc /proc proc rw 0 0
         assert!(mps.iter().any(|p| p == Path::new("/home")));
         assert!(mps.iter().any(|p| p == Path::new("/mnt/usb")));
         assert!(!mps.iter().any(|p| p == Path::new("/proc")));
+    }
+
+    #[test]
+    fn exdev_copy_syncs_before_source_unlink() {
+        let src = include_str!("trashdir.rs");
+        assert!(
+            src.contains("sync_copied_tree"),
+            "EXDEV must fsync dest before unlink"
+        );
+        assert!(
+            src.matches("sync_copied_tree").count() >= 3,
+            "put + relocate + definition"
+        );
+        assert!(
+            src.contains("sync_file(&mut f)"),
+            "regular-file EXDEV copy must sync_all the dest"
+        );
     }
 
     #[test]
