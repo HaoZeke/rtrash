@@ -130,6 +130,23 @@ if needed). Scripts and tests use this instead of XDG discovery.
 .B \-\-home\-only
 Always use the home trash (skip volume trash selection).
 .TP
+.B \-\-plain
+Skip the TUI put browser; require FILE operands even on a TTY.
+.TP
+.B \-\-json
+Emit a JSON summary
+(\fIok\fR, \fIfailed\fR, \fInames\fR); implies
+.BR \-\-plain .
+.TP
+.BI \-\-files\-from =PATH
+Read additional operands from
+.I PATH
+(\fB\-\fR = stdin).
+.TP
+.BR \-0 ", " \-\-zero
+.B \-\-files\-from
+records are NUL-separated (default: newline).
+.TP
 .B \-\-help
 Display help and exit.
 .TP
@@ -164,6 +181,10 @@ Print each removed item.
 .TP
 .BR \-f ", " \-\-force
 Accepted for trash-cli compatibility (emptying never prompts).
+.TP
+.B \-\-plain
+Skip the TUI empty browser; keep classic non-interactive empty
+(also the default when stdin is not a TTY).
 .TP
 .BI \-\-trash\-dir =PATH
 Empty only this trash directory (repeatable); default is the home trash
@@ -398,7 +419,7 @@ Output version information and exit.
 .B rtrash setup
 [\fIOPTION\fR]...
 .PP
-Install multi-call symlinks, bash/zsh completions, and this man page under a
+Install multi-call symlinks, bash/zsh/fish completions, and this man page under a
 user prefix (default
 .IR ~/.local ,
 or
@@ -442,8 +463,20 @@ Print the embedded completion script to stdout (packagers / custom paths).
 Print the embedded man page source to stdout.
 .SS keys
 .B rtrash keys
+[\fIOPTION\fR]
 .PP
 Show or sample the TUI keybind config (Unix TUI builds).
+.TP
+.BR \-l ", " \-\-list
+Print the resolved keymap (default).
+.TP
+.B \-\-sample
+Print a full sample
+.B keys.toml
+to stdout.
+.TP
+.B \-\-path
+Print the default config path.
 .SS rm (permanent delete from trash)
 .B rtrash rm
 [\fIOPTION\fR]...

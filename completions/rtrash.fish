@@ -23,6 +23,7 @@ complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'status' -d 'item cou
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'restore' -d 'restore a trashed item'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'rm' -d 'permanently delete matching trash entries'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'setup' -d 'install multi-call links, completions, man page'
+complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'keys' -d 'show/sample TUI keybind config'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'completions' -d 'print embedded shell completion script'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'man' -d 'print embedded man page to stdout'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -s h -l help -d 'display help and exit'
@@ -43,6 +44,9 @@ complete -c rtrash -n $put_cond -l no-preserve-root -d 'do not treat / specially
 complete -c rtrash -n $put_cond -l trash-dir -d 'put into this trash root' -r
 complete -c rtrash -n $put_cond -l home-only -d 'always use the home trash'
 complete -c rtrash -n $put_cond -l plain -d 'skip TUI; require file operands'
+complete -c rtrash -n $put_cond -l json -d 'JSON summary; implies --plain'
+complete -c rtrash -n $put_cond -l files-from -d 'read additional operands from PATH' -r
+complete -c rtrash -n $put_cond -s 0 -l zero -d '--files-from records are NUL-separated'
 
 # empty
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s n -l dry-run -d 'report what would be removed; show reclaimable size'
@@ -76,6 +80,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l gr
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l restore-to -d 'relocate payloads into DIR (keep basename)' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l home-only -d 'only the home trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l trash-dir -d 'only this trash directory' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l cwd-only -d 'only items whose original path is under cwd'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l plain -d 'numbered line selection even on a TTY'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l if-unique -d 'error unless exactly one match'
 
@@ -97,6 +102,11 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -s n -l
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -s f -l force -d 'replace existing links/files'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -s v -l verbose -d 'print each path written'
 
+# keys
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q keys' -s l -l list -d 'print resolved keymap'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q keys' -l sample -d 'print a full sample keys.toml'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q keys' -l path -d 'print the default config path'
+
 # completions shell names
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q completions' -f -a 'bash zsh fish' -d 'shell'
 
@@ -108,6 +118,10 @@ for cmd in trash-put trash
     complete -c $cmd -s v -l verbose
     complete -c $cmd -s i
     complete -c $cmd -s I
+    complete -c $cmd -l plain
+    complete -c $cmd -l json
+    complete -c $cmd -l files-from -r
+    complete -c $cmd -s 0 -l zero
     complete -c $cmd -l help
     complete -c $cmd -l version
 end
@@ -118,6 +132,8 @@ complete -c trash-empty -s f -l force
 complete -c trash-empty -l trash-dir -r
 complete -c trash-empty -l home-only
 complete -c trash-empty -l max-bytes -r
+complete -c trash-empty -l plain
+complete -c trash-empty -l json
 complete -c trash-empty -l help
 complete -c trash-empty -l version
 
@@ -141,6 +157,7 @@ complete -c trash-restore -l group
 complete -c trash-restore -l restore-to -r
 complete -c trash-restore -l home-only
 complete -c trash-restore -l trash-dir -r
+complete -c trash-restore -l cwd-only
 complete -c trash-restore -l plain
 complete -c trash-restore -l if-unique
 complete -c trash-restore -l help
