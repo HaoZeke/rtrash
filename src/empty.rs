@@ -260,6 +260,7 @@ fn empty_one(
         }
     }
 
+    let cache = trashdir::DirectorySizesMap::load(dir);
     victims.par_iter().for_each(|(target, info_path, display)| {
         if opts.dry_run {
             // Prefer FreeDesktop directorysizes for directory payloads; fall back
@@ -269,7 +270,7 @@ fn empty_one(
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let sz = if info_path.is_some() && !name.is_empty() {
-                trashdir::entry_reclaim_bytes(dir, &name)
+                trashdir::entry_reclaim_bytes_cached(dir, &name, Some(&cache))
             } else {
                 crate::fastdelete::disk_usage(target)
                     + info_path
@@ -326,11 +327,12 @@ fn full_empty_dry_run(dir: &TrashDir, opts: &Opts, removed: &AtomicU64, bytes: &
     let info_dir = dir.info();
     let mut n_files = 0u64;
     let mut total = 0u64;
+    let cache = trashdir::DirectorySizesMap::load(dir);
     if let Ok(entries) = fs::read_dir(&files_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
             // Directory payloads: use validated directorysizes when present.
-            let sz = trashdir::files_child_reclaim_bytes(dir, &p);
+            let sz = trashdir::files_child_reclaim_bytes_cached(dir, &p, Some(&cache));
             total = total.saturating_add(sz);
             n_files += 1;
             if opts.verbose {

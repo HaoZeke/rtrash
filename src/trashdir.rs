@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStringExt;
@@ -729,51 +729,73 @@ pub fn directorysizes_parse_line(line: &str) -> Option<(u64, i64, String)> {
     Some((size, mtime, enc))
 }
 
-/// Cached directory payload size from `$trash/directorysizes` when the line is
-/// still valid for `name`:
-/// - a matching percent-encoded name is present;
-/// - the payload under `files/` exists and is a directory (cache is for dirs);
-/// - the cached mtime equals the current `.trashinfo` mtime (FreeDesktop intent).
-///
-/// Any doubt → `None` so callers use [`crate::fastdelete::disk_usage`].
-pub fn directorysizes_cached_size(trash: &TrashDir, name: &str) -> Option<u64> {
-    use crate::util::url_encode;
-    let path = trash.root.join("directorysizes");
-    let body = fs::read_to_string(path).ok()?;
-    let want = url_encode(name.as_bytes());
-    let mut hit: Option<(u64, i64)> = None;
-    for line in body.lines() {
-        let Some((size, mtime, enc)) = directorysizes_parse_line(line) else {
-            continue;
-        };
-        if enc == want {
-            hit = Some((size, mtime));
-            // Last matching line wins (upsert rewrites whole file with one line,
-            // but tolerate hand-edited duplicates conservatively).
+/// Parsed `$trash/directorysizes` for one root. Load once per status/dry-run.
+#[derive(Default)]
+pub struct DirectorySizesMap {
+    /// percent-encoded name -> (size, cached mtime). Last line wins.
+    lines: HashMap<String, (u64, i64)>,
+}
+
+impl DirectorySizesMap {
+    pub fn load(trash: &TrashDir) -> Self {
+        let mut lines = HashMap::new();
+        let path = trash.root.join("directorysizes");
+        if let Ok(body) = fs::read_to_string(path) {
+            for line in body.lines() {
+                if let Some((size, mtime, enc)) = directorysizes_parse_line(line) {
+                    lines.insert(enc, (size, mtime));
+                }
+            }
         }
+        Self { lines }
     }
-    let (size, mtime) = hit?;
-    let payload = trash.files().join(name);
-    let meta = fs::symlink_metadata(&payload).ok()?;
-    if !meta.is_dir() {
-        return None;
+
+    /// Same validity rules as [`directorysizes_cached_size`].
+    pub fn cached_size(&self, trash: &TrashDir, name: &str) -> Option<u64> {
+        use crate::util::url_encode;
+        let want = url_encode(name.as_bytes());
+        let &(size, mtime) = self.lines.get(&want)?;
+        let payload = trash.files().join(name);
+        let meta = fs::symlink_metadata(&payload).ok()?;
+        if !meta.is_dir() {
+            return None;
+        }
+        let info = trash.info().join(format!("{name}.trashinfo"));
+        let info_mt = info_mtime_secs(&info).ok()?;
+        if info_mt != mtime {
+            return None;
+        }
+        Some(size)
     }
-    let info = trash.info().join(format!("{name}.trashinfo"));
-    let info_mt = info_mtime_secs(&info).ok()?;
-    if info_mt != mtime {
-        return None;
-    }
-    Some(size)
+}
+
+/// Cached directory payload size from `$trash/directorysizes` when the line is
+/// still valid for `name`. Reads the cache file once per call; prefer
+/// [`DirectorySizesMap`] when looking up many names.
+pub fn directorysizes_cached_size(trash: &TrashDir, name: &str) -> Option<u64> {
+    DirectorySizesMap::load(trash).cached_size(trash, name)
 }
 
 /// Approximate reclaimable bytes for one named trash entry (payload + its
 /// `.trashinfo` when present). Directory payloads use a valid `directorysizes`
 /// cache line when available; files, orphans, and invalid cache always walk.
 pub fn entry_reclaim_bytes(trash: &TrashDir, name: &str) -> u64 {
+    entry_reclaim_bytes_cached(trash, name, None)
+}
+
+/// Like [`entry_reclaim_bytes`] using a preloaded cache when present.
+pub fn entry_reclaim_bytes_cached(
+    trash: &TrashDir,
+    name: &str,
+    cache: Option<&DirectorySizesMap>,
+) -> u64 {
     let payload = trash.files().join(name);
     let info = trash.info().join(format!("{name}.trashinfo"));
-    let payload_sz = directorysizes_cached_size(trash, name)
-        .unwrap_or_else(|| crate::fastdelete::disk_usage(&payload));
+    let payload_sz = match cache {
+        Some(c) => c.cached_size(trash, name),
+        None => directorysizes_cached_size(trash, name),
+    }
+    .unwrap_or_else(|| crate::fastdelete::disk_usage(&payload));
     let info_sz = if info.exists() {
         crate::fastdelete::disk_usage(&info)
     } else {
@@ -785,12 +807,24 @@ pub fn entry_reclaim_bytes(trash: &TrashDir, name: &str) -> u64 {
 /// Reclaimable bytes for a path under `files/` (top-level name), using the
 /// directorysizes cache when the payload is a directory with a valid line.
 pub fn files_child_reclaim_bytes(trash: &TrashDir, path: &Path) -> u64 {
+    files_child_reclaim_bytes_cached(trash, path, None)
+}
+
+/// Like [`files_child_reclaim_bytes`] using a preloaded cache when present.
+pub fn files_child_reclaim_bytes_cached(
+    trash: &TrashDir,
+    path: &Path,
+    cache: Option<&DirectorySizesMap>,
+) -> u64 {
     let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
         return crate::fastdelete::disk_usage(path);
     };
-    // Prefer cache only when this is the trash files/ child (same parent as files()).
     if path.parent().is_some_and(|p| p == trash.files()) {
-        if let Some(sz) = directorysizes_cached_size(trash, &name) {
+        let hit = match cache {
+            Some(c) => c.cached_size(trash, &name),
+            None => directorysizes_cached_size(trash, &name),
+        };
+        if let Some(sz) = hit {
             return sz;
         }
     }
@@ -1199,6 +1233,12 @@ proc /proc proc rw 0 0
             format!("999000000 {mtime} tree\n"),
         )
         .unwrap();
+        let loaded = DirectorySizesMap::load(&trash);
+        assert_eq!(
+            loaded.cached_size(&trash, "tree"),
+            Some(999_000_000),
+            "preloaded map must match single-name lookup"
+        );
         assert_eq!(
             directorysizes_cached_size(&trash, "tree"),
             Some(999_000_000),

@@ -54,11 +54,22 @@ pub fn permanently_remove_entries(
 ) -> RemoveBatchResult {
     let mut succeeded = Vec::with_capacity(entries.len());
     let mut bytes = 0u64;
+    let mut caches: std::collections::HashMap<
+        std::path::PathBuf,
+        trashdir::DirectorySizesMap,
+    > = std::collections::HashMap::new();
     for entry in entries {
         let payload = entry.dir.files().join(&entry.name);
         let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
         if dry_run {
-            bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes(&entry.dir, &entry.name));
+            let cache = caches
+                .entry(entry.dir.root.clone())
+                .or_insert_with(|| trashdir::DirectorySizesMap::load(&entry.dir));
+            bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes_cached(
+                &entry.dir,
+                &entry.name,
+                Some(cache),
+            ));
             succeeded.push(true);
             continue;
         }

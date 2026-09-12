@@ -141,8 +141,13 @@ fn summarize_dirs(
         );
         let mut bytes = 0u64;
         let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let cache = trashdir::DirectorySizesMap::load(dir);
         for e in &entries {
-            bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes(dir, &e.name));
+            bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes_cached(
+                dir,
+                &e.name,
+                Some(&cache),
+            ));
             counted.insert(e.name.clone());
         }
         // Orphans only on unfiltered full status (age filter has no date for orphans).
