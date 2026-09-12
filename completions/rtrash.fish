@@ -63,6 +63,8 @@ for sub in list status
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l newer-than -d 'only items within last DAYS days' -r
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l json -d 'JSON output'
 end
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l cwd-only -d 'only items whose original path is under cwd'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l match -d 'glob (default), literal, or regex' -xa 'glob literal regex'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l orphans -d 'only files/ names with no .trashinfo'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l larger-than -d 'only items larger than N bytes' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l smaller-than -d 'only items smaller than N bytes' -r
@@ -121,6 +123,8 @@ complete -c trash-empty -l version
 
 complete -c trash-list -l home-only
 complete -c trash-list -l trash-dir -r
+complete -c trash-list -l cwd-only
+complete -c trash-list -l match -xa 'glob literal regex'
 complete -c trash-list -l older-than -r
 complete -c trash-list -l newer-than -r
 complete -c trash-list -l orphans

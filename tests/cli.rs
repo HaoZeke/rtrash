@@ -1458,14 +1458,35 @@ fn list_pattern_glob_literal_cwd_only() {
     let pin = format!("--trash-dir={}", sb.trash().display());
     sb.touch("keep.c");
     sb.touch("drop.o");
+    let outer = sb.root.join("outside.txt");
+    fs::write(&outer, b"outer").unwrap();
     assert!(sb.run(&["put", "keep.c"]).status.success());
     assert!(sb.run(&["put", "drop.o"]).status.success());
+    assert!(Command::new(bin())
+        .args(["put", outer.to_str().unwrap()])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("HOME", &sb.root)
+        .status()
+        .unwrap()
+        .success());
+    let catalog = sb.run(&["list", &pin]);
+    assert!(catalog.status.success(), "{}", stderr_of(&catalog));
+    let catalog_s = stdout_of(&catalog);
+    assert!(
+        catalog_s
+            .lines()
+            .any(|line| line.contains("keep.c") && line.contains(' ') && !line.contains('T')),
+        "no-pattern list stays trash-cli date path: {catalog_s}"
+    );
+    assert!(catalog_s.contains("outside.txt"), "{catalog_s}");
     let glob = sb.run(&["list", &pin, "*.o"]);
     assert!(glob.status.success(), "{}", stderr_of(&glob));
     let g = stdout_of(&glob);
     assert!(g.contains("drop.o"), "{g}");
     assert!(!g.contains("keep.c"), "{g}");
-    let lit = sb.run(&["list", &pin, "--match=literal", "keep.c"]);
+    assert!(!g.contains("outside.txt"), "{g}");
+    let lit = sb.run(&["list", &pin, "--match", "literal", "keep.c"]);
     assert!(lit.status.success(), "{}", stderr_of(&lit));
     let l = stdout_of(&lit);
     assert!(l.contains("keep.c"), "{l}");
@@ -1473,9 +1494,25 @@ fn list_pattern_glob_literal_cwd_only() {
     let re = sb.run(&["list", &pin, "--match=regex", r"keep\.c$"]);
     assert!(re.status.success(), "{}", stderr_of(&re));
     assert!(stdout_of(&re).contains("keep.c"), "{}", stdout_of(&re));
+    let json = sb.run(&["list", &pin, "--json", "*.c"]);
+    assert!(json.status.success(), "{}", stderr_of(&json));
+    let j = stdout_of(&json);
+    assert!(j.contains("keep.c"), "{j}");
+    assert!(!j.contains("drop.o"), "{j}");
+    assert!(j.contains("\"original\""), "{j}");
     let cwd = sb.run(&["list", &pin, "--cwd-only"]);
     assert!(cwd.status.success(), "{}", stderr_of(&cwd));
-    assert!(stdout_of(&cwd).contains("keep.c"), "{}", stdout_of(&cwd));
+    let c = stdout_of(&cwd);
+    assert!(c.contains("keep.c"), "{c}");
+    assert!(c.contains("drop.o"), "{c}");
+    assert!(
+        !c.contains("outside.txt"),
+        "cwd-only must drop items outside cwd: {c}"
+    );
+    let bad_mode = sb.run(&["list", &pin, "--match=globstar"]);
+    assert_eq!(bad_mode.status.code(), Some(2), "{}", stderr_of(&bad_mode));
+    let bad_re = sb.run(&["list", &pin, "--match=regex", "("]);
+    assert_eq!(bad_re.status.code(), Some(2), "{}", stderr_of(&bad_re));
 }
 
 #[test]

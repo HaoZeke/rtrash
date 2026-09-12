@@ -10,7 +10,7 @@ Windows uses the system Recycle Bin. rm-compatible put interface.
 Commands:
   put [OPTION]... FILE...     move files to the trash (accepts rm(1) flags)
   empty [OPTION]... [DAYS]    purge trashed items, optionally older than DAYS
-  list [OPTION]...            list trashed items
+  list [OPTION]... [PATTERN]...  list trashed items
   status [OPTION]...          item count and reclaimable size summary
   restore [OPTION]... [PATH]...  restore trashed items
   rm PATTERN...               permanently delete matching trash entries

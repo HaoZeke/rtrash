@@ -288,6 +288,7 @@ Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a
 ### `rtrash list` (also `trash-list`)
 
 Prints `DELETION-DATE ORIGINAL-PATH` per item, oldest first, in the `trash-list` output format (`YYYY-MM-DD HH:MM:SS` plus the original path).
+With `PATTERN` (repeatable), only items whose original path or basename matches (`--match=glob` by default, same shape as `trash-rm`). No pattern keeps the trash-cli line format for the full catalog.
 A `files/` name with no `.trashinfo` is an emergency row: date `????-??-?? ??:??:??`, label `ORPHAN <name> (no .trashinfo)`, no invented `Path=`. JSON sets `"orphan": true` and `original` to `null`.
 Scans the home trash and per-mount trash directories owned by the current user, or only the directories given with `--trash-dir=PATH` (repeatable).
 
@@ -295,6 +296,8 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 |------|---------|
 | `--json` | JSON array of `{deletion_date, original, name, trash_dir, orphan}`; `bytes` only when size is computed |
 | `--orphans` | Only `files/` names with no `.trashinfo` |
+| `--cwd-only` | Only items whose original path is under `$PWD` (same as restore) |
+| `--match=MODE` | `glob` (default), `literal`, or `regex` when `PATTERN` is given |
 | `--older-than=DAYS` | Only items trashed more than DAYS days ago (same cutoff as `empty DAYS`) |
 | `--newer-than=DAYS` | Only items trashed within the last DAYS days |
 | `--larger-than=N` | Only items larger than N bytes (`N`/`Nk`/`Nm`/`Ng`, 1024-based) |
