@@ -177,9 +177,19 @@ Same as positional
 .I DAYS
 (list/status flag style).
 .TP
+.BI \-\-max\-bytes =N
+Drop largest items first until remaining reclaimable bytes are at most
+.IR N .
+.I N
+is a byte count, or
+.IR Nk / NK ,
+.IR Nm / NM ,
+.IR Ng / NG
+(1024-based). Omit this flag for a full empty.
+.TP
 .B \-\-json
 Emit a JSON summary on stdout
-(\fIdry_run\fR, \fIremoved\fR, \fIbytes\fR, \fIdays\fR).
+(\fIdry_run\fR, \fIremoved\fR, \fIbytes\fR, \fIdays\fR, \fImax_bytes\fR).
 .TP
 .B \-\-help
 Display help and exit.
@@ -237,9 +247,20 @@ Only
 names with no
 .BR .trashinfo .
 .TP
+.BI \-\-larger\-than =N
+Only items whose reclaimable size is larger than
+.I N
+(same size syntax as
+.BR "empty \-\-max\-bytes" ).
+.TP
+.BI \-\-smaller\-than =N
+Only items whose reclaimable size is smaller than
+.IR N .
+.TP
 .B \-\-json
 Emit a JSON array of objects
-(\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR, \fIorphan\fR).
+(\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR, \fIorphan\fR;
+\fIbytes\fR when size is computed).
 .TP
 .B \-\-help
 Display help and exit.

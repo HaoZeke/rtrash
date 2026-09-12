@@ -51,6 +51,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s f -l
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l trash-dir -d 'empty only this trash directory' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l home-only -d 'only the home trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l older-than -d 'only items older than DAYS days' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l max-bytes -d 'drop largest until remaining reclaimable bytes <= N' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l json -d 'JSON summary'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l plain -d 'skip TUI'
 
@@ -63,6 +64,8 @@ for sub in list status
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l json -d 'JSON output'
 end
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l orphans -d 'only files/ names with no .trashinfo'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l larger-than -d 'only items larger than N bytes' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l smaller-than -d 'only items smaller than N bytes' -r
 
 # restore
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s f -l force -d 'overwrite existing file at original location'
@@ -109,6 +112,7 @@ complete -c trash-empty -s v -l verbose
 complete -c trash-empty -s f -l force
 complete -c trash-empty -l trash-dir -r
 complete -c trash-empty -l home-only
+complete -c trash-empty -l max-bytes -r
 complete -c trash-empty -l help
 complete -c trash-empty -l version
 
@@ -117,6 +121,8 @@ complete -c trash-list -l trash-dir -r
 complete -c trash-list -l older-than -r
 complete -c trash-list -l newer-than -r
 complete -c trash-list -l orphans
+complete -c trash-list -l larger-than -r
+complete -c trash-list -l smaller-than -r
 complete -c trash-list -l json
 complete -c trash-list -l help
 complete -c trash-list -l version

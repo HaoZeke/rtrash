@@ -14,12 +14,12 @@ _rtrash_put_opts=(
 
 _rtrash_empty_opts=(
   -n --dry-run -v --verbose -f --force
-  --trash-dir --trash-dir= --home-only --plain --older-than= --json
+  --trash-dir --trash-dir= --home-only --plain --older-than= --max-bytes= --json
   --help --version
 )
 
 _rtrash_list_opts=(
-  --home-only --cwd-only --match= --trash-dir --trash-dir= --older-than= --newer-than= --orphans --json --help --version
+  --home-only --cwd-only --match= --trash-dir --trash-dir= --older-than= --newer-than= --orphans --larger-than= --smaller-than= --json --help --version
 )
 
 _rtrash_status_opts=(

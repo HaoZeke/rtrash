@@ -74,6 +74,52 @@ pub fn is_trash_dir_flag(arg: &str) -> bool {
     arg == "--trash-dir" || arg.starts_with("--trash-dir=")
 }
 
+/// Parse a byte size: `N`, `Nk`/`NK`, `Nm`/`NM`, `Ng`/`NG` (1024-based).
+/// The suffix is a single letter; `KiB`/`MB` forms are rejected.
+pub fn parse_bytes(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty size".into());
+    }
+    let (num, mul) = match s.as_bytes().last().copied() {
+        Some(b'k' | b'K') => (&s[..s.len() - 1], 1024u64),
+        Some(b'm' | b'M') => (&s[..s.len() - 1], 1024 * 1024),
+        Some(b'g' | b'G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        Some(b) if b.is_ascii_digit() => (s, 1u64),
+        _ => return Err(format!("invalid size '{s}'")),
+    };
+    let num = num.trim();
+    if num.is_empty() {
+        return Err(format!("invalid size '{s}'"));
+    }
+    let n: u64 = num.parse().map_err(|_| format!("invalid size '{s}'"))?;
+    n.checked_mul(mul)
+        .ok_or_else(|| format!("size overflow '{s}'"))
+}
+
+/// `--name=VALUE` or `--name VALUE`. Advances `i` on the space form.
+pub fn take_eq_or_next<'a>(
+    args: &'a [String],
+    i: &mut usize,
+    name: &str,
+) -> Result<&'a str, String> {
+    let arg = args.get(*i).map(String::as_str).unwrap_or("");
+    if let Some(rest) = arg.strip_prefix(&format!("{name}=")) {
+        if rest.is_empty() {
+            return Err(format!("{name} requires a value"));
+        }
+        return Ok(rest);
+    }
+    if arg == name {
+        *i += 1;
+        return args
+            .get(*i)
+            .map(String::as_str)
+            .ok_or_else(|| format!("{name} requires a value"));
+    }
+    Err(format!("expected {name}"))
+}
+
 /// Consume a `--trash-dir` flag at `args[*i]`. On the space form, advances `i`
 /// to the PATH slot. Missing PATH is an error for the caller to print as usage.
 pub fn take_trash_dir_value(
@@ -251,5 +297,39 @@ mod tests {
         let missing = vec!["--trash-dir".to_string()];
         let mut k = 0usize;
         assert!(take_trash_dir_value(&missing, &mut k).is_err());
+    }
+
+    #[test]
+    fn parse_bytes_plain_and_iec_suffixes() {
+        assert_eq!(parse_bytes("0").unwrap(), 0);
+        assert_eq!(parse_bytes("1234").unwrap(), 1234);
+        assert_eq!(parse_bytes("20k").unwrap(), 20 * 1024);
+        assert_eq!(parse_bytes("20K").unwrap(), 20 * 1024);
+        assert_eq!(parse_bytes("2m").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_bytes("1G").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_bytes(" 8k ").unwrap(), 8 * 1024);
+        assert!(parse_bytes("").is_err());
+        assert!(parse_bytes("k").is_err());
+        assert!(parse_bytes("20KiB").is_err());
+        assert!(parse_bytes("5GB").is_err());
+        assert!(parse_bytes("-1").is_err());
+        assert!(parse_bytes("1.5M").is_err());
+    }
+
+    #[test]
+    fn take_eq_or_next_equals_and_space() {
+        let eq = vec!["--max-bytes=10k".to_string()];
+        let mut i = 0usize;
+        assert_eq!(take_eq_or_next(&eq, &mut i, "--max-bytes").unwrap(), "10k");
+        assert_eq!(i, 0);
+
+        let sp = vec!["--larger-than".to_string(), "1M".into(), "x".into()];
+        let mut j = 0usize;
+        assert_eq!(take_eq_or_next(&sp, &mut j, "--larger-than").unwrap(), "1M");
+        assert_eq!(j, 1);
+
+        let missing = vec!["--smaller-than".to_string()];
+        let mut k = 0usize;
+        assert!(take_eq_or_next(&missing, &mut k, "--smaller-than").is_err());
     }
 }

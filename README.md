@@ -283,7 +283,7 @@ Purges every trash directory visible to the user (home trash plus mounted volume
 With `DAYS` (or `--older-than=DAYS`), only items trashed more than `DAYS` days ago go.
 Entries are removed in parallel.
 Orphaned `files/` entries (no `.trashinfo`) and entries with broken metadata are purged on any empty, including an age filter (orphans have no `DeletionDate`), and the `directorysizes` cache is pruned when present.
-Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts), `--json` (summary: `dry_run`, `removed`, `bytes`, `days`).
+Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts), `--max-bytes=N` (drop largest items first until remaining reclaimable bytes ≤ N; `N`/`Nk`/`Nm`/`Ng`, 1024-based; default full empty is unchanged), `--json` (summary: `dry_run`, `removed`, `bytes`, `days`, `max_bytes`).
 
 ### `rtrash list` (also `trash-list`)
 
@@ -293,10 +293,12 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 
 | Flag | Meaning |
 |------|---------|
-| `--json` | JSON array of `{deletion_date, original, name, trash_dir, orphan}` |
+| `--json` | JSON array of `{deletion_date, original, name, trash_dir, orphan}`; includes `bytes` when size is computed |
 | `--orphans` | Only `files/` names with no `.trashinfo` |
 | `--older-than=DAYS` | Only items trashed more than DAYS days ago (same cutoff as `empty DAYS`) |
 | `--newer-than=DAYS` | Only items trashed within the last DAYS days |
+| `--larger-than=N` | Only items larger than N bytes (`N`/`Nk`/`Nm`/`Ng`, 1024-based) |
+| `--smaller-than=N` | Only items smaller than N bytes (same size syntax) |
 | `--home-only` | Home trash only |
 
 ### `rtrash status`
