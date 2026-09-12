@@ -12,6 +12,10 @@ _rtrash_put_opts=(
   --help --version
 )
 
+_rtrash_keys_opts=(
+  -l --list --sample --path --help
+)
+
 _rtrash_empty_opts=(
   -n --dry-run -v --verbose -f --force
   --trash-dir --trash-dir= --home-only --plain --older-than= --max-bytes= --json
@@ -28,7 +32,7 @@ _rtrash_status_opts=(
 
 _rtrash_restore_opts=(
   -f --force --overwrite --all --group --restore-to --restore-to=
-  --home-only --trash-dir --trash-dir= --plain --if-unique --help --version
+  --home-only --cwd-only --trash-dir --trash-dir= --plain --if-unique --help --version
 )
 
 _rtrash_rm_opts=(
@@ -98,7 +102,7 @@ _rtrash_main() {
   local i sub=
   for ((i = 1; i < ${#COMP_WORDS[@]}; i++)); do
     case "${COMP_WORDS[i]}" in
-      put | empty | list | status | restore | rm)
+      put | empty | list | status | restore | rm | setup | keys | completions | man)
         sub="${COMP_WORDS[i]}"
         break
         ;;
@@ -127,11 +131,12 @@ _rtrash_main() {
     restore) _rtrash_complete_from _rtrash_restore_opts ;;
     rm) _rtrash_complete_from _rtrash_rm_opts ;;
     setup) _rtrash_complete_from _rtrash_setup_opts ;;
+    keys) _rtrash_complete_from _rtrash_keys_opts ;;
     completions)
       if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W "--help" -- "$cur"))
       else
-        COMPREPLY=($(compgen -W "bash zsh" -- "$cur"))
+        COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
       fi
       ;;
     man)
