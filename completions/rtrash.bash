@@ -19,7 +19,7 @@ _rtrash_empty_opts=(
 )
 
 _rtrash_list_opts=(
-  --home-only --trash-dir --trash-dir= --older-than= --newer-than= --json --help --version
+  --home-only --cwd-only --match= --trash-dir --trash-dir= --older-than= --newer-than= --json --help --version
 )
 
 _rtrash_status_opts=(

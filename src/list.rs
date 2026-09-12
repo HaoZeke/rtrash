@@ -5,15 +5,21 @@ use rayon::prelude::*;
 
 use crate::info;
 use crate::trashdir::{self, TrashDir};
+use crate::util::fnmatch;
 
 const HELP: &str = "\
-Usage: {prog} [OPTION]...
+Usage: {prog} [OPTION]... [PATTERN]...
 List trashed items as 'DELETION-DATE ORIGINAL-PATH', oldest first.
+With PATTERN, only items whose original path or basename matches
+(trash-rm shaped; default --match=glob). No PATTERN keeps trash-cli
+line format for the full catalog.
 
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir PATH  list only this trash directory (repeatable;
                      `--trash-dir=PATH` also accepted);
                      default is the home trash plus every mounted volume
+      --cwd-only        only items whose original path is under cwd
+      --match=MODE      glob (default), literal, or regex
       --older-than=DAYS only items trashed more than DAYS days ago
                      (same cutoff model as `empty DAYS`)
       --newer-than=DAYS only items trashed within the last DAYS days
@@ -87,6 +93,51 @@ pub fn is_newer_than(entry: &Entry, days: i64) -> bool {
     match entry.date.as_deref().and_then(info::parse_local_to_epoch) {
         Some(t) => t > cutoff,
         None => false,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MatchMode {
+    Glob,
+    Literal,
+    Regex,
+}
+
+fn entry_matches(entry: &Entry, pat: &str, mode: MatchMode) -> bool {
+    let path_s = entry.original.to_string_lossy();
+    let base = entry
+        .original
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match mode {
+        MatchMode::Glob => {
+            fnmatch(pat, path_s.as_ref()) || fnmatch(pat, base.as_str()) || fnmatch(pat, &entry.name)
+        }
+        MatchMode::Literal => {
+            path_s.as_ref() == pat || base == pat || entry.name == pat || path_s.contains(pat)
+        }
+        MatchMode::Regex => match regex_compile(pat) {
+            Ok(re) => re.is_match(path_s.as_ref()) || re.is_match(&base) || re.is_match(&entry.name),
+            Err(_) => false,
+        },
+    }
+}
+
+fn regex_compile(pat: &str) -> Result<RegexPat, ()> {
+    RegexPat::new(pat)
+}
+
+/// Minimal regex: `regex` crate when available via a tiny wrapper that
+/// compiles `regex::Regex`.
+struct RegexPat(regex::Regex);
+
+impl RegexPat {
+    fn new(pat: &str) -> Result<Self, ()> {
+        regex::Regex::new(pat).map(Self).map_err(|_| ())
+    }
+    fn is_match(&self, text: &str) -> bool {
+        self.0.is_match(text)
     }
 }
 
@@ -186,12 +237,19 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut json = false;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
+    let mut cwd_only = false;
+    let mut match_mode = MatchMode::Glob;
+    let mut patterns: Vec<String> = Vec::new();
     let mut i = 0usize;
     while i < args.len() {
         let arg = &args[i];
         match arg.as_str() {
             "--home-only" => home_only = true,
+            "--cwd-only" => cwd_only = true,
             "--json" => json = true,
+            "--match=glob" => match_mode = MatchMode::Glob,
+            "--match=literal" => match_mode = MatchMode::Literal,
+            "--match=regex" => match_mode = MatchMode::Regex,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -240,11 +298,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     }
                 }
             }
-            a => {
+            a if a.starts_with("--match=") => {
+                eprintln!("{prog}: --match must be glob, literal, or regex");
+                return 2;
+            }
+            a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
                 eprintln!("Try '{prog} --help' for more information.");
                 return 2;
             }
+            a => patterns.push(a.to_string()),
         }
         i += 1;
     }
@@ -253,7 +316,26 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: no valid --trash-dir pins");
         return 2;
     }
-    let entries = filter_age(collect(&dirs), older_than, newer_than);
+    let mut entries = filter_age(collect(&dirs), older_than, newer_than);
+    if cwd_only {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        entries.retain(|e| e.original.starts_with(&cwd));
+    }
+    if !patterns.is_empty() {
+        if match_mode == MatchMode::Regex {
+            for pat in &patterns {
+                if regex_compile(pat).is_err() {
+                    eprintln!("{prog}: invalid regex '{pat}'");
+                    return 2;
+                }
+            }
+        }
+        entries.retain(|e| {
+            patterns
+                .iter()
+                .any(|pat| entry_matches(e, pat, match_mode))
+        });
+    }
     if json {
         println!("{}", entries_to_json_array(&entries));
     } else {

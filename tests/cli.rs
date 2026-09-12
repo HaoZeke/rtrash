@@ -1168,6 +1168,32 @@ fn list_json_and_age_filters() {
 }
 
 #[test]
+fn list_pattern_glob_literal_cwd_only() {
+    let sb = Sandbox::new("list-query");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("keep.c");
+    sb.touch("drop.o");
+    assert!(sb.run(&["put", "keep.c"]).status.success());
+    assert!(sb.run(&["put", "drop.o"]).status.success());
+    let glob = sb.run(&["list", &pin, "*.o"]);
+    assert!(glob.status.success(), "{}", stderr_of(&glob));
+    let g = stdout_of(&glob);
+    assert!(g.contains("drop.o"), "{g}");
+    assert!(!g.contains("keep.c"), "{g}");
+    let lit = sb.run(&["list", &pin, "--match=literal", "keep.c"]);
+    assert!(lit.status.success(), "{}", stderr_of(&lit));
+    let l = stdout_of(&lit);
+    assert!(l.contains("keep.c"), "{l}");
+    assert!(!l.contains("drop.o"), "{l}");
+    let re = sb.run(&["list", &pin, "--match=regex", r"keep\.c$"]);
+    assert!(re.status.success(), "{}", stderr_of(&re));
+    assert!(stdout_of(&re).contains("keep.c"), "{}", stdout_of(&re));
+    let cwd = sb.run(&["list", &pin, "--cwd-only"]);
+    assert!(cwd.status.success(), "{}", stderr_of(&cwd));
+    assert!(stdout_of(&cwd).contains("keep.c"), "{}", stdout_of(&cwd));
+}
+
+#[test]
 fn status_json_and_age_filter() {
     let sb = Sandbox::new("status-json");
     let pin = format!("--trash-dir={}", sb.trash().display());
