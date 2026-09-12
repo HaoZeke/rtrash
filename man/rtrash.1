@@ -147,6 +147,13 @@ Purge trashed items. With
 only items trashed more than
 .I DAYS
 days ago.
+Orphan
+.I files/
+payloads (no
+.BR .trashinfo )
+are always purged: they have no
+.B DeletionDate ,
+so an age filter cannot keep them.
 .TP
 .BR \-n ", " \-\-dry\-run
 Report what would be removed without removing anything; also prints
@@ -189,6 +196,21 @@ Also multi-call
 List trashed items as
 .RB \(oq "DELETION-DATE ORIGINAL-PATH" \(cq,
 oldest first.
+A
+.I files/
+name with no
+.B .trashinfo
+is an emergency row (date
+.BR ????\-??\-??T??:??:?? ,
+label
+.BR ORPHAN ,
+no invented
+.BR Path= ).
+JSON sets
+.B orphan
+true and
+.B original
+to null.
 .TP
 .B \-\-home\-only
 Only the home trash
@@ -209,9 +231,15 @@ Only items trashed within the last
 .I DAYS
 days.
 .TP
+.B \-\-orphans
+Only
+.I files/
+names with no
+.BR .trashinfo .
+.TP
 .B \-\-json
 Emit a JSON array of objects
-(\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR).
+(\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR, \fIorphan\fR).
 .TP
 .B \-\-help
 Display help and exit.

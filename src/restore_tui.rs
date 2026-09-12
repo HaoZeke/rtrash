@@ -26,7 +26,7 @@ pub fn filter_indices(hays: &[&str], query: &str) -> Vec<usize> {
 }
 
 fn hay_of(entry: &Entry) -> String {
-    entry.original.to_string_lossy().into_owned()
+    entry.path_label()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -652,6 +652,7 @@ mod tests {
                 root: PathBuf::from("/tmp/trash"),
                 topdir: None,
             },
+            orphan: false,
         }
     }
 

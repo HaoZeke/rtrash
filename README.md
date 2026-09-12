@@ -282,17 +282,19 @@ Putting ordinary files does not add directory lines.
 Purges every trash directory visible to the user (home trash plus mounted volumes).
 With `DAYS` (or `--older-than=DAYS`), only items trashed more than `DAYS` days ago go.
 Entries are removed in parallel.
-Orphaned `files/` entries (no `.trashinfo`) and entries with broken metadata are purged on a full empty, and the `directorysizes` cache is pruned when present.
+Orphaned `files/` entries (no `.trashinfo`) and entries with broken metadata are purged on any empty, including an age filter (orphans have no `DeletionDate`), and the `directorysizes` cache is pruned when present.
 Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts), `--json` (summary: `dry_run`, `removed`, `bytes`, `days`).
 
 ### `rtrash list` (also `trash-list`)
 
 Prints `DELETION-DATE ORIGINAL-PATH` per item, oldest first, in the `trash-list` output format (`YYYY-MM-DD HH:MM:SS` plus the original path).
+A `files/` name with no `.trashinfo` is an emergency row: date `????-??-?? ??:??:??`, label `ORPHAN <name> (no .trashinfo)`, no invented `Path=`. JSON sets `"orphan": true` and `original` to `null`.
 Scans the home trash and per-mount trash directories owned by the current user, or only the directories given with `--trash-dir=PATH` (repeatable).
 
 | Flag | Meaning |
 |------|---------|
-| `--json` | JSON array of `{deletion_date, original, name, trash_dir}` |
+| `--json` | JSON array of `{deletion_date, original, name, trash_dir, orphan}` |
+| `--orphans` | Only `files/` names with no `.trashinfo` |
 | `--older-than=DAYS` | Only items trashed more than DAYS days ago (same cutoff as `empty DAYS`) |
 | `--newer-than=DAYS` | Only items trashed within the last DAYS days |
 | `--home-only` | Home trash only |

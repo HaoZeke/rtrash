@@ -31,7 +31,7 @@ rtrash.put_paths([p1, p2], recursive=False, force=False)
 rtrash.unlink(path, recursive=False, force=False)   # os.remove-shaped
 rtrash.rmtree(path, force=False)                    # shutil.rmtree-shaped
 
-rtrash.list_trash(trash_dir=None)  # -> list[(date_str, original_path)]
+rtrash.list_trash(trash_dir=None)  # -> list[(date_str, original_path)]; orphans: ORPHAN label, no invented Path=
 rtrash.empty_trash(days=None, trash_dir=None, dry_run=False)
 rtrash.restore_path(path, force=False, trash_dir=None)
 rtrash.home_trash()  # Path to $XDG_DATA_HOME/Trash

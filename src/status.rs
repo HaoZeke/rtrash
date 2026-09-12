@@ -150,7 +150,7 @@ fn summarize_dirs(
             ));
             counted.insert(e.name.clone());
         }
-        // Orphans only on unfiltered full status (age filter has no date for orphans).
+        // Safety net: files/ names collect() missed (should already be in entries).
         if older_than.is_none() && newer_than.is_none() {
             if let Ok(rd) = std::fs::read_dir(dir.files()) {
                 for ent in rd.flatten() {

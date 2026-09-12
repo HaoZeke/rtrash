@@ -62,6 +62,7 @@ for sub in list status
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l newer-than -d 'only items within last DAYS days' -r
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l json -d 'JSON output'
 end
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l orphans -d 'only files/ names with no .trashinfo'
 
 # restore
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s f -l force -d 'overwrite existing file at original location'
@@ -115,6 +116,7 @@ complete -c trash-list -l home-only
 complete -c trash-list -l trash-dir -r
 complete -c trash-list -l older-than -r
 complete -c trash-list -l newer-than -r
+complete -c trash-list -l orphans
 complete -c trash-list -l json
 complete -c trash-list -l help
 complete -c trash-list -l version

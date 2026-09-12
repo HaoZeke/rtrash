@@ -1,0 +1,1 @@
+list surfaces `files/` names with no `.trashinfo` as emergency rows (`ORPHAN`, JSON `"orphan": true` and null `original`). `empty` with a days filter also purges those orphans (they have no DeletionDate). `restore` refuses them.

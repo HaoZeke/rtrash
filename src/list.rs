@@ -14,6 +14,10 @@ With PATTERN, only items whose original path or basename matches
 (trash-rm shaped; default --match=glob). No PATTERN keeps trash-cli
 line format for the full catalog.
 
+A files/ name with no .trashinfo is an emergency row: date
+????-??-??T??:??:??, label ORPHAN, no invented Path=. JSON sets
+\"orphan\": true and original to null.
+
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir PATH  list only this trash directory (repeatable;
                      `--trash-dir=PATH` also accepted);
@@ -23,6 +27,7 @@ line format for the full catalog.
       --older-than=DAYS only items trashed more than DAYS days ago
                      (same cutoff model as `empty DAYS`)
       --newer-than=DAYS only items trashed within the last DAYS days
+      --orphans         only files/ names with no .trashinfo
       --json            emit a JSON array (scripts; one object per item)
       --help            display this help and exit
       --version         output version information and exit
@@ -34,6 +39,19 @@ pub struct Entry {
     pub original: std::path::PathBuf,
     pub name: String,
     pub dir: TrashDir,
+    /// True when `files/<name>` has no matching `.trashinfo`.
+    pub orphan: bool,
+}
+
+impl Entry {
+    /// Path column for list/TUI: original Path=, or an emergency orphan label.
+    pub fn path_label(&self) -> String {
+        if self.orphan {
+            format!("ORPHAN {} (no .trashinfo)", self.name)
+        } else {
+            self.original.display().to_string()
+        }
+    }
 }
 
 pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
@@ -42,11 +60,18 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
         a.epoch
             .cmp(&b.epoch)
             .then_with(|| a.original.cmp(&b.original))
+            .then_with(|| a.name.cmp(&b.name))
     });
     out
 }
 
 fn collect_one(dir: &TrashDir) -> Vec<Entry> {
+    let mut out = collect_info_entries(dir);
+    out.extend(collect_orphan_entries(dir));
+    out
+}
+
+fn collect_info_entries(dir: &TrashDir) -> Vec<Entry> {
     let Ok(rd) = fs::read_dir(dir.info()) else {
         return Vec::new();
     };
@@ -54,6 +79,29 @@ fn collect_one(dir: &TrashDir) -> Vec<Entry> {
     infos
         .par_iter()
         .filter_map(|entry| parse_info_entry(dir, entry))
+        .collect()
+}
+
+/// `files/` children with no matching `.trashinfo` (spec: present as such).
+fn collect_orphan_entries(dir: &TrashDir) -> Vec<Entry> {
+    let Ok(rd) = fs::read_dir(dir.files()) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if dir.info().join(format!("{name}.trashinfo")).exists() {
+                return None;
+            }
+            Some(Entry {
+                date: None,
+                epoch: 0,
+                original: PathBuf::new(),
+                name,
+                dir: dir.clone(),
+                orphan: true,
+            })
+        })
         .collect()
 }
 
@@ -75,6 +123,7 @@ fn parse_info_entry(dir: &TrashDir, entry: &fs::DirEntry) -> Option<Entry> {
         epoch,
         name: name.to_string(),
         dir: dir.clone(),
+        orphan: false,
     })
 }
 
@@ -112,13 +161,17 @@ fn entry_matches(entry: &Entry, pat: &str, mode: MatchMode) -> bool {
         .unwrap_or_default();
     match mode {
         MatchMode::Glob => {
-            fnmatch(pat, path_s.as_ref()) || fnmatch(pat, base.as_str()) || fnmatch(pat, &entry.name)
+            fnmatch(pat, path_s.as_ref())
+                || fnmatch(pat, base.as_str())
+                || fnmatch(pat, &entry.name)
         }
         MatchMode::Literal => {
             path_s.as_ref() == pat || base == pat || entry.name == pat || path_s.contains(pat)
         }
         MatchMode::Regex => match regex_compile(pat) {
-            Ok(re) => re.is_match(path_s.as_ref()) || re.is_match(&base) || re.is_match(&entry.name),
+            Ok(re) => {
+                re.is_match(path_s.as_ref()) || re.is_match(&base) || re.is_match(&entry.name)
+            }
             Err(_) => false,
         },
     }
@@ -205,13 +258,21 @@ pub fn json_escape(s: &str) -> String {
 }
 
 pub fn entry_to_json(e: &Entry) -> String {
-    let date = e.date.as_deref().unwrap_or("");
+    let date = match e.date.as_deref() {
+        Some(d) => format!("\"{}\"", json_escape(d)),
+        None if e.orphan => "null".into(),
+        None => "\"\"".into(),
+    };
+    let original = if e.orphan {
+        "null".into()
+    } else {
+        format!("\"{}\"", json_escape(&e.original.to_string_lossy()))
+    };
     format!(
-        "{{\"deletion_date\":\"{}\",\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\"}}",
-        json_escape(date),
-        json_escape(&e.original.to_string_lossy()),
+        "{{\"deletion_date\":{date},\"original\":{original},\"name\":\"{}\",\"trash_dir\":\"{}\",\"orphan\":{}}}",
         json_escape(&e.name),
         json_escape(&e.dir.root.to_string_lossy()),
+        if e.orphan { "true" } else { "false" },
     )
 }
 
@@ -235,6 +296,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut home_only = false;
     let mut json = false;
+    let mut orphans_only = false;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
     let mut cwd_only = false;
@@ -246,6 +308,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         match arg.as_str() {
             "--home-only" => home_only = true,
             "--cwd-only" => cwd_only = true,
+            "--orphans" => orphans_only = true,
             "--json" => json = true,
             "--match=glob" => match_mode = MatchMode::Glob,
             "--match=literal" => match_mode = MatchMode::Literal,
@@ -317,9 +380,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 2;
     }
     let mut entries = filter_age(collect(&dirs), older_than, newer_than);
+    if orphans_only {
+        entries.retain(|e| e.orphan);
+    }
     if cwd_only {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-        entries.retain(|e| e.original.starts_with(&cwd));
+        entries.retain(|e| !e.orphan && e.original.starts_with(&cwd));
     }
     if !patterns.is_empty() {
         if match_mode == MatchMode::Regex {
@@ -330,22 +396,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 }
             }
         }
-        entries.retain(|e| {
-            patterns
-                .iter()
-                .any(|pat| entry_matches(e, pat, match_mode))
-        });
+        entries.retain(|e| patterns.iter().any(|pat| entry_matches(e, pat, match_mode)));
     }
     if json {
         println!("{}", entries_to_json_array(&entries));
     } else {
         for entry in &entries {
             let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
-            println!(
-                "{} {}",
-                date.replacen('T', " ", 1),
-                entry.original.display()
-            );
+            println!("{} {}", date.replacen('T', " ", 1), entry.path_label());
         }
     }
     0
@@ -367,6 +425,7 @@ mod tests {
                 root: PathBuf::from("/tmp/Trash"),
                 topdir: None,
             },
+            orphan: false,
         }
     }
 
@@ -408,6 +467,21 @@ mod tests {
         assert!(s.starts_with('['));
         assert!(s.contains("\"deletion_date\":\"2020-01-02T03:04:05\""));
         assert!(s.contains("\"original\":\"/tmp/x\""));
+        assert!(s.contains("\"orphan\":false"));
         assert!(s.ends_with(']'));
+    }
+
+    #[test]
+    fn orphan_json_nulls_original() {
+        let mut e = entry_with(None, 0);
+        e.orphan = true;
+        e.original = PathBuf::new();
+        e.name = "debris".into();
+        let s = entry_to_json(&e);
+        assert!(s.contains("\"orphan\":true"), "{s}");
+        assert!(s.contains("\"original\":null"), "{s}");
+        assert!(s.contains("\"deletion_date\":null"), "{s}");
+        assert!(!s.contains("\"original\":\"\""), "{s}");
+        assert_eq!(e.path_label(), "ORPHAN debris (no .trashinfo)");
     }
 }

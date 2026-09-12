@@ -143,6 +143,8 @@ fn rmtree(py: Python<'_>, path: PathBuf, force: bool) -> PyResult<()> {
 /// List trashed items as ``(deletion_date, original_path)`` strings.
 ///
 /// ``deletion_date`` uses trash-list form ``YYYY-MM-DD HH:MM:SS``.
+/// Orphan ``files/`` names (no ``.trashinfo``) use date ``????-??-?? ??:??:??``
+/// and path ``ORPHAN <name> (no .trashinfo)`` — never an invented Path=.
 /// Scans trash dirs with the GIL released; builds the Python list under the GIL.
 #[pyfunction]
 #[pyo3(signature = (*, trash_dir=None))]
@@ -160,7 +162,7 @@ fn list_trash(py: Python<'_>, trash_dir: Option<PathBuf>) -> PyResult<Py<PyList>
                     .as_deref()
                     .unwrap_or("????-??-??T??:??:??")
                     .replacen('T', " ", 1);
-                let path = e.original.display().to_string();
+                let path = e.path_label();
                 (date, path)
             })
             .collect()

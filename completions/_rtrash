@@ -42,6 +42,7 @@ list_opts=(
   '*--trash-dir=[list only this trash directory]:path:_files -/'
   '--older-than=[only items trashed more than DAYS days ago]:days:'
   '--newer-than=[only items trashed within the last DAYS days]:days:'
+  '--orphans[only files/ names with no .trashinfo]'
   '--json[emit a JSON array]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'

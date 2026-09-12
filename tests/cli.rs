@@ -497,6 +497,89 @@ fn empty_purges_orphaned_files() {
 }
 
 #[test]
+fn list_json_marks_orphan_without_invented_path() {
+    let sb = Sandbox::new("list-orphan");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let original = sb.touch("gone.txt");
+    assert!(sb.run(&["put", "gone.txt"]).status.success());
+    fs::remove_file(sb.trash().join("info/gone.txt.trashinfo")).unwrap();
+    assert!(sb.trash().join("files/gone.txt").is_file());
+
+    let j = sb.run(&["list", &pin, "--json"]);
+    assert!(j.status.success(), "{}", stderr_of(&j));
+    let s = stdout_of(&j);
+    assert!(s.contains("\"orphan\":true"), "{s}");
+    assert!(s.contains("\"original\":null"), "{s}");
+    assert!(s.contains("\"name\":\"gone.txt\""), "{s}");
+    assert!(
+        !s.contains(&original.display().to_string()),
+        "must not invent Path=: {s}"
+    );
+
+    let text = sb.run(&["list", &pin]);
+    assert!(text.status.success(), "{}", stderr_of(&text));
+    let t = stdout_of(&text);
+    assert!(t.contains("ORPHAN"), "{t}");
+    assert!(t.contains("gone.txt"), "{t}");
+    assert!(t.contains("????-??-??"), "{t}");
+    assert!(
+        !t.contains(&original.display().to_string()),
+        "must not invent Path=: {t}"
+    );
+
+    let only = sb.run(&["list", &pin, "--orphans"]);
+    assert!(only.status.success(), "{}", stderr_of(&only));
+    let o = stdout_of(&only);
+    assert!(o.contains("ORPHAN"), "{o}");
+    assert!(o.contains("gone.txt"), "{o}");
+}
+
+#[test]
+fn restore_refuses_orphan() {
+    let sb = Sandbox::new("restore-orphan");
+    sb.touch("noinfo.txt");
+    assert!(sb.run(&["put", "noinfo.txt"]).status.success());
+    fs::remove_file(sb.trash().join("info/noinfo.txt.trashinfo")).unwrap();
+    assert!(sb.trash().join("files/noinfo.txt").is_file());
+
+    let out = sb.run(&["restore", "noinfo.txt"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("no trashed files match") || err.contains("cannot restore orphan"),
+        "{err}"
+    );
+    assert!(
+        sb.trash().join("files/noinfo.txt").is_file(),
+        "orphan payload must stay"
+    );
+    assert!(!sb.work().join("noinfo.txt").exists());
+}
+
+#[test]
+fn empty_age_filter_purges_orphans() {
+    let sb = Sandbox::new("empty-days-orphan");
+    sb.touch("fresh.txt");
+    assert!(sb.run(&["put", "fresh.txt"]).status.success());
+    sb.touch("orphan.txt");
+    assert!(sb.run(&["put", "orphan.txt"]).status.success());
+    fs::remove_file(sb.trash().join("info/orphan.txt.trashinfo")).unwrap();
+
+    let out = sb.empty(&["5"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let names = trash_names(&sb);
+    assert_eq!(
+        names,
+        vec!["fresh.txt"],
+        "recent dated item must survive: {names:?}"
+    );
+    assert!(
+        !sb.trash().join("files/orphan.txt").exists(),
+        "orphan must be purged on age-filter empty"
+    );
+}
+
+#[test]
 fn restore_if_unique_rejects_colliding_originals() {
     let sb = Sandbox::new("restore-if-unique");
     let unique = sb.touch("one.txt");

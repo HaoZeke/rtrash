@@ -25,7 +25,7 @@ pub fn filter_indices(hays: &[&str], query: &str) -> Vec<usize> {
 }
 
 fn hay_of(entry: &Entry) -> String {
-    entry.original.to_string_lossy().into_owned()
+    entry.path_label()
 }
 
 /// Result of a permanent-remove batch: per-input success flags + dry-run bytes.
@@ -55,10 +55,8 @@ pub fn permanently_remove_entries(
 ) -> RemoveBatchResult {
     let mut succeeded = Vec::with_capacity(entries.len());
     let mut bytes = 0u64;
-    let mut caches: std::collections::HashMap<
-        std::path::PathBuf,
-        trashdir::DirectorySizesMap,
-    > = std::collections::HashMap::new();
+    let mut caches: std::collections::HashMap<std::path::PathBuf, trashdir::DirectorySizesMap> =
+        std::collections::HashMap::new();
     for entry in entries {
         let payload = entry.dir.files().join(&entry.name);
         let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));

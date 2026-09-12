@@ -13,6 +13,8 @@ use crate::util::{stdin_is_tty, url_decode};
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [DAYS]
 Purge trashed items. With DAYS, only items trashed more than DAYS days ago.
+Orphan files/ payloads (no .trashinfo) are always purged: they have no
+DeletionDate, so an age filter cannot keep them.
 On a TTY without DAYS, opens the interactive empty browser (multi-select
 permanent delete). Use --plain to skip the TUI.
 
@@ -243,19 +245,17 @@ fn empty_one(
         }
     }
 
-    // Orphans in files/ with no .trashinfo are stale debris; purge them on a
-    // full empty only (a days filter has no date to compare against).
-    if cutoff.is_none() {
-        if let Ok(entries) = fs::read_dir(&files_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let has_info = info_dir
-                    .join(format!("{}.trashinfo", name.to_string_lossy()))
-                    .exists();
-                if !has_info {
-                    let p = entry.path();
-                    victims.push((p.clone(), None, p));
-                }
+    // Orphans in files/ with no .trashinfo are stale debris. They have no
+    // DeletionDate, so any empty (including a days filter) purges them.
+    if let Ok(entries) = fs::read_dir(&files_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let has_info = info_dir
+                .join(format!("{}.trashinfo", name.to_string_lossy()))
+                .exists();
+            if !has_info {
+                let p = entry.path();
+                victims.push((p.clone(), None, p));
             }
         }
     }

@@ -45,7 +45,8 @@ rtrash put also applies *rm-shaped fail-safes*: refuse =.= / =..= / =/= (with pr
 - Mount-aware placement (not only home trash)
 - Concurrent-safe name allocation
 - Restore overwrite protection (=-f= to replace)
-- Empty with age filter, dry-run, orphan purge, =directorysizes= prune
+- Empty with age filter, dry-run, orphan purge (any empty, including age filter), =directorysizes= prune
+- List surfaces =files/= names with no =.trashinfo= as emergency =ORPHAN= rows; restore refuses them
 
 * Versus Python trash-cli (design, not speed)
 

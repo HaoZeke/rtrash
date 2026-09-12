@@ -87,20 +87,27 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 2;
     }
     let entries = list::collect(&dirs);
+    // Orphans have no Path=; never offer them as restore targets.
+    let restorable: Vec<&list::Entry> = entries.iter().filter(|e| !e.orphan).collect();
     let matches: Vec<&list::Entry> = match &target {
         Some(t) => {
             let abs = absolutize(t);
-            entries.iter().filter(|e| e.original == abs).collect()
+            restorable
+                .iter()
+                .copied()
+                .filter(|e| e.original == abs)
+                .collect()
         }
         None if cwd_only => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-            entries
+            restorable
                 .iter()
+                .copied()
                 .filter(|e| e.original.starts_with(&cwd))
                 .collect()
         }
-        // trash-cli parity: bare `restore` offers every item in scope.
-        None => entries.iter().collect(),
+        // trash-cli parity: bare `restore` offers every restorable item in scope.
+        None => restorable,
     };
 
     if matches.is_empty() {
@@ -191,6 +198,13 @@ fn lexical_clean(p: &Path) -> PathBuf {
 
 /// Restore one entry to its original path. Shared by CLI, piped pick, and TUI.
 pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
+    if entry.orphan {
+        eprintln!(
+            "{prog}: cannot restore orphan '{}' (no .trashinfo; no original Path=)",
+            entry.name
+        );
+        return 1;
+    }
     let _lock = match trashdir::TrashLock::acquire(&entry.dir.root) {
         Ok(l) => l,
         Err(e) => {
