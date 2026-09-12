@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use rayon::prelude::*;
+
 use crate::info;
 use crate::trashdir::{self, TrashDir};
 
@@ -29,46 +31,45 @@ pub struct Entry {
 }
 
 pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
-    let mut out = Vec::new();
-    for dir in dirs {
-        let Ok(entries) = fs::read_dir(dir.info()) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let fname = entry.file_name();
-            let fname = fname.to_string_lossy();
-            let Some(name) = fname.strip_suffix(".trashinfo") else {
-                continue;
-            };
-            let Ok(content) = fs::read_to_string(entry.path()) else {
-                continue;
-            };
-            let parsed = info::parse(&content);
-            let epoch = parsed
-                .deletion_date
-                .as_deref()
-                .and_then(info::parse_local_to_epoch)
-                .unwrap_or(0);
-            // Skip hostile/corrupt relative Path= that escape the volume topdir.
-            let original = match dir.resolve_original_checked(&parsed.path) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            out.push(Entry {
-                original,
-                date: parsed.deletion_date,
-                epoch,
-                name: name.to_string(),
-                dir: dir.clone(),
-            });
-        }
-    }
+    let mut out: Vec<Entry> = dirs.par_iter().flat_map(collect_one).collect();
     out.sort_by(|a, b| {
         a.epoch
             .cmp(&b.epoch)
             .then_with(|| a.original.cmp(&b.original))
     });
     out
+}
+
+fn collect_one(dir: &TrashDir) -> Vec<Entry> {
+    let Ok(rd) = fs::read_dir(dir.info()) else {
+        return Vec::new();
+    };
+    let infos: Vec<_> = rd.flatten().collect();
+    infos
+        .par_iter()
+        .filter_map(|entry| parse_info_entry(dir, entry))
+        .collect()
+}
+
+fn parse_info_entry(dir: &TrashDir, entry: &fs::DirEntry) -> Option<Entry> {
+    let fname = entry.file_name();
+    let fname = fname.to_string_lossy();
+    let name = fname.strip_suffix(".trashinfo")?;
+    let content = fs::read_to_string(entry.path()).ok()?;
+    let parsed = info::parse(&content);
+    let epoch = parsed
+        .deletion_date
+        .as_deref()
+        .and_then(info::parse_local_to_epoch)
+        .unwrap_or(0);
+    let original = dir.resolve_original_checked(&parsed.path).ok()?;
+    Some(Entry {
+        original,
+        date: parsed.deletion_date,
+        epoch,
+        name: name.to_string(),
+        dir: dir.clone(),
+    })
 }
 
 /// Age filter aligned with `empty DAYS`: missing/unparsable date counts as old.
