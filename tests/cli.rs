@@ -1117,6 +1117,35 @@ fn trash_dir_space_form_matches_equals() {
 }
 
 #[test]
+fn put_json_and_files_from_nul() {
+    let sb = Sandbox::new("put-json");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("a.txt");
+    sb.touch("b.txt");
+    let out = sb.run(&["put", "--json", "--plain", &pin, "a.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let s = stdout_of(&out);
+    assert!(s.contains("\"ok\":1") || s.contains("\"ok\": 1"), "{s}");
+    assert!(s.contains("a.txt"), "{s}");
+    let list = format!("{}\0", sb.work().join("b.txt").display());
+    let from = sb.root.join("from0");
+    fs::write(&from, list.as_bytes()).unwrap();
+    let nul = sb.run(&[
+        "put",
+        "--json",
+        "--plain",
+        &pin,
+        "--files-from",
+        from.to_str().unwrap(),
+        "-0",
+    ]);
+    assert!(nul.status.success(), "{}", stderr_of(&nul));
+    let n = stdout_of(&nul);
+    assert!(n.contains("\"ok\":1") || n.contains("\"ok\": 1"), "{n}");
+    assert!(sb.trash().join("files/b.txt").is_file());
+}
+
+#[test]
 fn empty_json_and_older_than_flag() {
     let sb = Sandbox::new("empty-json");
     let pin = format!("--trash-dir={}", sb.trash().display());

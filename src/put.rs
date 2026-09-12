@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -100,6 +102,9 @@ to require CLI operands even on a TTY.
                           needed); `--trash-dir=PATH` also accepted; scripts
                           pin instead of XDG discovery
       --home-only       always use the home trash (skip volume trash)
+      --json            emit a JSON summary {ok, failed, names}; implies --plain
+      --files-from=PATH read additional operands from PATH (`-` = stdin)
+      -0, --zero        --files-from records are NUL-separated (default: newline)
       --help            display this help and exit
       --version         output version information and exit
 
@@ -118,6 +123,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut no_more_opts = false;
     let mut plain = false;
+    let mut json = false;
+    let mut zero = false;
+    let mut files_from: Option<PathBuf> = None;
 
     let mut i = 0usize;
     while i < args.len() {
@@ -130,6 +138,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         match arg.as_str() {
             "--" => no_more_opts = true,
             "--plain" => plain = true,
+            "--json" => {
+                json = true;
+                plain = true;
+            }
+            "-0" | "--zero" => zero = true,
             // GNU rm: -f / -i / --interactive last flag wins for prompt vs force.
             "--force" => {
                 opts.force = true;
@@ -164,6 +177,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--version" => {
                 println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                 return 0;
+            }
+            a if a == "--files-from" || a.starts_with("--files-from=") => {
+                if files_from.is_some() {
+                    return usage_err(prog, "put accepts only one --files-from");
+                }
+                if let Some(rest) = a.strip_prefix("--files-from=") {
+                    files_from = Some(PathBuf::from(rest));
+                } else {
+                    i += 1;
+                    let Some(p) = args.get(i) else {
+                        return usage_err(prog, "--files-from requires PATH");
+                    };
+                    files_from = Some(PathBuf::from(p));
+                }
             }
             a if crate::util::is_trash_dir_flag(a) => {
                 if opts.trash_pin.is_some() {
@@ -205,6 +232,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         i += 1;
     }
 
+    if let Some(src) = &files_from {
+        match read_files_from(src, zero) {
+            Ok(extra) => files.extend(extra),
+            Err(e) => {
+                eprintln!("{prog}: cannot read --files-from '{}': {e}", src.display());
+                return 1;
+            }
+        }
+    }
+
     if files.is_empty() {
         #[cfg(feature = "tui")]
         if !plain && crate::util::stdin_is_tty() {
@@ -230,14 +267,59 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
 
     let mut status = 0;
+    let mut ok = 0u64;
+    let mut failed = 0u64;
+    let mut names: Vec<String> = Vec::new();
     let mut batch = PutBatch::new();
     for file in &files {
-        if let Err(code) = put_one_in(prog, file, &opts, &mut batch) {
-            status = status.max(code);
+        match put_one_in(prog, file, &opts, &mut batch) {
+            Ok(()) => {
+                ok += 1;
+                names.push(file.display().to_string());
+            }
+            Err(code) => {
+                failed += 1;
+                status = status.max(code);
+            }
         }
     }
     batch.finish();
+    if json {
+        let names_j: Vec<String> = names
+            .iter()
+            .map(|n| format!("\"{}\"", crate::list::json_escape(n)))
+            .collect();
+        println!(
+            "{{\"ok\":{ok},\"failed\":{failed},\"names\":[{}]}}",
+            names_j.join(",")
+        );
+    }
     status
+}
+
+fn read_files_from(path: &Path, nul: bool) -> io::Result<Vec<PathBuf>> {
+    use std::io::Read;
+    let data = if path.as_os_str() == "-" {
+        let mut buf = Vec::new();
+        io::stdin().read_to_end(&mut buf)?;
+        buf
+    } else {
+        fs::read(path)?
+    };
+    let sep = if nul { 0u8 } else { b'\n' };
+    let mut out = Vec::new();
+    for rec in data.split(|b| *b == sep) {
+        let rec = if !nul && rec.last() == Some(&b'\r') {
+            &rec[..rec.len() - 1]
+        } else {
+            rec
+        };
+        if rec.is_empty() {
+            continue;
+        }
+        out.push(PathBuf::from(OsStr::from_bytes(rec)));
+    }
+    Ok(out)
 }
 
 fn describe(meta: &fs::Metadata, path: &Path) -> &'static str {
