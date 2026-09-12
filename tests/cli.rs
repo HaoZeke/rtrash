@@ -778,13 +778,7 @@ fn restore_to_relocates_basename_and_overwrite() {
     assert!(stderr_of(&out).contains("refusing to overwrite"));
     assert_eq!(fs::read(recovered.join("dest.txt")).unwrap(), b"newer");
 
-    let out = sb.run(&[
-        "restore",
-        "--overwrite",
-        "--restore-to",
-        dest,
-        "dest.txt",
-    ]);
+    let out = sb.run(&["restore", "--overwrite", "--restore-to", dest, "dest.txt"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(fs::read(recovered.join("dest.txt")).unwrap(), b"payload");
 }
@@ -1518,11 +1512,17 @@ fn empty_max_bytes_drops_largest_first() {
     fs::write(sb.work().join("big.bin"), vec![b'x'; 20 * 1024]).unwrap();
     sb.touch("tiny1");
     sb.touch("tiny2");
-    assert!(sb.run(&["put", &pin, "big.bin", "tiny1", "tiny2"]).status.success());
+    assert!(sb
+        .run(&["put", &pin, "big.bin", "tiny1", "tiny2"])
+        .status
+        .success());
     let out = sb.run(&["empty", &pin, "--plain", "--json", "--max-bytes=10k"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let s = stdout_of(&out);
-    assert!(s.contains("\"removed\":1") || s.contains("\"removed\": 1"), "{s}");
+    assert!(
+        s.contains("\"removed\":1") || s.contains("\"removed\": 1"),
+        "{s}"
+    );
     assert!(!sb.trash().join("files/big.bin").exists());
     assert!(sb.trash().join("files/tiny1").is_file());
     assert!(sb.trash().join("files/tiny2").is_file());
@@ -1578,7 +1578,10 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
     let sized = sb.run(&["list", &pin, "--json", "--smaller-than=1G"]);
     assert!(sized.status.success(), "{}", stderr_of(&sized));
     let catalog = stdout_of(&sized);
-    assert!(catalog.contains("\"bytes\":"), "size filter JSON includes bytes: {catalog}");
+    assert!(
+        catalog.contains("\"bytes\":"),
+        "size filter JSON includes bytes: {catalog}"
+    );
     let rows = parse_list_json_sizes(&catalog);
     assert_eq!(rows.len(), 9, "expected big + 8 tinies: {catalog}");
     let big_sz = rows
@@ -1613,18 +1616,33 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
     let large = sb.run(&["list", &pin, "--json", "--larger-than", &split_s]);
     assert!(large.status.success(), "{}", stderr_of(&large));
     let l = stdout_of(&large);
-    assert!(l.contains("big.bin"), "larger-than should keep big.bin: {l}");
+    assert!(
+        l.contains("big.bin"),
+        "larger-than should keep big.bin: {l}"
+    );
     assert!(!l.contains("tiny"), "larger-than should drop tinies: {l}");
     assert!(l.contains("\"bytes\":"), "{l}");
 
     let small = sb.run(&["list", &pin, "--json", "--smaller-than", &split_s]);
     assert!(small.status.success(), "{}", stderr_of(&small));
     let sm = stdout_of(&small);
-    assert!(sm.contains("tiny0.txt"), "smaller-than should keep tinies: {sm}");
-    assert!(!sm.contains("big.bin"), "smaller-than should drop big.bin: {sm}");
+    assert!(
+        sm.contains("tiny0.txt"),
+        "smaller-than should keep tinies: {sm}"
+    );
+    assert!(
+        !sm.contains("big.bin"),
+        "smaller-than should drop big.bin: {sm}"
+    );
 
     let cap = tiny_sum.to_string();
-    let dry = sb.run(&["empty", &pin, "--dry-run", "--json", &format!("--max-bytes={cap}")]);
+    let dry = sb.run(&[
+        "empty",
+        &pin,
+        "--dry-run",
+        "--json",
+        &format!("--max-bytes={cap}"),
+    ]);
     assert!(dry.status.success(), "{}", stderr_of(&dry));
     let dj = stdout_of(&dry);
     assert!(
@@ -1632,10 +1650,14 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
         "dry-run should drop only the largest: {dj}"
     );
     assert!(
-        dj.contains(&format!("\"max_bytes\":{cap}")) || dj.contains(&format!("\"max_bytes\": {cap}")),
+        dj.contains(&format!("\"max_bytes\":{cap}"))
+            || dj.contains(&format!("\"max_bytes\": {cap}")),
         "{dj}"
     );
-    assert!(sb.trash().join("files/big.bin").is_file(), "dry-run keeps payload");
+    assert!(
+        sb.trash().join("files/big.bin").is_file(),
+        "dry-run keeps payload"
+    );
 
     let real = sb.run(&["empty", &pin, "--json", &format!("--max-bytes={cap}")]);
     assert!(real.status.success(), "{}", stderr_of(&real));
@@ -1644,7 +1666,10 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
         rj.contains("\"removed\":1") || rj.contains("\"removed\": 1"),
         "json removed count must match one large victim: {rj}"
     );
-    assert!(!sb.trash().join("files/big.bin").exists(), "largest item dropped");
+    assert!(
+        !sb.trash().join("files/big.bin").exists(),
+        "largest item dropped"
+    );
     assert!(!sb.trash().join("info/big.bin.trashinfo").exists());
     for i in 0..8 {
         assert!(
@@ -1661,7 +1686,7 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
 
 #[test]
 fn restore_group_all_and_restore_to() {
-    let sb = Sandbox::new("restore-group");
+    let sb = Sandbox::new("restore-group-pin");
     let pin = format!("--trash-dir={}", sb.trash().display());
     sb.touch("a.txt");
     sb.touch("b.txt");
@@ -1702,9 +1727,13 @@ fn restore_plain_index_range() {
     assert!(sb.run(&["put", &pin, "x1", "x2", "x3"]).status.success());
     let out = sb.run_with_stdin(&["restore", &pin, "--plain"], "0-1\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let back = [sb.work().join("x1").exists(), sb.work().join("x2").exists(), sb.work().join("x3").exists()]
-        .iter()
-        .filter(|b| **b)
-        .count();
+    let back = [
+        sb.work().join("x1").exists(),
+        sb.work().join("x2").exists(),
+        sb.work().join("x3").exists(),
+    ]
+    .iter()
+    .filter(|b| **b)
+    .count();
     assert_eq!(back, 2, "range 0-1 should restore two of three");
 }
