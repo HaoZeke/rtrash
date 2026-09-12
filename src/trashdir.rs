@@ -597,7 +597,8 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
     }
     // FreeDesktop directorysizes cache: only for trashed directories.
     if meta.is_dir() {
-        let size = dir_tree_size(&dest).unwrap_or(0);
+        // FreeDesktop: cache is du -B1 (st_blocks * 512), same as disk_usage.
+        let size = crate::fastdelete::disk_usage(&dest);
         let mtime = info_mtime_secs(&trash.info().join(format!("{name}.trashinfo"))).unwrap_or(0);
         let _ = directorysizes_upsert(trash, &name, size, mtime);
     }
@@ -653,25 +654,6 @@ fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
         // O_EXCL .trashinfo reservation before the payload rename.
         fs::rename(src, dest)
     }
-}
-
-/// Total byte size of a directory tree (symlink targets not followed).
-fn dir_tree_size(path: &Path) -> io::Result<u64> {
-    let meta = fs::symlink_metadata(path)?;
-    if !meta.is_dir() {
-        return Ok(meta.len());
-    }
-    let mut total = 0u64;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let emeta = fs::symlink_metadata(entry.path())?;
-        if emeta.is_dir() {
-            total = total.saturating_add(dir_tree_size(&entry.path())?);
-        } else {
-            total = total.saturating_add(emeta.len());
-        }
-    }
-    Ok(total)
 }
 
 fn info_mtime_secs(path: &Path) -> io::Result<i64> {
@@ -978,7 +960,8 @@ mod tests {
 
     #[test]
     fn infer_topdir_trash_dash_uid() {
-        let root = PathBuf::from("/mnt/usb/.Trash-1000");
+        let uid = 1000u32;
+        let root = PathBuf::from(format!("/mnt/usb/.Trash-{uid}"));
         assert_eq!(infer_topdir(&root).as_deref(), Some(Path::new("/mnt/usb")));
     }
 
@@ -1255,6 +1238,49 @@ proc /proc proc rw 0 0
             None,
             "file payloads must not use directorysizes"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn directorysizes_upsert_uses_block_allocation_not_logical_len() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-ds-sparse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("files/tree")).unwrap();
+        fs::create_dir_all(root.join("info")).unwrap();
+        let sparse = root.join("files/tree/hole");
+        {
+            let f = fs::File::create(&sparse).unwrap();
+            f.set_len(1_048_576).unwrap();
+        }
+        let info_path = root.join("info/tree.trashinfo");
+        fs::write(
+            &info_path,
+            "[Trash Info]\nPath=/orig/tree\nDeletionDate=2020-01-01T00:00:00\n",
+        )
+        .unwrap();
+        let mtime = info_mtime_secs(&info_path).unwrap();
+        let trash = TrashDir {
+            root: root.clone(),
+            topdir: None,
+        };
+        let blocks = crate::fastdelete::disk_usage(&root.join("files/tree"));
+        assert!(
+            blocks < 1_048_576,
+            "sparse payload must allocate less than logical 1MiB, got {blocks}"
+        );
+        directorysizes_upsert(&trash, "tree", blocks, mtime).unwrap();
+        let line = fs::read_to_string(root.join("directorysizes")).unwrap();
+        let (sz, _, enc) = directorysizes_parse_line(line.trim()).unwrap();
+        assert_eq!(enc, "tree");
+        assert_eq!(sz, blocks);
+        assert_eq!(directorysizes_cached_size(&trash, "tree"), Some(blocks));
         let _ = fs::remove_dir_all(&root);
     }
 }
