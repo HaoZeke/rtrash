@@ -1491,6 +1491,13 @@ fn list_pattern_glob_literal_cwd_only() {
     let l = stdout_of(&lit);
     assert!(l.contains("keep.c"), "{l}");
     assert!(!l.contains("drop.o"), "{l}");
+    let lit_sub = sb.run(&["list", &pin, "--match=literal", "keep"]);
+    assert!(lit_sub.status.success(), "{}", stderr_of(&lit_sub));
+    assert!(
+        stdout_of(&lit_sub).trim().is_empty(),
+        "literal is exact, not substring: {}",
+        stdout_of(&lit_sub)
+    );
     let re = sb.run(&["list", &pin, "--match=regex", r"keep\.c$"]);
     assert!(re.status.success(), "{}", stderr_of(&re));
     assert!(stdout_of(&re).contains("keep.c"), "{}", stdout_of(&re));
