@@ -177,9 +177,15 @@ Same as positional
 .I DAYS
 (list/status flag style).
 .TP
+.BI \-\-max\-bytes =N
+Drop largest items first until remaining reclaimable bytes are at most
+.IR N
+(\fIN\fR, \fINk\fR/\fIK\fR, \fINm\fR/\fIM\fR, \fINg\fR/\fIG\fR; 1024-based).
+Omit for a full empty (unchanged default).
+.TP
 .B \-\-json
 Emit a JSON summary on stdout
-(\fIdry_run\fR, \fIremoved\fR, \fIbytes\fR, \fIdays\fR).
+(\fIdry_run\fR, \fIremoved\fR, \fIbytes\fR, \fIdays\fR, \fImax_bytes\fR).
 .TP
 .B \-\-help
 Display help and exit.
@@ -237,9 +243,24 @@ Only
 names with no
 .BR .trashinfo .
 .TP
+.BI \-\-larger\-than =N
+Only items larger than
+.I N
+bytes
+(\fIN\fR, \fINk\fR/\fIK\fR, \fINm\fR/\fIM\fR, \fINg\fR/\fIG\fR; 1024-based).
+.TP
+.BI \-\-smaller\-than =N
+Only items smaller than
+.I N
+bytes (same size syntax as
+.BR \-\-larger\-than ).
+.TP
 .B \-\-json
 Emit a JSON array of objects
 (\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR, \fIorphan\fR).
+Includes
+.B bytes
+only when a size filter computes item sizes.
 .TP
 .B \-\-help
 Display help and exit.
