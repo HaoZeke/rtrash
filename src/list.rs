@@ -311,7 +311,10 @@ fn entries_to_json_sized(entries: &[Entry], sizes: Option<&[u64]>) -> String {
 }
 
 /// Reclaimable size per entry (directorysizes-when-valid, else walk).
-fn entry_bytes(e: &Entry, caches: &mut std::collections::HashMap<PathBuf, trashdir::DirectorySizesMap>) -> u64 {
+fn entry_bytes(
+    e: &Entry,
+    caches: &mut std::collections::HashMap<PathBuf, trashdir::DirectorySizesMap>,
+) -> u64 {
     let cache = caches
         .entry(e.dir.root.clone())
         .or_insert_with(|| trashdir::DirectorySizesMap::load(&e.dir));
@@ -491,10 +494,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         None
     };
     if json {
-        println!(
-            "{}",
-            entries_to_json_sized(&entries, sizes.as_deref())
-        );
+        println!("{}", entries_to_json_sized(&entries, sizes.as_deref()));
     } else {
         for entry in &entries {
             let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
@@ -563,7 +563,10 @@ mod tests {
         assert!(s.contains("\"deletion_date\":\"2020-01-02T03:04:05\""));
         assert!(s.contains("\"original\":\"/tmp/x\""));
         assert!(s.contains("\"orphan\":false"));
-        assert!(!s.contains("\"bytes\":"), "unfiltered JSON has no bytes: {s}");
+        assert!(
+            !s.contains("\"bytes\":"),
+            "unfiltered JSON has no bytes: {s}"
+        );
         assert!(s.ends_with(']'));
         let with = entries_to_json_sized(std::slice::from_ref(&e), Some(&[4096]));
         assert!(with.contains("\"bytes\":4096"), "{with}");
