@@ -44,6 +44,9 @@ fn fish_completion_covers_surface() {
             "trash-empty",
             "complete -c rtrash",
             "keys",
+            "max-bytes",
+            "larger-than",
+            "smaller-than",
         ],
         "completions/rtrash.fish",
     );
@@ -116,6 +119,9 @@ fn zsh_completion_covers_surface() {
             "--force",
             "--verbose",
             "#compdef",
+            "--max-bytes=",
+            "--larger-than=",
+            "--smaller-than=",
         ],
         "completions/_rtrash",
     );
@@ -149,6 +155,10 @@ fn man_page_covers_surface() {
             "\\-\\-plain",
             "\\-\\-cwd\\-only",
             "keys",
+            "\\-\\-max\\-bytes",
+            "\\-\\-larger\\-than",
+            "\\-\\-smaller\\-than",
+            "max_bytes",
         ],
         "man/rtrash.1",
     );
