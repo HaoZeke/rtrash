@@ -28,7 +28,11 @@ A files/ name with no .trashinfo is an emergency row: date
                      (same cutoff model as `empty DAYS`)
       --newer-than=DAYS only items trashed within the last DAYS days
       --orphans         only files/ names with no .trashinfo
-      --json            emit a JSON array (scripts; one object per item)
+      --larger-than=N   only items larger than N bytes
+                     (N, Nk/K, Nm/M, Ng/G; 1024-based)
+      --smaller-than=N  only items smaller than N bytes (same size syntax)
+      --json            emit a JSON array (scripts; one object per item).
+                     Includes a bytes field when size is computed
       --help            display this help and exit
       --version         output version information and exit
 ";
@@ -258,6 +262,10 @@ pub fn json_escape(s: &str) -> String {
 }
 
 pub fn entry_to_json(e: &Entry) -> String {
+    entry_to_json_opt_bytes(e, None)
+}
+
+fn entry_to_json_opt_bytes(e: &Entry, bytes: Option<u64>) -> String {
     let date = match e.date.as_deref() {
         Some(d) => format!("\"{}\"", json_escape(d)),
         None if e.orphan => "null".into(),
@@ -268,28 +276,72 @@ pub fn entry_to_json(e: &Entry) -> String {
     } else {
         format!("\"{}\"", json_escape(&e.original.to_string_lossy()))
     };
-    format!(
-        "{{\"deletion_date\":{date},\"original\":{original},\"name\":\"{}\",\"trash_dir\":\"{}\",\"orphan\":{}}}",
+    let mut s = format!(
+        "{{\"deletion_date\":{date},\"original\":{original},\"name\":\"{}\",\"trash_dir\":\"{}\",\"orphan\":{}",
         json_escape(&e.name),
         json_escape(&e.dir.root.to_string_lossy()),
         if e.orphan { "true" } else { "false" },
-    )
+    );
+    if let Some(b) = bytes {
+        s.push_str(&format!(",\"bytes\":{b}"));
+    }
+    s.push('}');
+    s
 }
 
 pub fn entries_to_json_array(entries: &[Entry]) -> String {
+    entries_to_json_sized(entries, None)
+}
+
+fn entries_to_json_sized(entries: &[Entry], sizes: Option<&[u64]>) -> String {
     let mut out = String::from("[\n");
     for (i, e) in entries.iter().enumerate() {
         if i > 0 {
             out.push_str(",\n");
         }
         out.push_str("  ");
-        out.push_str(&entry_to_json(e));
+        let bytes = sizes.and_then(|s| s.get(i).copied());
+        out.push_str(&entry_to_json_opt_bytes(e, bytes));
     }
     if !entries.is_empty() {
         out.push('\n');
     }
     out.push(']');
     out
+}
+
+/// Reclaimable size per entry (directorysizes-when-valid, else walk).
+fn entry_bytes(e: &Entry, caches: &mut std::collections::HashMap<PathBuf, trashdir::DirectorySizesMap>) -> u64 {
+    let cache = caches
+        .entry(e.dir.root.clone())
+        .or_insert_with(|| trashdir::DirectorySizesMap::load(&e.dir));
+    trashdir::entry_reclaim_bytes_cached(&e.dir, &e.name, Some(cache))
+}
+
+fn filter_size(
+    entries: Vec<Entry>,
+    larger_than: Option<u64>,
+    smaller_than: Option<u64>,
+) -> (Vec<Entry>, Vec<u64>) {
+    let mut caches = std::collections::HashMap::new();
+    let mut kept = Vec::new();
+    let mut sizes = Vec::new();
+    for e in entries {
+        let sz = entry_bytes(&e, &mut caches);
+        if let Some(n) = larger_than {
+            if sz <= n {
+                continue;
+            }
+        }
+        if let Some(n) = smaller_than {
+            if sz >= n {
+                continue;
+            }
+        }
+        kept.push(e);
+        sizes.push(sz);
+    }
+    (kept, sizes)
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
@@ -299,6 +351,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut orphans_only = false;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
+    let mut larger_than: Option<u64> = None;
+    let mut smaller_than: Option<u64> = None;
     let mut cwd_only = false;
     let mut match_mode = MatchMode::Glob;
     let mut patterns: Vec<String> = Vec::new();
@@ -361,6 +415,36 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     }
                 }
             }
+            a if a == "--larger-than" || a.starts_with("--larger-than=") => {
+                match crate::util::take_eq_or_next(args, &mut i, "--larger-than") {
+                    Ok(v) => match crate::util::parse_bytes(v) {
+                        Ok(n) => larger_than = Some(n),
+                        Err(e) => {
+                            eprintln!("{prog}: {e}");
+                            return 2;
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
+            a if a == "--smaller-than" || a.starts_with("--smaller-than=") => {
+                match crate::util::take_eq_or_next(args, &mut i, "--smaller-than") {
+                    Ok(v) => match crate::util::parse_bytes(v) {
+                        Ok(n) => smaller_than = Some(n),
+                        Err(e) => {
+                            eprintln!("{prog}: {e}");
+                            return 2;
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
             a if a.starts_with("--match=") => {
                 eprintln!("{prog}: --match must be glob, literal, or regex");
                 return 2;
@@ -398,8 +482,19 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         entries.retain(|e| patterns.iter().any(|pat| entry_matches(e, pat, match_mode)));
     }
+    let size_filter = larger_than.is_some() || smaller_than.is_some();
+    let sizes = if size_filter {
+        let (kept, sz) = filter_size(entries, larger_than, smaller_than);
+        entries = kept;
+        Some(sz)
+    } else {
+        None
+    };
     if json {
-        println!("{}", entries_to_json_array(&entries));
+        println!(
+            "{}",
+            entries_to_json_sized(&entries, sizes.as_deref())
+        );
     } else {
         for entry in &entries {
             let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
@@ -468,7 +563,10 @@ mod tests {
         assert!(s.contains("\"deletion_date\":\"2020-01-02T03:04:05\""));
         assert!(s.contains("\"original\":\"/tmp/x\""));
         assert!(s.contains("\"orphan\":false"));
+        assert!(!s.contains("\"bytes\":"), "unfiltered JSON has no bytes: {s}");
         assert!(s.ends_with(']'));
+        let with = entries_to_json_sized(std::slice::from_ref(&e), Some(&[4096]));
+        assert!(with.contains("\"bytes\":4096"), "{with}");
     }
 
     #[test]

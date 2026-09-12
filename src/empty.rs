@@ -25,7 +25,11 @@ permanent delete). Use --plain to skip the TUI.
   -f, --force      accepted for trash-cli compatibility (emptying never prompts)
       --plain      skip TUI; non-interactive empty (also used when stdin is not a TTY)
       --older-than=DAYS  same as positional DAYS (list/status flag style)
-      --json       emit a JSON summary on stdout ({dry_run, removed, bytes, days})
+      --max-bytes=N  drop largest items first until remaining reclaimable
+                     bytes <= N (N, Nk/K, Nm/M, Ng/G; 1024-based).
+                     Omit for a full empty (unchanged default)
+      --json       emit a JSON summary on stdout
+                     ({dry_run, removed, bytes, days, max_bytes})
       --trash-dir PATH  empty only this trash directory (repeatable;
                      `--trash-dir=PATH` also accepted);
                      default is the home trash plus every mounted volume
@@ -36,6 +40,7 @@ permanent delete). Use --plain to skip the TUI.
 
 struct Opts {
     days: Option<i64>,
+    max_bytes: Option<u64>,
     dry_run: bool,
     verbose: bool,
     home_only: bool,
@@ -53,6 +58,7 @@ fn usage_err(prog: &str, msg: &str) -> i32 {
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut opts = Opts {
         days: None,
+        max_bytes: None,
         dry_run: false,
         verbose: false,
         home_only: false,
@@ -96,6 +102,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--older-than" => {
                 return usage_err(prog, "--older-than requires DAYS (use --older-than=DAYS)");
             }
+            a if a == "--max-bytes" || a.starts_with("--max-bytes=") => {
+                match crate::util::take_eq_or_next(args, &mut i, "--max-bytes") {
+                    Ok(v) => match crate::util::parse_bytes(v) {
+                        Ok(n) => opts.max_bytes = Some(n),
+                        Err(e) => return usage_err(prog, &e),
+                    },
+                    Err(e) => return usage_err(prog, &e),
+                }
+            }
             a if !a.starts_with('-') => match a.parse::<i64>() {
                 Ok(d) if d >= 0 => opts.days = Some(d),
                 _ => return usage_err(prog, &format!("invalid DAYS argument '{a}'")),
@@ -113,16 +128,26 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 2;
     }
 
-    // TTY empty browser when no age filter (full interactive review).
-    // --json implies non-interactive (scripts).
+    // TTY empty browser when no age/size filter (full interactive review).
+    // --json / --max-bytes imply non-interactive (scripts).
     #[cfg(feature = "tui")]
-    if !opts.plain && !opts.json && opts.days.is_none() && stdin_is_tty() {
+    if !opts.plain
+        && !opts.json
+        && opts.days.is_none()
+        && opts.max_bytes.is_none()
+        && stdin_is_tty()
+    {
         let entries = list::collect(&dirs);
         let refs: Vec<&list::Entry> = entries.iter().collect();
         return crate::empty_tui::run(prog, refs, opts.dry_run);
     }
 
     let cutoff = opts.days.map(|d| info::now_epoch() - d * 86_400);
+
+    if let Some(cap) = opts.max_bytes {
+        return empty_max_bytes(prog, &dirs, cutoff, cap, &opts);
+    }
+
     let removed = AtomicU64::new(0);
     let bytes = AtomicU64::new(0);
     let errors = AtomicU64::new(0);
@@ -148,11 +173,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             None => "null".into(),
         };
         println!(
-            "{{\"dry_run\":{},\"removed\":{},\"bytes\":{},\"days\":{}}}",
+            "{{\"dry_run\":{},\"removed\":{},\"bytes\":{},\"days\":{},\"max_bytes\":{}}}",
             if opts.dry_run { "true" } else { "false" },
             n,
             b,
-            days
+            days,
+            "null"
         );
     } else {
         let verb = if opts.dry_run {
@@ -393,6 +419,222 @@ fn full_empty_wipe(
     prune_directorysizes(dir, &[]);
 }
 
+struct SizedItem {
+    dir: TrashDir,
+    name: String,
+    target: PathBuf,
+    info: Option<PathBuf>,
+    display: PathBuf,
+    bytes: u64,
+}
+
+/// Indices to drop (largest first) so the remaining sum is `<= cap`.
+fn prune_indices(sizes: &[u64], cap: u64) -> Vec<usize> {
+    let total: u64 = sizes.iter().copied().sum();
+    if total <= cap {
+        return Vec::new();
+    }
+    let mut order: Vec<usize> = (0..sizes.len()).collect();
+    order.sort_by(|&a, &b| sizes[b].cmp(&sizes[a]).then(a.cmp(&b)));
+    let mut remaining = total;
+    let mut drop = Vec::new();
+    for i in order {
+        if remaining <= cap {
+            break;
+        }
+        remaining = remaining.saturating_sub(sizes[i]);
+        drop.push(i);
+    }
+    drop
+}
+
+fn collect_sized_items(dirs: &[TrashDir], cutoff: Option<i64>) -> Vec<SizedItem> {
+    let mut items = Vec::new();
+    for dir in dirs {
+        let cache = trashdir::DirectorySizesMap::load(dir);
+        let entries = list::collect(std::slice::from_ref(dir));
+        let mut named: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for e in entries {
+            if let Some(cut) = cutoff {
+                if !is_old(e.date.as_deref(), cut) {
+                    continue;
+                }
+            }
+            named.insert(e.name.clone());
+            let sz = trashdir::entry_reclaim_bytes_cached(dir, &e.name, Some(&cache));
+            items.push(SizedItem {
+                dir: dir.clone(),
+                name: e.name.clone(),
+                target: dir.files().join(&e.name),
+                info: Some(dir.info().join(format!("{}.trashinfo", e.name))),
+                display: dir.root.join("files").join(&e.name),
+                bytes: sz,
+            });
+        }
+        // Orphans have no date; include them only on an unfiltered prune.
+        if cutoff.is_none() {
+            if let Ok(rd) = fs::read_dir(dir.files()) {
+                for ent in rd.flatten() {
+                    let name = ent.file_name().to_string_lossy().into_owned();
+                    if named.contains(&name) {
+                        continue;
+                    }
+                    let has_info = dir.info().join(format!("{name}.trashinfo")).exists();
+                    if has_info {
+                        continue;
+                    }
+                    let p = ent.path();
+                    let sz = trashdir::files_child_reclaim_bytes_cached(dir, &p, Some(&cache));
+                    items.push(SizedItem {
+                        dir: dir.clone(),
+                        name,
+                        target: p.clone(),
+                        info: None,
+                        display: p,
+                        bytes: sz,
+                    });
+                }
+            }
+        }
+    }
+    items
+}
+
+fn empty_max_bytes(
+    prog: &str,
+    dirs: &[TrashDir],
+    cutoff: Option<i64>,
+    cap: u64,
+    opts: &Opts,
+) -> i32 {
+    let items = collect_sized_items(dirs, cutoff);
+    let sizes: Vec<u64> = items.iter().map(|i| i.bytes).collect();
+    let drop_at = prune_indices(&sizes, cap);
+    let victims: Vec<&SizedItem> = drop_at.iter().map(|&i| &items[i]).collect();
+
+    let removed = AtomicU64::new(0);
+    let bytes = AtomicU64::new(0);
+    let errors = AtomicU64::new(0);
+
+    if opts.dry_run {
+        for v in &victims {
+            bytes.fetch_add(v.bytes, Ordering::Relaxed);
+            if opts.verbose {
+                println!(
+                    "would remove {} ({})",
+                    v.display.display(),
+                    crate::fastdelete::format_bytes(v.bytes)
+                );
+            }
+            removed.fetch_add(1, Ordering::Relaxed);
+        }
+    } else {
+        // Group victim names per trash root so we lock once and prune the cache.
+        let mut by_root: std::collections::HashMap<PathBuf, Vec<&SizedItem>> =
+            std::collections::HashMap::new();
+        for v in &victims {
+            by_root.entry(v.dir.root.clone()).or_default().push(*v);
+        }
+        let all_names_by_root = {
+            let mut m: std::collections::HashMap<PathBuf, Vec<String>> =
+                std::collections::HashMap::new();
+            for it in &items {
+                m.entry(it.dir.root.clone())
+                    .or_default()
+                    .push(it.name.clone());
+            }
+            m
+        };
+        for dir in dirs {
+            let Some(dir_victims) = by_root.get(&dir.root) else {
+                continue;
+            };
+            let _lock = match trashdir::TrashLock::acquire(&dir.root) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("{prog}: cannot lock trash '{}': {e}", dir.root.display());
+                    errors.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            };
+            dir_victims.par_iter().for_each(|v| {
+                match trashdir::remove_any_path(&v.target) {
+                    Ok(()) => {
+                        if let Some(ip) = &v.info {
+                            match fs::remove_file(ip) {
+                                Ok(()) => {}
+                                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                                Err(e) => {
+                                    eprintln!("{prog}: cannot remove '{}': {e}", ip.display());
+                                    errors.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        if opts.verbose {
+                            println!("removed {}", v.display.display());
+                        }
+                        removed.fetch_add(1, Ordering::Relaxed);
+                        bytes.fetch_add(v.bytes, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        eprintln!("{prog}: cannot remove '{}': {e}", v.display.display());
+                        errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+            let drop_names: std::collections::HashSet<&str> =
+                dir_victims.iter().map(|v| v.name.as_str()).collect();
+            let kept: Vec<String> = all_names_by_root
+                .get(&dir.root)
+                .into_iter()
+                .flatten()
+                .filter(|n| !drop_names.contains(n.as_str()))
+                .cloned()
+                .collect();
+            prune_directorysizes(dir, &kept);
+        }
+    }
+
+    let n = removed.load(Ordering::Relaxed);
+    let b = bytes.load(Ordering::Relaxed);
+    if opts.json {
+        let days = match opts.days {
+            Some(d) => d.to_string(),
+            None => "null".into(),
+        };
+        println!(
+            "{{\"dry_run\":{},\"removed\":{},\"bytes\":{},\"days\":{},\"max_bytes\":{}}}",
+            if opts.dry_run { "true" } else { "false" },
+            n,
+            b,
+            days,
+            cap
+        );
+    } else {
+        let verb = if opts.dry_run {
+            "Would remove"
+        } else {
+            "Removed"
+        };
+        let noun = if n == 1 { "item" } else { "items" };
+        if opts.verbose || opts.dry_run || n > 0 {
+            if opts.dry_run {
+                eprintln!(
+                    "{verb} {n} {noun} ({}, approximately reclaimable)",
+                    crate::fastdelete::format_bytes(b)
+                );
+            } else {
+                eprintln!("{verb} {n} {noun}");
+            }
+        }
+    }
+    if errors.load(Ordering::Relaxed) > 0 {
+        1
+    } else {
+        0
+    }
+}
+
 /// Rewrite the spec's `directorysizes` cache keeping only surviving entries;
 /// drop the file outright when nothing survives.
 fn prune_directorysizes(dir: &TrashDir, kept: &[String]) {
@@ -436,5 +678,14 @@ mod tests {
             Some("2001-01-01T00:00:00"),
             info::now_epoch() - 3600
         ));
+    }
+
+    #[test]
+    fn prune_indices_drops_largest_first() {
+        assert!(prune_indices(&[100, 20, 10], 200).is_empty());
+        assert_eq!(prune_indices(&[100, 20, 10], 30), vec![0]);
+        assert_eq!(prune_indices(&[100, 20, 10], 0), vec![0, 1, 2]);
+        // Ties: lower original index first among equal sizes.
+        assert_eq!(prune_indices(&[10, 50, 50], 10), vec![1, 2]);
     }
 }
