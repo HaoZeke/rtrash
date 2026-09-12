@@ -3,7 +3,8 @@
 //! In-process readdir + `unlinkat` (rsync empty-source style, no shell-out).
 //! Hot path optimisations for full trash empty:
 //! - use `d_type` to unlink regular files without a failed `openat` probe
-//! - parallel sibling deletion (rayon) at each directory level with many names
+//! - parallel sibling deletion (rayon) on wide levels of a `remove_path` walk
+//!   (and of a narrow wipe); a wide `wipe_children_parallel` is the rayon boundary
 //! - btrfs subvolume destroy when a directory is a real subvolume root (ino 256)
 
 use std::ffi::{CStr, CString, OsStr, OsString};
@@ -171,7 +172,8 @@ fn remove_dir_tree(path: &Path) -> io::Result<()> {
         return Err(e);
     }
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    remove_dirfd_contents(fd.as_raw_fd(), 0)?;
+    // Single-tree / age-filter walk: sibling rayon is allowed at every level.
+    remove_dirfd_contents(fd.as_raw_fd(), 0, true)?;
     drop(fd);
     match fs::remove_dir(path) {
         Ok(()) => Ok(()),
@@ -180,19 +182,36 @@ fn remove_dir_tree(path: &Path) -> io::Result<()> {
     }
 }
 
-fn remove_dirfd_contents(dirfd: RawFd, depth: u32) -> io::Result<()> {
+/// Parallelise this directory's names when the walk opted in, the level is
+/// wide enough, and we have not passed the nested-rayon cap.
+fn sibling_par_ok(n: usize, depth: u32, sibling_par: bool) -> bool {
+    sibling_par && n >= PAR_SIBLING_THRESHOLD && depth <= PAR_MAX_DEPTH
+}
+
+fn remove_dirfd_contents(dirfd: RawFd, depth: u32, sibling_par: bool) -> io::Result<()> {
     let entries = read_dirfd_entries(dirfd)?;
-    // Nested levels stay sequential: parallelising every directory oversubscribes
-    // rayon when the top-level full-empty wipe is already highly parallel.
-    // (Top-level `wipe_children_parallel` is the parallel boundary.)
-    let _ = (depth, PAR_SIBLING_THRESHOLD, PAR_MAX_DEPTH);
+    if sibling_par_ok(entries.len(), depth, sibling_par) {
+        let mut first_err = None;
+        let results: Vec<io::Result<()>> = entries
+            .par_iter()
+            .map(|e| remove_entry(dirfd, e, depth, sibling_par))
+            .collect();
+        for r in results {
+            if let Err(e) = r {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        return first_err.map_or(Ok(()), Err);
+    }
     for e in &entries {
-        remove_entry(dirfd, e, depth)?;
+        remove_entry(dirfd, e, depth, sibling_par)?;
     }
     Ok(())
 }
 
-fn remove_entry(dirfd: RawFd, ent: &DirEnt, depth: u32) -> io::Result<()> {
+fn remove_entry(dirfd: RawFd, ent: &DirEnt, depth: u32, sibling_par: bool) -> io::Result<()> {
     let name_c = CString::new(ent.name.as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
@@ -201,7 +220,7 @@ fn remove_entry(dirfd: RawFd, ent: &DirEnt, depth: u32) -> io::Result<()> {
         DT_REG | DT_LNK | DT_FIFO | DT_SOCK | DT_CHR | DT_BLK => {
             return unlinkat_file(dirfd, &name_c);
         }
-        DT_DIR => return remove_dir_child(dirfd, &ent.name, &name_c, depth),
+        DT_DIR => return remove_dir_child(dirfd, &ent.name, &name_c, depth, sibling_par),
         DT_UNKNOWN => {}
         _ => {}
     }
@@ -217,7 +236,7 @@ fn remove_entry(dirfd: RawFd, ent: &DirEnt, depth: u32) -> io::Result<()> {
     if child_fd >= 0 {
         // We already opened; finish as directory (subvol check on parent).
         unsafe { libc::close(child_fd) };
-        return remove_dir_child(dirfd, &ent.name, &name_c, depth);
+        return remove_dir_child(dirfd, &ent.name, &name_c, depth, sibling_par);
     }
     let err = io::Error::last_os_error();
     match err.raw_os_error() {
@@ -240,7 +259,13 @@ fn unlinkat_file(dirfd: RawFd, name_c: &CString) -> io::Result<()> {
     Ok(())
 }
 
-fn remove_dir_child(dirfd: RawFd, name: &OsStr, name_c: &CString, depth: u32) -> io::Result<()> {
+fn remove_dir_child(
+    dirfd: RawFd,
+    name: &OsStr,
+    name_c: &CString,
+    depth: u32,
+    sibling_par: bool,
+) -> io::Result<()> {
     // Subvolume destroy only at the first level of a tree (cheap for the common
     // non-subvolume case: one failed/skipped ioctl path per top-level payload,
     // not per nested directory).
@@ -266,7 +291,7 @@ fn remove_dir_child(dirfd: RawFd, name: &OsStr, name_c: &CString, depth: u32) ->
         return Err(e);
     }
     let child_fd = unsafe { OwnedFd::from_raw_fd(child_fd) };
-    remove_dirfd_contents(child_fd.as_raw_fd(), depth.saturating_add(1))?;
+    remove_dirfd_contents(child_fd.as_raw_fd(), depth.saturating_add(1), sibling_par)?;
     drop(child_fd);
     let rc = unsafe { libc::unlinkat(dirfd, name_c.as_ptr(), libc::AT_REMOVEDIR) };
     if rc != 0 {
@@ -413,12 +438,15 @@ pub fn wipe_children_parallel(dir: &Path) -> io::Result<u64> {
         return Ok(0);
     }
     // Always parallelise top-level wipe (full empty of files/ or info/).
+    // A wide wipe is the rayon boundary: nested sibling par would oversubscribe.
+    // A narrow wipe (one fat payload) still allows nested sibling rayon.
+    let sibling_par = (n as usize) < PAR_SIBLING_THRESHOLD;
     let err_slot: AtomicU64 = AtomicU64::new(0);
     // Store first error message is hard without mutex; collect errors.
     let mut first_err: Option<io::Error> = None;
     let results: Vec<io::Result<()>> = entries
         .par_iter()
-        .map(|e| remove_entry(fd.as_raw_fd(), e, 0))
+        .map(|e| remove_entry(fd.as_raw_fd(), e, 0, sibling_par))
         .collect();
     for r in results {
         if let Err(e) = r {
@@ -564,6 +592,89 @@ mod tests {
         }
         remove_path(&tree).unwrap();
         assert!(!tree.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sibling_par_gates() {
+        assert!(sibling_par_ok(PAR_SIBLING_THRESHOLD, 0, true));
+        assert!(sibling_par_ok(PAR_SIBLING_THRESHOLD, PAR_MAX_DEPTH, true));
+        assert!(!sibling_par_ok(PAR_SIBLING_THRESHOLD - 1, 0, true));
+        assert!(!sibling_par_ok(10_000, 0, false));
+        assert!(!sibling_par_ok(
+            10_000,
+            PAR_MAX_DEPTH.saturating_add(1),
+            true
+        ));
+    }
+
+    #[test]
+    fn wide_flat_remove_path() {
+        let root = tmp_root("flat");
+        let tree = root.join("w");
+        fs::create_dir_all(&tree).unwrap();
+        for i in 0..128 {
+            fs::write(tree.join(format!("f{i}")), b"z").unwrap();
+        }
+        remove_path(&tree).unwrap();
+        assert!(!tree.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn wipe_one_wide_child_tree() {
+        let root = tmp_root("wipe1");
+        let payload = root.join("p");
+        fs::create_dir_all(&payload).unwrap();
+        for i in 0..64 {
+            fs::write(payload.join(format!("f{i}")), b"z").unwrap();
+        }
+        let n = wipe_children_parallel(&root).unwrap();
+        assert_eq!(n, 1);
+        assert!(root.is_dir());
+        assert!(fs::read_dir(&root).unwrap().next().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Heavy: wide flat tree. Run on a builder (`--ignored`), not the laptop.
+    /// `RTRASH_WIDE_N` overrides the file count (default 5000).
+    #[test]
+    #[ignore]
+    fn wide_5k_flat_remove_path() {
+        let n: usize = std::env::var("RTRASH_WIDE_N")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5_000);
+        let root = tmp_root("flat5k");
+        let tree = root.join("w");
+        fs::create_dir_all(&tree).unwrap();
+        for i in 0..n {
+            fs::write(tree.join(format!("f{i}")), b"z").unwrap();
+        }
+        let t0 = std::time::Instant::now();
+        remove_path(&tree).unwrap();
+        eprintln!("remove_path {n} files in {:?}", t0.elapsed());
+        assert!(!tree.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Heavy: 5k top-level names via wipe. Builder only (`--ignored`).
+    #[test]
+    #[ignore]
+    fn wide_5k_wipe_children() {
+        let n: usize = std::env::var("RTRASH_WIDE_N")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5_000);
+        let root = tmp_root("wipe5k");
+        for i in 0..n {
+            fs::write(root.join(format!("f{i}")), b"z").unwrap();
+        }
+        let t0 = std::time::Instant::now();
+        let got = wipe_children_parallel(&root).unwrap();
+        eprintln!("wipe_children_parallel {n} names in {:?}", t0.elapsed());
+        assert_eq!(got, n as u64);
+        assert!(fs::read_dir(&root).unwrap().next().is_none());
         let _ = fs::remove_dir_all(&root);
     }
 }
