@@ -178,6 +178,15 @@ fn sticky_and_dir(meta: &fs::Metadata) -> bool {
     meta.is_dir() && (meta.permissions().mode() & 0o1000) != 0
 }
 
+/// FreeDesktop method (1): `$top/.Trash` must be a real directory (not a
+/// symlink) with the sticky bit. Failed check → do not use `$top/.Trash/$uid`.
+fn shared_trash_dir_ok(trash_dot: &Path) -> bool {
+    match fs::symlink_metadata(trash_dot) {
+        Ok(meta) => !meta.file_type().is_symlink() && sticky_and_dir(&meta),
+        Err(_) => false,
+    }
+}
+
 /// Trash dir for a file on device `dev` at absolute path `abs`.
 /// Home trash when on the same fs; otherwise `$top/.Trash/$uid` (must be a
 /// sticky non-symlink dir) or `$top/.Trash-$uid`; home trash as last resort
@@ -214,15 +223,13 @@ pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
     let uid = uid();
 
     let shared = top.join(".Trash");
-    if let Ok(meta) = fs::symlink_metadata(&shared) {
-        if sticky_and_dir(&meta) {
-            let td = TrashDir {
-                root: shared.join(uid.to_string()),
-                topdir: Some(top.clone()),
-            };
-            if td.ensure().is_ok() {
-                return Ok(td);
-            }
+    if shared_trash_dir_ok(&shared) {
+        let td = TrashDir {
+            root: shared.join(uid.to_string()),
+            topdir: Some(top.clone()),
+        };
+        if td.ensure().is_ok() {
+            return Ok(td);
         }
     }
 
@@ -345,21 +352,38 @@ pub fn all() -> Vec<TrashDir> {
         });
     }
     let uid = uid();
-    for mp in mount_points() {
-        for cand in [
-            mp.join(".Trash").join(uid.to_string()),
-            mp.join(format!(".Trash-{uid}")),
-        ] {
-            if !seen.contains(&cand) && cand.is_dir() {
-                seen.insert(cand.clone());
-                out.push(TrashDir {
-                    root: cand,
-                    topdir: Some(mp.clone()),
-                });
-            }
+    collect_volume_trash(&mount_points(), uid, &mut seen, &mut out);
+    out
+}
+
+/// Discover `$mp/.Trash/$uid` (only if `.Trash` is sticky and not a symlink)
+/// then `$mp/.Trash-$uid`. Used by [`all`]; split out so tests can pass a
+/// fake mount list without walking `/proc/self/mounts`.
+fn collect_volume_trash(
+    mps: &[PathBuf],
+    uid: u32,
+    seen: &mut HashSet<PathBuf>,
+    out: &mut Vec<TrashDir>,
+) {
+    for mp in mps {
+        let shared_parent = mp.join(".Trash");
+        let shared = shared_parent.join(uid.to_string());
+        if !seen.contains(&shared) && shared.is_dir() && shared_trash_dir_ok(&shared_parent) {
+            seen.insert(shared.clone());
+            out.push(TrashDir {
+                root: shared,
+                topdir: Some(mp.clone()),
+            });
+        }
+        let private = mp.join(format!(".Trash-{uid}"));
+        if !seen.contains(&private) && private.is_dir() {
+            seen.insert(private.clone());
+            out.push(TrashDir {
+                root: private,
+                topdir: Some(mp.clone()),
+            });
         }
     }
-    out
 }
 
 /// Exclusive per-trash-root lock (flock on `root/.rtrash.lock`) so put and empty
@@ -1189,6 +1213,49 @@ proc /proc proc rw 0 0
         assert!(mps.contains(&PathBuf::from("/")));
         assert!(mps.contains(&PathBuf::from("/home")));
         assert!(mps.contains(&PathBuf::from("/data")));
+    }
+
+    #[test]
+    fn discovery_skips_non_sticky_shared_trash() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-sticky-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let mp = root.join("vol");
+        let uid = 42u32;
+        let shared_uid = mp.join(".Trash").join(uid.to_string());
+        fs::create_dir_all(shared_uid.join("files")).unwrap();
+        fs::create_dir_all(shared_uid.join("info")).unwrap();
+        // World-writable .Trash without sticky: spec MUST NOT use it.
+        fs::set_permissions(mp.join(".Trash"), fs::Permissions::from_mode(0o777)).unwrap();
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        collect_volume_trash(&[mp.clone()], uid, &mut seen, &mut out);
+        assert!(
+            out.is_empty(),
+            "non-sticky .Trash/$uid must not be discovered: {out:?}"
+        );
+        fs::set_permissions(mp.join(".Trash"), fs::Permissions::from_mode(0o1777)).unwrap();
+        seen.clear();
+        out.clear();
+        collect_volume_trash(&[mp.clone()], uid, &mut seen, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].root, shared_uid);
+        let private = mp.join(format!(".Trash-{uid}"));
+        fs::create_dir_all(private.join("files")).unwrap();
+        fs::create_dir_all(private.join("info")).unwrap();
+        fs::set_permissions(mp.join(".Trash"), fs::Permissions::from_mode(0o777)).unwrap();
+        seen.clear();
+        out.clear();
+        collect_volume_trash(&[mp.clone()], uid, &mut seen, &mut out);
+        assert_eq!(out.len(), 1, "private .Trash-$uid stays even if shared fails");
+        assert_eq!(out[0].root, private);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
