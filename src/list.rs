@@ -169,9 +169,7 @@ fn entry_matches(entry: &Entry, pat: &str, mode: MatchMode) -> bool {
                 || fnmatch(pat, base.as_str())
                 || fnmatch(pat, &entry.name)
         }
-        MatchMode::Literal => {
-            path_s.as_ref() == pat || base == pat || entry.name == pat || path_s.contains(pat)
-        }
+        MatchMode::Literal => path_s.as_ref() == pat || base == pat || entry.name == pat,
         MatchMode::Regex => match regex_compile(pat) {
             Ok(re) => {
                 re.is_match(path_s.as_ref()) || re.is_match(&base) || re.is_match(&entry.name)
@@ -364,9 +362,6 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--cwd-only" => cwd_only = true,
             "--orphans" => orphans_only = true,
             "--json" => json = true,
-            "--match=glob" => match_mode = MatchMode::Glob,
-            "--match=literal" => match_mode = MatchMode::Literal,
-            "--match=regex" => match_mode = MatchMode::Regex,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -445,9 +440,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     }
                 }
             }
-            a if a.starts_with("--match=") => {
-                eprintln!("{prog}: --match must be glob, literal, or regex");
-                return 2;
+            a if a == "--match" || a.starts_with("--match=") => {
+                match crate::util::take_eq_or_next(args, &mut i, "--match") {
+                    Ok("glob") => match_mode = MatchMode::Glob,
+                    Ok("literal") => match_mode = MatchMode::Literal,
+                    Ok("regex") => match_mode = MatchMode::Regex,
+                    Ok(_) => {
+                        eprintln!("{prog}: --match must be glob, literal, or regex");
+                        return 2;
+                    }
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
             }
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
@@ -567,6 +573,20 @@ mod tests {
         assert!(s.ends_with(']'));
         let with = entries_to_json_sized(std::slice::from_ref(&e), Some(&[4096]));
         assert!(with.contains("\"bytes\":4096"), "{with}");
+    }
+
+    #[test]
+    fn match_literal_is_exact_not_substring() {
+        let mut e = entry_with(Some("2020-01-01T00:00:00"), 1);
+        e.original = PathBuf::from("/tmp/keep.c");
+        e.name = "keep.c".into();
+        assert!(entry_matches(&e, "keep.c", MatchMode::Literal));
+        assert!(
+            !entry_matches(&e, "keep", MatchMode::Literal),
+            "literal is exact path/basename/name, not a substring"
+        );
+        assert!(entry_matches(&e, "*.c", MatchMode::Glob));
+        assert!(entry_matches(&e, r"keep\.c$", MatchMode::Regex));
     }
 
     #[test]
