@@ -21,6 +21,11 @@ fn core_key_tokens_present_in_all_three_browsers() {
             s.contains("refilter_query") && s.contains("status_filter_live"),
             "{rel} must live-refilter draft"
         );
+        // Viewport-only ListItem draw; selection stays on the full filtered list.
+        assert!(
+            s.contains("viewport_range") && s.contains("viewport_selected"),
+            "{rel} must build ListItems for the visible viewport only"
+        );
     }
 }
 

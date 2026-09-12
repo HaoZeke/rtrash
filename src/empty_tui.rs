@@ -18,13 +18,14 @@ use crate::tui_list;
 use crate::tui_select::Selection;
 use crate::tui_term;
 
-pub fn filter_indices(entries: &[&Entry], query: &str) -> Vec<usize> {
-    let hays: Vec<String> = entries
-        .iter()
-        .map(|e| e.original.to_string_lossy().into_owned())
-        .collect();
-    let refs: Vec<&str> = hays.iter().map(String::as_str).collect();
-    tui_fuzzy::rank_indices(&refs, query)
+/// Fuzzy-rank cached original-path haystacks. Empty query keeps original order
+/// and does not allocate path `String`s.
+pub fn filter_indices(hays: &[&str], query: &str) -> Vec<usize> {
+    tui_fuzzy::rank_indices(hays, query)
+}
+
+fn hay_of(entry: &Entry) -> String {
+    entry.original.to_string_lossy().into_owned()
 }
 
 /// Result of a permanent-remove batch: per-input success flags + dry-run bytes.
@@ -105,6 +106,8 @@ enum Mode {
 struct App<'a> {
     prog: &'a str,
     entries: Vec<&'a Entry>,
+    /// Cached original-path display strings; one per `entries` row.
+    hays: Vec<String>,
     filtered: Vec<usize>,
     list_state: ListState,
     sel: Selection,
@@ -125,11 +128,13 @@ impl<'a> App<'a> {
             list_state.select(Some(0));
         }
         let n = entries.len();
+        let hays: Vec<String> = entries.iter().map(|e| hay_of(e)).collect();
         let keys = Keymap::load();
         let dry_hint = format!("{} dry-run", keys.display_chords(Action::ToggleDryRun));
         let mut app = Self {
             prog,
             entries,
+            hays,
             filtered: (0..n).collect(),
             list_state,
             sel: Selection::new(),
@@ -153,7 +158,12 @@ impl<'a> App<'a> {
 
     fn refilter_query(&mut self, query: &str) {
         let prev = self.selected_entry_idx();
-        self.filtered = filter_indices(&self.entries, query);
+        if query.trim().is_empty() {
+            self.filtered = (0..self.hays.len()).collect();
+        } else {
+            let refs: Vec<&str> = self.hays.iter().map(String::as_str).collect();
+            self.filtered = filter_indices(&refs, query);
+        }
         let new_sel = tui_list::reselect_after_filter(prev, &self.filtered);
         self.list_state.select(new_sel);
         self.ensure_scroll();
@@ -234,6 +244,7 @@ impl<'a> App<'a> {
             for &ei in removed_entry_idxs.iter().rev() {
                 if ei < self.entries.len() {
                     self.entries.remove(ei);
+                    self.hays.remove(ei);
                 }
             }
             self.sel.remap_after_removals(&removed_entry_idxs);
@@ -390,8 +401,12 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         .block(Block::default().borders(Borders::ALL).title("empty")),
         chunks[0],
     );
-    let items: Vec<ListItem> = app
-        .filtered
+    let (start, end) = tui_list::viewport_range(
+        app.list_state.offset(),
+        app.filtered.len(),
+        app.viewport_rows,
+    );
+    let items: Vec<ListItem> = app.filtered[start..end]
         .iter()
         .map(|&ei| {
             let e = app.entries[ei];
@@ -399,10 +414,16 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
             ListItem::new(format!(
                 "{mark} {}  {}",
                 e.date.as_deref().unwrap_or("?"),
-                e.original.display()
+                app.hays[ei]
             ))
         })
         .collect();
+    let mut view_state = ListState::default();
+    view_state.select(tui_list::viewport_selected(
+        app.list_state.selected(),
+        start,
+        end,
+    ));
     f.render_stateful_widget(
         List::new(items)
             .block(
@@ -413,7 +434,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD))
             .highlight_symbol("▸ "),
         chunks[1],
-        &mut app.list_state,
+        &mut view_state,
     );
     let dry_hint = format!("{} dry-run", app.keys.display_chords(Action::ToggleDryRun));
     let keys = match app.mode {

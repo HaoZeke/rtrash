@@ -61,6 +61,26 @@ pub fn scroll_offset(
     off.min(max_off)
 }
 
+/// Half-open range of filtered rows that fit in a viewport of `height` rows.
+///
+/// `offset` is the first visible filtered index (`ListState::offset`). The
+/// returned range is always inside `0..filtered_len`.
+pub fn viewport_range(offset: usize, filtered_len: usize, height: usize) -> (usize, usize) {
+    let start = offset.min(filtered_len);
+    let end = start.saturating_add(height.max(1)).min(filtered_len);
+    (start, end)
+}
+
+/// Map a full-list selected index into a viewport slice `[start, end)`.
+///
+/// Keeps `ListState::selected` on the full filtered list; only the draw
+/// path remaps so widgets can be built for the visible rows alone.
+pub fn viewport_selected(selected: Option<usize>, start: usize, end: usize) -> Option<usize> {
+    selected
+        .filter(|&s| s >= start && s < end)
+        .map(|s| s - start)
+}
+
 /// After a filter rebuild, map the previous *entry* index to a position in
 /// `new_filtered` (list of entry indices). Falls back to first match / `None`.
 pub fn reselect_after_filter(
@@ -119,6 +139,22 @@ mod tests {
         assert_eq!(scroll_offset(Some(6), 20, 5, 4), 4);
         // empty
         assert_eq!(scroll_offset(Some(0), 0, 5, 0), 0);
+    }
+
+    #[test]
+    fn viewport_range_clips_to_filtered_and_height() {
+        assert_eq!(viewport_range(0, 5000, 8), (0, 8));
+        assert_eq!(viewport_range(100, 5000, 8), (100, 108));
+        assert_eq!(viewport_range(4998, 5000, 8), (4998, 5000));
+        assert_eq!(viewport_range(0, 0, 8), (0, 0));
+        assert_eq!(viewport_range(10, 3, 8), (3, 3));
+    }
+
+    #[test]
+    fn viewport_selected_stays_consistent_with_full_list_index() {
+        assert_eq!(viewport_selected(Some(105), 100, 108), Some(5));
+        assert_eq!(viewport_selected(Some(99), 100, 108), None);
+        assert_eq!(viewport_selected(None, 100, 108), None);
     }
 
     #[test]

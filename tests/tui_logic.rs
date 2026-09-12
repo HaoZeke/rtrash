@@ -219,7 +219,18 @@ fn put_list_dir_rows_and_filter() {
     fs::create_dir(dir.join("subdir")).unwrap();
     let rows = put_tui::list_dir_rows(&dir).unwrap();
     assert!(rows.len() >= 3);
-    let idxs = put_tui::filter_indices(&rows, "alp");
+    let owned: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            r.path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let idxs = put_tui::filter_indices(&refs, "alp");
     assert!(!idxs.is_empty());
     let name = rows[idxs[0]].path.file_name().unwrap().to_string_lossy();
     assert!(name.to_lowercase().contains('a'), "{name}");

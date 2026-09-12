@@ -19,14 +19,14 @@ use crate::tui_list;
 use crate::tui_select::Selection;
 use crate::tui_term;
 
-/// Fuzzy-rank entry indices by original path. Empty query keeps original order.
-pub fn filter_indices(entries: &[&Entry], query: &str) -> Vec<usize> {
-    let hays: Vec<String> = entries
-        .iter()
-        .map(|e| e.original.to_string_lossy().into_owned())
-        .collect();
-    let refs: Vec<&str> = hays.iter().map(String::as_str).collect();
-    tui_fuzzy::rank_indices(&refs, query)
+/// Fuzzy-rank cached original-path haystacks. Empty query keeps original order
+/// and does not allocate path `String`s.
+pub fn filter_indices(hays: &[&str], query: &str) -> Vec<usize> {
+    tui_fuzzy::rank_indices(hays, query)
+}
+
+fn hay_of(entry: &Entry) -> String {
+    entry.original.to_string_lossy().into_owned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +41,8 @@ enum Mode {
 struct App<'a> {
     prog: &'a str,
     entries: Vec<&'a Entry>,
+    /// Cached original-path display strings; one per `entries` row.
+    hays: Vec<String>,
     filtered: Vec<usize>,
     list_state: ListState,
     sel: Selection,
@@ -63,11 +65,13 @@ impl<'a> App<'a> {
             list_state.select(Some(0));
         }
         let n = entries.len();
+        let hays: Vec<String> = entries.iter().map(|e| hay_of(e)).collect();
         let keys = Keymap::load();
         let force_hint = format!("{} force", keys.display_chords(Action::ToggleForce));
         let mut app = Self {
             prog,
             entries,
+            hays,
             filtered: (0..n).collect(),
             list_state,
             sel: Selection::new(),
@@ -96,7 +100,12 @@ impl<'a> App<'a> {
     /// Live or applied filter: rebuild visible indices from `query`.
     fn refilter_query(&mut self, query: &str) {
         let prev = self.selected_entry_idx();
-        self.filtered = filter_indices(&self.entries, query);
+        if query.trim().is_empty() {
+            self.filtered = (0..self.hays.len()).collect();
+        } else {
+            let refs: Vec<&str> = self.hays.iter().map(String::as_str).collect();
+            self.filtered = filter_indices(&refs, query);
+        }
         let new_sel = tui_list::reselect_after_filter(prev, &self.filtered);
         self.list_state.select(new_sel);
         self.ensure_scroll();
@@ -196,6 +205,7 @@ impl<'a> App<'a> {
         for &ei in result.succeeded_idxs.iter().rev() {
             if ei < self.entries.len() {
                 self.entries.remove(ei);
+                self.hays.remove(ei);
             }
         }
         self.sel.remap_after_removals(&result.succeeded_idxs);
@@ -381,13 +391,17 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
     .block(Block::default().borders(Borders::ALL).title("restore"));
     f.render_widget(header, chunks[0]);
 
-    let items: Vec<ListItem> = app
-        .filtered
+    let (start, end) = tui_list::viewport_range(
+        app.list_state.offset(),
+        app.filtered.len(),
+        app.viewport_rows,
+    );
+    let items: Vec<ListItem> = app.filtered[start..end]
         .iter()
         .map(|&ei| {
             let e = app.entries[ei];
             let mark = if app.sel.is_marked(ei) { "[x]" } else { "[ ]" };
-            let line = format!("{mark} {:<20}  {}", date_label(e), e.original.display());
+            let line = format!("{mark} {:<20}  {}", date_label(e), app.hays[ei]);
             ListItem::new(line)
         })
         .collect();
@@ -400,7 +414,13 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD))
         .highlight_symbol("▸ ");
-    f.render_stateful_widget(list, chunks[1], &mut app.list_state);
+    let mut view_state = ListState::default();
+    view_state.select(tui_list::viewport_selected(
+        app.list_state.selected(),
+        start,
+        end,
+    ));
+    f.render_stateful_widget(list, chunks[1], &mut view_state);
 
     let force_hint = format!("{} force", app.keys.display_chords(Action::ToggleForce));
     let keys = match app.mode {
@@ -635,12 +655,18 @@ mod tests {
         }
     }
 
+    fn hays_of(entries: &[&Entry]) -> Vec<String> {
+        entries.iter().map(|e| hay_of(e)).collect()
+    }
+
     #[test]
     fn filter_empty_matches_all() {
         let a = entry("/home/u/a.txt");
         let b = entry("/var/log/b.log");
         let entries = vec![&a, &b];
-        assert_eq!(filter_indices(&entries, ""), vec![0, 1]);
+        let owned = hays_of(&entries);
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        assert_eq!(filter_indices(&refs, ""), vec![0, 1]);
     }
 
     #[test]
@@ -648,9 +674,31 @@ mod tests {
         let a = entry("/var/cache/n_x_o_t_e_s_backup.bin");
         let b = entry("/home/user/Notes.md");
         let entries = vec![&a, &b];
-        let ranked = filter_indices(&entries, "notes");
+        let owned = hays_of(&entries);
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let ranked = filter_indices(&refs, "notes");
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0], 1);
+    }
+
+    #[test]
+    fn filter_empty_query_on_5k_cached_hays_does_not_clone_paths() {
+        // 5k synthetic cached display strings; empty query and a keystroke
+        // rank through the cache (no N new path Strings).
+        let owned: Vec<String> = (0..5000).map(|i| format!("/tmp/file-{i}.txt")).collect();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let all = filter_indices(&refs, "");
+        assert_eq!(all.len(), 5000);
+        assert_eq!(all[0], 0);
+        assert_eq!(all[4999], 4999);
+        let ranked = filter_indices(&refs, "file-1");
+        assert!(!ranked.is_empty());
+        assert!(
+            ranked
+                .iter()
+                .all(|&i| tui_fuzzy::fuzzy_score(refs[i], "file-1").is_some()),
+            "keystroke must rank the cached haystacks, not cloned paths"
+        );
     }
 
     #[test]

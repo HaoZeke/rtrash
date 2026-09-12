@@ -50,19 +50,18 @@ pub fn list_dir_rows(dir: &Path) -> io::Result<Vec<PathRow>> {
     Ok(rows)
 }
 
-pub fn filter_indices(rows: &[PathRow], query: &str) -> Vec<usize> {
-    let hays: Vec<String> = rows
-        .iter()
-        .map(|r| {
-            r.path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    let refs: Vec<&str> = hays.iter().map(String::as_str).collect();
-    tui_fuzzy::rank_indices(&refs, query)
+/// Fuzzy-rank cached file-name haystacks. Empty query keeps original order
+/// and does not allocate path `String`s.
+pub fn filter_indices(hays: &[&str], query: &str) -> Vec<usize> {
+    tui_fuzzy::rank_indices(hays, query)
+}
+
+fn hay_of(row: &PathRow) -> String {
+    row.path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Put selected paths using default recursive-for-dirs opts. Returns exit code.
@@ -97,6 +96,8 @@ struct App {
     prog: String,
     cwd: PathBuf,
     rows: Vec<PathRow>,
+    /// Cached file-name display strings; one per `rows` entry.
+    hays: Vec<String>,
     filtered: Vec<usize>,
     list_state: ListState,
     sel: Selection,
@@ -118,6 +119,7 @@ impl App {
             list_state.select(Some(0));
         }
         let n = rows.len();
+        let hays: Vec<String> = rows.iter().map(hay_of).collect();
         let keys = Keymap::load();
         let extra = format!(
             "{} recursive · {} force",
@@ -128,6 +130,7 @@ impl App {
             prog: prog.to_string(),
             cwd,
             rows,
+            hays,
             filtered: (0..n).collect(),
             list_state,
             sel: Selection::new(),
@@ -152,7 +155,12 @@ impl App {
 
     fn refilter_query(&mut self, query: &str) {
         let prev = self.selected_idx();
-        self.filtered = filter_indices(&self.rows, query);
+        if query.trim().is_empty() {
+            self.filtered = (0..self.hays.len()).collect();
+        } else {
+            let refs: Vec<&str> = self.hays.iter().map(String::as_str).collect();
+            self.filtered = filter_indices(&refs, query);
+        }
         let new_sel = tui_list::reselect_after_filter(prev, &self.filtered);
         self.list_state.select(new_sel);
         self.ensure_scroll();
@@ -221,6 +229,7 @@ impl App {
         // Refresh directory listing
         if let Ok(rows) = list_dir_rows(&self.cwd) {
             self.rows = rows;
+            self.hays = self.rows.iter().map(hay_of).collect();
             self.sel.clear();
             self.refilter();
         }
@@ -377,24 +386,33 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .block(Block::default().borders(Borders::ALL).title("put")),
         chunks[0],
     );
-    let items: Vec<ListItem> = app
-        .filtered
+    let (start, end) = tui_list::viewport_range(
+        app.list_state.offset(),
+        app.filtered.len(),
+        app.viewport_rows,
+    );
+    let items: Vec<ListItem> = app.filtered[start..end]
         .iter()
         .map(|&ei| {
             let r = &app.rows[ei];
             let mark = if app.sel.is_marked(ei) { "[x]" } else { "[ ]" };
             let kind = if r.is_dir { "/" } else { " " };
-            let name = r.path.file_name().unwrap_or_default().to_string_lossy();
-            ListItem::new(format!("{mark} {name}{kind}"))
+            ListItem::new(format!("{mark} {}{kind}", app.hays[ei]))
         })
         .collect();
+    let mut view_state = ListState::default();
+    view_state.select(tui_list::viewport_selected(
+        app.list_state.selected(),
+        start,
+        end,
+    ));
     f.render_stateful_widget(
         List::new(items)
             .block(Block::default().borders(Borders::ALL).title(" paths "))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD))
             .highlight_symbol("▸ "),
         chunks[1],
-        &mut app.list_state,
+        &mut view_state,
     );
     let extra = format!(
         "{} recursive · {} force",
