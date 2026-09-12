@@ -483,6 +483,45 @@ fn empty_purges_orphaned_files() {
 }
 
 #[test]
+fn restore_if_unique_rejects_colliding_originals() {
+    let sb = Sandbox::new("restore-if-unique");
+    let unique = sb.touch("one.txt");
+    assert!(sb.run(&["put", "one.txt"]).status.success());
+    let out = Command::new(bin())
+        .args(["restore", "--if-unique", "one.txt"])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("HOME", &sb.root)
+        .stdin(Stdio::null())
+        .output()
+        .expect("restore --if-unique unique");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(unique.exists());
+
+    let dup = sb.touch("dup.txt");
+    assert!(sb.run(&["put", "dup.txt"]).status.success());
+    fs::write(&dup, b"second").unwrap();
+    assert!(sb.run(&["put", "dup.txt"]).status.success());
+    assert_eq!(trash_names(&sb).len(), 2);
+
+    // Closed stdin: must exit 1 without a numbered pick or hang.
+    let out = Command::new(bin())
+        .args(["restore", "--if-unique", "dup.txt"])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("HOME", &sb.root)
+        .stdin(Stdio::null())
+        .output()
+        .expect("restore --if-unique collide");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(err.contains("--if-unique requires exactly one"), "{err}");
+    assert!(!err.contains("What file to restore"), "{err}");
+    assert_eq!(trash_names(&sb).len(), 2);
+    assert!(!dup.exists());
+}
+
+#[test]
 fn restore_single_match_roundtrip() {
     let sb = Sandbox::new("restore");
     let f = sb.touch("back.txt");

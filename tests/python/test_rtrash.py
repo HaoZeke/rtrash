@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import tempfile
 import unittest
@@ -70,6 +71,34 @@ class TrashSandbox(unittest.TestCase):
         self.rt.rmtree(str(d))
         self.assertFalse(d.exists())
         self.assertTrue((self.trash_files() / "tree" / "a").is_file())
+
+    def test_unlink_missing_is_file_not_found(self) -> None:
+        missing = self.work / "nope.txt"
+        with self.assertRaises(FileNotFoundError) as ctx:
+            self.rt.unlink(str(missing))
+        self.assertEqual(ctx.exception.errno, errno.ENOENT)
+        self.assertEqual(str(ctx.exception.filename), str(missing))
+
+    def test_unlink_directory_without_recursive(self) -> None:
+        d = self.work / "adir"
+        d.mkdir()
+        with self.assertRaises(IsADirectoryError) as ctx:
+            self.rt.unlink(str(d))
+        self.assertEqual(ctx.exception.errno, errno.EISDIR)
+        self.assertEqual(str(ctx.exception.filename), str(d))
+
+    def test_unlink_force_skips_missing(self) -> None:
+        self.rt.unlink(str(self.work / "nope.txt"), force=True)
+
+    def test_restore_colliding_originals_does_not_block(self) -> None:
+        target = self.work / "dup.txt"
+        target.write_text("first", encoding="utf-8")
+        self.rt.put(str(target))
+        target.write_text("second", encoding="utf-8")
+        self.rt.put(str(target))
+        with self.assertRaises(OSError):
+            self.rt.restore_path(str(target))
+        self.assertFalse(target.exists())
 
     def test_empty_clears_pinned_semantics_via_home(self) -> None:
         f = self.work / "z.txt"

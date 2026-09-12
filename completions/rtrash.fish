@@ -67,6 +67,8 @@ end
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s f -l force -d 'overwrite existing file at original location'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l home-only -d 'only the home trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l trash-dir -d 'only this trash directory' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l plain -d 'numbered line selection even on a TTY'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l if-unique -d 'error unless exactly one match'
 
 # rm (trash-rm)
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l trash-dir -d 'only this trash directory' -r
@@ -120,6 +122,8 @@ complete -c trash-list -l version
 complete -c trash-restore -s f -l force
 complete -c trash-restore -l home-only
 complete -c trash-restore -l trash-dir -r
+complete -c trash-restore -l plain
+complete -c trash-restore -l if-unique
 complete -c trash-restore -l help
 complete -c trash-restore -l version
 

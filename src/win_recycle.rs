@@ -346,6 +346,7 @@ on the Recycle Bin backend.
     pub fn restore_run(prog: &str, args: &[String]) -> i32 {
         let mut force = false;
         let mut plain = true; // no TUI on Windows recycle path
+        let mut if_unique = false;
         let mut target: Option<PathBuf> = None;
         let mut it = args.iter().peekable();
         while let Some(arg) = it.next() {
@@ -357,6 +358,7 @@ on the Recycle Bin backend.
                 }
                 "-f" | "--force" => force = true,
                 "--plain" | "--cwd-only" | "--home-only" => plain = true,
+                "--if-unique" => if_unique = true,
                 "--help" => {
                     print!(
                         "\
@@ -366,10 +368,12 @@ Restore an item from the Windows Recycle Bin to its original location.
 With PATH, restore the item whose original path equals PATH.
 Without PATH, print a numbered list and read an index from stdin.
 
-  -f, --force   overwrite when the destination exists (best-effort)
-      --plain   numbered selection (default on Windows)
-      --help    display this help and exit
-      --version output version information and exit
+  -f, --force    overwrite when the destination exists (best-effort)
+      --plain    numbered selection (default on Windows)
+      --if-unique  restore only when exactly one item matches; otherwise
+                     exit 1 without prompting
+      --help     display this help and exit
+      --version  output version information and exit
 "
                     );
                     let _ = plain;
@@ -411,6 +415,13 @@ Without PATH, print a numbered list and read an index from stdin.
         };
         if matches.is_empty() {
             eprintln!("{prog}: no trashed files match");
+            return 1;
+        }
+        if if_unique && matches.len() != 1 {
+            eprintln!(
+                "{prog}: {} matches; --if-unique requires exactly one",
+                matches.len()
+            );
             return 1;
         }
         if matches.len() == 1 {

@@ -308,6 +308,7 @@ Per-root item count and reclaimable size (uses `directorysizes` when valid). Sam
 | `rtrash restore PATH` | Restore the item whose original path was `PATH` (exact match) |
 | `rtrash restore` | **TUI** (TTY): fuzzy filter, multi-select (Space/a/A), bulk restore; session until `q` |
 | `rtrash restore --plain` | Numbered line list + index (scripts / no TUI) |
+| `rtrash restore --if-unique PATH` | Restore only if exactly one match; else exit 1, no prompt |
 | `printf '0\n' \| rtrash restore` | Piped index without TUI |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
 | Single match | Restores immediately without prompting |

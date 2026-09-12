@@ -274,6 +274,8 @@ Pass
 .B \-\-cwd\-only
 to limit bare restore to originals under the current directory.
 A single match restores directly; multiple matches require a selection.
+.B \-\-if\-unique
+exits 1 without prompting when the match set is not exactly one item.
 .TP
 .BR \-f ", " \-\-force
 Overwrite an existing file at the original location.
@@ -283,6 +285,10 @@ Without PATH, only items trashed from under the current directory.
 .TP
 .B \-\-plain
 Force numbered line selection even on a TTY (skip the TUI browser).
+.TP
+.B \-\-if\-unique
+Restore only when exactly one item matches; otherwise exit 1 without
+reading stdin.
 .TP
 .B \-\-home\-only
 Only the home trash (skip volume trash).

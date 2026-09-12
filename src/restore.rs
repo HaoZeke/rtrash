@@ -17,11 +17,14 @@ print a numbered table and read a selection from stdin.
 
 By default every trashed item in scope is listed; pass --cwd-only to limit to
 items whose original path is under the current directory. A single match
-restores immediately.
+restores immediately. --if-unique makes any other count an error (exit 1)
+instead of printing a numbered table or reading stdin.
 
   -f, --force     overwrite an existing file at the original location
       --cwd-only  without PATH, only items trashed from under the current directory
       --plain     force numbered line selection even on a TTY (no TUI)
+      --if-unique  restore only when exactly one item matches; otherwise
+                     exit 1 without prompting
       --home-only  only the home trash (skip volume trash)
       --trash-dir PATH  only consider this trash directory (repeatable;
                      `--trash-dir=PATH` also accepted)
@@ -34,6 +37,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut home_only = false;
     let mut cwd_only = false;
     let mut plain = false;
+    let mut if_unique = false;
     let mut target: Option<PathBuf> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut i = 0usize;
@@ -44,6 +48,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--home-only" => home_only = true,
             "--cwd-only" => cwd_only = true,
             "--plain" => plain = true,
+            "--if-unique" => if_unique = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -100,6 +105,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 
     if matches.is_empty() {
         eprintln!("{prog}: no trashed files match");
+        return 1;
+    }
+
+    if if_unique && matches.len() != 1 {
+        eprintln!(
+            "{prog}: {} matches; --if-unique requires exactly one",
+            matches.len()
+        );
         return 1;
     }
 

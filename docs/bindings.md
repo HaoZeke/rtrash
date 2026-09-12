@@ -46,4 +46,8 @@ python -m unittest tests.python.test_rtrash -v
 `put` / `put_paths` / `unlink` / `rmtree` / `empty_trash` / `restore_path` / `list_trash`
 **release the GIL** for FreeDesktop I/O (`PyO3` `detach`), so other Python
 threads can run during large tree puts or bulk empty. The API always passes
-`--plain` (never opens the CLI TUI).
+`--plain` (never opens the CLI TUI). `restore_path` also passes `--if-unique`
+so a colliding original raises `OSError` instead of reading stdin.
+
+Missing paths raise `FileNotFoundError` (unless `force=True`); a directory
+without `recursive=True` raises `IsADirectoryError`. Both set `filename`.

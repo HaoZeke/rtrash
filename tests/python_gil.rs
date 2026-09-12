@@ -10,6 +10,10 @@ fn python_rs_uses_detach_for_io() {
     );
     assert!(
         src.contains("--plain"),
-        "Python empty/put/restore must force --plain to avoid TUI"
+        "Python empty/restore must force --plain to avoid TUI"
+    );
+    assert!(
+        src.contains("--if-unique"),
+        "Python restore_path must pass --if-unique (no stdin pick)"
     );
 }

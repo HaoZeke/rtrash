@@ -9,9 +9,11 @@
 //! trash moves and bulk empty. List materialization back into a `PyList` re-takes
 //! the GIL only for the Python object build.
 
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
-use pyo3::exceptions::{PyOSError, PyValueError};
+use pyo3::exceptions::{PyFileNotFoundError, PyIsADirectoryError, PyOSError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
@@ -23,6 +25,40 @@ fn map_code(code: i32, what: &str) -> PyResult<()> {
         2 => Err(PyValueError::new_err(format!("{what}: invalid arguments"))),
         _ => Err(PyOSError::new_err(format!("{what} failed (exit {code})"))),
     }
+}
+
+fn os_filename(path: &Path) -> String {
+    path.as_os_str().to_string_lossy().into_owned()
+}
+
+fn file_not_found(path: &Path) -> PyErr {
+    PyFileNotFoundError::new_err((libc::ENOENT, "No such file or directory", os_filename(path)))
+}
+
+fn is_a_directory(path: &Path) -> PyErr {
+    PyIsADirectoryError::new_err((libc::EISDIR, "Is a directory", os_filename(path)))
+}
+
+/// Drop missing paths when `force`, else raise stdlib exceptions with filename.
+fn preflight_put_paths(
+    paths: Vec<PathBuf>,
+    recursive: bool,
+    force: bool,
+) -> PyResult<Vec<PathBuf>> {
+    let mut kept = Vec::with_capacity(paths.len());
+    for p in paths {
+        match fs::symlink_metadata(&p) {
+            Ok(meta) if meta.is_dir() && !recursive => return Err(is_a_directory(&p)),
+            Ok(_) => kept.push(p),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if !force {
+                    return Err(file_not_found(&p));
+                }
+            }
+            Err(_) => kept.push(p),
+        }
+    }
+    Ok(kept)
 }
 
 /// Move one or more paths into the FreeDesktop trash.
@@ -43,6 +79,10 @@ fn map_code(code: i32, what: &str) -> PyResult<()> {
 ///
 /// Raises
 /// ------
+/// FileNotFoundError
+///     When a path is missing and ``force`` is false (filename set).
+/// IsADirectoryError
+///     When a path is a directory and ``recursive`` is false (filename set).
 /// OSError
 ///     When put fails for a reason other than usage.
 /// ValueError
@@ -53,19 +93,24 @@ fn put_paths(py: Python<'_>, paths: Vec<PathBuf>, recursive: bool, force: bool) 
     if paths.is_empty() && !force {
         return Err(PyValueError::new_err("put: missing path operand"));
     }
-    let mut args: Vec<String> = Vec::new();
-    if recursive {
-        args.push("-r".into());
+    let paths = preflight_put_paths(paths, recursive, force)?;
+    if paths.is_empty() {
+        return Ok(());
     }
-    if force {
-        args.push("-f".into());
-    }
-    // Always non-interactive for the in-process API (no put TUI).
-    args.push("--plain".into());
-    for p in &paths {
-        args.push(p.as_os_str().to_string_lossy().into_owned());
-    }
-    let code = py.detach(|| put_mod::run("rtrash", &args));
+    let opts = put_mod::Opts {
+        force,
+        recursive,
+        ..put_mod::Opts::default()
+    };
+    let code = py.detach(|| {
+        let mut status = 0;
+        for p in &paths {
+            if let Err(c) = put_mod::put_one("rtrash", p, &opts) {
+                status = status.max(c);
+            }
+        }
+        status
+    });
     map_code(code, "put")
 }
 
@@ -165,7 +210,8 @@ fn empty_trash(
 /// Restore a trashed item originally at ``path``.
 ///
 /// Releases the GIL during restore I/O. Does not open the restore TUI
-/// (a PATH operand selects the item directly).
+/// and never reads stdin (``--plain --if-unique``): a colliding original
+/// raises ``OSError`` instead of prompting.
 #[pyfunction]
 #[pyo3(signature = (path, *, force=false, trash_dir=None))]
 fn restore_path(
@@ -176,6 +222,7 @@ fn restore_path(
 ) -> PyResult<()> {
     let mut args: Vec<String> = Vec::new();
     args.push("--plain".into());
+    args.push("--if-unique".into());
     if force {
         args.push("-f".into());
     }
@@ -233,7 +280,11 @@ mod tests {
         );
         assert!(
             src.contains("args.push(\"--plain\""),
-            "Python empty/put/restore must force --plain (no TUI)"
+            "Python empty/restore must force --plain (no TUI)"
+        );
+        assert!(
+            src.contains("args.push(\"--if-unique\""),
+            "Python restore_path must pass --if-unique (no stdin pick)"
         );
     }
 }
