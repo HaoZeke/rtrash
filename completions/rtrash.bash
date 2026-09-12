@@ -8,18 +8,18 @@ _rtrash_put_opts=(
   -f --force -i -I --interactive
   -r -R --recursive -d --dir -v --verbose
   --one-file-system --preserve-root --no-preserve-root
-  --trash-dir --trash-dir= --home-only --plain
+  --trash-dir --trash-dir= --home-only --plain --json --files-from --files-from= -0 --zero
   --help --version
 )
 
 _rtrash_empty_opts=(
   -n --dry-run -v --verbose -f --force
-  --trash-dir --trash-dir= --home-only --plain --older-than= --json
+  --trash-dir --trash-dir= --home-only --plain --older-than= --max-bytes= --json
   --help --version
 )
 
 _rtrash_list_opts=(
-  --home-only --cwd-only --match= --trash-dir --trash-dir= --older-than= --newer-than= --orphans --json --help --version
+  --home-only --cwd-only --match= --trash-dir --trash-dir= --older-than= --newer-than= --orphans --larger-than= --smaller-than= --json --help --version
 )
 
 _rtrash_status_opts=(
@@ -37,7 +37,7 @@ _rtrash_rm_opts=(
   --help --version
 )
 
-_rtrash_subcommands=(put empty list status restore rm setup completions man)
+_rtrash_subcommands=(put empty list status restore rm setup keys completions man)
 
 _rtrash_setup_opts=(
   --prefix= --bin-dir= --with-rm -n --dry-run -f --force -v --verbose --help

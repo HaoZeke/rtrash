@@ -7,7 +7,7 @@ function __rtrash_seen_subcommand
     set -e cmd[1]
     for c in $cmd
         switch $c
-            case put empty list status restore rm setup completions man
+            case put empty list status restore rm setup keys completions man
                 echo $c
                 return 0
         end

@@ -43,6 +43,7 @@ fn fish_completion_covers_surface() {
             "trash-put",
             "trash-empty",
             "complete -c rtrash",
+            "keys",
         ],
         "completions/rtrash.fish",
     );
@@ -81,6 +82,11 @@ fn bash_completion_covers_surface() {
             "--verbose",
             "setup",
             "completions",
+            "keys",
+            "--cwd-only",
+            "--plain",
+            "--max-bytes=",
+            "--files-from",
         ],
         "completions/rtrash.bash",
     );
@@ -139,6 +145,10 @@ fn man_page_covers_surface() {
             "\\-\\-recursive",
             "\\-\\-verbose",
             "XDG_DATA_HOME",
+            "rtrash 0.1.4",
+            "\\-\\-plain",
+            "\\-\\-cwd\\-only",
+            "keys",
         ],
         "man/rtrash.1",
     );

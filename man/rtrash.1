@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: MIT
-.TH RTRASH 1 "2026-07-06" "rtrash 0.1.0" "User Commands"
+.TH RTRASH 1 "2026-09-12" "rtrash 0.1.4" "User Commands"
 .SH NAME
 rtrash \- fast freedesktop.org trash tool with an rm-compatible interface
 .SH SYNOPSIS
@@ -392,13 +392,17 @@ Replace existing links/files (use after upgrades).
 Print each path written.
 .SS completions
 .B rtrash completions
-.RB { bash | zsh }
+.RB { bash | zsh | fish }
 .PP
 Print the embedded completion script to stdout (packagers / custom paths).
 .SS man
 .B rtrash man
 .PP
 Print the embedded man page source to stdout.
+.SS keys
+.B rtrash keys
+.PP
+Show or sample the TUI keybind config (Unix TUI builds).
 .SS rm (permanent delete from trash)
 .B rtrash rm
 [\fIOPTION\fR]...
