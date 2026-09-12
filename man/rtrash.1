@@ -194,7 +194,7 @@ Display help and exit.
 Output version information and exit.
 .SS list
 .B rtrash list
-[\fIOPTION\fR]...
+[\fIOPTION\fR]... [\fIPATTERN\fR]...
 .PP
 Also multi-call
 .BR trash-list .
@@ -202,6 +202,14 @@ Also multi-call
 List trashed items as
 .RB \(oq "DELETION-DATE ORIGINAL-PATH" \(cq,
 oldest first.
+With
+.I PATTERN
+(repeatable), only items whose original path or basename matches
+(trash-rm shaped; default
+.BR \-\-match =glob).
+No
+.I PATTERN
+keeps the trash-cli line format for the full catalog.
 A
 .I files/
 name with no
@@ -225,6 +233,21 @@ Only the home trash
 .BI \-\-trash\-dir =PATH
 List only this trash directory (repeatable); default is the home trash
 plus every mounted volume.
+.TP
+.B \-\-cwd\-only
+Only items whose original path is under the current directory
+(same semantics as
+.BR "restore \-\-cwd\-only" ).
+.TP
+.BI \-\-match =MODE
+Match
+.I PATTERN
+as
+.B glob
+(default),
+.B literal
+(exact original path, basename, or trash name), or
+.BR regex .
 .TP
 .BI \-\-older\-than =DAYS
 Only items trashed more than

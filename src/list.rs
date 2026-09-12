@@ -169,9 +169,7 @@ fn entry_matches(entry: &Entry, pat: &str, mode: MatchMode) -> bool {
                 || fnmatch(pat, base.as_str())
                 || fnmatch(pat, &entry.name)
         }
-        MatchMode::Literal => {
-            path_s.as_ref() == pat || base == pat || entry.name == pat || path_s.contains(pat)
-        }
+        MatchMode::Literal => path_s.as_ref() == pat || base == pat || entry.name == pat,
         MatchMode::Regex => match regex_compile(pat) {
             Ok(re) => {
                 re.is_match(path_s.as_ref()) || re.is_match(&base) || re.is_match(&entry.name)
@@ -311,7 +309,10 @@ fn entries_to_json_sized(entries: &[Entry], sizes: Option<&[u64]>) -> String {
 }
 
 /// Reclaimable size per entry (directorysizes-when-valid, else walk).
-fn entry_bytes(e: &Entry, caches: &mut std::collections::HashMap<PathBuf, trashdir::DirectorySizesMap>) -> u64 {
+fn entry_bytes(
+    e: &Entry,
+    caches: &mut std::collections::HashMap<PathBuf, trashdir::DirectorySizesMap>,
+) -> u64 {
     let cache = caches
         .entry(e.dir.root.clone())
         .or_insert_with(|| trashdir::DirectorySizesMap::load(&e.dir));
@@ -364,9 +365,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--cwd-only" => cwd_only = true,
             "--orphans" => orphans_only = true,
             "--json" => json = true,
-            "--match=glob" => match_mode = MatchMode::Glob,
-            "--match=literal" => match_mode = MatchMode::Literal,
-            "--match=regex" => match_mode = MatchMode::Regex,
+            a if a == "--match" || a.starts_with("--match=") => {
+                match crate::util::take_eq_or_next(args, &mut i, "--match") {
+                    Ok("glob") => match_mode = MatchMode::Glob,
+                    Ok("literal") => match_mode = MatchMode::Literal,
+                    Ok("regex") => match_mode = MatchMode::Regex,
+                    Ok(_) => {
+                        eprintln!("{prog}: --match must be glob, literal, or regex");
+                        return 2;
+                    }
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -445,10 +458,6 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     }
                 }
             }
-            a if a.starts_with("--match=") => {
-                eprintln!("{prog}: --match must be glob, literal, or regex");
-                return 2;
-            }
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
                 eprintln!("Try '{prog} --help' for more information.");
@@ -491,10 +500,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         None
     };
     if json {
-        println!(
-            "{}",
-            entries_to_json_sized(&entries, sizes.as_deref())
-        );
+        println!("{}", entries_to_json_sized(&entries, sizes.as_deref()));
     } else {
         for entry in &entries {
             let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
@@ -563,7 +569,10 @@ mod tests {
         assert!(s.contains("\"deletion_date\":\"2020-01-02T03:04:05\""));
         assert!(s.contains("\"original\":\"/tmp/x\""));
         assert!(s.contains("\"orphan\":false"));
-        assert!(!s.contains("\"bytes\":"), "unfiltered JSON has no bytes: {s}");
+        assert!(
+            !s.contains("\"bytes\":"),
+            "unfiltered JSON has no bytes: {s}"
+        );
         assert!(s.ends_with(']'));
         let with = entries_to_json_sized(std::slice::from_ref(&e), Some(&[4096]));
         assert!(with.contains("\"bytes\":4096"), "{with}");
@@ -581,5 +590,30 @@ mod tests {
         assert!(s.contains("\"deletion_date\":null"), "{s}");
         assert!(!s.contains("\"original\":\"\""), "{s}");
         assert_eq!(e.path_label(), "ORPHAN debris (no .trashinfo)");
+    }
+
+    fn match_entry(path: &str, name: &str) -> Entry {
+        Entry {
+            date: Some("2020-01-02T03:04:05".into()),
+            epoch: 1,
+            original: PathBuf::from(path),
+            name: name.into(),
+            dir: TrashDir {
+                root: PathBuf::from("/tmp/Trash"),
+                topdir: None,
+            },
+            orphan: false,
+        }
+    }
+
+    #[test]
+    fn entry_matches_glob_literal_regex() {
+        let e = match_entry("/tmp/work/keep.c", "keep.c");
+        assert!(entry_matches(&e, "*.c", MatchMode::Glob));
+        assert!(!entry_matches(&e, "*.o", MatchMode::Glob));
+        assert!(entry_matches(&e, "keep.c", MatchMode::Literal));
+        assert!(!entry_matches(&e, "eep", MatchMode::Literal));
+        assert!(entry_matches(&e, r"keep\.c$", MatchMode::Regex));
+        assert!(!entry_matches(&e, r"drop\.o$", MatchMode::Regex));
     }
 }

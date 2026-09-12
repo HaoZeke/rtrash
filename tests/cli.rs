@@ -778,13 +778,7 @@ fn restore_to_relocates_basename_and_overwrite() {
     assert!(stderr_of(&out).contains("refusing to overwrite"));
     assert_eq!(fs::read(recovered.join("dest.txt")).unwrap(), b"newer");
 
-    let out = sb.run(&[
-        "restore",
-        "--overwrite",
-        "--restore-to",
-        dest,
-        "dest.txt",
-    ]);
+    let out = sb.run(&["restore", "--overwrite", "--restore-to", dest, "dest.txt"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(fs::read(recovered.join("dest.txt")).unwrap(), b"payload");
 }
@@ -1464,24 +1458,68 @@ fn list_pattern_glob_literal_cwd_only() {
     let pin = format!("--trash-dir={}", sb.trash().display());
     sb.touch("keep.c");
     sb.touch("drop.o");
+    let outer = sb.root.join("outside.txt");
+    fs::write(&outer, b"outer").unwrap();
     assert!(sb.run(&["put", "keep.c"]).status.success());
     assert!(sb.run(&["put", "drop.o"]).status.success());
+    assert!(Command::new(bin())
+        .args(["put", outer.to_str().unwrap()])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("HOME", &sb.root)
+        .status()
+        .unwrap()
+        .success());
+    let catalog = sb.run(&["list", &pin]);
+    assert!(catalog.status.success(), "{}", stderr_of(&catalog));
+    let catalog_s = stdout_of(&catalog);
+    assert!(
+        catalog_s
+            .lines()
+            .any(|line| line.contains("keep.c") && line.contains(' ') && !line.contains('T')),
+        "no-pattern list stays trash-cli date path: {catalog_s}"
+    );
+    assert!(catalog_s.contains("outside.txt"), "{catalog_s}");
     let glob = sb.run(&["list", &pin, "*.o"]);
     assert!(glob.status.success(), "{}", stderr_of(&glob));
     let g = stdout_of(&glob);
     assert!(g.contains("drop.o"), "{g}");
     assert!(!g.contains("keep.c"), "{g}");
-    let lit = sb.run(&["list", &pin, "--match=literal", "keep.c"]);
+    assert!(!g.contains("outside.txt"), "{g}");
+    let lit = sb.run(&["list", &pin, "--match", "literal", "keep.c"]);
     assert!(lit.status.success(), "{}", stderr_of(&lit));
     let l = stdout_of(&lit);
     assert!(l.contains("keep.c"), "{l}");
     assert!(!l.contains("drop.o"), "{l}");
+    let lit_sub = sb.run(&["list", &pin, "--match=literal", "keep"]);
+    assert!(lit_sub.status.success(), "{}", stderr_of(&lit_sub));
+    assert!(
+        stdout_of(&lit_sub).trim().is_empty(),
+        "literal is exact, not substring: {}",
+        stdout_of(&lit_sub)
+    );
     let re = sb.run(&["list", &pin, "--match=regex", r"keep\.c$"]);
     assert!(re.status.success(), "{}", stderr_of(&re));
     assert!(stdout_of(&re).contains("keep.c"), "{}", stdout_of(&re));
+    let json = sb.run(&["list", &pin, "--json", "*.c"]);
+    assert!(json.status.success(), "{}", stderr_of(&json));
+    let j = stdout_of(&json);
+    assert!(j.contains("keep.c"), "{j}");
+    assert!(!j.contains("drop.o"), "{j}");
+    assert!(j.contains("\"original\""), "{j}");
     let cwd = sb.run(&["list", &pin, "--cwd-only"]);
     assert!(cwd.status.success(), "{}", stderr_of(&cwd));
-    assert!(stdout_of(&cwd).contains("keep.c"), "{}", stdout_of(&cwd));
+    let c = stdout_of(&cwd);
+    assert!(c.contains("keep.c"), "{c}");
+    assert!(c.contains("drop.o"), "{c}");
+    assert!(
+        !c.contains("outside.txt"),
+        "cwd-only must drop items outside cwd: {c}"
+    );
+    let bad_mode = sb.run(&["list", &pin, "--match=globstar"]);
+    assert_eq!(bad_mode.status.code(), Some(2), "{}", stderr_of(&bad_mode));
+    let bad_re = sb.run(&["list", &pin, "--match=regex", "("]);
+    assert_eq!(bad_re.status.code(), Some(2), "{}", stderr_of(&bad_re));
 }
 
 #[test]
@@ -1554,7 +1592,10 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
     let sized = sb.run(&["list", &pin, "--json", "--smaller-than=1G"]);
     assert!(sized.status.success(), "{}", stderr_of(&sized));
     let catalog = stdout_of(&sized);
-    assert!(catalog.contains("\"bytes\":"), "size filter JSON includes bytes: {catalog}");
+    assert!(
+        catalog.contains("\"bytes\":"),
+        "size filter JSON includes bytes: {catalog}"
+    );
     let rows = parse_list_json_sizes(&catalog);
     assert_eq!(rows.len(), 9, "expected big + 8 tinies: {catalog}");
     let big_sz = rows
@@ -1589,18 +1630,33 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
     let large = sb.run(&["list", &pin, "--json", "--larger-than", &split_s]);
     assert!(large.status.success(), "{}", stderr_of(&large));
     let l = stdout_of(&large);
-    assert!(l.contains("big.bin"), "larger-than should keep big.bin: {l}");
+    assert!(
+        l.contains("big.bin"),
+        "larger-than should keep big.bin: {l}"
+    );
     assert!(!l.contains("tiny"), "larger-than should drop tinies: {l}");
     assert!(l.contains("\"bytes\":"), "{l}");
 
     let small = sb.run(&["list", &pin, "--json", "--smaller-than", &split_s]);
     assert!(small.status.success(), "{}", stderr_of(&small));
     let sm = stdout_of(&small);
-    assert!(sm.contains("tiny0.txt"), "smaller-than should keep tinies: {sm}");
-    assert!(!sm.contains("big.bin"), "smaller-than should drop big.bin: {sm}");
+    assert!(
+        sm.contains("tiny0.txt"),
+        "smaller-than should keep tinies: {sm}"
+    );
+    assert!(
+        !sm.contains("big.bin"),
+        "smaller-than should drop big.bin: {sm}"
+    );
 
     let cap = tiny_sum.to_string();
-    let dry = sb.run(&["empty", &pin, "--dry-run", "--json", &format!("--max-bytes={cap}")]);
+    let dry = sb.run(&[
+        "empty",
+        &pin,
+        "--dry-run",
+        "--json",
+        &format!("--max-bytes={cap}"),
+    ]);
     assert!(dry.status.success(), "{}", stderr_of(&dry));
     let dj = stdout_of(&dry);
     assert!(
@@ -1608,10 +1664,14 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
         "dry-run should drop only the largest: {dj}"
     );
     assert!(
-        dj.contains(&format!("\"max_bytes\":{cap}")) || dj.contains(&format!("\"max_bytes\": {cap}")),
+        dj.contains(&format!("\"max_bytes\":{cap}"))
+            || dj.contains(&format!("\"max_bytes\": {cap}")),
         "{dj}"
     );
-    assert!(sb.trash().join("files/big.bin").is_file(), "dry-run keeps payload");
+    assert!(
+        sb.trash().join("files/big.bin").is_file(),
+        "dry-run keeps payload"
+    );
 
     let real = sb.run(&["empty", &pin, "--json", &format!("--max-bytes={cap}")]);
     assert!(real.status.success(), "{}", stderr_of(&real));
@@ -1620,7 +1680,10 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
         rj.contains("\"removed\":1") || rj.contains("\"removed\": 1"),
         "json removed count must match one large victim: {rj}"
     );
-    assert!(!sb.trash().join("files/big.bin").exists(), "largest item dropped");
+    assert!(
+        !sb.trash().join("files/big.bin").exists(),
+        "largest item dropped"
+    );
     assert!(!sb.trash().join("info/big.bin.trashinfo").exists());
     for i in 0..8 {
         assert!(
@@ -1678,9 +1741,13 @@ fn restore_plain_index_range() {
     assert!(sb.run(&["put", &pin, "x1", "x2", "x3"]).status.success());
     let out = sb.run_with_stdin(&["restore", &pin, "--plain"], "0-1\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let back = [sb.work().join("x1").exists(), sb.work().join("x2").exists(), sb.work().join("x3").exists()]
-        .iter()
-        .filter(|b| **b)
-        .count();
+    let back = [
+        sb.work().join("x1").exists(),
+        sb.work().join("x2").exists(),
+        sb.work().join("x3").exists(),
+    ]
+    .iter()
+    .filter(|b| **b)
+    .count();
     assert_eq!(back, 2, "range 0-1 should restore two of three");
 }

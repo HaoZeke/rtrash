@@ -47,6 +47,8 @@ fn fish_completion_covers_surface() {
             "-l max-bytes",
             "-l larger-than",
             "-l smaller-than",
+            "-l cwd-only",
+            "-l match",
         ],
         "completions/rtrash.fish",
     );
@@ -92,6 +94,7 @@ fn bash_completion_covers_surface() {
             "--larger-than=",
             "--smaller-than=",
             "--files-from",
+            "--match=",
         ],
         "completions/rtrash.bash",
     );
@@ -124,6 +127,9 @@ fn zsh_completion_covers_surface() {
             "--max-bytes=",
             "--larger-than=",
             "--smaller-than=",
+            "--cwd-only",
+            "--match=",
+            "*:pattern:",
         ],
         "completions/_rtrash",
     );
@@ -161,6 +167,8 @@ fn man_page_covers_surface() {
             "\\-\\-larger\\-than",
             "\\-\\-smaller\\-than",
             "max_bytes",
+            "\\-\\-match",
+            "[\\fIPATTERN\\fR]...",
         ],
         "man/rtrash.1",
     );
