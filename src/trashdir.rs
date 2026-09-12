@@ -544,6 +544,17 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
 
 /// Inner put path (caller holds the trash-root lock). Exposed for tests.
 pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
+    trash_move_locked_opts(abs, meta, trash, true)
+}
+
+/// Like [`trash_move_locked`]. When `fsync_info_dir` is false the caller must
+/// [`sync_info_dir`] once after a batch of puts under the same lock.
+pub fn trash_move_locked_opts(
+    abs: &Path,
+    meta: &fs::Metadata,
+    trash: &TrashDir,
+    fsync_info_dir: bool,
+) -> io::Result<String> {
     let base = abs
         .file_name()
         .and_then(|n| n.to_str())
@@ -604,7 +615,9 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
     // truncated .trashinfo as the only recoverability record).
     sync_file(&mut info_file)?;
     drop(info_file);
-    let _ = sync_dir(&trash.info());
+    if fsync_info_dir {
+        let _ = sync_dir(&trash.info());
+    }
 
     let dest = trash.files().join(&name);
     let moved = match rename_noreplace(abs, &dest) {
@@ -632,6 +645,11 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
 /// Flush file data+metadata to stable storage.
 pub fn sync_file(file: &mut fs::File) -> io::Result<()> {
     file.sync_all()
+}
+
+/// fsync `info/` after a batched put that skipped per-name dir sync.
+pub fn sync_info_dir(trash: &TrashDir) -> io::Result<()> {
+    sync_dir(&trash.info())
 }
 
 fn sync_dir(path: &Path) -> io::Result<()> {

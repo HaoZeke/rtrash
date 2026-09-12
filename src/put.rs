@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
@@ -5,6 +6,40 @@ use std::path::{Path, PathBuf};
 
 use crate::trashdir;
 use crate::util::confirm;
+
+/// One exclusive lock per trash root for this `put` invocation.
+struct PutBatch {
+    held: HashMap<PathBuf, (trashdir::TrashDir, trashdir::TrashLock)>,
+}
+
+impl PutBatch {
+    fn new() -> Self {
+        Self {
+            held: HashMap::new(),
+        }
+    }
+
+    fn move_into(
+        &mut self,
+        abs: &Path,
+        meta: &fs::Metadata,
+        trash: trashdir::TrashDir,
+    ) -> io::Result<String> {
+        let key = trash.root.clone();
+        if !self.held.contains_key(&key) {
+            let lock = trashdir::TrashLock::acquire(&trash.root)?;
+            self.held.insert(key.clone(), (trash, lock));
+        }
+        let (td, _) = self.held.get(&key).expect("just inserted");
+        trashdir::trash_move_locked_opts(abs, meta, td, false)
+    }
+
+    fn finish(&self) {
+        for (td, _) in self.held.values() {
+            let _ = trashdir::sync_info_dir(td);
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Interactive {
@@ -195,11 +230,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
 
     let mut status = 0;
+    let mut batch = PutBatch::new();
     for file in &files {
-        if let Err(code) = put_one(prog, file, &opts) {
+        if let Err(code) = put_one_in(prog, file, &opts, &mut batch) {
             status = status.max(code);
         }
     }
+    batch.finish();
     status
 }
 
@@ -220,6 +257,18 @@ fn describe(meta: &fs::Metadata, path: &Path) -> &'static str {
 }
 
 pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
+    let mut batch = PutBatch::new();
+    let r = put_one_in(prog, path, opts, &mut batch);
+    batch.finish();
+    r
+}
+
+fn put_one_in(
+    prog: &str,
+    path: &Path,
+    opts: &Opts,
+    batch: &mut PutBatch,
+) -> Result<(), i32> {
     let name = path.as_os_str().to_string_lossy();
 
     if opts.preserve_root && path == Path::new("/") {
@@ -287,7 +336,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
             return Err(1);
         }
     };
-    match trashdir::trash_move(&abs, &meta, &trash) {
+    match batch.move_into(&abs, &meta, trash) {
         Ok(_) => {
             if opts.verbose {
                 if meta.is_dir() {
