@@ -89,6 +89,8 @@ fn bash_completion_covers_surface() {
             "--cwd-only",
             "--plain",
             "--max-bytes=",
+            "--larger-than=",
+            "--smaller-than=",
             "--files-from",
         ],
         "completions/rtrash.bash",
