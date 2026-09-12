@@ -18,6 +18,9 @@ put_opts=(
   '--no-preserve-root[do not treat / specially]'
   '--trash-dir=[put into this trash root (creates layout if needed)]:path:_files -/'
   '--home-only[always use the home trash]'
+  '--json[emit a JSON summary {ok, failed, names}]'
+  '--files-from=[read additional operands from PATH (`-` = stdin)]:path:_files'
+  '(-0 --zero)'{-0,--zero}'[NUL-separated --files-from records]'
   '--plain[skip TUI; require file operands on a TTY]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
@@ -71,6 +74,7 @@ restore_opts=(
   '--restore-to=[relocate payloads into DIR (keep basename)]:dir:_files -/'
   '--home-only[only the home trash]'
   '*--trash-dir=[only consider this trash directory]:path:_files -/'
+  '--cwd-only[only items whose original path is under cwd]'
   '--plain[force numbered line selection even on a TTY]'
   '--if-unique[error if the match set is not exactly one item]'
   '(- *)'--help'[display help and exit]'
@@ -127,6 +131,7 @@ _rtrash_dispatch() {
     'restore:restore a trashed item'
     'rm:permanently delete matching trash entries'
     'setup:install multi-call links, completions, man page'
+    'keys:show or sample TUI keybind config'
     'completions:print embedded shell completion script'
     'man:print embedded man page to stdout'
   )
@@ -175,10 +180,17 @@ _rtrash_dispatch() {
             '(-v --verbose)'{-v,--verbose}'[print each path written]' \
             '(- *)'--help'[display help and exit]'
           ;;
+        keys)
+          _arguments -s -C \
+            '(-l --list)'{-l,--list}'[print resolved keymap]' \
+            '--sample[print a full sample keys.toml to stdout]' \
+            '--path[print the default config path]' \
+            '(- *)'--help'[display help and exit]'
+          ;;
         completions)
           _arguments -s -C \
             '(- *)'--help'[display help and exit]' \
-            '1:shell:(bash zsh)'
+            '1:shell:(bash zsh fish)'
           ;;
         man)
           _arguments -s -C '(- *)'--help'[display help and exit]'
