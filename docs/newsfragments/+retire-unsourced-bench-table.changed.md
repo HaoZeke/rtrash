@@ -1,0 +1,1 @@
+Drop the unsourced README 20k/100k/52× speed table; point at the dated 400-file harness in docs/benchmarks.md and mark those numbers as 0.1.2.

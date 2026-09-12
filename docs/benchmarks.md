@@ -32,8 +32,10 @@ On the 2026-07-08 run they were not installed.
 
 ## Measured results (Linux x86_64, 2026-07-08)
 
+These are the last harness run shipped in-tree. The crate version is now **0.1.4**; the table below is still **rtrash 0.1.2**. Re-run `benches/compare_trash_cli.py` before quoting it as current. List, EXDEV put, and 10k+ empty are **unmeasured** by this harness (`n_small=400`; ASV params 50/200).
+
 Host class: **Linux x86_64** (`sysname=Linux machine=x86_64`, build host for this tree).
-Peers: **rtrash 0.1.2** (release build of this tree), **trash-cli 0.24.5.26** (isolated venv; not multi-call rtrash).
+Peers: **rtrash 0.1.2** (release build of that tree), **trash-cli 0.24.5.26** (isolated venv; not multi-call rtrash).
 Optional: trashy **missing**, gtrash **missing**.
 
 From `benches/compare_trash_cli.py` (two trials each; log ends with `COMPARE_OK`):
