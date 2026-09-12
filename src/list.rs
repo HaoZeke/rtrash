@@ -9,7 +9,8 @@ Usage: {prog} [OPTION]...
 List trashed items as 'DELETION-DATE ORIGINAL-PATH', oldest first.
 
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
-      --trash-dir=PATH  list only this trash directory (repeatable);
+      --trash-dir PATH  list only this trash directory (repeatable;
+                     `--trash-dir=PATH` also accepted);
                      default is the home trash plus every mounted volume
       --older-than=DAYS only items trashed more than DAYS days ago
                      (same cutoff model as `empty DAYS`)
@@ -198,8 +199,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                 return 0;
             }
-            a if a.starts_with("--trash-dir=") => {
-                trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
+            a if crate::util::is_trash_dir_flag(a) => {
+                match crate::util::take_trash_dir_value(args, &mut i) {
+                    Ok(p) => trash_dirs.push(p),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        eprintln!("Try '{prog} --help' for more information.");
+                        return 2;
+                    }
+                }
             }
             a if a.starts_with("--older-than=") => match parse_days_flag(a, "--older-than") {
                 Ok(d) => older_than = Some(d),

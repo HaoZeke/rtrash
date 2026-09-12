@@ -1032,6 +1032,35 @@ fn put_trash_dir_pin_creates_layout_and_isolates() {
 }
 
 #[test]
+fn trash_dir_space_form_matches_equals() {
+    let sb = Sandbox::new("pin-space");
+    let pin_root = sb.root.join("space-trash");
+    sb.touch("spaced.txt");
+    let out = sb.run(&[
+        "put",
+        "--trash-dir",
+        pin_root.to_str().unwrap(),
+        "spaced.txt",
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(pin_root.join("files/spaced.txt").is_file());
+    let listed = sb.run(&["list", "--trash-dir", pin_root.to_str().unwrap()]);
+    assert!(listed.status.success(), "{}", stderr_of(&listed));
+    assert!(
+        stdout_of(&listed).contains("spaced.txt"),
+        "{}",
+        stdout_of(&listed)
+    );
+    let missing = sb.run(&["list", "--trash-dir"]);
+    assert_eq!(missing.status.code(), Some(2), "{}", stderr_of(&missing));
+    assert!(
+        stderr_of(&missing).contains("--trash-dir requires PATH"),
+        "{}",
+        stderr_of(&missing)
+    );
+}
+
+#[test]
 fn empty_json_and_older_than_flag() {
     let sb = Sandbox::new("empty-json");
     let pin = format!("--trash-dir={}", sb.trash().display());

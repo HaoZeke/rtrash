@@ -16,7 +16,8 @@ Note: multi-call name `rm` means *put into trash* (safe). This command
 (subcommand `rtrash rm` or multi-call `trash-rm`) permanently deletes
 matching *trash* entries — not a synonym for put.
 
-      --trash-dir=PATH  only consider this trash directory (repeatable)
+      --trash-dir PATH  only consider this trash directory (repeatable;
+                     `--trash-dir=PATH` also accepted)
       --home-only  only the home trash (skip volume trash)
       --older-than=DAYS only match items trashed more than DAYS days ago
       --newer-than=DAYS only match items trashed within the last DAYS days
@@ -74,8 +75,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                 return 0;
             }
-            a if a.starts_with("--trash-dir=") => {
-                trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
+            a if crate::util::is_trash_dir_flag(a) => {
+                match crate::util::take_trash_dir_value(args, &mut i) {
+                    Ok(p) => trash_dirs.push(p),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        eprintln!("Try '{prog} --help' for more information.");
+                        return 2;
+                    }
+                }
             }
             a if a.starts_with("--older-than=") => {
                 match parse_nonneg_days(&a["--older-than=".len()..]) {

@@ -23,7 +23,8 @@ restores immediately.
       --cwd-only  without PATH, only items trashed from under the current directory
       --plain     force numbered line selection even on a TTY (no TUI)
       --home-only  only the home trash (skip volume trash)
-      --trash-dir=PATH  only consider this trash directory (repeatable)
+      --trash-dir PATH  only consider this trash directory (repeatable;
+                     `--trash-dir=PATH` also accepted)
       --help      display this help and exit
       --version   output version information and exit
 ";
@@ -35,7 +36,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut plain = false;
     let mut target: Option<PathBuf> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
-    for arg in args {
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = &args[i];
         match arg.as_str() {
             "-f" | "--force" => force = true,
             "--home-only" => home_only = true,
@@ -49,8 +52,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                 return 0;
             }
-            a if a.starts_with("--trash-dir=") => {
-                trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
+            a if crate::util::is_trash_dir_flag(a) => {
+                match crate::util::take_trash_dir_value(args, &mut i) {
+                    Ok(p) => trash_dirs.push(p),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
             }
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
@@ -64,6 +73,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 target = Some(PathBuf::from(a));
             }
         }
+        i += 1;
     }
 
     let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);

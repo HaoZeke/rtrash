@@ -61,8 +61,9 @@ to require CLI operands even on a TTY.
                           moved whole, never traversed)
       --preserve-root   do not remove '/' (default)
       --no-preserve-root  do not treat '/' specially
-      --trash-dir=PATH  put into this trash root (creates files/ and info/ if
-                          needed); scripts/tests pin instead of XDG discovery
+      --trash-dir PATH  put into this trash root (creates files/ and info/ if
+                          needed); `--trash-dir=PATH` also accepted; scripts
+                          pin instead of XDG discovery
       --home-only       always use the home trash (skip volume trash)
       --help            display this help and exit
       --version         output version information and exit
@@ -83,9 +84,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut no_more_opts = false;
     let mut plain = false;
 
-    for arg in args {
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = &args[i];
         if no_more_opts || arg == "-" || !arg.starts_with('-') {
             files.push(PathBuf::from(arg));
+            i += 1;
             continue;
         }
         match arg.as_str() {
@@ -126,11 +130,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                 return 0;
             }
-            a if a.starts_with("--trash-dir=") => {
+            a if crate::util::is_trash_dir_flag(a) => {
                 if opts.trash_pin.is_some() {
-                    return usage_err(prog, "put accepts only one --trash-dir=PATH");
+                    return usage_err(prog, "put accepts only one --trash-dir PATH");
                 }
-                opts.trash_pin = Some(PathBuf::from(&a["--trash-dir=".len()..]));
+                match crate::util::take_trash_dir_value(args, &mut i) {
+                    Ok(p) => opts.trash_pin = Some(p),
+                    Err(e) => return usage_err(prog, e),
+                }
             }
             long if long.starts_with("--") => {
                 return usage_err(prog, &format!("unrecognized option '{long}'"));
@@ -160,6 +167,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 }
             }
         }
+        i += 1;
     }
 
     if files.is_empty() {

@@ -25,7 +25,7 @@ trash-empty runs `empty`; trash-list runs `list`; trash-restore runs
 (e.g. `rtrash -rf dir`) falls through to `put`.
 
 Most suite commands accept --home-only (home trash only) and
---trash-dir=PATH (repeatable pin).
+--trash-dir PATH (repeatable pin; `--trash-dir=PATH` also accepted).
 
 After cargo install, run:  rtrash setup
 

@@ -69,6 +69,34 @@ pub fn stdin_is_tty() -> bool {
     std::io::stdin().is_terminal()
 }
 
+/// `--trash-dir=PATH` or `--trash-dir` (PATH is the next argv), matching trash-cli.
+pub fn is_trash_dir_flag(arg: &str) -> bool {
+    arg == "--trash-dir" || arg.starts_with("--trash-dir=")
+}
+
+/// Consume a `--trash-dir` flag at `args[*i]`. On the space form, advances `i`
+/// to the PATH slot. Missing PATH is an error for the caller to print as usage.
+pub fn take_trash_dir_value(
+    args: &[String],
+    i: &mut usize,
+) -> Result<std::path::PathBuf, &'static str> {
+    let arg = args
+        .get(*i)
+        .map(String::as_str)
+        .ok_or("--trash-dir requires PATH")?;
+    if let Some(rest) = arg.strip_prefix("--trash-dir=") {
+        return Ok(std::path::PathBuf::from(rest));
+    }
+    if arg == "--trash-dir" {
+        *i += 1;
+        return args
+            .get(*i)
+            .map(|s| std::path::PathBuf::from(s))
+            .ok_or("--trash-dir requires PATH");
+    }
+    Err("--trash-dir requires PATH")
+}
+
 /// Shell-style glob match (`*`, `?`, `[…]` / `[!…]`), as used by trash-cli `trash-rm`.
 /// Matching is on the full string (callers also try the basename separately).
 pub fn fnmatch(pat: &str, text: &str) -> bool {
@@ -198,5 +226,30 @@ mod tests {
         assert!(fnmatch("*", "anything"));
         assert!(fnmatch("exact", "exact"));
         assert!(!fnmatch("exact", "exactx"));
+    }
+
+    #[test]
+    fn trash_dir_equals_and_space_forms() {
+        let eq = vec!["--trash-dir=/tmp/t".to_string()];
+        let mut i = 0usize;
+        assert!(is_trash_dir_flag(&eq[0]));
+        assert_eq!(
+            take_trash_dir_value(&eq, &mut i).unwrap(),
+            std::path::PathBuf::from("/tmp/t")
+        );
+        assert_eq!(i, 0);
+
+        let sp = vec!["--trash-dir".to_string(), "/tmp/u".to_string(), "x".into()];
+        let mut j = 0usize;
+        assert!(is_trash_dir_flag(&sp[0]));
+        assert_eq!(
+            take_trash_dir_value(&sp, &mut j).unwrap(),
+            std::path::PathBuf::from("/tmp/u")
+        );
+        assert_eq!(j, 1);
+
+        let missing = vec!["--trash-dir".to_string()];
+        let mut k = 0usize;
+        assert!(take_trash_dir_value(&missing, &mut k).is_err());
     }
 }

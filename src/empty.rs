@@ -24,7 +24,8 @@ permanent delete). Use --plain to skip the TUI.
       --plain      skip TUI; non-interactive empty (also used when stdin is not a TTY)
       --older-than=DAYS  same as positional DAYS (list/status flag style)
       --json       emit a JSON summary on stdout ({dry_run, removed, bytes, days})
-      --trash-dir=PATH  empty only this trash directory (repeatable);
+      --trash-dir PATH  empty only this trash directory (repeatable;
+                     `--trash-dir=PATH` also accepted);
                      default is the home trash plus every mounted volume
       --home-only  only the home trash (skip volume trash discovery)
       --help       display this help and exit
@@ -57,7 +58,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         plain: false,
         json: false,
     };
-    for arg in args {
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = &args[i];
         match arg.as_str() {
             "-n" | "--dry-run" => opts.dry_run = true,
             "-v" | "--verbose" => opts.verbose = true,
@@ -73,9 +76,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                 return 0;
             }
-            a if a.starts_with("--trash-dir=") => {
-                opts.trash_dirs
-                    .push(PathBuf::from(&a["--trash-dir=".len()..]));
+            a if crate::util::is_trash_dir_flag(a) => {
+                match crate::util::take_trash_dir_value(args, &mut i) {
+                    Ok(p) => opts.trash_dirs.push(p),
+                    Err(e) => return usage_err(prog, e),
+                }
             }
             a if a.starts_with("--older-than=") => {
                 match a["--older-than=".len()..].parse::<i64>() {
@@ -95,6 +100,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             },
             a => return usage_err(prog, &format!("unrecognized option '{a}'")),
         }
+        i += 1;
     }
 
     let dirs: Vec<TrashDir> = trashdir::resolve_dirs_opts(&opts.trash_dirs, opts.home_only);

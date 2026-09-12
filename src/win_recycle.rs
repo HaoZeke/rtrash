@@ -131,8 +131,14 @@ mod os {
         let mut verbose = false;
         let mut files: Vec<PathBuf> = Vec::new();
         let mut plain = false;
-        for arg in args {
+        let mut it = args.iter().peekable();
+        while let Some(arg) = it.next() {
             match arg.as_str() {
+                a if crate::util::is_trash_dir_flag(a) => {
+                    if a == "--trash-dir" {
+                        let _ = it.next();
+                    }
+                }
                 "-f" | "--force" => force = true,
                 "-v" | "--verbose" => verbose = true,
                 "--plain" => plain = true,
@@ -210,8 +216,14 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
     }
 
     pub fn list_run(prog: &str, args: &[String]) -> i32 {
-        for arg in args {
+        let mut it = args.iter().peekable();
+        while let Some(arg) = it.next() {
             match arg.as_str() {
+                a if crate::util::is_trash_dir_flag(a) => {
+                    if a == "--trash-dir" {
+                        let _ = it.next();
+                    }
+                }
                 "--help" => {
                     print!(
                         "\
@@ -232,7 +244,6 @@ on Windows (there is no FreeDesktop layout here).
                     return 0;
                 }
                 "--home-only" => {}
-                a if a.starts_with("--trash-dir=") => {}
                 a => {
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return 2;
@@ -262,8 +273,14 @@ on Windows (there is no FreeDesktop layout here).
     pub fn empty_run(prog: &str, args: &[String]) -> i32 {
         let mut dry_run = false;
         let mut verbose = false;
-        for arg in args {
+        let mut it = args.iter().peekable();
+        while let Some(arg) = it.next() {
             match arg.as_str() {
+                a if crate::util::is_trash_dir_flag(a) => {
+                    if a == "--trash-dir" {
+                        let _ = it.next();
+                    }
+                }
                 "-n" | "--dry-run" => dry_run = true,
                 "-v" | "--verbose" => verbose = true,
                 "-f" | "--force" | "--plain" | "--home-only" => {}
@@ -288,7 +305,6 @@ on the Recycle Bin backend.
                     println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                     return 0;
                 }
-                a if a.starts_with("--trash-dir=") => {}
                 a if !a.starts_with('-') => {
                     eprintln!("{prog}: DAYS age filter is not supported on Windows Recycle Bin");
                     return 2;
@@ -331,8 +347,14 @@ on the Recycle Bin backend.
         let mut force = false;
         let mut plain = true; // no TUI on Windows recycle path
         let mut target: Option<PathBuf> = None;
-        for arg in args {
+        let mut it = args.iter().peekable();
+        while let Some(arg) = it.next() {
             match arg.as_str() {
+                a if crate::util::is_trash_dir_flag(a) => {
+                    if a == "--trash-dir" {
+                        let _ = it.next();
+                    }
+                }
                 "-f" | "--force" => force = true,
                 "--plain" | "--cwd-only" | "--home-only" => plain = true,
                 "--help" => {
@@ -357,7 +379,6 @@ Without PATH, print a numbered list and read an index from stdin.
                     println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                     return 0;
                 }
-                a if a.starts_with("--trash-dir=") => {}
                 a if a.starts_with('-') && a.len() > 1 => {
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return 2;
@@ -444,8 +465,14 @@ Without PATH, print a numbered list and read an index from stdin.
     }
 
     pub fn status_run(prog: &str, args: &[String]) -> i32 {
-        for arg in args {
+        let mut it = args.iter().peekable();
+        while let Some(arg) = it.next() {
             match arg.as_str() {
+                a if crate::util::is_trash_dir_flag(a) => {
+                    if a == "--trash-dir" {
+                        let _ = it.next();
+                    }
+                }
                 "--help" => {
                     print!(
                         "\
@@ -463,7 +490,6 @@ Summarize Windows Recycle Bin item count.
                     return 0;
                 }
                 "--home-only" => {}
-                a if a.starts_with("--trash-dir=") => {}
                 a => {
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return 2;
@@ -488,8 +514,14 @@ Summarize Windows Recycle Bin item count.
         let mut force = false;
         let mut verbose = false;
         let mut patterns: Vec<String> = Vec::new();
-        for arg in args {
+        let mut it = args.iter().peekable();
+        while let Some(arg) = it.next() {
             match arg.as_str() {
+                a if crate::util::is_trash_dir_flag(a) => {
+                    if a == "--trash-dir" {
+                        let _ = it.next();
+                    }
+                }
                 "-n" | "--dry-run" => dry_run = true,
                 "-f" | "--force" => force = true,
                 "-v" | "--verbose" => verbose = true,
@@ -512,7 +544,6 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                     println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                     return 0;
                 }
-                a if a.starts_with("--trash-dir=") => {}
                 a if a.starts_with('-') => {
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return 2;
