@@ -88,6 +88,20 @@ fn stdout_of(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+fn du_blocks(path: &std::path::Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::symlink_metadata(path).unwrap();
+    let mut total = meta.blocks() as u64 * 512;
+    if meta.is_dir() {
+        if let Ok(rd) = fs::read_dir(path) {
+            for e in rd.flatten() {
+                total = total.saturating_add(du_blocks(&e.path()));
+            }
+        }
+    }
+    total
+}
+
 fn trash_names(sb: &Sandbox) -> Vec<String> {
     match fs::read_dir(sb.trash().join("files")) {
         Ok(rd) => rd
@@ -855,7 +869,10 @@ fn directory_put_writes_directorysizes_empty_prunes() {
     let parts: Vec<&str> = line.split_whitespace().collect();
     assert!(parts.len() >= 3, "expected size mtime name, got {line:?}");
     let size: u64 = parts[0].parse().expect("size");
-    assert_eq!(size, 12, "4+8 payload bytes");
+    let payload = sb.trash().join("files/tree");
+    let want = du_blocks(&payload);
+    assert_eq!(size, want, "directorysizes must be du -B1, not logical 12");
+    assert!(size >= 12, "allocation is at least the 12 payload bytes");
     assert_eq!(parts[parts.len() - 1], "tree");
 
     // File-only put must not invent a directorysizes line for that file name.
