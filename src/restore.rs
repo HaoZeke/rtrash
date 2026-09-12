@@ -178,6 +178,16 @@ fn lexical_clean(p: &Path) -> PathBuf {
 
 /// Restore one entry to its original path. Shared by CLI, piped pick, and TUI.
 pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
+    let _lock = match trashdir::TrashLock::acquire(&entry.dir.root) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!(
+                "{prog}: cannot lock trash '{}': {e}",
+                entry.dir.root.display()
+            );
+            return 1;
+        }
+    };
     let src = entry.dir.files().join(&entry.name);
     let dest = &entry.original;
 

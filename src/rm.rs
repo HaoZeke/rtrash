@@ -159,6 +159,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut removed = 0u64;
     let mut bytes = 0u64;
     let mut matched_paths: Vec<String> = Vec::new();
+    let mut locks: std::collections::HashMap<std::path::PathBuf, trashdir::TrashLock> =
+        std::collections::HashMap::new();
 
     for entry in &entries {
         let path_s = entry.original.to_string_lossy();
@@ -195,6 +197,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             matched_paths.push(entry.original.to_string_lossy().into_owned());
             removed += 1;
             continue;
+        }
+        if !locks.contains_key(&entry.dir.root) {
+            match trashdir::TrashLock::acquire(&entry.dir.root) {
+                Ok(l) => {
+                    locks.insert(entry.dir.root.clone(), l);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{prog}: cannot lock trash '{}': {e}",
+                        entry.dir.root.display()
+                    );
+                    status = 1;
+                    continue;
+                }
+            }
         }
         if let Err(e) = trashdir::remove_any_path(&payload) {
             eprintln!("{prog}: cannot remove '{}': {e}", payload.display());
