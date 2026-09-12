@@ -95,6 +95,10 @@ rtrash a.txt b.txt
 rtrash restore              # TUI on TTY
 rtrash restore --cwd-only
 rtrash restore --plain
+rtrash restore --group      # same DeletionDate second as newest
+rtrash restore --all
+rtrash restore --restore-to recovered a.txt
+printf '0-1\n' | rtrash restore --plain
 #+end_src
 
 * Changelog

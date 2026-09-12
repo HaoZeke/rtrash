@@ -65,7 +65,10 @@ end
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l orphans -d 'only files/ names with no .trashinfo'
 
 # restore
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s f -l force -d 'overwrite existing file at original location'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s f -l force -l overwrite -d 'overwrite existing file at destination'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l all -d 'restore every item in the current scope'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l group -d 'restore items sharing the newest match DeletionDate second'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l restore-to -d 'relocate payloads into DIR (keep basename)' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l home-only -d 'only the home trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l trash-dir -d 'only this trash directory' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l plain -d 'numbered line selection even on a TTY'
@@ -122,6 +125,10 @@ complete -c trash-list -l help
 complete -c trash-list -l version
 
 complete -c trash-restore -s f -l force
+complete -c trash-restore -l overwrite
+complete -c trash-restore -l all
+complete -c trash-restore -l group
+complete -c trash-restore -l restore-to -r
 complete -c trash-restore -l home-only
 complete -c trash-restore -l trash-dir -r
 complete -c trash-restore -l plain

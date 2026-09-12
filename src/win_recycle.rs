@@ -422,8 +422,8 @@ Without PATH, print a numbered list and read an index from stdin
             items
                 .into_iter()
                 .filter(|i| {
-                    abs.iter()
-                        .any(|t| i.original_path() == *t || targets.iter().any(|raw| i.original_path() == *raw))
+                    let orig = i.original_path();
+                    abs.iter().any(|t| orig == *t) || targets.iter().any(|raw| orig == *raw)
                 })
                 .collect()
         } else {

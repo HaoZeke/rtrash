@@ -303,13 +303,17 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 
 Per-root item count and reclaimable size (uses `directorysizes` when valid). Same discovery pins as list. Also accepts `--json`, `--older-than=DAYS`, `--newer-than=DAYS`.
 
-### `rtrash restore [PATH]` (also `trash-restore`)
+### `rtrash restore [PATH]...` (also `trash-restore`)
 
 | Invocation | Behavior |
 |------------|----------|
 | `rtrash restore PATH` | Restore the item whose original path was `PATH` (exact match) |
+| `rtrash restore a b` | Restore each named original (repeatable PATH) |
 | `rtrash restore` | **TUI** (TTY): fuzzy filter, multi-select (Space/a/A), bulk restore; session until `q` |
-| `rtrash restore --plain` | Numbered line list + index (scripts / no TUI) |
+| `rtrash restore --plain` | Numbered line list + index (scripts / no TUI); `0-2, 3` ranges |
+| `rtrash restore --all` | Restore every item in the current scope |
+| `rtrash restore --group` | Restore items sharing the newest match's DeletionDate second |
+| `rtrash restore --restore-to DIR` | Relocate payloads into `DIR` (keep basename) |
 | `rtrash restore --if-unique PATH` | Restore only if exactly one match; else exit 1, no prompt |
 | `printf '0\n' \| rtrash restore` | Piped index without TUI |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
@@ -325,7 +329,7 @@ Browser-specific actions (also remappable): restore `toggle_force` · empty `tog
 
 **TUI put:** bare `rtrash put` on a TTY opens the multi-select path browser for the current directory (`--plain` or FILE operands keep classic put).
 
-Existing paths at the destination are preserved unless `-f` / `--force` is given; with `-f`, a blocking destination is removed first.
+Existing paths at the destination are preserved unless `-f` / `--force` / `--overwrite` is given; with `-f`, a blocking destination is removed first.
 Same-filesystem restore uses `rename`; cross-device restore copies then deletes the trash payload (needed when put fell back to the home trash).
 Options: `--trash-dir=PATH` (repeatable), `--home-only`, `--cwd-only`.
 

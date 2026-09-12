@@ -9,7 +9,7 @@ Docs: <https://rtrash.rgoswami.me>
 | Install | `cargo binstall rtrash && rtrash setup` (or `cargo install` / `pip install rtrash`) |
 | Trash files | `rtrash file` or `rtrash put -rf dir` (rm-shaped flags) |
 | See trash | `rtrash list` · `rtrash status` |
-| Bring back | `rtrash restore` (TUI on TTY) or `rtrash restore --plain PATH` |
+| Bring back | `rtrash restore` (TUI on TTY) or `rtrash restore --plain PATH`; `--group` / `--all` / `--restore-to DIR` |
 | Wipe | `rtrash empty` (TUI) or `rtrash empty --plain` |
 | Scripts | always prefer `--plain` / non-TTY; pin `--trash-dir=` or isolate `XDG_DATA_HOME` |
 
@@ -132,13 +132,17 @@ Override path with `RTRASH_KEYS=/path/to/keys.toml`. Unlisted actions keep defau
 
 Also: **`rtrash empty`** (TTY) multi-select permanent delete; **`rtrash put`** (TTY, no files) multi-select put from the current directory. Use `--plain` to force classic CLI behavior.
 
-For automation: `--plain` or pipe an index (`printf '0\n' | rtrash restore`).
+For automation: `--plain` or pipe an index (`printf '0\n' | rtrash restore`). Numbered pick accepts trash-cli ranges (`0-2, 3`). `--group` restores the newest DeletionDate-second batch; `--all` restores the current scope; `--restore-to DIR` keeps the basename.
 
 ```shell
 rtrash a.txt b.txt
 rtrash restore              # TUI on TTY
 rtrash restore --cwd-only   # only originals under $PWD
 rtrash restore --plain      # line mode even on TTY
+rtrash restore --group
+rtrash restore --all
+rtrash restore --restore-to recovered a.txt
+printf '0-1\n' | rtrash restore --plain
 ```
 
 

@@ -282,31 +282,55 @@ Display help and exit.
 Output version information and exit.
 .SS restore
 .B rtrash restore
-[\fIOPTION\fR]... [\fIPATH\fR]
+[\fIOPTION\fR]... [\fIPATH\fR]...
 .PP
 Also multi-call
 .BR trash-restore .
 .PP
-Restore a trashed item to its original location. With
-.IR PATH ,
-restore the item originally at
+Restore trashed items to their original location (or
+.BR \-\-restore\-to ).
+With
 .IR PATH
-(exact original-path match).
+(repeatable), restore items originally at those paths
+(exact original-path match). Several PATH operands restore each unique match.
 Without
 .IR PATH ,
 on a TTY open the interactive restore browser (filter, navigate, restore);
 without a TTY (or with
 .BR \-\-plain )
-print a numbered list and read an index from stdin.
+print a numbered list and read a selection from stdin.
+Numbered pick accepts trash-cli indexes such as
+.BR 0-2,\ 3 .
 Pass
 .B \-\-cwd\-only
 to limit bare restore to originals under the current directory.
-A single match restores directly; multiple matches require a selection.
+A single match restores directly; multiple matches require a selection
+unless
+.BR \-\-all ,
+.BR \-\-group ,
+or several PATH operands are given.
 .B \-\-if\-unique
 exits 1 without prompting when the match set is not exactly one item.
 .TP
-.BR \-f ", " \-\-force
-Overwrite an existing file at the original location.
+.BR \-f ", " \-\-force ", " \-\-overwrite
+Overwrite an existing file at the destination.
+.TP
+.B \-\-all
+Restore every item in the current scope (respects
+.BR \-\-cwd\-only ,
+.BR \-\-trash\-dir ,
+.BR \-\-home\-only ).
+.TP
+.B \-\-group
+Restore every item sharing the DeletionDate second of the newest match,
+or of
+.I PATH
+when one PATH is given.
+.TP
+.BI \-\-restore\-to =DIR
+Relocate payloads into
+.I DIR
+(keep the original basename).
 .TP
 .B \-\-cwd\-only
 Without PATH, only items trashed from under the current directory.

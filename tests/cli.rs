@@ -763,7 +763,8 @@ fn restore_to_relocates_basename_and_overwrite() {
     let recovered = sb.work().join("recovered");
     fs::create_dir(&recovered).unwrap();
 
-    let out = sb.run(&["restore", "--restore-to", recovered.to_str().unwrap(), "dest.txt"]);
+    let dest = recovered.to_str().unwrap();
+    let out = sb.run(&["restore", "--restore-to", dest, "dest.txt"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!sb.work().join("dest.txt").exists());
     assert_eq!(fs::read(recovered.join("dest.txt")).unwrap(), b"payload");
@@ -772,7 +773,7 @@ fn restore_to_relocates_basename_and_overwrite() {
     sb.touch("dest.txt");
     assert!(sb.run(&["put", "dest.txt"]).status.success());
     fs::write(recovered.join("dest.txt"), b"newer").unwrap();
-    let out = sb.run(&["restore", "--restore-to", recovered.to_str().unwrap(), "dest.txt"]);
+    let out = sb.run(&["restore", "--restore-to", dest, "dest.txt"]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     assert!(stderr_of(&out).contains("refusing to overwrite"));
     assert_eq!(fs::read(recovered.join("dest.txt")).unwrap(), b"newer");
@@ -781,7 +782,7 @@ fn restore_to_relocates_basename_and_overwrite() {
         "restore",
         "--overwrite",
         "--restore-to",
-        recovered.to_str().unwrap(),
+        dest,
         "dest.txt",
     ]);
     assert!(out.status.success(), "{}", stderr_of(&out));

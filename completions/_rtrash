@@ -59,14 +59,17 @@ status_opts=(
 )
 
 restore_opts=(
-  '(-f --force)'{-f,--force}'[overwrite existing file at original location]'
+  '(-f --force --overwrite)'{-f,--force,--overwrite}'[overwrite existing file at destination]'
+  '--all[restore every item in the current scope]'
+  '--group[restore items sharing the newest match DeletionDate second]'
+  '--restore-to=[relocate payloads into DIR (keep basename)]:dir:_files -/'
   '--home-only[only the home trash]'
   '*--trash-dir=[only consider this trash directory]:path:_files -/'
   '--plain[force numbered line selection even on a TTY]'
   '--if-unique[error if the match set is not exactly one item]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
-  '1:path:_files'
+  '*:path:_files'
 )
 
 rm_opts=(
