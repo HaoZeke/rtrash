@@ -175,6 +175,17 @@ def main() -> int:
                 if not deep_ok:
                     print("FAIL deep payload missing after put", file=sys.stderr)
                     return 1
+                list_cmd = [rtrash, "list"] if tool == "rtrash" else [trash_list]
+                ec, dt_list, out, err = run(list_cmd, env)
+                print(
+                    f"LIST tool={tool} trial={trial} ec={ec} wall_s={dt_list:.6f} "
+                    f"stderr={err.strip()!r}"
+                )
+                if ec != 0:
+                    print(out)
+                    print(err, file=sys.stderr)
+                    return 1
+                results.append((tool, "list", dt_list, trial, n_after_put))
                 empty = [
                     c.format(trash=str(trash)) if "{trash}" in c else c for c in empty_cmd
                 ]
@@ -209,11 +220,15 @@ def main() -> int:
     print("--- SUMMARY ---")
     for tool in ("rtrash", "trash-cli"):
         print(
-            f"{tool} put_avg_s={avg(tool, 'put'):.6f} empty_avg_s={avg(tool, 'empty'):.6f}"
+            f"{tool} put_avg_s={avg(tool, 'put'):.6f} "
+            f"list_avg_s={avg(tool, 'list'):.6f} "
+            f"empty_avg_s={avg(tool, 'empty'):.6f}"
         )
     rp, tp = avg("rtrash", "put"), avg("trash-cli", "put")
     re, te = avg("rtrash", "empty"), avg("trash-cli", "empty")
+    rl, tl = avg("rtrash", "list"), avg("trash-cli", "list")
     print(f"put_speedup_rtrash_over_trashcli={tp / max(rp, 1e-9):.2f}x")
+    print(f"list_speedup_rtrash_over_trashcli={tl / max(rl, 1e-9):.2f}x")
     print(f"empty_speedup_rtrash_over_trashcli={te / max(re, 1e-9):.2f}x")
     with tempfile.TemporaryDirectory(prefix="rtrash-list-") as tmp:
         root = Path(tmp)

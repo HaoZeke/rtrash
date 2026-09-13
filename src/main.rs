@@ -12,6 +12,7 @@ Windows uses the system Recycle Bin. rm-compatible put interface.
 Commands:
   put [OPTION]... FILE...     move files to the trash (accepts rm(1) flags)
   empty [OPTION]... [DAYS]    purge trashed items, optionally older than DAYS
+  metafix [OPTION]...         delete dangling .trashinfo (no files/ twin)
   list [OPTION]... [PATTERN]...  list trashed items
   status [OPTION]...          item count and reclaimable size summary
   restore [OPTION]... [PATH]...  restore trashed items
@@ -53,6 +54,11 @@ fn main() {
         _ => match rest.first().map(String::as_str) {
             Some("put") => put::run(&argv0, &rest[1..]),
             Some("empty") => empty::run(&argv0, &rest[1..]),
+            Some("metafix") => {
+                let mut a = vec!["--metafix".into(), "--plain".into()];
+                a.extend(rest[1..].iter().cloned());
+                empty::run(&argv0, &a)
+            }
             Some("list") => list::run(&argv0, &rest[1..]),
             Some("status") => status::run(&argv0, &rest[1..]),
             Some("restore") => restore::run(&argv0, &rest[1..]),

@@ -22,7 +22,8 @@ permanent delete). Use --plain to skip the TUI.
                      also prints approximate reclaimable disk space (fast
                      in-process walk, like du of the victims)
   -v, --verbose    print each removed item
-  -f, --force      accepted for trash-cli compatibility (emptying never prompts)
+  -f, --force      skip the TTY confirm on DAYS / --max-bytes / --plain / --metafix
+      --metafix    delete dangling .trashinfo (no files/ twin); implies --plain
       --plain      skip TUI; non-interactive empty (also used when stdin is not a TTY)
       --older-than=DAYS  same as positional DAYS (list/status flag style)
       --max-bytes=N  drop largest items first until remaining reclaimable
@@ -47,6 +48,79 @@ struct Opts {
     trash_dirs: Vec<PathBuf>,
     plain: bool,
     json: bool,
+    force: bool,
+    metafix: bool,
+}
+
+fn needs_empty_confirm(opts: &Opts) -> bool {
+    !opts.force
+        && !opts.json
+        && !opts.dry_run
+        && stdin_is_tty()
+        && (opts.plain || opts.days.is_some() || opts.max_bytes.is_some())
+}
+
+fn confirm_empty(prog: &str, dirs: &[TrashDir], _opts: &Opts) -> bool {
+    let n = list::collect(dirs).len();
+    crate::util::confirm(&format!(
+        "{prog}: permanently remove {n} trashed item(s)? "
+    ))
+}
+
+fn metafix_dirs(
+    prog: &str,
+    dirs: &[TrashDir],
+    force: bool,
+    dry_run: bool,
+    json: bool,
+) -> i32 {
+    let entries = list::collect(dirs);
+    let dangling: Vec<&list::Entry> = entries
+        .iter()
+        .filter(|e| {
+            e.orphan
+                && e.dir
+                    .info()
+                    .join(format!("{}.trashinfo", e.name))
+                    .is_file()
+        })
+        .collect();
+    if dangling.is_empty() {
+        if json {
+            println!("{{\"ok\":true,\"removed\":0}}");
+        }
+        return 0;
+    }
+    if !force && !json && stdin_is_tty() && !crate::util::confirm(&format!(
+        "{prog}: delete {} dangling .trashinfo? ",
+        dangling.len()
+    )) {
+        return 0;
+    }
+    let mut removed = 0u64;
+    for e in dangling {
+        let ip = e.dir.info().join(format!("{}.trashinfo", e.name));
+        if dry_run {
+            println!("would remove {}", ip.display());
+            removed += 1;
+            continue;
+        }
+        match fs::remove_file(&ip) {
+            Ok(()) => {
+                crate::catalog_cache::remove_name(&e.dir, &e.name);
+                removed += 1;
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                eprintln!("{prog}: {err}");
+                return 1;
+            }
+        }
+    }
+    if json {
+        println!("{{\"ok\":true,\"removed\":{removed}}}");
+    }
+    0
 }
 
 fn usage_err(prog: &str, msg: &str) -> i32 {
@@ -65,6 +139,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         trash_dirs: Vec::new(),
         plain: false,
         json: false,
+        force: false,
+        metafix: false,
     };
     let mut i = 0usize;
     while i < args.len() {
@@ -72,7 +148,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         match arg.as_str() {
             "-n" | "--dry-run" => opts.dry_run = true,
             "-v" | "--verbose" => opts.verbose = true,
-            "-f" | "--force" => {}
+            "-f" | "--force" => opts.force = true,
+            "--metafix" => {
+                opts.metafix = true;
+                opts.plain = true;
+            }
             "--plain" => opts.plain = true,
             "--json" => opts.json = true,
             "--home-only" => opts.home_only = true,
@@ -140,6 +220,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let entries = list::collect(&dirs);
         let refs: Vec<&list::Entry> = entries.iter().collect();
         return crate::empty_tui::run(prog, refs, opts.dry_run);
+    }
+
+    if opts.metafix {
+        return metafix_dirs(prog, &dirs, opts.force, opts.dry_run, opts.json);
+    }
+
+    if needs_empty_confirm(&opts) && !confirm_empty(prog, &dirs, &opts) {
+        return 0;
     }
 
     let cutoff = opts.days.map(|d| info::now_epoch() - d * 86_400);

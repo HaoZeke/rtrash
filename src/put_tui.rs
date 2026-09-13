@@ -71,14 +71,30 @@ pub fn put_selection(prog: &str, paths: &[PathBuf], recursive: bool, force: bool
         force,
         ..put::Opts::default()
     };
-    let mut status = 0;
+    let mut buf = Vec::new();
     for p in paths {
         let mut o = opts.clone();
         if p.is_dir() && !o.recursive {
-            o.recursive = true; // TUI put dirs as trees by default when marked
+            o.recursive = true;
         }
-        if let Err(code) = put::put_one(prog, p, &o) {
-            status = status.max(code);
+        buf.push((p.to_path_buf(), o));
+    }
+    // One batch per distinct option set (recursive vs file).
+    let mut status = 0;
+    let mut i = 0;
+    while i < buf.len() {
+        let rec = buf[i].1.recursive;
+        let mut group = Vec::new();
+        while i < buf.len() && buf[i].1.recursive == rec {
+            group.push(buf[i].0.clone());
+            i += 1;
+        }
+        let mut o = opts.clone();
+        o.recursive = rec;
+        for r in put::put_paths(prog, &group, &o) {
+            if let Err(code) = r {
+                status = status.max(code);
+            }
         }
     }
     status

@@ -7,7 +7,7 @@
 | **Safer** than permanent `os.remove` / bare `rm`? | **Yes** — FreeDesktop trash and rm-shaped fail-safes; recoverable until empty |
 | **Safer** than trash-cli? | **Roughly equivalent** FreeDesktop correctness; rtrash has stronger GNU-style put fail-safes (`-f`/`-i` last-wins, preserve-root, and related flags) |
 | **Better** for this niche? | **Yes** if you want one native multi-call binary and in-process Python (`import rtrash`) without spawning trash-cli |
-| **Faster**? | **Yes on the measured fixtures** below — not a claim for every machine or trash size |
+| **Faster**? | **List and empty yes** on the 2026-09-13 terra run; **one-shot put is slower** than trash-cli on that 401-entry fixture (see table) |
 
 Prefer trash-cli when you only want distro Python packaging and no Rust toolchain.
 
@@ -30,23 +30,23 @@ Use `TRASH_CLI_BIN_DIR` or a PATH entry that is Python trash-cli.
 Optional peers (trashy, gtrash) are reported only if present on `PATH` and not rtrash multi-call.
 On the 2026-07-08 run they were not installed.
 
-## Measured results (Linux x86_64, 2026-07-08)
+## Measured results (Linux x86_64, 2026-09-13)
 
-These are the last harness run shipped in-tree. The crate version is now **0.1.4**; the table below is still **rtrash 0.1.2**. Re-run `benches/compare_trash_cli.py` before quoting it as current. List, EXDEV put, and 10k+ empty are **unmeasured** by this harness (`n_small=400`; ASV params 50/200).
+Harness: `benches/compare_trash_cli.py` on **rgam5terra** (`Linux 7.0.13-arch1-1-rg x86_64`, 32 CPUs, `/home` **btrfs** on `cryptroot`). Log: `benches/compare-trash-cli-2026-09-13.log` (ends `COMPARE_OK`).
 
-Host class: **Linux x86_64** (`sysname=Linux machine=x86_64`, build host for this tree).
-Peers: **rtrash 0.1.2** (release build of that tree), **trash-cli 0.24.5.26** (isolated venv; not multi-call rtrash).
-Optional: trashy **missing**, gtrash **missing**.
+Peers: **rtrash 0.1.4** (release `-p rtrash`), **trash-cli 0.24.5.26** (`/usr/bin/trash-put`, not multi-call rtrash). Optional: trashy **missing**, gtrash **missing** (not implied losers).
 
-From `benches/compare_trash_cli.py` (two trials each; log ends with `COMPARE_OK`):
+Fixture: 400 small files + one tree (80 nested files) = 401 trash entries; two trials; isolated `XDG_DATA_HOME`. List is timed on the full can after put (before empty). EXDEV put and 10k+ empty remain **unmeasured**.
 
-| Tool | put avg (s) | empty avg (s) |
-|------|-------------|----------------|
-| **rtrash** (release) | **0.005449** | **0.002986** |
-| trash-cli 0.24.5.26 | 0.074310 | 0.039565 |
-| **speedup (trash-cli / rtrash)** | **~13.6×** | **~13.3×** |
+| Tool | put avg (s) | list avg (s) | empty avg (s) |
+|------|-------------|--------------|----------------|
+| rtrash 0.1.4 release | 0.275409 | **0.002360** | **0.008723** |
+| trash-cli 0.24.5.26 | **0.096962** | 0.068124 | 0.052058 |
+| trash-cli / rtrash | 0.35× (rtrash slower) | **28.87×** | **5.97×** |
 
-Both tools: `ec=0`, multi-entry trash after put (`entries=401`), empty leaves `files_left=0` and `info_left=0`, `LIST_OK` for a single-file put.
+Both tools: `ec=0`, `entries=401`, empty leaves `files_left=0` `info_left=0`, `LIST_OK` for a single-file put.
+
+The 2026-07-08 table (rtrash **0.1.2** put 0.005449 s) is historical. Current put pays per-name `.trashinfo` fsync plus a sealed catalog upsert; it is **not** faster than trash-cli on this 401-entry one-shot put. List and empty are faster on this host.
 
 ### Earlier snapshot (same host class, 2026-07-07)
 

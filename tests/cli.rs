@@ -36,6 +36,7 @@ impl Sandbox {
             .current_dir(self.work())
             .env("XDG_DATA_HOME", self.root.join("xdg"))
             .env("XDG_CACHE_HOME", self.root.join("xdg-cache"))
+            .env("RTRASH_LIST_TSV", "0")
             .env("HOME", &self.root)
             .output()
             .expect("failed to run rtrash")
@@ -48,6 +49,7 @@ impl Sandbox {
             .current_dir(self.work())
             .env("XDG_DATA_HOME", self.root.join("xdg"))
             .env("XDG_CACHE_HOME", self.root.join("xdg-cache"))
+            .env("RTRASH_LIST_TSV", "0")
             .env("HOME", &self.root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -836,6 +838,8 @@ fn set_deletion_date(sb: &Sandbox, trash_name: &str, date: &str) {
         .join("\n")
         + "\n";
     fs::write(&info, rewritten).unwrap();
+    // In-place trashinfo rewrite does not bump info/ mtime; drop the sealed cache.
+    let _ = fs::remove_dir_all(sb.root.join("xdg-cache/rtrash"));
 }
 
 #[test]
@@ -1466,6 +1470,7 @@ fn list_json_and_age_filters() {
         .join("\n")
         + "\n";
     fs::write(&info, body).unwrap();
+    let _ = fs::remove_dir_all(sb.root.join("xdg-cache/rtrash"));
 
     let j = sb.run(&["list", &pin, "--json"]);
     assert!(j.status.success(), "{}", stderr_of(&j));
@@ -1933,4 +1938,108 @@ fn catalog_cache_survives_put_then_list_without_rescan_miss() {
     let after = stdout_of(&sb.run(&["list", &pin]));
     assert!(!after.contains("a.txt"), "{after}");
     assert!(after.contains("b.txt"), "{after}");
+}
+
+#[test]
+fn put_batch_shares_one_deletion_date() {
+    let sb = Sandbox::new("put-one-date");
+    sb.touch("x");
+    sb.touch("y");
+    sb.touch("z");
+    assert!(sb.run(&["put", "x", "y", "z"]).status.success());
+    let mut dates = Vec::new();
+    for name in ["x", "y", "z"] {
+        let body = fs::read_to_string(sb.trash().join(format!("info/{name}.trashinfo"))).unwrap();
+        let line = body.lines().find(|l| l.starts_with("DeletionDate=")).unwrap();
+        dates.push(line.to_string());
+        let mode = fs::metadata(sb.trash().join(format!("info/{name}.trashinfo")))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "{name}");
+    }
+    assert_eq!(dates[0], dates[1]);
+    assert_eq!(dates[1], dates[2]);
+}
+
+#[test]
+fn trash_put_trashes_directory_without_dash_r() {
+    let sb = Sandbox::new("trash-put-dir");
+    let bindir = sb.root.join("bin");
+    fs::create_dir_all(&bindir).unwrap();
+    std::os::unix::fs::symlink(bin(), bindir.join("trash-put")).unwrap();
+    fs::create_dir_all(sb.work().join("tree")).unwrap();
+    fs::write(sb.work().join("tree/f"), b"x").unwrap();
+    let out = Command::new(bindir.join("trash-put"))
+        .arg("tree")
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("HOME", &sb.root)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("tree").exists());
+    fs::create_dir_all(sb.work().join("tree2")).unwrap();
+    let fail = sb.run(&["put", "tree2"]);
+    assert!(!fail.status.success(), "rtrash put dir still needs -r");
+}
+
+#[test]
+fn list_directory_filter_and_tsv() {
+    let sb = Sandbox::new("list-dir-tsv");
+    fs::create_dir_all(sb.work().join("keep")).unwrap();
+    fs::write(sb.work().join("keep/a.txt"), b"a").unwrap();
+    fs::write(sb.work().join("skip.txt"), b"s").unwrap();
+    assert!(sb.run(&["put", "keep/a.txt", "skip.txt"]).status.success());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let keep = sb.work().join("keep");
+    let dirflag = format!("--directory={}", keep.display());
+    let out = stdout_of(&sb.run(&["list", &pin, &dirflag]));
+    assert!(out.contains("a.txt"), "{out}");
+    assert!(!out.contains("skip.txt"), "{out}");
+    let tsv = Command::new(bin())
+        .args(["list", &pin])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CACHE_HOME", sb.root.join("xdg-cache"))
+        .env("HOME", &sb.root)
+        .env("RTRASH_LIST_TSV", "1")
+        .output()
+        .unwrap();
+    let s = stdout_of(&tsv);
+    assert!(s.contains('\t'), "expected TSV: {s}");
+}
+
+#[test]
+fn put_verbose_and_json_name_dest() {
+    let sb = Sandbox::new("put-dest");
+    sb.touch("d.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let v = sb.run(&["put", "-v", &pin, "d.txt"]);
+    assert!(v.status.success(), "{}", stderr_of(&v));
+    let vs = stdout_of(&v);
+    assert!(vs.contains("d.txt"), "{vs}");
+    assert!(
+        vs.contains("Trash") || vs.contains(&sb.trash().display().to_string()),
+        "{vs}"
+    );
+    sb.touch("e.txt");
+    let j = stdout_of(&sb.run(&["put", "--json", &pin, "e.txt"]));
+    assert!(j.contains("\"dests\""), "{j}");
+    assert!(j.contains("Trash") || j.contains("xdg"), "{j}");
+}
+
+#[test]
+fn dangling_info_is_emergency_and_metafix_removes_it() {
+    let sb = Sandbox::new("metafix");
+    sb.touch("gone.txt");
+    assert!(sb.run(&["put", "gone.txt"]).status.success());
+    fs::remove_file(sb.trash().join("files/gone.txt")).unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let listed = stdout_of(&sb.run(&["list", &pin]));
+    assert!(listed.contains("DANGLING") || listed.contains("gone.txt"), "{listed}");
+    let mf = sb.run(&["metafix", &pin, "-f"]);
+    assert!(mf.status.success(), "{}", stderr_of(&mf));
+    assert!(!sb.trash().join("info/gone.txt.trashinfo").exists());
 }

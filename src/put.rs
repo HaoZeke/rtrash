@@ -12,12 +12,15 @@ use crate::util::confirm;
 /// One exclusive lock per trash root for this `put` invocation.
 struct PutBatch {
     held: HashMap<PathBuf, (trashdir::TrashDir, trashdir::TrashLock)>,
+    /// One DeletionDate for every payload in this invocation.
+    deletion_date: String,
 }
 
 impl PutBatch {
     fn new() -> Self {
         Self {
             held: HashMap::new(),
+            deletion_date: crate::info::now_local_string(),
         }
     }
 
@@ -33,7 +36,7 @@ impl PutBatch {
             self.held.insert(key.clone(), (trash, lock));
         }
         let (td, _) = self.held.get(&key).expect("just inserted");
-        trashdir::trash_move_locked_opts(abs, meta, td, false)
+        trashdir::trash_move_locked_opts(abs, meta, td, false, &self.deletion_date)
     }
 
     fn finish(&self) {
@@ -67,6 +70,8 @@ pub struct Opts {
     pub trash_pin: Option<PathBuf>,
     /// Prefer home trash only (skip volume selection). Ignored when `trash_pin` is set.
     pub home_only: bool,
+    /// Refuse copy-into-home when volume trash cannot be used.
+    pub no_home_fallback: bool,
 }
 
 impl Default for Opts {
@@ -80,6 +85,7 @@ impl Default for Opts {
             preserve_root: true,
             trash_pin: None,
             home_only: false,
+            no_home_fallback: false,
         }
     }
 }
@@ -107,7 +113,8 @@ to require CLI operands even on a TTY.
                           needed); `--trash-dir=PATH` also accepted; scripts
                           pin instead of XDG discovery
       --home-only       always use the home trash (skip volume trash)
-      --json            emit a JSON summary {ok, failed, names}; implies --plain
+      --no-home-fallback  refuse when volume trash cannot be used (no copy to $HOME)
+      --json            emit a JSON summary {ok, failed, names, dests}; implies --plain
       --files-from=PATH read additional operands from PATH (`-` = stdin)
       -0, --zero        --files-from records are NUL-separated (default: newline)
       --help            display this help and exit
@@ -125,6 +132,11 @@ fn usage_err(prog: &str, msg: &str) -> i32 {
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut opts = Opts::default();
+    // trash-cli / gio / gtrash: `trash-put dir` trashes a tree without -r.
+    // `rtrash put` and multi-call `rm` stay rm-shaped.
+    if prog == "trash-put" || prog == "trash" {
+        opts.recursive = true;
+    }
     let mut files: Vec<PathBuf> = Vec::new();
     let mut no_more_opts = false;
     let mut plain = false;
@@ -160,6 +172,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--preserve-root" => opts.preserve_root = true,
             "--no-preserve-root" => opts.preserve_root = false,
             "--home-only" => opts.home_only = true,
+            "--no-home-fallback" => opts.no_home_fallback = true,
             "--interactive" => {
                 opts.force = false;
                 opts.interactive = Interactive::Always;
@@ -275,12 +288,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut ok = 0u64;
     let mut failed = 0u64;
     let mut names: Vec<String> = Vec::new();
+    let mut dests: Vec<String> = Vec::new();
     let mut batch = PutBatch::new();
     for file in &files {
         match put_one_in(prog, file, &opts, &mut batch) {
-            Ok(()) => {
+            Ok(dest) => {
                 ok += 1;
                 names.push(file.display().to_string());
+                dests.push(dest);
             }
             Err(code) => {
                 failed += 1;
@@ -294,9 +309,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             .iter()
             .map(|n| format!("\"{}\"", crate::list::json_escape(n)))
             .collect();
+        let dests_j: Vec<String> = dests
+            .iter()
+            .map(|n| format!("\"{}\"", crate::list::json_escape(n)))
+            .collect();
         println!(
-            "{{\"ok\":{ok},\"failed\":{failed},\"names\":[{}]}}",
-            names_j.join(",")
+            "{{\"ok\":{ok},\"failed\":{failed},\"names\":[{}],\"dests\":[{}]}}",
+            names_j.join(","),
+            dests_j.join(",")
         );
     }
     status
@@ -345,10 +365,22 @@ fn describe(meta: &fs::Metadata, path: &Path) -> &'static str {
 
 /// Move one path into the trash. Shared by the CLI, TUI, and HUD.
 pub fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
+    let p = path.to_path_buf();
+    put_paths(prog, std::slice::from_ref(&p), opts)
+        .into_iter()
+        .find(Result::is_err)
+        .unwrap_or(Ok(()))
+}
+
+/// Put many paths under one [`PutBatch`] (one lock and one DeletionDate per root).
+pub fn put_paths(prog: &str, paths: &[PathBuf], opts: &Opts) -> Vec<Result<(), i32>> {
     let mut batch = PutBatch::new();
-    let r = put_one_in(prog, path, opts, &mut batch);
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
+        out.push(put_one_in(prog, p, opts, &mut batch).map(|_| ()));
+    }
     batch.finish();
-    r
+    out
 }
 
 fn put_one_in(
@@ -356,7 +388,7 @@ fn put_one_in(
     path: &Path,
     opts: &Opts,
     batch: &mut PutBatch,
-) -> Result<(), i32> {
+) -> Result<String, i32> {
     let name = path.as_os_str().to_string_lossy();
 
     if opts.preserve_root && path == Path::new("/") {
@@ -374,7 +406,7 @@ fn put_one_in(
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             if opts.force {
-                return Ok(());
+                return Ok(String::new());
             }
             eprintln!("{prog}: cannot remove '{name}': No such file or directory");
             return Err(1);
@@ -406,7 +438,7 @@ fn put_one_in(
     if opts.interactive == Interactive::Always {
         let kind = describe(&meta, path);
         if !confirm(&format!("{prog}: remove {kind} '{name}'? ")) {
-            return Ok(());
+            return Ok(String::new());
         }
     }
 
@@ -442,12 +474,15 @@ fn put_one_in(
             );
             if opts.verbose {
                 if meta.is_dir() {
-                    println!("removed directory '{name}'");
+                    println!(
+                        "removed directory '{name}' -> {}",
+                        trash_for_cache.root.display()
+                    );
                 } else {
-                    println!("removed '{name}'");
+                    println!("removed '{name}' -> {}", trash_for_cache.root.display());
                 }
             }
-            Ok(())
+            Ok(trash_for_cache.root.display().to_string())
         }
         Err(e) => {
             eprintln!("{prog}: cannot trash '{name}': {e}");
@@ -483,5 +518,5 @@ fn resolve_put_trash(
         td.ensure()?;
         return Ok(td);
     }
-    trashdir::select(abs, meta.dev())
+    trashdir::select_opts(abs, meta.dev(), !opts.no_home_fallback)
 }

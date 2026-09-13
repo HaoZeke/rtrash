@@ -106,6 +106,7 @@ impl Catalog {
             preserve_root: true,
             trash_pin: pin.clone(),
             home_only: pin.is_none(),
+            no_home_fallback: false,
         };
         put::put_one("rtrash-hud", path, &opts)
     }

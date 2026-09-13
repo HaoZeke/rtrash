@@ -23,6 +23,7 @@ A files/ name with no .trashinfo is an emergency row: date
                      `--trash-dir=PATH` also accepted);
                      default is the home trash plus every mounted volume
       --cwd-only        only items whose original path is under cwd
+      --directory=PATH  only items under PATH (repeatable; same rule as --cwd-only)
       --match=MODE      glob (default), literal, or regex
       --older-than=DAYS only items trashed more than DAYS days ago
                      (same cutoff model as `empty DAYS`)
@@ -61,7 +62,12 @@ impl Entry {
     /// Path column for list/TUI: original Path=, or an emergency orphan label.
     pub fn path_label(&self) -> String {
         if self.orphan {
-            format!("ORPHAN {} (no .trashinfo)", self.name)
+            let info = self.dir.info().join(format!("{}.trashinfo", self.name));
+            if info.is_file() {
+                format!("DANGLING {} (no files/)", self.name)
+            } else {
+                format!("ORPHAN {} (no .trashinfo)", self.name)
+            }
         } else {
             self.original.display().to_string()
         }
@@ -140,9 +146,20 @@ fn parse_info_entry(dir: &TrashDir, entry: &fs::DirEntry) -> Option<Entry> {
         .as_deref()
         .and_then(info::parse_local_to_epoch)
         .unwrap_or(0);
-    let original = dir.resolve_original_checked(&parsed.path).ok()?;
+    let files_ok = dir.files().join(name).symlink_metadata().is_ok();
+    let original = dir.resolve_original_checked(&parsed.path);
+    if !files_ok || original.is_err() {
+        return Some(Entry {
+            original: PathBuf::new(),
+            date: parsed.deletion_date,
+            epoch,
+            name: name.to_string(),
+            dir: dir.clone(),
+            orphan: true,
+        });
+    }
     Some(Entry {
-        original,
+        original: original.ok()?,
         date: parsed.deletion_date,
         epoch,
         name: name.to_string(),
@@ -384,6 +401,14 @@ fn parse_nonneg_count(s: &str) -> Result<usize, String> {
         .map_err(|_| format!("invalid count '{s}'"))
 }
 
+fn want_tsv() -> bool {
+    match std::env::var("RTRASH_LIST_TSV").ok().as_deref() {
+        Some("0") | Some("false") => false,
+        Some("1") | Some("true") => true,
+        _ => !crate::util::stdout_is_tty(),
+    }
+}
+
 fn format_text_line(entry: &Entry, size: Option<u64>) -> String {
     let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
     let date = date.replacen('T', " ", 1);
@@ -467,6 +492,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut reverse = false;
     let mut last: Option<usize> = None;
     let mut cwd_only = false;
+    let mut directories: Vec<PathBuf> = Vec::new();
     let mut match_mode = MatchMode::Glob;
     let mut patterns: Vec<String> = Vec::new();
     let mut i = 0usize;
@@ -475,6 +501,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         match arg.as_str() {
             "--home-only" => home_only = true,
             "--cwd-only" => cwd_only = true,
+            a if a == "--directory" || a.starts_with("--directory=") => {
+                match crate::util::take_eq_or_next(args, &mut i, "--directory") {
+                    Ok(p) => directories.push(PathBuf::from(p)),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
             "--orphans" => orphans_only = true,
             "--show-size" => show_size = true,
             "--reverse" => reverse = true,
@@ -645,7 +680,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     if cwd_only {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-        entries.retain(|e| !e.orphan && e.original.starts_with(&cwd));
+        directories.push(cwd);
+    }
+    if !directories.is_empty() {
+        entries.retain(|e| {
+            !e.orphan && directories.iter().any(|d| e.original.starts_with(d))
+        });
     }
     if !patterns.is_empty() {
         if match_mode == MatchMode::Regex {
@@ -683,7 +723,23 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             } else {
                 None
             };
-            println!("{}", format_text_line(entry, sz));
+            let line = format_text_line(entry, sz);
+            if want_tsv() {
+                // gtrash find: date TAB path so fzf | awk -F'\\t' is safe.
+                let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
+                let date = date.replacen('T', " ", 1);
+                match sz {
+                    Some(n) => println!(
+                        "{}\t{}\t{}",
+                        date,
+                        crate::fastdelete::format_bytes(n),
+                        entry.path_label()
+                    ),
+                    None => println!("{}\t{}", date, entry.path_label()),
+                }
+            } else {
+                println!("{line}");
+            }
         }
     }
     0

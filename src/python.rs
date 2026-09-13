@@ -103,13 +103,11 @@ fn put_paths(py: Python<'_>, paths: Vec<PathBuf>, recursive: bool, force: bool) 
         ..put_mod::Opts::default()
     };
     let code = py.detach(|| {
-        let mut status = 0;
-        for p in &paths {
-            if let Err(c) = put_mod::put_one("rtrash", p, &opts) {
-                status = status.max(c);
-            }
-        }
-        status
+        put_mod::put_paths("rtrash", &paths, &opts)
+            .into_iter()
+            .filter_map(Result::err)
+            .max()
+            .unwrap_or(0)
     });
     map_code(code, "put")
 }

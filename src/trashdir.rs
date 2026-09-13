@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::info;
@@ -187,6 +187,16 @@ fn shared_trash_dir_ok(trash_dot: &Path) -> bool {
     }
 }
 
+/// `$top/.Trash-$uid` must be a real directory owned by this uid (not a symlink).
+fn user_owned_dir(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            !meta.file_type().is_symlink() && meta.is_dir() && meta.uid() == uid()
+        }
+        Err(_) => false,
+    }
+}
+
 /// Trash dir for a file on device `dev` at absolute path `abs`.
 /// Home trash when on the same fs; otherwise `$top/.Trash/$uid` (must be a
 /// sticky non-symlink dir) or `$top/.Trash-$uid`; home trash as last resort
@@ -200,6 +210,12 @@ fn shared_trash_dir_ok(trash_dot: &Path) -> bool {
 /// `$XDG_DATA_HOME/Trash` or `~/.local/share/Trash`. This is **not** Finder Trash;
 /// volume `.Trash-$uid` discovery is disabled for the experimental path.
 pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
+    select_opts(abs, dev, true)
+}
+
+/// Like [`select`]. When `allow_home_fallback` is false, a missing volume trash
+/// is an error instead of a silent copy into `$HOME`.
+pub fn select_opts(abs: &Path, dev: u64, allow_home_fallback: bool) -> io::Result<TrashDir> {
     if crate::platform::is_macos_fdo_experimental() {
         let _ = (abs, dev);
         let home = TrashDir {
@@ -233,14 +249,32 @@ pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
         }
     }
 
-    let td = TrashDir {
-        root: top.join(format!(".Trash-{uid}")),
-        topdir: Some(top),
-    };
-    if td.ensure().is_ok() {
-        return Ok(td);
+    let private_root = top.join(format!(".Trash-{uid}"));
+    if private_root.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        eprintln!(
+            "rtrash: refusing symlink volume trash {}",
+            private_root.display()
+        );
+    } else {
+        let td = TrashDir {
+            root: private_root,
+            topdir: Some(top),
+        };
+        if td.ensure().is_ok() && user_owned_dir(&td.root) {
+            return Ok(td);
+        }
     }
 
+    if !allow_home_fallback {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "volume trash unavailable and home fallback disabled",
+        ));
+    }
+    eprintln!(
+        "rtrash: volume trash unavailable; using home trash {}",
+        home.root.display()
+    );
     home.ensure()?;
     Ok(home)
 }
@@ -376,7 +410,7 @@ fn collect_volume_trash(
             });
         }
         let private = mp.join(format!(".Trash-{uid}"));
-        if !seen.contains(&private) && private.is_dir() {
+        if !seen.contains(&private) && user_owned_dir(&private) {
             seen.insert(private.clone());
             out.push(TrashDir {
                 root: private,
@@ -411,6 +445,7 @@ impl TrashLock {
             .truncate(false)
             .read(true)
             .write(true)
+            .mode(0o600)
             .open(&path)?;
         use std::os::unix::io::AsRawFd;
         let rc = unsafe { libc::flock(file.as_raw_fd(), flags) };
@@ -544,7 +579,7 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
 
 /// Inner put path (caller holds the trash-root lock). Exposed for tests.
 pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
-    trash_move_locked_opts(abs, meta, trash, true)
+    trash_move_locked_opts(abs, meta, trash, true, &info::now_local_string())
 }
 
 /// Like [`trash_move_locked`]. When `fsync_info_dir` is false the caller must
@@ -554,6 +589,7 @@ pub fn trash_move_locked_opts(
     meta: &fs::Metadata,
     trash: &TrashDir,
     fsync_info_dir: bool,
+    deletion_date: &str,
 ) -> io::Result<String> {
     let base = abs
         .file_name()
@@ -571,7 +607,7 @@ pub fn trash_move_locked_opts(
             .unwrap_or_else(|_| abs.to_path_buf()),
         None => abs.to_path_buf(),
     };
-    let body = info::render(&recorded, &info::now_local_string());
+    let body = info::render(&recorded, deletion_date);
 
     let mut attempt: u64 = 0;
     let (name, mut info_file) = loop {
@@ -595,6 +631,7 @@ pub fn trash_move_locked_opts(
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&info_path)
         {
             Ok(f) => break (name, f),
@@ -885,7 +922,12 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
         std::process::id()
     ));
     {
-        let mut f = fs::File::create(&tmp)?;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
     }

@@ -69,6 +69,12 @@ pub fn stdin_is_tty() -> bool {
     std::io::stdin().is_terminal()
 }
 
+/// True when stdout is a terminal (list TTY vs TSV).
+pub fn stdout_is_tty() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+}
+
 /// `--trash-dir=PATH` or `--trash-dir` (PATH is the next argv), matching trash-cli.
 pub fn is_trash_dir_flag(arg: &str) -> bool {
     arg == "--trash-dir" || arg.starts_with("--trash-dir=")
