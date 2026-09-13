@@ -1,0 +1,1 @@
+Same-filesystem put reserves names with `openat`/`renameat2` on held `info/` and `files/` dirfds (no `files/` lstat on the happy path). Cross-device put uses `FICLONE`, then `copy_file_range`, then `sendfile`, then a large sequential buffer.

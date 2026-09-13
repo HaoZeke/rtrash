@@ -54,7 +54,7 @@ Secrets wipe, non-Linux platforms, policies that forbid recoverability.
 ## Library layout
 
 ```
-src/lib.rs main.rs put.rs empty.rs fastdelete.rs list.rs restore.rs rm.rs
+src/lib.rs main.rs put.rs empty.rs fastdelete.rs fastcopy.rs list.rs restore.rs rm.rs
 src/trashdir.rs info.rs util.rs python.rs (feature = python)
 ```
 

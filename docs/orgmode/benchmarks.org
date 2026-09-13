@@ -8,7 +8,7 @@
 | *Safer* than permanent =os.remove= / bare =rm=? | *Yes* — recoverable FreeDesktop trash + rm fail-safes |
 | *Safer* than trash-cli? | *Roughly equivalent* FreeDesktop correctness; stronger rm-flag fail-safes on put |
 | *Better* as a daily driver for this niche? | *Yes* for native multi-call + in-process Python |
-| *Faster*? | *Yes on the measured fixtures* (see dated table; not universal) |
+| *Faster*? | *Yes on the 2026-09-13 terra fixture* — same-FS put 6.2× vs trash-cli; EXDEV put succeeds where trash-cli refuses |
 
 * Reproduce
 
@@ -23,16 +23,16 @@ python3 benches/compare_trash_cli.py | tee compare-trash-cli.log
 Fixture: 400 small files + multi-file directory tree; two trials; put then empty with =--trash-dir= pin.
 Harness rejects =trash-put= when it is multi-call rtrash.
 
-* Measured results (Linux x86_64, 2026-07-08)
+* Measured results (Linux x86_64, 2026-09-13)
 
-These are the last harness run shipped in-tree. The crate version is now *0.1.4*; the table below is still *rtrash 0.1.2*. Re-run =benches/compare_trash_cli.py= before quoting it as current. List, EXDEV put, and 10k+ empty are *unmeasured* by this harness (=n_small=400=; ASV params 50/200).
+Harness =benches/compare_trash_cli.py= on terra-x86_64 (/home btrfs, /tmp a different device). Log: =benches/compare-trash-cli-2026-09-13-sota.txt= (ends =COMPARE_OK=).
 
-| Tool | put avg (s) | empty avg (s) |
-|------+-------------+---------------|
-| rtrash 0.1.2 release | 0.005449 | 0.002986 |
-| trash-cli 0.24.5.26 | 0.074310 | 0.039565 |
-| speedup | ~13.6× | ~13.3× |
+| Tool | put avg (s) | list avg (s) | empty avg (s) |
+|------+-------------+--------------+---------------|
+| rtrash 0.1.4 release | 0.012666 | 0.002015 | 0.009490 |
+| trash-cli 0.24.5.26 | 0.078211 | 0.048195 | 0.036530 |
+| trash-cli / rtrash | 6.17× | 23.92× | 3.85× |
 
-Both tools: =ec=0=, =entries=401= after put, empty leaves =files_left=0= =info_left=0=, =LIST_OK= for a single-file put.
-Optional peers trashy/gtrash: missing on the host.
-Earlier 2026-07-07 snapshot (~13× / ~12×) is superseded; do not treat it as current.
+Same-FS /tmp fixture: =ec=0=, =entries=401=, empty leaves =files_left=0= =info_left=0=, =LIST_OK=.
+Cross-device: rtrash put 0.402144 s (401 entries); trash-cli refused (not in the same volume).
+Optional peers trashy/gtrash: missing on the host (not implied losers).

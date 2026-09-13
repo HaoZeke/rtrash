@@ -14,9 +14,13 @@ pub mod win_recycle;
 #[cfg(unix)]
 pub mod catalog_cache;
 #[cfg(unix)]
+pub mod desktop;
+#[cfg(unix)]
 pub mod empty;
 #[cfg(all(unix, feature = "tui"))]
 pub mod empty_tui;
+#[cfg(unix)]
+pub mod fastcopy;
 #[cfg(unix)]
 pub mod fastdelete;
 #[cfg(unix)]
@@ -37,8 +41,6 @@ pub mod rm;
 pub mod setup;
 #[cfg(unix)]
 pub mod status;
-#[cfg(unix)]
-pub mod desktop;
 #[cfg(unix)]
 pub mod trashdir;
 #[cfg(all(unix, feature = "tui"))]

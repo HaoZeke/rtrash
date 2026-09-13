@@ -230,6 +230,86 @@ def main() -> int:
     print(f"put_speedup_rtrash_over_trashcli={tp / max(rp, 1e-9):.2f}x")
     print(f"list_speedup_rtrash_over_trashcli={tl / max(rl, 1e-9):.2f}x")
     print(f"empty_speedup_rtrash_over_trashcli={te / max(re, 1e-9):.2f}x")
+
+    tmp_probe = Path(tempfile.gettempdir())
+    home_probe = Path.home()
+    tmp_dev = tmp_probe.stat().st_dev
+    home_dev = home_probe.stat().st_dev
+    print(f"tmp_dev={tmp_dev} home_dev={home_dev}")
+    if tmp_dev == home_dev:
+        print("EXDEV status=same-device skipped")
+    else:
+        # Payloads on the tempfile device; isolated trash pin on $HOME's device.
+        # trash-cli refuses that copy ("not in the same volume"). rtrash must
+        # still succeed — that is the TeraCopy-style cross-volume path.
+        month = time.strftime("%Y-%m")
+        pin_root = home_probe / "var" / "scratch" / month / "rtrash-exdev-bench"
+        exdev_rtrash: list[float] = []
+        try:
+            with tempfile.TemporaryDirectory(prefix="rtrash-exdev-work-") as tmp:
+                work_root = Path(tmp)
+                for trial in (1, 2):
+                    work = work_root / f"rtrash-{trial}"
+                    xdg = pin_root / f"rtrash-{trial}" / "xdg"
+                    work.mkdir(parents=True)
+                    xdg.mkdir(parents=True)
+                    trash = xdg / "Trash"
+                    env = os.environ.copy()
+                    env["XDG_DATA_HOME"] = str(xdg)
+                    env["HOME"] = str(pin_root / f"rtrash-{trial}")
+                    populate_work(work)
+                    paths = [str(p) for p in sorted(work.iterdir())]
+                    put = [rtrash, "put", "-r", "--trash-dir", str(trash)] + paths
+                    ec, dt_put, out, err = run(put, env)
+                    n_after = count_trash(trash)
+                    print(
+                        f"EXDEV_PUT tool=rtrash trial={trial} ec={ec} "
+                        f"wall_s={dt_put:.6f} entries={n_after}"
+                    )
+                    if ec != 0 or n_after < 2:
+                        print(out)
+                        print(err[:200], file=sys.stderr)
+                        return 1
+                    ec, _, _, err = run(
+                        [rtrash, "empty", "-f", "--trash-dir", str(trash)], env
+                    )
+                    if ec != 0:
+                        print(err[:200], file=sys.stderr)
+                        return 1
+                    exdev_rtrash.append(dt_put)
+
+                work = work_root / "trash-cli-probe"
+                xdg = pin_root / "trash-cli-probe" / "xdg"
+                work.mkdir(parents=True)
+                xdg.mkdir(parents=True)
+                env = os.environ.copy()
+                env["XDG_DATA_HOME"] = str(xdg)
+                env["HOME"] = str(pin_root / "trash-cli-probe")
+                (work / "one.txt").write_text("x\n", encoding="utf-8")
+                ec, dt_put, _, err = run([trash_put, str(work / "one.txt")], env)
+                refused = "not in the same volume" in err or ec != 0
+                print(
+                    f"EXDEV_PUT tool=trash-cli trial=1 ec={ec} "
+                    f"wall_s={dt_put:.6f} entries={count_trash(xdg / 'Trash')} "
+                    f"status={'refused-cross-volume' if refused else 'copied'}"
+                )
+            rp_x = sum(exdev_rtrash) / len(exdev_rtrash)
+            print(f"EXDEV rtrash put_avg_s={rp_x:.6f}")
+            print("EXDEV trash-cli status=refused-cross-volume")
+        finally:
+            if pin_root.is_dir():
+                with tempfile.TemporaryDirectory(prefix="rtrash-exdev-cleanup-") as ctmp:
+                    ctrash = Path(ctmp) / "Trash"
+                    ctrash.mkdir()
+                    run(
+                        [rtrash, "put", "-rf", "--trash-dir", str(ctrash), str(pin_root)],
+                        os.environ.copy(),
+                    )
+                    run(
+                        [rtrash, "empty", "-f", "--trash-dir", str(ctrash)],
+                        os.environ.copy(),
+                    )
+
     with tempfile.TemporaryDirectory(prefix="rtrash-list-") as tmp:
         root = Path(tmp)
         for tool, put_bin, list_bin in (

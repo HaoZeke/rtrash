@@ -190,9 +190,7 @@ fn shared_trash_dir_ok(trash_dot: &Path) -> bool {
 /// `$top/.Trash-$uid` must be a real directory owned by this uid (not a symlink).
 fn user_owned_dir(path: &Path) -> bool {
     match fs::symlink_metadata(path) {
-        Ok(meta) => {
-            !meta.file_type().is_symlink() && meta.is_dir() && meta.uid() == uid()
-        }
+        Ok(meta) => !meta.file_type().is_symlink() && meta.is_dir() && meta.uid() == uid(),
         Err(_) => false,
     }
 }
@@ -250,7 +248,11 @@ pub fn select_opts(abs: &Path, dev: u64, allow_home_fallback: bool) -> io::Resul
     }
 
     let private_root = top.join(format!(".Trash-{uid}"));
-    if private_root.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+    if private_root
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
         eprintln!(
             "rtrash: refusing symlink volume trash {}",
             private_root.display()
@@ -422,8 +424,13 @@ fn collect_volume_trash(
 
 /// Exclusive per-trash-root lock (flock on `root/.rtrash.lock`) so put and empty
 /// cannot interleave a half-written pair under the same root.
+///
+/// Holds `O_DIRECTORY` fds for `info/` and `files/` so a batch put can
+/// `openat`/`renameat2` without re-walking those paths per name.
 pub struct TrashLock {
     _file: fs::File,
+    info_dir: fs::File,
+    files_dir: fs::File,
 }
 
 impl TrashLock {
@@ -439,6 +446,10 @@ impl TrashLock {
 
     fn acquire_flags(root: &Path, flags: i32) -> io::Result<Self> {
         fs::create_dir_all(root)?;
+        let mut b = fs::DirBuilder::new();
+        b.recursive(true).mode(0o700);
+        b.create(root.join("files"))?;
+        b.create(root.join("info"))?;
         let path = root.join(".rtrash.lock");
         let file = fs::OpenOptions::new()
             .create(true)
@@ -452,8 +463,36 @@ impl TrashLock {
         if rc != 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(TrashLock { _file: file })
+        let info_dir = open_dir(&root.join("info"))?;
+        let files_dir = open_dir(&root.join("files"))?;
+        Ok(TrashLock {
+            _file: file,
+            info_dir,
+            files_dir,
+        })
     }
+
+    fn info_fd(&self) -> std::os::unix::io::RawFd {
+        use std::os::unix::io::AsRawFd;
+        self.info_dir.as_raw_fd()
+    }
+
+    fn files_fd(&self) -> std::os::unix::io::RawFd {
+        use std::os::unix::io::AsRawFd;
+        self.files_dir.as_raw_fd()
+    }
+
+    /// fsync `info/` via the held directory fd.
+    pub fn sync_info(&self) -> io::Result<()> {
+        self.info_dir.sync_all()
+    }
+}
+
+fn open_dir(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(path)
 }
 
 const PSEUDO_FS: &[&str] = &[
@@ -573,21 +612,27 @@ pub fn abs_nofollow(path: &Path) -> io::Result<PathBuf> {
 /// concurrent empty of the same root cannot tear the pair.
 pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
     trash.ensure()?;
-    let _lock = TrashLock::acquire(&trash.root)?;
-    trash_move_locked(abs, meta, trash)
+    let lock = TrashLock::acquire(&trash.root)?;
+    trash_move_locked(abs, meta, trash, &lock)
 }
 
 /// Inner put path (caller holds the trash-root lock). Exposed for tests.
-pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
-    trash_move_locked_opts(abs, meta, trash, true, &info::now_local_string())
+pub fn trash_move_locked(
+    abs: &Path,
+    meta: &fs::Metadata,
+    trash: &TrashDir,
+    lock: &TrashLock,
+) -> io::Result<String> {
+    trash_move_locked_opts(abs, meta, trash, lock, true, &info::now_local_string())
 }
 
 /// Like [`trash_move_locked`]. When `fsync_info_dir` is false the caller must
-/// [`sync_info_dir`] once after a batch of puts under the same lock.
+/// [`TrashLock::sync_info`] once after a batch of puts under the same lock.
 pub fn trash_move_locked_opts(
     abs: &Path,
     meta: &fs::Metadata,
     trash: &TrashDir,
+    lock: &TrashLock,
     fsync_info_dir: bool,
     deletion_date: &str,
 ) -> io::Result<String> {
@@ -610,31 +655,61 @@ pub fn trash_move_locked_opts(
     let body = info::render(&recorded, deletion_date);
 
     let mut attempt: u64 = 0;
-    let (name, mut info_file) = loop {
+    loop {
         let name = if attempt == 0 {
             base.clone()
         } else {
             format!("{base}.{}", attempt + 1)
         };
-        // Skip names already occupied by an orphan payload (no .trashinfo).
-        if trash.files().join(&name).symlink_metadata().is_ok() {
-            attempt += 1;
-            if attempt > 10_000 {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "could not reserve a unique trash name",
-                ));
+        let info_name = format!("{name}.trashinfo");
+        let info_c = cstring_name(info_name.as_bytes())?;
+        match openat_excl(lock.info_fd(), &info_c, 0o600) {
+            Ok(mut info_file) => {
+                info_file.write_all(body.as_bytes())?;
+                info_file.flush()?;
+                if fsync_info_dir {
+                    // Single-name put: durable reservation before the payload move.
+                    sync_file(&mut info_file)?;
+                    let _ = lock.sync_info();
+                }
+                drop(info_file);
+
+                let dest_c = cstring_name(name.as_bytes())?;
+                let dest = trash.files().join(&name);
+                let moved = match rename_noreplace_at(abs, lock.files_fd(), &dest_c) {
+                    Ok(()) => Ok(()),
+                    Err(e) if e.raw_os_error() == Some(libc::EEXIST) => {
+                        // Orphan payload occupies this name. Drop the reservation
+                        // and try the next suffix — no files/ lstat on the happy path.
+                        let _ = unlinkat_name(lock.info_fd(), &info_c);
+                        attempt += 1;
+                        if attempt > 10_000 {
+                            return Err(io::Error::new(
+                                io::ErrorKind::AlreadyExists,
+                                "could not reserve a unique trash name",
+                            ));
+                        }
+                        continue;
+                    }
+                    Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+                        copy_recursive(abs, &dest, meta)
+                            .and_then(|_| sync_copied_tree(&dest, meta))
+                            .and_then(|_| remove_any(abs, meta))
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = moved {
+                    let _ = unlinkat_name(lock.info_fd(), &info_c);
+                    let _ = remove_any_path(&dest);
+                    return Err(e);
+                }
+                if meta.is_dir() {
+                    let size = crate::fastdelete::disk_usage(&dest);
+                    let mtime = info_mtime_secs(&trash.info().join(&info_name)).unwrap_or(0);
+                    let _ = directorysizes_upsert(trash, &name, size, mtime);
+                }
+                return Ok(name);
             }
-            continue;
-        }
-        let info_path = trash.info().join(format!("{name}.trashinfo"));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&info_path)
-        {
-            Ok(f) => break (name, f),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 attempt += 1;
                 if attempt > 10_000 {
@@ -646,37 +721,7 @@ pub fn trash_move_locked_opts(
             }
             Err(e) => return Err(e),
         }
-    };
-    info_file.write_all(body.as_bytes())?;
-    info_file.flush()?;
-    if fsync_info_dir {
-        // Single-name put: durable reservation before the payload move.
-        sync_file(&mut info_file)?;
-        let _ = sync_dir(&trash.info());
     }
-    drop(info_file);
-
-    let dest = trash.files().join(&name);
-    let moved = match rename_noreplace(abs, &dest) {
-        Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => copy_recursive(abs, &dest, meta)
-            .and_then(|_| sync_copied_tree(&dest, meta))
-            .and_then(|_| remove_any(abs, meta)),
-        Err(e) => Err(e),
-    };
-    if let Err(e) = moved {
-        let _ = fs::remove_file(trash.info().join(format!("{name}.trashinfo")));
-        let _ = remove_any_path(&dest);
-        return Err(e);
-    }
-    // FreeDesktop directorysizes cache: only for trashed directories.
-    if meta.is_dir() {
-        // FreeDesktop: cache is du -B1 (st_blocks * 512), same as disk_usage.
-        let size = crate::fastdelete::disk_usage(&dest);
-        let mtime = info_mtime_secs(&trash.info().join(format!("{name}.trashinfo"))).unwrap_or(0);
-        let _ = directorysizes_upsert(trash, &name, size, mtime);
-    }
-    Ok(name)
 }
 
 /// Flush file data+metadata to stable storage.
@@ -694,26 +739,61 @@ fn sync_dir(path: &Path) -> io::Result<()> {
     f.sync_all()
 }
 
-/// `rename(2)` that refuses to replace an existing path when the kernel supports
-/// `RENAME_NOREPLACE` (Linux); falls back to plain `rename` otherwise (macOS/BSD).
-fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
+fn cstring_name(bytes: &[u8]) -> io::Result<std::ffi::CString> {
+    std::ffi::CString::new(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+}
+
+fn openat_excl(
+    dirfd: std::os::unix::io::RawFd,
+    name: &std::ffi::CStr,
+    mode: u32,
+) -> io::Result<fs::File> {
+    use std::os::unix::io::FromRawFd;
+    let fd = unsafe {
+        libc::openat(
+            dirfd,
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC,
+            mode,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+fn unlinkat_name(dirfd: std::os::unix::io::RawFd, name: &std::ffi::CStr) -> io::Result<()> {
+    let rc = unsafe { libc::unlinkat(dirfd, name.as_ptr(), 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// `renameat2(RENAME_NOREPLACE)` into an already-open `files/` directory.
+///
+/// Older kernels without `renameat2` fall back to `renameat` after `fstatat`
+/// so an orphan payload is still not overwritten.
+fn rename_noreplace_at(
+    src: &Path,
+    dest_dirfd: std::os::unix::io::RawFd,
+    dest_name: &std::ffi::CStr,
+) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let src_c = std::ffi::CString::new(src.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     #[cfg(target_os = "linux")]
     {
-        use std::os::unix::ffi::OsStrExt;
-        let src_c = std::ffi::CString::new(src.as_os_str().as_bytes())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let dest_c = std::ffi::CString::new(dest.as_os_str().as_bytes())
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        // RENAME_NOREPLACE = 1 on Linux. Use the renameat2 syscall (available under
-        // both glibc and musl libc crates; renameat2 is not always exported as a
-        // function symbol on musl).
+        // RENAME_NOREPLACE = 1. syscall form works on glibc and musl.
         let rc = unsafe {
             libc::syscall(
                 libc::SYS_renameat2,
                 libc::AT_FDCWD,
                 src_c.as_ptr(),
-                libc::AT_FDCWD,
-                dest_c.as_ptr(),
+                dest_dirfd,
+                dest_name.as_ptr(),
                 1usize,
             )
         };
@@ -721,17 +801,35 @@ fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
             return Ok(());
         }
         let err = io::Error::last_os_error();
-        // Older kernels: fall back (orphan pre-check still applies).
-        if err.raw_os_error() == Some(libc::EINVAL) || err.raw_os_error() == Some(libc::ENOSYS) {
-            return fs::rename(src, dest);
+        if err.raw_os_error() != Some(libc::EINVAL) && err.raw_os_error() != Some(libc::ENOSYS) {
+            return Err(err);
         }
-        Err(err)
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        // macOS/BSD: no RENAME_NOREPLACE in this path; collision handled by
-        // O_EXCL .trashinfo reservation before the payload rename.
-        fs::rename(src, dest)
+    // macOS/BSD, or Linux without renameat2: refuse to clobber via fstatat.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let exists = unsafe {
+        libc::fstatat(
+            dest_dirfd,
+            dest_name.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if exists == 0 {
+        return Err(io::Error::from_raw_os_error(libc::EEXIST));
+    }
+    let rc = unsafe {
+        libc::renameat(
+            libc::AT_FDCWD,
+            src_c.as_ptr(),
+            dest_dirfd,
+            dest_name.as_ptr(),
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -991,11 +1089,7 @@ pub fn copy_recursive(src: &Path, dst: &Path, meta: &fs::Metadata) -> io::Result
         set_times(dst, meta)?;
         Ok(())
     } else {
-        fs::copy(src, dst)?;
-        fs::set_permissions(dst, meta.permissions())?;
-        set_times(dst, meta)?;
-        let mut f = fs::File::open(dst)?;
-        sync_file(&mut f)?;
+        crate::fastcopy::copy_file_fast(src, dst)?;
         Ok(())
     }
 }
@@ -1192,9 +1286,66 @@ proc /proc proc rw 0 0
             "put + relocate + definition"
         );
         assert!(
-            src.contains("sync_file(&mut f)"),
-            "regular-file EXDEV copy must sync_all the dest"
+            src.contains("copy_file_fast"),
+            "regular-file EXDEV copy must use kernel/large-buffer copy_file_fast"
         );
+        assert!(
+            !src.contains(concat!("fs::", "copy(src, dst)?")),
+            "userspace bounce copy must not remain on the EXDEV path"
+        );
+        assert!(
+            !src.contains(concat!("files().join(&name).", "symlink_metadata()")),
+            "name reserve must not lstat files/ on the happy path"
+        );
+    }
+
+    #[test]
+    fn trash_move_orphan_payload_gets_numeric_suffix() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-orphan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let td = TrashDir {
+            root: root.join("Trash"),
+            topdir: None,
+        };
+        td.ensure().unwrap();
+        fs::write(td.files().join("foo"), b"orphan").unwrap();
+        let src = root.join("foo");
+        fs::write(&src, b"new").unwrap();
+        let meta = fs::symlink_metadata(&src).unwrap();
+        let name = trash_move(&src, &meta, &td).unwrap();
+        assert_eq!(name, "foo.2");
+        assert_eq!(fs::read(td.files().join("foo")).unwrap(), b"orphan");
+        assert_eq!(fs::read(td.files().join("foo.2")).unwrap(), b"new");
+        assert!(td.info().join("foo.2.trashinfo").is_file());
+        assert!(!td.info().join("foo.trashinfo").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn trash_lock_holds_info_and_files_dirfds() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-dirfd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let lock = TrashLock::acquire(&root).unwrap();
+        assert!(root.join("files").is_dir());
+        assert!(root.join("info").is_dir());
+        lock.sync_info().unwrap();
+        drop(lock);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1346,7 +1497,11 @@ proc /proc proc rw 0 0
         seen.clear();
         out.clear();
         collect_volume_trash(&[mp.clone()], uid, &mut seen, &mut out);
-        assert_eq!(out.len(), 1, "private .Trash-$uid stays even if shared fails");
+        assert_eq!(
+            out.len(),
+            1,
+            "private .Trash-$uid stays even if shared fails"
+        );
         assert_eq!(out[0].root, private);
         let _ = fs::remove_dir_all(&root);
     }

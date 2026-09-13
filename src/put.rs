@@ -34,9 +34,9 @@ impl PutBatch {
     }
 
     fn abs_nofollow(&mut self, path: &Path) -> io::Result<PathBuf> {
-        let file_name = path.file_name().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "path has no file name")
-        })?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
         let parent = match path.parent() {
             Some(p) if !p.as_os_str().is_empty() => p,
             _ => Path::new(""),
@@ -65,11 +65,11 @@ impl PutBatch {
             let lock = trashdir::TrashLock::acquire(&trash.root)?;
             self.held.insert(key.clone(), (trash, lock));
         }
-        let (td, _) = self.held.get(&key).expect("just inserted");
+        let (td, lock) = self.held.get(&key).expect("just inserted");
         // Per-name fsync of .trashinfo is the 401-entry put cost. The batch
         // fsyncs info/ once at finish (same durability window as a crash
         // mid-argv).
-        trashdir::trash_move_locked_opts(abs, meta, td, false, &self.deletion_date)
+        trashdir::trash_move_locked_opts(abs, meta, td, lock, false, &self.deletion_date)
     }
 
     fn note(&mut self, trash: &trashdir::TrashDir, stored: String, original: PathBuf) {
@@ -88,14 +88,14 @@ impl PutBatch {
     }
 
     fn finish(&mut self) {
-        for (td, _) in self.held.values() {
-            let _ = trashdir::sync_info_dir(td);
+        for (td, lock) in self.held.values() {
+            let _ = lock.sync_info();
             let extra = self.pending.remove(&td.root).unwrap_or_default();
             if extra.is_empty() {
                 continue;
             }
-            let mut rows =
-                crate::catalog_cache::load_unverified(td).unwrap_or_else(|| crate::list::collect_one(td));
+            let mut rows = crate::catalog_cache::load_unverified(td)
+                .unwrap_or_else(|| crate::list::collect_one(td));
             let names: std::collections::HashSet<&str> =
                 extra.iter().map(|e| e.name.as_str()).collect();
             rows.retain(|e| !names.contains(e.name.as_str()));
@@ -442,12 +442,7 @@ pub fn put_paths(prog: &str, paths: &[PathBuf], opts: &Opts) -> Vec<Result<(), i
     out
 }
 
-fn put_one_in(
-    prog: &str,
-    path: &Path,
-    opts: &Opts,
-    batch: &mut PutBatch,
-) -> Result<String, i32> {
+fn put_one_in(prog: &str, path: &Path, opts: &Opts, batch: &mut PutBatch) -> Result<String, i32> {
     let name = path.as_os_str().to_string_lossy();
 
     if opts.preserve_root && path == Path::new("/") {
