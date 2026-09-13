@@ -298,6 +298,27 @@ Only items smaller than
 .I N
 bytes (same size syntax).
 .TP
+.B \-\-show\-size
+Print a reclaimable-size field (human-readable). Implied by
+.B \-\-larger\-than
+and
+.BR \-\-smaller\-than .
+.TP
+.BI \-\-sort =KEY
+Sort by
+.B date
+(default, oldest first) or
+.B size
+(smallest first).
+.TP
+.B \-\-reverse
+Reverse the sort order.
+.TP
+.BR \-n ", " \-\-last =N
+Print only the last
+.I N
+items after sorting.
+.TP
 .B \-\-json
 Emit a JSON array of objects
 (\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR, \fIorphan\fR;

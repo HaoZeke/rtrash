@@ -23,7 +23,7 @@ _rtrash_empty_opts=(
 )
 
 _rtrash_list_opts=(
-  --home-only --cwd-only --match --match= --trash-dir --trash-dir= --older-than= --newer-than= --orphans --larger-than= --smaller-than= --json --help --version
+  --home-only --cwd-only --match --match= --trash-dir --trash-dir= --older-than= --newer-than= --orphans --larger-than= --smaller-than= --show-size --sort --sort= --reverse -n --last --last= --json --help --version
 )
 
 _rtrash_status_opts=(

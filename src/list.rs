@@ -31,12 +31,18 @@ A files/ name with no .trashinfo is an emergency row: date
       --larger-than=N   only items larger than N bytes
                      (N, Nk/K, Nm/M, Ng/G; 1024-based)
       --smaller-than=N  only items smaller than N bytes (same size syntax)
+      --show-size       print a size field (on automatically with
+                     --larger-than/--smaller-than)
+      --sort=KEY        date (default, oldest first) or size (smallest first)
+      --reverse         reverse the sort order
+  -n, --last=N          print only the last N items after sorting
       --json            emit a JSON array (scripts; one object per item).
                      Includes a bytes field when size is computed
       --help            display this help and exit
       --version         output version information and exit
 ";
 
+#[derive(Clone)]
 pub struct Entry {
     pub date: Option<String>,
     pub epoch: i64,
@@ -149,11 +155,17 @@ pub fn is_newer_than(entry: &Entry, days: i64) -> bool {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MatchMode {
     Glob,
     Literal,
     Regex,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SortKey {
+    Date,
+    Size,
 }
 
 fn entry_matches(entry: &Entry, pat: &str, mode: MatchMode) -> bool {
@@ -345,6 +357,88 @@ fn filter_size(
     (kept, sizes)
 }
 
+fn compute_sizes(entries: &[Entry]) -> Vec<u64> {
+    let mut caches = std::collections::HashMap::new();
+    entries
+        .iter()
+        .map(|e| entry_bytes(e, &mut caches))
+        .collect()
+}
+
+fn parse_nonneg_count(s: &str) -> Result<usize, String> {
+    s.parse::<usize>()
+        .map_err(|_| format!("invalid count '{s}'"))
+}
+
+fn format_text_line(entry: &Entry, size: Option<u64>) -> String {
+    let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
+    let date = date.replacen('T', " ", 1);
+    match size {
+        Some(n) => format!(
+            "{} {} {}",
+            date,
+            crate::fastdelete::format_bytes(n),
+            entry.path_label()
+        ),
+        None => format!("{} {}", date, entry.path_label()),
+    }
+}
+
+/// Sort by date (oldest first) or size (smallest first), then optionally
+/// reverse and keep only the last N rows.
+fn sort_and_limit(
+    entries: Vec<Entry>,
+    sizes: Option<Vec<u64>>,
+    key: SortKey,
+    reverse: bool,
+    last: Option<usize>,
+) -> (Vec<Entry>, Option<Vec<u64>>) {
+    let n = entries.len();
+    if n == 0 {
+        return (entries, sizes);
+    }
+    let mut idx: Vec<usize> = (0..n).collect();
+    match (key, sizes.as_deref()) {
+        (SortKey::Size, Some(sz)) => {
+            idx.sort_by(|&i, &j| {
+                sz[i]
+                    .cmp(&sz[j])
+                    .then_with(|| entries[i].epoch.cmp(&entries[j].epoch))
+                    .then_with(|| entries[i].original.cmp(&entries[j].original))
+                    .then_with(|| entries[i].name.cmp(&entries[j].name))
+            });
+        }
+        _ => {
+            idx.sort_by(|&i, &j| {
+                entries[i]
+                    .epoch
+                    .cmp(&entries[j].epoch)
+                    .then_with(|| entries[i].original.cmp(&entries[j].original))
+                    .then_with(|| entries[i].name.cmp(&entries[j].name))
+            });
+        }
+    }
+    if reverse {
+        idx.reverse();
+    }
+    if let Some(k) = last {
+        if idx.len() > k {
+            idx.drain(0..idx.len() - k);
+        }
+    }
+    let mut taken: Vec<Option<Entry>> = entries.into_iter().map(Some).collect();
+    let mut taken_sz = sizes.map(|s| s.into_iter().map(Some).collect::<Vec<_>>());
+    let mut new_entries = Vec::with_capacity(idx.len());
+    let mut new_sizes = taken_sz.as_ref().map(|_| Vec::with_capacity(idx.len()));
+    for i in idx {
+        new_entries.push(taken[i].take().expect("index used once"));
+        if let (Some(ns), Some(ts)) = (new_sizes.as_mut(), taken_sz.as_mut()) {
+            ns.push(ts[i].take().expect("index used once"));
+        }
+    }
+    (new_entries, new_sizes)
+}
+
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut home_only = false;
@@ -354,6 +448,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut newer_than: Option<i64> = None;
     let mut larger_than: Option<u64> = None;
     let mut smaller_than: Option<u64> = None;
+    let mut show_size = false;
+    let mut sort_key = SortKey::Date;
+    let mut reverse = false;
+    let mut last: Option<usize> = None;
     let mut cwd_only = false;
     let mut match_mode = MatchMode::Glob;
     let mut patterns: Vec<String> = Vec::new();
@@ -364,6 +462,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--home-only" => home_only = true,
             "--cwd-only" => cwd_only = true,
             "--orphans" => orphans_only = true,
+            "--show-size" => show_size = true,
+            "--reverse" => reverse = true,
             "--json" => json = true,
             a if a == "--match" || a.starts_with("--match=") => {
                 match crate::util::take_eq_or_next(args, &mut i, "--match") {
@@ -458,6 +558,59 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     }
                 }
             }
+            a if a == "--sort" || a.starts_with("--sort=") => {
+                match crate::util::take_eq_or_next(args, &mut i, "--sort") {
+                    Ok("date") => sort_key = SortKey::Date,
+                    Ok("size") => sort_key = SortKey::Size,
+                    Ok(_) => {
+                        eprintln!("{prog}: --sort must be date or size");
+                        return 2;
+                    }
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
+            a if a == "--last" || a.starts_with("--last=") => {
+                match crate::util::take_eq_or_next(args, &mut i, "--last") {
+                    Ok(v) => match parse_nonneg_count(v) {
+                        Ok(n) => last = Some(n),
+                        Err(e) => {
+                            eprintln!("{prog}: {e}");
+                            return 2;
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
+            "-n" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    eprintln!("{prog}: -n requires N");
+                    return 2;
+                };
+                match parse_nonneg_count(val) {
+                    Ok(n) => last = Some(n),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
+            a if a.starts_with("-n") && a.len() > 2 => {
+                let rest = a.strip_prefix("-n=").unwrap_or(&a[2..]);
+                match parse_nonneg_count(rest) {
+                    Ok(n) => last = Some(n),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
                 eprintln!("Try '{prog} --help' for more information.");
@@ -492,19 +645,31 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         entries.retain(|e| patterns.iter().any(|pat| entry_matches(e, pat, match_mode)));
     }
     let size_filter = larger_than.is_some() || smaller_than.is_some();
-    let sizes = if size_filter {
+    let mut sizes = if size_filter {
         let (kept, sz) = filter_size(entries, larger_than, smaller_than);
         entries = kept;
         Some(sz)
     } else {
         None
     };
+    // Size filters imply a size column; sort=size and --show-size need bytes.
+    if size_filter {
+        show_size = true;
+    }
+    if sizes.is_none() && (show_size || sort_key == SortKey::Size) {
+        sizes = Some(compute_sizes(&entries));
+    }
+    let (entries, sizes) = sort_and_limit(entries, sizes, sort_key, reverse, last);
     if json {
         println!("{}", entries_to_json_sized(&entries, sizes.as_deref()));
     } else {
-        for entry in &entries {
-            let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
-            println!("{} {}", date.replacen('T', " ", 1), entry.path_label());
+        for (i, entry) in entries.iter().enumerate() {
+            let sz = if show_size {
+                sizes.as_deref().and_then(|s| s.get(i).copied())
+            } else {
+                None
+            };
+            println!("{}", format_text_line(entry, sz));
         }
     }
     0
@@ -615,5 +780,63 @@ mod tests {
         assert!(!entry_matches(&e, "eep", MatchMode::Literal));
         assert!(entry_matches(&e, r"keep\.c$", MatchMode::Regex));
         assert!(!entry_matches(&e, r"drop\.o$", MatchMode::Regex));
+    }
+
+    fn sized_entry(path: &str, epoch: i64) -> Entry {
+        let mut e = match_entry(path, path.rsplit('/').next().unwrap_or(path));
+        e.epoch = epoch;
+        e
+    }
+
+    #[test]
+    fn sort_size_last_keeps_larger() {
+        let small = sized_entry("/tmp/small.bin", 10);
+        let large = sized_entry("/tmp/large.bin", 1);
+        let (out, sz) = sort_and_limit(
+            vec![small, large],
+            Some(vec![100, 9000]),
+            SortKey::Size,
+            false,
+            Some(1),
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "large.bin");
+        assert_eq!(sz.as_deref(), Some(&[9000][..]));
+    }
+
+    #[test]
+    fn sort_date_last_keeps_newest() {
+        let old = sized_entry("/tmp/old.txt", 1);
+        let new = sized_entry("/tmp/new.txt", 9);
+        let (out, _) = sort_and_limit(vec![old, new], None, SortKey::Date, false, Some(1));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "new.txt");
+    }
+
+    #[test]
+    fn reverse_date_then_last_keeps_oldest() {
+        let old = sized_entry("/tmp/old.txt", 1);
+        let new = sized_entry("/tmp/new.txt", 9);
+        let (out, _) = sort_and_limit(vec![old, new], None, SortKey::Date, true, Some(1));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "old.txt");
+    }
+
+    #[test]
+    fn format_text_line_size_and_plain() {
+        let e = sized_entry("/tmp/x", 1);
+        let plain = format_text_line(&e, None);
+        assert_eq!(plain, "2020-01-02 03:04:05 /tmp/x");
+        let sized = format_text_line(&e, Some(512));
+        assert_eq!(sized, "2020-01-02 03:04:05 512 B /tmp/x");
+        assert_ne!(plain, sized);
+    }
+
+    #[test]
+    fn parse_nonneg_count_rejects_negative() {
+        assert_eq!(parse_nonneg_count("2").unwrap(), 2);
+        assert_eq!(parse_nonneg_count("0").unwrap(), 0);
+        assert!(parse_nonneg_count("-1").is_err());
+        assert!(parse_nonneg_count("nope").is_err());
     }
 }

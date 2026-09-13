@@ -1523,6 +1523,84 @@ fn list_pattern_glob_literal_cwd_only() {
 }
 
 #[test]
+fn list_show_size_sort_last() {
+    let sb = Sandbox::new("list-show-size");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    fs::write(sb.work().join("tiny.bin"), b"x").unwrap();
+    fs::write(sb.work().join("huge.bin"), vec![b'H'; 32 * 1024]).unwrap();
+    assert!(sb.run(&["put", "tiny.bin"]).status.success());
+    assert!(sb.run(&["put", "huge.bin"]).status.success());
+
+    let catalog = sb.run(&["list", &pin]);
+    assert!(catalog.status.success(), "{}", stderr_of(&catalog));
+    let catalog_s = stdout_of(&catalog);
+    assert!(
+        catalog_s.contains("tiny.bin") && catalog_s.contains("huge.bin"),
+        "unflagged catalog lists both: {catalog_s}"
+    );
+    for line in catalog_s.lines().filter(|l| !l.trim().is_empty()) {
+        assert!(
+            !line.contains(" KiB") && !line.contains(" MiB") && !line.contains(" B "),
+            "unflagged line stays DATE PATH: {line}"
+        );
+    }
+
+    let shown = sb.run(&["list", &pin, "--show-size"]);
+    assert!(shown.status.success(), "{}", stderr_of(&shown));
+    let shown_s = stdout_of(&shown);
+    assert!(
+        shown_s.contains("tiny.bin") && shown_s.contains("huge.bin"),
+        "show-size lists both: {shown_s}"
+    );
+    assert!(
+        shown_s.contains(" B") || shown_s.contains("KiB") || shown_s.contains("MiB"),
+        "show-size prints a size field: {shown_s}"
+    );
+    assert_ne!(shown_s, catalog_s, "show-size must change the line format");
+
+    let auto = sb.run(&["list", &pin, "--larger-than=0"]);
+    assert!(auto.status.success(), "{}", stderr_of(&auto));
+    let auto_s = stdout_of(&auto);
+    assert!(
+        auto_s.contains(" B") || auto_s.contains("KiB") || auto_s.contains("MiB"),
+        "size filter auto-enables show-size: {auto_s}"
+    );
+
+    let last = sb.run(&["list", &pin, "--sort=size", "--last=1"]);
+    assert!(last.status.success(), "{}", stderr_of(&last));
+    let last_s = stdout_of(&last);
+    assert!(
+        last_s.contains("huge.bin"),
+        "sort=size --last=1 keeps the larger: {last_s}"
+    );
+    assert!(
+        !last_s.contains("tiny.bin"),
+        "sort=size --last=1 drops the smaller: {last_s}"
+    );
+
+    let nflag = sb.run(&["list", &pin, "--sort", "size", "-n", "1"]);
+    assert!(nflag.status.success(), "{}", stderr_of(&nflag));
+    assert!(
+        stdout_of(&nflag).contains("huge.bin") && !stdout_of(&nflag).contains("tiny.bin"),
+        "-n 1 after size sort keeps larger: {}",
+        stdout_of(&nflag)
+    );
+
+    let rev = sb.run(&["list", &pin, "--sort=size", "--reverse", "--last=1"]);
+    assert!(rev.status.success(), "{}", stderr_of(&rev));
+    assert!(
+        stdout_of(&rev).contains("tiny.bin") && !stdout_of(&rev).contains("huge.bin"),
+        "reverse size last=1 keeps smaller: {}",
+        stdout_of(&rev)
+    );
+
+    let bad_sort = sb.run(&["list", &pin, "--sort=name"]);
+    assert_eq!(bad_sort.status.code(), Some(2), "{}", stderr_of(&bad_sort));
+    let bad_last = sb.run(&["list", &pin, "--last=nope"]);
+    assert_eq!(bad_last.status.code(), Some(2), "{}", stderr_of(&bad_last));
+}
+
+#[test]
 fn status_json_and_age_filter() {
     let sb = Sandbox::new("status-json");
     let pin = format!("--trash-dir={}", sb.trash().display());
@@ -1612,7 +1690,7 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
         "big.bin ({big_sz}) must outrank tinies ({max_tiny}) so largest-first drops it"
     );
 
-    // Line format stays DATE PATH even with a size filter (no bytes column).
+    // Size filters imply --show-size; the line is still not JSON.
     let lines = sb.run(&["list", &pin, "--larger-than=0"]);
     assert!(lines.status.success(), "{}", stderr_of(&lines));
     let line_out = stdout_of(&lines);
@@ -1622,7 +1700,7 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
     );
     assert!(
         !line_out.contains("\"bytes\""),
-        "default list line format unchanged: {line_out}"
+        "text list is not JSON: {line_out}"
     );
 
     let split = max_tiny + (big_sz - max_tiny) / 2;

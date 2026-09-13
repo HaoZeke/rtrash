@@ -300,8 +300,12 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 | `--match=MODE` | `glob` (default), `literal` (exact path/basename/name), or `regex` when `PATTERN` is given |
 | `--older-than=DAYS` | Only items trashed more than DAYS days ago (same cutoff as `empty DAYS`) |
 | `--newer-than=DAYS` | Only items trashed within the last DAYS days |
-| `--larger-than=N` | Only items larger than N bytes (`N`/`Nk`/`Nm`/`Ng`, 1024-based) |
-| `--smaller-than=N` | Only items smaller than N bytes (same size syntax) |
+| `--larger-than=N` | Only items larger than N bytes (`N`/`Nk`/`Nm`/`Ng`, 1024-based); implies `--show-size` |
+| `--smaller-than=N` | Only items smaller than N bytes (same size syntax); implies `--show-size` |
+| `--show-size` | Print a reclaimable-size field (human-readable) |
+| `--sort=date\|size` | Sort by date (default, oldest first) or size (smallest first) |
+| `--reverse` | Reverse the sort order |
+| `-n`/`--last=N` | Print only the last N items after sorting |
 | `--home-only` | Home trash only |
 
 ### `rtrash status`
