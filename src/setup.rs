@@ -557,7 +557,13 @@ mod tests {
         assert!(MC_MENU.contains("rtrash put"));
         assert!(BASH_COMPLETION.contains("--json"));
         assert!(BASH_COMPLETION.contains("older-than"));
-        assert!(FISH_COMPLETION.contains("older-than") || FISH_COMPLETION.contains("json"));
+        assert!(FISH_COMPLETION.contains("complete -c trash-empty -l older-than"));
+        assert!(FISH_COMPLETION.contains("complete -c trash-rm -l json"));
+        assert!(MAN_PAGE.contains("bash, zsh, and fish"));
+        assert!(
+            !MAN_PAGE.contains("(bash and zsh)"),
+            "embedded man SEE ALSO must name fish"
+        );
         assert!(
             (MAN_PAGE.contains("older") && MAN_PAGE.contains("json")) || MAN_PAGE.contains("JSON")
         );
