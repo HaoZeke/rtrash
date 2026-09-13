@@ -7,7 +7,7 @@
 | **Safer** than permanent `os.remove` / bare `rm`? | **Yes** — FreeDesktop trash and rm-shaped fail-safes; recoverable until empty |
 | **Safer** than trash-cli? | **Roughly equivalent** FreeDesktop correctness; rtrash has stronger GNU-style put fail-safes (`-f`/`-i` last-wins, preserve-root, and related flags) |
 | **Better** for this niche? | **Yes** if you want one native multi-call binary and in-process Python (`import rtrash`) without spawning trash-cli |
-| **Faster**? | **List and empty yes** on the 2026-09-13 terra run; **one-shot put is slower** than trash-cli on that 401-entry fixture (see table) |
+| **Faster**? | **Yes on the 2026-09-13 terra fixture** — put 6.9×, list 35×, empty 6.0× vs trash-cli 0.24.5.26 (see table) |
 
 Prefer trash-cli when you only want distro Python packaging and no Rust toolchain.
 
