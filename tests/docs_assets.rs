@@ -52,6 +52,16 @@ fn fish_completion_covers_surface() {
             "-l plain",
             "-l files-from",
             "bash zsh fish",
+            "complete -c trash-empty -l older-than",
+            "complete -c trash-rm -l json",
+            "complete -c trash-rm -l older-than",
+            "complete -c trash-rm -l newer-than",
+            "complete -c $cmd -l trash-dir",
+            "complete -c $cmd -l home-only",
+            "complete -c $cmd -l interactive",
+            "complete -c $cmd -l one-file-system",
+            "complete -c $cmd -l preserve-root",
+            "complete -c $cmd -l no-preserve-root",
         ],
         "completions/rtrash.fish",
     );
@@ -179,8 +189,13 @@ fn man_page_covers_surface() {
             "[\\fIPATTERN\\fR]...",
             "\\-\\-files\\-from",
             "bash/zsh/fish",
+            "bash, zsh, and fish",
         ],
         "man/rtrash.1",
+    );
+    assert!(
+        !s.contains("(bash and zsh)"),
+        "man SEE ALSO must name fish, not bash and zsh only"
     );
 }
 
