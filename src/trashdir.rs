@@ -730,12 +730,8 @@ pub fn trash_move_locked_opts(
                     let _ = remove_any_path(&dest);
                     return Err(e);
                 }
-                if meta.is_dir() {
-                    let dest = trash.files().join(&name);
-                    let size = crate::fastdelete::disk_usage(&dest);
-                    let mtime = info_mtime_secs(&trash.info().join(&info_name)).unwrap_or(0);
-                    let _ = directorysizes_upsert(trash, &name, size, mtime);
-                }
+                // Directorysizes is filled later (`rtrash metafix --sizes`).
+                // Walking here is the too-many-files tax on cargo target trees.
                 return Ok(name);
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -873,6 +869,36 @@ fn info_mtime_secs(path: &Path) -> io::Result<i64> {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     Ok(d.as_secs() as i64)
+}
+
+/// Walk `files/` and write a `directorysizes` line for each directory payload
+/// that has no valid cache line. Returns how many names were sized.
+pub fn fill_directorysizes(trash: &TrashDir) -> u64 {
+    let cache = DirectorySizesMap::load(trash);
+    let Ok(rd) = fs::read_dir(trash.files()) else {
+        return 0;
+    };
+    let mut n = 0u64;
+    for ent in rd.flatten() {
+        let path = ent.path();
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if cache.cached_size(trash, &name).is_some() {
+            continue;
+        }
+        let size = crate::fastdelete::disk_usage(&path);
+        let info_name = format!("{name}.trashinfo");
+        let mtime = info_mtime_secs(&trash.info().join(&info_name)).unwrap_or(0);
+        if directorysizes_upsert(trash, &name, size, mtime).is_ok() {
+            n = n.saturating_add(1);
+        }
+    }
+    n
 }
 
 /// Insert or replace a `directorysizes` line: `size mtime percent-encoded-name`.

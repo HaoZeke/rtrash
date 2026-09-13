@@ -38,6 +38,8 @@ pub mod restore_tui;
 #[cfg(unix)]
 pub mod rm;
 #[cfg(unix)]
+pub mod scan;
+#[cfg(unix)]
 pub mod setup;
 #[cfg(unix)]
 pub mod status;

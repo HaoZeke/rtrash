@@ -1,5 +1,7 @@
 #[cfg(unix)]
 use rtrash::desktop;
+#[cfg(unix)]
+use rtrash::scan;
 #[cfg(all(unix, feature = "tui"))]
 use rtrash::tui_binds;
 use rtrash::{empty, list, put, restore, rm, setup, status};
@@ -12,7 +14,8 @@ Windows uses the system Recycle Bin. rm-compatible put interface.
 Commands:
   put [OPTION]... FILE...     move files to the trash (accepts rm(1) flags)
   empty [OPTION]... [DAYS]    purge trashed items, optionally older than DAYS
-  metafix [OPTION]...         delete dangling .trashinfo (no files/ twin)
+  metafix [OPTION]...         dangling .trashinfo, or --sizes to fill directorysizes
+  scan [OPTION]... [DIR]...   list reclaimable artifact dirs (CACHEDIR.TAG, target)
   list [OPTION]... [PATTERN]...  list trashed items
   status [OPTION]...          item count and reclaimable size summary
   restore [OPTION]... [PATH]...  restore trashed items
@@ -60,6 +63,13 @@ fn main() {
                 empty::run(&argv0, &a)
             }
             Some("list") => list::run(&argv0, &rest[1..]),
+            #[cfg(unix)]
+            Some("scan") => scan::run(&argv0, &rest[1..]),
+            #[cfg(not(unix))]
+            Some("scan") => {
+                eprintln!("{argv0}: scan is Unix-only");
+                1
+            }
             Some("status") => status::run(&argv0, &rest[1..]),
             Some("restore") => restore::run(&argv0, &rest[1..]),
             Some("rm") => rm::run(&argv0, &rest[1..]),

@@ -19,6 +19,7 @@ _rtrash_keys_opts=(
 _rtrash_empty_opts=(
   -n --dry-run -v --verbose -f --force
   --trash-dir --trash-dir= --home-only --plain --older-than= --max-bytes= --json
+  --metafix --sizes
   --help --version
 )
 
@@ -47,7 +48,12 @@ _rtrash_desktop_opts=(
   --help --version
 )
 
-_rtrash_subcommands=(put empty list status restore rm setup keys desktop completions man)
+_rtrash_scan_opts=(
+  --xdev --no-xdev --exclude --exclude= --json -0 --zero
+  --help --version
+)
+
+_rtrash_subcommands=(put empty list status restore rm scan setup keys desktop completions man)
 
 _rtrash_setup_opts=(
   --prefix= --bin-dir= --with-rm -n --dry-run -f --force -v --verbose --help
@@ -108,7 +114,7 @@ _rtrash_main() {
   local i sub=
   for ((i = 1; i < ${#COMP_WORDS[@]}; i++)); do
     case "${COMP_WORDS[i]}" in
-      put | empty | list | status | restore | rm | setup | keys | desktop | completions | man)
+      put | empty | list | status | restore | rm | scan | setup | keys | desktop | completions | man)
         sub="${COMP_WORDS[i]}"
         break
         ;;
@@ -136,6 +142,7 @@ _rtrash_main() {
     status) _rtrash_complete_from _rtrash_status_opts ;;
     restore) _rtrash_complete_from _rtrash_restore_opts ;;
     rm) _rtrash_complete_from _rtrash_rm_opts ;;
+    scan) _rtrash_complete_from _rtrash_scan_opts ;;
     setup) _rtrash_complete_from _rtrash_setup_opts ;;
     keys) _rtrash_complete_from _rtrash_keys_opts ;;
     desktop) _rtrash_complete_from _rtrash_desktop_opts ;;

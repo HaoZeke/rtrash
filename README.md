@@ -275,8 +275,11 @@ Names are reserved atomically (create-new / `O_EXCL` on the `.trashinfo`), so co
 
 **Script pins:** `--trash-dir=PATH` puts into that FreeDesktop root (creates `files/` and `info/` if needed); `--home-only` always uses the home trash.
 
-Putting a **directory** updates that trash dir’s FreeDesktop `directorysizes` cache (`size mtime percent-encoded-name`).
-Putting ordinary files does not add directory lines.
+Putting a **directory** is a rename; it does **not** walk the tree to write FreeDesktop `directorysizes`. Fill the cache afterwards with `rtrash metafix --sizes` (same `size mtime percent-encoded-name` lines, `du -B1` blocks). Putting ordinary files does not add directory lines.
+
+### `rtrash scan [DIR]...`
+
+Lists reclaimable artifact directories under `DIR` (default: cwd) by walking **directory names only**: `CACHEDIR.TAG` parents, cargo `target/`, `node_modules`, `.venv`. Prunes `.git`. Never descends into `Zotero`. Stays on one filesystem (`--xdev`, default). One absolute path per line, for `rtrash put --files-from`. `--json`, `-0`/`--zero`, `--exclude NAME`.
 
 ### `rtrash empty [DAYS]` (also `trash-empty`)
 

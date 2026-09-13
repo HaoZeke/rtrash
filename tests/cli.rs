@@ -1,6 +1,6 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
@@ -326,6 +326,8 @@ fn directorysizes_atomic_rewrite_survives_put() {
     fs::create_dir(sb.work().join("d")).unwrap();
     fs::write(sb.work().join("d/x"), b"payload-bytes").unwrap();
     assert!(sb.run(&["put", "-r", "d"]).status.success());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    assert!(sb.run(&["metafix", &pin, "--sizes", "-f"]).status.success());
     let cache = sb.trash().join("directorysizes");
     assert!(cache.is_file());
     let body = fs::read_to_string(&cache).unwrap();
@@ -1067,9 +1069,11 @@ fn directory_put_writes_directorysizes_empty_prunes() {
     fs::write(sb.work().join("tree/a"), b"aaaa").unwrap();
     fs::write(sb.work().join("tree/b"), b"bbbbbbbb").unwrap();
     assert!(sb.run(&["put", "-r", "tree"]).status.success());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    assert!(sb.run(&["metafix", &pin, "--sizes", "-f"]).status.success());
 
     let cache = sb.trash().join("directorysizes");
-    assert!(cache.is_file(), "directory put must write directorysizes");
+    assert!(cache.is_file(), "metafix --sizes must write directorysizes");
     let body = fs::read_to_string(&cache).unwrap();
     // FreeDesktop: "size mtime percent-encoded-name"
     let line = body.lines().next().expect("at least one cache line");
@@ -1085,6 +1089,7 @@ fn directory_put_writes_directorysizes_empty_prunes() {
     // File-only put must not invent a directorysizes line for that file name.
     sb.touch("solo.txt");
     assert!(sb.run(&["put", "solo.txt"]).status.success());
+    assert!(sb.run(&["metafix", &pin, "--sizes", "-f"]).status.success());
     let body2 = fs::read_to_string(&cache).unwrap();
     assert!(
         !body2.split_whitespace().any(|t| t == "solo.txt"),
@@ -1903,7 +1908,11 @@ fn catalog_cache_blob_is_sealed_after_list() {
             }
         }
     }
-    assert_eq!(blobs.len(), 1, "expected one sealed cache blob under {cache_root:?}");
+    assert_eq!(
+        blobs.len(),
+        1,
+        "expected one sealed cache blob under {cache_root:?}"
+    );
     let raw = fs::read(&blobs[0]).unwrap();
     assert!(raw.starts_with(b"RTR1"), "magic");
     let text = String::from_utf8_lossy(&raw);
@@ -1917,7 +1926,11 @@ fn catalog_cache_blob_is_sealed_after_list() {
     assert_eq!(stdout_of(&second), out);
     let st = sb.run(&["status", &pin]);
     assert!(st.status.success(), "{}", stderr_of(&st));
-    assert!(stdout_of(&st).contains("1 items") || stdout_of(&st).contains("1 item"), "{}", stdout_of(&st));
+    assert!(
+        stdout_of(&st).contains("1 items") || stdout_of(&st).contains("1 item"),
+        "{}",
+        stdout_of(&st)
+    );
 }
 
 #[test]
@@ -1929,7 +1942,10 @@ fn catalog_cache_survives_put_then_list_without_rescan_miss() {
     assert!(sb.run(&["put", "a.txt"]).status.success());
     assert!(sb.run(&["put", "b.txt"]).status.success());
     let listed = stdout_of(&sb.run(&["list", &pin]));
-    assert!(listed.contains("a.txt") && listed.contains("b.txt"), "{listed}");
+    assert!(
+        listed.contains("a.txt") && listed.contains("b.txt"),
+        "{listed}"
+    );
     // Restore a; cache must drop that row so the next list is still correct.
     assert!(sb
         .run(&["restore", "--plain", "--if-unique", "a.txt"])
@@ -1950,7 +1966,10 @@ fn put_batch_shares_one_deletion_date() {
     let mut dates = Vec::new();
     for name in ["x", "y", "z"] {
         let body = fs::read_to_string(sb.trash().join(format!("info/{name}.trashinfo"))).unwrap();
-        let line = body.lines().find(|l| l.starts_with("DeletionDate=")).unwrap();
+        let line = body
+            .lines()
+            .find(|l| l.starts_with("DeletionDate="))
+            .unwrap();
         dates.push(line.to_string());
         let mode = fs::metadata(sb.trash().join(format!("info/{name}.trashinfo")))
             .unwrap()
@@ -2038,8 +2057,96 @@ fn dangling_info_is_emergency_and_metafix_removes_it() {
     fs::remove_file(sb.trash().join("files/gone.txt")).unwrap();
     let pin = format!("--trash-dir={}", sb.trash().display());
     let listed = stdout_of(&sb.run(&["list", &pin]));
-    assert!(listed.contains("DANGLING") || listed.contains("gone.txt"), "{listed}");
+    assert!(
+        listed.contains("DANGLING") || listed.contains("gone.txt"),
+        "{listed}"
+    );
     let mf = sb.run(&["metafix", &pin, "-f"]);
     assert!(mf.status.success(), "{}", stderr_of(&mf));
     assert!(!sb.trash().join("info/gone.txt.trashinfo").exists());
+}
+
+#[test]
+fn directory_put_defers_directorysizes_until_metafix_sizes() {
+    let sb = Sandbox::new("defer-dirsizes");
+    fs::create_dir(sb.work().join("tree")).unwrap();
+    fs::write(sb.work().join("tree/a"), b"aaaa").unwrap();
+    fs::write(sb.work().join("tree/b"), b"bbbbbbbb").unwrap();
+    assert!(sb.run(&["put", "-r", "tree"]).status.success());
+    assert!(sb.trash().join("files/tree").is_dir());
+
+    let cache = sb.trash().join("directorysizes");
+    if cache.is_file() {
+        let body = fs::read_to_string(&cache).unwrap();
+        assert!(
+            !body.split_whitespace().any(|t| t == "tree"),
+            "put must not walk the payload to write directorysizes: {body}"
+        );
+    }
+
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let mf = sb.run(&["metafix", &pin, "--sizes", "-f"]);
+    assert!(mf.status.success(), "{}", stderr_of(&mf));
+    assert!(cache.is_file(), "metafix --sizes must write directorysizes");
+    let body = fs::read_to_string(&cache).unwrap();
+    let line = body
+        .lines()
+        .find(|l| l.split_whitespace().any(|t| t == "tree"))
+        .expect("cache line for tree");
+    let size: u64 = line.split_whitespace().next().unwrap().parse().unwrap();
+    let want = du_blocks(&sb.trash().join("files/tree"));
+    assert_eq!(size, want, "directorysizes must be du -B1");
+
+    let out = sb.empty(&[]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        !cache.exists(),
+        "full empty must prune/remove directorysizes"
+    );
+}
+
+#[test]
+fn scan_lists_artifact_dirs_skips_zotero_and_git() {
+    let sb = Sandbox::new("scan-art");
+    let work = sb.work();
+    fs::create_dir_all(work.join("keep")).unwrap();
+    fs::write(work.join("keep/file.txt"), b"keep").unwrap();
+    fs::create_dir_all(work.join("proj/target/debug")).unwrap();
+    fs::write(work.join("proj/Cargo.toml"), b"[package]\nname=\"p\"\n").unwrap();
+    fs::write(
+        work.join("proj/target/CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    fs::write(work.join("proj/target/debug/foo"), b"obj").unwrap();
+    fs::create_dir_all(work.join("Zotero/storage/AB12")).unwrap();
+    fs::write(work.join("Zotero/storage/AB12/x.pdf"), b"%PDF").unwrap();
+    fs::create_dir_all(work.join("env/.venv/lib")).unwrap();
+    fs::write(work.join("env/.venv/lib/x"), b"py").unwrap();
+    fs::create_dir_all(work.join("js/node_modules/pkg")).unwrap();
+    fs::write(work.join("js/node_modules/pkg/index.js"), b"1").unwrap();
+    fs::create_dir_all(work.join("cache")).unwrap();
+    fs::write(
+        work.join("cache/CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    fs::create_dir_all(work.join(".git/objects/ab")).unwrap();
+    fs::write(work.join(".git/objects/ab/cd"), b"blob").unwrap();
+
+    let out = sb.run(&["scan", work.to_str().unwrap()]);
+    assert!(out.status.success(), "scan: {}", stderr_of(&out));
+    let s = stdout_of(&out);
+    assert!(s.contains("proj/target"), "cargo target: {s}");
+    assert!(s.contains("node_modules"), "node_modules: {s}");
+    assert!(s.contains(".venv"), ".venv: {s}");
+    assert!(s.contains("cache"), "CACHEDIR.TAG parent: {s}");
+    assert!(!s.contains("Zotero"), "must not enter Zotero: {s}");
+    assert!(!s.contains("keep/file"), "must not list regular files: {s}");
+    assert!(!s.contains(".git/objects"), "must prune .git: {s}");
+
+    let help = sb.run(&["scan", "--help"]);
+    assert!(help.status.success(), "{}", stderr_of(&help));
+    let h = stdout_of(&help);
+    assert!(h.contains("--xdev") || h.contains("xdev"), "{h}");
 }

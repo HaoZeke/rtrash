@@ -24,6 +24,7 @@ permanent delete). Use --plain to skip the TUI.
   -v, --verbose    print each removed item
   -f, --force      skip the TTY confirm on DAYS / --max-bytes / --plain / --metafix
       --metafix    delete dangling .trashinfo (no files/ twin); implies --plain
+      --sizes      fill missing FreeDesktop directorysizes (no put-time walk)
       --plain      skip TUI; non-interactive empty (also used when stdin is not a TTY)
       --older-than=DAYS  same as positional DAYS (list/status flag style)
       --max-bytes=N  drop largest items first until remaining reclaimable
@@ -50,6 +51,7 @@ struct Opts {
     json: bool,
     force: bool,
     metafix: bool,
+    sizes: bool,
 }
 
 fn needs_empty_confirm(opts: &Opts) -> bool {
@@ -62,9 +64,7 @@ fn needs_empty_confirm(opts: &Opts) -> bool {
 
 fn confirm_empty(prog: &str, dirs: &[TrashDir], _opts: &Opts) -> bool {
     let n = list::collect(dirs).len();
-    crate::util::confirm(&format!(
-        "{prog}: permanently remove {n} trashed item(s)? "
-    ))
+    crate::util::confirm(&format!("{prog}: permanently remove {n} trashed item(s)? "))
 }
 
 fn metafix_dirs(
@@ -73,28 +73,52 @@ fn metafix_dirs(
     force: bool,
     dry_run: bool,
     json: bool,
+    sizes: bool,
+    dangling_fix: bool,
 ) -> i32 {
+    let mut sized = 0u64;
+    if sizes {
+        if dry_run {
+            for dir in dirs {
+                if let Ok(rd) = fs::read_dir(dir.files()) {
+                    sized = sized
+                        .saturating_add(rd.flatten().filter(|e| e.path().is_dir()).count() as u64);
+                }
+            }
+        } else {
+            for dir in dirs {
+                sized = sized.saturating_add(trashdir::fill_directorysizes(dir));
+            }
+        }
+    }
+
     let entries = list::collect(dirs);
-    let dangling: Vec<&list::Entry> = entries
-        .iter()
-        .filter(|e| {
-            e.orphan
-                && e.dir
-                    .info()
-                    .join(format!("{}.trashinfo", e.name))
-                    .is_file()
-        })
-        .collect();
+    let dangling: Vec<&list::Entry> = if dangling_fix {
+        entries
+            .iter()
+            .filter(|e| e.orphan && e.dir.info().join(format!("{}.trashinfo", e.name)).is_file())
+            .collect()
+    } else {
+        Vec::new()
+    };
     if dangling.is_empty() {
         if json {
-            println!("{{\"ok\":true,\"removed\":0}}");
+            if sizes {
+                println!("{{\"ok\":true,\"removed\":0,\"sized\":{sized}}}");
+            } else {
+                println!("{{\"ok\":true,\"removed\":0}}");
+            }
         }
         return 0;
     }
-    if !force && !json && stdin_is_tty() && !crate::util::confirm(&format!(
-        "{prog}: delete {} dangling .trashinfo? ",
-        dangling.len()
-    )) {
+    if !force
+        && !json
+        && stdin_is_tty()
+        && !crate::util::confirm(&format!(
+            "{prog}: delete {} dangling .trashinfo? ",
+            dangling.len()
+        ))
+    {
         return 0;
     }
     let mut removed = 0u64;
@@ -118,7 +142,11 @@ fn metafix_dirs(
         }
     }
     if json {
-        println!("{{\"ok\":true,\"removed\":{removed}}}");
+        if sizes {
+            println!("{{\"ok\":true,\"removed\":{removed},\"sized\":{sized}}}");
+        } else {
+            println!("{{\"ok\":true,\"removed\":{removed}}}");
+        }
     }
     0
 }
@@ -141,6 +169,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         json: false,
         force: false,
         metafix: false,
+        sizes: false,
     };
     let mut i = 0usize;
     while i < args.len() {
@@ -151,6 +180,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "-f" | "--force" => opts.force = true,
             "--metafix" => {
                 opts.metafix = true;
+                opts.plain = true;
+            }
+            "--sizes" => {
+                opts.sizes = true;
                 opts.plain = true;
             }
             "--plain" => opts.plain = true,
@@ -222,8 +255,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return crate::empty_tui::run(prog, refs, opts.dry_run);
     }
 
-    if opts.metafix {
-        return metafix_dirs(prog, &dirs, opts.force, opts.dry_run, opts.json);
+    if opts.metafix || opts.sizes {
+        return metafix_dirs(
+            prog,
+            &dirs,
+            opts.force,
+            opts.dry_run,
+            opts.json,
+            opts.sizes,
+            opts.metafix,
+        );
     }
 
     if needs_empty_confirm(&opts) && !confirm_empty(prog, &dirs, &opts) {
@@ -646,8 +687,9 @@ fn empty_max_bytes(
                     continue;
                 }
             };
-            dir_victims.par_iter().for_each(|v| {
-                match trashdir::remove_any_path(&v.target) {
+            dir_victims
+                .par_iter()
+                .for_each(|v| match trashdir::remove_any_path(&v.target) {
                     Ok(()) => {
                         if let Some(ip) = &v.info {
                             match fs::remove_file(ip) {
@@ -669,8 +711,7 @@ fn empty_max_bytes(
                         eprintln!("{prog}: cannot remove '{}': {e}", v.display.display());
                         errors.fetch_add(1, Ordering::Relaxed);
                     }
-                }
-            });
+                });
             let drop_names: std::collections::HashSet<&str> =
                 dir_victims.iter().map(|v| v.name.as_str()).collect();
             let kept: Vec<String> = all_names_by_root

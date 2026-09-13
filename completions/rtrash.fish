@@ -7,7 +7,7 @@ function __rtrash_seen_subcommand
     set -e cmd[1]
     for c in $cmd
         switch $c
-            case put empty list status restore rm setup keys desktop completions man
+            case put empty list status restore rm scan setup keys desktop completions man
                 echo $c
                 return 0
         end
@@ -22,6 +22,7 @@ complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'list' -d 'list trash
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'status' -d 'item count and reclaimable size summary'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'restore' -d 'restore a trashed item'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'rm' -d 'permanently delete matching trash entries'
+complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'scan' -d 'list reclaimable artifact directories'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'setup' -d 'install multi-call links, completions, man page'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'keys' -d 'show/sample TUI keybind config'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'desktop' -d 'exec the rtrash-hud icedtea desktop HUD'
@@ -59,6 +60,15 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l olde
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l max-bytes -d 'drop largest items first until remaining reclaimable bytes <= N' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l json -d 'JSON summary'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l plain -d 'skip TUI'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l metafix -d 'delete dangling .trashinfo'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l sizes -d 'fill missing directorysizes'
+
+# scan
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q scan' -l xdev -d 'do not cross mount points (default)'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q scan' -l no-xdev -d 'follow other filesystems'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q scan' -l exclude -d 'skip a directory basename' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q scan' -l json -d 'JSON array of paths'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q scan' -s 0 -l zero -d 'NUL-separate paths'
 
 # list / status
 for sub in list status

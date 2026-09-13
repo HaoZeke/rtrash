@@ -40,6 +40,16 @@ const DT_BLK: u8 = 6;
 const PAR_SIBLING_THRESHOLD: usize = 4;
 /// Cap nested rayon depth so we do not oversubscribe on deep narrow trees.
 const PAR_MAX_DEPTH: u32 = 12;
+/// Parallelise `disk_usage` only when a directory is this wide. A lower
+/// threshold reintroduces the db8407b cost: `par_iter` on a two-child tree
+/// still warms the global pool. Put no longer calls this (directorysizes is
+/// deferred); metafix --sizes and status cache-miss do.
+pub const DISK_USAGE_PAR_MIN_CHILDREN: usize = 32;
+
+/// Whether `disk_usage` should `par_iter` this directory's children.
+pub fn disk_usage_should_parallel(child_count: usize, depth: u32) -> bool {
+    child_count >= DISK_USAGE_PAR_MIN_CHILDREN && depth < PAR_MAX_DEPTH
+}
 
 #[repr(C)]
 struct BtrfsIoctlVolArgs {
@@ -378,6 +388,10 @@ fn read_dirfd_entries(dirfd: RawFd) -> io::Result<Vec<DirEnt>> {
 ///
 /// Symlinks count only the link inode (not the target). Missing paths are 0.
 pub fn disk_usage(path: &Path) -> u64 {
+    disk_usage_at(path, 0)
+}
+
+fn disk_usage_at(path: &Path, depth: u32) -> u64 {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(_) => return 0,
@@ -386,15 +400,19 @@ pub fn disk_usage(path: &Path) -> u64 {
     if !meta.is_dir() {
         return own;
     }
-    // Serial: put calls this for directorysizes on one payload. A rayon
-    // pool (one worker per CPU) costs more than walking a few hundred files.
     let Ok(rd) = fs::read_dir(path) else {
         return own;
     };
-    let child_sum: u64 = rd
-        .filter_map(|e| e.ok())
-        .map(|e| disk_usage(&e.path()))
-        .sum();
+    let kids: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    let child_sum: u64 = if disk_usage_should_parallel(kids.len(), depth) {
+        kids.par_iter()
+            .map(|p| disk_usage_at(p, depth.saturating_add(1)))
+            .sum()
+    } else {
+        kids.iter()
+            .map(|p| disk_usage_at(p, depth.saturating_add(1)))
+            .sum()
+    };
     own.saturating_add(child_sum)
 }
 
@@ -557,6 +575,26 @@ mod tests {
         let root = tmp_root("miss");
         remove_path(&root.join("nope")).unwrap();
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn disk_usage_parallel_only_when_wide() {
+        assert!(
+            !disk_usage_should_parallel(2, 0),
+            "two-child tree must stay serial (db8407b: pool spawn on a small tree)"
+        );
+        assert!(
+            !disk_usage_should_parallel(DISK_USAGE_PAR_MIN_CHILDREN - 1, 0),
+            "just under the threshold stays serial"
+        );
+        assert!(
+            disk_usage_should_parallel(DISK_USAGE_PAR_MIN_CHILDREN, 0),
+            "wide directory uses the existing rayon pool"
+        );
+        assert!(
+            !disk_usage_should_parallel(10_000, PAR_MAX_DEPTH.saturating_add(1)),
+            "do not nest rayon past PAR_MAX_DEPTH"
+        );
     }
 
     #[test]

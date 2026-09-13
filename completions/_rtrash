@@ -36,6 +36,8 @@ empty_opts=(
   '--max-bytes=[drop largest items first until remaining reclaimable bytes <= N]:size:'
   '--json[emit a JSON summary]'
   '--plain[skip TUI]'
+  '--metafix[delete dangling .trashinfo]'
+  '--sizes[fill missing directorysizes]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
   '1:days:'
@@ -134,6 +136,7 @@ _rtrash_dispatch() {
     'status:item count and reclaimable size summary'
     'restore:restore a trashed item'
     'rm:permanently delete matching trash entries'
+    'scan:list reclaimable artifact directories'
     'setup:install multi-call links, completions, man page'
     'keys:show or sample TUI keybind config'
     'desktop:exec the rtrash-hud icedtea desktop HUD'
@@ -174,6 +177,17 @@ _rtrash_dispatch() {
           ;;
         rm)
           _arguments -s -C $rm_opts
+          ;;
+        scan)
+          _arguments -s -C \
+            '--xdev[do not cross mount points (default)]' \
+            '--no-xdev[follow other filesystems]' \
+            '*--exclude=[skip a directory basename]:name:' \
+            '--json[JSON array of paths]' \
+            '(-0 --zero)'{-0,--zero}'[NUL-separate paths]' \
+            '(- *)'--help'[display help and exit]' \
+            '(- *)'--version'[output version and exit]' \
+            '*:dir:_files -/'
           ;;
         setup)
           _arguments -s -C \

@@ -152,6 +152,78 @@ Display help and exit.
 .TP
 .B \-\-version
 Output version information and exit.
+.SS scan
+.B rtrash scan
+[\fIOPTION\fR]... [\fIDIR\fR]...
+.PP
+List reclaimable artifact directories under
+.I DIR
+(default: current directory). Walks directory names only: does not open
+regular files. Records a directory that contains
+.BR CACHEDIR.TAG ,
+a cargo
+.B target/
+(next to
+.B Cargo.toml
+or with
+.BR CACHEDIR.TAG ),
+.BR node_modules ,
+and
+.BR .venv .
+Prunes
+.BR .git .
+Never descends into
+.B Zotero
+(or names given with
+.BR \-\-exclude ).
+Stays on one filesystem unless
+.BR \-\-no\-xdev .
+Stdout is one absolute path per line, for
+.BR "rtrash put \-\-files\-from" .
+.TP
+.B \-\-xdev
+Do not cross mount points (default).
+.TP
+.B \-\-no\-xdev
+Follow other filesystems.
+.TP
+.BI \-\-exclude =NAME
+Skip a directory basename (repeatable). Defaults also skip
+.BR Zotero ,
+.BR pCloudDrive ,
+.BR .Trash ,
+.BR Trash ,
+and
+.BR .git .
+.TP
+.B \-\-json
+JSON array of
+.B path
+objects.
+.TP
+.BR \-0 ", " \-\-zero
+NUL-separate paths (for
+.BR "put \-\-files\-from \-0" ).
+.SS metafix
+.B rtrash metafix
+[\fIOPTION\fR]...
+.PP
+Delete dangling
+.B .trashinfo
+files (no
+.I files/
+twin). With
+.B \-\-sizes ,
+walk each directory payload and write the FreeDesktop
+.B directorysizes
+cache. Directory
+.B put
+does not walk the tree; size is this pass.
+.TP
+.B \-\-sizes
+Fill missing
+.B directorysizes
+lines (du \-B1 block allocation).
 .SS empty
 .B rtrash empty
 [\fIOPTION\fR]... [\fIDAYS\fR]
