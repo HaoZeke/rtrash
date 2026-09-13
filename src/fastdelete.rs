@@ -386,16 +386,15 @@ pub fn disk_usage(path: &Path) -> u64 {
     if !meta.is_dir() {
         return own;
     }
-    // Directory tree: sum children (parallel at this level when wide).
+    // Serial: put calls this for directorysizes on one payload. A rayon
+    // pool (one worker per CPU) costs more than walking a few hundred files.
     let Ok(rd) = fs::read_dir(path) else {
         return own;
     };
-    let children: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-    let child_sum: u64 = if children.len() >= 4 {
-        children.par_iter().map(|p| disk_usage(p)).sum()
-    } else {
-        children.iter().map(|p| disk_usage(p)).sum()
-    };
+    let child_sum: u64 = rd
+        .filter_map(|e| e.ok())
+        .map(|e| disk_usage(&e.path()))
+        .sum();
     own.saturating_add(child_sum)
 }
 

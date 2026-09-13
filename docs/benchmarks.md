@@ -7,7 +7,7 @@
 | **Safer** than permanent `os.remove` / bare `rm`? | **Yes** — FreeDesktop trash and rm-shaped fail-safes; recoverable until empty |
 | **Safer** than trash-cli? | **Roughly equivalent** FreeDesktop correctness; rtrash has stronger GNU-style put fail-safes (`-f`/`-i` last-wins, preserve-root, and related flags) |
 | **Better** for this niche? | **Yes** if you want one native multi-call binary and in-process Python (`import rtrash`) without spawning trash-cli |
-| **Faster**? | **Yes on the 2026-09-13 terra fixture** — same-FS put 6.2×, list 24×, empty 3.9× vs trash-cli 0.24.5.26; EXDEV put succeeds where trash-cli refuses (see table) |
+| **Faster**? | **Yes vs trash-cli** on the 2026-09-13 terra fixture (put 8.1×). **Tied with gtrash** on the same 401-entry same-FS put (1.01×). trashy not compared. |
 
 Prefer trash-cli when you only want distro Python packaging and no Rust toolchain.
 
@@ -32,21 +32,23 @@ On the 2026-07-08 run they were not installed.
 
 ## Measured results (Linux x86_64, 2026-09-13)
 
-Harness: `benches/compare_trash_cli.py` on **terra-x86_64** (`Linux 7.0.13-arch1-1-rg x86_64`, 32 CPUs, `/home` **btrfs**, `/tmp` a different device). After dirfd/`renameat2` put plus kernel `FICLONE`/`copy_file_range`/`sendfile` EXDEV: `benches/compare-trash-cli-2026-09-13-sota.txt` (ends `COMPARE_OK`). Same-day earlier logs (per-name fsync; then batch fsync) are historical.
+Harness: `benches/compare_trash_cli.py` on **terra-x86_64** (`Linux 7.0.13-arch1-1-rg x86_64`, 32 CPUs, `/home` **btrfs**, `/tmp` a different device). After stopping put from rayon-scanning `info/` and from `disk_usage` spawning a 32-thread pool: `benches/compare-trash-cli-2026-09-13-meta.txt` (ends `COMPARE_OK`). The dirfd/`FICLONE` commit (`4e9a48b`) did not move this same-FS number; that path is EXDEV-only.
 
-Peers: **rtrash 0.1.4** (release `-p rtrash`), **trash-cli 0.24.5.26** (`/usr/bin/trash-put`, not multi-call rtrash). Optional: trashy **missing**, gtrash **missing** (not implied losers).
+Peers: **rtrash 0.1.4** (release `-p rtrash`), **trash-cli 0.24.5.26**. trashy **missing**. gtrash was built once on this host for a side-by-side put (not on `PATH`, so the harness still prints `missing`).
 
-Fixture: 400 small files + one tree (80 nested files) = 401 trash entries; two trials; isolated `XDG_DATA_HOME`. List is timed on the full can after put (before empty).
+Fixture: 400 small files + one tree (80 nested files) = 401 trash entries; two trials; isolated `XDG_DATA_HOME`.
 
 | Tool | put avg (s) | list avg (s) | empty avg (s) |
 |------|-------------|--------------|----------------|
-| rtrash 0.1.4 release | **0.012666** | **0.002015** | **0.009490** |
-| trash-cli 0.24.5.26 | 0.078211 | 0.048195 | 0.036530 |
-| trash-cli / rtrash | **6.17×** | **23.92×** | **3.85×** |
+| rtrash 0.1.4 release | **0.009593** | **0.001807** | **0.007606** |
+| trash-cli 0.24.5.26 | 0.077653 | 0.048971 | 0.041696 |
+| trash-cli / rtrash | **8.09×** | **27.10×** | **5.48×** |
 
-Both tools (same-FS `/tmp` fixture): `ec=0`, `entries=401`, empty leaves `files_left=0` `info_left=0`, `LIST_OK` for a single-file put.
+Same fixture, one-off gtrash put: rtrash **0.010132 s**, gtrash **0.010190 s** (**1.01×**). Same-FS put is 401× (`openat`+`write`+`renameat2`); `strace -c` after the fix is 401 `renameat2`, 421 `openat`, 404 `write`, 2 `fsync`, and no `clone3`/`futex` pool.
 
-Cross-device (`/tmp` payloads → home-fs trash pin): rtrash put **0.402144 s** (`ec=0`, 401 entries). trash-cli **refused** (`ec=74`, `not in the same volume`). An 8 MiB EXDEV put on this host issued `renameat2` (`EXDEV`) then `ioctl(FICLONE)` (`= 0`).
+Both harness tools (same-FS `/tmp`): `ec=0`, `entries=401`, empty leaves `files_left=0` `info_left=0`, `LIST_OK`.
+
+Cross-device (`/tmp` → home-fs trash pin): rtrash put **0.378 s** (`ec=0`, 401 entries). trash-cli **refused** (`ec=74`). Kernel `FICLONE`/`copy_file_range` only runs on that EXDEV path.
 
 A same-day earlier run (per-name `.trashinfo` fsync plus per-name catalog encrypt) had rtrash put at 0.275 s. Batching the catalog store and deferring info/ fsync flipped put; dirfd `openat`/`renameat2` is the same-FS reservation path after that. Single-name `put_one` still fsyncs that `.trashinfo` before the payload move.
 

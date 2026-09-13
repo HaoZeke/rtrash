@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -20,6 +20,11 @@ struct PutBatch {
     pending: HashMap<PathBuf, Vec<crate::list::Entry>>,
     /// Resolved trash root per device (same-FS batch).
     resolved: HashMap<u64, trashdir::TrashDir>,
+    /// `--trash-dir` / `--home` pin: `ensure()` once, not once per name.
+    sticky: Option<trashdir::TrashDir>,
+    /// Roots whose `info/` had no `.trashinfo` when the lock was taken.
+    /// Pending rows are then the whole catalog; do not rayon-scan them back.
+    fresh: HashSet<PathBuf>,
 }
 
 impl PutBatch {
@@ -30,6 +35,8 @@ impl PutBatch {
             parents: HashMap::new(),
             pending: HashMap::new(),
             resolved: HashMap::new(),
+            sticky: None,
+            fresh: HashSet::new(),
         }
     }
 
@@ -63,6 +70,9 @@ impl PutBatch {
         let key = trash.root.clone();
         if !self.held.contains_key(&key) {
             let lock = trashdir::TrashLock::acquire(&trash.root)?;
+            if info_dir_has_no_trashinfo(&trash) {
+                self.fresh.insert(key.clone());
+            }
             self.held.insert(key.clone(), (trash, lock));
         }
         let (td, lock) = self.held.get(&key).expect("just inserted");
@@ -94,15 +104,31 @@ impl PutBatch {
             if extra.is_empty() {
                 continue;
             }
-            let mut rows = crate::catalog_cache::load_unverified(td)
-                .unwrap_or_else(|| crate::list::collect_one(td));
-            let names: std::collections::HashSet<&str> =
-                extra.iter().map(|e| e.name.as_str()).collect();
-            rows.retain(|e| !names.contains(e.name.as_str()));
-            rows.extend(extra);
-            crate::catalog_cache::store(td, &rows);
+            match crate::catalog_cache::load_unverified(td) {
+                Some(mut rows) => {
+                    let names: HashSet<&str> = extra.iter().map(|e| e.name.as_str()).collect();
+                    rows.retain(|e| !names.contains(e.name.as_str()));
+                    rows.extend(extra);
+                    crate::catalog_cache::store(td, &rows);
+                }
+                None if self.fresh.contains(&td.root) => {
+                    crate::catalog_cache::store(td, &extra);
+                }
+                None => {
+                    // Existing can, no cache: do not spawn rayon from put.
+                    // list collect rebuilds the blob.
+                }
+            }
         }
     }
+}
+
+fn info_dir_has_no_trashinfo(td: &trashdir::TrashDir) -> bool {
+    let Ok(rd) = fs::read_dir(td.info()) else {
+        return true;
+    };
+    !rd.filter_map(|e| e.ok())
+        .any(|e| e.file_name().as_encoded_bytes().ends_with(b".trashinfo"))
 }
 
 /// Prompt policy for one put (GNU rm `-f`/`-i`/`-I` last-wins).
@@ -539,15 +565,19 @@ fn resolve_put_trash_cached(
     abs: &Path,
     meta: &fs::Metadata,
 ) -> io::Result<trashdir::TrashDir> {
-    if opts.trash_pin.is_none() && !opts.home_only {
-        if let Some(td) = batch.resolved.get(&meta.dev()) {
+    if opts.trash_pin.is_some() || opts.home_only {
+        if let Some(td) = &batch.sticky {
             return Ok(td.clone());
         }
+        let td = resolve_put_trash(opts, abs, meta)?;
+        batch.sticky = Some(td.clone());
+        return Ok(td);
+    }
+    if let Some(td) = batch.resolved.get(&meta.dev()) {
+        return Ok(td.clone());
     }
     let td = resolve_put_trash(opts, abs, meta)?;
-    if opts.trash_pin.is_none() {
-        batch.resolved.insert(meta.dev(), td.clone());
-    }
+    batch.resolved.insert(meta.dev(), td.clone());
     Ok(td)
 }
 
@@ -579,4 +609,24 @@ fn resolve_put_trash(
         return Ok(td);
     }
     trashdir::select_opts(abs, meta.dev(), !opts.no_home_fallback)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn trash_pin_is_cached_for_the_batch() {
+        let src = include_str!("put.rs");
+        assert!(
+            src.contains("sticky: Option<trashdir::TrashDir>"),
+            "--trash-dir must not mkdir files/info once per name"
+        );
+        assert!(
+            src.contains("if let Some(td) = &batch.sticky"),
+            "pin/home trash is reused after the first ensure"
+        );
+        assert!(
+            !src.contains(concat!("list::", "collect_one")),
+            "put finish must not rayon-scan info/ after writing it"
+        );
+    }
 }

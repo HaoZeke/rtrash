@@ -675,7 +675,6 @@ pub fn trash_move_locked_opts(
                 drop(info_file);
 
                 let dest_c = cstring_name(name.as_bytes())?;
-                let dest = trash.files().join(&name);
                 let moved = match rename_noreplace_at(abs, lock.files_fd(), &dest_c) {
                     Ok(()) => Ok(()),
                     Err(e) if e.raw_os_error() == Some(libc::EEXIST) => {
@@ -692,6 +691,7 @@ pub fn trash_move_locked_opts(
                         continue;
                     }
                     Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+                        let dest = trash.files().join(&name);
                         copy_recursive(abs, &dest, meta)
                             .and_then(|_| sync_copied_tree(&dest, meta))
                             .and_then(|_| remove_any(abs, meta))
@@ -700,10 +700,12 @@ pub fn trash_move_locked_opts(
                 };
                 if let Err(e) = moved {
                     let _ = unlinkat_name(lock.info_fd(), &info_c);
+                    let dest = trash.files().join(&name);
                     let _ = remove_any_path(&dest);
                     return Err(e);
                 }
                 if meta.is_dir() {
+                    let dest = trash.files().join(&name);
                     let size = crate::fastdelete::disk_usage(&dest);
                     let mtime = info_mtime_secs(&trash.info().join(&info_name)).unwrap_or(0);
                     let _ = directorysizes_upsert(trash, &name, size, mtime);
