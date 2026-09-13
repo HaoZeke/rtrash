@@ -1612,7 +1612,7 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
         "big.bin ({big_sz}) must outrank tinies ({max_tiny}) so largest-first drops it"
     );
 
-    // Line format stays DATE PATH even with a size filter (no bytes column).
+    // Size filters turn on the size field; still not JSON.
     let lines = sb.run(&["list", &pin, "--larger-than=0"]);
     assert!(lines.status.success(), "{}", stderr_of(&lines));
     let line_out = stdout_of(&lines);
@@ -1621,8 +1621,12 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
         "default list line still shows path: {line_out}"
     );
     assert!(
+        line_out.contains("KiB") || line_out.contains(" B"),
+        "size filter auto-enables the size field: {line_out}"
+    );
+    assert!(
         !line_out.contains("\"bytes\""),
-        "default list line format unchanged: {line_out}"
+        "text list is not JSON: {line_out}"
     );
 
     let split = max_tiny + (big_sz - max_tiny) / 2;
@@ -1696,6 +1700,78 @@ fn empty_max_bytes_leaves_tiny_set_and_list_size_filters() {
     assert_eq!(bad.status.code(), Some(2), "{}", stderr_of(&bad));
     let bad_list = sb.run(&["list", &pin, "--larger-than=nope"]);
     assert_eq!(bad_list.status.code(), Some(2), "{}", stderr_of(&bad_list));
+}
+
+#[test]
+fn list_show_size_sort_last() {
+    let sb = Sandbox::new("list-show-size");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    fs::write(sb.work().join("tiny.txt"), b"x").unwrap();
+    fs::write(sb.work().join("huge.bin"), vec![b'H'; 20 * 1024]).unwrap();
+    assert!(sb.run(&["put", "tiny.txt"]).status.success());
+    assert!(sb.run(&["put", "huge.bin"]).status.success());
+
+    let catalog = sb.run(&["list", &pin]);
+    assert!(catalog.status.success(), "{}", stderr_of(&catalog));
+    let catalog_s = stdout_of(&catalog);
+    assert!(
+        catalog_s
+            .lines()
+            .any(|line| line.contains("tiny.txt") && line.contains(' ') && !line.contains('T')),
+        "no-flag list stays trash-cli date path: {catalog_s}"
+    );
+    assert!(
+        !catalog_s.contains("KiB") && !catalog_s.contains(" B "),
+        "unflagged catalog has no size field: {catalog_s}"
+    );
+    assert!(catalog_s.contains("tiny.txt"), "{catalog_s}");
+    assert!(catalog_s.contains("huge.bin"), "{catalog_s}");
+
+    let sized = sb.run(&["list", &pin, "--show-size"]);
+    assert!(sized.status.success(), "{}", stderr_of(&sized));
+    let sized_s = stdout_of(&sized);
+    assert!(
+        sized_s.contains("KiB") || sized_s.contains(" B"),
+        "list --show-size prints a size field: {sized_s}"
+    );
+    assert!(sized_s.contains("tiny.txt"), "{sized_s}");
+    assert!(sized_s.contains("huge.bin"), "{sized_s}");
+
+    let last = sb.run(&["list", &pin, "--sort=size", "--last=1"]);
+    assert!(last.status.success(), "{}", stderr_of(&last));
+    let last_s = stdout_of(&last);
+    assert!(
+        last_s.contains("huge.bin"),
+        "--sort=size --last=1 keeps the larger: {last_s}"
+    );
+    assert!(
+        !last_s.contains("tiny.txt"),
+        "--sort=size --last=1 drops the smaller: {last_s}"
+    );
+    assert!(
+        !last_s.contains("KiB") && !last_s.contains(" B "),
+        "sort/last without --show-size stays DATE PATH: {last_s}"
+    );
+
+    let nflag = sb.run(&["list", &pin, "--sort", "size", "-n", "1"]);
+    assert!(nflag.status.success(), "{}", stderr_of(&nflag));
+    let n_s = stdout_of(&nflag);
+    assert!(n_s.contains("huge.bin"), "{n_s}");
+    assert!(!n_s.contains("tiny.txt"), "{n_s}");
+
+    let rev = sb.run(&["list", &pin, "--sort=size", "--reverse", "--last=1"]);
+    assert!(rev.status.success(), "{}", stderr_of(&rev));
+    let rev_s = stdout_of(&rev);
+    assert!(
+        rev_s.contains("tiny.txt"),
+        "size reverse last=1 is the smaller: {rev_s}"
+    );
+    assert!(!rev_s.contains("huge.bin"), "{rev_s}");
+
+    let bad_sort = sb.run(&["list", &pin, "--sort=name"]);
+    assert_eq!(bad_sort.status.code(), Some(2), "{}", stderr_of(&bad_sort));
+    let bad_last = sb.run(&["list", &pin, "--last=nope"]);
+    assert_eq!(bad_last.status.code(), Some(2), "{}", stderr_of(&bad_last));
 }
 
 #[test]
