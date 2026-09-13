@@ -118,6 +118,12 @@ for cmd in trash-put trash
     complete -c $cmd -s v -l verbose
     complete -c $cmd -s i
     complete -c $cmd -s I
+    complete -c $cmd -l interactive
+    complete -c $cmd -l one-file-system
+    complete -c $cmd -l preserve-root
+    complete -c $cmd -l no-preserve-root
+    complete -c $cmd -l trash-dir -r
+    complete -c $cmd -l home-only
     complete -c $cmd -l plain
     complete -c $cmd -l json
     complete -c $cmd -l files-from -r
@@ -131,6 +137,7 @@ complete -c trash-empty -s v -l verbose
 complete -c trash-empty -s f -l force
 complete -c trash-empty -l trash-dir -r
 complete -c trash-empty -l home-only
+complete -c trash-empty -l older-than -r
 complete -c trash-empty -l max-bytes -r
 complete -c trash-empty -l plain
 complete -c trash-empty -l json
@@ -165,9 +172,12 @@ complete -c trash-restore -l version
 
 complete -c trash-rm -l trash-dir -r
 complete -c trash-rm -l home-only
+complete -c trash-rm -l older-than -r
+complete -c trash-rm -l newer-than -r
 complete -c trash-rm -s n -l dry-run
 complete -c trash-rm -s f -l force
 complete -c trash-rm -s v -l verbose
+complete -c trash-rm -l json
 complete -c trash-rm -l help
 complete -c trash-rm -l version
 # Multi-call name `rm` is intentionally not completed here (would shadow system rm).
