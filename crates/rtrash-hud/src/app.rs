@@ -22,7 +22,7 @@ use crate::tray::{self, TrayAction};
 
 const HUD_W: f32 = 860.0;
 const HUD_H: f32 = 620.0;
-const APP_ID: &str = install_desktop::APP_ID;
+
 
 /// iced messages.
 #[derive(Debug, Clone)]
@@ -422,7 +422,9 @@ pub fn hud_window() -> window::Settings {
     let boot = icedtea::app::Boot::new("rtrash", app_id)
         .size(HUD_W, HUD_H)
         .min_size(360.0, 420.0);
-    icedtea::app::bootstrap(&boot).window
+    let mut settings = icedtea::app::bootstrap(&boot).window;
+    settings.icon = crate::brand::window_icon();
+    settings
 }
 
 /// Run the iced loop (iced 0.14 daemon boot, same shape as vissue-hud).

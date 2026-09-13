@@ -4,6 +4,7 @@
 //! `rtrash-hud` binary. `--offline` paints the catalog without a TTY.
 
 pub mod app;
+pub mod brand;
 pub mod catalog;
 pub mod cli;
 pub mod install_desktop;
@@ -14,5 +15,6 @@ pub mod theme;
 pub mod tray;
 pub mod view;
 pub mod watch;
+pub mod wlactivate;
 
 pub use cli::{HudCli, run_cli};

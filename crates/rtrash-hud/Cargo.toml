@@ -31,3 +31,9 @@ iced = { version = "0.14", default-features = true, features = [
 icedtea = "0.17.0"
 rtrash = { path = "../..", version = "0.1.4" }
 crossterm = "0.28"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
+wayland-backend = { version = "0.3.16", features = ["client_system"] }
+wayland-client = { version = "0.31.15", features = ["system"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
