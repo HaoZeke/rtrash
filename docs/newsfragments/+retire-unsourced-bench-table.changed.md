@@ -1,1 +1,1 @@
-Drop the unsourced README 20k/100k/52× speed table; point at the dated 400-file harness in docs/benchmarks.md and mark those numbers as 0.1.2.
+Drop the unsourced README 20k/100k/52× speed table; point at the dated 400-file harness in docs/benchmarks.md and mark those numbers as rtrash 0.1.2 vs crate 0.1.4. Sphinx RST and org lockstep the same dated table and unmeasured list/EXDEV/10k+ empty note.
