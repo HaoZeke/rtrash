@@ -72,6 +72,10 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l match
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l orphans -d 'only files/ names with no .trashinfo'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l larger-than -d 'only items larger than N bytes' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l smaller-than -d 'only items smaller than N bytes' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l show-size -d 'print a size field'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l sort -d 'date (default) or size' -xa 'date size'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l reverse -d 'reverse the sort order'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -s n -l last -d 'print only the last N items' -r
 
 # restore
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s f -l force -l overwrite -d 'overwrite existing file at destination'
@@ -153,6 +157,10 @@ complete -c trash-list -l newer-than -r
 complete -c trash-list -l orphans
 complete -c trash-list -l larger-than -r
 complete -c trash-list -l smaller-than -r
+complete -c trash-list -l show-size
+complete -c trash-list -l sort -xa 'date size'
+complete -c trash-list -l reverse
+complete -c trash-list -s n -l last -r
 complete -c trash-list -l json
 complete -c trash-list -l help
 complete -c trash-list -l version
