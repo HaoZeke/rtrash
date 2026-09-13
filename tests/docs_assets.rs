@@ -198,6 +198,8 @@ fn man_page_covers_surface() {
             "keys",
             "desktop",
             "rtrash-hud",
+            "XDG_CACHE_HOME",
+            "RTRASH_NO_CACHE",
             "\\-\\-max\\-bytes",
             "\\-\\-larger\\-than",
             "\\-\\-smaller\\-than",

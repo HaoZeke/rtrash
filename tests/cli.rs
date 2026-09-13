@@ -1910,4 +1910,27 @@ fn catalog_cache_blob_is_sealed_after_list() {
     let second = sb.run(&["list", &pin]);
     assert!(second.status.success());
     assert_eq!(stdout_of(&second), out);
+    let st = sb.run(&["status", &pin]);
+    assert!(st.status.success(), "{}", stderr_of(&st));
+    assert!(stdout_of(&st).contains("1 items") || stdout_of(&st).contains("1 item"), "{}", stdout_of(&st));
+}
+
+#[test]
+fn catalog_cache_survives_put_then_list_without_rescan_miss() {
+    let sb = Sandbox::new("catalog-cache-put");
+    sb.touch("a.txt");
+    sb.touch("b.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    assert!(sb.run(&["put", "a.txt"]).status.success());
+    assert!(sb.run(&["put", "b.txt"]).status.success());
+    let listed = stdout_of(&sb.run(&["list", &pin]));
+    assert!(listed.contains("a.txt") && listed.contains("b.txt"), "{listed}");
+    // Restore a; cache must drop that row so the next list is still correct.
+    assert!(sb
+        .run(&["restore", "--plain", "--if-unique", "a.txt"])
+        .status
+        .success());
+    let after = stdout_of(&sb.run(&["list", &pin]));
+    assert!(!after.contains("a.txt"), "{after}");
+    assert!(after.contains("b.txt"), "{after}");
 }

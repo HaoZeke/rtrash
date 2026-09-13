@@ -39,7 +39,6 @@ impl PutBatch {
     fn finish(&self) {
         for (td, _) in self.held.values() {
             let _ = trashdir::sync_info_dir(td);
-            crate::catalog_cache::invalidate(td);
         }
     }
 }
@@ -425,8 +424,22 @@ fn put_one_in(
             return Err(1);
         }
     };
+    let trash_for_cache = trash.clone();
     match batch.move_into(&abs, &meta, trash) {
-        Ok(_) => {
+        Ok(stored) => {
+            let date = crate::info::now_local_string();
+            let epoch = crate::info::parse_local_to_epoch(&date).unwrap_or(0);
+            crate::catalog_cache::upsert(
+                &trash_for_cache,
+                crate::list::Entry {
+                    date: Some(date),
+                    epoch,
+                    original: abs.clone(),
+                    name: stored,
+                    dir: trash_for_cache.clone(),
+                    orphan: false,
+                },
+            );
             if opts.verbose {
                 if meta.is_dir() {
                     println!("removed directory '{name}'");

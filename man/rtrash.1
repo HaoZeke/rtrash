@@ -246,6 +246,21 @@ JSON sets
 true and
 .B original
 to null.
+.PP
+.BR list ,
+.BR status ,
+.BR restore ,
+.BR rm ,
+.BR empty ,
+and the HUD share a compact sealed catalog cache under
+.I $XDG_CACHE_HOME/rtrash
+(key in
+.IR $XDG_DATA_HOME/rtrash ).
+Unchanged cans skip the
+.B .trashinfo
+walk.
+.B RTRASH_NO_CACHE=1
+disables it.
 .TP
 .B \-\-home\-only
 Only the home trash

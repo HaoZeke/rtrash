@@ -146,7 +146,6 @@ pub fn summarize(
             newer_than,
         );
         let mut bytes = 0u64;
-        let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
         let cache = trashdir::DirectorySizesMap::load(dir);
         for e in &entries {
             bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes_cached(
@@ -154,22 +153,6 @@ pub fn summarize(
                 &e.name,
                 Some(&cache),
             ));
-            counted.insert(e.name.clone());
-        }
-        // Safety net: files/ names collect() missed (should already be in entries).
-        if older_than.is_none() && newer_than.is_none() {
-            if let Ok(rd) = std::fs::read_dir(dir.files()) {
-                for ent in rd.flatten() {
-                    let name = ent.file_name().to_string_lossy().into_owned();
-                    if counted.contains(&name) {
-                        continue;
-                    }
-                    let has_info = dir.info().join(format!("{name}.trashinfo")).exists();
-                    if !has_info {
-                        bytes = bytes.saturating_add(fastdelete::disk_usage(&ent.path()));
-                    }
-                }
-            }
         }
         let n = entries.len() as u64;
         total_items = total_items.saturating_add(n);

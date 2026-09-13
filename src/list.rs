@@ -40,6 +40,10 @@ A files/ name with no .trashinfo is an emergency row: date
                      Includes a bytes field when size is computed
       --help            display this help and exit
       --version         output version information and exit
+
+Catalog: list, status, restore, rm, empty, and the HUD share a compact
+sealed cache under $XDG_CACHE_HOME/rtrash (key in $XDG_DATA_HOME/rtrash).
+Unchanged cans skip the .trashinfo walk. RTRASH_NO_CACHE=1 disables.
 ";
 
 #[derive(Clone, Debug)]
@@ -84,7 +88,8 @@ fn collect_one_cached(dir: &TrashDir) -> Vec<Entry> {
     entries
 }
 
-fn collect_one(dir: &TrashDir) -> Vec<Entry> {
+/// Walk one root with no cache. Used to seed [`crate::catalog_cache::upsert`].
+pub(crate) fn collect_one(dir: &TrashDir) -> Vec<Entry> {
     let mut out = collect_info_entries(dir);
     out.extend(collect_orphan_entries(dir));
     out

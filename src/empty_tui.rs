@@ -85,7 +85,7 @@ pub fn permanently_remove_entries(
             }
         }
         trashdir::directorysizes_remove(&entry.dir, &entry.name);
-        crate::catalog_cache::invalidate(&entry.dir);
+        crate::catalog_cache::remove_name(&entry.dir, &entry.name);
         succeeded.push(true);
     }
     RemoveBatchResult {

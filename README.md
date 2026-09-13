@@ -292,6 +292,7 @@ Prints `DELETION-DATE ORIGINAL-PATH` per item, oldest first, in the `trash-list`
 With `PATTERN` (repeatable), only items whose original path or basename matches (`--match=glob` by default, same shape as `trash-rm`). No pattern keeps the trash-cli line format for the full catalog.
 A `files/` name with no `.trashinfo` is an emergency row: date `????-??-?? ??:??:??`, label `ORPHAN <name> (no .trashinfo)`, no invented `Path=`. JSON sets `"orphan": true` and `original` to `null`.
 Scans the home trash and per-mount trash directories owned by the current user, or only the directories given with `--trash-dir=PATH` (repeatable).
+`list`, `status`, `restore`, `rm`, `empty`, and the HUD share a compact sealed catalog cache under `$XDG_CACHE_HOME/rtrash` (32-byte key at `$XDG_DATA_HOME/rtrash/cache.key`). Unchanged cans skip the `.trashinfo` walk. `RTRASH_NO_CACHE=1` disables it.
 
 | Flag | Meaning |
 |------|---------|

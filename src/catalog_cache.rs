@@ -1,4 +1,5 @@
-//! Compact sealed per-root catalog so `list` / HUD skip a full `.trashinfo` walk.
+//! Compact sealed per-root catalog so CLI list/status/restore/rm/empty
+//! and the HUD skip a full `.trashinfo` walk.
 //!
 //! The blob lives under `$XDG_CACHE_HOME/rtrash/`. The 32-byte key is
 //! `$XDG_DATA_HOME/rtrash/cache.key` (mode 0600). This is not a git vault:
@@ -91,6 +92,81 @@ pub fn store(dir: &TrashDir, entries: &[Entry]) {
 /// Drop the sealed blob so the next collect walks.
 pub fn invalidate(dir: &TrashDir) {
     let _ = fs::remove_file(cache_path(dir));
+}
+
+/// Decrypt even if the on-disk fingerprint is stale (after a put/rm).
+pub fn load_unverified(dir: &TrashDir) -> Option<Vec<Entry>> {
+    if disabled() {
+        return None;
+    }
+    let raw = fs::read(cache_path(dir)).ok()?;
+    if raw.len() < MAGIC.len() + NONCE_LEN + 16 || &raw[..4] != MAGIC {
+        return None;
+    }
+    let nonce = XNonce::from_slice(&raw[4..4 + NONCE_LEN]);
+    let cipher = XChaCha20Poly1305::new_from_slice(&load_or_create_key()?).ok()?;
+    let plain = cipher.decrypt(nonce, &raw[4 + NONCE_LEN..]).ok()?;
+    decode_skip_finger(dir, &plain)
+}
+
+/// Insert or replace one row, then rewrite the sealed blob with a live fingerprint.
+pub fn upsert(dir: &TrashDir, entry: Entry) {
+    if disabled() {
+        return;
+    }
+    let mut rows = load_unverified(dir).unwrap_or_else(|| crate::list::collect_one(dir));
+    rows.retain(|e| e.name != entry.name);
+    rows.push(entry);
+    store(dir, &rows);
+}
+
+/// Drop one name and rewrite. Missing cache is a no-op (next list walks).
+pub fn remove_name(dir: &TrashDir, name: &str) {
+    if disabled() {
+        return;
+    }
+    let Some(mut rows) = load_unverified(dir) else {
+        invalidate(dir);
+        return;
+    };
+    rows.retain(|e| e.name != name);
+    store(dir, &rows);
+}
+
+fn decode_skip_finger(dir: &TrashDir, plain: &[u8]) -> Option<Vec<Entry>> {
+    let mut i = 0;
+    let _ = Finger {
+        info_m: read_i64(plain, &mut i)?,
+        info_n: read_i64(plain, &mut i)?,
+        files_m: read_i64(plain, &mut i)?,
+        files_n: read_i64(plain, &mut i)?,
+        info_count: read_u32(plain, &mut i)?,
+        files_count: read_u32(plain, &mut i)?,
+    };
+    let n = read_u32(plain, &mut i)? as usize;
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let orphan = *plain.get(i)? != 0;
+        i += 1;
+        let epoch = read_i64(plain, &mut i)?;
+        let name = read_str(plain, &mut i)?;
+        let original = PathBuf::from(read_str(plain, &mut i)?);
+        let date_raw = read_str(plain, &mut i)?;
+        let date = if date_raw.is_empty() {
+            None
+        } else {
+            Some(date_raw)
+        };
+        out.push(Entry {
+            date,
+            epoch,
+            original,
+            name,
+            dir: dir.clone(),
+            orphan,
+        });
+    }
+    Some(out)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -346,6 +422,41 @@ mod tests {
         assert_eq!(mode, 0o600);
         invalidate(&dir);
         assert!(load(&dir).is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn upsert_keeps_sibling_rows() {
+        let (root, dir, _env) = isolated_dir();
+        store(
+            &dir,
+            &[Entry {
+                date: Some("2026-01-01T00:00:00".into()),
+                epoch: 1,
+                original: PathBuf::from("/tmp/a"),
+                name: "a".into(),
+                dir: dir.clone(),
+                orphan: false,
+            }],
+        );
+        upsert(
+            &dir,
+            Entry {
+                date: Some("2026-01-02T00:00:00".into()),
+                epoch: 2,
+                original: PathBuf::from("/tmp/b"),
+                name: "b".into(),
+                dir: dir.clone(),
+                orphan: false,
+            },
+        );
+        let loaded = load(&dir).expect("hit after upsert");
+        let names: Vec<_> = loaded.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"a") && names.contains(&"b"), "{names:?}");
+        remove_name(&dir, "a");
+        let loaded = load(&dir).expect("hit after remove");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "b");
         let _ = fs::remove_dir_all(root);
     }
 }

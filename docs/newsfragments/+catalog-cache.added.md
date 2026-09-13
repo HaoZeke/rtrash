@@ -1,1 +1,1 @@
-List, restore, empty, and the HUD reuse a compact sealed per-root catalog cache under `$XDG_CACHE_HOME/rtrash` so unchanged cans skip a full `.trashinfo` walk.
+`list`, `status`, `restore`, `rm`, `empty`, and the HUD share a compact sealed per-root catalog cache under `$XDG_CACHE_HOME/rtrash` so unchanged cans skip a full `.trashinfo` walk. Put upserts; restore/rm drop the row.
