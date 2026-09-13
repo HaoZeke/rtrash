@@ -417,6 +417,7 @@ fn full_empty_wipe(
 
     // Full empty: nothing kept — drop directorysizes entirely.
     prune_directorysizes(dir, &[]);
+    crate::catalog_cache::invalidate(dir);
 }
 
 struct SizedItem {

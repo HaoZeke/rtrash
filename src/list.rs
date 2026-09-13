@@ -65,7 +65,7 @@ impl Entry {
 }
 
 pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
-    let mut out: Vec<Entry> = dirs.par_iter().flat_map(collect_one).collect();
+    let mut out: Vec<Entry> = dirs.par_iter().flat_map(collect_one_cached).collect();
     out.sort_by(|a, b| {
         a.epoch
             .cmp(&b.epoch)
@@ -73,6 +73,15 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
             .then_with(|| a.name.cmp(&b.name))
     });
     out
+}
+
+fn collect_one_cached(dir: &TrashDir) -> Vec<Entry> {
+    if let Some(hit) = crate::catalog_cache::load(dir) {
+        return hit;
+    }
+    let entries = collect_one(dir);
+    crate::catalog_cache::store(dir, &entries);
+    entries
 }
 
 fn collect_one(dir: &TrashDir) -> Vec<Entry> {

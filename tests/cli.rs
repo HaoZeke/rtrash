@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
@@ -34,6 +35,7 @@ impl Sandbox {
             .args(args)
             .current_dir(self.work())
             .env("XDG_DATA_HOME", self.root.join("xdg"))
+            .env("XDG_CACHE_HOME", self.root.join("xdg-cache"))
             .env("HOME", &self.root)
             .output()
             .expect("failed to run rtrash")
@@ -45,6 +47,7 @@ impl Sandbox {
             .args(args)
             .current_dir(self.work())
             .env("XDG_DATA_HOME", self.root.join("xdg"))
+            .env("XDG_CACHE_HOME", self.root.join("xdg-cache"))
             .env("HOME", &self.root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1863,4 +1866,37 @@ fn restore_plain_index_range() {
     .filter(|b| **b)
     .count();
     assert_eq!(back, 2, "range 0-1 should restore two of three");
+}
+
+#[test]
+fn catalog_cache_blob_is_sealed_after_list() {
+    let sb = Sandbox::new("catalog-cache-seal");
+    sb.touch("hello.txt");
+    assert!(sb.run(&["put", "hello.txt"]).status.success());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let first = sb.run(&["list", &pin]);
+    assert!(first.status.success(), "{}", stderr_of(&first));
+    let out = stdout_of(&first);
+    assert!(out.contains("hello.txt"), "{out}");
+    let cache_root = sb.root.join("xdg-cache/rtrash");
+    let mut blobs = Vec::new();
+    if let Ok(rd) = fs::read_dir(&cache_root) {
+        for e in rd.flatten() {
+            if e.path().extension().and_then(|s| s.to_str()) == Some("bin") {
+                blobs.push(e.path());
+            }
+        }
+    }
+    assert_eq!(blobs.len(), 1, "expected one sealed cache blob under {cache_root:?}");
+    let raw = fs::read(&blobs[0]).unwrap();
+    assert!(raw.starts_with(b"RTR1"), "magic");
+    let text = String::from_utf8_lossy(&raw);
+    assert!(!text.contains("hello.txt"), "blob must not be a Path= dump");
+    let key = sb.root.join("xdg/rtrash/cache.key");
+    assert!(key.is_file(), "cache key under XDG_DATA_HOME");
+    let mode = fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    let second = sb.run(&["list", &pin]);
+    assert!(second.status.success());
+    assert_eq!(stdout_of(&second), out);
 }

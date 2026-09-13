@@ -303,11 +303,18 @@ pub fn restore_entries(
     restore_to: Option<&Path>,
 ) -> i32 {
     let mut rc = 0;
+    let mut roots = Vec::new();
     for e in chosen {
         let code = restore_entry(prog, e, force, restore_to);
         if code != 0 {
             rc = code;
         }
+        if !roots.iter().any(|d: &crate::trashdir::TrashDir| d.root == e.dir.root) {
+            roots.push(e.dir.clone());
+        }
+    }
+    for d in roots {
+        crate::catalog_cache::invalidate(&d);
     }
     rc
 }

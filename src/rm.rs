@@ -226,6 +226,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
         trashdir::directorysizes_remove(&entry.dir, &entry.name);
+        crate::catalog_cache::invalidate(&entry.dir);
         bytes = bytes.saturating_add(sz);
         if !json && verbose {
             println!("removed '{}'", entry.original.display());

@@ -12,6 +12,8 @@ pub mod util;
 pub mod win_recycle;
 
 #[cfg(unix)]
+pub mod catalog_cache;
+#[cfg(unix)]
 pub mod empty;
 #[cfg(all(unix, feature = "tui"))]
 pub mod empty_tui;

@@ -39,6 +39,7 @@ impl PutBatch {
     fn finish(&self) {
         for (td, _) in self.held.values() {
             let _ = trashdir::sync_info_dir(td);
+            crate::catalog_cache::invalidate(td);
         }
     }
 }
