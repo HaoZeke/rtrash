@@ -32,7 +32,7 @@ On the 2026-07-08 run they were not installed.
 
 ## Measured results (Linux x86_64, 2026-09-13)
 
-Harness: `benches/compare_trash_cli.py` on **rgam5terra** (`Linux 7.0.13-arch1-1-rg x86_64`, 32 CPUs, `/home` **btrfs** on `cryptroot`). Log: `benches/compare-trash-cli-2026-09-13.log` (ends `COMPARE_OK`).
+Harness: `benches/compare_trash_cli.py` on **terra-x86_64** (`Linux 7.0.13-arch1-1-rg x86_64`, 32 CPUs, `/home` **btrfs**). After the put-batch fix: `benches/compare-trash-cli-2026-09-13-putfix.txt` (ends `COMPARE_OK`). Earlier same-day log (per-name fsync + catalog upsert) is historical.
 
 Peers: **rtrash 0.1.4** (release `-p rtrash`), **trash-cli 0.24.5.26** (`/usr/bin/trash-put`, not multi-call rtrash). Optional: trashy **missing**, gtrash **missing** (not implied losers).
 
@@ -40,13 +40,13 @@ Fixture: 400 small files + one tree (80 nested files) = 401 trash entries; two t
 
 | Tool | put avg (s) | list avg (s) | empty avg (s) |
 |------|-------------|--------------|----------------|
-| rtrash 0.1.4 release | 0.275409 | **0.002360** | **0.008723** |
-| trash-cli 0.24.5.26 | **0.096962** | 0.068124 | 0.052058 |
-| trash-cli / rtrash | 0.35× (rtrash slower) | **28.87×** | **5.97×** |
+| rtrash 0.1.4 release | **0.013118** | **0.001957** | **0.008739** |
+| trash-cli 0.24.5.26 | 0.091093 | 0.068604 | 0.052841 |
+| trash-cli / rtrash | **6.94×** | **35.05×** | **6.05×** |
 
 Both tools: `ec=0`, `entries=401`, empty leaves `files_left=0` `info_left=0`, `LIST_OK` for a single-file put.
 
-The 2026-07-08 table (rtrash **0.1.2** put 0.005449 s) is historical. Current put pays per-name `.trashinfo` fsync plus a sealed catalog upsert; it is **not** faster than trash-cli on this 401-entry one-shot put. List and empty are faster on this host.
+A same-day earlier run (per-name `.trashinfo` fsync plus per-name catalog encrypt) had rtrash put at 0.275 s. Batching the catalog store and deferring info/ fsync to the end of the argv is what flipped put. Single-name `put_one` still fsyncs that `.trashinfo` before the payload move.
 
 ### Earlier snapshot (same host class, 2026-07-07)
 

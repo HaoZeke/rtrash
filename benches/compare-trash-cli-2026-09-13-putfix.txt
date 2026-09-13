@@ -1,0 +1,36 @@
+date_utc=2026-09-13
+host=terra-x86_64
+sysname=Linux machine=x86_64 release=7.0.13-arch1-1-rg
+rtrash=<release-rtrash>
+rtrash_version=rtrash 0.1.4
+trash-put=/usr/bin/trash-put
+trash-put_version=0.24.5.26
+trash-empty=/usr/bin/trash-empty
+trash-list=/usr/bin/trash-list
+optional_peer=trashy status=missing
+optional_peer=gtrash status=missing
+PUT tool=rtrash trial=1 ec=0 wall_s=0.013340 entries=401 stderr=''
+LIST tool=rtrash trial=1 ec=0 wall_s=0.001947 stderr=''
+EMPTY tool=rtrash trial=1 ec=0 wall_s=0.007880 stderr='Removed 401 items'
+POST tool=rtrash trial=1 files_left=0 info_left=0
+PUT tool=rtrash trial=2 ec=0 wall_s=0.012896 entries=401 stderr=''
+LIST tool=rtrash trial=2 ec=0 wall_s=0.001968 stderr=''
+EMPTY tool=rtrash trial=2 ec=0 wall_s=0.009599 stderr='Removed 401 items'
+POST tool=rtrash trial=2 files_left=0 info_left=0
+PUT tool=trash-cli trial=1 ec=0 wall_s=0.093010 entries=401 stderr=''
+LIST tool=trash-cli trial=1 ec=0 wall_s=0.066334 stderr=''
+EMPTY tool=trash-cli trial=1 ec=0 wall_s=0.048026 stderr=''
+POST tool=trash-cli trial=1 files_left=0 info_left=0
+PUT tool=trash-cli trial=2 ec=0 wall_s=0.089176 entries=401 stderr=''
+LIST tool=trash-cli trial=2 ec=0 wall_s=0.070874 stderr=''
+EMPTY tool=trash-cli trial=2 ec=0 wall_s=0.057656 stderr=''
+POST tool=trash-cli trial=2 files_left=0 info_left=0
+--- SUMMARY ---
+rtrash put_avg_s=0.013118 list_avg_s=0.001957 empty_avg_s=0.008739
+trash-cli put_avg_s=0.091093 list_avg_s=0.068604 empty_avg_s=0.052841
+put_speedup_rtrash_over_trashcli=6.94x
+list_speedup_rtrash_over_trashcli=35.05x
+empty_speedup_rtrash_over_trashcli=6.05x
+LIST_OK tool=rtrash
+LIST_OK tool=trash-cli
+COMPARE_OK

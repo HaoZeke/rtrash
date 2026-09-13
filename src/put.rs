@@ -14,6 +14,12 @@ struct PutBatch {
     held: HashMap<PathBuf, (trashdir::TrashDir, trashdir::TrashLock)>,
     /// One DeletionDate for every payload in this invocation.
     deletion_date: String,
+    /// Canonical parents for `abs_nofollow` (same-dir batch).
+    parents: HashMap<PathBuf, PathBuf>,
+    /// Catalog rows to merge once at [`PutBatch::finish`].
+    pending: HashMap<PathBuf, Vec<crate::list::Entry>>,
+    /// Resolved trash root per device (same-FS batch).
+    resolved: HashMap<u64, trashdir::TrashDir>,
 }
 
 impl PutBatch {
@@ -21,7 +27,31 @@ impl PutBatch {
         Self {
             held: HashMap::new(),
             deletion_date: crate::info::now_local_string(),
+            parents: HashMap::new(),
+            pending: HashMap::new(),
+            resolved: HashMap::new(),
         }
+    }
+
+    fn abs_nofollow(&mut self, path: &Path) -> io::Result<PathBuf> {
+        let file_name = path.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "path has no file name")
+        })?;
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new(""),
+        };
+        let key = parent.to_path_buf();
+        if let Some(canon) = self.parents.get(&key) {
+            return Ok(canon.join(file_name));
+        }
+        let canon = if parent.as_os_str().is_empty() {
+            std::env::current_dir()?
+        } else {
+            parent.canonicalize()?
+        };
+        self.parents.insert(key, canon.clone());
+        Ok(canon.join(file_name))
     }
 
     fn move_into(
@@ -36,12 +66,41 @@ impl PutBatch {
             self.held.insert(key.clone(), (trash, lock));
         }
         let (td, _) = self.held.get(&key).expect("just inserted");
+        // Per-name fsync of .trashinfo is the 401-entry put cost. The batch
+        // fsyncs info/ once at finish (same durability window as a crash
+        // mid-argv).
         trashdir::trash_move_locked_opts(abs, meta, td, false, &self.deletion_date)
     }
 
-    fn finish(&self) {
+    fn note(&mut self, trash: &trashdir::TrashDir, stored: String, original: PathBuf) {
+        let epoch = crate::info::parse_local_to_epoch(&self.deletion_date).unwrap_or(0);
+        self.pending
+            .entry(trash.root.clone())
+            .or_default()
+            .push(crate::list::Entry {
+                date: Some(self.deletion_date.clone()),
+                epoch,
+                original,
+                name: stored,
+                dir: trash.clone(),
+                orphan: false,
+            });
+    }
+
+    fn finish(&mut self) {
         for (td, _) in self.held.values() {
             let _ = trashdir::sync_info_dir(td);
+            let extra = self.pending.remove(&td.root).unwrap_or_default();
+            if extra.is_empty() {
+                continue;
+            }
+            let mut rows =
+                crate::catalog_cache::load_unverified(td).unwrap_or_else(|| crate::list::collect_one(td));
+            let names: std::collections::HashSet<&str> =
+                extra.iter().map(|e| e.name.as_str()).collect();
+            rows.retain(|e| !names.contains(e.name.as_str()));
+            rows.extend(extra);
+            crate::catalog_cache::store(td, &rows);
         }
     }
 }
@@ -442,14 +501,14 @@ fn put_one_in(
         }
     }
 
-    let abs = match trashdir::abs_nofollow(path) {
+    let abs = match batch.abs_nofollow(path) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{prog}: cannot remove '{name}': {e}");
             return Err(1);
         }
     };
-    let trash = match resolve_put_trash(opts, &abs, &meta) {
+    let trash = match resolve_put_trash_cached(batch, opts, &abs, &meta) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("{prog}: cannot trash '{name}': {e}");
@@ -459,19 +518,7 @@ fn put_one_in(
     let trash_for_cache = trash.clone();
     match batch.move_into(&abs, &meta, trash) {
         Ok(stored) => {
-            let date = crate::info::now_local_string();
-            let epoch = crate::info::parse_local_to_epoch(&date).unwrap_or(0);
-            crate::catalog_cache::upsert(
-                &trash_for_cache,
-                crate::list::Entry {
-                    date: Some(date),
-                    epoch,
-                    original: abs.clone(),
-                    name: stored,
-                    dir: trash_for_cache.clone(),
-                    orphan: false,
-                },
-            );
+            batch.note(&trash_for_cache, stored, abs.clone());
             if opts.verbose {
                 if meta.is_dir() {
                     println!(
@@ -489,6 +536,24 @@ fn put_one_in(
             Err(1)
         }
     }
+}
+
+fn resolve_put_trash_cached(
+    batch: &mut PutBatch,
+    opts: &Opts,
+    abs: &Path,
+    meta: &fs::Metadata,
+) -> io::Result<trashdir::TrashDir> {
+    if opts.trash_pin.is_none() && !opts.home_only {
+        if let Some(td) = batch.resolved.get(&meta.dev()) {
+            return Ok(td.clone());
+        }
+    }
+    let td = resolve_put_trash(opts, abs, meta)?;
+    if opts.trash_pin.is_none() {
+        batch.resolved.insert(meta.dev(), td.clone());
+    }
+    Ok(td)
 }
 
 /// Pick destination trash: explicit pin (created if needed), home-only, or auto-select.

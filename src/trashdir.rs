@@ -648,13 +648,13 @@ pub fn trash_move_locked_opts(
         }
     };
     info_file.write_all(body.as_bytes())?;
-    // Durable reservation before payload move (crash mid-put must not leave a
-    // truncated .trashinfo as the only recoverability record).
-    sync_file(&mut info_file)?;
-    drop(info_file);
+    info_file.flush()?;
     if fsync_info_dir {
+        // Single-name put: durable reservation before the payload move.
+        sync_file(&mut info_file)?;
         let _ = sync_dir(&trash.info());
     }
+    drop(info_file);
 
     let dest = trash.files().join(&name);
     let moved = match rename_noreplace(abs, &dest) {
