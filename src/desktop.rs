@@ -20,6 +20,9 @@ It is not in the musl CLI tarball. This command execs `rtrash-hud`
   --offline            paint the catalog without a compositor (no TTY)
   --trash-dir PATH     pin trash roots (repeatable; --trash-dir=PATH ok)
   --home-only          home trash only
+  --show / --hide / --toggle
+                       talk to a running HUD (hide-miss exits 0)
+  --install-desktop    write .desktop + Sway overlay rules
   --foreground         stay on the terminal (HUD default)
   -h, --help           show this help
   -V, --version        print the HUD version via the HUD binary
@@ -65,6 +68,12 @@ pub fn missing_bin_message() -> &'static str {
 pub fn run(prog: &str, args: &[String]) -> i32 {
     if args.iter().any(|a| a == "-h" || a == "--help") {
         print!("{HELP}");
+        return 0;
+    }
+    // Hide with no HUD binary is success (compositor bind miss).
+    if args.iter().any(|a| a == "--hide")
+        && !resolve_hud_bin().is_some_and(|p| p.is_file())
+    {
         return 0;
     }
     let Some(bin) = resolve_hud_bin().filter(|p| p.is_file()) else {

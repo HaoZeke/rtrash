@@ -109,4 +109,24 @@ mod tests {
             Some(Pane::Restore)
         );
     }
+
+    #[test]
+    fn keys_toml_remap_moves_hud_down() {
+        let dir = std::env::temp_dir().join(format!(
+            "rtrash-hud-keys-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("keys.toml");
+        std::fs::write(&path, "[keys]\nmove_down = \"x\"\n").unwrap();
+        let map = Keymap::load_file(&path).unwrap();
+        let act = resolve(
+            &map,
+            &Key::Character("x".into()),
+            Modifiers::empty(),
+            Mode::Browse,
+        );
+        assert_eq!(act, Some(Action::MoveDown));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

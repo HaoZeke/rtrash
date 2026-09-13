@@ -198,6 +198,10 @@ _rtrash_dispatch() {
             '--trash-dir=[pin trash roots]:dir:_files -/' \
             '--home-only[home trash only]' \
             '--foreground[stay on the terminal]' \
+            '--show[show the HUD overlay]' \
+            '--hide[hide the HUD overlay]' \
+            '--toggle[toggle the HUD overlay]' \
+            '--install-desktop[write .desktop and Sway rules]' \
             '(- *)'{-h,--help}'[display help and exit]' \
             '(- *)'{-V,--version}'[print version]'
           ;;

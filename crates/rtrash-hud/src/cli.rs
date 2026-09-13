@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use crate::app;
 use crate::catalog;
+use crate::install_desktop;
+use crate::summon::{self, SummonAction, SummonCli};
 
 const HELP: &str = "\
 Usage: rtrash-hud [OPTION]...
@@ -15,6 +17,9 @@ the CLI for the happy path. glibc only; not in the musl binstall tarball.
   --offline            paint the catalog without a compositor (no TTY)
   --trash-dir PATH     pin trash roots (repeatable; --trash-dir=PATH ok)
   --home-only          home trash only
+  --show / --hide / --toggle
+                       talk to a running HUD (hide-miss exits 0)
+  --install-desktop    write .desktop + Sway overlay rules
   --foreground         stay on the terminal (default)
   -h, --help           show this help
   -V, --version        print the product version
@@ -31,6 +36,12 @@ pub struct HudCli {
     pub home_only: bool,
     /// Explicit FreeDesktop trash roots.
     pub trash_dirs: Vec<PathBuf>,
+    /// Summon verb from the command line.
+    pub summon: Option<SummonAction>,
+    /// Write desktop files and exit.
+    pub install_desktop: bool,
+    /// Start with the overlay mapped.
+    pub visible: bool,
 }
 
 impl HudCli {
@@ -49,6 +60,10 @@ impl HudCli {
                 "--offline" => cli.offline = true,
                 "--foreground" => cli.foreground = true,
                 "--home-only" => cli.home_only = true,
+                "--show" => cli.summon = Some(SummonAction::Show),
+                "--hide" => cli.summon = Some(SummonAction::Hide),
+                "--toggle" => cli.summon = Some(SummonAction::Toggle),
+                "--install-desktop" => cli.install_desktop = true,
                 a if rtrash::util::is_trash_dir_flag(a) => {
                     match rtrash::util::take_trash_dir_value(args, &mut i) {
                         Ok(p) => cli.trash_dirs.push(p),
@@ -85,9 +100,28 @@ pub fn run_with_args(args: &[String]) -> Result<i32, String> {
             eprintln!("Try 'rtrash-hud --help' for more information.");
             Ok(2)
         }
+        Ok(cli) if cli.install_desktop => install_desktop::run_cli()
+            .map(|_| 0)
+            .map_err(|e| e.to_string()),
         Ok(cli) if cli.offline => Ok(catalog::paint_offline(&cli.trash_dirs, cli.home_only)),
-        Ok(cli) => app::run(cli).map(|()| 0).map_err(|e| e.to_string()),
+        Ok(cli) => dispatch_live(cli),
     }
+}
+
+fn dispatch_live(mut cli: HudCli) -> Result<i32, String> {
+    if let Some(action) = cli.summon {
+        match summon::plan_summon_cli(action, summon::send_command(action)) {
+            Ok(SummonCli::Done) => return Ok(0),
+            Ok(SummonCli::StartShown) => cli.visible = true,
+            Err(err) => {
+                eprintln!("rtrash-hud: {err}");
+                return Ok(1);
+            }
+        }
+    } else {
+        cli.visible = true;
+    }
+    app::run(cli).map(|()| 0).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -112,5 +146,20 @@ mod tests {
         assert!(HELP.contains("list / restore / empty / put / status"));
         assert!(HELP.contains("--offline"));
         assert!(HELP.contains("icedtea"));
+        assert!(HELP.contains("--toggle"));
+        assert!(HELP.contains("--install-desktop"));
+    }
+
+    #[test]
+    fn hide_without_socket_is_zero() {
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var(
+                "RTRASH_HUD_SOCKET",
+                format!("/tmp/rtrash-hud-none-{}", std::process::id()),
+            );
+        }
+        let code = run_with_args(&["--hide".into()]).unwrap();
+        assert_eq!(code, 0);
     }
 }

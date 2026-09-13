@@ -43,6 +43,7 @@ _rtrash_rm_opts=(
 
 _rtrash_desktop_opts=(
   --offline --trash-dir --trash-dir= --home-only --foreground
+  --show --hide --toggle --install-desktop
   --help --version
 )
 

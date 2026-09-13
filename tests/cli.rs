@@ -1213,6 +1213,17 @@ fn desktop_help_names_the_hud() {
 }
 
 #[test]
+fn desktop_hide_without_hud_exits_0() {
+    let out = Command::new(bin())
+        .args(["desktop", "--hide"])
+        .env("RTRASH_HUD_BIN", "/nonexistent/rtrash-hud")
+        .env("PATH", "/nonexistent")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+}
+
+#[test]
 fn desktop_missing_hud_exits_127() {
     let out = Command::new(bin())
         .args(["desktop", "--offline"])

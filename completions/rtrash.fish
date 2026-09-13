@@ -117,6 +117,10 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q desktop' -l of
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q desktop' -l trash-dir -d 'pin trash roots'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q desktop' -l home-only -d 'home trash only'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q desktop' -l foreground -d 'stay on the terminal'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q desktop' -l show -d 'show the HUD overlay'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q desktop' -l hide -d 'hide the HUD overlay'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q desktop' -l toggle -d 'toggle the HUD overlay'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q desktop' -l install-desktop -d 'write .desktop and Sway rules'
 
 # completions shell names
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q completions' -f -a 'bash zsh fish' -d 'shell'

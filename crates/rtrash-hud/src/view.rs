@@ -50,6 +50,7 @@ pub fn view(app: &HudApp) -> Element<'_, Message> {
             A11y::new("status", Role::Status),
         ));
     }
+    pane = pane.push(footer_hints(app, tea));
 
     container(pane.spacing(10).width(Fill).height(Fill))
         .width(Fill)
@@ -92,6 +93,16 @@ fn header(app: &HudApp, tea: Tokens) -> Element<'_, Message> {
             widget::ChipKind::Filter,
             Icons::NONE,
             A11y::button("force"),
+        ),
+        widget::chip(
+            format!("refresh={}", app.last_refresh),
+            None,
+            None,
+            tea,
+            Variant::Quiet,
+            widget::ChipKind::Filter,
+            Icons::NONE,
+            A11y::button("refresh"),
         ),
         widget::chip(
             format!("dry-run={}", app.dry_run),
@@ -304,6 +315,19 @@ fn status_pane(app: &HudApp, tea: Tokens) -> Element<'_, Message> {
         ));
     }
     col.into()
+}
+
+fn footer_hints(app: &HudApp, tea: Tokens) -> Element<'_, Message> {
+    let down = app
+        .keys
+        .display_chords(rtrash::tui_binds::Action::MoveDown);
+    let help = app.keys.display_chords(rtrash::tui_binds::Action::Help);
+    widget::label(
+        format!("{down} move  {help} help  1-5 panes"),
+        widget::LabelFace::Meta,
+        tea,
+        A11y::new("footer", Role::Status),
+    )
 }
 
 fn help_overlay(app: &HudApp, tea: Tokens) -> Element<'_, Message> {

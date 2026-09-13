@@ -12,12 +12,17 @@ use rtrash::tui_binds::{Action, Keymap};
 
 use crate::catalog::{Catalog, Pane};
 use crate::cli::HudCli;
+use crate::install_desktop;
 use crate::keys::{self, Mode};
+use crate::prefs;
+use crate::summon::{self, SummonAction, SummonServer};
 use crate::theme;
+use crate::tray::{self, TrayAction};
+
 
 const HUD_W: f32 = 860.0;
 const HUD_H: f32 = 620.0;
-const APP_ID: &str = "me.rgoswami.rtrash-hud";
+const APP_ID: &str = install_desktop::APP_ID;
 
 /// iced messages.
 #[derive(Debug, Clone)]
@@ -43,6 +48,10 @@ pub enum Message {
     },
     /// Window close.
     Close,
+    /// Iced assigned a window id.
+    Opened(window::Id),
+    /// Poll summon / tray / watch.
+    Tick,
     /// Discarded click.
     Noop,
 }
@@ -55,7 +64,6 @@ pub enum ConfirmKind {
 }
 
 /// iced application state.
-#[derive(Debug)]
 pub struct HudApp {
     /// Live catalog.
     pub catalog: Catalog,
@@ -92,6 +100,19 @@ pub struct HudApp {
     pub catalog_window: icedtea::collection::VisibleWindow,
     /// Row heights for `virtual_column` (must outlive the view).
     pub list_heights: Vec<f32>,
+    /// Overlay currently mapped.
+    pub visible: bool,
+    /// Decorated window (env RTRASH_HUD_WINDOW).
+    pub window_mode: bool,
+    /// Last iced window id.
+    pub window_id: Option<window::Id>,
+    /// Pending xdg-activation token.
+    pub pending_token: Option<String>,
+    /// Last refresh banner clock.
+    pub last_refresh: String,
+    _summon: Option<SummonServer>,
+    _tray: Option<tray::HudTray>,
+    watch: Option<crate::watch::Watch>,
 }
 
 impl HudApp {
@@ -99,6 +120,12 @@ impl HudApp {
     pub fn boot(cli: HudCli) -> Self {
         let catalog = Catalog::load(&cli.trash_dirs, cli.home_only);
         let n = catalog.entries.len();
+        let watch_roots: Vec<PathBuf> = cli
+            .trash_dirs
+            .iter()
+            .cloned()
+            .chain(catalog.dirs.iter().map(|d| d.root.clone()))
+            .collect();
         let mut app = HudApp {
             catalog,
             pane: Pane::List,
@@ -118,6 +145,14 @@ impl HudApp {
             home_only: cli.home_only,
             catalog_window: icedtea::collection::VisibleWindow::new(480.0),
             list_heights: Vec::new(),
+            visible: cli.visible || prefs::window_mode(),
+            window_mode: prefs::window_mode(),
+            window_id: None,
+            pending_token: summon::take_env_token(),
+            last_refresh: "now".into(),
+            _summon: summon::install().ok(),
+            _tray: tray::install().ok(),
+            watch: Some(crate::watch::install(&watch_roots)),
         };
         app.sync_heights();
         app
@@ -379,7 +414,12 @@ impl HudApp {
 
 /// Decorated desktop window. Overlay / summon is a sibling ticket.
 pub fn hud_window() -> window::Settings {
-    let boot = icedtea::app::Boot::new("rtrash", APP_ID)
+    let app_id = if prefs::window_mode() {
+        install_desktop::APP_ID
+    } else {
+        install_desktop::OVERLAY_APP_ID
+    };
+    let boot = icedtea::app::Boot::new("rtrash", app_id)
         .size(HUD_W, HUD_H)
         .min_size(360.0, 420.0);
     icedtea::app::bootstrap(&boot).window
@@ -392,8 +432,15 @@ pub fn run(cli: HudCli) -> iced::Result {
     iced::daemon(
         move || {
             let cli = cell.lock().expect("boot").take().expect("boot once");
-            let (_id, open) = window::open(hud_window());
-            (HudApp::boot(cli), open.map(|_| Message::Noop))
+            let mut app = HudApp::boot(cli);
+            let task = if app.visible {
+                let (id, open) = window::open(hud_window());
+                app.window_id = Some(id);
+                open.map(Message::Opened)
+            } else {
+                Task::none()
+            };
+            (app, task)
         },
         update,
         view,
@@ -412,7 +459,18 @@ pub fn run(cli: HudCli) -> iced::Result {
 
 fn update(app: &mut HudApp, message: Message) -> Task<Message> {
     match message {
-        Message::Close => iced::exit(),
+        Message::Opened(id) => {
+            app.window_id = Some(id);
+            Task::none()
+        }
+        Message::Tick => tick(app),
+        Message::Close => {
+            if app.window_mode {
+                iced::exit()
+            } else {
+                hide_overlay(app)
+            }
+        }
         Message::Noop => Task::none(),
         Message::SetPane(pane) => {
             app.pane = pane;
@@ -476,13 +534,66 @@ fn view(app: &HudApp, _id: window::Id) -> Element<'_, Message> {
 }
 
 fn subscription(_app: &HudApp) -> Subscription<Message> {
-    event::listen_with(|event, _status, _id| match event {
+    let keys = event::listen_with(|event, _status, _id| match event {
         Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
             Some(Message::RawKey { key, modifiers })
         }
         Event::Window(window::Event::CloseRequested) => Some(Message::Close),
         _ => None,
-    })
+    });
+    let tick = iced::time::every(std::time::Duration::from_millis(200)).map(|_| Message::Tick);
+    Subscription::batch([keys, tick])
+}
+
+fn tick(app: &mut HudApp) -> Task<Message> {
+    if let Some(req) = summon::try_recv() {
+        app.pending_token = req.token;
+        return apply_summon(app, req.action);
+    }
+    if let Some(tray) = tray::try_recv() {
+        return match tray {
+            TrayAction::Show => apply_summon(app, SummonAction::Show),
+            TrayAction::Toggle => apply_summon(app, SummonAction::Toggle),
+            TrayAction::Quit => iced::exit(),
+        };
+    }
+    if app.watch.as_ref().is_some_and(|w| w.take()) {
+        app.reload();
+        app.last_refresh = "live".into();
+    }
+    Task::none()
+}
+
+fn apply_summon(app: &mut HudApp, action: SummonAction) -> Task<Message> {
+    let show = match action {
+        SummonAction::Show => true,
+        SummonAction::Hide => false,
+        SummonAction::Toggle => !app.visible,
+    };
+    if show {
+        show_overlay(app)
+    } else {
+        hide_overlay(app)
+    }
+}
+
+fn show_overlay(app: &mut HudApp) -> Task<Message> {
+    app.visible = true;
+    if app.window_id.is_some() {
+        return Task::none();
+    }
+    let (id, open) = window::open(hud_window());
+    app.window_id = Some(id);
+    open.map(Message::Opened)
+}
+
+fn hide_overlay(app: &mut HudApp) -> Task<Message> {
+    app.visible = false;
+    if let Some(id) = app.window_id.take() {
+        window::close(id)
+    } else {
+        Task::none()
+    }
 }
 
 /// Key subscription uses the live keymap so view stays dumb.
