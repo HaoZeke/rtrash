@@ -136,6 +136,7 @@ _rtrash_dispatch() {
     'rm:permanently delete matching trash entries'
     'setup:install multi-call links, completions, man page'
     'keys:show or sample TUI keybind config'
+    'desktop:exec the rtrash-hud icedtea desktop HUD'
     'completions:print embedded shell completion script'
     'man:print embedded man page to stdout'
   )
@@ -190,6 +191,15 @@ _rtrash_dispatch() {
             '--sample[print a full sample keys.toml to stdout]' \
             '--path[print the default config path]' \
             '(- *)'--help'[display help and exit]'
+          ;;
+        desktop)
+          _arguments -s -C \
+            '--offline[paint the catalog without a compositor]' \
+            '--trash-dir=[pin trash roots]:dir:_files -/' \
+            '--home-only[home trash only]' \
+            '--foreground[stay on the terminal]' \
+            '(- *)'{-h,--help}'[display help and exit]' \
+            '(- *)'{-V,--version}'[print version]'
           ;;
         completions)
           _arguments -s -C \

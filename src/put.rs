@@ -43,15 +43,20 @@ impl PutBatch {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Interactive {
+/// Prompt policy for one put (GNU rm `-f`/`-i`/`-I` last-wins).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Interactive {
+    /// Never prompt (`-f` / `--interactive=never`).
     Never,
+    /// Prompt once before a large or recursive batch (`-I`).
     Once,
+    /// Prompt before every removal (`-i`).
     Always,
 }
 
-#[derive(Clone)]
-pub(crate) struct Opts {
+/// Options for [`put_one`]. The CLI, TUI, and HUD share this struct.
+#[derive(Clone, Debug)]
+pub struct Opts {
     pub force: bool,
     pub recursive: bool,
     pub empty_dirs: bool,
@@ -338,7 +343,8 @@ fn describe(meta: &fs::Metadata, path: &Path) -> &'static str {
     }
 }
 
-pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
+/// Move one path into the trash. Shared by the CLI, TUI, and HUD.
+pub fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
     let mut batch = PutBatch::new();
     let r = put_one_in(prog, path, opts, &mut batch);
     batch.finish();

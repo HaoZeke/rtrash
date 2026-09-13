@@ -30,7 +30,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -38,7 +38,7 @@ jobs:
           tool: nextest
 
       - name: Test (nextest, locked, ci profile)
-        run: cargo nextest run --locked --profile ci
+        run: cargo nextest run --locked --workspace --profile ci
 
   deny:
     name: cargo-deny
@@ -49,3 +49,4 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+          arguments: --exclude rtrash-hud

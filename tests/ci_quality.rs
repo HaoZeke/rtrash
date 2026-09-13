@@ -98,4 +98,8 @@ fn cargo_dist_and_asv_layout_exist() {
         fs::read_to_string(root.join(".github/workflows/ci_bench_commenter.yml")).unwrap();
     assert!(comment.contains("asv-perch"));
     assert!(root.join(".config/nextest.toml").is_file());
+    assert!(
+        !dist.contains("rtrash-hud") || dist.contains("cargo:."),
+        "cargo-dist workspace must not add the HUD to musl targets"
+    );
 }

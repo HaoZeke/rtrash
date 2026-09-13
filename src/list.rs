@@ -42,7 +42,7 @@ A files/ name with no .trashinfo is an emergency row: date
       --version         output version information and exit
 ";
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Entry {
     pub date: Option<String>,
     pub epoch: i64,

@@ -58,7 +58,9 @@ package_one() {
     fi
   fi
 
-  cargo build --release --target "${TARGET}"
+  # Default workspace member is the musl CLI only. Never build rtrash-hud
+  # (iced) for musl; the HUD is glibc and is not in this tarball.
+  cargo build --release --target "${TARGET}" -p rtrash --bin rtrash
 
   local BIN="$ROOT/target/${TARGET}/release/rtrash"
   if [[ ! -x "$BIN" ]]; then

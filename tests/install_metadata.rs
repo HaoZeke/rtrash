@@ -177,6 +177,37 @@ fn binstall_remaps_linux_gnu_hosts_to_matching_musl_assets() {
 }
 
 #[test]
+fn musl_cli_package_does_not_depend_on_iced() {
+    let cargo = read("Cargo.toml");
+    let script = read("scripts/package-release.sh");
+    // The rtrash package itself must not name iced. HUD is a sibling crate.
+    let mut in_package_deps = false;
+    let mut saw_iced = false;
+    for line in cargo.lines() {
+        let t = line.trim();
+        if t == "[dependencies]" {
+            in_package_deps = true;
+            continue;
+        }
+        if in_package_deps && t.starts_with('[') {
+            break;
+        }
+        if in_package_deps && t.starts_with("iced") {
+            saw_iced = true;
+        }
+    }
+    assert!(!saw_iced, "rtrash [dependencies] must not include iced");
+    assert!(
+        !cargo.contains("icedtea"),
+        "root Cargo.toml must not depend on icedtea (HUD crate only)"
+    );
+    assert!(
+        script.contains("-p rtrash"),
+        "package-release musl build must pin -p rtrash so iced is not linked"
+    );
+}
+
+#[test]
 fn readme_prioritizes_binstall_install_path() {
     let s = read("README.md");
     let binstall_pos = s.find("cargo binstall").expect("cargo binstall");

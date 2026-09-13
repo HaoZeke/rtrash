@@ -36,6 +36,8 @@ pub mod setup;
 #[cfg(unix)]
 pub mod status;
 #[cfg(unix)]
+pub mod desktop;
+#[cfg(unix)]
 pub mod trashdir;
 #[cfg(all(unix, feature = "tui"))]
 pub mod tui_binds;

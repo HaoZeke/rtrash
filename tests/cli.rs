@@ -1197,6 +1197,32 @@ fn help_mentions_setup() {
 }
 
 #[test]
+fn desktop_help_names_the_hud() {
+    let out = Command::new(bin())
+        .args(["desktop", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let s = stdout_of(&out);
+    assert!(s.contains("rtrash-hud"), "{s}");
+    assert!(s.contains("icedtea"), "{s}");
+    assert!(s.contains("--offline"), "{s}");
+}
+
+#[test]
+fn desktop_missing_hud_exits_127() {
+    let out = Command::new(bin())
+        .args(["desktop", "--offline"])
+        .env("RTRASH_HUD_BIN", "/nonexistent/rtrash-hud")
+        .env("PATH", "/nonexistent")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(127), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(err.contains("rtrash-hud"), "{err}");
+}
+
+#[test]
 fn status_uses_directorysizes_cache_when_valid() {
     let sb = Sandbox::new("status-dircache");
     let d = sb.work().join("cachedir");
@@ -1232,8 +1258,9 @@ fn status_uses_directorysizes_cache_when_valid() {
     assert!(out2.status.success(), "{}", stderr_of(&out2));
     let s2 = stdout_of(&out2);
     // Fallback walk of a 2 KiB file must not still report ~741 MiB.
+    // Match the formatted size, not a substring of the sandbox path (PIDs).
     assert!(
-        !s2.contains("741") && !s2.contains("740.") && !s2.contains("GiB"),
+        !s2.contains("741.0") && !s2.contains("740.") && !s2.contains(" GiB"),
         "stale cache must not dominate status: {s2}"
     );
 }

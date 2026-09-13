@@ -119,13 +119,19 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     0
 }
 
-struct RootSummary {
-    path: String,
-    items: u64,
-    bytes: u64,
+/// Per-root item count and reclaimable bytes.
+#[derive(Clone, Debug)]
+pub struct RootSummary {
+    /// Trash root path (`files/` + `info/` parent).
+    pub path: String,
+    /// Catalog entries in this root (after age filters).
+    pub items: u64,
+    /// Approximate reclaimable bytes.
+    pub bytes: u64,
 }
 
-fn summarize_dirs(
+/// Summarize discovered trash roots. Shared by the CLI and HUD.
+pub fn summarize(
     dirs: &[TrashDir],
     older_than: Option<i64>,
     newer_than: Option<i64>,
@@ -183,7 +189,7 @@ pub fn print_status(dirs: &[TrashDir], older_than: Option<i64>, newer_than: Opti
         eprintln!("Total: 0 items (0 B)");
         return;
     }
-    let (roots, total_items, total_bytes) = summarize_dirs(dirs, older_than, newer_than);
+    let (roots, total_items, total_bytes) = summarize(dirs, older_than, newer_than);
     for r in &roots {
         println!(
             "{}\t{} items\t{}",
@@ -200,7 +206,7 @@ pub fn print_status(dirs: &[TrashDir], older_than: Option<i64>, newer_than: Opti
 }
 
 fn print_status_json(dirs: &[TrashDir], older_than: Option<i64>, newer_than: Option<i64>) {
-    let (roots, total_items, total_bytes) = summarize_dirs(dirs, older_than, newer_than);
+    let (roots, total_items, total_bytes) = summarize(dirs, older_than, newer_than);
     let mut out = String::from("{\n  \"roots\": [\n");
     for (i, r) in roots.iter().enumerate() {
         if i > 0 {

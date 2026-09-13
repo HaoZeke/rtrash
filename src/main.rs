@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use rtrash::desktop;
 #[cfg(all(unix, feature = "tui"))]
 use rtrash::tui_binds;
 use rtrash::{empty, list, put, restore, rm, setup, status};
@@ -16,6 +18,7 @@ Commands:
   rm PATTERN...               permanently delete matching trash entries
   setup [OPTION]...           install multi-call links, completions, man page
   keys [OPTION]...            show/sample TUI keybind config (customizable)
+  desktop [OPTION]...         exec the rtrash-hud icedtea desktop HUD
   completions {bash|zsh|fish} print embedded shell completion script
   man                         print embedded man(1) page to stdout
 
@@ -60,6 +63,13 @@ fn main() {
             #[cfg(not(all(unix, feature = "tui")))]
             Some("keys") => {
                 eprintln!("{argv0}: keys requires the TUI feature on Unix");
+                1
+            }
+            #[cfg(unix)]
+            Some("desktop") => desktop::run(&argv0, &rest[1..]),
+            #[cfg(not(unix))]
+            Some("desktop") => {
+                eprintln!("{argv0}: desktop HUD is Unix-only");
                 1
             }
             Some("completions") => setup::run("completions", &rest[1..]),

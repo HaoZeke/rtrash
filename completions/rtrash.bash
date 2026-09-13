@@ -41,7 +41,12 @@ _rtrash_rm_opts=(
   --help --version
 )
 
-_rtrash_subcommands=(put empty list status restore rm setup keys completions man)
+_rtrash_desktop_opts=(
+  --offline --trash-dir --trash-dir= --home-only --foreground
+  --help --version
+)
+
+_rtrash_subcommands=(put empty list status restore rm setup keys desktop completions man)
 
 _rtrash_setup_opts=(
   --prefix= --bin-dir= --with-rm -n --dry-run -f --force -v --verbose --help
@@ -102,7 +107,7 @@ _rtrash_main() {
   local i sub=
   for ((i = 1; i < ${#COMP_WORDS[@]}; i++)); do
     case "${COMP_WORDS[i]}" in
-      put | empty | list | status | restore | rm | setup | keys | completions | man)
+      put | empty | list | status | restore | rm | setup | keys | desktop | completions | man)
         sub="${COMP_WORDS[i]}"
         break
         ;;
@@ -132,6 +137,7 @@ _rtrash_main() {
     rm) _rtrash_complete_from _rtrash_rm_opts ;;
     setup) _rtrash_complete_from _rtrash_setup_opts ;;
     keys) _rtrash_complete_from _rtrash_keys_opts ;;
+    desktop) _rtrash_complete_from _rtrash_desktop_opts ;;
     completions)
       if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W "--help" -- "$cur"))

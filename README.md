@@ -62,6 +62,7 @@ $ rtrash empty --plain
 | `empty --dry-run` | suite GIF |
 | Custom keys (`rtrash keys`, `keys.toml`) | suite GIF |
 | Interactive TUI (fuzzy, multi-select, `?`) | **TTY** — not in the GIF; run `rtrash restore` |
+| Desktop HUD (`rtrash desktop`) | icedtea overlay; glibc `rtrash-hud`, not in the musl tarball |
 | Python `unlink` / `rmtree` | [bindings](docs/bindings.md) |
 
 Demos are regenerable: `./docs/demo/record.sh` (pinned `--trash-dir` sandbox — safe).

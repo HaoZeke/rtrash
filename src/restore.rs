@@ -295,7 +295,8 @@ fn parse_restore_indexes(input: &str, n: usize) -> Result<Vec<usize>, ()> {
     }
 }
 
-fn restore_entries(
+/// Restore each chosen catalog entry. Shared by the CLI, TUI, and HUD.
+pub fn restore_entries(
     prog: &str,
     chosen: &[&list::Entry],
     force: bool,
@@ -350,8 +351,8 @@ pub(crate) fn dest_path(entry: &list::Entry, restore_to: Option<&Path>) -> PathB
 }
 
 /// Restore one entry to its original path (or `--restore-to`). Shared by CLI,
-/// piped pick, and TUI.
-pub(crate) fn restore_entry(
+/// piped pick, TUI, and HUD.
+pub fn restore_entry(
     prog: &str,
     entry: &list::Entry,
     force: bool,

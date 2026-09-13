@@ -7,7 +7,7 @@ function __rtrash_seen_subcommand
     set -e cmd[1]
     for c in $cmd
         switch $c
-            case put empty list status restore rm setup keys completions man
+            case put empty list status restore rm setup keys desktop completions man
                 echo $c
                 return 0
         end
@@ -24,6 +24,7 @@ complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'restore' -d 'restore
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'rm' -d 'permanently delete matching trash entries'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'setup' -d 'install multi-call links, completions, man page'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'keys' -d 'show/sample TUI keybind config'
+complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'desktop' -d 'exec the rtrash-hud icedtea desktop HUD'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'completions' -d 'print embedded shell completion script'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'man' -d 'print embedded man page to stdout'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -s h -l help -d 'display help and exit'
@@ -110,6 +111,12 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -s v -l
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q keys' -s l -l list -d 'print resolved keymap'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q keys' -l sample -d 'print a full sample keys.toml'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q keys' -l path -d 'print the default config path'
+
+# desktop HUD
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q desktop' -l offline -d 'paint the catalog without a compositor'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q desktop' -l trash-dir -d 'pin trash roots'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q desktop' -l home-only -d 'home trash only'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q desktop' -l foreground -d 'stay on the terminal'
 
 # completions shell names
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q completions' -f -a 'bash zsh fish' -d 'shell'

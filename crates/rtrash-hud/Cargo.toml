@@ -1,0 +1,33 @@
+[package]
+name = "rtrash-hud"
+version = "0.1.4"
+edition = "2021"
+rust-version = "1.77"
+description = "icedtea desktop HUD for rtrash (glibc; not in the musl CLI tarball)"
+license = "MIT"
+authors = ["Rohit Goswami <rgoswami@ieee.org>"]
+repository = "https://github.com/HaoZeke/rtrash"
+readme = "../../README.md"
+
+# iced links native graphics stacks. Musl archives are the CLI only.
+[package.metadata.dist]
+dist = false
+
+[lib]
+name = "rtrash_hud"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rtrash-hud"
+path = "src/bin.rs"
+
+[dependencies]
+iced = { version = "0.14", default-features = true, features = [
+  "tokio",
+  "advanced",
+  "lazy",
+] }
+# 0.17.0: checkbox is CheckState, label takes LabelFace. Do not fork iced.
+icedtea = "0.17.0"
+rtrash = { path = "../..", version = "0.1.4" }
+crossterm = "0.28"

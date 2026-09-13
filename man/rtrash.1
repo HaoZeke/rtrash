@@ -498,6 +498,32 @@ to stdout.
 .TP
 .B \-\-path
 Print the default config path.
+.SS desktop
+.B rtrash desktop
+[\fIOPTION\fR]...
+.PP
+Exec the
+.B rtrash-hud
+icedtea desktop HUD (glibc; not in the musl tarball).
+Looks up
+.B rtrash-hud
+next to this binary, in
+.BR $RTRASH_HUD_BIN ,
+or on
+.BR PATH .
+Forwards remaining flags.
+.TP
+.B \-\-offline
+Paint the catalog without a compositor (no TTY required).
+.TP
+.BI \-\-trash\-dir =PATH
+Pin trash roots (repeatable).
+.TP
+.B \-\-home\-only
+Home trash only.
+.TP
+.B \-\-foreground
+Stay on the terminal.
 .SS rm (permanent delete from trash)
 .B rtrash rm
 [\fIOPTION\fR]...
