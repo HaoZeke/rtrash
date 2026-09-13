@@ -1,0 +1,29 @@
+date_utc=2026-09-13
+host=terra-x86_64
+sysname=Linux machine=x86_64 release=7.0.13-arch1-1-rg
+rtrash=<release-rtrash>
+rtrash_version=rtrash 0.1.4
+trash-put=/usr/bin/trash-put
+trash-put_version=0.24.5.26
+optional_peer=trashy status=missing
+PUT tool=rtrash trial=1 ec=0 wall_s=0.006757 entries=401
+PUT tool=rtrash trial=2 ec=0 wall_s=0.006937 entries=401
+PUT tool=trash-cli trial=1 ec=0 wall_s=0.073968 entries=401
+PUT tool=trash-cli trial=2 ec=0 wall_s=0.071894 entries=401
+--- SUMMARY ---
+rtrash put_avg_s=0.006847 list_avg_s=0.002078 empty_avg_s=0.007651
+trash-cli put_avg_s=0.072931 list_avg_s=0.047440 empty_avg_s=0.036055
+put_speedup_rtrash_over_trashcli=10.65x
+list_speedup_rtrash_over_trashcli=22.82x
+empty_speedup_rtrash_over_trashcli=4.71x
+EXDEV rtrash put_avg_s=0.390020
+EXDEV trash-cli status=refused-cross-volume
+LIST_OK tool=rtrash
+LIST_OK tool=trash-cli
+COMPARE_OK
+# Warmed 7-trial same fixture vs terra-built gtrash (not on PATH):
+# rtrash avg=0.006882 median=0.007344 min=0.005803 max=0.007801
+# gtrash avg=0.009155 median=0.009263 min=0.008186 max=0.010101
+# put_speedup_rtrash_over_gtrash=1.33x (every trial rtrash < gtrash)
+# Change: renameat2 from held source parent dirfd; batch put skips info/ fsync
+# (gtrash never fsyncs); directorysizes atomic write no longer sync_all.

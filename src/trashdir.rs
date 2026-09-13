@@ -488,7 +488,7 @@ impl TrashLock {
     }
 }
 
-fn open_dir(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn open_dir(path: &Path) -> io::Result<fs::File> {
     fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
@@ -613,7 +613,23 @@ pub fn abs_nofollow(path: &Path) -> io::Result<PathBuf> {
 pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
     trash.ensure()?;
     let lock = TrashLock::acquire(&trash.root)?;
-    trash_move_locked(abs, meta, trash, &lock)
+    let src_dir = match abs.parent() {
+        Some(p) if !p.as_os_str().is_empty() => open_dir(p).ok(),
+        _ => None,
+    };
+    let src_fd = src_dir.as_ref().map(|f| {
+        use std::os::unix::io::AsRawFd;
+        f.as_raw_fd()
+    });
+    trash_move_locked_opts(
+        abs,
+        meta,
+        trash,
+        &lock,
+        src_fd,
+        true,
+        &info::now_local_string(),
+    )
 }
 
 /// Inner put path (caller holds the trash-root lock). Exposed for tests.
@@ -623,16 +639,26 @@ pub fn trash_move_locked(
     trash: &TrashDir,
     lock: &TrashLock,
 ) -> io::Result<String> {
-    trash_move_locked_opts(abs, meta, trash, lock, true, &info::now_local_string())
+    trash_move_locked_opts(
+        abs,
+        meta,
+        trash,
+        lock,
+        None,
+        true,
+        &info::now_local_string(),
+    )
 }
 
-/// Like [`trash_move_locked`]. When `fsync_info_dir` is false the caller must
-/// [`TrashLock::sync_info`] once after a batch of puts under the same lock.
+/// Like [`trash_move_locked`]. When `fsync_info_dir` is false the caller skips
+/// per-name and batch `info/` fsync (gtrash does not fsync on put).
+/// `src_dirfd` is the already-open parent of `abs` for `renameat2`.
 pub fn trash_move_locked_opts(
     abs: &Path,
     meta: &fs::Metadata,
     trash: &TrashDir,
     lock: &TrashLock,
+    src_dirfd: Option<std::os::unix::io::RawFd>,
     fsync_info_dir: bool,
     deletion_date: &str,
 ) -> io::Result<String> {
@@ -675,7 +701,7 @@ pub fn trash_move_locked_opts(
                 drop(info_file);
 
                 let dest_c = cstring_name(name.as_bytes())?;
-                let moved = match rename_noreplace_at(abs, lock.files_fd(), &dest_c) {
+                let moved = match rename_noreplace_at(abs, src_dirfd, lock.files_fd(), &dest_c) {
                     Ok(()) => Ok(()),
                     Err(e) if e.raw_os_error() == Some(libc::EEXIST) => {
                         // Orphan payload occupies this name. Drop the reservation
@@ -780,20 +806,31 @@ fn unlinkat_name(dirfd: std::os::unix::io::RawFd, name: &std::ffi::CStr) -> io::
 /// so an orphan payload is still not overwritten.
 fn rename_noreplace_at(
     src: &Path,
+    src_dirfd: Option<std::os::unix::io::RawFd>,
     dest_dirfd: std::os::unix::io::RawFd,
     dest_name: &std::ffi::CStr,
 ) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
-    let src_c = std::ffi::CString::new(src.as_os_str().as_bytes())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let src_owned;
+    let (src_at, src_ptr) = if let Some(fd) = src_dirfd {
+        let base = src
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+        src_owned = cstring_name(base.as_bytes())?;
+        (fd, src_owned.as_ptr())
+    } else {
+        src_owned = std::ffi::CString::new(src.as_os_str().as_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        (libc::AT_FDCWD, src_owned.as_ptr())
+    };
     #[cfg(target_os = "linux")]
     {
         // RENAME_NOREPLACE = 1. syscall form works on glibc and musl.
         let rc = unsafe {
             libc::syscall(
                 libc::SYS_renameat2,
-                libc::AT_FDCWD,
-                src_c.as_ptr(),
+                src_at,
+                src_ptr,
                 dest_dirfd,
                 dest_name.as_ptr(),
                 1usize,
@@ -820,14 +857,7 @@ fn rename_noreplace_at(
     if exists == 0 {
         return Err(io::Error::from_raw_os_error(libc::EEXIST));
     }
-    let rc = unsafe {
-        libc::renameat(
-            libc::AT_FDCWD,
-            src_c.as_ptr(),
-            dest_dirfd,
-            dest_name.as_ptr(),
-        )
-    };
+    let rc = unsafe { libc::renameat(src_at, src_ptr, dest_dirfd, dest_name.as_ptr()) };
     if rc == 0 {
         Ok(())
     } else {
@@ -868,7 +898,7 @@ pub fn directorysizes_upsert(
         }
     }
     out.push_str(&line);
-    atomic_write(&path, out.as_bytes())
+    atomic_write_opts(&path, out.as_bytes(), false)
 }
 
 /// Drop a single name from `directorysizes` (used by selective trash-rm).
@@ -1012,6 +1042,10 @@ pub fn files_child_reclaim_bytes_cached(
 
 /// Write `data` to `path` via a same-dir temp file and rename (atomic on POSIX).
 pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
+    atomic_write_opts(path, data, true)
+}
+
+fn atomic_write_opts(path: &Path, data: &[u8], sync: bool) -> io::Result<()> {
     use std::io::Write;
     let parent = path.parent().unwrap_or(Path::new("."));
     let tmp = parent.join(format!(
@@ -1029,7 +1063,9 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
             .mode(0o600)
             .open(&tmp)?;
         f.write_all(data)?;
-        f.sync_all()?;
+        if sync {
+            f.sync_all()?;
+        }
     }
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),

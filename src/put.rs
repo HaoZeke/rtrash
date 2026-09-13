@@ -25,6 +25,8 @@ struct PutBatch {
     /// Roots whose `info/` had no `.trashinfo` when the lock was taken.
     /// Pending rows are then the whole catalog; do not rayon-scan them back.
     fresh: HashSet<PathBuf>,
+    /// Source parent dirfds for `renameat2` (one per unique parent).
+    src_dirs: HashMap<PathBuf, fs::File>,
 }
 
 impl PutBatch {
@@ -37,6 +39,7 @@ impl PutBatch {
             resolved: HashMap::new(),
             sticky: None,
             fresh: HashSet::new(),
+            src_dirs: HashMap::new(),
         }
     }
 
@@ -75,11 +78,22 @@ impl PutBatch {
             }
             self.held.insert(key.clone(), (trash, lock));
         }
+        let src_fd = self.src_dirfd(abs)?;
         let (td, lock) = self.held.get(&key).expect("just inserted");
-        // Per-name fsync of .trashinfo is the 401-entry put cost. The batch
-        // fsyncs info/ once at finish (same durability window as a crash
-        // mid-argv).
-        trashdir::trash_move_locked_opts(abs, meta, td, lock, false, &self.deletion_date)
+        trashdir::trash_move_locked_opts(abs, meta, td, lock, src_fd, false, &self.deletion_date)
+    }
+
+    fn src_dirfd(&mut self, abs: &Path) -> io::Result<Option<std::os::unix::io::RawFd>> {
+        use std::os::unix::io::AsRawFd;
+        let parent = match abs.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => return Ok(None),
+        };
+        if !self.src_dirs.contains_key(parent) {
+            let f = trashdir::open_dir(parent)?;
+            self.src_dirs.insert(parent.to_path_buf(), f);
+        }
+        Ok(self.src_dirs.get(parent).map(|f| f.as_raw_fd()))
     }
 
     fn note(&mut self, trash: &trashdir::TrashDir, stored: String, original: PathBuf) {
@@ -98,8 +112,7 @@ impl PutBatch {
     }
 
     fn finish(&mut self) {
-        for (td, lock) in self.held.values() {
-            let _ = lock.sync_info();
+        for (td, _lock) in self.held.values() {
             let extra = self.pending.remove(&td.root).unwrap_or_default();
             if extra.is_empty() {
                 continue;

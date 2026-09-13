@@ -7,7 +7,7 @@
 | **Safer** than permanent `os.remove` / bare `rm`? | **Yes** — FreeDesktop trash and rm-shaped fail-safes; recoverable until empty |
 | **Safer** than trash-cli? | **Roughly equivalent** FreeDesktop correctness; rtrash has stronger GNU-style put fail-safes (`-f`/`-i` last-wins, preserve-root, and related flags) |
 | **Better** for this niche? | **Yes** if you want one native multi-call binary and in-process Python (`import rtrash`) without spawning trash-cli |
-| **Faster**? | **Yes vs trash-cli** on the 2026-09-13 terra fixture (put 8.1×). **Tied with gtrash** on the same 401-entry same-FS put (1.01×). trashy not compared. |
+| **Faster**? | **Yes vs trash-cli** (put 10.7×) and **vs gtrash** (put 1.33× warmed) on the 2026-09-13 terra 401-entry same-FS fixture. trashy not compared. |
 
 Prefer trash-cli when you only want distro Python packaging and no Rust toolchain.
 
@@ -40,11 +40,11 @@ Fixture: 400 small files + one tree (80 nested files) = 401 trash entries; two t
 
 | Tool | put avg (s) | list avg (s) | empty avg (s) |
 |------|-------------|--------------|----------------|
-| rtrash 0.1.4 release | **0.009593** | **0.001807** | **0.007606** |
-| trash-cli 0.24.5.26 | 0.077653 | 0.048971 | 0.041696 |
-| trash-cli / rtrash | **8.09×** | **27.10×** | **5.48×** |
+| rtrash 0.1.4 release | **0.006847** | **0.002078** | **0.007651** |
+| trash-cli 0.24.5.26 | 0.072931 | 0.047440 | 0.036055 |
+| trash-cli / rtrash | **10.65×** | **22.82×** | **4.71×** |
 
-Same fixture, one-off gtrash put: rtrash **0.010132 s**, gtrash **0.010190 s** (**1.01×**). Same-FS put is 401× (`openat`+`write`+`renameat2`); `strace -c` after the fix is 401 `renameat2`, 421 `openat`, 404 `write`, 2 `fsync`, and no `clone3`/`futex` pool.
+Warmed 7-trial same fixture vs a terra-built gtrash: rtrash **0.006882 s**, gtrash **0.009155 s** (**1.33×**; every trial rtrash was faster). Log: `benches/compare-trash-cli-2026-09-13-gtrash.txt`. Batch put `renameat2`s from a held source parent dirfd and does not fsync `info/` (gtrash never fsyncs). `directorysizes` is still written on directory put.
 
 Both harness tools (same-FS `/tmp`): `ec=0`, `entries=401`, empty leaves `files_left=0` `info_left=0`, `LIST_OK`.
 

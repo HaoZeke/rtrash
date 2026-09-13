@@ -8,7 +8,7 @@
 | *Safer* than permanent =os.remove= / bare =rm=? | *Yes* — recoverable FreeDesktop trash + rm fail-safes |
 | *Safer* than trash-cli? | *Roughly equivalent* FreeDesktop correctness; stronger rm-flag fail-safes on put |
 | *Better* as a daily driver for this niche? | *Yes* for native multi-call + in-process Python |
-| *Faster*? | *Yes vs trash-cli* (put 8.1×). *Tied with gtrash* on the same 401-entry same-FS put (1.01×) |
+| *Faster*? | *Yes vs trash-cli* (put 10.7×) and *vs gtrash* (put 1.33× warmed) on the 401-entry same-FS fixture |
 
 * Reproduce
 
@@ -25,14 +25,14 @@ Harness rejects =trash-put= when it is multi-call rtrash.
 
 * Measured results (Linux x86_64, 2026-09-13)
 
-Harness =benches/compare_trash_cli.py= on terra-x86_64 (/home btrfs, /tmp a different device). Log: =benches/compare-trash-cli-2026-09-13-sota.txt= (ends =COMPARE_OK=).
+Harness =benches/compare_trash_cli.py= on terra-x86_64. Log: =benches/compare-trash-cli-2026-09-13-meta.txt= (ends =COMPARE_OK=).
 
 | Tool | put avg (s) | list avg (s) | empty avg (s) |
 |------+-------------+--------------+---------------|
-| rtrash 0.1.4 release | 0.012666 | 0.002015 | 0.009490 |
-| trash-cli 0.24.5.26 | 0.078211 | 0.048195 | 0.036530 |
-| trash-cli / rtrash | 6.17× | 23.92× | 3.85× |
+| rtrash 0.1.4 release | 0.006847 | 0.002078 | 0.007651 |
+| trash-cli 0.24.5.26 | 0.072931 | 0.047440 | 0.036055 |
+| trash-cli / rtrash | 10.65× | 22.82× | 4.71× |
 
-Same-FS /tmp fixture: =ec=0=, =entries=401=, empty leaves =files_left=0= =info_left=0=, =LIST_OK=.
-Cross-device: rtrash put 0.402144 s (401 entries); trash-cli refused (not in the same volume).
-Optional peers trashy/gtrash: missing on the host (not implied losers).
+Same-FS /tmp: =ec=0=, =entries=401=. Warmed 7-trial gtrash put: rtrash 0.006882 s, gtrash 0.009155 s (1.33×).
+Cross-device: rtrash put 0.378 s; trash-cli refused.
+trashy: missing. The dirfd/FICLONE stack does not run on this same-FS fixture.
