@@ -356,8 +356,13 @@ Walk with
 .I N
 threads. The default is one per CPU, or
 .B RAYON_NUM_THREADS
-when it is set. More threads than CPUs can help when the cache is cold
-or the file system is remote.
+when it is set. Without either, rtrash first times a few stats and opens
+under the first
+.IR PATH ;
+when they average 10 microseconds or more, the metadata is coming off
+the disk, and the walk uses three threads per CPU, up to 64. Cached, the
+probe costs well under a millisecond and changes nothing. More threads
+than CPUs can also help on a remote file system.
 .TP
 .B \-\-all\-dirs
 List every directory level, including parents that one subdirectory

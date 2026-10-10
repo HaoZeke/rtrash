@@ -50,7 +50,8 @@ directories appear as one `trash` row and are never printed by --print0.
   -x, --one-file-system skip directories on other file systems
       --apparent        rank by apparent size (file length) instead of disk use
       --max-depth=N     list only entries at most N levels below PATH
-      --threads=N       walk with N threads (default: one per CPU)
+      --threads=N       walk with N threads (default: one per CPU, or three
+                          per CPU up to 64 when the first PATH looks uncached)
       --all-dirs        list every directory level, not just the one that
                           holds the bulk of its parent
       --artefacts       list only regenerable build artefacts and caches
@@ -991,6 +992,77 @@ fn strip_verbatim(p: &Path) -> PathBuf {
     }
 }
 
+/// Entries the cold-cache probe stats, and subdirectories it lists.
+const PROBE_STATS: usize = 48;
+const PROBE_SUBDIRS: usize = 4;
+/// A probe whose stats and opens average this long means the metadata is
+/// coming off the disk. Measured on a loaded 8 CPU box, without the
+/// slowest call: at most 2.8 us cached (240 runs over four trees), at
+/// least 16 us right after dropping the caches.
+const PROBE_COLD_PER_CALL: std::time::Duration = std::time::Duration::from_micros(10);
+
+/// Whether the metadata under `path` looks uncached: time a listing of
+/// `path` and a few of its subdirectories and the stat of some entries.
+/// Walks that wait on the disk go faster with more threads in flight
+/// than there are CPUs; cached walks go slower, so this decides.
+fn looks_cold(path: &Path) -> bool {
+    use std::time::{Duration, Instant};
+    let Ok(dir) = du_fs::Dir::open(path) else {
+        return false;
+    };
+    // Only stats and opens are timed: listing a huge directory is slow
+    // even when cached, and says little about the cache per entry.
+    let mut spent = Duration::ZERO;
+    let mut slowest = Duration::ZERO;
+    let mut calls = 0u32;
+    let mut timed = |f: &mut dyn FnMut()| {
+        let t = Instant::now();
+        f();
+        let took = t.elapsed();
+        spent += took;
+        slowest = slowest.max(took);
+        calls += 1;
+    };
+    let (entries, _) = dir.entries();
+    let mut subdirs = 0;
+    for i in 0..entries.len().min(PROBE_STATS) {
+        let (name, kind) = entries.get(i);
+        let mut st = entries.stat(i);
+        if st.is_none() {
+            timed(&mut || st = dir.stat_at(name).ok());
+        }
+        let is_dir = kind == du_fs::Kind::Dir || st.is_some_and(|m| m.is_dir());
+        if !is_dir || subdirs == PROBE_SUBDIRS {
+            continue;
+        }
+        subdirs += 1;
+        let mut child = None;
+        timed(&mut || child = dir.open_child(name).ok());
+        let Some(child) = child else { continue };
+        let (inner, _) = child.entries();
+        for j in 0..inner.len().min(PROBE_STATS / PROBE_SUBDIRS) {
+            if inner.stat(j).is_none() {
+                timed(&mut || {
+                    let _ = child.stat_at(inner.get(j).0);
+                });
+            }
+        }
+    }
+    // The slowest call is left out: on a busy machine one call that loses
+    // its CPU would otherwise decide for a cached tree.
+    if calls < 2 {
+        return false;
+    }
+    (spent - slowest) / (calls - 1) >= PROBE_COLD_PER_CALL
+}
+
+/// Threads for a walk that waits on the disk: three per CPU, as diskus
+/// found best, up to 64.
+fn cold_threads() -> usize {
+    let cpus = std::thread::available_parallelism().map_or(4, |n| n.get());
+    (cpus * 3).min(64)
+}
+
 /// Fill in `git` for every listed row. Returns false when `git` could not
 /// be run at all.
 pub fn annotate_git(report: &mut Report) -> bool {
@@ -1374,6 +1446,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         None
     };
     let scan = |paths: &[PathBuf], opts: &ScanOpts| scan_with(paths, opts, prefetch.as_ref());
+    // Without --threads or RAYON_NUM_THREADS, an uncached tree gets more
+    // threads than CPUs.
+    let threads = threads.or_else(|| {
+        if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+            return None;
+        }
+        let first = paths.first()?;
+        let first = absolute(first).ok()?;
+        looks_cold(&first).then(cold_threads)
+    });
     let scanned = match threads {
         Some(n) => match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
             Ok(pool) => pool.install(|| scan(&paths, &opts)),
@@ -1495,6 +1577,13 @@ mod tests {
         assert_eq!(p(r"\\?\UNC\srv\share\x"), PathBuf::from(r"\\srv\share\x"));
         assert_eq!(p(r"\\?\Volume{1}\x"), PathBuf::from(r"\\?\Volume{1}\x"));
         assert_eq!(p("/home/me"), PathBuf::from("/home/me"));
+    }
+
+    #[test]
+    fn cold_walks_get_three_threads_per_cpu_up_to_64() {
+        let cpus = std::thread::available_parallelism().map_or(4, |n| n.get());
+        assert_eq!(cold_threads(), (cpus * 3).min(64));
+        assert!(!looks_cold(Path::new("/nonexistent-rtrash-probe")));
     }
 
     #[test]
