@@ -233,6 +233,8 @@ fn usage_errors_exit_2() {
     assert_eq!(t.du(&["-n", "x"]).status.code(), Some(2));
     assert_eq!(t.du(&["--older-than=-1"]).status.code(), Some(2));
     assert_eq!(t.du(&["--json", "--print0"]).status.code(), Some(2));
+    assert_eq!(t.du(&["--threads=0"]).status.code(), Some(2));
+    assert_eq!(t.du(&["--threads", "many"]).status.code(), Some(2));
     // No terminal on stdin in tests: --pick refuses instead of hanging.
     assert_eq!(t.du(&["--pick"]).status.code(), Some(2));
     assert_eq!(t.du(&["missing-path"]).status.code(), Some(1));
@@ -506,6 +508,11 @@ fn wide_directory_split_keeps_rows_and_counts() {
     assert_eq!(files[0], s(&big), "{j}");
     assert_eq!(files[1], s(&t.root.join("flat/sub/inner.bin")), "{j}");
     assert_eq!(field(&j, "files"), 1001, "{j}");
+    // Any thread count gives the same answer.
+    for n in ["1", "3"] {
+        let k = t.json(&["--no-git", "-n", "2", "--files", "--threads", n]);
+        assert_eq!(k, j, "--threads {n}");
+    }
 }
 
 #[test]

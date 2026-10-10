@@ -46,6 +46,7 @@ directories appear as one `trash` row and are never printed by --print0.
   -x, --one-file-system skip directories on other file systems
       --apparent        rank by apparent size (file length) instead of disk use
       --max-depth=N     list only entries at most N levels below PATH
+      --threads=N       walk with N threads (default: one per CPU)
       --all-dirs        list every directory level, not just the one that
                           holds the bulk of its parent
       --artefacts       list only regenerable build artefacts and caches
@@ -1035,6 +1036,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut trash_pins: Vec<PathBuf> = Vec::new();
     let mut include_dirty = false;
     let mut pick = false;
+    let mut threads: Option<usize> = None;
     let now = info::now_epoch();
     let mut i = 0usize;
     while i < args.len() {
@@ -1059,6 +1061,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         } else if let Some(v) = take_value(args, &mut i, arg, "--max-depth", None) {
             match v.and_then(|v| parse_count(v, "depth")) {
                 Ok(n) => opts.max_depth = Some(n),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--threads", None) {
+            match v.and_then(|v| parse_count(v, "N")) {
+                Ok(0) => bail!("--threads must be at least 1"),
+                Ok(n) => threads = Some(n),
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--older-than", None) {
@@ -1129,7 +1137,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         .iter()
         .map(|d| fs::canonicalize(&d.root).unwrap_or_else(|_| d.root.clone()))
         .collect();
-    let mut report = match scan(&paths, &opts) {
+    let scanned = match threads {
+        Some(n) => match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
+            Ok(pool) => pool.install(|| scan(&paths, &opts)),
+            Err(e) => {
+                eprintln!("{prog}: cannot start {n} threads: {e}");
+                return 1;
+            }
+        },
+        None => scan(&paths, &opts),
+    };
+    let mut report = match scanned {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{prog}: cannot scan: {e}");

@@ -63,6 +63,7 @@ du_opts=(
   '(-x --one-file-system)'{-x,--one-file-system}'[skip directories on other file systems]'
   '--apparent[rank by apparent size instead of disk use]'
   '--max-depth=[list only entries at most N levels deep]:N:'
+  '--threads=[walk with N threads]:N:'
   '--all-dirs[list every directory level]'
   '--artefacts[list only regenerable build artefacts and caches]'
   '--dirs[list directories only]'

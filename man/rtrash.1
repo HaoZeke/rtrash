@@ -341,6 +341,14 @@ levels below
 .IR PATH .
 Sizes still include everything below.
 .TP
+.BI \-\-threads =N
+Walk with
+.I N
+threads. The default is one per CPU, or
+.B RAYON_NUM_THREADS
+when it is set. More threads than CPUs can help when the cache is cold
+or the file system is remote.
+.TP
 .B \-\-all\-dirs
 List every directory level, including parents that one subdirectory
 dominates.

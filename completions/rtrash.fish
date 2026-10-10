@@ -70,6 +70,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s n -l to
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s x -l one-file-system -d 'skip directories on other file systems'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l apparent -d 'rank by apparent size instead of disk use'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l max-depth -d 'list only entries at most N levels deep' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l threads -d 'walk with N threads' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l all-dirs -d 'list every directory level'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l artefacts -d 'list only regenerable build artefacts and caches'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dirs -d 'list directories only'
