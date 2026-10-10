@@ -235,3 +235,35 @@ fn usage_errors_exit_2() {
     assert_eq!(t.du(&["--json", "--print0"]).status.code(), Some(2));
     assert_eq!(t.du(&["missing-path"]).status.code(), Some(1));
 }
+
+#[test]
+fn artefacts_are_one_row_and_filterable() {
+    let t = Tree::new("artefacts");
+    t.file("proj/target/.rustc_info.json", 10);
+    t.file("proj/target/debug/huge.rlib", 600_000);
+    t.file("web/node_modules/pkg/index.js", 300_000);
+    let src = t.file("proj/src/main.rs", 100_000);
+    let target = s(&t.root.join("proj/target"));
+    let nm = s(&t.root.join("web/node_modules"));
+
+    let j = t.json(&[]);
+    let dirs = paths_in(&j, "dirs");
+    // proj (target + src) outranks target; both rows appear.
+    assert_eq!(dirs[..2], [s(&t.root.join("proj")), target.clone()], "{j}");
+    assert!(
+        !dirs.iter().any(|d| d.starts_with(&format!("{target}/"))),
+        "{j}"
+    );
+    assert!(j.contains("\"artefact\":\"cargo-target\""), "{j}");
+    assert!(j.contains("\"artefact\":\"node-modules\""), "{j}");
+    // Files inside artefacts are covered by the artefact row.
+    assert_eq!(paths_in(&j, "files"), [s(&src)], "{j}");
+
+    let j = t.json(&["--artefacts"]);
+    assert_eq!(paths_in(&j, "dirs"), [target, nm], "{j}");
+    assert!(paths_in(&j, "files").is_empty(), "{j}");
+
+    let out = t.du(&["--artefacts"]);
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("cargo-target"), "{text}");
+}

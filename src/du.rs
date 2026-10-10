@@ -24,6 +24,8 @@ largest directories and files, by on-disk size unless --apparent is given.
 Symlinks are never followed, and a file with more than one hard link
 counts once. When one subdirectory accounts for 90% or more of a
 directory's size, only the subdirectory is listed (--all-dirs lists both).
+Regenerable artefacts are tagged and listed as one row each; their
+contents never appear on their own.
 
   -n, --top=N           list N directories and N files (default 20)
   -x, --one-file-system skip directories on other file systems
@@ -31,6 +33,9 @@ directory's size, only the subdirectory is listed (--all-dirs lists both).
       --max-depth=N     list only entries at most N levels below PATH
       --all-dirs        list every directory level, not just the one that
                           holds the bulk of its parent
+      --artefacts       list only regenerable build artefacts and caches
+                          (cargo target dirs, node_modules, __pycache__,
+                          virtualenvs, CACHEDIR.TAG directories, ...)
       --dirs            list directories only
       --files           list files only
       --older-than=DAYS only list entries whose newest modification is more
@@ -42,6 +47,41 @@ directory's size, only the subdirectory is listed (--all-dirs lists both).
       --help            display this help and exit
       --version         output version information and exit
 ";
+
+/// Classify a directory as a regenerable build artefact or cache from its
+/// name and the names of its direct children. Rules need a marker file where
+/// the name alone is ambiguous (`target`, `build`, `venv`).
+pub fn artefact_kind(name: &str, has_child: impl Fn(&str) -> bool) -> Option<&'static str> {
+    if has_child(".rustc_info.json") || (name == "target" && has_child("CACHEDIR.TAG")) {
+        return Some("cargo-target");
+    }
+    let by_name = match name {
+        "node_modules" => Some("node-modules"),
+        "__pycache__" | ".pytest_cache" | ".mypy_cache" | ".ruff_cache" | ".hypothesis" => {
+            Some("python-cache")
+        }
+        ".tox" | ".nox" => Some("python-env"),
+        ".gradle" => Some("gradle-cache"),
+        ".next" | ".nuxt" | ".parcel-cache" | ".turbo" | ".svelte-kit" => Some("js-build-cache"),
+        ".zig-cache" | "zig-cache" | "zig-out" => Some("zig-cache"),
+        ".pixi" => Some("pixi-env"),
+        ".direnv" => Some("direnv"),
+        _ => None,
+    };
+    if by_name.is_some() {
+        return by_name;
+    }
+    if has_child("pyvenv.cfg") {
+        return Some("python-env");
+    }
+    if has_child("CMakeCache.txt") {
+        return Some("cmake-build");
+    }
+    if has_child("CACHEDIR.TAG") {
+        return Some("cache");
+    }
+    None
+}
 
 /// Which size orders the lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +98,8 @@ pub struct ScanOpts {
     pub sort: SortKey,
     pub max_depth: Option<usize>,
     pub all_dirs: bool,
+    /// List only directories tagged as regenerable artefacts.
+    pub artefacts_only: bool,
     /// Only list entries whose newest mtime is at or before this epoch.
     pub older_cutoff: Option<i64>,
     /// Only list entries whose newest mtime is after this epoch.
@@ -72,6 +114,7 @@ impl Default for ScanOpts {
             sort: SortKey::Disk,
             max_depth: None,
             all_dirs: false,
+            artefacts_only: false,
             older_cutoff: None,
             newer_cutoff: None,
         }
@@ -89,6 +132,8 @@ pub struct Item {
     pub disk: u64,
     /// Newest modification time in the tree (seconds since the epoch).
     pub mtime: i64,
+    /// Kind of regenerable artefact (`cargo-target`, `node-modules`, ...).
+    pub artefact: Option<&'static str>,
 }
 
 impl Item {
@@ -241,11 +286,16 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
         }
     };
     let mut subdirs: Vec<(PathBuf, fs::Metadata)> = Vec::new();
+    let mut markers: Vec<std::ffi::OsString> = Vec::new();
     for ent in rd {
         let Ok(ent) = ent else {
             ctx.unreadable.fetch_add(1, Ordering::Relaxed);
             continue;
         };
+        let fname = ent.file_name();
+        if MARKERS.iter().any(|m| fname == *m) {
+            markers.push(fname);
+        }
         // DirEntry::metadata does not follow symlinks on Unix.
         let Ok(m) = ent.metadata() else {
             ctx.unreadable.fetch_add(1, Ordering::Relaxed);
@@ -266,13 +316,14 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
         node.apparent = node.apparent.saturating_add(a);
         node.disk = node.disk.saturating_add(d);
         node.mtime = node.mtime.max(m.mtime());
-        if m.is_file() && ctx.listable(depth + 1, m.mtime()) {
+        if m.is_file() && !opts.artefacts_only && ctx.listable(depth + 1, m.mtime()) {
             node.top_files.push(Item {
                 path: ent.path(),
                 is_dir: false,
                 apparent: a,
                 disk: d,
                 mtime: m.mtime(),
+                artefact: None,
             });
         }
     }
@@ -295,22 +346,51 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
         node.top_files.merge(child.top_files);
         node.top_dirs.merge(child.top_dirs);
     }
-    node.top_dirs_offer_self(ctx, path, depth, largest_child);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    let artefact = artefact_kind(&name, |c| markers.iter().any(|m| m == c));
+    if artefact.is_some() {
+        // The artefact is one row; nothing below it is listed separately.
+        node.top_dirs = TopN::new(opts.top, opts.sort);
+        node.top_files = TopN::new(opts.top, opts.sort);
+    }
+    node.top_dirs_offer_self(ctx, path, depth, largest_child, artefact);
     node
 }
+
+/// Child names that `artefact_kind` looks for.
+const MARKERS: &[&str] = &[
+    ".rustc_info.json",
+    "CACHEDIR.TAG",
+    "pyvenv.cfg",
+    "CMakeCache.txt",
+];
 
 impl Node {
     /// Offer this directory to the list unless it is the scan root or one
     /// subdirectory already accounts for 90% or more of it.
-    fn top_dirs_offer_self(&mut self, ctx: &Ctx<'_>, path: &Path, depth: usize, largest: u64) {
+    fn top_dirs_offer_self(
+        &mut self,
+        ctx: &Ctx<'_>,
+        path: &Path,
+        depth: usize,
+        largest: u64,
+        artefact: Option<&'static str>,
+    ) {
         if depth == 0 || !ctx.listable(depth, self.mtime) {
+            return;
+        }
+        if ctx.opts.artefacts_only && artefact.is_none() {
             return;
         }
         let own = match ctx.opts.sort {
             SortKey::Disk => self.disk,
             SortKey::Apparent => self.apparent,
         };
-        if !ctx.opts.all_dirs && own > 0 && largest.saturating_mul(10) >= own.saturating_mul(9) {
+        let dominated = own > 0 && largest.saturating_mul(10) >= own.saturating_mul(9);
+        if artefact.is_none() && !ctx.opts.all_dirs && dominated {
             return;
         }
         self.top_dirs.push(Item {
@@ -319,6 +399,7 @@ impl Node {
             apparent: self.apparent,
             disk: self.disk,
             mtime: self.mtime,
+            artefact,
         });
     }
 }
@@ -349,13 +430,14 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
         } else {
             ctx.files.fetch_add(1, Ordering::Relaxed);
             let (a, d) = sizes(&meta);
-            if meta.is_file() && ctx.listable(0, meta.mtime()) {
+            if meta.is_file() && !opts.artefacts_only && ctx.listable(0, meta.mtime()) {
                 files.push(Item {
                     path: abs.clone(),
                     is_dir: false,
                     apparent: a,
                     disk: d,
                     mtime: meta.mtime(),
+                    artefact: None,
                 });
             }
             (a, d)
@@ -401,15 +483,36 @@ pub fn format_age(mtime: i64, now: i64) -> String {
     }
 }
 
+fn json_opt(v: Option<&str>) -> String {
+    match v {
+        Some(s) => format!("\"{}\"", json_escape(s)),
+        None => "null".into(),
+    }
+}
+
 fn item_json(it: &Item) -> String {
     format!(
-        "{{\"path\":\"{}\",\"type\":\"{}\",\"disk\":{},\"apparent\":{},\"mtime\":{}}}",
+        "{{\"path\":\"{}\",\"type\":\"{}\",\"disk\":{},\"apparent\":{},\"mtime\":{},\"artefact\":{}}}",
         json_escape(&it.path.to_string_lossy()),
         if it.is_dir { "dir" } else { "file" },
         it.disk,
         it.apparent,
-        it.mtime
+        it.mtime,
+        json_opt(it.artefact)
     )
+}
+
+/// Tags shown in the NOTE column.
+fn notes(it: &Item) -> String {
+    let mut v: Vec<String> = Vec::new();
+    if let Some(a) = it.artefact {
+        v.push(a.to_string());
+    }
+    if v.is_empty() {
+        "-".into()
+    } else {
+        v.join(",")
+    }
 }
 
 /// JSON form of a report (one object; arrays of roots, dirs and files).
@@ -444,17 +547,27 @@ fn print_table(title: &str, items: &[Item], now: i64) {
         return;
     }
     println!("{title}");
-    println!("{:>10}  {:>10}  {:>4}  PATH", "DISK", "APPARENT", "AGE");
+    let width = items
+        .iter()
+        .map(|it| notes(it).len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    println!(
+        "{:>10}  {:>10}  {:>4}  {:<width$}  PATH",
+        "DISK", "APPARENT", "AGE", "NOTE"
+    );
     for it in items {
         let mut path = it.path.display().to_string();
         if it.is_dir {
             path.push('/');
         }
         println!(
-            "{:>10}  {:>10}  {:>4}  {}",
+            "{:>10}  {:>10}  {:>4}  {:<width$}  {}",
             format_bytes(it.disk),
             format_bytes(it.apparent),
             format_age(it.mtime, now),
+            notes(it),
             path
         );
     }
@@ -548,6 +661,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "-x" | "--one-file-system" => opts.one_file_system = true,
                 "--apparent" => opts.sort = SortKey::Apparent,
                 "--all-dirs" => opts.all_dirs = true,
+                "--artefacts" => opts.artefacts_only = true,
                 "--dirs" => only_dirs = true,
                 "--files" => only_files = true,
                 "--json" => json = true,
@@ -636,6 +750,7 @@ mod tests {
             apparent,
             disk,
             mtime: 0,
+            artefact: None,
         }
     }
 
@@ -678,5 +793,34 @@ mod tests {
         assert_eq!(format_age(0, 3 * 86_400), "3d");
         assert_eq!(format_age(0, 800 * 86_400), "2y");
         assert_eq!(format_age(10, 0), "0s");
+    }
+
+    #[test]
+    fn artefact_rules() {
+        let none = |_: &str| false;
+        assert_eq!(artefact_kind("node_modules", none), Some("node-modules"));
+        assert_eq!(artefact_kind("__pycache__", none), Some("python-cache"));
+        assert_eq!(artefact_kind("target", none), None);
+        assert_eq!(artefact_kind("build", none), None);
+        assert_eq!(
+            artefact_kind("target", |c| c == "CACHEDIR.TAG"),
+            Some("cargo-target")
+        );
+        assert_eq!(
+            artefact_kind("target-pub", |c| c == ".rustc_info.json"),
+            Some("cargo-target")
+        );
+        assert_eq!(
+            artefact_kind(".venv", |c| c == "pyvenv.cfg"),
+            Some("python-env")
+        );
+        assert_eq!(
+            artefact_kind("build", |c| c == "CMakeCache.txt"),
+            Some("cmake-build")
+        );
+        assert_eq!(
+            artefact_kind("anything", |c| c == "CACHEDIR.TAG"),
+            Some("cache")
+        );
     }
 }

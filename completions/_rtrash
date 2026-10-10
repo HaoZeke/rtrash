@@ -64,6 +64,7 @@ du_opts=(
   '--apparent[rank by apparent size instead of disk use]'
   '--max-depth=[list only entries at most N levels deep]:N:'
   '--all-dirs[list every directory level]'
+  '--artefacts[list only regenerable build artefacts and caches]'
   '--dirs[list directories only]'
   '--files[list files only]'
   '--older-than=[only entries untouched for more than DAYS days]:DAYS:'

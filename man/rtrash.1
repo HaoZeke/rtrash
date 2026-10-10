@@ -310,6 +310,40 @@ Sizes still include everything below.
 List every directory level, including parents that one subdirectory
 dominates.
 .TP
+.B \-\-artefacts
+List only regenerable build artefacts and caches.
+Each one is a single row, and nothing below it is listed on its own.
+The tags are
+.B cargo\-target
+(a directory with
+.I .rustc_info.json
+or a
+.I target
+directory with
+.IR CACHEDIR.TAG ),
+.B node\-modules ,
+.B python\-cache
+(\fI__pycache__\fR, \fI.pytest_cache\fR, \fI.mypy_cache\fR, \fI.ruff_cache\fR, \fI.hypothesis\fR),
+.B python\-env
+(a directory with
+.IR pyvenv.cfg ,
+\fI.tox\fR, \fI.nox\fR),
+.B cmake\-build
+(a directory with
+.IR CMakeCache.txt ),
+.B gradle\-cache ,
+.B js\-build\-cache
+(\fI.next\fR, \fI.nuxt\fR, \fI.parcel\-cache\fR, \fI.turbo\fR, \fI.svelte\-kit\fR),
+.B zig\-cache ,
+.B pixi\-env ,
+.B direnv ,
+and
+.B cache
+for any other directory with a
+.I CACHEDIR.TAG
+file.
+The same tags appear in the NOTE column without this flag.
+.TP
 .B \-\-dirs
 Show the directory table alone.
 .TP
@@ -329,7 +363,8 @@ days.
 .B \-\-json
 Emit one JSON object
 (\fIroots\fR, \fIdirs\fR, \fIfiles\fR, \fIunreadable\fR); each listed entry has
-\fIpath\fR, \fItype\fR, \fIdisk\fR, \fIapparent\fR and \fImtime\fR.
+\fIpath\fR, \fItype\fR, \fIdisk\fR, \fIapparent\fR, \fImtime\fR and \fIartefact\fR
+(a tag or null).
 .TP
 .B \-\-print0
 Print the listed paths separated by null bytes, for

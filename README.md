@@ -314,11 +314,14 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du -n 5 -x ~` | Top 5 of each, staying on the file system of `~` |
 | `rtrash du --apparent` | Rank by file length; sparse files rank higher than their disk use |
 | `rtrash du --dirs --older-than=30` | Directories with nothing modified in the last 30 days |
+| `rtrash du --artefacts ~/src` | Only regenerable build output and caches: cargo `target`, `node_modules`, `__pycache__`, virtualenvs, CMake build trees, `CACHEDIR.TAG` directories |
 | `rtrash du --max-depth=2 --all-dirs` | Every directory level, at most 2 below `PATH` |
 | `rtrash du --json` | One object with `roots`, `dirs`, `files`, `unreadable` |
 | `rtrash du --print0 … \| xargs -0 rtrash put -rf --` | Trash the listed paths |
 
 Symlinks are never followed, and a file with more than one hard link counts once. When one subdirectory accounts for 90% or more of a directory's size, only the subdirectory is listed, so each row points at the bulk itself. The scan root appears only in the closing total.
+
+The NOTE column tags regenerable artefacts (`cargo-target`, `node-modules`, `python-cache`, `python-env`, `cmake-build`, `cache`, and a few more listed in `man rtrash`). An artefact is one row; nothing below it is listed on its own, so the list names the `target` directory instead of the largest `.rlib` inside it. Names that are ambiguous on their own (`target`, `build`, `venv`) need a marker file such as `.rustc_info.json`, `CMakeCache.txt` or `pyvenv.cfg`.
 
 ### `rtrash restore [PATH]` (also `trash-restore`)
 
