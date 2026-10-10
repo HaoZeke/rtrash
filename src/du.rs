@@ -195,8 +195,10 @@ impl TopN {
         }
         let k = item.key(self.sort);
         if self.items.len() == self.cap {
+            // A full list keeps the smaller path on a tie, whatever order
+            // the workers report in.
             match self.items.last() {
-                Some(last) if last.key(self.sort) >= k => return,
+                Some(last) if (last.key(self.sort), &item.path) >= (k, &last.path) => return,
                 _ => {}
             }
         }
@@ -210,9 +212,21 @@ impl TopN {
     }
 
     pub fn merge(&mut self, other: TopN) {
-        for it in other.items {
+        self.merge_vec(other.items);
+    }
+
+    pub fn merge_vec(&mut self, items: Vec<Item>) {
+        for it in items {
             self.push(it);
         }
+    }
+
+    /// Key of the smallest kept item, once the list is full.
+    pub fn floor(&self) -> Option<u64> {
+        if self.items.len() < self.cap {
+            return None;
+        }
+        self.items.last().map(|x| x.key(self.sort))
     }
 
     pub fn into_vec(self) -> Vec<Item> {
@@ -273,6 +287,51 @@ pub fn trash_on_scanned_devices(dirs: &[TrashDir], report: &Report) -> TrashSumm
     }
 }
 
+/// One list shared by every worker, with the key of its smallest kept
+/// item mirrored in an atomic so most candidates are dropped without a
+/// lock or an allocation.
+struct SharedTop {
+    list: Mutex<TopN>,
+    /// Smallest kept key once the list is full, 0 before.
+    floor: AtomicU64,
+}
+
+impl SharedTop {
+    fn new(cap: usize, sort: SortKey) -> Self {
+        SharedTop {
+            list: Mutex::new(TopN::new(cap, sort)),
+            floor: AtomicU64::new(0),
+        }
+    }
+
+    /// Whether an item with this key could still enter the list. A key
+    /// equal to the floor may win its tie on path, so it passes.
+    fn wants(&self, key: u64) -> bool {
+        key >= self.floor.load(Ordering::Relaxed)
+    }
+
+    fn offer(&self, key: u64, make: impl FnOnce() -> Item) {
+        if !self.wants(key) {
+            return;
+        }
+        let mut list = self.list.lock().unwrap_or_else(|e| e.into_inner());
+        if list.cap == 0 {
+            return;
+        }
+        list.push(make());
+        if let Some(f) = list.floor() {
+            self.floor.store(f, Ordering::Relaxed);
+        }
+    }
+
+    fn into_vec(self) -> Vec<Item> {
+        self.list
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner())
+            .into_vec()
+    }
+}
+
 struct Ctx<'a> {
     opts: &'a ScanOpts,
     root_dev: u64,
@@ -281,6 +340,8 @@ struct Ctx<'a> {
     unreadable: AtomicU64,
     files: AtomicU64,
     dirs: AtomicU64,
+    top_dirs: SharedTop,
+    top_files: SharedTop,
 }
 
 impl Ctx<'_> {
@@ -311,14 +372,19 @@ impl Ctx<'_> {
         let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
         seen.insert((meta.dev(), meta.ino()))
     }
+
+    fn key(&self, apparent: u64, disk: u64) -> u64 {
+        match self.opts.sort {
+            SortKey::Disk => disk,
+            SortKey::Apparent => apparent,
+        }
+    }
 }
 
 struct Node {
     apparent: u64,
     disk: u64,
     mtime: i64,
-    top_dirs: TopN,
-    top_files: TopN,
     repos: Vec<PathBuf>,
 }
 
@@ -329,7 +395,18 @@ fn sizes(meta: &fs::Metadata) -> (u64, u64) {
     (meta.len(), meta.blocks().saturating_mul(512))
 }
 
-fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> Node {
+/// A file that looked big enough for the list while its directory was
+/// being read; it is offered once the directory is known to be listable.
+struct FileCandidate {
+    name: std::ffi::OsString,
+    apparent: u64,
+    disk: u64,
+    mtime: i64,
+}
+
+/// Walk one directory. `listing` is false below `.git`, artefacts and
+/// trash roots: their sizes count, but nothing inside them is listed.
+fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize, listing: bool) -> Node {
     let opts = ctx.opts;
     // Like GNU du, a directory adds blocks to disk use but nothing to the
     // apparent size: its st_size is a filesystem detail, not data.
@@ -338,8 +415,6 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
         apparent: 0,
         disk,
         mtime: meta.mtime(),
-        top_dirs: TopN::new(opts.top, opts.sort),
-        top_files: TopN::new(opts.top, opts.sort),
         repos: Vec::new(),
     };
     ctx.dirs.fetch_add(1, Ordering::Relaxed);
@@ -350,8 +425,10 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
             return node;
         }
     };
+    let list_files = listing && !opts.artefacts_only && opts.top > 0;
     let mut subdirs: Vec<(PathBuf, fs::Metadata)> = Vec::new();
     let mut markers: Vec<std::ffi::OsString> = Vec::new();
+    let mut candidates: Vec<FileCandidate> = Vec::new();
     for ent in rd {
         let Ok(ent) = ent else {
             ctx.unreadable.fetch_add(1, Ordering::Relaxed);
@@ -362,7 +439,7 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
             node.repos.push(path.to_path_buf());
         }
         if MARKERS.iter().any(|m| fname == *m) {
-            markers.push(fname);
+            markers.push(fname.clone());
         }
         // DirEntry::metadata does not follow symlinks on Unix.
         let Ok(m) = ent.metadata() else {
@@ -384,13 +461,43 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
         node.apparent = node.apparent.saturating_add(a);
         node.disk = node.disk.saturating_add(d);
         node.mtime = node.mtime.max(m.mtime());
-        if m.is_file() && !opts.artefacts_only && ctx.listable(depth + 1, m.mtime()) {
-            node.top_files.push(Item {
-                path: ent.path(),
-                is_dir: false,
+        if list_files
+            && m.is_file()
+            && ctx.top_files.wants(ctx.key(a, d))
+            && ctx.listable(depth + 1, m.mtime())
+        {
+            candidates.push(FileCandidate {
+                name: fname,
                 apparent: a,
                 disk: d,
                 mtime: m.mtime(),
+            });
+        }
+    }
+
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    let is_git_dir = name == ".git";
+    let artefact = if is_git_dir {
+        None
+    } else if opts.trash_roots.iter().any(|r| r == path) {
+        Some("trash")
+    } else {
+        artefact_kind(&name, |c| markers.iter().any(|m| m == c))
+    };
+    // Repository internals are never offered for deletion, and an artefact
+    // is one row: nothing below either is listed on its own.
+    let inner_listing = listing && !is_git_dir && artefact.is_none();
+    if inner_listing {
+        for c in candidates {
+            ctx.top_files.offer(ctx.key(c.apparent, c.disk), || Item {
+                path: path.join(&c.name),
+                is_dir: false,
+                apparent: c.apparent,
+                disk: c.disk,
+                mtime: c.mtime,
                 artefact: None,
                 repos: Vec::new(),
                 git: None,
@@ -400,48 +507,24 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
 
     let children: Vec<Node> = subdirs
         .into_par_iter()
-        .map(|(p, m)| walk_dir(ctx, &p, &m, depth + 1))
+        .map(|(p, m)| walk_dir(ctx, &p, &m, depth + 1, inner_listing))
         .collect();
 
     let mut largest_child = 0u64;
     for child in children {
-        let child_key = match opts.sort {
-            SortKey::Disk => child.disk,
-            SortKey::Apparent => child.apparent,
-        };
-        largest_child = largest_child.max(child_key);
+        largest_child = largest_child.max(ctx.key(child.apparent, child.disk));
         node.apparent = node.apparent.saturating_add(child.apparent);
         node.disk = node.disk.saturating_add(child.disk);
         node.mtime = node.mtime.max(child.mtime);
-        node.top_files.merge(child.top_files);
-        node.top_dirs.merge(child.top_dirs);
         for r in child.repos {
             if node.repos.len() < MAX_REPOS {
                 node.repos.push(r);
             }
         }
     }
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy())
-        .unwrap_or_default();
-    if name == ".git" {
-        // Repository internals are never offered for deletion.
-        node.top_dirs = TopN::new(opts.top, opts.sort);
-        node.top_files = TopN::new(opts.top, opts.sort);
-        return node;
+    if listing && !is_git_dir {
+        node.offer_self(ctx, path, depth, largest_child, artefact);
     }
-    let artefact = if opts.trash_roots.iter().any(|r| r == path) {
-        Some("trash")
-    } else {
-        artefact_kind(&name, |c| markers.iter().any(|m| m == c))
-    };
-    if artefact.is_some() {
-        // The artefact is one row; nothing below it is listed separately.
-        node.top_dirs = TopN::new(opts.top, opts.sort);
-        node.top_files = TopN::new(opts.top, opts.sort);
-    }
-    node.top_dirs_offer_self(ctx, path, depth, largest_child, artefact);
     node
 }
 
@@ -456,8 +539,8 @@ const MARKERS: &[&str] = &[
 impl Node {
     /// Offer this directory to the list unless it is the scan root or one
     /// subdirectory already accounts for 90% or more of it.
-    fn top_dirs_offer_self(
-        &mut self,
+    fn offer_self(
+        &self,
         ctx: &Ctx<'_>,
         path: &Path,
         depth: usize,
@@ -470,15 +553,12 @@ impl Node {
         if ctx.opts.artefacts_only && artefact.is_none() {
             return;
         }
-        let own = match ctx.opts.sort {
-            SortKey::Disk => self.disk,
-            SortKey::Apparent => self.apparent,
-        };
+        let own = ctx.key(self.apparent, self.disk);
         let dominated = own > 0 && largest.saturating_mul(10) >= own.saturating_mul(9);
         if artefact.is_none() && !ctx.opts.all_dirs && dominated {
             return;
         }
-        self.top_dirs.push(Item {
+        ctx.top_dirs.offer(own, || Item {
             path: path.to_path_buf(),
             is_dir: true,
             apparent: self.apparent,
@@ -508,17 +588,17 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
             unreadable: AtomicU64::new(0),
             files: AtomicU64::new(0),
             dirs: AtomicU64::new(0),
+            top_dirs: SharedTop::new(opts.top, opts.sort),
+            top_files: SharedTop::new(opts.top, opts.sort),
         };
         let (apparent, disk) = if meta.is_dir() {
-            let node = walk_dir(&ctx, &abs, &meta, 0);
-            dirs.merge(node.top_dirs);
-            files.merge(node.top_files);
+            let node = walk_dir(&ctx, &abs, &meta, 0, true);
             (node.apparent, node.disk)
         } else {
             ctx.files.fetch_add(1, Ordering::Relaxed);
             let (a, d) = sizes(&meta);
             if meta.is_file() && !opts.artefacts_only && ctx.listable(0, meta.mtime()) {
-                files.push(Item {
+                ctx.top_files.offer(ctx.key(a, d), || Item {
                     path: abs.clone(),
                     is_dir: false,
                     apparent: a,
@@ -539,6 +619,8 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
             files: ctx.files.load(Ordering::Relaxed),
             dirs: ctx.dirs.load(Ordering::Relaxed),
         });
+        dirs.merge_vec(ctx.top_dirs.into_vec());
+        files.merge_vec(ctx.top_files.into_vec());
     }
     Ok(Report {
         roots,
@@ -1029,6 +1111,25 @@ mod tests {
         t.push(item("/m", 4, 4));
         let v: Vec<_> = t.into_vec().into_iter().map(|i| i.path).collect();
         assert_eq!(v, [PathBuf::from("/a"), "/m".into(), "/z".into()]);
+    }
+
+    #[test]
+    fn topn_full_list_ties_keep_smaller_path_in_any_order() {
+        let mut t = TopN::new(2, SortKey::Disk);
+        t.push(item("/z", 4, 4));
+        t.push(item("/y", 4, 4));
+        t.push(item("/a", 4, 4));
+        t.push(item("/zz", 4, 4));
+        let v: Vec<_> = t.into_vec().into_iter().map(|i| i.path).collect();
+        assert_eq!(v, [PathBuf::from("/a"), "/y".into()]);
+        assert_eq!(
+            {
+                let mut f = TopN::new(1, SortKey::Disk);
+                f.push(item("/b", 4, 4));
+                f.floor()
+            },
+            Some(4)
+        );
     }
 
     #[test]
