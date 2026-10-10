@@ -609,6 +609,41 @@ fn restore_plain_order_defaults_oldest_first_and_flags_flip_it() {
 }
 
 #[test]
+fn restore_by_name_latest_json() {
+    let sb = Sandbox::new("restore-name");
+    let f = sb.touch("note.txt");
+    assert!(sb.run(&["put", "note.txt"]).status.success());
+    backdate_trashinfo(&sb, "note.txt", "2001-01-01T00:00:00");
+    fs::write(&f, b"newer").unwrap();
+    assert!(sb.run(&["put", "note.txt"]).status.success());
+    assert_eq!(trash_names(&sb).len(), 2);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+
+    // Two items share the name; without --latest the table goes to stderr
+    // and stdout carries only the JSON summary.
+    let out = sb.run_with_stdin(&["restore", &pin, "--json", "--name=note.txt"], "q\n");
+    assert!(!out.status.success());
+    assert!(stderr_of(&out).contains("note.txt"), "{}", stderr_of(&out));
+    assert!(!f.exists());
+
+    let out = sb.run(&["restore", &pin, "--json", "--latest", "--name=note.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let json = stdout_of(&out);
+    assert!(json.starts_with("{\"restored\":[{\"original\":"), "{json}");
+    assert!(json.trim_end().ends_with("\"failed\":0}"), "{json}");
+    assert!(!json.contains("restored '"), "{json}");
+    assert_eq!(fs::read(&f).unwrap(), b"newer");
+    assert_eq!(trash_names(&sb), vec!["note.txt".to_string()]);
+
+    let out = sb.run(&["restore", &pin, "--json", "--name=missing.txt"]);
+    assert!(!out.status.success());
+    assert_eq!(stdout_of(&out).trim(), "{\"restored\":[],\"failed\":0}");
+
+    let out = sb.run(&["restore", "note.txt", "--name=note.txt"]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
 fn restore_cwd_only_skips_items_outside_cwd() {
     let sb = Sandbox::new("restore-cwd");
     let in_work = sb.touch("local.txt");

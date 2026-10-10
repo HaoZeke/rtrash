@@ -456,6 +456,10 @@ Restore a trashed item to its original location. With
 restore the item originally at
 .IR PATH
 (exact original-path match).
+With
+.BI \-\-name= NAME ,
+restore the item whose file name, or whose name inside the trash, is
+.IR NAME .
 Without
 .IR PATH ,
 on a TTY open the interactive restore browser (filter, navigate, restore);
@@ -481,6 +485,20 @@ List the most recently trashed item first (default in the interactive browser).
 .TP
 .B \-\-oldest\-first
 Order from oldest to newest (default for the numbered list, so the newest row prints just above the prompt).
+.TP
+.BI \-\-name= NAME
+Match items by original file name or by name inside the trash, instead of by
+.IR PATH .
+.TP
+.B \-\-latest
+When several items match, restore the most recently trashed one without asking.
+.TP
+.B \-\-json
+Print
+.B {"restored": [...], "failed": N}
+on stdout. Implies
+.BR \-\-plain ;
+the numbered table, if any, goes to stderr.
 .TP
 .B \-\-home\-only
 Only the home trash (skip volume trash).

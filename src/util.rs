@@ -104,6 +104,16 @@ pub fn put_summary_json(
     items: &[(&std::path::Path, &str, &std::path::Path)],
     failed: usize,
 ) -> String {
+    items_json("trashed", items, failed)
+}
+
+/// `{"<key>": [{original, name, trash_dir}...], "failed": N}`, the shape
+/// of the `put --json` and `restore --json` summaries.
+pub fn items_json(
+    key: &str,
+    items: &[(&std::path::Path, &str, &std::path::Path)],
+    failed: usize,
+) -> String {
     let items: Vec<String> = items
         .iter()
         .map(|(original, name, dir)| {
@@ -115,7 +125,11 @@ pub fn put_summary_json(
             )
         })
         .collect();
-    format!("{{\"trashed\":[{}],\"failed\":{failed}}}", items.join(","))
+    format!(
+        "{{\"{}\":[{}],\"failed\":{failed}}}",
+        json_escape(key),
+        items.join(",")
+    )
 }
 
 /// Seconds since the Unix epoch, now.

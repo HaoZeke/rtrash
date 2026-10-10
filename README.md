@@ -348,6 +348,7 @@ $ rtrash empty -n && rtrash empty 14                    # free the space
 | `rtrash restore --plain` | Numbered line list + index (scripts / no TUI) |
 | `printf '0\n' \| rtrash restore` | Piped index without TUI |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
+| `rtrash restore --name=NAME --latest --json` | Restore the newest item named `NAME` (file name or trash name) without a prompt and print `{"restored": [...], "failed": N}` |
 | `rtrash restore --newest-first` / `--oldest-first` | Set the list order. The interactive browser lists newest first and `o` flips it; `--plain` lists oldest first, so the newest item sits next to the prompt |
 | Single match | Restores immediately without prompting |
 

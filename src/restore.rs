@@ -11,6 +11,9 @@ Usage: {prog} [OPTION]... [PATH]
 Restore a trashed item to its original location.
 
 With PATH, restore the item originally at PATH (exact original path match).
+With --name=NAME, restore the item whose file name, or whose name inside
+the trash, is NAME. When several items match, --latest restores the most
+recently trashed one without asking.
 Without PATH on a TTY, open the interactive restore browser (ratatui): filter,
 navigate, restore one or more items. Without a TTY (or with a piped index),
 print a numbered table and read a selection from stdin.
@@ -28,6 +31,10 @@ the index prompt. --newest-first and --oldest-first set the order for both.
       --plain     force numbered line selection even on a TTY (no TUI)
       --newest-first  list the most recently trashed item first
       --oldest-first  list the oldest trashed item first
+      --name=NAME  match items by file name or trash name instead of PATH
+      --latest    of several matches, restore the most recently trashed
+      --json      print {restored, failed} as JSON on stdout; implies
+                    --plain, and the numbered table goes to stderr
       --home-only  only the home trash (skip volume trash)
       --trash-dir=PATH  only consider this trash directory (repeatable)
       --help      display this help and exit
@@ -41,10 +48,26 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut plain = false;
     let mut newest_first: Option<bool> = None;
     let mut target: Option<PathBuf> = None;
+    let mut name: Option<String> = None;
+    let mut latest = false;
+    let mut json = false;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     for arg in args {
         match arg.as_str() {
             "-f" | "--force" => force = true,
+            "--latest" => latest = true,
+            "--json" => {
+                json = true;
+                plain = true;
+            }
+            a if a.starts_with("--name=") => {
+                let n = &a["--name=".len()..];
+                if n.is_empty() {
+                    eprintln!("{prog}: --name needs a non-empty NAME");
+                    return 2;
+                }
+                name = Some(n.to_string());
+            }
             "--home-only" => home_only = true,
             "--cwd-only" => cwd_only = true,
             "--plain" => plain = true,
@@ -75,18 +98,24 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
+    if target.is_some() && name.is_some() {
+        eprintln!("{prog}: give PATH or --name, not both");
+        return 2;
+    }
+
     let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);
     if dirs.is_empty() && !trash_dirs.is_empty() {
         eprintln!("{prog}: no valid --trash-dir pins (need files/ and info/ directories)");
         return 2;
     }
     let entries = list::collect(&dirs);
-    let mut matches: Vec<&list::Entry> = match &target {
-        Some(t) => {
+    let mut matches: Vec<&list::Entry> = match (&target, &name) {
+        (Some(t), _) => {
             let abs = absolutize(t);
             entries.iter().filter(|e| e.original == abs).collect()
         }
-        None if cwd_only => {
+        (None, Some(n)) => entries.iter().filter(|e| name_matches(e, n)).collect(),
+        (None, None) if cwd_only => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
             entries
                 .iter()
@@ -94,17 +123,24 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 .collect()
         }
         // trash-cli parity: bare `restore` offers every item in scope.
-        None => entries.iter().collect(),
+        (None, None) => entries.iter().collect(),
     };
 
     if matches.is_empty() {
         eprintln!("{prog}: no trashed files match");
+        if json {
+            println!("{}", restored_json(&[], 0));
+        }
         return 1;
+    }
+    if latest {
+        order_entries(&mut matches, true);
+        matches.truncate(1);
     }
 
     // TTY + multi-item: prefer ratatui browser when built with `tui` (unless --plain).
     #[cfg(feature = "tui")]
-    if !plain && target.is_none() && matches.len() > 1 && stdin_is_tty() {
+    if !plain && target.is_none() && name.is_none() && matches.len() > 1 && stdin_is_tty() {
         let newest = newest_first.unwrap_or(true);
         order_entries(&mut matches, newest);
         return crate::restore_tui::run(prog, matches, force, newest);
@@ -118,11 +154,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     } else {
         for (i, e) in matches.iter().enumerate() {
             let date = e.date.as_deref().unwrap_or("????-??-??T??:??:??");
-            println!(
+            let row = format!(
                 "{i:4}  {}  {}",
                 date.replacen('T', " ", 1),
                 e.original.display()
             );
+            // Keep stdout for the JSON summary.
+            if json {
+                eprintln!("{row}");
+            } else {
+                println!("{row}");
+            }
         }
         // Piped index for scripts / tests: `printf '0\n' | rtrash restore`.
         if stdin_is_tty() {
@@ -151,7 +193,31 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     };
 
-    restore_entry(prog, chosen, force)
+    let code = restore_entry_quiet(prog, chosen, force, json);
+    if json {
+        let ok = code == 0;
+        let items = if ok { vec![chosen] } else { Vec::new() };
+        println!("{}", restored_json(&items, usize::from(!ok)));
+    }
+    code
+}
+
+/// Whether `e` goes by `name`: its original file name or its name under
+/// `files/` in the trash.
+fn name_matches(e: &list::Entry, name: &str) -> bool {
+    e.name == name
+        || e.original
+            .file_name()
+            .is_some_and(|f| f == std::ffi::OsStr::new(name))
+}
+
+/// `{"restored": [...], "failed": N}` for `restore --json`.
+fn restored_json(restored: &[&list::Entry], failed: usize) -> String {
+    let items: Vec<(&Path, &str, &Path)> = restored
+        .iter()
+        .map(|e| (e.original.as_path(), e.name.as_str(), e.dir.root.as_path()))
+        .collect();
+    crate::util::items_json("restored", &items, failed)
 }
 
 /// Order entries by deletion time. `list::collect` yields oldest first, with
@@ -192,8 +258,15 @@ fn lexical_clean(p: &Path) -> PathBuf {
     out
 }
 
-/// Restore one entry to its original path. Shared by CLI, piped pick, and TUI.
+/// Restore one entry to its original path, for the TUI.
+#[cfg(feature = "tui")]
 pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
+    restore_entry_quiet(prog, entry, force, false)
+}
+
+/// Restore one entry to its original path. Shared by the CLI, the piped
+/// pick and the TUI; `quiet` drops the `restored '...'` line.
+fn restore_entry_quiet(prog: &str, entry: &list::Entry, force: bool, quiet: bool) -> i32 {
     let src = entry.dir.files().join(&entry.name);
     let dest = &entry.original;
 
@@ -272,7 +345,9 @@ pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32
         );
     }
     trashdir::directorysizes_remove(&entry.dir, &entry.name);
-    println!("restored '{}'", dest.display());
+    if !quiet {
+        println!("restored '{}'", dest.display());
+    }
     0
 }
 
@@ -311,6 +386,26 @@ mod tests {
         assert_eq!(paths(&v), ["/a/new", "/a/mid", "/a/old"]);
         order_entries(&mut v, false);
         assert_eq!(paths(&v), ["/a/old", "/a/mid", "/a/new"]);
+    }
+
+    #[test]
+    fn name_matches_file_name_or_trash_name() {
+        let mut e = entry("/home/u/report.pdf", 1);
+        e.name = "report.2.pdf".into();
+        assert!(name_matches(&e, "report.pdf"));
+        assert!(name_matches(&e, "report.2.pdf"));
+        assert!(!name_matches(&e, "report"));
+        assert!(!name_matches(&e, "u/report.pdf"));
+    }
+
+    #[test]
+    fn restored_json_lists_items() {
+        let e = entry("/a/\"q\".txt", 1);
+        assert_eq!(
+            restored_json(&[&e], 0),
+            r#"{"restored":[{"original":"/a/\"q\".txt","name":"n","trash_dir":"/tmp/trash"}],"failed":0}"#
+        );
+        assert_eq!(restored_json(&[], 1), r#"{"restored":[],"failed":1}"#);
     }
 
     #[test]
