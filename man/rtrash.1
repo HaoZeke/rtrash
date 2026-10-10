@@ -421,6 +421,16 @@ Emit one JSON object
 Print the listed paths separated by null bytes, for
 .BR "xargs \-0 rtrash put \-rf \-\-" .
 .TP
+.B \-\-pick
+Open the put browser on the listed rows (directories, then files).
+Mark rows and press Enter to trash them after a confirmation; rows with
+dirty, unpushed or unknown git state show
+.B !
+and the confirmation counts them.
+Needs a terminal on stdin and the
+.B tui
+feature.
+.TP
 .B \-\-help
 Display help and exit.
 .TP

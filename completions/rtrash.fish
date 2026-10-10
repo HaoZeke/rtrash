@@ -82,6 +82,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-git 
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l include-dirty -d 'with --print0, also print rows with git work at risk'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l json -d 'emit a JSON object'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l print0 -d 'print listed paths NUL-separated'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l pick -d 'mark listed rows in the put browser and trash them'
 
 # restore
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s f -l force -d 'overwrite existing file at original location'

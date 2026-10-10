@@ -62,6 +62,8 @@ directories appear as one `trash` row and are never printed by --print0.
       --json            emit a JSON object (scripts)
       --print0          print the listed paths, NUL-separated, for
                           `xargs -0 rtrash put -rf --`
+      --pick            open the put browser on the listed rows: mark rows
+                          and trash them (needs a terminal)
       --help            display this help and exit
       --version         output version information and exit
 ";
@@ -717,6 +719,37 @@ fn print_trash(t: &TrashSummary) {
     }
 }
 
+fn pick_available() -> bool {
+    cfg!(feature = "tui") && crate::util::stdin_is_tty()
+}
+
+/// Browser rows for `--pick`: directories then files, without trash rows.
+/// Rows with git work at risk carry `warn` and show `!`.
+#[cfg(feature = "tui")]
+pub fn pick_rows(report: &Report) -> Vec<crate::put_tui::PathRow> {
+    let items: Vec<&Item> = report
+        .dirs
+        .iter()
+        .chain(report.files.iter())
+        .filter(|it| it.artefact != Some("trash"))
+        .collect();
+    let width = items.iter().map(|it| notes(it).len()).max().unwrap_or(1);
+    items
+        .into_iter()
+        .map(|it| crate::put_tui::PathRow {
+            path: it.path.clone(),
+            is_dir: it.is_dir,
+            label: Some(format!(
+                "{:>10}  {:<width$}  {}",
+                format_bytes(it.disk),
+                notes(it),
+                it.path.display()
+            )),
+            warn: it.git.as_ref().is_some_and(|(s, _)| s.is_risky()),
+        })
+        .collect()
+}
+
 fn parse_days(s: &str) -> Result<i64, String> {
     match s.parse::<i64>() {
         Ok(d) if d >= 0 => Ok(d),
@@ -766,6 +799,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut home_only = false;
     let mut trash_pins: Vec<PathBuf> = Vec::new();
     let mut include_dirty = false;
+    let mut pick = false;
     let now = info::now_epoch();
     let mut i = 0usize;
     while i < args.len() {
@@ -819,6 +853,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     trash_pins.push(PathBuf::from(&a["--trash-dir=".len()..]));
                 }
                 "--include-dirty" => include_dirty = true,
+                "--pick" => pick = true,
                 "--help" => {
                     print!("{}", HELP.replace("{prog}", prog));
                     return 0;
@@ -838,8 +873,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if only_files && !only_dirs {
         want_dirs = false;
     }
-    if json && print0 {
-        eprintln!("{prog}: --json and --print0 are mutually exclusive");
+    if [json, print0, pick].iter().filter(|b| **b).count() > 1 {
+        eprintln!("{prog}: --json, --print0 and --pick are mutually exclusive");
+        return 2;
+    }
+    if pick && !pick_available() {
+        eprintln!("{prog}: --pick needs a terminal and the tui feature");
         return 2;
     }
     if paths.is_empty() {
@@ -873,6 +912,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
 
     let trash = trash_on_scanned_devices(&trash_dirs, &report);
+    #[cfg(feature = "tui")]
+    if pick {
+        let title = report
+            .roots
+            .first()
+            .map(|r| r.path.clone())
+            .unwrap_or_default();
+        return crate::put_tui::run_rows(prog, &title, pick_rows(&report));
+    }
     if json {
         println!("{}", report_json(&report, &trash));
     } else if print0 {
@@ -1005,5 +1053,30 @@ mod tests {
             artefact_kind("anything", |c| c == "CACHEDIR.TAG"),
             Some("cache")
         );
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn pick_rows_skip_trash_and_flag_risky() {
+        let mut risky = item("/w/local", 9, 9);
+        risky.is_dir = true;
+        risky.git = Some((GitState::Unpushed, PathBuf::from("/w/local")));
+        let mut trash = item("/w/Trash", 8, 8);
+        trash.is_dir = true;
+        trash.artefact = Some("trash");
+        let report = Report {
+            roots: Vec::new(),
+            dirs: vec![risky, trash],
+            files: vec![item("/w/f.bin", 1, 1)],
+            unreadable: 0,
+        };
+        let rows = pick_rows(&report);
+        let paths: Vec<_> = rows.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(
+            paths,
+            [PathBuf::from("/w/local"), PathBuf::from("/w/f.bin")]
+        );
+        assert!(rows[0].warn && !rows[1].warn);
+        assert!(rows[0].label.as_deref().unwrap().contains("git:unpushed"));
     }
 }

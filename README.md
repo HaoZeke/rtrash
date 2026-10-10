@@ -320,6 +320,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du --no-git` | Skip the git checks |
 | `rtrash du --trash-dir=PATH` / `--home-only` | Limit the trash summary to these trash directories |
 | `rtrash du --print0 … \| xargs -0 rtrash put -rf --` | Trash the listed paths |
+| `rtrash du --pick` | Mark rows in the put browser and trash them; rows with git work at risk show `!` |
 
 Symlinks are never followed, and a file with more than one hard link counts once. When one subdirectory accounts for 90% or more of a directory's size, only the subdirectory is listed, so each row points at the bulk itself. The scan root appears only in the closing total.
 
@@ -334,6 +335,7 @@ A cleanup pass on a source tree:
 ```console
 $ rtrash du --artefacts --older-than=14 ~/src          # review
 $ rtrash du --artefacts --older-than=14 --print0 ~/src | xargs -0 rtrash put -rf --
+$ rtrash du --artefacts --pick ~/src                   # or mark rows by hand
 $ rtrash empty -n && rtrash empty 14                    # free the space
 ```
 

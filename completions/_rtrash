@@ -75,6 +75,7 @@ du_opts=(
   '--include-dirty[with --print0, also print rows with git work at risk]'
   '--json[emit a JSON object]'
   '--print0[print listed paths NUL-separated]'
+  '--pick[mark listed rows in the put browser and trash them]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
   '*:path:_files -/'
