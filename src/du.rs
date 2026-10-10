@@ -30,7 +30,8 @@ Symlinks are never followed, and a file with more than one hard link
 counts once. When one subdirectory accounts for 90% or more of a
 directory's size, only the subdirectory is listed (--all-dirs lists both).
 Regenerable artefacts are tagged and listed as one row each; their
-contents never appear on their own.
+contents never appear on their own, unless the artefact is the PATH
+being scanned.
 
 Each row inside or containing a git repository gets a git state: ignored,
 clean, dirty (uncommitted changes, untracked files or a stash), unknown, or
@@ -249,6 +250,8 @@ pub struct RootTotals {
     pub disk: u64,
     pub files: u64,
     pub dirs: u64,
+    /// Artefact kind of the PATH itself, when it is one.
+    pub artefact: Option<&'static str>,
 }
 
 /// Result of scanning one or more paths.
@@ -459,6 +462,8 @@ struct Node {
     /// The filters would let this directory onto the list. A parent only
     /// hands its row to a dominant child that can show up in its place.
     listable: bool,
+    /// Artefact kind (`cargo-target`, `trash`, ...), if any.
+    artefact: Option<&'static str>,
 }
 
 /// At most this many repo roots are remembered per directory.
@@ -518,6 +523,7 @@ fn enter(
             mtime: st.mtime,
             repos: Vec::new(),
             listable: false,
+            artefact: None,
         });
     };
     let st = match known {
@@ -629,6 +635,7 @@ fn walk_dir(
         mtime: st.mtime,
         repos: Vec::new(),
         listable: false,
+        artefact: None,
     };
     ctx.dirs.fetch_add(1, Ordering::Relaxed);
     let (entries, failed) = dir.entries();
@@ -687,8 +694,11 @@ fn walk_dir(
         artefact_kind(&name, |c| markers.contains(&c))
     };
     // Repository internals are never offered for deletion, and an artefact
-    // is one row: nothing below either is listed on its own.
-    let inner_listing = listing && !is_git_dir && artefact.is_none();
+    // is one row: nothing below either is listed on its own. A PATH that is
+    // itself an artefact is the exception: it was named to be looked into,
+    // so its contents are listed. A trash root stays closed even then.
+    let opens_as_root = depth == 0 && artefact != Some("trash");
+    let inner_listing = listing && !is_git_dir && (artefact.is_none() || opens_as_root);
     if inner_listing {
         // Best first: the list's own order, by key and then by name since
         // the parent matches. No more than `top` of them can get in, and
@@ -754,6 +764,7 @@ fn walk_dir(
         }
     }
     node.listable = listing && !is_git_dir && depth > 0 && ctx.listable(depth, node.mtime);
+    node.artefact = artefact;
     if listing && !is_git_dir {
         node.offer_self(ctx, path, depth, largest_child, artefact);
     }
@@ -824,10 +835,10 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
             top_dirs: SharedTop::new(opts.top, opts.sort),
             top_files: SharedTop::new(opts.top, opts.sort),
         };
-        let (apparent, disk) = if meta.is_dir() {
+        let (apparent, disk, artefact) = if meta.is_dir() {
             enter(&ctx, None, &abs, Some(meta), 0, true)
-                .map(|n| (n.apparent, n.disk))
-                .unwrap_or((0, 0))
+                .map(|n| (n.apparent, n.disk, n.artefact))
+                .unwrap_or((0, 0, None))
         } else {
             ctx.files.fetch_add(1, Ordering::Relaxed);
             let (a, d) = meta.sizes();
@@ -843,7 +854,7 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
                     git: None,
                 });
             }
-            (a, d)
+            (a, d, None)
         };
         unreadable += ctx.unreadable.load(Ordering::Relaxed);
         roots.push(RootTotals {
@@ -852,6 +863,7 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
             disk,
             files: ctx.files.load(Ordering::Relaxed),
             dirs: ctx.dirs.load(Ordering::Relaxed),
+            artefact,
         });
         dirs.merge_vec(ctx.top_dirs.into_vec());
         files.merge_vec(ctx.top_files.into_vec());
@@ -1012,12 +1024,13 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
         .iter()
         .map(|t| {
             format!(
-                "{{\"path\":\"{}\",\"disk\":{},\"apparent\":{},\"files\":{},\"dirs\":{}}}",
+                "{{\"path\":\"{}\",\"disk\":{},\"apparent\":{},\"files\":{},\"dirs\":{},\"artefact\":{}}}",
                 json_escape(&t.path.to_string_lossy()),
                 t.disk,
                 t.apparent,
                 t.files,
-                t.dirs
+                t.dirs,
+                json_opt(t.artefact)
             )
         })
         .collect();
@@ -1340,8 +1353,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         print_table(&format!("Largest directories (by {by})"), &report.dirs, now);
         print_table(&format!("Largest files (by {by})"), &report.files, now);
         for t in &report.roots {
+            let kind = t.artefact.map(|k| format!(" ({k})")).unwrap_or_default();
             println!(
-                "Total {}: {} on disk, {} apparent, {}, {}",
+                "Total {}{kind}: {} on disk, {} apparent, {}, {}",
                 t.path.display(),
                 format_bytes(t.disk),
                 format_bytes(t.apparent),

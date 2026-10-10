@@ -394,6 +394,32 @@ fn artefacts_are_one_row_and_filterable() {
     assert!(text.contains("cargo-target"), "{text}");
 }
 
+#[test]
+fn an_artefact_named_as_path_lists_its_contents() {
+    let t = Tree::new("artefact-root");
+    t.file("web/node_modules/pkg/index.js", 300_000);
+    t.file("web/node_modules/pkg/dist/bundle.js", 200_000);
+    let nm = t.root.join("web/node_modules");
+    let nm_s = s(&nm);
+
+    let j = t.json(&[&nm_s]);
+    assert!(j.contains("\"artefact\":\"node-modules\"}"), "{j}");
+    assert_eq!(paths_in(&j, "dirs")[0], s(&nm.join("pkg")), "{j}");
+    assert_eq!(
+        paths_in(&j, "files"),
+        [
+            s(&nm.join("pkg/index.js")),
+            s(&nm.join("pkg/dist/bundle.js"))
+        ],
+        "{j}"
+    );
+    let text = String::from_utf8(t.du(&[&nm_s]).stdout).unwrap();
+    assert!(
+        text.contains(&format!("Total {nm_s} (node-modules):")),
+        "{text}"
+    );
+}
+
 fn git_ok() -> bool {
     Command::new("git")
         .arg("--version")
@@ -705,6 +731,11 @@ fn trash_is_one_row_and_summarized() {
     let printed = String::from_utf8(out.stdout).unwrap();
     assert!(!printed.contains(&trash_s), "{printed:?}");
     assert!(printed.contains(&s(&keep)), "{printed:?}");
+
+    // Named as the PATH, a trash root still keeps its contents to itself.
+    let j = t.json(&[&pin, &trash_s]);
+    assert!(paths_in(&j, "dirs").is_empty(), "{j}");
+    assert!(paths_in(&j, "files").is_empty(), "{j}");
 
     let out = t.du(&[&pin]);
     let text = String::from_utf8(out.stdout).unwrap();

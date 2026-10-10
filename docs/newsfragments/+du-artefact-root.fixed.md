@@ -1,0 +1,1 @@
+du lists what is inside a regenerable artefact when that artefact is the PATH being scanned (`rtrash du target`), instead of only printing a total. The total and the JSON root name its kind. A trash directory named as the PATH still keeps its contents unlisted.
