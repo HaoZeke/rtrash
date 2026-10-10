@@ -64,6 +64,7 @@ to require CLI operands even on a TTY.
       --trash-dir=PATH  put into this trash root (creates files/ and info/ if
                           needed); scripts/tests pin instead of XDG discovery
       --home-only       always use the home trash (skip volume trash)
+      --plain           never open the put browser; require FILE operands
       --help            display this help and exit
       --version         output version information and exit
 

@@ -67,6 +67,10 @@ end
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s f -l force -d 'overwrite existing file at original location'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l home-only -d 'only the home trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l trash-dir -d 'only this trash directory' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l cwd-only -d 'only items trashed from under the current directory'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l plain -d 'numbered selection even on a TTY'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l newest-first -d 'list the most recently trashed item first'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l oldest-first -d 'list the oldest trashed item first'
 
 # rm (trash-rm)
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l trash-dir -d 'only this trash directory' -r
@@ -97,6 +101,13 @@ for cmd in trash-put trash
     complete -c $cmd -s v -l verbose
     complete -c $cmd -s i
     complete -c $cmd -s I
+    complete -c $cmd -l interactive
+    complete -c $cmd -l one-file-system
+    complete -c $cmd -l preserve-root
+    complete -c $cmd -l no-preserve-root
+    complete -c $cmd -l trash-dir -r
+    complete -c $cmd -l home-only
+    complete -c $cmd -l plain
     complete -c $cmd -l help
     complete -c $cmd -l version
 end
@@ -106,6 +117,9 @@ complete -c trash-empty -s v -l verbose
 complete -c trash-empty -s f -l force
 complete -c trash-empty -l trash-dir -r
 complete -c trash-empty -l home-only
+complete -c trash-empty -l older-than -r
+complete -c trash-empty -l json
+complete -c trash-empty -l plain
 complete -c trash-empty -l help
 complete -c trash-empty -l version
 
@@ -120,11 +134,18 @@ complete -c trash-list -l version
 complete -c trash-restore -s f -l force
 complete -c trash-restore -l home-only
 complete -c trash-restore -l trash-dir -r
+complete -c trash-restore -l cwd-only
+complete -c trash-restore -l plain
+complete -c trash-restore -l newest-first
+complete -c trash-restore -l oldest-first
 complete -c trash-restore -l help
 complete -c trash-restore -l version
 
 complete -c trash-rm -l trash-dir -r
 complete -c trash-rm -l home-only
+complete -c trash-rm -l older-than -r
+complete -c trash-rm -l newer-than -r
+complete -c trash-rm -l json
 complete -c trash-rm -s n -l dry-run
 complete -c trash-rm -s f -l force
 complete -c trash-rm -s v -l verbose

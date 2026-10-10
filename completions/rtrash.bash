@@ -27,7 +27,8 @@ _rtrash_status_opts=(
 )
 
 _rtrash_restore_opts=(
-  -f --force --home-only --trash-dir= --help --version
+  -f --force --home-only --trash-dir= --cwd-only --plain
+  --newest-first --oldest-first --help --version
 )
 
 _rtrash_rm_opts=(

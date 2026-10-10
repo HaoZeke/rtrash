@@ -130,6 +130,11 @@ if needed). Scripts and tests use this instead of XDG discovery.
 .B \-\-home\-only
 Always use the home trash (skip volume trash selection).
 .TP
+.B \-\-plain
+Never open the put browser; require
+.I FILE
+operands even on a TTY.
+.TP
 .B \-\-help
 Display help and exit.
 .TP
@@ -173,6 +178,9 @@ Same as positional
 .B \-\-json
 Emit a JSON summary on stdout
 (\fIdry_run\fR, \fIremoved\fR, \fIbytes\fR, \fIdays\fR).
+.TP
+.B \-\-plain
+Never open the empty browser on a TTY.
 .TP
 .B \-\-help
 Display help and exit.

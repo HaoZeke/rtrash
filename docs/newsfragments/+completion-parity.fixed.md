@@ -1,0 +1,1 @@
+Shell completions now offer every option that `--help` lists: restore gains `--cwd-only` and `--plain` in bash, zsh and fish, and the fish `trash-*` names pick up the age, JSON and pin flags. `put --help` and the man page now document `--plain`.
