@@ -28,7 +28,7 @@ pub struct RecycleIMeta {
 }
 
 /// FILETIME units between 1601-01-01 and 1970-01-01 UTC.
-pub const FILETIME_UNIX_EPOCH: u64 = 11_644_473_600_000_000_000;
+pub const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
 /// 100-nanosecond intervals per second.
 pub const HUNDRED_NS_PER_SEC: u64 = 10_000_000;
 
@@ -657,6 +657,15 @@ mod tests {
     #[test]
     fn recycle_i_rejects_short() {
         assert!(parse_recycle_i(&[0u8; 8]).is_none());
+    }
+
+    #[test]
+    fn filetime_matches_a_known_date() {
+        // 2026-01-01T00:00:00Z: 11644473600 s after 1601 plus the Unix time.
+        assert_eq!(
+            filetime_to_unix_epoch(134_116_992_000_000_000),
+            1_767_225_600
+        );
     }
 
     #[test]
