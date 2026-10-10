@@ -860,9 +860,12 @@ fn size_ties_list_the_smallest_names() {
         .map(|p| s(&t.root.join(p)))
         .collect();
     assert_eq!(paths_in(&j, "files"), want, "{j}");
+    // The trash summary reads the system Recycle Bin on Windows, which
+    // other processes change while this runs; compare the scan alone.
+    let scan = |j: &str| j[..j.find("\"trash\":").unwrap_or(j.len())].to_string();
     for n in ["1", "2", "5"] {
         let k = t.json(&["--no-git", "-n", "4", "--files", "--threads", n]);
-        assert_eq!(k, j, "--threads {n}");
+        assert_eq!(scan(&k), scan(&j), "--threads {n}");
     }
 }
 
