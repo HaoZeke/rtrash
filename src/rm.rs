@@ -1,6 +1,6 @@
 //! Selective permanent delete of trash entries (trash-cli `trash-rm` role).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::list;
 use crate::trashdir::{self, TrashDir};
@@ -10,7 +10,9 @@ const HELP: &str = "\
 Usage: {prog} [OPTION]... PATTERN...
 Permanently remove trashed items whose original path or basename matches
 a PATTERN (shell-style glob; quote globs from the shell). Matching entries
-are deleted from the trash (files/ + .trashinfo), not restored.
+are deleted from the trash (files/ + .trashinfo), not restored. An absolute
+PATTERN also matches with symlinks in its directory part resolved, the way
+put records original paths.
 
 Note: multi-call name `rm` means *put into trash* (safe). This command
 (subcommand `rtrash rm` or multi-call `trash-rm`) permanently deletes
@@ -146,6 +148,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: no valid --trash-dir pins");
         return 2;
     }
+    // put records originals with their parent directory resolved, so a
+    // path typed through a symlinked directory matches in that form too.
+    let resolved: Vec<String> = patterns.iter().filter_map(|p| resolve_pattern(p)).collect();
+    patterns.extend(resolved);
     let entries = list::filter_age(list::collect(&dirs), older_than, newer_than);
     let mut status = 0i32;
     let mut removed = 0u64;
@@ -241,9 +247,72 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     status
 }
 
+/// An absolute PATTERN with symlinks resolved in its literal directory
+/// part: the components before the first one with a glob character, or
+/// the parent when there is none. The rest stays as typed, so a glob or
+/// the final name is never followed. `None` when nothing changes.
+fn resolve_pattern(pat: &str) -> Option<String> {
+    let path = Path::new(pat);
+    if !path.is_absolute() {
+        return None;
+    }
+    let is_glob = |c: &std::ffi::OsStr| c.to_string_lossy().contains(['*', '?', '[', '\\']);
+    let comps: Vec<_> = path.components().collect();
+    let split = comps
+        .iter()
+        .position(|c| is_glob(c.as_os_str()))
+        .unwrap_or(comps.len().saturating_sub(1))
+        .max(1);
+    let prefix: PathBuf = comps[..split].iter().collect();
+    let rest: PathBuf = comps[split..].iter().collect();
+    let out = trashdir::resolve_existing(&prefix).join(rest);
+    let out = out.to_str()?.to_string();
+    // A trailing slash typed by the user is part of the pattern.
+    let out = if pat.ends_with('/') && !out.ends_with('/') {
+        out + "/"
+    } else {
+        out
+    };
+    (out != pat).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::resolve_pattern;
     use crate::util::fnmatch;
+
+    #[test]
+    fn absolute_patterns_resolve_their_literal_directories() {
+        let base = std::env::temp_dir().join(format!("rtrash-rm-pat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("real/sub")).unwrap();
+        // Resolved up front: macOS reaches temp_dir through /var.
+        let base = std::fs::canonicalize(&base).unwrap();
+        let real = std::fs::canonicalize(base.join("real")).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let l = link.display();
+        let r = real.display();
+        assert_eq!(
+            resolve_pattern(&format!("{l}/a.txt")),
+            Some(format!("{r}/a.txt"))
+        );
+        assert_eq!(
+            resolve_pattern(&format!("{l}/sub/*.o")),
+            Some(format!("{r}/sub/*.o"))
+        );
+        // The glob part and everything after it stay as typed.
+        assert_eq!(
+            resolve_pattern(&format!("{l}/s*/x")),
+            Some(format!("{r}/s*/x"))
+        );
+        // A link as the final name is not followed: it names the trashed item.
+        assert_eq!(resolve_pattern(&format!("{r}/sub")), None);
+        assert_eq!(resolve_pattern(&format!("{}/link", base.display())), None);
+        assert_eq!(resolve_pattern("*.o"), None);
+        assert_eq!(resolve_pattern("foo"), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn pattern_matches_basename_glob() {

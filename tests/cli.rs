@@ -229,6 +229,38 @@ fn symlinked_parents_resolve_alike_for_originals_and_trash() {
     let _ = fs::remove_file(&link);
 }
 
+/// `rm` takes an absolute pattern typed through a symlinked directory,
+/// as restore takes such a path.
+#[test]
+fn rm_patterns_through_a_symlinked_parent_match() {
+    let sb = Sandbox::new("rm-symlinked");
+    let link = sb.root.with_extension("link");
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(&sb.root, &link).unwrap();
+    let lwork = link.join("work");
+    let ldata = link.join("xdg");
+    for f in ["a.txt", "b.o", "c.o"] {
+        fs::write(lwork.join(f), b"x").unwrap();
+    }
+    let out = run_in(&lwork, &ldata, &["put", "a.txt", "b.o", "c.o"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+
+    let typed = lwork.join("a.txt");
+    let out = run_in(&lwork, &ldata, &["rm", typed.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let glob = format!("{}/*.o", lwork.display());
+    let out = run_in(&lwork, &ldata, &["rm", "-n", &glob]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).lines().count(), 2, "{}", stdout_of(&out));
+    let left: Vec<_> = fs::read_dir(sb.trash().join("info"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(!left.iter().any(|n| n.starts_with("a.txt")), "{left:?}");
+    assert_eq!(left.len(), 2, "{left:?}");
+    let _ = fs::remove_file(&link);
+}
+
 #[test]
 fn put_json_force_missing_is_empty_summary() {
     let sb = Sandbox::new("put-json-force");

@@ -586,6 +586,12 @@ deleted from the trash
 (\fBfiles/\fR and
 .BR .trashinfo ),
 not restored.
+An absolute
+.I PATTERN
+also matches with symlinks resolved in its directory part (up to the
+first glob), the form
+.B put
+records, so a path typed through a symlinked directory still matches.
 .PP
 Note: multi-call name
 .B rm
