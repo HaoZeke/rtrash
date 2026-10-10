@@ -19,6 +19,7 @@ put_opts=(
   '--trash-dir=[put into this trash root (creates layout if needed)]:path:_files -/'
   '--home-only[always use the home trash]'
   '--plain[skip TUI; require file operands on a TTY]'
+  '--json[print a JSON summary of trashed items]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
 )

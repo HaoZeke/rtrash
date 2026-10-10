@@ -25,6 +25,36 @@ pub(crate) struct Opts {
     pub trash_pin: Option<PathBuf>,
     /// Prefer home trash only (skip volume selection). Ignored when `trash_pin` is set.
     pub home_only: bool,
+    /// Suppress `-v` lines (stdout carries the `--json` summary instead).
+    pub quiet: bool,
+}
+
+/// One item moved into a trash directory by `put_one`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trashed {
+    /// Absolute original path (as recorded, before the move).
+    pub original: PathBuf,
+    /// Name under `files/` (and `info/NAME.trashinfo`).
+    pub name: String,
+    /// Trash root the item went to.
+    pub trash_dir: PathBuf,
+}
+
+/// JSON summary for `put --json`: every trashed item plus the failure count.
+pub fn summary_json(trashed: &[Trashed], failed: usize) -> String {
+    use crate::list::json_escape;
+    let items: Vec<String> = trashed
+        .iter()
+        .map(|t| {
+            format!(
+                "{{\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\"}}",
+                json_escape(&t.original.to_string_lossy()),
+                json_escape(&t.name),
+                json_escape(&t.trash_dir.to_string_lossy()),
+            )
+        })
+        .collect();
+    format!("{{\"trashed\":[{}],\"failed\":{failed}}}", items.join(","))
 }
 
 impl Default for Opts {
@@ -38,6 +68,7 @@ impl Default for Opts {
             preserve_root: true,
             trash_pin: None,
             home_only: false,
+            quiet: false,
         }
     }
 }
@@ -65,6 +96,8 @@ to require CLI operands even on a TTY.
                           needed); scripts/tests pin instead of XDG discovery
       --home-only       always use the home trash (skip volume trash)
       --plain           never open the put browser; require FILE operands
+      --json            print a JSON summary on stdout ({trashed, failed});
+                          implies --plain and replaces -v output
       --help            display this help and exit
       --version         output version information and exit
 
@@ -83,6 +116,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut files: Vec<PathBuf> = Vec::new();
     let mut no_more_opts = false;
     let mut plain = false;
+    let mut json = false;
 
     for arg in args {
         if no_more_opts || arg == "-" || !arg.starts_with('-') {
@@ -92,6 +126,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         match arg.as_str() {
             "--" => no_more_opts = true,
             "--plain" => plain = true,
+            "--json" => {
+                json = true;
+                opts.quiet = true;
+            }
             // GNU rm: -f / -i / --interactive last flag wins for prompt vs force.
             "--force" => {
                 opts.force = true;
@@ -165,12 +203,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 
     if files.is_empty() {
         #[cfg(feature = "tui")]
-        if !plain && crate::util::stdin_is_tty() {
+        if !plain && !json && crate::util::stdin_is_tty() {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             return crate::put_tui::run(prog, &cwd);
         }
         let _ = plain;
         if opts.force {
+            if json {
+                println!("{}", summary_json(&[], 0));
+            }
             return 0;
         }
         return usage_err(prog, "missing operand");
@@ -188,10 +229,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
 
     let mut status = 0;
+    let mut trashed = Vec::new();
+    let mut failed = 0usize;
     for file in &files {
-        if let Err(code) = put_one(prog, file, &opts) {
-            status = status.max(code);
+        match put_one(prog, file, &opts) {
+            Ok(Some(t)) => trashed.push(t),
+            Ok(None) => {}
+            Err(code) => {
+                failed += 1;
+                status = status.max(code);
+            }
         }
+    }
+    if json {
+        println!("{}", summary_json(&trashed, failed));
     }
     status
 }
@@ -212,7 +263,9 @@ fn describe(meta: &fs::Metadata, path: &Path) -> &'static str {
     }
 }
 
-pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
+/// Trash one path. `Ok(None)` means nothing moved without an error (missing
+/// file under `-f`, or a declined prompt).
+pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Trashed>, i32> {
     let name = path.as_os_str().to_string_lossy();
 
     if opts.preserve_root && path == Path::new("/") {
@@ -230,7 +283,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             if opts.force {
-                return Ok(());
+                return Ok(None);
             }
             eprintln!("{prog}: cannot remove '{name}': No such file or directory");
             return Err(1);
@@ -262,7 +315,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
     if opts.interactive == Interactive::Always {
         let kind = describe(&meta, path);
         if !confirm(&format!("{prog}: remove {kind} '{name}'? ")) {
-            return Ok(());
+            return Ok(None);
         }
     }
 
@@ -281,15 +334,19 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<(), i32> {
         }
     };
     match trashdir::trash_move(&abs, &meta, &trash) {
-        Ok(_) => {
-            if opts.verbose {
+        Ok(trash_name) => {
+            if opts.verbose && !opts.quiet {
                 if meta.is_dir() {
                     println!("removed directory '{name}'");
                 } else {
                     println!("removed '{name}'");
                 }
             }
-            Ok(())
+            Ok(Some(Trashed {
+                original: abs,
+                name: trash_name,
+                trash_dir: trash.root,
+            }))
         }
         Err(e) => {
             eprintln!("{prog}: cannot trash '{name}': {e}");
@@ -326,4 +383,24 @@ fn resolve_put_trash(
         return Ok(td);
     }
     trashdir::select(abs, meta.dev())
+}
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+
+    #[test]
+    fn summary_json_lists_items_and_failures() {
+        let t = Trashed {
+            original: PathBuf::from("/w/a \"q\".txt"),
+            name: "a \"q\".txt".into(),
+            trash_dir: PathBuf::from("/x/Trash"),
+        };
+        let s = summary_json(&[t], 2);
+        assert_eq!(
+            s,
+            r#"{"trashed":[{"original":"/w/a \"q\".txt","name":"a \"q\".txt","trash_dir":"/x/Trash"}],"failed":2}"#
+        );
+        assert_eq!(summary_json(&[], 0), r#"{"trashed":[],"failed":0}"#);
+    }
 }

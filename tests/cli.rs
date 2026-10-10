@@ -113,6 +113,43 @@ fn put_moves_file_and_writes_info() {
 }
 
 #[test]
+fn put_json_reports_trashed_and_failed() {
+    let sb = Sandbox::new("put-json");
+    sb.touch("a.txt");
+    fs::create_dir(sb.work().join("d")).unwrap();
+    fs::write(sb.work().join("d/x"), b"x").unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = sb.run(&["put", &pin, "--json", "-rv", "a.txt", "d", "missing.txt"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let stdout = stdout_of(&out);
+    // -v lines must not mix into the JSON on stdout.
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let line = stdout.trim();
+    assert!(line.starts_with("{\"trashed\":["), "{line}");
+    assert!(line.ends_with(",\"failed\":1}"), "{line}");
+    let a = sb.work().join("a.txt");
+    assert!(
+        line.contains(&format!("\"original\":\"{}\"", a.display())),
+        "{line}"
+    );
+    assert!(line.contains("\"name\":\"d\""), "{line}");
+    assert!(
+        line.contains(&format!("\"trash_dir\":\"{}\"", sb.trash().display())),
+        "{line}"
+    );
+    assert!(stderr_of(&out).contains("missing.txt"));
+}
+
+#[test]
+fn put_json_force_missing_is_empty_summary() {
+    let sb = Sandbox::new("put-json-force");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = sb.run(&["put", &pin, "--json", "-f", "nope.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), r#"{"trashed":[],"failed":0}"#);
+}
+
+#[test]
 fn put_directory_requires_recursive() {
     let sb = Sandbox::new("put-dir");
     fs::create_dir(sb.work().join("d")).unwrap();

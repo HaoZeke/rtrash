@@ -43,6 +43,7 @@ complete -c rtrash -n $put_cond -l no-preserve-root -d 'do not treat / specially
 complete -c rtrash -n $put_cond -l trash-dir -d 'put into this trash root' -r
 complete -c rtrash -n $put_cond -l home-only -d 'always use the home trash'
 complete -c rtrash -n $put_cond -l plain -d 'skip TUI; require file operands'
+complete -c rtrash -n $put_cond -l json -d 'JSON summary of trashed items'
 
 # empty
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s n -l dry-run -d 'report what would be removed; show reclaimable size'
@@ -108,6 +109,7 @@ for cmd in trash-put trash
     complete -c $cmd -l trash-dir -r
     complete -c $cmd -l home-only
     complete -c $cmd -l plain
+    complete -c $cmd -l json
     complete -c $cmd -l help
     complete -c $cmd -l version
 end

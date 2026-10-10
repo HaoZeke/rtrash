@@ -135,6 +135,16 @@ Never open the put browser; require
 .I FILE
 operands even on a TTY.
 .TP
+.B \-\-json
+Print one JSON object on stdout:
+\fItrashed\fR (one entry per moved item with \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR)
+and \fIfailed\fR (operands that could not be trashed).
+Implies
+.B \-\-plain
+and replaces
+.B \-v
+output.
+.TP
 .B \-\-help
 Display help and exit.
 .TP
