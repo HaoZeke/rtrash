@@ -32,7 +32,7 @@ _rtrash_du_opts=(
   -n --top= -x --one-file-system --apparent --sort= -C --count --unique --max-depth= --threads= --all-dirs
   --artefacts --exclude= -X --exclude-from= --exclude-caches --gitignore
   --dirs --files --older-than= --newer-than= --home-only
-  --trash-dir= --no-git --include-dirty --json --print0 --pick -i --interactive -o --output= -f --file= --stacks --help
+  --trash-dir= --no-git --include-dirty --json --print0 --pick -i --interactive --no-delete -o --output= -f --file= --stacks --help
   --version
 )
 

@@ -91,6 +91,7 @@ du_opts=(
   '--print0[print listed paths NUL-separated]'
   '--pick[mark listed rows in the put browser and trash them]'
   '(-i --interactive)'{-i,--interactive}'[explore one directory at a time; trash, undo, rescan]'
+  '--no-delete[with -i, browse only: no trash or undo]'
   '(-o --output)'{-o,--output=}'[write a snapshot of every directory total]:file:_files'
   '--stacks[print folded stacks for flame graph tools]'
   '(-f --file)'{-f,--file=}'[list from a snapshot instead of scanning]:file:_files'

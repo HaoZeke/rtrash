@@ -1249,3 +1249,17 @@ fn exclude_matches_names_that_are_not_utf8() {
     let from = run(&[OsStr::from_bytes(&arg)]);
     assert!(!from.contains(".log"), "{from}");
 }
+
+#[test]
+fn no_delete_needs_the_explorer() {
+    let t = Tree::new("nodelete");
+    t.file("a.bin", 10);
+    let out = t.du(&["--no-delete"]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--no-delete applies to --interactive"),
+        "{err}"
+    );
+    assert!(out.stdout.is_empty());
+}

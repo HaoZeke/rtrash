@@ -75,6 +75,12 @@ const KEYS: &[(&str, &str, Kind, &str)] = &[
         "leave out what git ignores (--gitignore)",
     ),
     (
+        "du",
+        "no_delete",
+        Kind::Bool,
+        "open -i without delete (--no-delete)",
+    ),
+    (
         "list",
         "sort",
         Kind::Str,

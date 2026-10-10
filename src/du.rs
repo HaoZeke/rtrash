@@ -104,6 +104,7 @@ directories appear as one `trash` row and are never printed by --print0.
   -i, --interactive     explore PATH one directory at a time: open and leave
                           directories, trash rows (d), undo (u) and rescan
                           (r); rows show git state and artefact kind
+      --no-delete       with -i, browse only: d and u do nothing
       --help            display this help and exit
       --version         output version information and exit
 ";
@@ -1778,6 +1779,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut include_dirty = false;
     let mut pick = false;
     let mut interactive = false;
+    let mut no_delete = false;
     let mut output: Option<PathBuf> = None;
     let mut from_file: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
@@ -1808,6 +1810,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     count = cfg.bool("du", "count").unwrap_or(count);
     opts.one_file_system = cfg.bool("du", "one_file_system").unwrap_or(false);
     use_git = cfg.bool("du", "git").unwrap_or(use_git);
+    // The config key only shapes -i; the flag alone is an error below.
+    let mut read_only = cfg.bool("du", "no_delete").unwrap_or(false);
     filter.exclude_caches = cfg.bool("du", "exclude_caches").unwrap_or(false);
     filter.gitignore = cfg.bool("du", "gitignore").unwrap_or(false);
     for p in cfg.list("du", "exclude") {
@@ -1913,6 +1917,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--include-dirty" => include_dirty = true,
                 "--pick" => pick = true,
                 "-i" | "--interactive" => interactive = true,
+                "--no-delete" => no_delete = true,
                 "--help" => {
                     print!("{}", HELP.replace("{prog}", prog));
                     return 0;
@@ -1961,6 +1966,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if paths.is_empty() {
         paths.push(PathBuf::from("."));
     }
+    if no_delete && !interactive {
+        eprintln!("{prog}: --no-delete applies to --interactive; other modes never delete");
+        return 2;
+    }
+    read_only |= no_delete;
+    #[cfg(not(feature = "tui"))]
+    let _ = read_only;
     if interactive && paths.len() > 1 {
         eprintln!("{prog}: --interactive takes one PATH");
         return 2;
@@ -2054,7 +2066,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     #[cfg(feature = "tui")]
     if interactive {
-        return crate::du_tui::run(prog, &paths[0], opts, use_git);
+        return crate::du_tui::run(prog, &paths[0], opts, use_git, read_only);
     }
     // Git probes run beside the walk. Under --no-git, or without git on
     // PATH, there is nothing to start.

@@ -125,6 +125,8 @@ struct App {
     viewport_rows: usize,
     keys: Keymap,
     undo: Vec<UndoGroup>,
+    /// `--no-delete`: browse only; `d` and `u` explain instead of acting.
+    read_only: bool,
 }
 
 /// The size a row shows and its bar measures: apparent size under
@@ -251,6 +253,7 @@ impl App {
             viewport_rows: 10,
             keys,
             undo: Vec::new(),
+            read_only: false,
         })
     }
 
@@ -414,6 +417,10 @@ impl App {
     }
 
     fn ask_delete(&mut self) {
+        if self.read_only {
+            self.status = "read-only (--no-delete): nothing gets trashed".into();
+            return;
+        }
         let t = self.targets();
         if t.is_empty() {
             self.status = "nothing to trash".into();
@@ -480,6 +487,10 @@ impl App {
 
     /// Restore the most recent delete of this session.
     fn undo_last(&mut self) {
+        if self.read_only {
+            self.status = "read-only (--no-delete): nothing to undo".into();
+            return;
+        }
         let Some(group) = self.undo.pop() else {
             self.status = "nothing to undo".into();
             return;
@@ -650,7 +661,15 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             title,
             Style::default().add_modifier(Modifier::BOLD),
         ))
-        .block(Block::default().borders(Borders::ALL).title("rtrash du")),
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(if app.read_only {
+                    "rtrash du (read-only)"
+                } else {
+                    "rtrash du"
+                }),
+        ),
         chunks[0],
     );
     f.render_stateful_widget(
@@ -668,10 +687,15 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             app.keys.display_chords(Action::ConfirmNo)
         ),
         _ => format!(
-            "{}/{} move  {}/→ open  ←/h up  d trash  u undo  r rescan  {} mark  {} help  {} quit",
+            "{}/{} move  {}/→ open  ←/h up  {}r rescan  {} mark  {} help  {} quit",
             app.keys.display_chords(Action::MoveUp),
             app.keys.display_chords(Action::MoveDown),
             app.keys.display_chords(Action::Action),
+            if app.read_only {
+                ""
+            } else {
+                "d trash  u undo  "
+            },
             app.keys.display_chords(Action::ToggleMark),
             app.keys.display_chords(Action::Help),
             app.keys.display_chords(Action::Quit),
@@ -688,8 +712,16 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             &app.keys,
             &[
                 "→ l enter — open directory · ← h backspace — up",
-                "d delete — move to the trash (asks first)",
-                "u — undo the last delete · r — rescan this directory",
+                if app.read_only {
+                    "read-only (--no-delete): d and u are off"
+                } else {
+                    "d delete — move to the trash (asks first)"
+                },
+                if app.read_only {
+                    "r — rescan this directory"
+                } else {
+                    "u — undo the last delete · r — rescan this directory"
+                },
                 "! — git work at risk (dirty, unpushed or unknown)",
             ],
         );
@@ -713,7 +745,7 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
 }
 
 /// Run the explorer on `root`. Returns the process exit code.
-pub fn run(prog: &str, root: &Path, opts: ScanOpts, git: bool) -> i32 {
+pub fn run(prog: &str, root: &Path, opts: ScanOpts, git: bool, read_only: bool) -> i32 {
     let root = match root.canonicalize() {
         Ok(p) => p,
         Err(e) => {
@@ -726,7 +758,7 @@ pub fn run(prog: &str, root: &Path, opts: ScanOpts, git: bool) -> i32 {
         return 2;
     }
     let mut app = match App::new(prog, root, opts, git) {
-        Ok(a) => a,
+        Ok(a) => App { read_only, ..a },
         Err(e) => {
             eprintln!("{prog}: cannot scan: {e}");
             return 1;
@@ -900,6 +932,27 @@ mod tests {
         );
         assert!(text.contains("big/"), "{text}");
         assert!(text.contains("d trash  u undo  r rescan"), "{text}");
+    }
+
+    #[test]
+    fn read_only_keeps_files_and_hides_delete_keys() {
+        let t = tree("ro");
+        let mut a = app(&t);
+        a.read_only = true;
+        a.select(0);
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Browse);
+        assert!(a.status.contains("read-only"), "{}", a.status);
+        a.on_key(KeyCode::Delete, KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(t.0.join("w/big").exists());
+        assert!(!t.0.join("Trash").exists());
+        a.on_key(KeyCode::Char('u'), KeyModifiers::NONE);
+        assert!(a.status.contains("nothing to undo"), "{}", a.status);
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("rtrash du (read-only)"), "{text}");
+        assert!(!text.contains("d trash"), "{text}");
+        assert!(text.contains("r rescan"), "{text}");
     }
 
     #[test]

@@ -349,6 +349,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du -f base.snap` | List the largest directories from a snapshot without scanning |
 | `rtrash du --stacks ~ \| inferno-flamegraph --countname=bytes > du.svg` | Folded stacks of each directory's own bytes for a flame graph (`flamegraph.pl`, inferno, speedscope); works with `-f FILE` |
 | `rtrash du -i ~/src` | Explore one directory at a time, like ncdu: `d` trashes, `u` undoes, `r` rescans; rows carry size bars, artefact and git badges |
+| `rtrash du -i --no-delete /srv` | The same explorer, read-only: `d` and `u` only show a note (config key `no_delete` makes it the default) |
 
 Symlinks are never followed, and a file with more than one hard link counts once, in the sizes and in the file count, so files plus directories match `du --inodes -s`; the total names the extra links. When one subdirectory accounts for 90% or more of a directory's size, only the subdirectory is listed, so each row points at the bulk itself. The scan root appears only in the closing total.
 
@@ -453,7 +454,7 @@ prune = "oldest"         # or largest (RTRASH_PRUNE wins)
 paths = ["/srv/data", "/home/*/keep"]   # put refuses these, like safe-rm entries
 ```
 
-The other `[du]` keys are `count`, `one_file_system`, `threads`, `git` and `exclude_caches`, and `[list]` also takes `reverse`. Unknown keys and values of the wrong type earn a warning and are skipped, and the rest of the file still applies.
+The other `[du]` keys are `count`, `one_file_system`, `threads`, `git`, `exclude_caches` and `no_delete`, and `[list]` also takes `reverse`. Unknown keys and values of the wrong type earn a warning and are skipped, and the rest of the file still applies.
 
 ### `rtrash rm PATTERN...` (also `trash-rm`)
 

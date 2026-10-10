@@ -757,6 +757,24 @@ uses the Recycle Bin and
 .B u
 takes the newest item with that path back out.
 .TP
+.B \-\-no\-delete
+With
+.BR \-i ,
+browse only:
+.B d
+and
+.B u
+show a note instead of acting, and the title reads
+.BR "(read\-only)" .
+Safe on a shared server or a tree you only want to measure.
+Without
+.B \-i
+it exits 2, since no other mode deletes.
+The
+.B no_delete
+config key turns it on for every
+.BR \-i .
+.TP
 .B \-\-help
 Display help and exit.
 .TP
@@ -1011,6 +1029,7 @@ git = true                # false = \-\-no\-git
 exclude = ["*.iso"]       # \-\-exclude, before any given on the command line
 exclude_caches = false    # \-\-exclude\-caches
 gitignore = false         # \-\-gitignore
+no_delete = false         # \-\-no\-delete for every \-i
 
 [list]
 sort = "date"             # \-\-sort: date, size, name or path
