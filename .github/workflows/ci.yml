@@ -32,6 +32,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Clippy (no TUI feature)
+        run: cargo clippy --locked --lib --bins --no-default-features -- -D warnings
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:

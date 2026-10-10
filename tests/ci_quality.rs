@@ -38,6 +38,11 @@ fn ci_workflow_runs_fmt_clippy_locked_tests() {
             "ci.yml must include {needle:?}\n---\n{yml}"
         );
     }
+    // The thin `--no-default-features` build must stay warning-free too.
+    assert!(
+        yml.contains("--no-default-features"),
+        "ci.yml must lint the build without the tui feature"
+    );
     // push to main is the other trigger
     assert!(
         yml.contains("branches: [main]") || yml.contains("branches: [\"main\"]"),

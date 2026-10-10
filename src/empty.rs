@@ -6,9 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rayon::prelude::*;
 
 use crate::info;
+#[cfg(feature = "tui")]
 use crate::list;
 use crate::trashdir::{self, TrashDir};
-use crate::util::{stdin_is_tty, url_decode};
+#[cfg(feature = "tui")]
+use crate::util::stdin_is_tty;
+use crate::util::url_decode;
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [DAYS]
