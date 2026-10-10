@@ -328,10 +328,15 @@ fn print0_and_text_output() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("Largest directories (by disk use)"), "{text}");
     assert!(
-        text.contains(&format!("{}/", s(&t.root.join("d")))),
+        text.contains(&format!(
+            "{}{}",
+            s(&t.root.join("d")),
+            std::path::MAIN_SEPARATOR
+        )),
         "{text}"
     );
     assert!(text.contains("Total "), "{text}");
+    assert!(text.contains(" apparent, 1 file, 2 directories"), "{text}");
 }
 
 #[test]
@@ -341,7 +346,16 @@ fn usage_errors_exit_2() {
     assert_eq!(t.du(&["-n", "x"]).status.code(), Some(2));
     assert_eq!(t.du(&["--older-than=-1"]).status.code(), Some(2));
     assert_eq!(t.du(&["--json", "--print0"]).status.code(), Some(2));
-    assert_eq!(t.du(&["--threads=0"]).status.code(), Some(2));
+    let threads = t.du(&["--threads=0"]);
+    assert_eq!(threads.status.code(), Some(2));
+    // The hint names the subcommand's own help.
+    let hint = String::from_utf8_lossy(&threads.stderr);
+    assert!(hint.contains(" du --help'"), "{hint}");
+    let help = String::from_utf8(t.du(&["--help"]).stdout).unwrap();
+    assert!(
+        help.lines().next().unwrap().contains(" du [OPTION]..."),
+        "{help}"
+    );
     assert_eq!(t.du(&["--threads", "many"]).status.code(), Some(2));
     // No terminal on stdin in tests: --pick refuses instead of hanging.
     assert_eq!(t.du(&["--pick"]).status.code(), Some(2));

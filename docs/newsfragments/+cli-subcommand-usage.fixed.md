@@ -1,0 +1,1 @@
+Subcommand help and error hints now name the subcommand, so `rtrash du --help` shows `Usage: rtrash du` and a bad option points at `rtrash du --help`. Counts read `1 item`, `1 file` and `1 directory`, and on Windows the `du` table ends directory paths with a backslash instead of a forward slash.

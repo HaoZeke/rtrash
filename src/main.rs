@@ -53,14 +53,16 @@ fn main() {
         "trash-restore" => restore::run(&argv0, rest),
         "trash-rm" => rm::run(&argv0, rest),
         "rm" | "trash-put" | "trash" => put::run(&argv0, rest),
+        // Subcommands name themselves in usage lines and messages
+        // (`rtrash du --help`), so a hint points at the right help.
         _ => match rest.first().map(String::as_str) {
             Some("put") => put::run(&argv0, &rest[1..]),
-            Some("empty") => empty::run(&argv0, &rest[1..]),
-            Some("list") => list::run(&argv0, &rest[1..]),
-            Some("status") => status::run(&argv0, &rest[1..]),
-            Some("du") => du::run(&argv0, &rest[1..]),
-            Some("restore") => restore::run(&argv0, &rest[1..]),
-            Some("rm") => rm::run(&argv0, &rest[1..]),
+            Some("empty") => empty::run(&format!("{argv0} empty"), &rest[1..]),
+            Some("list") => list::run(&format!("{argv0} list"), &rest[1..]),
+            Some("status") => status::run(&format!("{argv0} status"), &rest[1..]),
+            Some("du") => du::run(&format!("{argv0} du"), &rest[1..]),
+            Some("restore") => restore::run(&format!("{argv0} restore"), &rest[1..]),
+            Some("rm") => rm::run(&format!("{argv0} rm"), &rest[1..]),
             Some("setup") => setup::run("setup", &rest[1..]),
             #[cfg(all(unix, feature = "tui"))]
             Some("keys") => tui_binds::run_cli(&argv0, &rest[1..]),

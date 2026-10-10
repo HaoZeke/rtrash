@@ -64,6 +64,11 @@ pub fn confirm(prompt: &str) -> bool {
     )
 }
 
+/// `1 item`, `2 items`: a count with its noun in the right number.
+pub fn plural(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// Human-readable binary units (KiB/MiB/GiB) for CLI summaries.
 pub fn format_bytes(n: u64) -> String {
     const K: f64 = 1024.0;
@@ -240,6 +245,13 @@ fn class_match(pat: &[u8], ch: u8) -> Option<(usize, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plural_matches_the_count() {
+        assert_eq!(plural(1, "item", "items"), "1 item");
+        assert_eq!(plural(0, "item", "items"), "0 items");
+        assert_eq!(plural(2, "directory", "directories"), "2 directories");
+    }
 
     #[test]
     fn encode_plain_path() {

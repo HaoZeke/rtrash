@@ -19,7 +19,7 @@ use crate::du_git::{self, GitState};
 use crate::status;
 #[cfg(unix)]
 use crate::trashdir::{self, TrashDir};
-use crate::util::{format_bytes, json_escape};
+use crate::util::{format_bytes, json_escape, plural};
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [PATH]...
@@ -1051,7 +1051,7 @@ fn print_table(title: &str, items: &[Item], now: i64) {
     for it in items {
         let mut path = it.path.display().to_string();
         if it.is_dir {
-            path.push('/');
+            path.push(std::path::MAIN_SEPARATOR);
         }
         println!(
             "{:>10}  {:>10}  {:>4}  {:<width$}  {}",
@@ -1066,11 +1066,10 @@ fn print_table(title: &str, items: &[Item], now: i64) {
 }
 
 fn print_trash(t: &TrashSummary) {
-    let noun = if t.items == 1 { "item" } else { "items" };
     println!(
-        "Trash on these file systems: {} in {} {noun}",
+        "Trash on these file systems: {} in {}",
         format_bytes(t.bytes),
-        t.items
+        plural(t.items, "item", "items")
     );
     if t.items > 0 {
         println!(
@@ -1342,18 +1341,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         print_table(&format!("Largest files (by {by})"), &report.files, now);
         for t in &report.roots {
             println!(
-                "Total {}: {} on disk, {} apparent, {} files, {} directories",
+                "Total {}: {} on disk, {} apparent, {}, {}",
                 t.path.display(),
                 format_bytes(t.disk),
                 format_bytes(t.apparent),
-                t.files,
-                t.dirs
+                plural(t.files, "file", "files"),
+                plural(t.dirs, "directory", "directories")
             );
         }
         print_trash(&trash);
     }
     if report.unreadable > 0 {
-        eprintln!("{prog}: {} entries could not be read", report.unreadable);
+        eprintln!(
+            "{prog}: {} could not be read",
+            plural(report.unreadable, "entry", "entries")
+        );
     }
     0
 }

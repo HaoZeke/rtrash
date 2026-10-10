@@ -392,7 +392,10 @@ fn status_reports_items_and_size_after_put() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let s = stdout_of(&out);
     assert!(s.contains("Total:"), "{s}");
-    assert!(s.contains("1 items") || s.contains("1 item"), "{s}");
+    assert!(
+        s.contains("\t1 item\t") && s.contains("Total: 1 item ("),
+        "{s}"
+    );
     assert!(!s.contains("Total: 0 items"), "{s}");
 }
 

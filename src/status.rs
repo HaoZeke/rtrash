@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use crate::fastdelete;
 use crate::list;
 use crate::trashdir::{self, TrashDir};
+use crate::util::plural;
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]...
@@ -173,15 +174,15 @@ pub fn print_status(dirs: &[TrashDir], older_than: Option<i64>, newer_than: Opti
     let (roots, total_items, total_bytes) = summarize_dirs(dirs, older_than, newer_than);
     for r in &roots {
         println!(
-            "{}\t{} items\t{}",
+            "{}\t{}\t{}",
             r.path,
-            r.items,
+            plural(r.items, "item", "items"),
             fastdelete::format_bytes(r.bytes)
         );
     }
     println!(
-        "Total: {} items ({})",
-        total_items,
+        "Total: {} ({})",
+        plural(total_items, "item", "items"),
         fastdelete::format_bytes(total_bytes)
     );
 }
