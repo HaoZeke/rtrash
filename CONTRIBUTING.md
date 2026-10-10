@@ -7,7 +7,9 @@ CI (`.github/workflows/ci.yml`) runs the same commands on `main`/PRs. Prefer **`
 ```shell
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --all-targets --no-default-features -- -D warnings
 cargo nextest run --locked --profile ci   # or: cargo test --locked
+cargo nextest run --locked --profile ci --no-default-features
 cargo deny check                          # needs cargo-deny; policy in deny.toml
 ```
 

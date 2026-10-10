@@ -32,8 +32,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Clippy (no TUI feature)
-        run: cargo clippy --locked --lib --bins --no-default-features -- -D warnings
+      - name: Clippy (no TUI feature, tests included)
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -42,6 +42,9 @@ jobs:
 
       - name: Test (nextest, locked, ci profile)
         run: cargo nextest run --locked --profile ci
+
+      - name: Test without the TUI feature
+        run: cargo nextest run --locked --profile ci --no-default-features
 
   deny:
     name: cargo-deny

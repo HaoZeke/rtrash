@@ -2,6 +2,9 @@
 //! Drive shipped library functions against a real FreeDesktop trash layout
 //! (isolated XDG_DATA_HOME). No alternate-screen / ratatui event loop.
 
+// The browsers and their helpers exist only with the `tui` feature.
+#![cfg(feature = "tui")]
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
