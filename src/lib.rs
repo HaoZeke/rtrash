@@ -40,6 +40,8 @@ pub mod retention;
 #[cfg(unix)]
 pub mod rm;
 #[cfg(unix)]
+pub mod safety;
+#[cfg(unix)]
 pub mod setup;
 #[cfg(unix)]
 pub mod status;

@@ -41,8 +41,8 @@ complete -c rtrash -n $put_cond -s r -s R -l recursive -d 'remove directories an
 complete -c rtrash -n $put_cond -s d -l dir -d 'remove empty directories'
 complete -c rtrash -n $put_cond -s v -l verbose -d 'explain what is being done'
 complete -c rtrash -n $put_cond -l one-file-system -d 'accepted for rm compatibility (no-op)'
-complete -c rtrash -n $put_cond -l preserve-root -d 'do not remove / (default)'
-complete -c rtrash -n $put_cond -l no-preserve-root -d 'do not treat / specially'
+complete -c rtrash -n $put_cond -l preserve-root -f -a all -d 'refuse /, home and mount points (default)'
+complete -c rtrash -n $put_cond -l no-preserve-root -d 'do not treat those specially'
 complete -c rtrash -n $put_cond -l trash-dir -d 'put into this trash root' -r
 complete -c rtrash -n $put_cond -l home-only -d 'always use the home trash'
 complete -c rtrash -n $put_cond -l plain -d 'skip TUI; require file operands'

@@ -1,0 +1,1 @@
+Put now skips paths on the safe-rm list (its built-in system directories plus `/etc/safe-rm.conf`, `~/.config/safe-rm` and `~/.safe-rm`), refuses your home directory and mount points unless given `--no-preserve-root`, accepts `--preserve-root=all` as coreutils spells it, and warns before it trashes a git repository with uncommitted or unpushed work.

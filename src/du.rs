@@ -877,7 +877,7 @@ fn bare_part(name: &[u8], kind: du_fs::Kind) -> u8 {
 /// Whether `path` holds a bare repository: git's own test, a `HEAD` that
 /// names a ref or a commit next to `objects/` and `refs/`. Directories
 /// inside a `.git` (submodules, worktrees) belong to that repository.
-fn is_bare_repo(path: &Path) -> bool {
+pub(crate) fn is_bare_repo(path: &Path) -> bool {
     if du_git::inside_git_dir(path) {
         return false;
     }

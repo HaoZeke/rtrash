@@ -110,15 +110,36 @@ Accepted for rm compatibility (no-op: entries are moved whole, never
 traversed like
 .BR "rm \-x" ).
 .TP
-.B \-\-preserve\-root
+.BR \-\-preserve\-root [ =all ]
 Do not remove
-.RB \(oq / \(cq
-(default).
+.RB \(oq / \(cq ,
+your home directory, or a directory on another device than its parent
+(a mount point; renaming fails there, and a copy would drag the whole
+file system into the trash).
+The default;
+.B =all
+spells the same thing in GNU terms.
 .TP
 .B \-\-no\-preserve\-root
-Do not treat
-.RB \(oq / \(cq
-specially.
+Do not treat those specially.
+.PP
+Put also skips paths on the safe-rm list: safe-rm's built-in system
+directories (such as
+.BR /usr ,
+.BR /etc ,
+.BR /home )
+plus every path or shell pattern, one per line, in
+.BR /etc/safe\-rm.conf ,
+.BR /usr/local/etc/safe\-rm.conf ,
+.B $XDG_CONFIG_HOME/safe\-rm
+and
+.BR ~/.safe\-rm .
+No flag overrides that list.
+Before it trashes a directory with a git repository at its top that
+has uncommitted, unpushed or unreadable work, put prints a warning;
+.B rtrash undo
+brings the run back.
+.TP
 .TP
 .BI \-\-trash\-dir =PATH
 Put into this FreeDesktop trash root (creates
@@ -803,6 +824,10 @@ does.
 and
 .B "empty \-\-dry\-run"
 write walked sizes back.
+.TP
+.IR /etc/safe\-rm.conf ", " ~/.safe\-rm
+safe-rm protected paths that put skips (see
+.BR put ).
 .TP
 .IR $top /.Trash/ $uid
 or

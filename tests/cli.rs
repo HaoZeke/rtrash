@@ -346,6 +346,73 @@ fn refuses_dot_and_root() {
     assert!(stderr_of(&out).contains("dangerous"));
 }
 
+#[cfg(unix)]
+#[test]
+fn put_skips_safe_rm_paths_and_refuses_home() {
+    let sb = Sandbox::new("put-safety");
+    fs::create_dir(sb.work().join("precious")).unwrap();
+    sb.touch("precious/f");
+    fs::create_dir(sb.work().join("other")).unwrap();
+    // safe-rm's per-user list lives in ~/.safe-rm; patterns work too.
+    fs::write(
+        sb.root.join(".safe-rm"),
+        format!("# keep\n{}/prec*\n", sb.work().display()),
+    )
+    .unwrap();
+    let out = sb.run(&["put", "-r", "precious", "other"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr_of(&out);
+    assert!(err.contains("skipping protected path 'precious'"), "{err}");
+    assert!(sb.work().join("precious/f").exists());
+    assert!(!sb.work().join("other").exists(), "unlisted paths still go");
+
+    let out = sb.run(&["put", "-rf", "/usr"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr_of(&out).contains("safe-rm list entry '/usr'"));
+
+    let home = sb.root.display().to_string();
+    let out = sb.run(&["put", "-r", "--preserve-root=all", &home]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr_of(&out).contains("home directory"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(sb.root.join("work").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn put_warns_before_trashing_a_repo_with_unsaved_work() {
+    let sb = Sandbox::new("put-repo-warn");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", &sb.root)
+            .output()
+    };
+    if !git(&["init", "-q"]).is_ok_and(|o| o.status.success()) {
+        eprintln!("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    fs::create_dir(sb.work().join("plain")).unwrap();
+    let out = sb.run(&["put", "-r", "repo", "plain"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("'repo' contains a git repository with"),
+        "{err}"
+    );
+    assert!(err.contains("rtrash undo"), "{err}");
+    assert!(!err.contains("'plain'"), "{err}");
+    assert!(!repo.exists(), "a warning, not a refusal");
+}
+
 #[test]
 fn collision_gets_suffixed_name() {
     let sb = Sandbox::new("put-collide");

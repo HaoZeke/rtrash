@@ -266,7 +266,12 @@ $ rtrash list              # b.c still listed
 
 ### `rtrash put` (also `rm`, `trash`, `trash-put`, or bare `rtrash`)
 
-Accepts the common `rm(1)` flags with the same semantics, except that files move to the trash: `-f`, `-i`, `-I`, `--interactive[=WHEN]`, `-r`/`-R`, `-d`, `-v`, `--one-file-system` (accepted for rm compatibility; no-op because entries move whole and are never walked like `rm -x`), `--preserve-root` (default), `--no-preserve-root`, `--`. Directories need `-r` (or `-d` when empty), `.`/`..`/`/` are refused (unless `--no-preserve-root` for `/`), and exit codes mirror rm (0 success, 1 failure, 2 usage error).
+Accepts the common `rm(1)` flags with the same semantics, except that files move to the trash: `-f`, `-i`, `-I`, `--interactive[=WHEN]`, `-r`/`-R`, `-d`, `-v`, `--one-file-system` (accepted for rm compatibility; no-op because entries move whole and are never walked like `rm -x`), `--preserve-root[=all]` (default), `--no-preserve-root`, `--`. Directories need `-r` (or `-d` when empty), `.`/`..`/`/` get refused, and so do your home directory and mount points (unless `--no-preserve-root`); exit codes mirror rm (0 success, 1 failure, 2 usage error).
+
+Safety rails beyond rm:
+
+- **safe-rm list.** Put skips safe-rm's built-in system directories and every path or shell pattern listed in `/etc/safe-rm.conf`, `/usr/local/etc/safe-rm.conf`, `$XDG_CONFIG_HOME/safe-rm` or `~/.safe-rm`, so an existing safe-rm setup keeps working.
+- **Repository warning.** Trashing a directory with a git repository at its top that has uncommitted or unpushed work prints a warning naming `rtrash undo`.
 
 As with GNU rm, **the last of `-f` / `-i` / `-I` (and the matching long forms) wins** for prompt vs force behavior.
 `-f` also ignores missing paths.

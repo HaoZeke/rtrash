@@ -82,8 +82,9 @@ to require CLI operands even on a TTY.
   -v, --verbose         explain what is being done
       --one-file-system accepted for rm compatibility (no-op: entries are
                           moved whole, never traversed)
-      --preserve-root   do not remove '/' (default)
-      --no-preserve-root  do not treat '/' specially
+      --preserve-root[=all]  do not remove '/', your home directory or a
+                        mount point (default)
+      --no-preserve-root  do not treat those specially
       --trash-dir=PATH  put into this trash root (creates files/ and info/ if
                           needed); scripts/tests pin instead of XDG discovery
       --home-only       always use the home trash (skip volume trash)
@@ -131,7 +132,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--dir" => opts.empty_dirs = true,
             "--verbose" => opts.verbose = true,
             "--one-file-system" => {}
-            "--preserve-root" => opts.preserve_root = true,
+            // GNU's =all also refuses arguments on another device than
+            // their parent; rtrash refuses mount roots under plain
+            // --preserve-root already.
+            "--preserve-root" | "--preserve-root=all" => opts.preserve_root = true,
             "--no-preserve-root" => opts.preserve_root = false,
             "--home-only" => opts.home_only = true,
             "--interactive" => {
@@ -280,6 +284,12 @@ fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
     }
 }
 
+/// The safe-rm protected list, read once per process.
+fn protected() -> &'static [String] {
+    static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LIST.get_or_init(crate::safety::protected_patterns)
+}
+
 fn describe(meta: &fs::Metadata, path: &Path) -> &'static str {
     let ft = meta.file_type();
     if ft.is_symlink() {
@@ -359,6 +369,30 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             return Err(1);
         }
     };
+    if let Some(pat) = crate::safety::protected_by(&abs, protected()) {
+        eprintln!("{prog}: skipping protected path '{name}' (safe-rm list entry '{pat}')");
+        return Err(1);
+    }
+    if opts.preserve_root && meta.is_dir() {
+        if crate::safety::is_home(&abs) {
+            eprintln!("{prog}: refusing to remove your home directory '{name}'");
+            eprintln!("{prog}: use --no-preserve-root to override this failsafe");
+            return Err(1);
+        }
+        if crate::safety::is_mount_root(&abs, &meta) {
+            eprintln!("{prog}: skipping '{name}', since it is a mount point");
+            eprintln!("{prog}: use --no-preserve-root to override this failsafe");
+            return Err(1);
+        }
+    }
+    if meta.is_dir() {
+        if let Some(state) = crate::safety::risky_repo_state(&abs) {
+            eprintln!(
+                "{prog}: warning: '{name}' contains a git repository with {} work; `rtrash undo` brings it back",
+                state.as_str()
+            );
+        }
+    }
     let trash = match resolve_put_trash(opts, &abs, &meta) {
         Ok(t) => t,
         Err(e) => {
