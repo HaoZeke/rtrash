@@ -227,7 +227,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             match trash::delete(f) {
                 Ok(()) => {
                     if verbose && !json {
-                        println!("removed '{}'", f.display());
+                        println!("removed '{}'", crate::util::term_path(f));
                     }
                     moved.push(abs);
                 }
@@ -385,14 +385,17 @@ on the Recycle Bin backend.
         };
         if dry_run {
             for it in &items {
-                println!("would remove {}", it.original_path().display());
+                println!(
+                    "would remove {}",
+                    crate::util::term_path(&it.original_path())
+                );
             }
             println!("{} item(s)", items.len());
             return 0;
         }
         if verbose {
             for it in &items {
-                println!("{}", it.original_path().display());
+                println!("{}", crate::util::term_path(&it.original_path()));
             }
         }
         match os_limited::purge_all(items) {
@@ -713,13 +716,13 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             .collect();
         if dry_run {
             for it in &matched {
-                println!("{}", it.original_path().display());
+                println!("{}", crate::util::term_path(&it.original_path()));
             }
             return 0;
         }
         if verbose {
             for it in &matched {
-                println!("{}", it.original_path().display());
+                println!("{}", crate::util::term_path(&it.original_path()));
             }
         }
         match os_limited::purge_all(matched) {

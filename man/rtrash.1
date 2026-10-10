@@ -49,6 +49,21 @@ is permanent delete of matching
 File names need not be UTF-8. An argument or a trashed name with other
 bytes keeps them through every command. Output shows each such byte as
 the Unicode replacement character.
+.PP
+When standard output is a terminal, names and paths in text output show
+each control character (C0, DEL, and C1) and each bidirectional override
+as
+.BR ? ,
+as
+.BR ls (1)
+does. A name or a
+.B Path=
+line in a shared trash can't move the cursor, recolor the screen, or fake
+extra rows that way. A pipe, a file, and
+.B \-\-json
+still get the raw name. Errors about a trashed item on standard error
+follow the same rule when standard error is a terminal. The browsers
+drop control characters when they draw.
 .SH GLOBAL OPTIONS
 When
 .B rtrash

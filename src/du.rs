@@ -1610,7 +1610,7 @@ fn print_table(title: &str, items: &[Item], now: i64, count: bool) {
         "NOTE"
     );
     for it in items {
-        let mut path = it.path.display().to_string();
+        let mut path = crate::util::term_path(&it.path);
         if it.is_dir {
             path.push(std::path::MAIN_SEPARATOR);
         }
@@ -2019,7 +2019,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             for t in &report.roots {
                 println!(
                     "Total {}: {} on disk, {} apparent",
-                    t.path.display(),
+                    crate::util::term_path(&t.path),
                     format_bytes(t.disk),
                     format_bytes(t.apparent)
                 );
@@ -2183,7 +2183,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 .unwrap_or_default();
             println!(
                 "Total {}{kind}: {} on disk{unique}, {} apparent, {}{links}, {}{excluded}",
-                t.path.display(),
+                crate::util::term_path(&t.path),
                 format_bytes(t.disk),
                 format_bytes(t.apparent),
                 plural(t.files, "file", "files"),

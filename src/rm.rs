@@ -183,11 +183,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 if verbose {
                     println!(
                         "would permanently remove {} ({})",
-                        entry.original.display(),
+                        crate::util::term_path(&entry.original),
                         crate::fastdelete::format_bytes(sz)
                     );
                 } else {
-                    println!("{}", entry.original.display());
+                    println!("{}", crate::util::term_path(&entry.original));
                 }
             }
             matched_paths.push(entry.original.to_string_lossy().into_owned());
@@ -195,13 +195,19 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             continue;
         }
         if let Err(e) = trashdir::remove_any_path(&payload) {
-            eprintln!("{prog}: cannot remove '{}': {e}", payload.display());
+            eprintln!(
+                "{prog}: cannot remove '{}': {e}",
+                crate::util::err_path(&payload)
+            );
             status = 1;
             continue;
         }
         if let Err(e) = std::fs::remove_file(&info_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("{prog}: cannot remove '{}': {e}", info_path.display());
+                eprintln!(
+                    "{prog}: cannot remove '{}': {e}",
+                    crate::util::err_path(&info_path)
+                );
                 status = 1;
                 continue;
             }
@@ -209,7 +215,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         trashdir::directorysizes_remove(&entry.dir, &entry.name);
         bytes = bytes.saturating_add(sz);
         if !json && verbose {
-            println!("removed '{}'", entry.original.display());
+            println!("removed '{}'", crate::util::term_path(&entry.original));
         }
         matched_paths.push(entry.original.to_string_lossy().into_owned());
         removed += 1;

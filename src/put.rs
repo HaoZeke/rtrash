@@ -417,9 +417,9 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         Ok(trash_name) => {
             if opts.verbose && !opts.quiet {
                 if meta.is_dir() {
-                    println!("removed directory '{name}'");
+                    println!("removed directory '{}'", crate::util::term_text(&name));
                 } else {
-                    println!("removed '{name}'");
+                    println!("removed '{}'", crate::util::term_text(&name));
                 }
             }
             Ok(Some(Trashed {

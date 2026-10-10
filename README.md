@@ -471,6 +471,7 @@ Previously deferred items are implemented in the shipped put/empty path:
 - **Put/empty exclusion:** each trash root takes an exclusive `flock` on `.rtrash.lock` for put and empty so the pair cannot tear mid-operation.
 - **Btrfs multi-subvol topdir:** volume topdir is the **longest mount-point prefix** from `/proc/self/mounts`, not a pure `st_dev` parent walk.
 - **Names that are not UTF-8:** put keeps the bytes of such a name in `files/` and `info/`, so two such names never fold into one. A `.trashinfo` whose `Path=` carries raw bytes from another tool still lists and restores, and an age filter can empty it. Output shows each stray byte as the Unicode replacement character.
+- **Terminal-safe names:** when stdout is a terminal, text output shows control characters and bidirectional overrides in names as `?`, as `ls` does, so a hostile `Path=` in a shared trash can't rewrite the screen or fake rows. Pipes, files, and `--json` keep the raw name.
 - **Default multi-volume empty:** with no `--trash-dir`, empty/list/restore/rm discover home trash plus existing user trash on every non-pseudo mount (including `/`), matching trash-cli’s multi-volume default. Pin with `--trash-dir` in scripts.
 
 ## Limitations

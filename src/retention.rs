@@ -178,12 +178,15 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
             }
         } else {
             if let Err(e) = remove_entry(dir, &c.name) {
-                eprintln!("{prog}: cannot remove '{}': {e}", shown.display());
+                eprintln!(
+                    "{prog}: cannot remove '{}': {e}",
+                    crate::util::err_path(&shown)
+                );
                 out.errors += 1;
                 continue;
             }
             if p.verbose {
-                println!("removed {}", shown.display());
+                println!("removed {}", crate::util::term_path(&shown));
             }
         }
         out.removed += 1;

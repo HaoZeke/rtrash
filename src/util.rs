@@ -282,6 +282,70 @@ pub fn stdin_is_tty() -> bool {
     std::io::stdin().is_terminal()
 }
 
+/// Whether stdout is a terminal, checked once per process.
+pub fn stdout_is_tty() -> bool {
+    use std::io::IsTerminal;
+    static TTY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TTY.get_or_init(|| io::stdout().is_terminal())
+}
+
+/// Whether stderr is a terminal, checked once per process.
+pub fn stderr_is_tty() -> bool {
+    use std::io::IsTerminal;
+    static TTY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TTY.get_or_init(|| io::stderr().is_terminal())
+}
+
+/// Characters a terminal would act on instead of print: C0 and C1 controls,
+/// DEL and the bidirectional overrides that reorder the rest of a line.
+fn is_unsafe_char(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Replace each unsafe character with `?`, as `ls` does on a terminal.
+///
+/// A trashed name (or the `Path=` line of a `.trashinfo` in a shared trash)
+/// can carry escape sequences or newlines that would rewrite the screen or
+/// fake extra rows.
+pub fn scrub(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.chars().any(is_unsafe_char) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    std::borrow::Cow::Owned(
+        s.chars()
+            .map(|c| if is_unsafe_char(c) { '?' } else { c })
+            .collect(),
+    )
+}
+
+/// `s` made safe for stdout: scrubbed on a terminal, raw in a pipe.
+pub fn term_text(s: &str) -> std::borrow::Cow<'_, str> {
+    if stdout_is_tty() {
+        scrub(s)
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
+/// A path for human output on stdout (see [`term_text`]).
+pub fn term_path(p: &std::path::Path) -> String {
+    let shown = p.display().to_string();
+    match term_text(&shown) {
+        std::borrow::Cow::Borrowed(_) => shown,
+        std::borrow::Cow::Owned(o) => o,
+    }
+}
+
+/// A path for messages on stderr: scrubbed when stderr is a terminal.
+pub fn err_path(p: &std::path::Path) -> String {
+    let shown = p.display().to_string();
+    if stderr_is_tty() {
+        scrub(&shown).into_owned()
+    } else {
+        shown
+    }
+}
+
 /// Shell-style glob match (`*`, `?`, `[…]` / `[!…]`), as used by trash-cli `trash-rm`.
 /// Matching is on the full string (callers also try the basename separately).
 pub fn fnmatch(pat: &str, text: &str) -> bool {
@@ -377,6 +441,18 @@ fn class_match(pat: &[u8], ch: u8) -> Option<(usize, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrub_replaces_controls_and_keeps_text() {
+        assert!(matches!(
+            scrub("plain/ünïcode name"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert_eq!(scrub("a\x1b[2Jb"), "a?[2Jb");
+        assert_eq!(scrub("one\ntwo\rthree\tfour"), "one?two?three?four");
+        assert_eq!(scrub("del\x7f c1\u{9b}"), "del? c1?");
+        assert_eq!(scrub("txt.\u{202e}exe\u{2066}"), "txt.?exe?");
+    }
 
     #[test]
     fn plural_matches_the_count() {

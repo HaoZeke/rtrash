@@ -196,7 +196,11 @@ fn list(prog: &str, args: &[String]) -> i32 {
                 .original
                 .as_ref()
                 .map_or("?".to_string(), |o| o.display().to_string());
-            println!("{} -> {orig}", i.name);
+            println!(
+                "{} -> {}",
+                crate::util::term_text(&i.name),
+                crate::util::term_text(&orig)
+            );
         }
     }
     0
@@ -292,7 +296,7 @@ fn restore(prog: &str, args: &[String]) -> i32 {
         match move_back(&trash.join(&item.name), &dest, force) {
             Ok(()) => {
                 if !json {
-                    println!("restored '{}'", dest.display());
+                    println!("restored '{}'", crate::util::term_path(&dest));
                 }
                 done.push((item, dest));
             }
@@ -408,7 +412,7 @@ end run";
             Ok(s) if s.success() => {
                 if verbose {
                     for p in &paths {
-                        println!("trashed '{}'", p.display());
+                        println!("trashed '{}'", crate::util::term_path(p));
                     }
                 }
             }

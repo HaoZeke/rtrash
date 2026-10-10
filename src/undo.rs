@@ -151,6 +151,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if dry_run {
         for e in &batch.entries {
             let line = format!("would restore '{}'", e.original.display());
+            let tty = if json {
+                crate::util::stderr_is_tty()
+            } else {
+                crate::util::stdout_is_tty()
+            };
+            let line = if tty {
+                crate::util::scrub(&line).into_owned()
+            } else {
+                line
+            };
             if json {
                 eprintln!("{line}");
             } else {
@@ -172,7 +182,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     eprintln!("{prog}: warning: {w}");
                 }
                 if !json {
-                    println!("restored '{}'", done.dest.display());
+                    println!("restored '{}'", crate::util::term_path(&done.dest));
                 }
                 restored.push(e);
             }

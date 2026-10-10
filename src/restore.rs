@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::list;
 use crate::trashdir;
-use crate::util::stdin_is_tty;
+use crate::util::{scrub, stderr_is_tty, stdin_is_tty, stdout_is_tty};
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [PATH]
@@ -287,6 +287,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 date.replacen('T', " ", 1),
                 e.original.display()
             );
+            // The row goes to stderr with --json, so scrub for that stream.
+            let tty = if json {
+                stderr_is_tty()
+            } else {
+                stdout_is_tty()
+            };
+            let row = if tty { scrub(&row).into_owned() } else { row };
             // Keep stdout for the JSON summary.
             if json {
                 eprintln!("{row}");
@@ -357,7 +364,7 @@ impl Plan<'_> {
             (Some(_), None) => {
                 eprintln!(
                     "{prog}: cannot restore '{}' by name: no file name",
-                    e.original.display()
+                    crate::util::err_path(&e.original)
                 );
                 return Outcome::Failed;
             }
@@ -366,7 +373,10 @@ impl Plan<'_> {
         let exists = dest.symlink_metadata().is_ok();
         let (dest, force) = match (exists, self.conflict) {
             (true, Conflict::Skip) => {
-                eprintln!("{prog}: skipping '{}': it exists", dest.display());
+                eprintln!(
+                    "{prog}: skipping '{}': it exists",
+                    crate::util::err_path(&dest)
+                );
                 return Outcome::Skipped;
             }
             (true, Conflict::Rename) => (free_name(&dest), false),
@@ -378,7 +388,7 @@ impl Plan<'_> {
                     eprintln!("{prog}: warning: {w}");
                 }
                 if !self.quiet {
-                    println!("restored '{}'", done.dest.display());
+                    println!("restored '{}'", crate::util::term_path(&done.dest));
                 }
                 Outcome::Restored(done.dest)
             }

@@ -332,18 +332,18 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let mut out = std::io::BufWriter::new(std::io::stdout().lock());
         for (k, entry) in rows.iter().enumerate() {
             let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
-            let mut date = date.replacen('T', " ", 1);
+            let mut date = crate::util::term_text(date).replacen('T', " ", 1);
             if let Some(o) = &owners {
-                date = format!("{date} {:<8}", o[k]);
+                date = format!("{date} {:<8}", crate::util::term_text(&o[k]));
             }
             let res = match &row_sizes {
                 Some(s) => writeln!(
                     out,
                     "{date} {:>10} {}",
                     crate::util::format_bytes(s[k]),
-                    entry.original.display()
+                    crate::util::term_path(&entry.original)
                 ),
-                None => writeln!(out, "{date} {}", entry.original.display()),
+                None => writeln!(out, "{date} {}", crate::util::term_path(&entry.original)),
             };
             if res.is_err() {
                 return 0;

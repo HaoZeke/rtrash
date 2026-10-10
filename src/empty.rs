@@ -347,18 +347,21 @@ fn empty_one(
                         // A concurrent empty may have won the race.
                         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                         Err(e) => {
-                            eprintln!("{prog}: cannot remove '{}': {e}", ip.display());
+                            eprintln!("{prog}: cannot remove '{}': {e}", crate::util::err_path(ip));
                             errors.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
                 if opts.verbose {
-                    println!("removed {}", display.display());
+                    println!("removed {}", crate::util::term_path(display));
                 }
                 removed.fetch_add(1, Ordering::Relaxed);
             }
             Err(e) => {
-                eprintln!("{prog}: cannot remove '{}': {e}", display.display());
+                eprintln!(
+                    "{prog}: cannot remove '{}': {e}",
+                    crate::util::err_path(display)
+                );
                 errors.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -422,7 +425,7 @@ fn full_empty_wipe(
     if opts.verbose {
         if let Ok(entries) = fs::read_dir(&files_dir) {
             for entry in entries.flatten() {
-                println!("removed {}", entry.path().display());
+                println!("removed {}", crate::util::term_path(&entry.path()));
             }
         }
     }

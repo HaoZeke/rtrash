@@ -2152,3 +2152,44 @@ fn list_all_users_adds_the_owner_and_stays_read_only() {
         assert_eq!(sb.run(bad).status.code(), Some(2), "{bad:?}");
     }
 }
+
+/// A `.trashinfo` written by someone else can put escape sequences and
+/// newlines in `Path=`. A terminal gets them as `?`; a pipe gets them raw.
+#[cfg(target_os = "linux")]
+#[test]
+fn list_scrubs_control_characters_on_a_terminal() {
+    if !Path::new("/usr/bin/script").exists() {
+        eprintln!("skipping: no script(1) to give rtrash a terminal");
+        return;
+    }
+    let sb = Sandbox::new("scrub");
+    fs::create_dir_all(sb.trash().join("files")).unwrap();
+    fs::create_dir_all(sb.trash().join("info")).unwrap();
+    fs::write(sb.trash().join("files/evil"), b"x").unwrap();
+    fs::write(
+        sb.trash().join("info/evil.trashinfo"),
+        "[Trash Info]\nPath=/tmp/a%1B%5B2Jb%0Afake%7F\nDeletionDate=2024-01-02T03:04:05\n",
+    )
+    .unwrap();
+
+    let piped = sb.run(&["list"]);
+    assert!(piped.status.success(), "{}", stderr_of(&piped));
+    assert!(stdout_of(&piped).contains("/tmp/a\x1b[2Jb\nfake\x7f"));
+
+    let cmd = format!("{} list", bin());
+    let tty = Command::new("/usr/bin/script")
+        .args(["-qec", &cmd, "/dev/null"])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to run script");
+    let shown = stdout_of(&tty);
+    assert!(shown.contains("/tmp/a?[2Jb?fake?"), "{shown:?}");
+    assert!(
+        !shown.contains('\x1b') && !shown.contains('\x7f'),
+        "{shown:?}"
+    );
+}
