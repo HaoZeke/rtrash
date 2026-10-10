@@ -326,6 +326,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du --trash-dir=PATH` / `--home-only` | Limit the trash summary to these trash directories |
 | `rtrash du --print0 … \| xargs -0 rtrash put -rf --` | Trash the listed paths |
 | `rtrash du --pick` | Mark rows in the put browser and trash them; rows with git work at risk show `!` |
+| `rtrash du -i ~/src` | Explore one directory at a time, like ncdu: `d` trashes, `u` undoes, `r` rescans; rows carry size bars, artefact and git badges |
 
 Symlinks are never followed, and a file with more than one hard link counts once, in the sizes and in the file count, so files plus directories match `du --inodes -s`; the total names the extra links. When one subdirectory accounts for 90% or more of a directory's size, only the subdirectory is listed, so each row points at the bulk itself. The scan root appears only in the closing total.
 

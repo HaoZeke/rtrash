@@ -72,6 +72,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           `xargs -0 rtrash put -rf --`
       --pick            open the put browser on the listed rows: mark rows
                           and trash them (needs a terminal)
+  -i, --interactive     explore PATH one directory at a time: open and leave
+                          directories, trash rows (d), undo (u) and rescan
+                          (r); rows show git state and artefact kind
       --help            display this help and exit
       --version         output version information and exit
 ";
@@ -1327,6 +1330,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut trash_pins: Vec<PathBuf> = Vec::new();
     let mut include_dirty = false;
     let mut pick = false;
+    let mut interactive = false;
     let mut threads: Option<usize> = None;
     let now = crate::util::now_epoch();
     let mut i = 0usize;
@@ -1388,6 +1392,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 }
                 "--include-dirty" => include_dirty = true,
                 "--pick" => pick = true,
+                "-i" | "--interactive" => interactive = true,
                 "--help" => {
                     print!("{}", HELP.replace("{prog}", prog));
                     return 0;
@@ -1407,16 +1412,29 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if only_files && !only_dirs {
         want_dirs = false;
     }
-    if [json, print0, pick].iter().filter(|b| **b).count() > 1 {
-        eprintln!("{prog}: --json, --print0 and --pick are mutually exclusive");
+    if [json, print0, pick, interactive]
+        .iter()
+        .filter(|b| **b)
+        .count()
+        > 1
+    {
+        eprintln!("{prog}: --json, --print0, --pick and --interactive are mutually exclusive");
         return 2;
     }
     if pick && !pick_available() {
         eprintln!("{prog}: --pick needs a terminal and the tui feature");
         return 2;
     }
+    if interactive && !pick_available() {
+        eprintln!("{prog}: --interactive needs a terminal and the tui feature");
+        return 2;
+    }
     if paths.is_empty() {
         paths.push(PathBuf::from("."));
+    }
+    if interactive && paths.len() > 1 {
+        eprintln!("{prog}: --interactive takes one PATH");
+        return 2;
     }
 
     #[cfg(windows)]
@@ -1437,6 +1455,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             .iter()
             .map(|d| fs::canonicalize(&d.root).unwrap_or_else(|_| d.root.clone()))
             .collect();
+    }
+    #[cfg(all(unix, feature = "tui"))]
+    if interactive {
+        return crate::du_tui::run(prog, &paths[0], opts, use_git);
     }
     // Git probes run beside the walk. Under --no-git, or without git on
     // PATH, there is nothing to start.

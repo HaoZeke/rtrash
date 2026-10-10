@@ -472,7 +472,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     }
 }
 
-fn draw_help_overlay(f: &mut ratatui::Frame, keys: &Keymap, extras: &[&str]) {
+pub(crate) fn draw_help_overlay(f: &mut ratatui::Frame, keys: &Keymap, extras: &[&str]) {
     let area = {
         let r = f.area();
         let v = Layout::default()

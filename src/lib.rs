@@ -14,6 +14,8 @@ pub mod win_recycle;
 pub mod du;
 pub mod du_fs;
 pub mod du_git;
+#[cfg(all(unix, feature = "tui"))]
+pub mod du_tui;
 #[cfg(unix)]
 pub mod empty;
 #[cfg(all(unix, feature = "tui"))]

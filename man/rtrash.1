@@ -458,6 +458,26 @@ Needs a terminal on stdin and the
 .B tui
 feature.
 .TP
+.BR \-i ", " \-\-interactive
+Explore one
+.I PATH
+a directory at a time, largest first, with a size bar per row.
+Right, l or Enter opens a directory; left, h or Backspace goes up.
+.B d
+moves the cursor row (or the marked rows) to the trash after a
+confirmation,
+.B u
+restores the last deletion, and
+.B r
+rescans the current directory.
+Sizes of the parent directories follow each change without a rescan.
+Rows show the artefact kind and git state; risky git state shows
+.BR ! .
+Trash directories stay closed.
+Needs a terminal on stdin and the
+.B tui
+feature.
+.TP
 .B \-\-help
 Display help and exit.
 .TP
