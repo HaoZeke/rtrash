@@ -57,9 +57,7 @@ pub fn now_local_string() -> String {
     }
 }
 
-pub fn now_epoch() -> i64 {
-    unsafe { libc::time(std::ptr::null_mut()) as i64 }
-}
+pub use crate::util::now_epoch;
 
 fn parse_num(b: &[u8]) -> Option<i32> {
     let mut v: i32 = 0;

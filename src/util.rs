@@ -64,6 +64,47 @@ pub fn confirm(prompt: &str) -> bool {
     )
 }
 
+/// Human-readable binary units (KiB/MiB/GiB) for CLI summaries.
+pub fn format_bytes(n: u64) -> String {
+    const K: f64 = 1024.0;
+    if n < 1024 {
+        format!("{n} B")
+    } else if (n as f64) < K * K {
+        format!("{:.1} KiB", n as f64 / K)
+    } else if (n as f64) < K * K * K {
+        format!("{:.1} MiB", n as f64 / (K * K))
+    } else {
+        format!("{:.2} GiB", n as f64 / (K * K * K))
+    }
+}
+
+/// Escape a string for JSON (UTF-8, control chars).
+pub fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Seconds since the Unix epoch, now.
+pub fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 pub fn stdin_is_tty() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()

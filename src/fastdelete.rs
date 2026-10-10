@@ -374,19 +374,7 @@ pub fn disk_usage(path: &Path) -> u64 {
     own.saturating_add(child_sum)
 }
 
-/// Human-readable binary units (KiB/MiB/GiB) for CLI summaries.
-pub fn format_bytes(n: u64) -> String {
-    const K: f64 = 1024.0;
-    if n < 1024 {
-        format!("{n} B")
-    } else if (n as f64) < K * K {
-        format!("{:.1} KiB", n as f64 / K)
-    } else if (n as f64) < K * K * K {
-        format!("{:.1} MiB", n as f64 / (K * K))
-    } else {
-        format!("{:.2} GiB", n as f64 / (K * K * K))
-    }
-}
+pub use crate::util::format_bytes;
 
 /// Wipe every top-level child of `dir` in parallel. Missing `dir` is success.
 /// Returns the number of top-level children removed.
