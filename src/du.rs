@@ -92,6 +92,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           --max-depth) to FILE (- for stdout) instead of
                           listing; compare snapshots with `du diff`
   -f, --file=FILE       list from a snapshot instead of scanning
+      --stacks          print folded stacks of every directory's own size
+                          for flame graph tools (flamegraph.pl, inferno,
+                          speedscope) instead of listing; works with -f
       --pick            open the put browser on the listed rows: mark rows
                           and trash them (needs a terminal)
   -i, --interactive     explore PATH one directory at a time: open and leave
@@ -1556,6 +1559,19 @@ fn take_value<'a>(
     None
 }
 
+/// Print folded stacks to stdout; a closed pipe (`| head`) ends quietly.
+fn stacks_out(prog: &str, roots: &[RootTotals], dirs: &[Item], apparent: bool) -> i32 {
+    let out = io::BufWriter::new(io::stdout().lock());
+    match crate::du_snap::write_stacks(roots, dirs, apparent, out) {
+        Ok(()) => 0,
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => 0,
+        Err(e) => {
+            eprintln!("{prog}: cannot write stacks: {e}");
+            1
+        }
+    }
+}
+
 pub fn run(prog: &str, args: &[String]) -> i32 {
     if args.first().map(String::as_str) == Some("diff") {
         return crate::du_snap::run_diff(prog, &args[1..]);
@@ -1564,6 +1580,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut json = false;
     let mut print0 = false;
+    let mut stacks = false;
     let mut want_dirs = true;
     let mut want_files = true;
     let mut only_dirs = false;
@@ -1700,6 +1717,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--files" => only_files = true,
                 "--json" => json = true,
                 "--print0" => print0 = true,
+                "--stacks" => stacks = true,
                 "--no-git" => use_git = false,
                 "--home-only" => home_only = true,
                 a if a.starts_with("--trash-dir=") => {
@@ -1764,6 +1782,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: --output writes a snapshot; it takes no other output mode");
         return 2;
     }
+    if stacks && (output.is_some() || json || print0 || pick || interactive) {
+        eprintln!("{prog}: --stacks prints folded stacks; it takes no other output mode");
+        return 2;
+    }
+    if stacks && !matches!(opts.sort, SortKey::Disk | SortKey::Apparent) {
+        eprintln!("{prog}: --stacks weighs by disk use or --apparent size");
+        return 2;
+    }
     if let Some(file) = &from_file {
         if print0 || pick || interactive {
             eprintln!(
@@ -1778,6 +1804,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 return 1;
             }
         };
+        if stacks {
+            let apparent = opts.sort == SortKey::Apparent;
+            return stacks_out(prog, &snap.roots, &snap.dirs, apparent);
+        }
         if opts.sort == SortKey::Items {
             eprintln!("{prog}: snapshots do not record item counts; --sort=items needs a scan");
             return 2;
@@ -1804,7 +1834,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         return 0;
     }
-    if output.is_some() {
+    if output.is_some() || stacks {
         opts = crate::du_snap::snapshot_opts(opts);
         // Snapshots record sizes only.
         use_git = false;
@@ -1868,6 +1898,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             return 1;
         }
     };
+    if stacks {
+        let apparent = opts.sort == SortKey::Apparent;
+        return stacks_out(prog, &report.roots, &report.dirs, apparent);
+    }
     if let Some(out) = &output {
         let written = if out.as_os_str() == "-" {
             crate::du_snap::write(&report, &opts, now, io::stdout().lock())

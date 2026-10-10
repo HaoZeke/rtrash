@@ -646,6 +646,25 @@ A snapshot can be stale, so it cannot drive
 .BR \-\-print0 ,
 .BR \-\-pick " or " \-\-interactive .
 .TP
+.B \-\-stacks
+Print folded stacks instead of listing: one line per directory, its path
+from the scanned root as frames joined by
+.BR ; ,
+then the bytes it uses outside the directories below it.
+Flame graph tools draw these lines:
+.BR flamegraph.pl ,
+.BR inferno\-flamegraph ,
+or speedscope.
+The weight follows disk use, or
+.B \-\-apparent
+size; other sort keys exit 2.
+A
+.B ;
+or control character in a name prints as
+.BR _ .
+Works on a snapshot with
+.BR \-f .
+.TP
 .BR \-i ", " \-\-interactive
 Explore one
 .I PATH

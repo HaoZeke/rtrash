@@ -1129,3 +1129,44 @@ fn snapshots_list_back_and_diff_against_a_later_scan() {
     let _ = fs::remove_file(&snap_a);
     let _ = fs::remove_file(&snap_b);
 }
+
+#[test]
+fn stacks_fold_each_directory_by_its_own_size() {
+    let t = Tree::new("stacks");
+    t.file("t/top", 3);
+    t.file("t/a/g", 5);
+    t.file("t/a/b/f", 10);
+    t.file("t/x;y/h", 7);
+    let scan = t.du(&["--stacks", "--apparent", "--no-git", "t"]);
+    assert!(
+        scan.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scan.stderr)
+    );
+    let text = String::from_utf8(scan.stdout).unwrap();
+    let root = t.root.join("t").display().to_string();
+    let want = format!("{root} 3\n{root};a 5\n{root};a;b 10\n{root};x_y 7\n");
+    assert_eq!(text, want);
+
+    // A snapshot folds the same way.
+    let snap = t.root.join("snap");
+    let w = t.du(&["-o", snap.to_str().unwrap(), "--no-git", "t"]);
+    assert!(w.status.success(), "{}", String::from_utf8_lossy(&w.stderr));
+    let back = t.du(&["-f", snap.to_str().unwrap(), "--stacks", "--apparent"]);
+    assert_eq!(String::from_utf8(back.stdout).unwrap(), want);
+
+    // Disk weights add up to the root's disk total.
+    let disk = String::from_utf8(t.du(&["--stacks", "--no-git", "t"]).stdout).unwrap();
+    let sum: u64 = disk
+        .lines()
+        .map(|l| l.rsplit(' ').next().unwrap().parse::<u64>().unwrap())
+        .sum();
+    let json = t.json(&["--no-git", "t"]);
+    let total = json.split("\"disk\":").nth(1).unwrap();
+    let total: u64 = total[..total.find(',').unwrap()].parse().unwrap();
+    assert_eq!(sum, total, "{disk}\n{json}");
+
+    for bad in [&["--stacks", "--json"][..], &["--stacks", "--sort=items"]] {
+        assert_eq!(t.du(bad).status.code(), Some(2), "{bad:?}");
+    }
+}

@@ -196,6 +196,80 @@ pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
     Ok(snap)
 }
 
+/// Folded stacks for flame graph tools (`flamegraph.pl`, inferno,
+/// speedscope): one line per directory, its frames joined by `;` and then
+/// its own bytes, the part outside the directories listed below it. The
+/// first frame names the scanned root. A `;` or control character inside a
+/// name becomes `_`, since the format has no escape. A directory whose own
+/// part is zero gets no line; its children still draw it.
+pub fn write_stacks(
+    roots: &[RootTotals],
+    dirs: &[Item],
+    apparent: bool,
+    mut w: impl Write,
+) -> io::Result<()> {
+    use std::ffi::OsStr;
+    let size = |disk: u64, app: u64| if apparent { app } else { disk };
+    // Keyed by the raw path text: hashing and ordering a Path walks its
+    // components, which showed up when folding 12000 directories.
+    let mut below: HashMap<&OsStr, u64> = HashMap::with_capacity(dirs.len());
+    for d in dirs {
+        if let Some(p) = d.path.parent() {
+            let e = below.entry(p.as_os_str()).or_default();
+            *e = e.saturating_add(size(d.disk, d.apparent));
+        }
+    }
+    let own =
+        |p: &Path, total: u64| total.saturating_sub(below.get(p.as_os_str()).copied().unwrap_or(0));
+    let mut sorted: Vec<&Item> = dirs.iter().collect();
+    sorted.sort_unstable_by(|a, b| a.path.as_os_str().cmp(b.path.as_os_str()));
+    let mut line = String::new();
+    for r in roots {
+        let head = frame(&r.path.to_string_lossy());
+        let n = own(&r.path, size(r.disk, r.apparent));
+        if n > 0 {
+            writeln!(w, "{head} {n}")?;
+        }
+        for d in &sorted {
+            let Ok(rel) = d.path.strip_prefix(&r.path) else {
+                continue;
+            };
+            let n = own(&d.path, size(d.disk, d.apparent));
+            if n == 0 || rel.as_os_str().is_empty() {
+                continue;
+            }
+            line.clear();
+            line.push_str(&head);
+            for c in rel.components() {
+                line.push(';');
+                push_frame(&mut line, &c.as_os_str().to_string_lossy());
+            }
+            writeln!(w, "{line} {n}")?;
+        }
+    }
+    w.flush()
+}
+
+fn frame(name: &str) -> String {
+    let mut s = String::with_capacity(name.len());
+    push_frame(&mut s, name);
+    s
+}
+
+fn push_frame(out: &mut String, name: &str) {
+    if !name
+        .bytes()
+        .any(|b| b == b';' || b.is_ascii_control() || b >= 0x80)
+    {
+        out.push_str(name);
+        return;
+    }
+    out.extend(
+        name.chars()
+            .map(|c| if c == ';' || c.is_control() { '_' } else { c }),
+    );
+}
+
 pub fn read(path: &Path) -> io::Result<Snapshot> {
     let f = fs::File::open(path)?;
     parse(io::BufReader::new(f))

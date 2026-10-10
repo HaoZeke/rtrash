@@ -102,6 +102,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l pick -d
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s i -l interactive -d 'explore one directory at a time; trash, undo, rescan'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s o -l output -r -d 'write a snapshot of every directory total'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s f -l file -r -d 'list from a snapshot instead of scanning'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l stacks -d 'print folded stacks for flame graph tools'
 
 # finder
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -f -a 'put list restore'

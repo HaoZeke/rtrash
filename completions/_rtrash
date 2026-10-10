@@ -90,6 +90,7 @@ du_opts=(
   '--pick[mark listed rows in the put browser and trash them]'
   '(-i --interactive)'{-i,--interactive}'[explore one directory at a time; trash, undo, rescan]'
   '(-o --output)'{-o,--output=}'[write a snapshot of every directory total]:file:_files'
+  '--stacks[print folded stacks for flame graph tools]'
   '(-f --file)'{-f,--file=}'[list from a snapshot instead of scanning]:file:_files'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
