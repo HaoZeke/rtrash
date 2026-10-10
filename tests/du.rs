@@ -435,6 +435,9 @@ fn git_state_marks_rows_and_print0_holds_back_risky_ones() {
     t.file("clean/src/lib.rs", 200_000);
     t.file("clean/target/.rustc_info.json", 10);
     t.file("clean/target/debug/out.bin", 400_000);
+    // A nested ignored directory: on Windows git gets its relative path
+    // with a backslash.
+    t.file("clean/crates/inner/target/out.bin", 300_000);
     git(&clean, &["init", "-q"]);
     git(&clean, &["add", "."]);
     git(&clean, &["commit", "-qm", "init"]);
@@ -456,6 +459,8 @@ fn git_state_marks_rows_and_print0_holds_back_risky_ones() {
     let target = s(&clean.join("target"));
     let j = t.json(&["--all-dirs"]);
     assert!(row(&j, &target).contains("\"git\":\"ignored\""), "{j}");
+    let nested = s(&clean.join("crates/inner/target"));
+    assert!(row(&j, &nested).contains("\"git\":\"ignored\""), "{j}");
     assert!(
         row(&j, &s(&clean.join("src"))).contains("\"git\":\"clean\""),
         "{j}"
@@ -463,11 +468,11 @@ fn git_state_marks_rows_and_print0_holds_back_risky_ones() {
     let local_row = row(&j, &s(&local));
     assert!(local_row.contains("\"git\":\"unpushed\""), "{local_row}");
     assert!(
-        local_row.contains(&format!("\"git_repo\":\"{}\"", s(&local))),
+        local_row.contains(&format!("\"git_repo\":\"{}\"", escaped(&s(&local)))),
         "{local_row}"
     );
     assert!(!j.contains("big-pack.bin"), "{j}");
-    assert!(!j.contains(&format!("{}/.git", s(&local))), "{j}");
+    assert!(!j.contains(&escaped(&s(&local.join(".git")))), "{j}");
 
     // Untracked work makes the clean repo dirty.
     t.file("clean/src/new.rs", 10);
