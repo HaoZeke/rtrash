@@ -132,15 +132,15 @@ pub(crate) fn summarize_dirs(
             older_than,
             newer_than,
         );
-        let mut bytes = 0u64;
-        let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
         // One read of the cache per root; walked directories are written
         // back at the end, so the next status is a lookup.
         let sizes = trashdir::DirSizes::load(dir);
-        for e in &entries {
-            bytes = bytes.saturating_add(sizes.entry_bytes(&e.name));
-            counted.insert(e.name.clone());
-        }
+        let mut bytes: u64 = {
+            use rayon::prelude::*;
+            entries.par_iter().map(|e| sizes.entry_bytes(&e.name)).sum()
+        };
+        let counted: std::collections::HashSet<String> =
+            entries.iter().map(|e| e.name.clone()).collect();
         sizes.write_back();
         // Orphans only on unfiltered full status (age filter has no date for orphans).
         if older_than.is_none() && newer_than.is_none() {

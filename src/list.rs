@@ -30,20 +30,18 @@ pub struct Entry {
 }
 
 pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
+    use rayon::prelude::*;
     let mut out = Vec::new();
     for dir in dirs {
         let Ok(entries) = fs::read_dir(dir.info()) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let fname = entry.file_name();
-            let fname = fname.to_string_lossy();
-            let Some(name) = fname.strip_suffix(".trashinfo") else {
-                continue;
-            };
-            let Ok(content) = fs::read_to_string(entry.path()) else {
-                continue;
-            };
+        let paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        // One read per item: spread a big trash over the rayon pool.
+        out.par_extend(paths.into_par_iter().filter_map(|path| {
+            let fname = path.file_name()?.to_string_lossy().into_owned();
+            let name = fname.strip_suffix(".trashinfo")?;
+            let content = fs::read_to_string(&path).ok()?;
             let parsed = info::parse(&content);
             let epoch = parsed
                 .deletion_date
@@ -51,24 +49,22 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
                 .and_then(info::parse_local_to_epoch)
                 .unwrap_or(0);
             // Skip hostile/corrupt relative Path= that escape the volume topdir.
-            let original = match dir.resolve_original_checked(&parsed.path) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            out.push(Entry {
+            let original = dir.resolve_original_checked(&parsed.path).ok()?;
+            Some(Entry {
                 original,
                 date: parsed.deletion_date,
                 epoch,
                 name: name.to_string(),
                 dir: dir.clone(),
                 batch: parsed.batch,
-            });
-        }
+            })
+        }));
     }
     out.sort_by(|a, b| {
         a.epoch
             .cmp(&b.epoch)
             .then_with(|| a.original.cmp(&b.original))
+            .then_with(|| a.name.cmp(&b.name))
     });
     out
 }

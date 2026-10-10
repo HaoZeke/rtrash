@@ -126,6 +126,31 @@ pub fn parse_local_to_epoch(s: &str) -> Option<i64> {
     let hour = parse_num(&b[11..13])?;
     let min = parse_num(&b[14..16])?;
     let sec = parse_num(&b[17..19])?;
+    if !(0..60).contains(&min) || !(0..61).contains(&sec) {
+        return mktime_local(year, mon, mday, hour, min, sec);
+    }
+    // glibc stats /etc/localtime on every mktime when TZ is unset, so a
+    // trash of thousands of items paid one stat each. Offsets change on
+    // hour boundaries, so one mktime per hour serves every entry in it.
+    thread_local! {
+        static HOURS: std::cell::RefCell<HourCache> = std::cell::RefCell::new(HourCache::new());
+    }
+    let key = (year, mon, mday, hour);
+    let base = HOURS.with(|h| {
+        let mut h = h.borrow_mut();
+        if h.len() > 4096 {
+            h.clear();
+        }
+        *h.entry(key)
+            .or_insert_with(|| mktime_local(year, mon, mday, hour, 0, 0))
+    })?;
+    Some(base + i64::from(min) * 60 + i64::from(sec))
+}
+
+/// Epoch of each local `(year, month, day, hour)` seen, from mktime.
+type HourCache = std::collections::HashMap<(i32, i32, i32, i32), Option<i64>>;
+
+fn mktime_local(year: i32, mon: i32, mday: i32, hour: i32, min: i32, sec: i32) -> Option<i64> {
     unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
         tm.tm_year = year - 1900;
@@ -164,6 +189,22 @@ mod tests {
         assert_eq!(parse(&body).batch.as_deref(), Some("17-42"));
         assert_eq!(parse(&render(Path::new("/a"), "x")).batch, None);
         assert_eq!(batch_id(), batch_id());
+    }
+
+    #[test]
+    fn hour_cache_matches_mktime_for_every_minute_and_second() {
+        for s in [
+            "2026-03-08T01:59:59",
+            "2026-03-08T03:00:00",
+            "2026-11-01T01:30:00",
+            "2024-02-29T23:59:60",
+            "2026-07-03T12:34:56",
+        ] {
+            let b = s.as_bytes();
+            let n = |r: std::ops::Range<usize>| parse_num(&b[r]).unwrap();
+            let want = mktime_local(n(0..4), n(5..7), n(8..10), n(11..13), n(14..16), n(17..19));
+            assert_eq!(parse_local_to_epoch(s), want, "{s}");
+        }
     }
 
     #[test]

@@ -871,11 +871,16 @@ impl<'a> DirSizes<'a> {
     /// valid: the payload is a directory and the line's mtime equals the
     /// current `.trashinfo` mtime.
     pub fn cached(&self, name: &str) -> Option<u64> {
-        let (size, mtime) = *self.lines.get(&crate::util::url_encode(name.as_bytes()))?;
         let meta = fs::symlink_metadata(self.trash.files().join(name)).ok()?;
         if !meta.is_dir() {
             return None;
         }
+        self.cached_dir(name)
+    }
+
+    /// [`Self::cached`] for a payload already known to be a directory.
+    fn cached_dir(&self, name: &str) -> Option<u64> {
+        let (size, mtime) = *self.lines.get(&crate::util::url_encode(name.as_bytes()))?;
         let info = self.trash.info().join(format!("{name}.trashinfo"));
         (info_mtime_secs(&info).ok()? == mtime).then_some(size)
     }
@@ -884,14 +889,20 @@ impl<'a> DirSizes<'a> {
     /// valid line, otherwise a walk, remembered for [`Self::write_back`]
     /// when the payload is a directory with a `.trashinfo`.
     pub fn payload_bytes(&self, name: &str) -> u64 {
-        if let Some(size) = self.cached(name) {
+        let payload = self.trash.files().join(name);
+        let Ok(meta) = fs::symlink_metadata(&payload) else {
+            return 0;
+        };
+        if !meta.is_dir() {
+            // One stat answers for a file, a symlink or a special file.
+            return meta.blocks().saturating_mul(512);
+        }
+        if let Some(size) = self.cached_dir(name) {
             return size;
         }
-        let payload = self.trash.files().join(name);
         let size = crate::fastdelete::disk_usage(&payload);
-        let is_dir = fs::symlink_metadata(&payload).is_ok_and(|m| m.is_dir());
         let info = self.trash.info().join(format!("{name}.trashinfo"));
-        if is_dir {
+        {
             if let Ok(mtime) = info_mtime_secs(&info) {
                 self.misses.lock().unwrap_or_else(|e| e.into_inner()).push((
                     name.to_string(),
@@ -906,11 +917,7 @@ impl<'a> DirSizes<'a> {
     /// Payload plus `.trashinfo` bytes for one entry.
     pub fn entry_bytes(&self, name: &str) -> u64 {
         let info = self.trash.info().join(format!("{name}.trashinfo"));
-        let info_sz = if info.exists() {
-            crate::fastdelete::disk_usage(&info)
-        } else {
-            0
-        };
+        let info_sz = fs::symlink_metadata(&info).map_or(0, |m| m.blocks().saturating_mul(512));
         self.payload_bytes(name).saturating_add(info_sz)
     }
 
