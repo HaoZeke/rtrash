@@ -73,6 +73,7 @@ end
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l size -d 'add each item size'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l sort -x -a 'date size name path' -d 'row order'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l reverse -d 'reverse the order'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l all-users -d 'list every readable user trash with an owner column'
 
 # du
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s n -l top -d 'list N directories and N files' -r
@@ -212,6 +213,7 @@ complete -c trash-list -l json
 complete -c trash-list -l size
 complete -c trash-list -l sort -x -a 'date size name path'
 complete -c trash-list -l reverse
+complete -c trash-list -l all-users
 complete -c trash-list -l help
 complete -c trash-list -l version
 

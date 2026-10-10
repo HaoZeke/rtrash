@@ -262,6 +262,29 @@ Only the home trash
 List only this trash directory (repeatable); default is the home trash
 plus every mounted volume.
 .TP
+.B \-\-all\-users
+List the trash of every account this user can read, with an owner column
+after the date (and an
+.B owner
+field in JSON).
+It reads each home trash at the default
+.IR ~/.local/share/Trash ,
+since another account's
+.B XDG_DATA_HOME
+is unknown, plus every
+.I .Trash/$uid
+and
+.I .Trash\-$uid
+on mounted volumes.
+Root sees them all.
+Nothing changes on disk; to restore or remove another account's items,
+root pins that trash with
+.BR \-\-trash\-dir .
+Takes no
+.B \-\-home\-only
+or
+.BR \-\-trash\-dir .
+.TP
 .BI \-\-older\-than =DAYS
 Only items trashed more than
 .I DAYS

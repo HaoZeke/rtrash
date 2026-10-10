@@ -11,6 +11,8 @@ List trashed items as 'DELETION-DATE ORIGINAL-PATH', oldest first.
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  list only this trash directory (repeatable);
                      default is the home trash plus every mounted volume
+      --all-users       list every user's trash this account can read
+                     (root reads all) and add an OWNER column; read-only
       --older-than=DAYS only items trashed more than DAYS days ago
                      (same cutoff model as `empty DAYS`)
       --newer-than=DAYS only items trashed within the last DAYS days
@@ -187,6 +189,7 @@ fn sized_json_array(entries: &[&Entry], sizes: Option<&[u64]>) -> String {
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut home_only = false;
+    let mut all_users = false;
     let mut json = false;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
@@ -209,6 +212,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let arg = &args[i];
         match arg.as_str() {
             "--home-only" => home_only = true,
+            "--all-users" => all_users = true,
             "--json" => json = true,
             "--size" => with_size = true,
             "--reverse" => reverse = true,
@@ -271,7 +275,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         i += 1;
     }
-    let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);
+    if all_users && (home_only || !trash_dirs.is_empty()) {
+        eprintln!("{prog}: --all-users takes no --home-only or --trash-dir");
+        return 2;
+    }
+    let dirs = if all_users {
+        trashdir::all_users()
+    } else {
+        trashdir::resolve_dirs_opts(&trash_dirs, home_only)
+    };
     if dirs.is_empty() && !trash_dirs.is_empty() {
         eprintln!("{prog}: no valid --trash-dir pins");
         return 2;
@@ -282,14 +294,48 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let order = sorted_order(&entries, sizes.as_deref(), sort, reverse);
     let rows: Vec<&Entry> = order.iter().map(|&i| &entries[i]).collect();
     let row_sizes: Option<Vec<u64>> = sizes.map(|s| order.iter().map(|&i| s[i]).collect());
+    // Owner of each row's trash root, looked up once per root.
+    let owners: Option<Vec<String>> = all_users.then(|| {
+        let mut by_root: std::collections::HashMap<&std::path::Path, String> =
+            std::collections::HashMap::new();
+        rows.iter()
+            .map(|e| {
+                by_root
+                    .entry(e.dir.root.as_path())
+                    .or_insert_with(|| trashdir::owner_name(&e.dir.root))
+                    .clone()
+            })
+            .collect()
+    });
     if json {
-        println!("{}", sized_json_array(&rows, row_sizes.as_deref()));
+        match &owners {
+            None => println!("{}", sized_json_array(&rows, row_sizes.as_deref())),
+            Some(owners) => {
+                let items: Vec<String> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(k, e)| {
+                        let obj = entry_to_json_sized(e, row_sizes.as_ref().map(|s| s[k]));
+                        let body = obj.strip_suffix('}').unwrap_or(&obj);
+                        format!("  {body},\"owner\":\"{}\"}}", json_escape(&owners[k]))
+                    })
+                    .collect();
+                if items.is_empty() {
+                    println!("[\n]");
+                } else {
+                    println!("[\n{}\n]", items.join(",\n"));
+                }
+            }
+        }
     } else {
         use std::io::Write;
         let mut out = std::io::BufWriter::new(std::io::stdout().lock());
         for (k, entry) in rows.iter().enumerate() {
             let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
-            let date = date.replacen('T', " ", 1);
+            let mut date = date.replacen('T', " ", 1);
+            if let Some(o) = &owners {
+                date = format!("{date} {:<8}", o[k]);
+            }
             let res = match &row_sizes {
                 Some(s) => writeln!(
                     out,

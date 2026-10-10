@@ -315,6 +315,7 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 | `--older-than=DAYS` | Only items trashed more than DAYS days ago (same cutoff as `empty DAYS`) |
 | `--newer-than=DAYS` | Only items trashed within the last DAYS days |
 | `--home-only` | Home trash only |
+| `--all-users` | Every account's trash this user can read (root reads all), with an owner column and a JSON `owner` field; read-only. Root restores or removes another account's items by pinning that trash with `--trash-dir` |
 
 ### `rtrash status`
 

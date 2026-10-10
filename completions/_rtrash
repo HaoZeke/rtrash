@@ -49,6 +49,7 @@ list_opts=(
   '--size[add each item size]'
   '--sort=[row order]:key:(date size name path)'
   '--reverse[reverse the order]'
+  '--all-users[list every readable user trash with an owner column]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
 )

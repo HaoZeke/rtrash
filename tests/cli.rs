@@ -2116,3 +2116,39 @@ fn missing_payload_lists_refuses_restore_and_empties() {
     assert!(empty.status.success(), "{}", stderr_of(&empty));
     assert!(!info.join("ghost.trashinfo").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn list_all_users_adds_the_owner_and_stays_read_only() {
+    let sb = Sandbox::new("allusers");
+    fs::write(sb.work().join("mine.txt"), "x").unwrap();
+    let put = sb.run(&["put", "mine.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let info = sb.trash().join("info/mine.txt.trashinfo");
+    let before = fs::read(&info).unwrap();
+
+    let me = String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout).unwrap();
+    let me = me.trim();
+    let text = stdout_of(&sb.run(&["list", "--all-users"]));
+    let row = text
+        .lines()
+        .find(|l| l.ends_with("/mine.txt"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(row.contains(&format!(" {me} ")), "{row}");
+    let json = stdout_of(&sb.run(&["list", "--all-users", "--json"]));
+    let obj = json
+        .lines()
+        .find(|l| l.contains("/mine.txt\""))
+        .unwrap_or_else(|| panic!("{json}"));
+    assert!(obj.contains(&format!("\"owner\":\"{me}\"")), "{obj}");
+    // Plain list output keeps its shape.
+    assert!(!stdout_of(&sb.run(&["list", "--json"])).contains("\"owner\""));
+    assert_eq!(fs::read(&info).unwrap(), before);
+
+    for bad in [
+        &["list", "--all-users", "--home-only"][..],
+        &["list", "--all-users", "--trash-dir=/x"],
+    ] {
+        assert_eq!(sb.run(bad).status.code(), Some(2), "{bad:?}");
+    }
+}

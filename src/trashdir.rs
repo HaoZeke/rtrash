@@ -451,6 +451,112 @@ pub fn all() -> Vec<TrashDir> {
     out
 }
 
+/// Every trash this process can read, for `list --all-users`: each
+/// account's home trash at the default `~/.local/share/Trash` (another
+/// user's `XDG_DATA_HOME` is unknowable), plus every `.Trash/$uid` and
+/// `.Trash-$uid` on each mounted volume, plus this user's own trash. Root
+/// reads them all; anyone else gets the ones that let them in. Nothing is
+/// created or changed.
+pub fn all_users() -> Vec<TrashDir> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let mut push = |root: PathBuf, topdir: Option<PathBuf>| {
+        if seen.insert(root.clone())
+            && is_valid_trash_root(&root)
+            && fs::read_dir(root.join("info")).is_ok()
+        {
+            out.push(TrashDir { root, topdir });
+        }
+    };
+    for td in all() {
+        push(td.root, td.topdir);
+    }
+    for home in user_homes() {
+        push(resolve_parent(&home.join(".local/share/Trash")), None);
+    }
+    for mp in mount_points() {
+        for root in volume_user_trashes(&mp) {
+            push(root, Some(mp.clone()));
+        }
+    }
+    out
+}
+
+/// The per-user trash roots on the volume mounted at `mp`: `.Trash/$uid`
+/// and `.Trash-$uid` for any numeric uid.
+pub fn volume_user_trashes(mp: &Path) -> Vec<PathBuf> {
+    let numeric = |s: &std::ffi::OsStr| {
+        let b = s.as_bytes();
+        !b.is_empty() && b.iter().all(u8::is_ascii_digit)
+    };
+    let mut out = Vec::new();
+    if let Ok(rd) = fs::read_dir(mp.join(".Trash")) {
+        out.extend(
+            rd.flatten()
+                .filter(|e| numeric(&e.file_name()))
+                .map(|e| e.path()),
+        );
+    }
+    if let Ok(rd) = fs::read_dir(mp) {
+        out.extend(
+            rd.flatten()
+                .filter(|e| {
+                    let name = e.file_name();
+                    name.as_bytes()
+                        .strip_prefix(b".Trash-")
+                        .is_some_and(|rest| numeric(std::ffi::OsStr::from_bytes(rest)))
+                })
+                .map(|e| e.path()),
+        );
+    }
+    out.sort();
+    out
+}
+
+/// Home directories from the user database (`getpwent`, so NSS sources
+/// such as LDAP count too).
+fn user_homes() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    unsafe {
+        libc::setpwent();
+        loop {
+            let pw = libc::getpwent();
+            if pw.is_null() {
+                break;
+            }
+            let dir = (*pw).pw_dir;
+            if !dir.is_null() {
+                let home = std::ffi::CStr::from_ptr(dir).to_bytes();
+                if home.first() == Some(&b'/') && home != b"/" {
+                    out.push(PathBuf::from(std::ffi::OsStr::from_bytes(home)));
+                }
+            }
+        }
+        libc::endpwent();
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The account name owning `path`, or its uid when the user database has
+/// no name for it.
+pub fn owner_name(path: &Path) -> String {
+    let Ok(meta) = fs::metadata(path) else {
+        return "?".to_string();
+    };
+    let uid = meta.uid();
+    let mut buf = vec![0 as libc::c_char; 1024];
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut res: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe { libc::getpwuid_r(uid, &mut pw, buf.as_mut_ptr(), buf.len(), &mut res) };
+    if rc == 0 && !res.is_null() && !pw.pw_name.is_null() {
+        let name = unsafe { std::ffi::CStr::from_ptr(pw.pw_name) };
+        return name.to_string_lossy().into_owned();
+    }
+    uid.to_string()
+}
+
 /// Exclusive per-trash-root lock (flock on `root/.rtrash.lock`) so put and empty
 /// cannot interleave a half-written pair under the same root.
 pub struct TrashLock {
@@ -1678,6 +1784,28 @@ proc /proc proc rw 0 0
         fs::set_permissions(src.join("ro"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::set_permissions(dst.join("ro"), fs::Permissions::from_mode(0o755)).unwrap();
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn volume_user_trashes_finds_numeric_uid_dirs_only() {
+        let mp = std::env::temp_dir().join(format!("rtrash-vol-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&mp);
+        for d in [
+            ".Trash/1000",
+            ".Trash/abc",
+            ".Trash-1001",
+            ".Trash-x",
+            ".Trash-",
+            "other",
+        ] {
+            fs::create_dir_all(mp.join(d)).unwrap();
+        }
+        assert_eq!(
+            volume_user_trashes(&mp),
+            [mp.join(".Trash/1000"), mp.join(".Trash-1001")]
+        );
+        assert!(!owner_name(&mp).is_empty());
+        let _ = fs::remove_dir_all(&mp);
     }
 
     #[test]
