@@ -80,3 +80,21 @@ Timed `rtrash empty --trash-dir=…` only; **7 trials** each after warm-up.
 | speedup | **~1.91×** | ~1.71× | **~2.00×** | **~1.91×** |
 
 Every timed trial: `ec=0`, `top_before=8001`, `files_left=0`, `info_left=0`.
+
+## rtrash du against other disk usage tools
+
+`bench/du.sh` times `rtrash du` next to du(1), diskus, dust, dua, pdu and gdu with [hyperfine](https://github.com/sharkdp/hyperfine).
+Tools that are not installed are skipped.
+
+```shell
+cargo install --locked hyperfine diskus du-dust dua-cli parallel-disk-usage
+cargo build --release
+RTRASH=$PWD/target/release/rtrash bench/du.sh ~/.rustup /usr synthetic
+```
+
+Besides those tools, each tree gets three `rtrash du` variants: the default (`-n 20`, with git states), `--no-git`, and `-n 0 --no-git`, which walks and sums but lists nothing.
+Pass the word `synthetic` as a tree to generate `SYNTH_FILES` (default 500000) files of 100 bytes each under `$TMPDIR`; the script removes that tree when it exits.
+
+Every tree is timed with a warm cache.
+Cold-cache runs on each tree happen when `sudo -n` can write `/proc/sys/vm/drop_caches`; set `COLD=0` to skip them.
+`RUNS`, `WARMUP` and `COLD_RUNS` set the run counts, and `OUT` names the directory that receives the Markdown and JSON tables.

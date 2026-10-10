@@ -28,6 +28,8 @@ asv machine --yes
 asv run -E existing:$(command -v python3) --quick
 ```
 
+**Disk usage timing:** `bench/du.sh` compares `rtrash du` with other disk usage tools through hyperfine; see [docs/benchmarks.md](docs/benchmarks.md#rtrash-du-against-other-disk-usage-tools).
+
 `prek` covers fast hygiene (whitespace, yaml/toml, large files, codespell). It does **not** compile the crate on every commit.
 
 ## Changelog fragments (towncrier)
