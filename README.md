@@ -308,7 +308,10 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 
 | Flag | Meaning |
 |------|---------|
-| `--json` | JSON array of `{deletion_date, original, name, trash_dir}` |
+| `--json` | JSON array of `{deletion_date, original, name, trash_dir, batch}` (plus `size` in bytes with `--size`) |
+| `--size` | Add each item's disk usage (payload plus `.trashinfo`, as `status` counts it) |
+| `--sort=date\|size\|name\|path` | Row order; `size` lists the largest first and implies `--size` |
+| `--reverse` | Reverse the order |
 | `--older-than=DAYS` | Only items trashed more than DAYS days ago (same cutoff as `empty DAYS`) |
 | `--newer-than=DAYS` | Only items trashed within the last DAYS days |
 | `--home-only` | Home trash only |
@@ -363,9 +366,13 @@ $ rtrash empty -n && rtrash empty 14                    # free the space
 | `rtrash restore PATH` | Restore the item whose original path was `PATH` (exact match) |
 | `rtrash restore` | **TUI** (TTY): fuzzy filter, multi-select (Space/a/A), bulk restore; session until `q` |
 | `rtrash restore --plain` | Numbered line list + index (scripts / no TUI) |
-| `printf '0\n' \| rtrash restore` | Piped index without TUI |
+| `printf '0-2,5\n' \| rtrash restore` | Piped selection without TUI: indices, ranges, commas, or `all` |
+| `rtrash restore --glob='*.rs' --all` | Restore every item whose file name matches; a pattern with a `/` matches the original path |
+| `rtrash restore --regex='/src/.*\.c$' --all` | Restore every item whose original path matches the regular expression |
+| `rtrash restore --to=DIR …` | Restore into `DIR`, keeping each file name |
+| `rtrash restore --conflict=rename\|skip\|overwrite …` | When the destination exists: restore as `NAME.1.EXT`, leave the item in the trash, or replace it (`-f`); the default refuses |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
-| `rtrash restore --name=NAME --latest --json` | Restore the newest item named `NAME` (file name or trash name) without a prompt and print `{"restored": [...], "failed": N}` |
+| `rtrash restore --name=NAME --latest --json` | Restore the newest item named `NAME` (file name or trash name) without a prompt and print `{"restored": [...], "failed": N, "skipped": N}` |
 | `rtrash restore --newest-first` / `--oldest-first` | Set the list order. The interactive browser lists newest first and `o` flips it; `--plain` lists oldest first, so the newest item sits next to the prompt |
 | Single match | Restores immediately without prompting |
 

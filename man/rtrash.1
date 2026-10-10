@@ -261,10 +261,37 @@ Only items trashed within the last
 .I DAYS
 days.
 .TP
+.B \-\-size
+Add a column with each item's disk usage: the payload plus its
+.IR .trashinfo ,
+as
+.B status
+counts it.
+Directory sizes come from
+.I directorysizes
+when valid, and walked sizes go back into it.
+.TP
+.BI \-\-sort= KEY
+Order rows by
+.B date
+(the default),
+.B size
+(largest first; implies
+.BR \-\-size ),
+.B name
+(original file name) or
+.B path
+(original path).
+Ties keep the date order.
+.TP
+.B \-\-reverse
+Reverse the order.
+.TP
 .B \-\-json
 Emit a JSON array of objects
 (\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR,
-\fIbatch\fR).
+\fIbatch\fR, and \fIsize\fR in bytes with
+.BR \-\-size ).
 The batch holds the put run id for items rtrash trashed, else null.
 .TP
 .B \-\-help
@@ -572,14 +599,37 @@ Without
 on a TTY open the interactive restore browser (filter, navigate, restore);
 without a TTY (or with
 .BR \-\-plain )
-print a numbered list and read an index from stdin.
+print a numbered list and read a selection from stdin: indices, ranges
+and commas such as
+.BR 0\-2,5 ,
+or
+.BR all .
 Pass
 .B \-\-cwd\-only
 to limit bare restore to originals under the current directory.
 A single match restores directly; multiple matches require a selection.
 .TP
 .BR \-f ", " \-\-force
-Overwrite an existing file at the original location.
+Overwrite an existing file at the destination (same as
+.BR \-\-conflict=overwrite ).
+.TP
+.BI \-\-conflict= POLICY
+What to do when the destination exists:
+.B refuse
+(the default; the item stays in the trash and the run fails),
+.BR overwrite ,
+.B rename
+(restore next to it as
+.IR STEM .1. EXT ,
+counting up)
+or
+.B skip
+(the item stays in the trash; the run still succeeds).
+.TP
+.BI \-\-to= DIR
+Restore into the existing directory
+.I DIR
+instead of the original location, keeping each item's file name.
 .TP
 .B \-\-cwd\-only
 Without PATH, only items trashed from under the current directory.
@@ -597,13 +647,32 @@ Order from oldest to newest (default for the numbered list, so the newest row pr
 Match items by original file name or by name inside the trash, instead of by
 .IR PATH .
 .TP
+.BI \-\-glob= PATTERN
+Match items by shell pattern: against the original path when
+.I PATTERN
+contains a slash, else against the original file name or the name inside
+the trash.
+.TP
+.BI \-\-regex= REGEX
+Match items whose original path contains a match for
+.IR REGEX .
+Give only one of
+.BR \-\-name ,
+.B \-\-glob
+and
+.BR \-\-regex .
+.TP
 .B \-\-latest
 When several items match, restore the most recently trashed one without asking.
 .TP
+.B \-\-all
+When several items match, restore every one without asking.
+.TP
 .B \-\-json
 Print
-.B {"restored": [...], "failed": N}
-on stdout. Implies
+.B {"restored": [...], "failed": N, "skipped": N}
+on stdout; each restored item also names its
+.IR restored_to . Implies
 .BR \-\-plain ;
 the numbered table, if any, goes to stderr.
 .TP

@@ -821,17 +821,114 @@ fn restore_by_name_latest_json() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let json = stdout_of(&out);
     assert!(json.starts_with("{\"restored\":[{\"original\":"), "{json}");
-    assert!(json.trim_end().ends_with("\"failed\":0}"), "{json}");
+    assert!(
+        json.trim_end().ends_with("\"failed\":0,\"skipped\":0}"),
+        "{json}"
+    );
     assert!(!json.contains("restored '"), "{json}");
     assert_eq!(fs::read(&f).unwrap(), b"newer");
     assert_eq!(trash_names(&sb), vec!["note.txt".to_string()]);
 
     let out = sb.run(&["restore", &pin, "--json", "--name=missing.txt"]);
     assert!(!out.status.success());
-    assert_eq!(stdout_of(&out).trim(), "{\"restored\":[],\"failed\":0}");
+    assert_eq!(
+        stdout_of(&out).trim(),
+        "{\"restored\":[],\"failed\":0,\"skipped\":0}"
+    );
 
     let out = sb.run(&["restore", "note.txt", "--name=note.txt"]);
     assert_eq!(out.status.code(), Some(2));
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_glob_regex_ranges_to_and_conflicts() {
+    let sb = Sandbox::new("restore-match");
+    for n in ["a.rs", "b.rs", "c.txt", "d.txt"] {
+        sb.touch(n);
+    }
+    assert!(sb
+        .run(&["put", "a.rs", "b.rs", "c.txt", "d.txt"])
+        .status
+        .success());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+
+    // --glob with --all restores every match, nothing else.
+    let out = sb.run(&["restore", &pin, "--glob=*.rs", "--all"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(sb.work().join("a.rs").exists() && sb.work().join("b.rs").exists());
+    assert!(!sb.work().join("c.txt").exists());
+
+    // --to restores into another directory; a clash there gets renamed.
+    let dest = sb.root.join("dest");
+    fs::create_dir(&dest).unwrap();
+    fs::write(dest.join("c.txt"), b"keep").unwrap();
+    let to = format!("--to={}", dest.display());
+    let out = sb.run(&[
+        "restore",
+        &pin,
+        "--regex=c\\.txt$",
+        &to,
+        "--conflict=rename",
+        "--json",
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let json = stdout_of(&out);
+    assert!(json.contains("c.1.txt\""), "{json}");
+    assert_eq!(fs::read(dest.join("c.txt")).unwrap(), b"keep");
+    assert_eq!(fs::read(dest.join("c.1.txt")).unwrap(), b"payload");
+
+    // skip leaves the item in the trash and still exits 0.
+    fs::write(sb.work().join("d.txt"), b"live").unwrap();
+    let out = sb.run(&["restore", &pin, "--name=d.txt", "--conflict=skip", "--json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("\"skipped\":1"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert_eq!(trash_names(&sb), vec!["d.txt".to_string()]);
+
+    // A range on stdin restores several rows of the numbered table.
+    for n in ["e1", "e2", "e3"] {
+        sb.touch(n);
+    }
+    assert!(sb.run(&["put", "e1", "e2", "e3"]).status.success());
+    fs::remove_file(sb.work().join("d.txt")).unwrap();
+    let out = sb.run_with_stdin(&["restore", &pin, "--plain"], "0-1,3\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb).len(), 1, "{}", stdout_of(&out));
+
+    let bad = sb.run(&["restore", &pin, "--conflict=maybe"]);
+    assert_eq!(bad.status.code(), Some(2));
+    let bad = sb.run(&["restore", &pin, "--glob=*", "--regex=x"]);
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+#[cfg(unix)]
+#[test]
+fn list_size_and_sort() {
+    let sb = Sandbox::new("list-sort");
+    fs::write(sb.work().join("big"), vec![1u8; 64 * 1024]).unwrap();
+    fs::write(sb.work().join("small"), b"x").unwrap();
+    assert!(sb.run(&["put", "big", "small"]).status.success());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+
+    let out = stdout_of(&sb.run(&["list", &pin, "--sort=size"]));
+    let rows: Vec<&str> = out.lines().collect();
+    assert_eq!(rows.len(), 2, "{out}");
+    assert!(
+        rows[0].ends_with("/big") && rows[0].contains("KiB"),
+        "{out}"
+    );
+    let out = stdout_of(&sb.run(&["list", &pin, "--sort=name", "--reverse"]));
+    assert!(
+        out.lines().next().unwrap_or("").ends_with("/small"),
+        "{out}"
+    );
+    let json = stdout_of(&sb.run(&["list", &pin, "--size", "--json"]));
+    assert!(json.contains("\"size\":"), "{json}");
+    assert_eq!(sb.run(&["list", "--sort=colour"]).status.code(), Some(2));
 }
 
 #[test]

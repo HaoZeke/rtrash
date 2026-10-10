@@ -14,7 +14,13 @@ List trashed items as 'DELETION-DATE ORIGINAL-PATH', oldest first.
       --older-than=DAYS only items trashed more than DAYS days ago
                      (same cutoff model as `empty DAYS`)
       --newer-than=DAYS only items trashed within the last DAYS days
-      --json            emit a JSON array (scripts; one object per item)
+      --size            add each item's disk usage (payload plus its
+                     .trashinfo, as status counts it)
+      --sort=KEY        order by date (default), size, name (file name)
+                     or path (original path); size implies --size
+      --reverse         reverse the order
+      --json            emit a JSON array (scripts; one object per item;
+                     \"size\" in bytes with --size)
       --help            display this help and exit
       --version         output version information and exit
 ";
@@ -134,29 +140,42 @@ fn parse_days_flag(arg: &str, name: &str) -> Result<i64, String> {
 pub use crate::util::json_escape;
 
 pub fn entry_to_json(e: &Entry) -> String {
+    entry_to_json_sized(e, None)
+}
+
+/// [`entry_to_json`] with a `size` field when `size` is known.
+pub fn entry_to_json_sized(e: &Entry, size: Option<u64>) -> String {
+    let size = size.map(|n| format!(",\"size\":{n}")).unwrap_or_default();
     let date = e.date.as_deref().unwrap_or("");
     let batch = match &e.batch {
         Some(b) => format!("\"{}\"", json_escape(b)),
         None => "null".to_string(),
     };
     format!(
-        "{{\"deletion_date\":\"{}\",\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\",\"batch\":{}}}",
+        "{{\"deletion_date\":\"{}\",\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\",\"batch\":{}{}}}",
         json_escape(date),
         json_escape(&e.original.to_string_lossy()),
         json_escape(&e.name),
         json_escape(&e.dir.root.to_string_lossy()),
         batch,
+        size,
     )
 }
 
 pub fn entries_to_json_array(entries: &[Entry]) -> String {
+    let refs: Vec<&Entry> = entries.iter().collect();
+    sized_json_array(&refs, None)
+}
+
+/// JSON array of `entries`, with `sizes[i]` as entry `i`'s size when given.
+fn sized_json_array(entries: &[&Entry], sizes: Option<&[u64]>) -> String {
     let mut out = String::from("[\n");
     for (i, e) in entries.iter().enumerate() {
         if i > 0 {
             out.push_str(",\n");
         }
         out.push_str("  ");
-        out.push_str(&entry_to_json(e));
+        out.push_str(&entry_to_json_sized(e, sizes.map(|s| s[i])));
     }
     if !entries.is_empty() {
         out.push('\n');
@@ -171,12 +190,27 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut json = false;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
+    let mut with_size = false;
+    let mut sort = SortKey::Date;
+    let mut reverse = false;
     let mut i = 0usize;
     while i < args.len() {
         let arg = &args[i];
         match arg.as_str() {
             "--home-only" => home_only = true,
             "--json" => json = true,
+            "--size" => with_size = true,
+            "--reverse" => reverse = true,
+            a if a.starts_with("--sort=") => match SortKey::parse(&a["--sort=".len()..]) {
+                Some(k) => sort = k,
+                None => {
+                    eprintln!(
+                        "{prog}: invalid --sort '{}' (date, size, name or path)",
+                        &a["--sort=".len()..]
+                    );
+                    return 2;
+                }
+            },
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -232,19 +266,102 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 2;
     }
     let entries = filter_age(collect(&dirs), older_than, newer_than);
+    let with_size = with_size || sort == SortKey::Size;
+    let sizes = with_size.then(|| entry_sizes(&dirs, &entries));
+    let order = sorted_order(&entries, sizes.as_deref(), sort, reverse);
+    let rows: Vec<&Entry> = order.iter().map(|&i| &entries[i]).collect();
+    let row_sizes: Option<Vec<u64>> = sizes.map(|s| order.iter().map(|&i| s[i]).collect());
     if json {
-        println!("{}", entries_to_json_array(&entries));
+        println!("{}", sized_json_array(&rows, row_sizes.as_deref()));
     } else {
-        for entry in &entries {
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        for (k, entry) in rows.iter().enumerate() {
             let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
-            println!(
-                "{} {}",
-                date.replacen('T', " ", 1),
-                entry.original.display()
-            );
+            let date = date.replacen('T', " ", 1);
+            let res = match &row_sizes {
+                Some(s) => writeln!(
+                    out,
+                    "{date} {:>10} {}",
+                    crate::util::format_bytes(s[k]),
+                    entry.original.display()
+                ),
+                None => writeln!(out, "{date} {}", entry.original.display()),
+            };
+            if res.is_err() {
+                return 0;
+            }
         }
+        let _ = out.flush();
     }
     0
+}
+
+/// What `list --sort` orders by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortKey {
+    Date,
+    Size,
+    Name,
+    Path,
+}
+
+impl SortKey {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "date" | "time" => SortKey::Date,
+            "size" => SortKey::Size,
+            "name" => SortKey::Name,
+            "path" => SortKey::Path,
+            _ => return None,
+        })
+    }
+}
+
+/// Disk usage of each entry, payload plus `.trashinfo`, through each root's
+/// size cache; walked directories go back into the cache.
+fn entry_sizes(dirs: &[TrashDir], entries: &[Entry]) -> Vec<u64> {
+    use rayon::prelude::*;
+    let caches: Vec<trashdir::DirSizes> = dirs.iter().map(trashdir::DirSizes::load).collect();
+    let sizes = entries
+        .par_iter()
+        .map(|e| {
+            caches
+                .iter()
+                .zip(dirs)
+                .find(|(_, d)| d.root == e.dir.root)
+                .map_or(0, |(c, _)| c.entry_bytes(&e.name))
+        })
+        .collect();
+    for c in caches {
+        c.write_back();
+    }
+    sizes
+}
+
+/// Row order for `entries` (already oldest first) under `key`. Ties keep
+/// the date order, so equal sizes or names stay oldest first.
+pub fn sorted_order(
+    entries: &[Entry],
+    sizes: Option<&[u64]>,
+    key: SortKey,
+    reverse: bool,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    let file_name = |i: usize| entries[i].original.file_name().unwrap_or_default();
+    match key {
+        SortKey::Date => {}
+        SortKey::Size => {
+            let sizes = sizes.unwrap_or(&[]);
+            order.sort_by_key(|&i| std::cmp::Reverse(sizes.get(i).copied().unwrap_or(0)));
+        }
+        SortKey::Name => order.sort_by(|&a, &b| file_name(a).cmp(file_name(b))),
+        SortKey::Path => order.sort_by(|&a, &b| entries[a].original.cmp(&entries[b].original)),
+    }
+    if reverse {
+        order.reverse();
+    }
+    order
 }
 
 #[cfg(test)]
@@ -296,6 +413,25 @@ mod tests {
         let out = filter_age(vec![recent, old], Some(30), None);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].epoch, 978_307_200);
+    }
+
+    #[test]
+    fn sort_keys_order_rows_and_reverse() {
+        let mk = |path: &str, epoch: i64| Entry {
+            original: PathBuf::from(path),
+            ..entry_with(None, epoch)
+        };
+        let es = vec![mk("/b/zeta", 1), mk("/a/beta", 2), mk("/c/alpha", 3)];
+        let sizes = [10, 30, 20];
+        assert_eq!(sorted_order(&es, None, SortKey::Date, false), [0, 1, 2]);
+        assert_eq!(
+            sorted_order(&es, Some(&sizes), SortKey::Size, false),
+            [1, 2, 0]
+        );
+        assert_eq!(sorted_order(&es, None, SortKey::Name, false), [2, 1, 0]);
+        assert_eq!(sorted_order(&es, None, SortKey::Path, true), [2, 0, 1]);
+        let s = entry_to_json_sized(&es[0], Some(42));
+        assert!(s.ends_with(",\"size\":42}"), "{s}");
     }
 
     #[test]

@@ -12,11 +12,13 @@ Restore a trashed item to its original location.
 
 With PATH, restore the item originally at PATH (exact original path match).
 With --name=NAME, restore the item whose file name, or whose name inside
-the trash, is NAME. When several items match, --latest restores the most
-recently trashed one without asking.
+the trash, is NAME. --glob and --regex match many items at once. When several
+items match, --latest restores the most recently trashed one and --all
+restores every one, both without asking.
 Without PATH on a TTY, open the interactive restore browser (ratatui): filter,
 navigate, restore one or more items. Without a TTY (or with a piped index),
-print a numbered table and read a selection from stdin.
+print a numbered table and read a selection from stdin: indices, ranges
+and commas such as '0-2,5', or 'all'.
 
 By default every trashed item in scope is listed; pass --cwd-only to limit to
 items whose original path is under the current directory. A single match
@@ -26,39 +28,114 @@ The browser lists the most recently trashed item first, with the cursor on
 it. The numbered table lists oldest first, so the newest item sits next to
 the index prompt. --newest-first and --oldest-first set the order for both.
 
-  -f, --force     overwrite an existing file at the original location
+  -f, --force     overwrite an existing file (same as --conflict=overwrite)
+      --conflict=POLICY  when the destination exists: refuse (default),
+                    overwrite, rename (restore next to it as NAME.1.EXT)
+                    or skip
+      --to=DIR    restore into DIR, keeping each item's file name
       --cwd-only  without PATH, only items trashed from under the current directory
       --plain     force numbered line selection even on a TTY (no TUI)
       --newest-first  list the most recently trashed item first
       --oldest-first  list the oldest trashed item first
       --name=NAME  match items by file name or trash name instead of PATH
+      --glob=PATTERN  match items by shell pattern: against the original
+                    path when PATTERN has a '/', else against the file name
+      --regex=REGEX  match items whose original path contains REGEX
       --latest    of several matches, restore the most recently trashed
-      --json      print {restored, failed} as JSON on stdout; implies
-                    --plain, and the numbered table goes to stderr
+      --all       of several matches, restore every one
+      --json      print {restored, failed, skipped} as JSON on stdout;
+                    implies --plain, and the numbered table goes to stderr
       --home-only  only the home trash (skip volume trash)
       --trash-dir=PATH  only consider this trash directory (repeatable)
       --help      display this help and exit
       --version   output version information and exit
 ";
 
+/// What to do when the restore destination already exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Conflict {
+    Refuse,
+    Overwrite,
+    Rename,
+    Skip,
+}
+
+impl Conflict {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "refuse" => Conflict::Refuse,
+            "overwrite" => Conflict::Overwrite,
+            "rename" => Conflict::Rename,
+            "skip" => Conflict::Skip,
+            _ => return None,
+        })
+    }
+}
+
+/// How the CLI picks entries besides PATH.
+enum Matcher {
+    Name(String),
+    Glob(String),
+    Regex(regex_lite::Regex),
+}
+
+impl Matcher {
+    fn matches(&self, e: &list::Entry) -> bool {
+        match self {
+            Matcher::Name(n) => name_matches(e, n),
+            Matcher::Glob(p) => glob_matches(e, p),
+            Matcher::Regex(re) => re.is_match(&e.original.to_string_lossy()),
+        }
+    }
+}
+
 pub fn run(prog: &str, args: &[String]) -> i32 {
-    let mut force = false;
+    let mut conflict = Conflict::Refuse;
     let mut home_only = false;
     let mut cwd_only = false;
     let mut plain = false;
     let mut newest_first: Option<bool> = None;
     let mut target: Option<PathBuf> = None;
-    let mut name: Option<String> = None;
+    let mut matcher: Option<Matcher> = None;
+    let mut to: Option<PathBuf> = None;
     let mut latest = false;
+    let mut all = false;
     let mut json = false;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     for arg in args {
+        let mut set_matcher = |m: Matcher| {
+            if matcher.is_some() {
+                eprintln!("{prog}: give only one of --name, --glob and --regex");
+                return false;
+            }
+            matcher = Some(m);
+            true
+        };
         match arg.as_str() {
-            "-f" | "--force" => force = true,
+            "-f" | "--force" => conflict = Conflict::Overwrite,
             "--latest" => latest = true,
+            "--all" => all = true,
             "--json" => {
                 json = true;
                 plain = true;
+            }
+            a if a.starts_with("--conflict=") => match Conflict::parse(&a["--conflict=".len()..]) {
+                Some(c) => conflict = c,
+                None => {
+                    eprintln!(
+                        "{prog}: invalid --conflict '{}' (refuse, overwrite, rename or skip)",
+                        &a["--conflict=".len()..]
+                    );
+                    return 2;
+                }
+            },
+            a if a.starts_with("--to=") => {
+                let d = &a["--to=".len()..];
+                if d.is_empty() {
+                    eprintln!("{prog}: --to needs a non-empty DIR");
+                    return 2;
+                }
+                to = Some(PathBuf::from(d));
             }
             a if a.starts_with("--name=") => {
                 let n = &a["--name=".len()..];
@@ -66,7 +143,33 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     eprintln!("{prog}: --name needs a non-empty NAME");
                     return 2;
                 }
-                name = Some(n.to_string());
+                if !set_matcher(Matcher::Name(n.to_string())) {
+                    return 2;
+                }
+            }
+            a if a.starts_with("--glob=") => {
+                let g = &a["--glob=".len()..];
+                if g.is_empty() {
+                    eprintln!("{prog}: --glob needs a non-empty PATTERN");
+                    return 2;
+                }
+                if !set_matcher(Matcher::Glob(g.to_string())) {
+                    return 2;
+                }
+            }
+            a if a.starts_with("--regex=") => {
+                let r = &a["--regex=".len()..];
+                match regex_lite::Regex::new(r) {
+                    Ok(re) => {
+                        if !set_matcher(Matcher::Regex(re)) {
+                            return 2;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{prog}: invalid --regex '{r}': {e}");
+                        return 2;
+                    }
+                }
             }
             "--home-only" => home_only = true,
             "--cwd-only" => cwd_only = true,
@@ -98,9 +201,19 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
-    if target.is_some() && name.is_some() {
-        eprintln!("{prog}: give PATH or --name, not both");
+    if target.is_some() && matcher.is_some() {
+        eprintln!("{prog}: give PATH or a --name, --glob or --regex match, not both");
         return 2;
+    }
+    if latest && all {
+        eprintln!("{prog}: give --latest or --all, not both");
+        return 2;
+    }
+    if let Some(d) = &to {
+        if !d.is_dir() {
+            eprintln!("{prog}: --to: '{}' is not a directory", d.display());
+            return 2;
+        }
     }
 
     let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);
@@ -109,12 +222,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 2;
     }
     let entries = list::collect(&dirs);
-    let mut matches: Vec<&list::Entry> = match (&target, &name) {
+    let mut matches: Vec<&list::Entry> = match (&target, &matcher) {
         (Some(t), _) => {
             let abs = absolutize(t);
             entries.iter().filter(|e| e.original == abs).collect()
         }
-        (None, Some(n)) => entries.iter().filter(|e| name_matches(e, n)).collect(),
+        (None, Some(m)) => entries.iter().filter(|e| m.matches(e)).collect(),
         (None, None) if cwd_only => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
             entries
@@ -126,10 +239,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         (None, None) => entries.iter().collect(),
     };
 
+    let plan = Plan {
+        to: to.as_deref(),
+        conflict,
+        quiet: json,
+    };
     if matches.is_empty() {
         eprintln!("{prog}: no trashed files match");
         if json {
-            println!("{}", restored_json(&[], 0));
+            println!("{}", restored_json(&[], 0, 0));
         }
         return 1;
     }
@@ -140,17 +258,25 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 
     // TTY + multi-item: prefer ratatui browser when built with `tui` (unless --plain).
     #[cfg(feature = "tui")]
-    if !plain && target.is_none() && name.is_none() && matches.len() > 1 && stdin_is_tty() {
+    if !plain
+        && !all
+        && target.is_none()
+        && matcher.is_none()
+        && to.is_none()
+        && matches!(conflict, Conflict::Refuse | Conflict::Overwrite)
+        && matches.len() > 1
+        && stdin_is_tty()
+    {
         let newest = newest_first.unwrap_or(true);
         order_entries(&mut matches, newest);
-        return crate::restore_tui::run(prog, matches, force, newest);
+        return crate::restore_tui::run(prog, matches, conflict == Conflict::Overwrite, newest);
     }
     #[cfg(not(feature = "tui"))]
     let _ = plain;
     order_entries(&mut matches, newest_first.unwrap_or(false));
 
-    let chosen: &list::Entry = if matches.len() == 1 {
-        matches[0]
+    let chosen: Vec<&list::Entry> = if matches.len() == 1 || all {
+        matches
     } else {
         for (i, e) in matches.iter().enumerate() {
             let date = e.date.as_deref().unwrap_or("????-??-??T??:??:??");
@@ -184,22 +310,150 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             );
             return 1;
         }
-        match line.trim().parse::<usize>() {
-            Ok(i) if i < matches.len() => matches[i],
-            _ => {
-                eprintln!("{prog}: invalid selection");
+        match parse_selection(&line, matches.len()) {
+            Ok(idx) => idx.into_iter().map(|i| matches[i]).collect(),
+            Err(e) => {
+                eprintln!("{prog}: invalid selection: {e}");
                 return 1;
             }
         }
     };
 
-    let code = restore_entry_quiet(prog, chosen, force, json);
-    if json {
-        let ok = code == 0;
-        let items = if ok { vec![chosen] } else { Vec::new() };
-        println!("{}", restored_json(&items, usize::from(!ok)));
+    let mut done: Vec<(&list::Entry, PathBuf)> = Vec::new();
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+    for e in chosen {
+        match plan.apply(prog, e) {
+            Outcome::Restored(dest) => done.push((e, dest)),
+            Outcome::Skipped => skipped += 1,
+            Outcome::Failed => failed += 1,
+        }
     }
-    code
+    if json {
+        println!("{}", restored_json(&done, failed, skipped));
+    }
+    i32::from(failed > 0)
+}
+
+/// Where and how the CLI restores each chosen entry.
+struct Plan<'a> {
+    to: Option<&'a Path>,
+    conflict: Conflict,
+    quiet: bool,
+}
+
+enum Outcome {
+    Restored(PathBuf),
+    Skipped,
+    Failed,
+}
+
+impl Plan<'_> {
+    fn apply(&self, prog: &str, e: &list::Entry) -> Outcome {
+        let dest = match (self.to, e.original.file_name()) {
+            (Some(dir), Some(name)) => dir.join(name),
+            (Some(_), None) => {
+                eprintln!(
+                    "{prog}: cannot restore '{}' by name: no file name",
+                    e.original.display()
+                );
+                return Outcome::Failed;
+            }
+            (None, _) => e.original.clone(),
+        };
+        let exists = dest.symlink_metadata().is_ok();
+        let (dest, force) = match (exists, self.conflict) {
+            (true, Conflict::Skip) => {
+                eprintln!("{prog}: skipping '{}': it exists", dest.display());
+                return Outcome::Skipped;
+            }
+            (true, Conflict::Rename) => (free_name(&dest), false),
+            (_, c) => (dest, c == Conflict::Overwrite),
+        };
+        match restore_one_to(e, &dest, force) {
+            Ok(done) => {
+                for w in &done.warnings {
+                    eprintln!("{prog}: warning: {w}");
+                }
+                if !self.quiet {
+                    println!("restored '{}'", done.dest.display());
+                }
+                Outcome::Restored(done.dest)
+            }
+            Err(err) => {
+                eprintln!("{prog}: {err}");
+                Outcome::Failed
+            }
+        }
+    }
+}
+
+/// The first `STEM.N.EXT` (or `NAME.N` without an extension) next to
+/// `dest` that does not exist yet.
+fn free_name(dest: &Path) -> PathBuf {
+    let parent = dest.parent().unwrap_or(Path::new(""));
+    let stem = dest.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = dest.extension().map(|e| e.to_string_lossy());
+    (1u64..)
+        .map(|n| {
+            let name = match &ext {
+                Some(x) => format!("{stem}.{n}.{x}"),
+                None => format!("{stem}.{n}"),
+            };
+            parent.join(name)
+        })
+        .find(|p| p.symlink_metadata().is_err())
+        .unwrap_or_else(|| dest.to_path_buf())
+}
+
+/// Parse a pick like `0-2,5 7` or `all` against `len` rows: indices in
+/// the order given, each once.
+pub fn parse_selection(line: &str, len: usize) -> Result<Vec<usize>, String> {
+    let line = line.trim();
+    if line.eq_ignore_ascii_case("all") || line == "*" {
+        return Ok((0..len).collect());
+    }
+    let mut out: Vec<usize> = Vec::new();
+    let mut seen = vec![false; len];
+    for tok in line.split([',', ' ', '\t']).filter(|t| !t.is_empty()) {
+        let (lo, hi) = match tok.split_once('-') {
+            Some((a, b)) => (a.trim(), b.trim()),
+            None => (tok, tok),
+        };
+        let num = |s: &str| {
+            s.parse::<usize>()
+                .map_err(|_| format!("'{tok}' is no index or range"))
+        };
+        let (lo, hi) = (num(lo)?, num(hi)?);
+        if lo > hi {
+            return Err(format!("range '{tok}' runs backwards"));
+        }
+        if hi >= len {
+            return Err(format!("{hi} lies outside 0..{}", len - 1));
+        }
+        for (i, was) in seen.iter_mut().enumerate().take(hi + 1).skip(lo) {
+            if !*was {
+                *was = true;
+                out.push(i);
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err("nothing selected".into());
+    }
+    Ok(out)
+}
+
+/// Shell-pattern match: against the original path when the pattern names a
+/// directory part, else against the file name or the trash name.
+fn glob_matches(e: &list::Entry, pat: &str) -> bool {
+    if pat.contains('/') {
+        return crate::util::fnmatch(pat, &e.original.to_string_lossy());
+    }
+    crate::util::fnmatch(pat, &e.name)
+        || e.original
+            .file_name()
+            .is_some_and(|f| crate::util::fnmatch(pat, &f.to_string_lossy()))
 }
 
 /// Whether `e` goes by `name`: its original file name or its name under
@@ -211,13 +465,27 @@ fn name_matches(e: &list::Entry, name: &str) -> bool {
             .is_some_and(|f| f == std::ffi::OsStr::new(name))
 }
 
-/// `{"restored": [...], "failed": N}` for `restore --json`.
-fn restored_json(restored: &[&list::Entry], failed: usize) -> String {
-    let items: Vec<(&Path, &str, &Path)> = restored
+/// `{"restored": [...], "failed": N, "skipped": N}` for `restore --json`.
+/// Each item carries `restored_to`, which differs from `original` under
+/// `--to` or a rename.
+fn restored_json(restored: &[(&list::Entry, PathBuf)], failed: usize, skipped: usize) -> String {
+    use crate::util::json_escape;
+    let items: Vec<String> = restored
         .iter()
-        .map(|e| (e.original.as_path(), e.name.as_str(), e.dir.root.as_path()))
+        .map(|(e, dest)| {
+            format!(
+                "{{\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\",\"restored_to\":\"{}\"}}",
+                json_escape(&e.original.to_string_lossy()),
+                json_escape(&e.name),
+                json_escape(&e.dir.root.to_string_lossy()),
+                json_escape(&dest.to_string_lossy()),
+            )
+        })
         .collect();
-    crate::util::items_json("restored", &items, failed)
+    format!(
+        "{{\"restored\":[{}],\"failed\":{failed},\"skipped\":{skipped}}}",
+        items.join(",")
+    )
 }
 
 /// Order entries by deletion time. `list::collect` yields oldest first, with
@@ -272,8 +540,9 @@ pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32
     restore_entry_quiet(prog, entry, force, false)
 }
 
-/// Restore one entry to its original path, printing the outcome. Shared by
-/// the CLI and the piped pick; `quiet` drops the `restored '...'` line.
+/// Restore one entry to its original path, printing the outcome; `quiet`
+/// drops the `restored '...'` line.
+#[cfg(feature = "tui")]
 fn restore_entry_quiet(prog: &str, entry: &list::Entry, force: bool, quiet: bool) -> i32 {
     match restore_one(entry, force) {
         Ok(done) => {
@@ -303,9 +572,17 @@ pub(crate) struct Restored {
 /// TUI can call it while it owns the terminal. Errors come back as text
 /// without the program name.
 pub(crate) fn restore_one(entry: &list::Entry, force: bool) -> Result<Restored, String> {
+    restore_one_to(entry, &entry.original, force)
+}
+
+/// [`restore_one`] to `dest` instead of the original path.
+pub(crate) fn restore_one_to(
+    entry: &list::Entry,
+    dest: &Path,
+    force: bool,
+) -> Result<Restored, String> {
     let mut warnings = Vec::new();
     let src = entry.dir.files().join(&entry.name);
-    let dest = &entry.original;
 
     // Never destroy the live destination until the trash payload is known good.
     if src.symlink_metadata().is_err() {
@@ -370,7 +647,7 @@ pub(crate) fn restore_one(entry: &list::Entry, force: bool) -> Result<Restored, 
     }
     trashdir::directorysizes_remove(&entry.dir, &entry.name);
     Ok(Restored {
-        dest: dest.clone(),
+        dest: dest.to_path_buf(),
         warnings,
     })
 }
@@ -427,10 +704,46 @@ mod tests {
     fn restored_json_lists_items() {
         let e = entry("/a/\"q\".txt", 1);
         assert_eq!(
-            restored_json(&[&e], 0),
-            r#"{"restored":[{"original":"/a/\"q\".txt","name":"n","trash_dir":"/tmp/trash"}],"failed":0}"#
+            restored_json(&[(&e, PathBuf::from("/b/q.txt"))], 0, 2),
+            r#"{"restored":[{"original":"/a/\"q\".txt","name":"n","trash_dir":"/tmp/trash","restored_to":"/b/q.txt"}],"failed":0,"skipped":2}"#
         );
-        assert_eq!(restored_json(&[], 1), r#"{"restored":[],"failed":1}"#);
+        assert_eq!(
+            restored_json(&[], 1, 0),
+            r#"{"restored":[],"failed":1,"skipped":0}"#
+        );
+    }
+
+    #[test]
+    fn selection_takes_indices_ranges_and_all() {
+        assert_eq!(parse_selection("3\n", 5), Ok(vec![3]));
+        assert_eq!(parse_selection("0-2,4", 5), Ok(vec![0, 1, 2, 4]));
+        assert_eq!(parse_selection(" 4 1-2, 2 ", 5), Ok(vec![4, 1, 2]));
+        assert_eq!(parse_selection("all", 3), Ok(vec![0, 1, 2]));
+        assert!(parse_selection("5", 5).is_err());
+        assert!(parse_selection("3-1", 5).is_err());
+        assert!(parse_selection("x", 5).is_err());
+        assert!(parse_selection(",", 5).is_err());
+    }
+
+    #[test]
+    fn glob_matches_path_with_a_slash_else_the_name() {
+        let e = entry("/home/u/src/main.rs", 1);
+        assert!(glob_matches(&e, "*.rs"));
+        assert!(glob_matches(&e, "/home/*/src/*"));
+        assert!(!glob_matches(&e, "src/*"));
+        assert!(!glob_matches(&e, "*.txt"));
+    }
+
+    #[test]
+    fn free_name_counts_up_before_the_extension() {
+        let dir = std::env::temp_dir().join(format!("rtrash-freename-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.txt"), b"").unwrap();
+        fs::write(dir.join("a.1.txt"), b"").unwrap();
+        assert_eq!(free_name(&dir.join("a.txt")), dir.join("a.2.txt"));
+        assert_eq!(free_name(&dir.join(".rc")), dir.join(".rc.1"));
+        assert_eq!(free_name(&dir.join("d")), dir.join("d.1"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

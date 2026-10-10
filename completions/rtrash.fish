@@ -68,6 +68,9 @@ for sub in list status
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l newer-than -d 'only items within last DAYS days' -r
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l json -d 'JSON output'
 end
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l size -d 'add each item size'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l sort -x -a 'date size name path' -d 'row order'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l reverse -d 'reverse the order'
 
 # du
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s n -l top -d 'list N directories and N files' -r
@@ -111,6 +114,11 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l ne
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l oldest-first -d 'list the oldest trashed item first'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l name -r -d 'match by file name or trash name'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l latest -d 'of several matches, restore the newest'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l all -d 'of several matches, restore every one'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l glob -x -d 'match by shell pattern'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l regex -x -d 'match original paths by regex'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l to -x -a '(__fish_complete_directories)' -d 'restore into this directory'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l conflict -x -a 'refuse overwrite rename skip' -d 'when the destination exists'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l json -d 'print the result as JSON'
 
 # rm (trash-rm)
@@ -177,6 +185,9 @@ complete -c trash-list -l trash-dir -r
 complete -c trash-list -l older-than -r
 complete -c trash-list -l newer-than -r
 complete -c trash-list -l json
+complete -c trash-list -l size
+complete -c trash-list -l sort -x -a 'date size name path'
+complete -c trash-list -l reverse
 complete -c trash-list -l help
 complete -c trash-list -l version
 
@@ -189,6 +200,11 @@ complete -c trash-restore -l newest-first
 complete -c trash-restore -l oldest-first
 complete -c trash-restore -l name -r
 complete -c trash-restore -l latest
+complete -c trash-restore -l all
+complete -c trash-restore -l glob -x
+complete -c trash-restore -l regex -x
+complete -c trash-restore -l to -x -a '(__fish_complete_directories)'
+complete -c trash-restore -l conflict -x -a 'refuse overwrite rename skip'
 complete -c trash-restore -l json
 complete -c trash-restore -l help
 complete -c trash-restore -l version

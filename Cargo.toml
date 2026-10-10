@@ -71,6 +71,11 @@ serde = { version = "1", optional = true, features = ["derive"] }
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
+# restore --regex. The lite engine keeps the binary small; patterns match
+# paths, so Unicode classes do not matter.
+[target.'cfg(unix)'.dependencies]
+regex-lite = "0.1"
+
 # Windows system Recycle Bin (shell APIs). Not used on Unix FreeDesktop builds.
 [target.'cfg(windows)'.dependencies]
 trash = { version = "5.2", default-features = true }
