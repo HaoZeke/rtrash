@@ -55,7 +55,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 return 0;
             }
             a if a.starts_with("--trash-dir=") => {
-                trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
+                trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
             a if a.starts_with("--older-than=") => {
                 match parse_nonneg_days(&a["--older-than=".len()..]) {
@@ -146,11 +146,11 @@ pub(crate) fn summarize_dirs(
         if older_than.is_none() && newer_than.is_none() {
             if let Ok(rd) = std::fs::read_dir(dir.files()) {
                 for ent in rd.flatten() {
-                    let name = ent.file_name().to_string_lossy().into_owned();
+                    let name = crate::util::str_from_os_ref(&ent.file_name());
                     if counted.contains(&name) {
                         continue;
                     }
-                    let has_info = dir.info().join(format!("{name}.trashinfo")).exists();
+                    let has_info = crate::util::join_info(&dir.info(), &name).exists();
                     if !has_info {
                         bytes = bytes.saturating_add(fastdelete::disk_usage(&ent.path()));
                     }

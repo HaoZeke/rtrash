@@ -6,6 +6,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::info;
+use crate::util::{join_info, join_name};
 
 /// A `files/` + `info/` pair per the freedesktop.org Trash spec.
 #[derive(Clone, Debug)]
@@ -620,9 +621,9 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
 /// Write the `directorysizes` line for the trashed directory `name`.
 /// Best effort: a cache that cannot be written is rebuilt by `status`.
 pub fn record_dir_size(trash: &TrashDir, name: &str) {
-    let dest = trash.files().join(name);
+    let dest = join_name(&trash.files(), name);
     let size = crate::fastdelete::disk_usage(&dest);
-    let Ok(mtime) = info_mtime_secs(&trash.info().join(format!("{name}.trashinfo"))) else {
+    let Ok(mtime) = info_mtime_secs(&join_info(&trash.info(), name)) else {
         return;
     };
     if let Ok(_lock) = TrashLock::acquire(&trash.root) {
@@ -632,14 +633,9 @@ pub fn record_dir_size(trash: &TrashDir, name: &str) {
 
 /// Inner put path (caller holds the trash-root lock). Exposed for tests.
 pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
-    let base = abs
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            String::from_utf8_lossy(abs.file_name().unwrap_or_default().as_encoded_bytes())
-                .into_owned()
-        });
+    // Keep the bytes of a name that is not UTF-8, as other tools do, so
+    // two such names never fold into one replacement-character name.
+    let base = crate::util::str_from_os_ref(abs.file_name().unwrap_or_default());
 
     let recorded: PathBuf = match &trash.topdir {
         Some(top) => abs
@@ -658,7 +654,7 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
             format!("{base}.{}", attempt + 1)
         };
         // Skip names already occupied by an orphan payload (no .trashinfo).
-        if trash.files().join(&name).symlink_metadata().is_ok() {
+        if join_name(&trash.files(), &name).symlink_metadata().is_ok() {
             attempt += 1;
             if attempt > 10_000 {
                 return Err(io::Error::new(
@@ -668,7 +664,7 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
             }
             continue;
         }
-        let info_path = trash.info().join(format!("{name}.trashinfo"));
+        let info_path = join_info(&trash.info(), &name);
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -694,7 +690,7 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
     drop(info_file);
     let _ = sync_dir(&trash.info());
 
-    let dest = trash.files().join(&name);
+    let dest = join_name(&trash.files(), &name);
     let moved = match rename_noreplace(abs, &dest) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
@@ -703,7 +699,7 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
         Err(e) => Err(e),
     };
     if let Err(e) = moved {
-        let _ = fs::remove_file(trash.info().join(format!("{name}.trashinfo")));
+        let _ = fs::remove_file(join_info(&trash.info(), &name));
         let _ = remove_any_path(&dest);
         return Err(e);
     }
@@ -781,7 +777,7 @@ pub fn directorysizes_upsert(
 ) -> io::Result<()> {
     use crate::util::url_encode;
     let path = trash.root.join("directorysizes");
-    let enc = url_encode(name.as_bytes());
+    let enc = url_encode(crate::util::os_from_str(name).as_bytes());
     let line = format!("{size} {mtime} {enc}\n");
     let mut out = String::new();
     if let Ok(existing) = fs::read_to_string(&path) {
@@ -804,7 +800,7 @@ pub fn directorysizes_remove(trash: &TrashDir, name: &str) {
     let Ok(existing) = fs::read_to_string(&path) else {
         return;
     };
-    let enc = url_encode(name.as_bytes());
+    let enc = url_encode(crate::util::os_from_str(name).as_bytes());
     let filtered: String = existing
         .lines()
         .filter(|l| l.rsplit(' ').next().is_some_and(|e| e != enc.as_str()))
@@ -871,7 +867,7 @@ impl<'a> DirSizes<'a> {
     /// valid: the payload is a directory and the line's mtime equals the
     /// current `.trashinfo` mtime.
     pub fn cached(&self, name: &str) -> Option<u64> {
-        let meta = fs::symlink_metadata(self.trash.files().join(name)).ok()?;
+        let meta = fs::symlink_metadata(join_name(&self.trash.files(), name)).ok()?;
         if !meta.is_dir() {
             return None;
         }
@@ -880,8 +876,9 @@ impl<'a> DirSizes<'a> {
 
     /// [`Self::cached`] for a payload already known to be a directory.
     fn cached_dir(&self, name: &str) -> Option<u64> {
-        let (size, mtime) = *self.lines.get(&crate::util::url_encode(name.as_bytes()))?;
-        let info = self.trash.info().join(format!("{name}.trashinfo"));
+        let key = crate::util::url_encode(crate::util::os_from_str(name).as_bytes());
+        let (size, mtime) = *self.lines.get(&key)?;
+        let info = join_info(&self.trash.info(), name);
         (info_mtime_secs(&info).ok()? == mtime).then_some(size)
     }
 
@@ -889,7 +886,7 @@ impl<'a> DirSizes<'a> {
     /// valid line, otherwise a walk, remembered for [`Self::write_back`]
     /// when the payload is a directory with a `.trashinfo`.
     pub fn payload_bytes(&self, name: &str) -> u64 {
-        let payload = self.trash.files().join(name);
+        let payload = join_name(&self.trash.files(), name);
         let Ok(meta) = fs::symlink_metadata(&payload) else {
             return 0;
         };
@@ -901,7 +898,7 @@ impl<'a> DirSizes<'a> {
             return size;
         }
         let size = crate::fastdelete::disk_usage(&payload);
-        let info = self.trash.info().join(format!("{name}.trashinfo"));
+        let info = join_info(&self.trash.info(), name);
         {
             if let Ok(mtime) = info_mtime_secs(&info) {
                 self.misses.lock().unwrap_or_else(|e| e.into_inner()).push((
@@ -916,7 +913,7 @@ impl<'a> DirSizes<'a> {
 
     /// Payload plus `.trashinfo` bytes for one entry.
     pub fn entry_bytes(&self, name: &str) -> u64 {
-        let info = self.trash.info().join(format!("{name}.trashinfo"));
+        let info = join_info(&self.trash.info(), name);
         let info_sz = fs::symlink_metadata(&info).map_or(0, |m| m.blocks().saturating_mul(512));
         self.payload_bytes(name).saturating_add(info_sz)
     }
@@ -964,7 +961,7 @@ impl<'a> DirSizes<'a> {
             .filter(|(enc, _, _)| !gone(enc))
             .collect();
         for (name, size, mtime) in misses {
-            let enc = crate::util::url_encode(name.as_bytes());
+            let enc = crate::util::url_encode(crate::util::os_from_str(&name).as_bytes());
             kept.retain(|(e, _, _)| *e != enc);
             kept.push((enc, size, mtime));
         }
@@ -1000,7 +997,7 @@ pub fn entry_reclaim_bytes(trash: &TrashDir, name: &str) -> u64 {
 pub fn files_child_reclaim_bytes(trash: &TrashDir, path: &Path) -> u64 {
     match path.file_name() {
         Some(name) if path.parent() == Some(trash.files().as_path()) => {
-            DirSizes::load(trash).payload_bytes(&name.to_string_lossy())
+            DirSizes::load(trash).payload_bytes(&crate::util::str_from_os_ref(name))
         }
         _ => crate::fastdelete::disk_usage(path),
     }

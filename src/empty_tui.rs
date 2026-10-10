@@ -55,8 +55,8 @@ pub fn permanently_remove_entries(
     let mut succeeded = Vec::with_capacity(entries.len());
     let mut bytes = 0u64;
     for entry in entries {
-        let payload = entry.dir.files().join(&entry.name);
-        let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
+        let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
+        let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
         if dry_run {
             bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes(&entry.dir, &entry.name));
             succeeded.push(true);

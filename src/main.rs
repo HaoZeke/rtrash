@@ -43,7 +43,8 @@ After cargo install, run:  rtrash setup
 ";
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    // args() panics on a name that is not UTF-8; carry its bytes instead.
+    let args: Vec<String> = std::env::args_os().map(rtrash::util::str_from_os).collect();
     let argv0 = std::path::Path::new(args.first().map(String::as_str).unwrap_or("rtrash"))
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())

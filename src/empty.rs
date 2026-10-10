@@ -1,5 +1,6 @@
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -87,7 +88,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
             a if a.starts_with("--trash-dir=") => {
                 opts.trash_dirs
-                    .push(PathBuf::from(&a["--trash-dir=".len()..]));
+                    .push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
             a if a.starts_with("--max-size=") => {
                 match crate::retention::parse_size(&a["--max-size=".len()..]) {
@@ -266,14 +267,14 @@ fn empty_one(
         for entry in entries.flatten() {
             let info_path = entry.path();
             let fname = entry.file_name();
-            let fname = fname.to_string_lossy();
+            let fname = crate::util::str_from_os_ref(&fname);
             let Some(name) = fname.strip_suffix(".trashinfo") else {
                 continue;
             };
             let take = match cutoff {
                 None => true,
                 Some(cut) => {
-                    let parsed = fs::read_to_string(&info_path).map(|c| info::parse(&c)).ok();
+                    let parsed = fs::read(&info_path).map(|c| info::parse_bytes(&c)).ok();
                     is_old(
                         parsed.as_ref().and_then(|i| i.deletion_date.as_deref()),
                         cut,
@@ -282,9 +283,9 @@ fn empty_one(
             };
             if take {
                 victims.push((
-                    files_dir.join(name),
+                    crate::util::join_name(&files_dir, name),
                     Some(info_path),
-                    dir.root.join("files").join(name),
+                    crate::util::join_name(&dir.root.join("files"), name),
                 ));
             } else {
                 kept_names.push(name.to_string());
@@ -298,9 +299,9 @@ fn empty_one(
         if let Ok(entries) = fs::read_dir(&files_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
-                let has_info = info_dir
-                    .join(format!("{}.trashinfo", name.to_string_lossy()))
-                    .exists();
+                let mut info_name = name;
+                info_name.push(".trashinfo");
+                let has_info = info_dir.join(info_name).exists();
                 if !has_info {
                     let p = entry.path();
                     victims.push((p.clone(), None, p));
@@ -316,7 +317,7 @@ fn empty_one(
             // to a disk_usage walk. Always add the .trashinfo size when present.
             let name = target
                 .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
+                .map(crate::util::str_from_os_ref)
                 .unwrap_or_default();
             let sz = if info_path.is_some() && !name.is_empty() {
                 sizes.entry_bytes(&name)
@@ -383,7 +384,7 @@ fn full_empty_dry_run(dir: &TrashDir, opts: &Opts, removed: &AtomicU64, bytes: &
         for entry in entries.flatten() {
             let p = entry.path();
             // Directory payloads: use validated directorysizes when present.
-            let sz = sizes.payload_bytes(&entry.file_name().to_string_lossy());
+            let sz = sizes.payload_bytes(&crate::util::str_from_os_ref(&entry.file_name()));
             total = total.saturating_add(sz);
             n_files += 1;
             if opts.verbose {
@@ -462,7 +463,8 @@ fn prune_directorysizes(dir: &TrashDir, kept: &[String]) {
         .filter(|line| {
             line.rsplit(' ').next().is_some_and(|enc| {
                 let decoded = url_decode(enc);
-                keep.contains(String::from_utf8_lossy(&decoded).as_ref())
+                let name = crate::util::str_from_os_ref(std::ffi::OsStr::from_bytes(&decoded));
+                keep.contains(name.as_str())
             })
         })
         .map(|l| format!("{l}\n"))

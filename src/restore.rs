@@ -84,7 +84,9 @@ impl Matcher {
         match self {
             Matcher::Name(n) => name_matches(e, n),
             Matcher::Glob(p) => glob_matches(e, p),
-            Matcher::Regex(re) => re.is_match(&e.original.to_string_lossy()),
+            Matcher::Regex(re) => {
+                re.is_match(&crate::util::str_from_os_ref(e.original.as_os_str()))
+            }
         }
     }
 }
@@ -135,7 +137,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     eprintln!("{prog}: --to needs a non-empty DIR");
                     return 2;
                 }
-                to = Some(PathBuf::from(d));
+                to = Some(crate::util::arg_path(d));
             }
             a if a.starts_with("--name=") => {
                 let n = &a["--name=".len()..];
@@ -185,7 +187,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 return 0;
             }
             a if a.starts_with("--trash-dir=") => {
-                trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
+                trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
@@ -196,7 +198,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     eprintln!("{prog}: only one PATH may be given");
                     return 2;
                 }
-                target = Some(PathBuf::from(a));
+                target = Some(crate::util::arg_path(a));
             }
         }
     }
@@ -448,12 +450,12 @@ pub fn parse_selection(line: &str, len: usize) -> Result<Vec<usize>, String> {
 /// directory part, else against the file name or the trash name.
 fn glob_matches(e: &list::Entry, pat: &str) -> bool {
     if pat.contains('/') {
-        return crate::util::fnmatch(pat, &e.original.to_string_lossy());
+        return crate::util::fnmatch(pat, &crate::util::str_from_os_ref(e.original.as_os_str()));
     }
     crate::util::fnmatch(pat, &e.name)
         || e.original
             .file_name()
-            .is_some_and(|f| crate::util::fnmatch(pat, &f.to_string_lossy()))
+            .is_some_and(|f| crate::util::fnmatch(pat, &crate::util::str_from_os_ref(f)))
 }
 
 /// Whether `e` goes by `name`: its original file name or its name under
@@ -462,7 +464,7 @@ fn name_matches(e: &list::Entry, name: &str) -> bool {
     e.name == name
         || e.original
             .file_name()
-            .is_some_and(|f| f == std::ffi::OsStr::new(name))
+            .is_some_and(|f| f == crate::util::os_from_str(name))
 }
 
 /// `{"restored": [...], "failed": N, "skipped": N}` for `restore --json`.
@@ -476,7 +478,7 @@ fn restored_json(restored: &[(&list::Entry, PathBuf)], failed: usize, skipped: u
             format!(
                 "{{\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\",\"restored_to\":\"{}\"}}",
                 json_escape(&e.original.to_string_lossy()),
-                json_escape(&e.name),
+                json_escape(&crate::util::show_name(&e.name)),
                 json_escape(&e.dir.root.to_string_lossy()),
                 json_escape(&dest.to_string_lossy()),
             )
@@ -582,13 +584,13 @@ pub(crate) fn restore_one_to(
     force: bool,
 ) -> Result<Restored, String> {
     let mut warnings = Vec::new();
-    let src = entry.dir.files().join(&entry.name);
+    let src = crate::util::join_name(&entry.dir.files(), &entry.name);
 
     // Never destroy the live destination until the trash payload is known good.
     if src.symlink_metadata().is_err() {
         return Err(format!(
             "trash payload missing for '{}' (stale .trashinfo?)",
-            entry.name
+            crate::util::show_name(&entry.name)
         ));
     }
 
@@ -612,11 +614,10 @@ pub(crate) fn restore_one_to(
 
     // Stage into the destination directory first, then swap over any blocker.
     // On failure the live dest (if any) is left intact.
-    let staged = parent.join(format!(
-        ".rtrash-restore-{}-{}",
-        std::process::id(),
-        entry.name
-    ));
+    let staged = crate::util::join_name(
+        parent,
+        &format!(".rtrash-restore-{}-{}", std::process::id(), entry.name),
+    );
     let _ = trashdir::remove_any_path(&staged);
     if let Err(e) = trashdir::relocate(&src, &staged) {
         let err = format!("cannot restore '{}' to staging area: {e}", src.display());
@@ -641,7 +642,7 @@ pub(crate) fn restore_one_to(
         return Err(err);
     }
 
-    let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
+    let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
     if let Err(e) = fs::remove_file(&info_path) {
         warnings.push(format!("cannot remove '{}': {e}", info_path.display()));
     }

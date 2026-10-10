@@ -467,6 +467,7 @@ Previously deferred items are implemented in the shipped put/empty path:
 - **EXDEV fidelity:** cross-device put/restore copies preserve content, symlink-as-link, mode, and mtime (not a bare content-only copy).
 - **Put/empty exclusion:** each trash root takes an exclusive `flock` on `.rtrash.lock` for put and empty so the pair cannot tear mid-operation.
 - **Btrfs multi-subvol topdir:** volume topdir is the **longest mount-point prefix** from `/proc/self/mounts`, not a pure `st_dev` parent walk.
+- **Names that are not UTF-8:** put keeps the bytes of such a name in `files/` and `info/`, so two such names never fold into one. A `.trashinfo` whose `Path=` carries raw bytes from another tool still lists and restores, and an age filter can empty it. Output shows each stray byte as the Unicode replacement character.
 - **Default multi-volume empty:** with no `--trash-dir`, empty/list/restore/rm discover home trash plus existing user trash on every non-pseudo mount (including `/`), matching trash-cli’s multi-volume default. Pin with `--trash-dir` in scripts.
 
 ## Limitations

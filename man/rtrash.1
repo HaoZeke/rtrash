@@ -45,6 +45,10 @@ is permanent delete of matching
 , not the same as multi-call
 .B rm
 (which puts).
+.PP
+File names need not be UTF-8. An argument or a trashed name with other
+bytes keeps them through every command. Output shows each such byte as
+the Unicode replacement character.
 .SH GLOBAL OPTIONS
 When
 .B rtrash

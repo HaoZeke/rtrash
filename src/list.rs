@@ -45,10 +45,10 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
         let paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
         // One read per item: spread a big trash over the rayon pool.
         out.par_extend(paths.into_par_iter().filter_map(|path| {
-            let fname = path.file_name()?.to_string_lossy().into_owned();
+            let fname = crate::util::str_from_os_ref(path.file_name()?);
             let name = fname.strip_suffix(".trashinfo")?;
-            let content = fs::read_to_string(&path).ok()?;
-            let parsed = info::parse(&content);
+            let content = fs::read(&path).ok()?;
+            let parsed = info::parse_bytes(&content);
             let epoch = parsed
                 .deletion_date
                 .as_deref()
@@ -155,7 +155,7 @@ pub fn entry_to_json_sized(e: &Entry, size: Option<u64>) -> String {
         "{{\"deletion_date\":\"{}\",\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\",\"batch\":{}{}}}",
         json_escape(date),
         json_escape(&e.original.to_string_lossy()),
-        json_escape(&e.name),
+        json_escape(&crate::util::show_name(&e.name)),
         json_escape(&e.dir.root.to_string_lossy()),
         batch,
         size,
@@ -231,7 +231,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 return 0;
             }
             a if a.starts_with("--trash-dir=") => {
-                trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
+                trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
             a if a.starts_with("--older-than=") => match parse_days_flag(a, "--older-than") {
                 Ok(d) => older_than = Some(d),

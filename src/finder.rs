@@ -157,7 +157,7 @@ fn list(prog: &str, args: &[String]) -> i32 {
         match a.as_str() {
             "--json" => json = true,
             a if a.starts_with("--trash-dir=") => {
-                pinned = Some(PathBuf::from(&a["--trash-dir=".len()..]))
+                pinned = Some(crate::util::arg_path(&a["--trash-dir=".len()..]))
             }
             a => {
                 eprintln!("{prog}: unrecognized argument '{a}'");
@@ -221,7 +221,7 @@ fn restore(prog: &str, args: &[String]) -> i32 {
                 }
             },
             a if a.starts_with("--trash-dir=") => {
-                pinned = Some(PathBuf::from(&a["--trash-dir=".len()..]))
+                pinned = Some(crate::util::arg_path(&a["--trash-dir=".len()..]))
             }
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
@@ -360,7 +360,7 @@ fn put(prog: &str, args: &[String]) -> i32 {
                 eprintln!("{prog}: unrecognized option '{a}'");
                 return 2;
             }
-            a => files.push(PathBuf::from(a)),
+            a => files.push(crate::util::arg_path(a)),
         }
     }
     let mut failed = false;

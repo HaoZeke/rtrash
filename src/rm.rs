@@ -1,6 +1,6 @@
 //! Selective permanent delete of trash entries (trash-cli `trash-rm` role).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::list;
 use crate::trashdir::{self, TrashDir};
@@ -77,7 +77,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 return 0;
             }
             a if a.starts_with("--trash-dir=") => {
-                trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
+                trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
             a if a.starts_with("--older-than=") => {
                 match parse_nonneg_days(&a["--older-than=".len()..]) {
@@ -159,11 +159,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut matched_paths: Vec<String> = Vec::new();
 
     for entry in &entries {
-        let path_s = entry.original.to_string_lossy();
+        let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
         let base = entry
             .original
             .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
+            .map(crate::util::str_from_os_ref)
             .unwrap_or_default();
         let hit = patterns.iter().any(|pat| {
             fnmatch(pat, path_s.as_ref())
@@ -173,8 +173,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         if !hit {
             continue;
         }
-        let payload = entry.dir.files().join(&entry.name);
-        let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
+        let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
+        let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
         let sz =
             crate::fastdelete::disk_usage(&payload) + crate::fastdelete::disk_usage(&info_path);
         if dry_run {
@@ -252,7 +252,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 /// the parent when there is none. The rest stays as typed, so a glob or
 /// the final name is never followed. `None` when nothing changes.
 fn resolve_pattern(pat: &str) -> Option<String> {
-    let path = Path::new(pat);
+    let path = crate::util::arg_path(pat);
     if !path.is_absolute() {
         return None;
     }
@@ -266,7 +266,7 @@ fn resolve_pattern(pat: &str) -> Option<String> {
     let prefix: PathBuf = comps[..split].iter().collect();
     let rest: PathBuf = comps[split..].iter().collect();
     let out = trashdir::resolve_existing(&prefix).join(rest);
-    let out = out.to_str()?.to_string();
+    let out = crate::util::str_from_os_ref(out.as_os_str());
     // A trailing slash typed by the user is part of the pattern.
     let out = if pat.ends_with('/') && !out.ends_with('/') {
         out + "/"

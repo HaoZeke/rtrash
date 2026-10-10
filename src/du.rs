@@ -1616,7 +1616,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     while i < args.len() {
         let arg = args[i].as_str();
         if no_more_opts || arg == "-" || !arg.starts_with('-') {
-            paths.push(PathBuf::from(arg));
+            paths.push(crate::util::arg_path(arg));
             i += 1;
             continue;
         }
@@ -1645,12 +1645,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--output", Some("-o")) {
             match v {
-                Ok(v) => output = Some(PathBuf::from(v)),
+                Ok(v) => output = Some(crate::util::arg_path(v)),
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--file", Some("-f")) {
             match v {
-                Ok(v) => from_file = Some(PathBuf::from(v)),
+                Ok(v) => from_file = Some(crate::util::arg_path(v)),
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--sort", None) {
@@ -1668,7 +1668,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--exclude-from", Some("-X")) {
-            match v.map(|v| (v, du_filter::read_pattern_file(Path::new(v)))) {
+            match v.map(|v| (v, du_filter::read_pattern_file(&crate::util::arg_path(v)))) {
                 Ok((_, Ok(lines))) => filter.patterns.extend(lines),
                 Ok((v, Err(e))) => {
                     eprintln!("{prog}: cannot read pattern file '{v}': {e}");
@@ -1703,7 +1703,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--no-git" => use_git = false,
                 "--home-only" => home_only = true,
                 a if a.starts_with("--trash-dir=") => {
-                    trash_pins.push(PathBuf::from(&a["--trash-dir=".len()..]));
+                    trash_pins.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
                 }
                 "--include-dirty" => include_dirty = true,
                 "--pick" => pick = true,

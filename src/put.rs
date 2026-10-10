@@ -113,7 +113,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 
     for arg in args {
         if no_more_opts || arg == "-" || !arg.starts_with('-') {
-            files.push(PathBuf::from(arg));
+            files.push(crate::util::arg_path(arg));
             continue;
         }
         match arg.as_str() {
@@ -165,7 +165,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 if opts.trash_pin.is_some() {
                     return usage_err(prog, "put accepts only one --trash-dir=PATH");
                 }
-                opts.trash_pin = Some(PathBuf::from(&a["--trash-dir=".len()..]));
+                opts.trash_pin = Some(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
             long if long.starts_with("--") => {
                 return usage_err(prog, &format!("unrecognized option '{long}'"));

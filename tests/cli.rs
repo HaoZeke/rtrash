@@ -1992,3 +1992,127 @@ fn environment_beats_the_config_file() {
         Some(2)
     );
 }
+
+/// Linux only: macOS file systems refuse names that are not UTF-8.
+#[cfg(target_os = "linux")]
+fn run_os(sb: &Sandbox, args: &[&std::ffi::OsStr]) -> Output {
+    Command::new(bin())
+        .args(args)
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .output()
+        .expect("failed to run rtrash")
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn names_that_are_not_utf8_put_list_rm_restore_and_empty() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let sb = Sandbox::new("nonutf8");
+    let a = OsStr::from_bytes(b"name\xe9");
+    let b = OsStr::from_bytes(b"name\xe8");
+    let d = OsStr::from_bytes(b"d\xff");
+    fs::write(sb.work().join(a), "a").unwrap();
+    fs::write(sb.work().join(b), "bb").unwrap();
+    fs::create_dir(sb.work().join(d)).unwrap();
+    fs::write(sb.work().join(d).join("inner"), "z").unwrap();
+
+    // Used to panic in argument parsing.
+    let put = run_os(&sb, &[OsStr::new("put"), OsStr::new("-r"), a, b, d]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    // Each name keeps its own bytes in the trash: no folding into U+FFFD.
+    for n in [a, b, d] {
+        assert!(sb.trash().join("files").join(n).exists(), "{n:?}");
+        let mut info = n.to_os_string();
+        info.push(".trashinfo");
+        assert!(sb.trash().join("info").join(info).exists(), "{n:?}");
+    }
+    let sizes = fs::read_to_string(sb.trash().join("directorysizes")).unwrap();
+    assert!(sizes.trim_end().ends_with(" d%FF"), "{sizes}");
+    let list = stdout_of(&sb.run(&["list", "--json"]));
+    assert_eq!(list.matches("\"name\":").count(), 3, "{list}");
+    assert!(!list.contains('\u{10FFFF}'), "{list}");
+
+    // rm by the raw name removes that item only.
+    let rm = run_os(&sb, &[OsStr::new("rm"), b]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    assert!(!sb.trash().join("files").join(b).exists());
+    assert!(sb.trash().join("files").join(a).exists());
+
+    let restore = run_os(&sb, &[OsStr::new("restore"), a]);
+    assert!(restore.status.success(), "{}", stderr_of(&restore));
+    assert_eq!(fs::read(sb.work().join(a)).unwrap(), b"a");
+
+    // A days filter leaves recent items; a full empty takes the pair.
+    let keep = sb.run(&["empty", "-f", "30"]);
+    assert!(keep.status.success(), "{}", stderr_of(&keep));
+    assert!(sb.trash().join("files").join(d).exists());
+    let all = sb.run(&["empty", "-f"]);
+    assert!(all.status.success(), "{}", stderr_of(&all));
+    assert_eq!(fs::read_dir(sb.trash().join("files")).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(sb.trash().join("info")).unwrap().count(), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn trashinfo_with_raw_bytes_lists_restores_and_ages_out() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let sb = Sandbox::new("rawinfo");
+    let files = sb.trash().join("files");
+    let info = sb.trash().join("info");
+    fs::create_dir_all(&files).unwrap();
+    fs::create_dir_all(&info).unwrap();
+    // Another tool wrote the path bytes unescaped; read_to_string dropped it.
+    let mut body = b"[Trash Info]\nPath=".to_vec();
+    body.extend_from_slice(sb.work().as_os_str().as_bytes());
+    body.extend_from_slice(b"/raw\xfe\nDeletionDate=2020-01-01T00:00:00\n");
+    fs::write(info.join("raw.trashinfo"), &body).unwrap();
+    fs::write(files.join("raw"), "r").unwrap();
+
+    let list = stdout_of(&sb.run(&["list"]));
+    assert!(list.contains("/raw\u{fffd}"), "{list}");
+    let name = OsStr::from_bytes(b"raw\xfe");
+    let restore = run_os(&sb, &[OsStr::new("restore"), name]);
+    assert!(restore.status.success(), "{}", stderr_of(&restore));
+    assert_eq!(fs::read(sb.work().join(name)).unwrap(), b"r");
+
+    // Same file again, now aged out by `empty DAYS`.
+    fs::write(info.join("raw.trashinfo"), &body).unwrap();
+    fs::write(files.join("raw"), "r").unwrap();
+    let empty = sb.run(&["empty", "-f", "1"]);
+    assert!(empty.status.success(), "{}", stderr_of(&empty));
+    assert!(!files.join("raw").exists());
+    assert!(!info.join("raw.trashinfo").exists());
+}
+
+#[test]
+fn missing_payload_lists_refuses_restore_and_empties() {
+    let sb = Sandbox::new("ghost");
+    let info = sb.trash().join("info");
+    fs::create_dir_all(sb.trash().join("files")).unwrap();
+    fs::create_dir_all(&info).unwrap();
+    let body = format!(
+        "[Trash Info]\nPath={}/ghost\nDeletionDate=2020-01-01T00:00:00\n",
+        sb.work().display()
+    );
+    fs::write(info.join("ghost.trashinfo"), body).unwrap();
+
+    assert!(stdout_of(&sb.run(&["list"])).contains("/ghost"));
+    let restore = sb.run(&["restore", "ghost"]);
+    assert_eq!(restore.status.code(), Some(1));
+    assert!(
+        stderr_of(&restore).contains("trash payload missing for 'ghost'"),
+        "{}",
+        stderr_of(&restore)
+    );
+    assert!(!sb.work().join("ghost").exists());
+    let status = sb.run(&["status"]);
+    assert!(status.status.success(), "{}", stderr_of(&status));
+    let empty = sb.run(&["empty", "-f", "1"]);
+    assert!(empty.status.success(), "{}", stderr_of(&empty));
+    assert!(!info.join("ghost.trashinfo").exists());
+}

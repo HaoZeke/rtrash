@@ -63,7 +63,7 @@ fn put_paths(py: Python<'_>, paths: Vec<PathBuf>, recursive: bool, force: bool) 
     // Always non-interactive for the in-process API (no put TUI).
     args.push("--plain".into());
     for p in &paths {
-        args.push(p.as_os_str().to_string_lossy().into_owned());
+        args.push(crate::util::str_from_os_ref(p.as_os_str()));
     }
     let code = py.detach(|| put_mod::run("rtrash", &args));
     map_code(code, "put")
@@ -182,7 +182,7 @@ fn restore_path(
     if let Some(p) = trash_dir {
         args.push(format!("--trash-dir={}", p.display()));
     }
-    args.push(path.as_os_str().to_string_lossy().into_owned());
+    args.push(crate::util::str_from_os_ref(path.as_os_str()));
     let code = py.detach(|| restore::run("rtrash", &args));
     map_code(code, "restore")
 }

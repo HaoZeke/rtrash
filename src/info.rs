@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use crate::util::{url_decode, url_encode};
+use crate::util::{url_decode_bytes, url_encode};
 
 pub struct TrashInfo {
     /// Original path, absolute or relative to the trash topdir.
@@ -50,23 +50,31 @@ pub fn render_batch(original: &Path, date: &str, batch: Option<&str>) -> String 
 
 /// Parse a `.trashinfo` file body. Per spec, the first occurrence of a key wins.
 pub fn parse(content: &str) -> TrashInfo {
+    parse_bytes(content.as_bytes())
+}
+
+/// [`parse`] for raw file bytes. Another tool may write a `Path=` with
+/// bytes that are not UTF-8 instead of escaping them; those bytes are kept,
+/// so the item still lists and restores to the right place.
+pub fn parse_bytes(content: &[u8]) -> TrashInfo {
     let mut path = PathBuf::new();
     let mut date = None;
     let mut batch = None;
-    let batch_prefix = format!("{BATCH_KEY}=");
-    for line in content.lines() {
-        if let Some(v) = line.strip_prefix("Path=") {
+    let batch_key = format!("{BATCH_KEY}=");
+    for line in content.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if let Some(v) = line.strip_prefix(b"Path=") {
             if path.as_os_str().is_empty() {
-                path = PathBuf::from(OsString::from_vec(url_decode(v.trim_end())));
+                path = PathBuf::from(OsString::from_vec(url_decode_bytes(trim_end(v))));
             }
-        } else if let Some(v) = line.strip_prefix("DeletionDate=") {
+        } else if let Some(v) = line.strip_prefix(b"DeletionDate=") {
             if date.is_none() {
-                date = Some(v.trim().to_string());
+                date = Some(String::from_utf8_lossy(trim_end(trim_start(v))).into_owned());
             }
-        } else if let Some(v) = line.strip_prefix(batch_prefix.as_str()) {
-            let v = v.trim();
+        } else if let Some(v) = line.strip_prefix(batch_key.as_bytes()) {
+            let v = trim_end(trim_start(v));
             if batch.is_none() && !v.is_empty() {
-                batch = Some(v.to_string());
+                batch = Some(String::from_utf8_lossy(v).into_owned());
             }
         }
     }
@@ -75,6 +83,26 @@ pub fn parse(content: &str) -> TrashInfo {
         deletion_date: date,
         batch,
     }
+}
+
+fn trim_end(mut b: &[u8]) -> &[u8] {
+    while let [rest @ .., last] = b {
+        if !last.is_ascii_whitespace() {
+            break;
+        }
+        b = rest;
+    }
+    b
+}
+
+fn trim_start(mut b: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = b {
+        if !first.is_ascii_whitespace() {
+            break;
+        }
+        b = rest;
+    }
+    b
 }
 
 /// Current local time as `YYYY-MM-DDTHH:MM:SS` (the trashinfo format).

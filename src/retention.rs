@@ -167,7 +167,7 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
     for i in plan(&items, p.max, p.policy) {
         let c = &items[i];
         let dir = &dirs[c.root];
-        let shown = dir.files().join(&c.name);
+        let shown = crate::util::join_name(&dir.files(), &c.name);
         if p.dry_run {
             if p.verbose {
                 println!(
@@ -203,8 +203,8 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
 }
 
 fn remove_entry(dir: &TrashDir, name: &str) -> io::Result<()> {
-    trashdir::remove_any_path(&dir.files().join(name))?;
-    match fs::remove_file(dir.info().join(format!("{name}.trashinfo"))) {
+    trashdir::remove_any_path(&crate::util::join_name(&dir.files(), name))?;
+    match fs::remove_file(crate::util::join_info(&dir.info(), name)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }

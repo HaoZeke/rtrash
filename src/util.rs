@@ -31,9 +31,123 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+/// First code point of the range that carries raw bytes through a `String`.
+/// A byte `b` that is not part of valid UTF-8 becomes `U+10FF00 + b`, a
+/// private-use character. Byte values below 0x80 are always valid, so
+/// only `U+10FF80..=U+10FFFF` ever shows up.
+const RAW_BYTE_BASE: u32 = 0x10_FF00;
+
+/// Turn an OS string (an argument or a file name) into a `String` without
+/// losing bytes. Valid UTF-8 passes through; each stray byte becomes one
+/// private-use character that [`os_from_str`] turns back into that byte.
+/// Windows strings are UTF-16 and almost always valid, so they go through
+/// lossy conversion there.
+pub fn str_from_os(s: std::ffi::OsString) -> String {
+    match s.into_string() {
+        Ok(s) => s,
+        Err(s) => escape_bytes(&os_bytes(&s)),
+    }
+}
+
+/// [`str_from_os`] for a borrowed name.
+pub fn str_from_os_ref(s: &std::ffi::OsStr) -> String {
+    match s.to_str() {
+        Some(s) => s.to_string(),
+        None => escape_bytes(&os_bytes(s)),
+    }
+}
+
+#[cfg(unix)]
+fn os_bytes(s: &std::ffi::OsStr) -> std::borrow::Cow<'_, [u8]> {
+    use std::os::unix::ffi::OsStrExt;
+    std::borrow::Cow::Borrowed(s.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn os_bytes(s: &std::ffi::OsStr) -> std::borrow::Cow<'_, [u8]> {
+    std::borrow::Cow::Owned(s.to_string_lossy().into_owned().into_bytes())
+}
+
+fn escape_bytes(mut b: &[u8]) -> String {
+    let mut out = String::with_capacity(b.len() + 8);
+    loop {
+        match std::str::from_utf8(b) {
+            Ok(s) => {
+                out.push_str(s);
+                return out;
+            }
+            Err(e) => {
+                let (good, rest) = b.split_at(e.valid_up_to());
+                // from_utf8 already checked this prefix.
+                out.push_str(std::str::from_utf8(good).unwrap_or_default());
+                let bad = e.error_len().unwrap_or(rest.len());
+                for &x in &rest[..bad] {
+                    out.extend(char::from_u32(RAW_BYTE_BASE + u32::from(x)));
+                }
+                b = &rest[bad..];
+            }
+        }
+    }
+}
+
+/// Inverse of [`str_from_os`]: private-use characters in the raw-byte
+/// range become their bytes again.
+pub fn os_from_str(s: &str) -> std::ffi::OsString {
+    let raw = |c: char| (RAW_BYTE_BASE + 0x80..=RAW_BYTE_BASE + 0xFF).contains(&u32::from(c));
+    if !s.chars().any(raw) {
+        return s.into();
+    }
+    let mut out = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        if raw(c) {
+            out.push((u32::from(c) - RAW_BYTE_BASE) as u8);
+        } else {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    os_from_bytes(out)
+}
+
+#[cfg(unix)]
+fn os_from_bytes(b: Vec<u8>) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStringExt;
+    std::ffi::OsString::from_vec(b)
+}
+
+#[cfg(not(unix))]
+fn os_from_bytes(b: Vec<u8>) -> std::ffi::OsString {
+    String::from_utf8_lossy(&b).into_owned().into()
+}
+
+/// A path argument as the OS spells it: [`os_from_str`] as a `PathBuf`.
+pub fn arg_path(s: &str) -> std::path::PathBuf {
+    os_from_str(s).into()
+}
+
+/// A name kept by [`str_from_os`] as text for people and JSON: stray bytes
+/// show as U+FFFD, like a lossy path.
+pub fn show_name(name: &str) -> String {
+    os_from_str(name).to_string_lossy().into_owned()
+}
+
+/// `dir/NAME` for a name kept by [`str_from_os`].
+pub fn join_name(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    dir.join(os_from_str(name))
+}
+
+/// `dir/NAME.trashinfo` for a name kept by [`str_from_os`].
+pub fn join_info(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    dir.join(os_from_str(&format!("{name}.trashinfo")))
+}
+
 /// Decode `%XX` sequences; malformed escapes pass through verbatim.
 pub fn url_decode(s: &str) -> Vec<u8> {
-    let b = s.as_bytes();
+    url_decode_bytes(s.as_bytes())
+}
+
+/// [`url_decode`] for a raw byte value.
+pub fn url_decode_bytes(b: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
@@ -125,7 +239,7 @@ pub fn items_json(
             format!(
                 "{{\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\"}}",
                 json_escape(&original.to_string_lossy()),
-                json_escape(name),
+                json_escape(&show_name(name)),
                 json_escape(&dir.to_string_lossy()),
             )
         })
