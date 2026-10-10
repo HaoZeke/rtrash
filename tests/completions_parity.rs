@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 
 const SUBCOMMANDS: &[&str] = &[
-    "put", "empty", "list", "status", "du", "restore", "undo", "rm",
+    "put", "empty", "list", "status", "du", "restore", "undo", "rm", "finder",
 ];
 
 fn bin() -> &'static str {

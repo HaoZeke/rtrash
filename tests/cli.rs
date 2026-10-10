@@ -1779,3 +1779,84 @@ fn put_prunes_to_rtrash_max_size_but_keeps_its_own_items() {
         stderr_of(&out)
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn finder_list_and_restore_use_put_back_records() {
+    use rtrash::ds_store::{write, Record, Value};
+    let sb = Sandbox::new("finder");
+    let trash = sb.root.join(".Trash");
+    fs::create_dir(&trash).unwrap();
+    // Finder renames a clashing item inside the trash and records the
+    // original folder (volume-relative) and name.
+    let folder = sb.work().strip_prefix("/").unwrap().display().to_string() + "/";
+    let rec = |name: &str, code: &[u8; 4], s: &str| Record {
+        name: name.into(),
+        code: *code,
+        value: Value::Ustr(s.into()),
+    };
+    fs::write(trash.join("note 12.00.01.txt"), b"one").unwrap();
+    fs::create_dir(trash.join("dir")).unwrap();
+    fs::write(trash.join("dir/inner"), b"in").unwrap();
+    fs::write(trash.join("orphan"), b"?").unwrap();
+    fs::write(
+        trash.join(".DS_Store"),
+        write(&[
+            rec("note 12.00.01.txt", b"ptbL", &folder),
+            rec("note 12.00.01.txt", b"ptbN", "note.txt"),
+            rec("dir", b"ptbL", &format!("{folder}sub/")),
+        ]),
+    )
+    .unwrap();
+
+    // The default trash is ~/.Trash.
+    let out = sb.run(&["finder", "list"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let s = stdout_of(&out);
+    let note = sb.work().join("note.txt");
+    assert!(
+        s.contains(&format!("note 12.00.01.txt -> {}", note.display())),
+        "{s}"
+    );
+    assert!(s.contains("orphan -> ?"), "{s}");
+    assert!(!s.contains(".DS_Store"), "{s}");
+
+    let json = stdout_of(&sb.run(&["finder", "list", "--json"]));
+    assert!(
+        json.contains("{\"name\":\"orphan\",\"original\":null}"),
+        "{json}"
+    );
+
+    // Restore by original path; the clash policy applies as in restore.
+    fs::write(&note, b"live").unwrap();
+    let out = sb.run(&["finder", "restore", &note.display().to_string()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr_of(&out).contains("refusing to overwrite"));
+    let out = sb.run(&[
+        "finder",
+        "restore",
+        "--conflict=rename",
+        "--json",
+        &note.display().to_string(),
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(fs::read(sb.work().join("note.1.txt")).unwrap(), b"one");
+    assert_eq!(fs::read(&note).unwrap(), b"live");
+
+    // --all restores what has a record and leaves the orphan.
+    let out = sb.run(&["finder", "restore", "--all"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(fs::read(sb.work().join("sub/dir/inner")).unwrap(), b"in");
+    assert!(trash.join("orphan").exists());
+    let out = sb.run(&["finder", "restore", "orphan"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr_of(&out).contains("no Put Back record"));
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let out = sb.run(&["finder", "put", "x"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(stderr_of(&out).contains("macOS only"));
+    }
+    assert_eq!(sb.run(&["finder"]).status.code(), Some(2));
+}

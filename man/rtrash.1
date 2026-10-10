@@ -730,6 +730,82 @@ Display help and exit.
 Output version information and exit.
 .PP
 Exit status 0 means every item came back; 1 means nothing matched or an item failed.
+.SS finder
+.B rtrash finder put
+[\fB\-v\fR] [\fB\-f\fR] \fIFILE\fR...
+.br
+.B rtrash finder list
+[\fB\-\-json\fR] [\fB\-\-trash\-dir=\fIDIR\fR]
+.br
+.B rtrash finder restore
+[\fIOPTION\fR]... \fINAME\fR|\fIORIGINAL\fR...
+.PP
+Use the macOS Finder Trash, with Put Back.
+.B put
+asks Finder (through
+.BR osascript )
+to move each
+.I FILE
+to the Trash, so Finder records the original location and its own Put
+Back works; macOS only, and symbolic links get refused.
+.B list
+prints each item as
+.RB \(oq "NAME \-> ORIGINAL\-PATH" \(cq,
+reading Finder's Put Back records
+.RI ( ptbL
+and
+.IR ptbN )
+from the trash's
+.IR .DS_Store ,
+with
+.B ?
+for an item without one.
+.B restore
+moves items back, matched by their name inside the trash or by original
+path, and leaves
+.I .DS_Store
+for Finder to tidy.
+List and restore read files only, so they also run on Linux against a
+copied trash.
+Experimental: tested against crafted
+.I .DS_Store
+files, not yet against Finder.
+.TP
+.BI \-\-trash\-dir= DIR
+Use this Finder trash (default
+.IR ~/.Trash ).
+For a volume trash such as
+.IR /Volumes/X/.Trashes/501 ,
+Put Back paths count from the volume root above
+.IR .Trashes .
+.TP
+.B \-\-all
+Restore every item that has a Put Back record.
+.TP
+.BR \-f ", " \-\-force
+Put: ignore missing files.
+Restore: overwrite an existing destination (same as
+.BR \-\-conflict=overwrite ).
+.TP
+.BI \-\-conflict= POLICY
+.BR refuse " (default), " overwrite ,
+.B rename
+or
+.BR skip ,
+as for
+.BR restore .
+.TP
+.BR \-v ", " \-\-verbose
+Put: name each trashed file.
+.TP
+.B \-\-json
+List: a JSON array of
+.RI { name ", " original }.
+Restore:
+.BR {"restored": [...], "failed": N, "skipped": N} .
+.TP
+.B \-\-help
+Display help and exit.
 .SS setup
 .B rtrash setup
 [\fIOPTION\fR]...

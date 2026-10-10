@@ -390,7 +390,7 @@ impl Plan<'_> {
 
 /// The first `STEM.N.EXT` (or `NAME.N` without an extension) next to
 /// `dest` that does not exist yet.
-fn free_name(dest: &Path) -> PathBuf {
+pub(crate) fn free_name(dest: &Path) -> PathBuf {
     let parent = dest.parent().unwrap_or(Path::new(""));
     let stem = dest.file_stem().unwrap_or_default().to_string_lossy();
     let ext = dest.extension().map(|e| e.to_string_lossy());

@@ -7,7 +7,7 @@ function __rtrash_seen_subcommand
     set -e cmd[1]
     for c in $cmd
         switch $c
-            case put empty list status du restore undo rm setup keys completions man
+            case put empty list status du restore undo rm finder setup keys completions man
                 echo $c
                 return 0
         end
@@ -24,6 +24,7 @@ complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'du' -d 'find the lar
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'restore' -d 'restore a trashed item'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'undo' -d 'restore everything one put run trashed'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'rm' -d 'permanently delete matching trash entries'
+complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'finder' -d 'macOS Finder Trash with Put Back'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'setup' -d 'install multi-call links, completions, man page'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'keys' -d 'show or sample the TUI keybind config'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'completions' -d 'print embedded shell completion script'
@@ -94,6 +95,16 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l pick -d
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s i -l interactive -d 'explore one directory at a time; trash, undo, rescan'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s o -l output -r -d 'write a snapshot of every directory total'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s f -l file -r -d 'list from a snapshot instead of scanning'
+
+# finder
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -f -a 'put list restore'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -l trash-dir -r -d 'use this Finder trash'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -l all -d 'restore every item with a Put Back record'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -s f -l force -d 'put: ignore missing; restore: overwrite'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -l conflict -x -a 'refuse overwrite rename skip' -d 'when the destination exists'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -s v -l verbose -d 'put: name each trashed file'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -l json -d 'print JSON'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -l help -d 'display help'
 
 # undo
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -f

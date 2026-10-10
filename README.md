@@ -101,7 +101,7 @@ $ pip install rtrash
 | OS | Backend | Notes |
 | -- | ------- | ----- |
 | **Linux** | FreeDesktop home + per-mount trash | Primary niche; multi-call `setup`, musl releases, full suite tests |
-| **macOS** | FreeDesktop **home** trash only (experimental) | `$XDG_DATA_HOME/Trash` or `~/.local/share/Trash`. **Not** Finder / system Trash |
+| **macOS** | FreeDesktop **home** trash (experimental); Finder Trash through `rtrash finder` (experimental, untested on a real Mac) | `$XDG_DATA_HOME/Trash` or `~/.local/share/Trash`; `rtrash finder` uses `~/.Trash` with Put Back |
 | **Windows** | System **Recycle Bin** (shell APIs) | put/list/restore/empty/rm/status/du. **Not** FreeDesktop on-disk layout. Multi-call `setup` is Unix-oriented |
 
 On Linux/macOS TTY, bare `rtrash restore` opens the **interactive restore browser** (ratatui). Windows uses numbered restore selection (no TUI).
@@ -407,6 +407,19 @@ Items trashed by gio, Dolphin or trash-cli carry no batch id, so undo never pick
 It refuses to overwrite a path that exists again unless given `-f`.
 The library shares one id across a process, so a Python session counts as one run.
 
+### `rtrash finder put|list|restore` (macOS Finder Trash)
+
+> **Experimental and untested on a real Mac.** The `.DS_Store` reader passes tests on files written by rtrash and by the Python `ds_store` package, and put compiles for macOS. Neither has run against Finder yet.
+
+| Invocation | Behavior |
+|------------|----------|
+| `rtrash finder put FILE...` | Ask Finder (through `osascript`) to trash each file, so Finder's own Put Back works. macOS only; symbolic links get refused |
+| `rtrash finder list` | `NAME -> ORIGINAL-PATH` for each item in `~/.Trash`, read from the Put Back records in its `.DS_Store` (`?` when none) |
+| `rtrash finder restore NAME\|ORIGINAL...` | Move items back to their Put Back location; `--all`, `--conflict=…` and `--json` work as for restore |
+| `--trash-dir=DIR` | Another Finder trash, such as `/Volumes/X/.Trashes/501` (Put Back paths count from the volume root) |
+
+List and restore only read files, so they also work on Linux against a copied trash.
+
 ### `rtrash rm PATTERN...` (also `trash-rm`)
 
 Permanently deletes trash entries whose original path, basename, or trash name matches a shell-style glob `PATTERN` (quote globs from the shell).
@@ -426,7 +439,7 @@ Previously deferred items are implemented in the shipped put/empty path:
 
 ## Limitations
 
-- **Platform:** Linux FreeDesktop is the primary niche. macOS is experimental FreeDesktop **home** trash (not Finder). Windows uses the system Recycle Bin (not FreeDesktop layout).
+- **Platform:** Linux FreeDesktop is the primary niche. macOS is experimental FreeDesktop **home** trash; the Finder Trash lives behind `rtrash finder`, also experimental and untested on a real Mac. Windows uses the system Recycle Bin (not FreeDesktop layout).
 - **Restore UI:** bare `rtrash restore` on a TTY opens the **ratatui restore browser** (filter, navigate, multi-restore). Use `--plain` or a piped index for non-interactive selection. Scripts and path restore stay first-class.
 - **Not a general soft-delete database:** only the FreeDesktop on-disk layout.
 - **EXDEV does not re-create xattrs/ACLs/hardlinks** (mode+mtime+symlink+bytes only).

@@ -11,6 +11,7 @@ pub mod platform;
 pub mod util;
 pub mod win_recycle;
 
+pub mod ds_store;
 pub mod du;
 pub mod du_fs;
 pub mod du_git;
@@ -23,6 +24,8 @@ pub mod empty;
 pub mod empty_tui;
 #[cfg(unix)]
 pub mod fastdelete;
+#[cfg(unix)]
+pub mod finder;
 #[cfg(unix)]
 pub mod info;
 #[cfg(unix)]
@@ -103,6 +106,13 @@ pub mod setup {
 pub mod undo {
     pub fn run(prog: &str, _args: &[String]) -> i32 {
         eprintln!("{prog}: undo needs the FreeDesktop trash; on Windows, use restore");
+        1
+    }
+}
+#[cfg(windows)]
+pub mod finder {
+    pub fn run(prog: &str, _args: &[String]) -> i32 {
+        eprintln!("{prog}: the Finder Trash exists on macOS only");
         1
     }
 }

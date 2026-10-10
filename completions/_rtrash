@@ -3,7 +3,7 @@
 # Preferred install: rtrash setup
 # Or: rtrash completions zsh > …/zsh/site-functions/_rtrash
 
-local -a put_opts empty_opts list_opts status_opts du_opts restore_opts undo_opts rm_opts
+local -a put_opts empty_opts list_opts status_opts du_opts restore_opts undo_opts finder_opts rm_opts
 
 put_opts=(
   '(-f --force)'{-f,--force}'[ignore nonexistent files, never prompt]'
@@ -90,6 +90,18 @@ du_opts=(
   '*:path:_files -/'
 )
 
+finder_opts=(
+  '1:action:(put list restore)'
+  '*--trash-dir=[use this Finder trash]:path:_files -/'
+  '--all[restore every item with a Put Back record]'
+  '(-f --force)'{-f,--force}'[put: ignore missing files; restore: overwrite]'
+  '--conflict=[when the destination exists]:policy:(refuse overwrite rename skip)'
+  '(-v --verbose)'{-v,--verbose}'[put: name each trashed file]'
+  '--json[print JSON]'
+  '(- *)'--help'[display help and exit]'
+  '*:file:_files'
+)
+
 undo_opts=(
   '(-l --list)'{-l,--list}'[list put runs, newest first]'
   '(-n --dry-run)'{-n,--dry-run}'[show what would be restored]'
@@ -173,6 +185,7 @@ _rtrash_dispatch() {
     'restore:restore a trashed item'
     'undo:restore everything one put run trashed'
     'rm:permanently delete matching trash entries'
+    'finder:macOS Finder Trash with Put Back'
     'setup:install multi-call links, completions, man page'
     'keys:show or sample the TUI keybind config'
     'completions:print embedded shell completion script'
@@ -215,6 +228,9 @@ _rtrash_dispatch() {
           ;;
         undo)
           _arguments -s -C $undo_opts
+          ;;
+        finder)
+          _arguments -s -C $finder_opts
           ;;
         rm)
           _arguments -s -C $rm_opts
