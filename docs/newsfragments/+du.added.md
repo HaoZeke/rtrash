@@ -1,0 +1,1 @@
+du: new subcommand that lists the largest directories and files under one or more paths, with on-disk and apparent sizes and the age of the newest change. It walks in parallel, never follows symlinks, counts hard links once, and takes `-x`, `--max-depth`, age filters, `--json` and `--print0`.

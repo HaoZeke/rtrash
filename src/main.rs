@@ -1,6 +1,6 @@
 #[cfg(all(unix, feature = "tui"))]
 use rtrash::tui_binds;
-use rtrash::{empty, list, put, restore, rm, setup, status};
+use rtrash::{du, empty, list, put, restore, rm, setup, status};
 
 const HELP: &str = "\
 Usage: rtrash <COMMAND> [ARGS]...
@@ -12,6 +12,7 @@ Commands:
   empty [OPTION]... [DAYS]    purge trashed items, optionally older than DAYS
   list [OPTION]...            list trashed items
   status [OPTION]...          item count and reclaimable size summary
+  du [OPTION]... [PATH]...    find the largest directories and files to trash
   restore [OPTION]... [PATH]  restore a trashed item
   rm PATTERN...               permanently delete matching trash entries
   setup [OPTION]...           install multi-call links, completions, man page
@@ -52,6 +53,7 @@ fn main() {
             Some("empty") => empty::run(&argv0, &rest[1..]),
             Some("list") => list::run(&argv0, &rest[1..]),
             Some("status") => status::run(&argv0, &rest[1..]),
+            Some("du") => du::run(&argv0, &rest[1..]),
             Some("restore") => restore::run(&argv0, &rest[1..]),
             Some("rm") => rm::run(&argv0, &rest[1..]),
             Some("setup") => setup::run("setup", &rest[1..]),

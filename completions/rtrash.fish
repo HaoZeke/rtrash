@@ -7,7 +7,7 @@ function __rtrash_seen_subcommand
     set -e cmd[1]
     for c in $cmd
         switch $c
-            case put empty list status restore rm setup completions man
+            case put empty list status du restore rm setup completions man
                 echo $c
                 return 0
         end
@@ -20,6 +20,7 @@ complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'put' -d 'move files 
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'empty' -d 'purge trashed items'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'list' -d 'list trashed items'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'status' -d 'item count and reclaimable size summary'
+complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'du' -d 'find the largest directories and files to trash'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'restore' -d 'restore a trashed item'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'rm' -d 'permanently delete matching trash entries'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'setup' -d 'install multi-call links, completions, man page'
@@ -63,6 +64,19 @@ for sub in list status
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l newer-than -d 'only items within last DAYS days' -r
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l json -d 'JSON output'
 end
+
+# du
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s n -l top -d 'list N directories and N files' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s x -l one-file-system -d 'skip directories on other file systems'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l apparent -d 'rank by apparent size instead of disk use'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l max-depth -d 'list only entries at most N levels deep' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l all-dirs -d 'list every directory level'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dirs -d 'list directories only'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l files -d 'list files only'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l older-than -d 'only entries untouched for more than DAYS days' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l newer-than -d 'only entries modified within the last DAYS days' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l json -d 'emit a JSON object'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l print0 -d 'print listed paths NUL-separated'
 
 # restore
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s f -l force -d 'overwrite existing file at original location'

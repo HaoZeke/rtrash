@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-const SUBCOMMANDS: &[&str] = &["put", "empty", "list", "status", "restore", "rm"];
+const SUBCOMMANDS: &[&str] = &["put", "empty", "list", "status", "du", "restore", "rm"];
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_rtrash")

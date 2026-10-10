@@ -3,7 +3,7 @@
 # Preferred install: rtrash setup
 # Or: rtrash completions zsh > …/zsh/site-functions/_rtrash
 
-local -a put_opts empty_opts list_opts status_opts restore_opts rm_opts
+local -a put_opts empty_opts list_opts status_opts du_opts restore_opts rm_opts
 
 put_opts=(
   '(-f --force)'{-f,--force}'[ignore nonexistent files, never prompt]'
@@ -56,6 +56,23 @@ status_opts=(
   '--json[emit a JSON object]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
+)
+
+du_opts=(
+  '(-n --top)'{-n,--top=}'[list N directories and N files]:N:'
+  '(-x --one-file-system)'{-x,--one-file-system}'[skip directories on other file systems]'
+  '--apparent[rank by apparent size instead of disk use]'
+  '--max-depth=[list only entries at most N levels deep]:N:'
+  '--all-dirs[list every directory level]'
+  '--dirs[list directories only]'
+  '--files[list files only]'
+  '--older-than=[only entries untouched for more than DAYS days]:DAYS:'
+  '--newer-than=[only entries modified within the last DAYS days]:DAYS:'
+  '--json[emit a JSON object]'
+  '--print0[print listed paths NUL-separated]'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+  '*:path:_files -/'
 )
 
 restore_opts=(
@@ -117,6 +134,7 @@ _rtrash_dispatch() {
     'empty:purge trashed items'
     'list:list trashed items'
     'status:item count and reclaimable size summary'
+    'du:find the largest directories and files to trash'
     'restore:restore a trashed item'
     'rm:permanently delete matching trash entries'
     'setup:install multi-call links, completions, man page'
@@ -151,6 +169,9 @@ _rtrash_dispatch() {
           ;;
         status)
           _arguments -s -C $status_opts
+          ;;
+        du)
+          _arguments -s -C $du_opts
           ;;
         restore)
           _arguments -s -C $restore_opts

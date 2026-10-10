@@ -26,6 +26,12 @@ _rtrash_status_opts=(
   --home-only --trash-dir= --older-than= --newer-than= --json --help --version
 )
 
+_rtrash_du_opts=(
+  -n --top= -x --one-file-system --apparent --max-depth= --all-dirs
+  --dirs --files --older-than= --newer-than= --json --print0 --help
+  --version
+)
+
 _rtrash_restore_opts=(
   -f --force --home-only --trash-dir= --cwd-only --plain
   --newest-first --oldest-first --help --version
@@ -37,7 +43,7 @@ _rtrash_rm_opts=(
   --help --version
 )
 
-_rtrash_subcommands=(put empty list status restore rm setup completions man)
+_rtrash_subcommands=(put empty list status du restore rm setup completions man)
 
 _rtrash_setup_opts=(
   --prefix= --bin-dir= --with-rm -n --dry-run -f --force -v --verbose --help
@@ -98,7 +104,7 @@ _rtrash_main() {
   local i sub=
   for ((i = 1; i < ${#COMP_WORDS[@]}; i++)); do
     case "${COMP_WORDS[i]}" in
-      put | empty | list | status | restore | rm)
+      put | empty | list | status | du | restore | rm)
         sub="${COMP_WORDS[i]}"
         break
         ;;
@@ -124,6 +130,7 @@ _rtrash_main() {
     empty) _rtrash_complete_from _rtrash_empty_opts ;;
     list) _rtrash_complete_from _rtrash_list_opts ;;
     status) _rtrash_complete_from _rtrash_status_opts ;;
+    du) _rtrash_complete_from _rtrash_du_opts ;;
     restore) _rtrash_complete_from _rtrash_restore_opts ;;
     rm) _rtrash_complete_from _rtrash_rm_opts ;;
     setup) _rtrash_complete_from _rtrash_setup_opts ;;

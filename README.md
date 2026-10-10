@@ -36,6 +36,7 @@
 $ cargo binstall rtrash && rtrash setup
 $ rtrash notes.txt                 # put (also: rtrash -rf dir, multi-call trash-put)
 $ rtrash list && rtrash status
+$ rtrash du -n 10 ~/src             # largest dirs and files to trash
 $ rtrash restore                   # TUI on a TTY; --plain for scripts
 $ rtrash empty --plain
 ```
@@ -196,7 +197,7 @@ From a checkout (dev): `pip install maturin && maturin develop --features python
 
 Useful flags: `rtrash setup --dry-run`, `--force` (refresh after upgrade), `--with-rm` (also link `rm` → put into trash), `--prefix=/usr/local`.
 
-Subcommands work without multi-call names: `rtrash put|empty|list|status|restore|rm …`.
+Subcommands work without multi-call names: `rtrash put|empty|list|status|du|restore|rm …`.
 
 | Multi-call name | Meaning |
 | --------------- | ------- |
@@ -302,6 +303,22 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 ### `rtrash status`
 
 Per-root item count and reclaimable size (uses `directorysizes` when valid). Same discovery pins as list. Also accepts `--json`, `--older-than=DAYS`, `--newer-than=DAYS`.
+
+### `rtrash du [PATH]...`
+
+Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists the largest directories and files, with on-disk size, apparent size, and the age of the newest modification below each entry.
+
+| Invocation | Behavior |
+|------------|----------|
+| `rtrash du /workspace` | 20 largest directories and 20 largest files, ranked by disk use |
+| `rtrash du -n 5 -x ~` | Top 5 of each, staying on the file system of `~` |
+| `rtrash du --apparent` | Rank by file length; sparse files rank higher than their disk use |
+| `rtrash du --dirs --older-than=30` | Directories with nothing modified in the last 30 days |
+| `rtrash du --max-depth=2 --all-dirs` | Every directory level, at most 2 below `PATH` |
+| `rtrash du --json` | One object with `roots`, `dirs`, `files`, `unreadable` |
+| `rtrash du --print0 … \| xargs -0 rtrash put -rf --` | Trash the listed paths |
+
+Symlinks are never followed, and a file with more than one hard link counts once. When one subdirectory accounts for 90% or more of a directory's size, only the subdirectory is listed, so each row points at the bulk itself. The scan root appears only in the closing total.
 
 ### `rtrash restore [PATH]` (also `trash-restore`)
 

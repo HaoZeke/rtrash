@@ -270,6 +270,76 @@ Display help and exit.
 .TP
 .B \-\-version
 Output version information and exit.
+.SS du
+.B rtrash du
+[\fIOPTION\fR]... [\fIPATH\fR]...
+.PP
+Find what to delete. Walk each
+.I PATH
+(default the current directory) in parallel and list the largest
+directories and files with their on-disk and apparent sizes and the age of
+their newest modification. Symlinks are never followed, and a file with
+more than one hard link counts once. When one subdirectory accounts for
+90% or more of a directory's size, only the subdirectory is listed.
+The scan root itself appears only in the closing total.
+.TP
+.BR \-n ", " \-\-top =\fIN\fR
+List
+.I N
+directories and
+.I N
+files (default 20).
+.TP
+.BR \-x ", " \-\-one\-file\-system
+Skip directories on other file systems.
+.TP
+.B \-\-apparent
+Rank by apparent size (file length) instead of allocated disk space.
+As with coreutils
+.BR du (1),
+directories add to disk use but not to apparent size.
+.TP
+.BI \-\-max\-depth =N
+List only entries at most
+.I N
+levels below
+.IR PATH .
+Sizes still include everything below.
+.TP
+.B \-\-all\-dirs
+List every directory level, including parents that one subdirectory
+dominates.
+.TP
+.B \-\-dirs
+Show the directory table alone.
+.TP
+.B \-\-files
+Show the file table alone.
+.TP
+.BI \-\-older\-than =DAYS
+Only list entries whose newest modification is more than
+.I DAYS
+days old. A directory uses the newest file anywhere below it.
+.TP
+.BI \-\-newer\-than =DAYS
+Only list entries modified within the last
+.I DAYS
+days.
+.TP
+.B \-\-json
+Emit one JSON object
+(\fIroots\fR, \fIdirs\fR, \fIfiles\fR, \fIunreadable\fR); each listed entry has
+\fIpath\fR, \fItype\fR, \fIdisk\fR, \fIapparent\fR and \fImtime\fR.
+.TP
+.B \-\-print0
+Print the listed paths separated by null bytes, for
+.BR "xargs \-0 rtrash put \-rf \-\-" .
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
 .SS restore
 .B rtrash restore
 [\fIOPTION\fR]... [\fIPATH\fR]
