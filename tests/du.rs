@@ -215,7 +215,11 @@ fn hard_links_count_once() {
     let j = t.json(&["--files"]);
     let roots = &j[..j.find("\"dirs\"").unwrap()];
     assert_eq!(field(roots, "apparent"), 100_000, "{j}");
+    assert_eq!(field(roots, "files"), 1, "{j}");
+    assert_eq!(field(roots, "links"), 2, "{j}");
     assert_eq!(paths_in(&j, "files").len(), 1, "{j}");
+    let text = String::from_utf8(t.du(&[]).stdout).unwrap();
+    assert!(text.contains("1 file (+2 hard links), "), "{text}");
 }
 
 #[cfg(unix)]
@@ -684,9 +688,13 @@ fn totals_match_du_with_deep_links_and_unreadable_dirs() {
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
     let disk = du_total("-B1", &t.root);
     let apparent = du_total("-b", &t.root);
+    let inodes = du_total("--inodes", &t.root);
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(field(&j, "disk"), disk, "{j}");
     assert_eq!(field(&j, "apparent"), apparent, "{j}");
+    // Files and directories, each hard-linked file once, as du counts inodes.
+    assert_eq!(field(&j, "files") + field(&j, "dirs"), inodes, "{j}");
+    assert_eq!(field(&j, "links"), 1, "{j}");
     if blocked {
         assert_eq!(field(&j, "unreadable"), 1, "{j}");
         assert!(err.contains("could not be read"), "{err}");

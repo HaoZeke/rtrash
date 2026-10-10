@@ -322,7 +322,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du --print0 … \| xargs -0 rtrash put -rf --` | Trash the listed paths |
 | `rtrash du --pick` | Mark rows in the put browser and trash them; rows with git work at risk show `!` |
 
-Symlinks are never followed, and a file with more than one hard link counts once. When one subdirectory accounts for 90% or more of a directory's size, only the subdirectory is listed, so each row points at the bulk itself. The scan root appears only in the closing total.
+Symlinks are never followed, and a file with more than one hard link counts once, in the sizes and in the file count, so files plus directories match `du --inodes -s`; the total names the extra links. When one subdirectory accounts for 90% or more of a directory's size, only the subdirectory is listed, so each row points at the bulk itself. The scan root appears only in the closing total.
 
 The NOTE column tags regenerable artefacts (`cargo-target`, `node-modules`, `python-cache`, `python-env`, `cmake-build`, `cache`, and a few more listed in `man rtrash`). An artefact is one row; nothing below it is listed on its own, so the list names the `target` directory instead of the largest `.rlib` inside it. Scanning an artefact directly (`rtrash du target`) lists what is inside it, and the total names its kind. Names that are ambiguous on their own (`target`, `build`, `venv`) need a marker file such as `.rustc_info.json`, `CMakeCache.txt` or `pyvenv.cfg`.
 

@@ -27,7 +27,8 @@ Find what to delete: walk each PATH (default .) in parallel and list the
 largest directories and files, by on-disk size unless --apparent is given.
 
 Symlinks are never followed, and a file with more than one hard link
-counts once. When one subdirectory accounts for 90% or more of a
+counts once, in the sizes and in the file count (as with du --inodes);
+the total names the extra links. When one subdirectory accounts for 90% or more of a
 directory's size, only the subdirectory is listed (--all-dirs lists both).
 Regenerable artefacts are tagged and listed as one row each; their
 contents never appear on their own, unless the artefact is the PATH
@@ -249,7 +250,11 @@ pub struct RootTotals {
     pub path: PathBuf,
     pub apparent: u64,
     pub disk: u64,
+    /// Files, each counted once however many hard links it has (as
+    /// `du --inodes` counts them).
     pub files: u64,
+    /// Names that pointed at a file already counted: extra hard links.
+    pub links: u64,
     pub dirs: u64,
     /// Artefact kind of the PATH itself, when it is one.
     pub artefact: Option<&'static str>,
@@ -412,7 +417,10 @@ struct Ctx<'a> {
     /// Multiply-linked files already counted.
     seen: LinkSet,
     unreadable: AtomicU64,
+    /// Files counted, each hard-linked file once.
     files: AtomicU64,
+    /// Further names of files already counted.
+    links: AtomicU64,
     dirs: AtomicU64,
     top_dirs: SharedTop,
     top_files: SharedTop,
@@ -593,10 +601,11 @@ fn stat_entries(
             out.subdirs.push((i, Some(m)));
             continue;
         }
-        ctx.files.fetch_add(1, Ordering::Relaxed);
         if !ctx.first_link(&m) {
+            ctx.links.fetch_add(1, Ordering::Relaxed);
             continue;
         }
+        ctx.files.fetch_add(1, Ordering::Relaxed);
         let (a, d) = m.sizes();
         out.apparent = out.apparent.saturating_add(a);
         out.disk = out.disk.saturating_add(d);
@@ -876,6 +885,7 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
             seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
             files: AtomicU64::new(0),
+            links: AtomicU64::new(0),
             dirs: AtomicU64::new(0),
             top_dirs: SharedTop::new(opts.top, opts.sort),
             top_files: SharedTop::new(opts.top, opts.sort),
@@ -907,6 +917,7 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
             apparent,
             disk,
             files: ctx.files.load(Ordering::Relaxed),
+            links: ctx.links.load(Ordering::Relaxed),
             dirs: ctx.dirs.load(Ordering::Relaxed),
             artefact,
         });
@@ -1069,11 +1080,12 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
         .iter()
         .map(|t| {
             format!(
-                "{{\"path\":\"{}\",\"disk\":{},\"apparent\":{},\"files\":{},\"dirs\":{},\"artefact\":{}}}",
+                "{{\"path\":\"{}\",\"disk\":{},\"apparent\":{},\"files\":{},\"links\":{},\"dirs\":{},\"artefact\":{}}}",
                 json_escape(&t.path.to_string_lossy()),
                 t.disk,
                 t.apparent,
                 t.files,
+                t.links,
                 t.dirs,
                 json_opt(t.artefact)
             )
@@ -1399,8 +1411,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         print_table(&format!("Largest files (by {by})"), &report.files, now);
         for t in &report.roots {
             let kind = t.artefact.map(|k| format!(" ({k})")).unwrap_or_default();
+            let links = if t.links > 0 {
+                format!(" (+{})", plural(t.links, "hard link", "hard links"))
+            } else {
+                String::new()
+            };
             println!(
-                "Total {}{kind}: {} on disk, {} apparent, {}, {}",
+                "Total {}{kind}: {} on disk, {} apparent, {}{links}, {}",
                 t.path.display(),
                 format_bytes(t.disk),
                 format_bytes(t.apparent),
