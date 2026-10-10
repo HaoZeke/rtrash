@@ -537,7 +537,7 @@ fn stat_entries(
             out.subdirs.push((i, None));
             continue;
         }
-        let Ok(m) = dir.stat_at(name) else {
+        let Some(m) = entries.stat(i).or_else(|| dir.stat_at(name).ok()) else {
             ctx.unreadable.fetch_add(1, Ordering::Relaxed);
             continue;
         };

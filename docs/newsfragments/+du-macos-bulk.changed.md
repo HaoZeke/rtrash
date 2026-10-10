@@ -1,0 +1,1 @@
+du: on macOS one `getattrlistbulk` call returns the names and sizes of many entries at once. The walk falls back to `readdir` and parallel stats when a file system lacks the call or the reads wait on the disk; `RTRASH_DU_BULK=0` or `1` forces either path.
