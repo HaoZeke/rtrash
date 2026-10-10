@@ -342,11 +342,39 @@ impl SharedTop {
     }
 }
 
+/// Hard links seen so far, as `(dev, ino)`, split over several locks so
+/// workers on a tree full of links (pnpm, nix, ccache) rarely wait on
+/// each other.
+struct LinkSet {
+    shards: Vec<Mutex<HashSet<(u64, u64)>>>,
+}
+
+impl LinkSet {
+    const SHARDS: usize = 16;
+
+    fn new() -> Self {
+        LinkSet {
+            shards: (0..Self::SHARDS).map(|_| Mutex::default()).collect(),
+        }
+    }
+
+    /// Record the file; returns whether it was new.
+    fn insert(&self, dev: u64, ino: u64) -> bool {
+        // Fibonacci hashing: inode numbers often share their low bits.
+        let h = (ino ^ dev.rotate_left(32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let shard = &self.shards[(h >> 60) as usize % Self::SHARDS];
+        shard
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((dev, ino))
+    }
+}
+
 struct Ctx<'a> {
     opts: &'a ScanOpts,
     root_dev: u64,
-    /// (dev, ino) of multiply-linked files already counted.
-    seen: Mutex<HashSet<(u64, u64)>>,
+    /// Multiply-linked files already counted.
+    seen: LinkSet,
     unreadable: AtomicU64,
     files: AtomicU64,
     dirs: AtomicU64,
@@ -375,12 +403,10 @@ impl Ctx<'_> {
     }
 
     /// Count a non-directory once even when it has several hard links.
+    /// A link count of 0 means the platform did not report one, so the
+    /// file is tracked like a linked one.
     fn first_link(&self, st: &du_fs::Stat) -> bool {
-        if st.nlink <= 1 {
-            return true;
-        }
-        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        seen.insert((st.dev, st.ino))
+        st.nlink == 1 || self.seen.insert(st.dev, st.ino)
     }
 
     fn key(&self, apparent: u64, disk: u64) -> u64 {
@@ -749,7 +775,7 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
         let ctx = Ctx {
             opts,
             root_dev: meta.dev,
-            seen: Mutex::new(HashSet::new()),
+            seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
             files: AtomicU64::new(0),
             dirs: AtomicU64::new(0),
@@ -1262,6 +1288,24 @@ mod tests {
             repos: Vec::new(),
             git: None,
         }
+    }
+
+    #[test]
+    fn link_set_counts_each_inode_once_across_shards() {
+        let set = LinkSet::new();
+        let mut used = HashSet::new();
+        for ino in 0..4096u64 {
+            assert!(set.insert(7, ino));
+            assert!(!set.insert(7, ino), "second link of {ino}");
+            // The same inode number on another device is another file.
+            assert!(set.insert(8, ino));
+        }
+        for (i, s) in set.shards.iter().enumerate() {
+            if !s.lock().unwrap().is_empty() {
+                used.insert(i);
+            }
+        }
+        assert_eq!(used.len(), LinkSet::SHARDS, "sequential inodes spread out");
     }
 
     #[test]
