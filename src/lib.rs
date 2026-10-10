@@ -36,6 +36,8 @@ pub mod restore;
 #[cfg(all(unix, feature = "tui"))]
 pub mod restore_tui;
 #[cfg(unix)]
+pub mod retention;
+#[cfg(unix)]
 pub mod rm;
 #[cfg(unix)]
 pub mod setup;

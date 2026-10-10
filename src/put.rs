@@ -236,7 +236,48 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if json {
         println!("{}", summary_json(&trashed, failed));
     }
+    if !trashed.is_empty() {
+        prune_after_put(prog, &trashed, opts.quiet || json);
+    }
     status
+}
+
+/// With `RTRASH_MAX_SIZE` set, bring each trash root this run used back
+/// under the budget, never touching what this run trashed.
+fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
+    let Some((max, policy)) = crate::retention::from_env(prog) else {
+        return;
+    };
+    let mut roots: Vec<PathBuf> = trashed.iter().map(|t| t.trash_dir.clone()).collect();
+    roots.sort();
+    roots.dedup();
+    let dirs: Vec<trashdir::TrashDir> = roots
+        .iter()
+        .filter_map(|r| trashdir::TrashDir::from_root(r).ok())
+        .collect();
+    // One budget per root: each volume's trash frees space on that volume.
+    for dir in &dirs {
+        let done = crate::retention::prune(
+            prog,
+            std::slice::from_ref(dir),
+            &crate::retention::Prune {
+                max,
+                policy,
+                dry_run: false,
+                verbose: false,
+                protect_batch: Some(crate::info::batch_id()),
+                gone_before: None,
+            },
+        );
+        if done.removed > 0 && !quiet {
+            eprintln!(
+                "{prog}: removed {} from '{}' to keep it under {} (RTRASH_MAX_SIZE)",
+                crate::util::plural(done.removed, "item", "items"),
+                dir.root.display(),
+                crate::fastdelete::format_bytes(max)
+            );
+        }
+    }
 }
 
 fn describe(meta: &fs::Metadata, path: &Path) -> &'static str {

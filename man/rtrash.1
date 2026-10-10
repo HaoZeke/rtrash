@@ -185,9 +185,22 @@ Same as positional
 .I DAYS
 (list/status flag style).
 .TP
+.BI \-\-max\-size =SIZE
+Remove items until the trash directories in scope, taken together, fit in
+.I SIZE
+(bytes, or with a K, M, G or T suffix in powers of 1024).
+With
+.IR DAYS ,
+the age cut runs first.
+.TP
+.BR \-\-prune =oldest|largest
+Which items
+.B \-\-max\-size
+removes first (default oldest).
+.TP
 .B \-\-json
 Emit a JSON summary on stdout
-(\fIdry_run\fR, \fIremoved\fR, \fIbytes\fR, \fIdays\fR).
+(\fIdry_run\fR, \fIremoved\fR, \fIbytes\fR, \fIdays\fR, \fImax_size\fR).
 .TP
 .B \-\-plain
 Never open the empty browser on a TTY.
@@ -764,6 +777,17 @@ when unset.
 .TP
 .B HOME
 Used when resolving the default data home.
+.TP
+.B RTRASH_MAX_SIZE
+When set to a size such as 10G, each put afterwards prunes every trash
+directory it used back under that size, removing older items first.
+Items of the same put run never go.
+.TP
+.B RTRASH_PRUNE
+Set to
+.B largest
+to make that prune remove the largest items first (default
+.BR oldest ).
 .SH FILES
 .TP
 .I $XDG_DATA_HOME/Trash

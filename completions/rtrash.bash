@@ -15,6 +15,7 @@ _rtrash_put_opts=(
 _rtrash_empty_opts=(
   -n --dry-run -v --verbose -f --force
   --trash-dir= --home-only --plain --older-than= --json
+  --max-size= --prune=
   --help --version
 )
 

@@ -26,6 +26,11 @@ permanent delete). Use --plain to skip the TUI.
   -f, --force      accepted for trash-cli compatibility (emptying never prompts)
       --plain      skip TUI; non-interactive empty (also used when stdin is not a TTY)
       --older-than=DAYS  same as positional DAYS (list/status flag style)
+      --max-size=SIZE  remove items until the trash (all roots in scope
+                     together) fits in SIZE, such as 500M or 10G; with
+                     DAYS, the age cut runs first
+      --prune=oldest|largest  which items --max-size removes first
+                     (default oldest)
       --json       emit a JSON summary on stdout ({dry_run, removed, bytes, days})
       --trash-dir=PATH  empty only this trash directory (repeatable);
                      default is the home trash plus every mounted volume
@@ -42,6 +47,8 @@ struct Opts {
     trash_dirs: Vec<PathBuf>,
     plain: bool,
     json: bool,
+    max_size: Option<u64>,
+    prune: crate::retention::Policy,
 }
 
 fn usage_err(prog: &str, msg: &str) -> i32 {
@@ -59,6 +66,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         trash_dirs: Vec::new(),
         plain: false,
         json: false,
+        max_size: None,
+        prune: crate::retention::Policy::Oldest,
     };
     for arg in args {
         match arg.as_str() {
@@ -79,6 +88,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             a if a.starts_with("--trash-dir=") => {
                 opts.trash_dirs
                     .push(PathBuf::from(&a["--trash-dir=".len()..]));
+            }
+            a if a.starts_with("--max-size=") => {
+                match crate::retention::parse_size(&a["--max-size=".len()..]) {
+                    Some(n) => opts.max_size = Some(n),
+                    None => return usage_err(prog, &format!("invalid SIZE in '{a}'")),
+                }
+            }
+            a if a.starts_with("--prune=") => {
+                match crate::retention::Policy::parse(&a["--prune=".len()..]) {
+                    Some(p) => opts.prune = p,
+                    None => return usage_err(prog, "--prune takes oldest or largest"),
+                }
+            }
+            "--max-size" | "--prune" => {
+                return usage_err(prog, &format!("{arg} needs a value ({arg}=VALUE)"));
             }
             a if a.starts_with("--older-than=") => {
                 match a["--older-than=".len()..].parse::<i64>() {
@@ -111,7 +135,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     // TTY empty browser when no age filter (full interactive review).
     // --json implies non-interactive (scripts).
     #[cfg(feature = "tui")]
-    if !opts.plain && !opts.json && opts.days.is_none() && stdin_is_tty() {
+    if !opts.plain && !opts.json && opts.days.is_none() && opts.max_size.is_none() && stdin_is_tty()
+    {
         let entries = list::collect(&dirs);
         let refs: Vec<&list::Entry> = entries.iter().collect();
         return crate::empty_tui::run(prog, refs, opts.dry_run);
@@ -122,7 +147,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let bytes = AtomicU64::new(0);
     let errors = AtomicU64::new(0);
 
-    for dir in &dirs {
+    // A size budget alone removes nothing by age.
+    let age_pass = !(opts.max_size.is_some() && cutoff.is_none());
+    for dir in dirs.iter().filter(|_| age_pass) {
         // Exclusive lock for this trash root so put cannot interleave a half pair.
         let _lock = match trashdir::TrashLock::acquire(&dir.root) {
             Ok(l) => l,
@@ -135,6 +162,24 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         empty_one(prog, dir, cutoff, &opts, &removed, &bytes, &errors);
     }
 
+    if let Some(max) = opts.max_size {
+        let done = crate::retention::prune(
+            prog,
+            &dirs,
+            &crate::retention::Prune {
+                max,
+                policy: opts.prune,
+                dry_run: opts.dry_run,
+                verbose: opts.verbose,
+                protect_batch: None,
+                gone_before: cutoff,
+            },
+        );
+        removed.fetch_add(done.removed, Ordering::Relaxed);
+        bytes.fetch_add(done.bytes, Ordering::Relaxed);
+        errors.fetch_add(done.errors, Ordering::Relaxed);
+    }
+
     let n = removed.load(Ordering::Relaxed);
     let b = bytes.load(Ordering::Relaxed);
     if opts.json {
@@ -142,12 +187,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             Some(d) => d.to_string(),
             None => "null".into(),
         };
+        let max_size = match opts.max_size {
+            Some(m) => m.to_string(),
+            None => "null".into(),
+        };
         println!(
-            "{{\"dry_run\":{},\"removed\":{},\"bytes\":{},\"days\":{}}}",
+            "{{\"dry_run\":{},\"removed\":{},\"bytes\":{},\"days\":{},\"max_size\":{}}}",
             if opts.dry_run { "true" } else { "false" },
             n,
             b,
-            days
+            days,
+            max_size
         );
     } else {
         let verb = if opts.dry_run {
@@ -163,6 +213,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     "{verb} {n} {noun} ({}, approximately reclaimable)",
                     crate::fastdelete::format_bytes(b)
                 );
+            } else if opts.max_size.is_some() {
+                eprintln!("{verb} {n} {noun} ({})", crate::fastdelete::format_bytes(b));
             } else {
                 eprintln!("{verb} {n} {noun}");
             }

@@ -1527,3 +1527,91 @@ fn undo_keeps_a_recreated_path_without_force() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(fs::read(sb.work().join("x.txt")).unwrap(), b"payload");
 }
+
+/// Trash `name` (`len` bytes) dated `days` before 2020-01-28.
+fn trash_aged(sb: &Sandbox, name: &str, len: usize, days: u32) {
+    fs::write(sb.work().join(name), vec![b'x'; len]).unwrap();
+    assert!(sb.run(&["put", name]).status.success());
+    let info = sb.trash().join(format!("info/{name}.trashinfo"));
+    let body = fs::read_to_string(&info).unwrap();
+    assert!(days < 28);
+    let day = 28 - days;
+    let dated: String = body
+        .lines()
+        .map(|l| {
+            if l.starts_with("DeletionDate=") {
+                format!("DeletionDate=2020-01-{day:02}T00:00:00\n")
+            } else {
+                format!("{l}\n")
+            }
+        })
+        .collect();
+    fs::write(&info, dated).unwrap();
+}
+
+fn names_in_trash(sb: &Sandbox) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(sb.trash().join("files"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn empty_max_size_removes_oldest_or_largest_until_it_fits() {
+    let sb = Sandbox::new("maxsize");
+    trash_aged(&sb, "old", 40_000, 20);
+    trash_aged(&sb, "mid", 40_000, 10);
+    trash_aged(&sb, "new", 40_000, 1);
+    // Three items of about 44 KiB each (blocks plus the .trashinfo).
+    let dry = sb.empty(&["--max-size=100K", "-n", "--json"]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    let s = stdout_of(&dry);
+    assert!(
+        s.contains("\"removed\":1") && s.contains("\"max_size\":102400"),
+        "{s}"
+    );
+    assert_eq!(names_in_trash(&sb).len(), 3, "dry run removes nothing");
+
+    let out = sb.empty(&["--max-size=100K"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(names_in_trash(&sb), ["mid", "new"]);
+    assert!(!sb.trash().join("info/old.trashinfo").exists());
+
+    trash_aged(&sb, "huge", 200_000, 25);
+    let out = sb.empty(&["--max-size=100K", "--prune=largest"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(names_in_trash(&sb), ["mid", "new"], "largest goes first");
+
+    // A budget the trash already fits removes nothing, and never all.
+    let out = sb.empty(&["--max-size=1G"]);
+    assert!(out.status.success());
+    assert_eq!(names_in_trash(&sb).len(), 2);
+    let bad = sb.empty(&["--max-size=lots"]);
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+#[test]
+fn put_prunes_to_rtrash_max_size_but_keeps_its_own_items() {
+    let sb = Sandbox::new("putprune");
+    trash_aged(&sb, "old1", 40_000, 20);
+    trash_aged(&sb, "old2", 40_000, 10);
+    fs::write(sb.work().join("fresh"), vec![b'y'; 150_000]).unwrap();
+    let out = Command::new(bin())
+        .args(["put", "fresh"])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("HOME", &sb.root)
+        .env("RTRASH_MAX_SIZE", "100K")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    // The fresh item alone exceeds the budget; everything older goes, it stays.
+    assert_eq!(names_in_trash(&sb), ["fresh"]);
+    assert!(
+        stderr_of(&out).contains("removed 2 items"),
+        "{}",
+        stderr_of(&out)
+    );
+}
