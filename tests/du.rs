@@ -575,6 +575,34 @@ fn exclude_patterns_leave_entries_out_of_sizes_and_rows() {
 }
 
 #[test]
+fn config_file_sets_du_defaults_and_options_win() {
+    let t = Tree::new("config");
+    t.file("a/x.iso", 300_000);
+    t.file("a/y.bin", 100_000);
+    t.file("b/z.bin", 200_000);
+    fs::create_dir_all(t.root.join(".cfg/rtrash")).unwrap();
+    fs::write(
+        t.root.join(".cfg/rtrash/config.toml"),
+        "[du]\ntop = 1\ngit = false\nexclude = [\"*.iso\"]\n",
+    )
+    .unwrap();
+    let j = t.json(&[]);
+    assert_eq!(paths_in(&j, "files"), [s(&t.root.join("b/z.bin"))], "{j}");
+    assert_eq!(field(&j, "excluded"), 1, "{j}");
+    // Options override; command-line patterns add to the config's.
+    let j = t.json(&["--top=5", "--exclude=z.bin", "--exclude=/.cfg/"]);
+    assert_eq!(paths_in(&j, "files"), [s(&t.root.join("a/y.bin"))], "{j}");
+    fs::write(t.root.join(".cfg/rtrash/config.toml"), "[du]\ntop = -1\n").unwrap();
+    let out = t.du(&["--no-git"]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("ignoring du.top = '-1'"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn exclude_caches_needs_a_valid_tag() {
     let t = Tree::new("cachedir");
     t.file("c/data.bin", 300_000);

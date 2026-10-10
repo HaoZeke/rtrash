@@ -887,6 +887,63 @@ Restore:
 .TP
 .B \-\-help
 Display help and exit.
+.SS config
+.B rtrash config
+[\fB\-\-path\fR | \fB\-\-default\fR]
+.PP
+Show the config file and the settings it makes, with a warning for each
+line that cannot be read; the exit status is 1 when there is one.
+Settings rank below environment variables and command-line options.
+The file holds TOML tables:
+.RS
+.nf
+[du]
+top = 20                  # \-\-top
+sort = "disk"             # \-\-sort: disk, apparent, items or mtime
+count = false             # \-\-count
+one_file_system = false   # \-x
+threads = 8               # \-\-threads
+git = true                # false = \-\-no\-git
+exclude = ["*.iso"]       # \-\-exclude, before any given on the command line
+exclude_caches = false    # \-\-exclude\-caches
+gitignore = false         # \-\-gitignore
+
+[list]
+sort = "date"             # \-\-sort: date, size, name or path
+size = false              # \-\-size
+reverse = false           # \-\-reverse
+
+[policy]
+max_size = "50G"          # RTRASH_MAX_SIZE
+prune = "oldest"          # RTRASH_PRUNE: oldest or largest
+
+[protect]
+paths = ["/srv/data", "/home/*/keep"]
+.fi
+.RE
+.PP
+Only these keys are read: strings, integers, booleans and arrays of
+strings. An unknown key or a value of the wrong type gets a warning and
+is skipped; the rest of the file still applies.
+.B protect.paths
+works like the safe-rm lists:
+.B put
+refuses a path that matches an entry exactly or as a shell pattern.
+A config file cannot be undone by an option, so
+.B RTRASH_CONFIG=
+(empty) runs without it.
+.TP
+.B \-\-path
+Print where the config file is looked for.
+.TP
+.B \-\-default
+Print a config file with every setting commented out.
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
 .SS setup
 .B rtrash setup
 [\fIOPTION\fR]...
@@ -1025,10 +1082,17 @@ when unset.
 .B HOME
 Used when resolving the default data home.
 .TP
+.B RTRASH_CONFIG
+The config file to read instead of
+.IR $XDG_CONFIG_HOME/rtrash/config.toml .
+Empty turns the config file off.
+.TP
 .B RTRASH_MAX_SIZE
 When set to a size such as 10G, each put afterwards prunes every trash
 directory it used back under that size, removing older items first.
-Items of the same put run never go.
+Items of the same put run never go. It overrides
+.B policy.max_size
+in the config file, and an empty value turns the prune off.
 .TP
 .B RTRASH_PRUNE
 Set to
@@ -1050,6 +1114,16 @@ does.
 and
 .B "empty \-\-dry\-run"
 write walked sizes back.
+.TP
+.I $XDG_CONFIG_HOME/rtrash/config.toml
+Config file (see
+.BR config );
+.I ~/.config/rtrash/config.toml
+when
+.B XDG_CONFIG_HOME
+is unset, and
+.I %APPDATA%\(rsrtrash\(rsconfig.toml
+on Windows.
 .TP
 .IR /etc/safe\-rm.conf ", " ~/.safe\-rm
 safe-rm protected paths that put skips (see

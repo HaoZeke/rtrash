@@ -299,7 +299,7 @@ Orphaned `files/` entries (no `.trashinfo`) and entries with broken metadata are
 Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts), `--json` (summary: `dry_run`, `removed`, `bytes`, `days`, `max_size`).
 
 **Retention by size:** `rtrash empty --max-size=10G` removes items, oldest first, until the trash directories in scope fit in 10 GiB together; `--prune=largest` removes the largest first, and `DAYS` runs before the size cut.
-Set `RTRASH_MAX_SIZE=10G` (and optionally `RTRASH_PRUNE=largest`) to prune after every put: each trash directory the put used goes back under the budget, and the items that put just trashed always stay.
+Set `RTRASH_MAX_SIZE=10G` (and optionally `RTRASH_PRUNE=largest`), or `max_size` under `[policy]` in the config file, to prune after every put: each trash directory the put used goes back under the budget, and the items that put just trashed always stay.
 
 ### `rtrash list` (also `trash-list`)
 
@@ -426,6 +426,31 @@ The library shares one id across a process, so a Python session counts as one ru
 | `--trash-dir=DIR` | Another Finder trash, such as `/Volumes/X/.Trashes/501` (Put Back paths count from the volume root) |
 
 List and restore only read files, so they also work on Linux against a copied trash.
+
+### `rtrash config`
+
+Defaults live in `$XDG_CONFIG_HOME/rtrash/config.toml`. Without `XDG_CONFIG_HOME` the file is `~/.config/rtrash/config.toml`, or `%APPDATA%\rtrash\config.toml` on Windows. Environment variables and command-line options win over it. `RTRASH_CONFIG=FILE` reads another file, and an empty value turns the file off. Run `rtrash config` to see the settings in effect, with a warning for each line it cannot read. Add `--path` to see where it looks, or `--default` for a template with every key commented out.
+
+```toml
+[du]
+top = 30
+sort = "disk"            # disk, apparent, items or mtime
+exclude = ["*.iso", "/scratch/"]
+gitignore = true
+
+[list]
+sort = "size"
+size = true
+
+[policy]
+max_size = "50G"         # the prune after every put (RTRASH_MAX_SIZE wins)
+prune = "oldest"         # or largest (RTRASH_PRUNE wins)
+
+[protect]
+paths = ["/srv/data", "/home/*/keep"]   # put refuses these, like safe-rm entries
+```
+
+The other `[du]` keys are `count`, `one_file_system`, `threads`, `git` and `exclude_caches`, and `[list]` also takes `reverse`. Unknown keys and values of the wrong type earn a warning and are skipped, and the rest of the file still applies.
 
 ### `rtrash rm PATTERN...` (also `trash-rm`)
 

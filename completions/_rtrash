@@ -3,7 +3,7 @@
 # Preferred install: rtrash setup
 # Or: rtrash completions zsh > …/zsh/site-functions/_rtrash
 
-local -a put_opts empty_opts list_opts status_opts du_opts restore_opts undo_opts finder_opts rm_opts
+local -a put_opts empty_opts list_opts status_opts du_opts restore_opts undo_opts finder_opts rm_opts config_opts
 
 put_opts=(
   '(-f --force)'{-f,--force}'[ignore nonexistent files, never prompt]'
@@ -108,6 +108,13 @@ finder_opts=(
   '*:file:_files'
 )
 
+config_opts=(
+  '(--default)--path[print where the config file is looked for]'
+  '(--path)--default[print a config file with every setting commented out]'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+)
+
 undo_opts=(
   '(-l --list)'{-l,--list}'[list put runs, newest first]'
   '(-n --dry-run)'{-n,--dry-run}'[show what would be restored]'
@@ -192,6 +199,7 @@ _rtrash_dispatch() {
     'undo:restore everything one put run trashed'
     'rm:permanently delete matching trash entries'
     'finder:macOS Finder Trash with Put Back'
+    'config:show the config file and the settings it makes'
     'setup:install multi-call links, completions, man page'
     'keys:show or sample the TUI keybind config'
     'completions:print embedded shell completion script'
@@ -237,6 +245,9 @@ _rtrash_dispatch() {
           ;;
         finder)
           _arguments -s -C $finder_opts
+          ;;
+        config)
+          _arguments -s -C $config_opts
           ;;
         rm)
           _arguments -s -C $rm_opts

@@ -1581,6 +1581,37 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut filter = du_filter::Spec::default();
     let mut count = false;
     let now = crate::util::now_epoch();
+    // Defaults from the config file; the options below override them.
+    let cfg = crate::config::get();
+    let warn = |key: &str, want: &str| {
+        eprintln!("{prog}: warning: {}", cfg.bad_value("du", key, want));
+    };
+    match cfg.int("du", "top").map(usize::try_from) {
+        Some(Ok(n)) => opts.top = n,
+        Some(Err(_)) => warn("top", "a count of 0 or more"),
+        None => {}
+    }
+    if let Some(s) = cfg.str("du", "sort") {
+        match SortKey::parse(s) {
+            Some(k) => opts.sort = k,
+            None => warn("sort", "disk, apparent, items or mtime"),
+        }
+    }
+    match cfg.int("du", "threads") {
+        Some(n) if n >= 1 => threads = usize::try_from(n).ok(),
+        Some(_) => warn("threads", "1 or more"),
+        None => {}
+    }
+    count = cfg.bool("du", "count").unwrap_or(count);
+    opts.one_file_system = cfg.bool("du", "one_file_system").unwrap_or(false);
+    use_git = cfg.bool("du", "git").unwrap_or(use_git);
+    filter.exclude_caches = cfg.bool("du", "exclude_caches").unwrap_or(false);
+    filter.gitignore = cfg.bool("du", "gitignore").unwrap_or(false);
+    for p in cfg.list("du", "exclude") {
+        if du_filter::Pattern::parse(p).is_some() {
+            filter.patterns.push(p.clone());
+        }
+    }
     let mut i = 0usize;
     while i < args.len() {
         let arg = args[i].as_str();

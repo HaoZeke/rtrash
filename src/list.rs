@@ -190,9 +190,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut json = false;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
-    let mut with_size = false;
+    // Defaults from the config file; options override them.
+    let cfg = crate::config::get();
+    let mut with_size = cfg.bool("list", "size").unwrap_or(false);
     let mut sort = SortKey::Date;
-    let mut reverse = false;
+    if let Some(s) = cfg.str("list", "sort") {
+        match SortKey::parse(s) {
+            Some(k) => sort = k,
+            None => eprintln!(
+                "{prog}: warning: {}",
+                cfg.bad_value("list", "sort", "date, size, name or path")
+            ),
+        }
+    }
+    let mut reverse = cfg.bool("list", "reverse").unwrap_or(false);
     let mut i = 0usize;
     while i < args.len() {
         let arg = &args[i];

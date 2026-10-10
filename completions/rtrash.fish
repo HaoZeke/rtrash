@@ -7,7 +7,7 @@ function __rtrash_seen_subcommand
     set -e cmd[1]
     for c in $cmd
         switch $c
-            case put empty list status du restore undo rm finder setup keys completions man
+            case put empty list status du restore undo rm finder config setup keys completions man
                 echo $c
                 return 0
         end
@@ -25,6 +25,7 @@ complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'restore' -d 'restore
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'undo' -d 'restore everything one put run trashed'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'rm' -d 'permanently delete matching trash entries'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'finder' -d 'macOS Finder Trash with Put Back'
+complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'config' -d 'show the config file and the settings it makes'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'setup' -d 'install multi-call links, completions, man page'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'keys' -d 'show or sample the TUI keybind config'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'completions' -d 'print embedded shell completion script'
@@ -111,6 +112,11 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -l con
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -s v -l verbose -d 'put: name each trashed file'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -l json -d 'print JSON'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -l help -d 'display help'
+
+# config
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q config' -f
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q config' -l path -d 'print where the config file is looked for'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q config' -l default -d 'print a config file with every setting commented out'
 
 # undo
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -f

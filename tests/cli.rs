@@ -42,6 +42,7 @@ impl Sandbox {
             .args(args)
             .current_dir(self.work())
             .env("XDG_DATA_HOME", self.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", self.root.join(".config"))
             .env("HOME", &self.root)
             .output()
             .expect("failed to run rtrash")
@@ -53,6 +54,7 @@ impl Sandbox {
             .args(args)
             .current_dir(self.work())
             .env("XDG_DATA_HOME", self.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", self.root.join(".config"))
             .env("HOME", &self.root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1859,4 +1861,134 @@ fn finder_list_and_restore_use_put_back_records() {
         assert!(stderr_of(&out).contains("macOS only"));
     }
     assert_eq!(sb.run(&["finder"]).status.code(), Some(2));
+}
+
+/// Write `body` as the sandbox's config file.
+fn write_config(sb: &Sandbox, body: &str) {
+    let dir = sb.root.join(".config/rtrash");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("config.toml"), body).unwrap();
+}
+
+#[test]
+fn config_file_sets_list_defaults_policy_and_protected_paths() {
+    let sb = Sandbox::new("config");
+    trash_aged(&sb, "zz", 40_000, 20);
+    trash_aged(&sb, "aa", 40_000, 10);
+    write_config(
+        &sb,
+        &format!(
+            "[list]\nsort = \"name\"\n\n[policy]\nmax_size = \"100K\"\n\n[protect]\npaths = [\"{}/keep*\"]\n",
+            sb.work().display()
+        ),
+    );
+    // list: name order from the config; an option still wins.
+    let text = stdout_of(&sb.run(&["list"]));
+    assert!(
+        text.find("/aa").unwrap() < text.find("/zz").unwrap(),
+        "{text}"
+    );
+    let text = stdout_of(&sb.run(&["list", "--sort=date"]));
+    assert!(
+        text.find("/zz").unwrap() < text.find("/aa").unwrap(),
+        "{text}"
+    );
+
+    // protect.paths refuses a match and lets others go.
+    fs::create_dir(sb.work().join("keepme")).unwrap();
+    let out = sb.run(&["put", "-r", "keepme"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr_of(&out).contains("config protect.paths entry"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(sb.work().join("keepme").exists());
+
+    // policy.max_size prunes after put, naming its source.
+    fs::write(sb.work().join("fresh"), vec![b'y'; 150_000]).unwrap();
+    let out = sb.run(&["put", "fresh"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(names_in_trash(&sb), ["fresh"]);
+    assert!(
+        stderr_of(&out).contains("policy.max_size in the config file"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+#[test]
+fn environment_beats_the_config_file() {
+    let sb = Sandbox::new("config-env");
+    trash_aged(&sb, "old1", 40_000, 20);
+    write_config(&sb, "[policy]\nmax_size = \"10K\"\n");
+    fs::write(sb.work().join("fresh"), vec![b'y'; 50_000]).unwrap();
+    // An empty RTRASH_MAX_SIZE turns the budget off.
+    let out = Command::new(bin())
+        .args(["put", "fresh"])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .env("RTRASH_MAX_SIZE", "")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(names_in_trash(&sb), ["fresh", "old1"]);
+
+    // RTRASH_CONFIG names another file; empty turns the file off.
+    let other = sb.root.join("other.toml");
+    fs::write(&other, "[list]\nsort = \"bogus\"\n").unwrap();
+    let run = |cfg: &Path, args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .current_dir(sb.work())
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("HOME", &sb.root)
+            .env("RTRASH_CONFIG", cfg)
+            .output()
+            .unwrap()
+    };
+    let out = run(&other, &["list"]);
+    assert!(out.status.success());
+    assert!(
+        stderr_of(&out).contains("ignoring list.sort = 'bogus'"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = run(&other, &["config"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a bad value parses; only lines that cannot be read fail"
+    );
+    assert!(
+        stdout_of(&out).contains("sort = \"bogus\""),
+        "{}",
+        stdout_of(&out)
+    );
+    assert_eq!(
+        stdout_of(&run(&other, &["config", "--path"])).trim(),
+        other.display().to_string()
+    );
+    fs::write(&other, "[list]\ncolour = 1\n").unwrap();
+    let out = run(&other, &["config"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr_of(&out).contains("unknown key 'list.colour'"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = run(Path::new(""), &["config", "--path"]);
+    assert!(stdout_of(&out).contains("off"), "{}", stdout_of(&out));
+    let out = run(Path::new(""), &["config", "--default"]);
+    assert!(
+        stdout_of(&out).contains("# max_size = \"50G\""),
+        "{}",
+        stdout_of(&out)
+    );
+    assert_eq!(
+        run(Path::new(""), &["config", "--bogus"]).status.code(),
+        Some(2)
+    );
 }

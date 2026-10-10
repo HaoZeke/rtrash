@@ -246,10 +246,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     status
 }
 
-/// With `RTRASH_MAX_SIZE` set, bring each trash root this run used back
-/// under the budget, never touching what this run trashed.
+/// With a trash budget (`RTRASH_MAX_SIZE` or `policy.max_size` in the
+/// config), bring each trash root this run used back under it, never
+/// touching what this run trashed.
 fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
-    let Some((max, policy)) = crate::retention::from_env(prog) else {
+    let Some((max, policy, source)) = crate::retention::budget(prog) else {
         return;
     };
     let mut roots: Vec<PathBuf> = trashed.iter().map(|t| t.trash_dir.clone()).collect();
@@ -275,7 +276,7 @@ fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
         );
         if done.removed > 0 && !quiet {
             eprintln!(
-                "{prog}: removed {} from '{}' to keep it under {} (RTRASH_MAX_SIZE)",
+                "{prog}: removed {} from '{}' to keep it under {} ({source})",
                 crate::util::plural(done.removed, "item", "items"),
                 dir.root.display(),
                 crate::fastdelete::format_bytes(max)
@@ -288,6 +289,14 @@ fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
 fn protected() -> &'static [String] {
     static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     LIST.get_or_init(crate::safety::protected_patterns)
+}
+
+/// `protect.paths` from the config file, in the same form.
+fn config_protected() -> &'static [String] {
+    static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        crate::safety::parse_config(&crate::config::get().list("protect", "paths").join("\n"))
+    })
 }
 
 fn describe(meta: &fs::Metadata, path: &Path) -> &'static str {
@@ -371,6 +380,10 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
     };
     if let Some(pat) = crate::safety::protected_by(&abs, protected()) {
         eprintln!("{prog}: skipping protected path '{name}' (safe-rm list entry '{pat}')");
+        return Err(1);
+    }
+    if let Some(pat) = crate::safety::protected_by(&abs, config_protected()) {
+        eprintln!("{prog}: skipping protected path '{name}' (config protect.paths entry '{pat}')");
         return Err(1);
     }
     if opts.preserve_root && meta.is_dir() {
