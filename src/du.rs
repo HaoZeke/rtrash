@@ -461,6 +461,83 @@ fn enter(
     Some(walk_dir(ctx, dir, path, &st, depth, listing))
 }
 
+/// Directories with more entries than this stat them in parallel.
+const WIDE_DIR: usize = 256;
+/// Entries per parallel stat job in a wide directory.
+const WIDE_CHUNK: usize = 64;
+
+/// What the stats of some entries of one directory add up to.
+struct Stats {
+    apparent: u64,
+    disk: u64,
+    mtime: i64,
+    /// Subdirectories, with their stat when it was taken here (for -x or
+    /// an entry of unknown type).
+    subdirs: Vec<(usize, Option<du_fs::Stat>)>,
+    candidates: Vec<FileCandidate>,
+}
+
+/// Stat entries `range` of `dir`: sum the files and collect the
+/// subdirectories and the files big enough for the list.
+fn stat_entries(
+    ctx: &Ctx<'_>,
+    dir: &du_fs::Dir,
+    entries: &du_fs::Entries,
+    range: std::ops::Range<usize>,
+    depth: usize,
+    list_files: bool,
+) -> Stats {
+    let opts = ctx.opts;
+    let mut out = Stats {
+        apparent: 0,
+        disk: 0,
+        mtime: i64::MIN,
+        subdirs: Vec::new(),
+        candidates: Vec::new(),
+    };
+    for i in range {
+        let (name, kind) = entries.get(i);
+        // A directory gets its stat from its own descriptor once open.
+        // Under -x it is stat-ed first so a mount point is never opened.
+        if kind == du_fs::Kind::Dir && !opts.one_file_system {
+            out.subdirs.push((i, None));
+            continue;
+        }
+        let Ok(m) = dir.stat_at(name) else {
+            ctx.unreadable.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+        if m.is_dir() {
+            if opts.one_file_system && m.dev != ctx.root_dev {
+                continue;
+            }
+            out.subdirs.push((i, Some(m)));
+            continue;
+        }
+        ctx.files.fetch_add(1, Ordering::Relaxed);
+        if !ctx.first_link(&m) {
+            continue;
+        }
+        let (a, d) = m.sizes();
+        out.apparent = out.apparent.saturating_add(a);
+        out.disk = out.disk.saturating_add(d);
+        out.mtime = out.mtime.max(m.mtime);
+        if list_files
+            && m.is_file()
+            && ctx.top_files.wants(ctx.key(a, d))
+            && ctx.listable(depth + 1, m.mtime)
+        {
+            out.candidates.push(FileCandidate {
+                entry: i,
+                apparent: a,
+                disk: d,
+                mtime: m.mtime,
+            });
+        }
+    }
+    out
+}
+
 /// Walk one open directory. `listing` is false below `.git`, artefacts
 /// and trash roots: their sizes count, but nothing inside them is listed.
 fn walk_dir(
@@ -486,57 +563,38 @@ fn walk_dir(
         ctx.unreadable.fetch_add(1, Ordering::Relaxed);
     }
     let list_files = listing && !opts.artefacts_only && opts.top > 0;
-    // Subdirectories with their stat when it was needed already (for -x
-    // or an entry of unknown type).
-    let mut subdirs: Vec<(usize, Option<du_fs::Stat>)> = Vec::new();
     let mut markers: Vec<&'static str> = Vec::new();
-    let mut candidates: Vec<FileCandidate> = Vec::new();
     for i in 0..entries.len() {
-        let (name, kind) = entries.get(i);
-        let bytes = name.to_bytes();
+        let bytes = entries.get(i).0.to_bytes();
         if bytes == b".git" && node.repos.is_empty() {
             node.repos.push(path.to_path_buf());
         }
         if let Some(m) = MARKERS.iter().find(|m| m.as_bytes() == bytes) {
             markers.push(m);
         }
-        // A directory gets its stat from its own descriptor once open.
-        // Under -x it is stat-ed first so a mount point is never opened.
-        if kind == du_fs::Kind::Dir && !opts.one_file_system {
-            subdirs.push((i, None));
-            continue;
-        }
-        let Ok(m) = dir.stat_at(name) else {
-            ctx.unreadable.fetch_add(1, Ordering::Relaxed);
-            continue;
-        };
-        if m.is_dir() {
-            if opts.one_file_system && m.dev != ctx.root_dev {
-                continue;
-            }
-            subdirs.push((i, Some(m)));
-            continue;
-        }
-        ctx.files.fetch_add(1, Ordering::Relaxed);
-        if !ctx.first_link(&m) {
-            continue;
-        }
-        let (a, d) = m.sizes();
-        node.apparent = node.apparent.saturating_add(a);
-        node.disk = node.disk.saturating_add(d);
-        node.mtime = node.mtime.max(m.mtime);
-        if list_files
-            && m.is_file()
-            && ctx.top_files.wants(ctx.key(a, d))
-            && ctx.listable(depth + 1, m.mtime)
-        {
-            candidates.push(FileCandidate {
-                entry: i,
-                apparent: a,
-                disk: d,
-                mtime: m.mtime,
-            });
-        }
+    }
+    let stat_chunk =
+        |range: std::ops::Range<usize>| stat_entries(ctx, &dir, &entries, range, depth, list_files);
+    let n = entries.len();
+    // One thread stats a directory's entries unless there are many: then
+    // chunks of them go to the pool, so a huge flat directory does not
+    // serialise the scan.
+    let parts: Vec<Stats> = if n > WIDE_DIR {
+        (0..n.div_ceil(WIDE_CHUNK))
+            .into_par_iter()
+            .map(|c| stat_chunk(c * WIDE_CHUNK..n.min((c + 1) * WIDE_CHUNK)))
+            .collect()
+    } else {
+        vec![stat_chunk(0..n)]
+    };
+    let mut subdirs: Vec<(usize, Option<du_fs::Stat>)> = Vec::new();
+    let mut candidates: Vec<FileCandidate> = Vec::new();
+    for p in parts {
+        node.apparent = node.apparent.saturating_add(p.apparent);
+        node.disk = node.disk.saturating_add(p.disk);
+        node.mtime = node.mtime.max(p.mtime);
+        subdirs.extend(p.subdirs);
+        candidates.extend(p.candidates);
     }
 
     let name = path

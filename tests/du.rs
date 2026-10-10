@@ -494,6 +494,21 @@ fn totals_match_du_with_deep_links_and_unreadable_dirs() {
 }
 
 #[test]
+fn wide_directory_split_keeps_rows_and_counts() {
+    let t = Tree::new("wide");
+    for i in 0..1000 {
+        t.file(&format!("flat/f{i:04}"), 10);
+    }
+    let big = t.file("flat/f0777", 300_000);
+    t.file("flat/sub/inner.bin", 200_000);
+    let j = t.json(&["--no-git", "-n", "2", "--files"]);
+    let files = paths_in(&j, "files");
+    assert_eq!(files[0], s(&big), "{j}");
+    assert_eq!(files[1], s(&t.root.join("flat/sub/inner.bin")), "{j}");
+    assert_eq!(field(&j, "files"), 1001, "{j}");
+}
+
+#[test]
 fn trash_is_one_row_and_summarized() {
     let t = Tree::new("trash");
     let trash = t.root.join("Trash");
