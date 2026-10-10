@@ -432,6 +432,67 @@ fn stash_alone_marks_repo_dirty_and_ignores_batch() {
     );
 }
 
+fn gnu_du() -> bool {
+    Command::new("du")
+        .arg("--version")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("GNU coreutils"))
+        .unwrap_or(false)
+}
+
+fn du_total(flag: &str, root: &Path) -> u64 {
+    let out = Command::new("du")
+        .args(["-s", flag])
+        .arg(root)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[test]
+fn totals_match_du_with_deep_links_and_unreadable_dirs() {
+    use std::os::unix::fs::PermissionsExt;
+    if !gnu_du() {
+        return;
+    }
+    let t = Tree::new("parity");
+    // Deeper than the walker keeps directory descriptors open for.
+    let mut deep = String::from("deep");
+    for i in 0..80 {
+        deep.push_str(&format!("/d{i}"));
+        t.file(&format!("{deep}/f.bin"), 1000 + i);
+    }
+    let a = t.file("links/a.bin", 50_000);
+    fs::hard_link(&a, t.root.join("links/b.bin")).unwrap();
+    std::os::unix::fs::symlink(&a, t.root.join("links/sym")).unwrap();
+    std::os::unix::fs::symlink(t.root.join("deep"), t.root.join("dirlink")).unwrap();
+    for i in 0..600 {
+        t.file(&format!("wide/f{i:04}"), i);
+    }
+    t.file("locked/inner/x.bin", 70_000);
+    let locked = t.root.join("locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let blocked = fs::read_dir(&locked).is_err();
+
+    let out = t.du(&["--json", "--no-git", "-n", "0", "."]);
+    let j = String::from_utf8(out.stdout).unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    let disk = du_total("-B1", &t.root);
+    let apparent = du_total("-b", &t.root);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(field(&j, "disk"), disk, "{j}");
+    assert_eq!(field(&j, "apparent"), apparent, "{j}");
+    if blocked {
+        assert_eq!(field(&j, "unreadable"), 1, "{j}");
+        assert!(err.contains("could not be read"), "{err}");
+    }
+}
+
 #[test]
 fn trash_is_one_row_and_summarized() {
     let t = Tree::new("trash");

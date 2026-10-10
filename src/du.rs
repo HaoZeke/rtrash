@@ -2,6 +2,7 @@
 //! reports the largest directories and files, with on-disk and apparent sizes.
 
 use std::collections::HashSet;
+use std::ffi::CStr;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
@@ -11,6 +12,7 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 
+use crate::du_fs;
 use crate::du_git::{self, GitState};
 use crate::fastdelete::format_bytes;
 use crate::info;
@@ -365,12 +367,12 @@ impl Ctx<'_> {
     }
 
     /// Count a non-directory once even when it has several hard links.
-    fn first_link(&self, meta: &fs::Metadata) -> bool {
-        if meta.nlink() <= 1 {
+    fn first_link(&self, st: &du_fs::Stat) -> bool {
+        if st.nlink <= 1 {
             return true;
         }
         let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-        seen.insert((meta.dev(), meta.ino()))
+        seen.insert((st.dev, st.ino))
     }
 
     fn key(&self, apparent: u64, disk: u64) -> u64 {
@@ -391,86 +393,148 @@ struct Node {
 /// At most this many repo roots are remembered per directory.
 const MAX_REPOS: usize = 64;
 
-fn sizes(meta: &fs::Metadata) -> (u64, u64) {
-    (meta.len(), meta.blocks().saturating_mul(512))
-}
+/// Below this depth a directory stays open while its subdirectories are
+/// read, so they open relative to it. Deeper directories close first and
+/// their children open by full path, which bounds open descriptors.
+const FD_HOLD_DEPTH: usize = 64;
 
 /// A file that looked big enough for the list while its directory was
 /// being read; it is offered once the directory is known to be listable.
 struct FileCandidate {
-    name: std::ffi::OsString,
+    entry: usize,
     apparent: u64,
     disk: u64,
     mtime: i64,
 }
 
-/// Walk one directory. `listing` is false below `.git`, artefacts and
-/// trash roots: their sizes count, but nothing inside them is listed.
-fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize, listing: bool) -> Node {
+/// Open and walk one directory. `parent` and `name` locate it relative to
+/// an open parent; without them it opens by `path`. `known` is its stat
+/// when the caller already has one. Returns `None` for a directory on
+/// another file system under `-x`, or one that cannot be stat-ed.
+fn enter(
+    ctx: &Ctx<'_>,
+    parent: Option<(&du_fs::Dir, &CStr)>,
+    path: &Path,
+    known: Option<du_fs::Stat>,
+    depth: usize,
+    listing: bool,
+) -> Option<Node> {
+    let opened = match parent {
+        Some((dir, name)) => dir.open_child(name),
+        None => du_fs::Dir::open(path),
+    };
+    let stat_again = || match parent {
+        Some((dir, name)) => dir.stat_at(name),
+        None => du_fs::lstat(path),
+    };
+    let unreadable = || {
+        ctx.unreadable.fetch_add(1, Ordering::Relaxed);
+        None
+    };
+    let Ok(dir) = opened else {
+        // Unreadable directory: its own blocks still count, as with du(1).
+        let Some(st) = known.or_else(|| stat_again().ok()) else {
+            return unreadable();
+        };
+        if !st.is_dir() || (ctx.opts.one_file_system && st.dev != ctx.root_dev) {
+            return unreadable();
+        }
+        ctx.dirs.fetch_add(1, Ordering::Relaxed);
+        ctx.unreadable.fetch_add(1, Ordering::Relaxed);
+        return Some(Node {
+            apparent: 0,
+            disk: st.sizes().1,
+            mtime: st.mtime,
+            repos: Vec::new(),
+        });
+    };
+    let st = match known {
+        Some(st) => st,
+        None => match dir.stat() {
+            Ok(st) => st,
+            Err(_) => return unreadable(),
+        },
+    };
+    if ctx.opts.one_file_system && st.dev != ctx.root_dev {
+        return None;
+    }
+    Some(walk_dir(ctx, dir, path, &st, depth, listing))
+}
+
+/// Walk one open directory. `listing` is false below `.git`, artefacts
+/// and trash roots: their sizes count, but nothing inside them is listed.
+fn walk_dir(
+    ctx: &Ctx<'_>,
+    dir: du_fs::Dir,
+    path: &Path,
+    st: &du_fs::Stat,
+    depth: usize,
+    listing: bool,
+) -> Node {
     let opts = ctx.opts;
     // Like GNU du, a directory adds blocks to disk use but nothing to the
     // apparent size: its st_size is a filesystem detail, not data.
-    let (_, disk) = sizes(meta);
     let mut node = Node {
         apparent: 0,
-        disk,
-        mtime: meta.mtime(),
+        disk: st.sizes().1,
+        mtime: st.mtime,
         repos: Vec::new(),
     };
     ctx.dirs.fetch_add(1, Ordering::Relaxed);
-    let rd = match fs::read_dir(path) {
-        Ok(rd) => rd,
-        Err(_) => {
-            ctx.unreadable.fetch_add(1, Ordering::Relaxed);
-            return node;
-        }
-    };
+    let (entries, failed) = dir.entries();
+    if failed {
+        ctx.unreadable.fetch_add(1, Ordering::Relaxed);
+    }
     let list_files = listing && !opts.artefacts_only && opts.top > 0;
-    let mut subdirs: Vec<(PathBuf, fs::Metadata)> = Vec::new();
-    let mut markers: Vec<std::ffi::OsString> = Vec::new();
+    // Subdirectories with their stat when it was needed already (for -x
+    // or an entry of unknown type).
+    let mut subdirs: Vec<(usize, Option<du_fs::Stat>)> = Vec::new();
+    let mut markers: Vec<&'static str> = Vec::new();
     let mut candidates: Vec<FileCandidate> = Vec::new();
-    for ent in rd {
-        let Ok(ent) = ent else {
-            ctx.unreadable.fetch_add(1, Ordering::Relaxed);
-            continue;
-        };
-        let fname = ent.file_name();
-        if fname == ".git" && node.repos.is_empty() {
+    for i in 0..entries.len() {
+        let (name, kind) = entries.get(i);
+        let bytes = name.to_bytes();
+        if bytes == b".git" && node.repos.is_empty() {
             node.repos.push(path.to_path_buf());
         }
-        if MARKERS.iter().any(|m| fname == *m) {
-            markers.push(fname.clone());
+        if let Some(m) = MARKERS.iter().find(|m| m.as_bytes() == bytes) {
+            markers.push(m);
         }
-        // DirEntry::metadata does not follow symlinks on Unix.
-        let Ok(m) = ent.metadata() else {
+        // A directory gets its stat from its own descriptor once open.
+        // Under -x it is stat-ed first so a mount point is never opened.
+        if kind == du_fs::Kind::Dir && !opts.one_file_system {
+            subdirs.push((i, None));
+            continue;
+        }
+        let Ok(m) = dir.stat_at(name) else {
             ctx.unreadable.fetch_add(1, Ordering::Relaxed);
             continue;
         };
         if m.is_dir() {
-            if opts.one_file_system && m.dev() != ctx.root_dev {
+            if opts.one_file_system && m.dev != ctx.root_dev {
                 continue;
             }
-            subdirs.push((ent.path(), m));
+            subdirs.push((i, Some(m)));
             continue;
         }
         ctx.files.fetch_add(1, Ordering::Relaxed);
         if !ctx.first_link(&m) {
             continue;
         }
-        let (a, d) = sizes(&m);
+        let (a, d) = m.sizes();
         node.apparent = node.apparent.saturating_add(a);
         node.disk = node.disk.saturating_add(d);
-        node.mtime = node.mtime.max(m.mtime());
+        node.mtime = node.mtime.max(m.mtime);
         if list_files
             && m.is_file()
             && ctx.top_files.wants(ctx.key(a, d))
-            && ctx.listable(depth + 1, m.mtime())
+            && ctx.listable(depth + 1, m.mtime)
         {
             candidates.push(FileCandidate {
-                name: fname,
+                entry: i,
                 apparent: a,
                 disk: d,
-                mtime: m.mtime(),
+                mtime: m.mtime,
             });
         }
     }
@@ -482,10 +546,14 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize, listi
     let is_git_dir = name == ".git";
     let artefact = if is_git_dir {
         None
-    } else if opts.trash_roots.iter().any(|r| r == path) {
+    } else if opts
+        .trash_roots
+        .iter()
+        .any(|r| r.as_os_str() == path.as_os_str())
+    {
         Some("trash")
     } else {
-        artefact_kind(&name, |c| markers.iter().any(|m| m == c))
+        artefact_kind(&name, |c| markers.contains(&c))
     };
     // Repository internals are never offered for deletion, and an artefact
     // is one row: nothing below either is listed on its own.
@@ -493,7 +561,7 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize, listi
     if inner_listing {
         for c in candidates {
             ctx.top_files.offer(ctx.key(c.apparent, c.disk), || Item {
-                path: path.join(&c.name),
+                path: path.join(du_fs::os(entries.get(c.entry).0)),
                 is_dir: false,
                 apparent: c.apparent,
                 disk: c.disk,
@@ -505,13 +573,24 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize, listi
         }
     }
 
-    let children: Vec<Node> = subdirs
+    let parent = if depth < FD_HOLD_DEPTH {
+        Some(dir)
+    } else {
+        drop(dir);
+        None
+    };
+    let children: Vec<Option<Node>> = subdirs
         .into_par_iter()
-        .map(|(p, m)| walk_dir(ctx, &p, &m, depth + 1, inner_listing))
+        .map(|(i, known)| {
+            let cname = entries.get(i).0;
+            let child = path.join(du_fs::os(cname));
+            let rel = parent.as_ref().map(|d| (d, cname));
+            enter(ctx, rel, &child, known, depth + 1, inner_listing)
+        })
         .collect();
 
     let mut largest_child = 0u64;
-    for child in children {
+    for child in children.into_iter().flatten() {
         largest_child = largest_child.max(ctx.key(child.apparent, child.disk));
         node.apparent = node.apparent.saturating_add(child.apparent);
         node.disk = node.disk.saturating_add(child.disk);
@@ -574,16 +653,17 @@ impl Node {
 /// Scan `paths` and return the merged report. Paths are made absolute first
 /// (without resolving a final symlink) so listed paths work from any cwd.
 pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
+    du_fs::raise_nofile_limit();
     let mut roots = Vec::new();
     let mut dirs = TopN::new(opts.top, opts.sort);
     let mut files = TopN::new(opts.top, opts.sort);
     let mut unreadable = 0u64;
     for p in paths {
         let abs = absolute(p)?;
-        let meta = fs::symlink_metadata(&abs)?;
+        let meta = du_fs::lstat(&abs)?;
         let ctx = Ctx {
             opts,
-            root_dev: meta.dev(),
+            root_dev: meta.dev,
             seen: Mutex::new(HashSet::new()),
             unreadable: AtomicU64::new(0),
             files: AtomicU64::new(0),
@@ -592,18 +672,19 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
             top_files: SharedTop::new(opts.top, opts.sort),
         };
         let (apparent, disk) = if meta.is_dir() {
-            let node = walk_dir(&ctx, &abs, &meta, 0, true);
-            (node.apparent, node.disk)
+            enter(&ctx, None, &abs, Some(meta), 0, true)
+                .map(|n| (n.apparent, n.disk))
+                .unwrap_or((0, 0))
         } else {
             ctx.files.fetch_add(1, Ordering::Relaxed);
-            let (a, d) = sizes(&meta);
-            if meta.is_file() && !opts.artefacts_only && ctx.listable(0, meta.mtime()) {
+            let (a, d) = meta.sizes();
+            if meta.is_file() && !opts.artefacts_only && ctx.listable(0, meta.mtime) {
                 ctx.top_files.offer(ctx.key(a, d), || Item {
                     path: abs.clone(),
                     is_dir: false,
                     apparent: a,
                     disk: d,
-                    mtime: meta.mtime(),
+                    mtime: meta.mtime,
                     artefact: None,
                     repos: Vec::new(),
                     git: None,
