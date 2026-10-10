@@ -544,12 +544,14 @@ mod tests {
             + fs::symlink_metadata(d.join("sub")).unwrap().blocks() * 512;
         let b = fs::symlink_metadata(d.join("sub/b")).unwrap().blocks() * 512;
         assert_eq!(disk_usage(&d), dirs + one + b);
+        // Compare against GNU du only: on macOS, `du -sB1` printed
+        // 512-byte blocks in CI.
         let gnu = std::process::Command::new("du")
             .args(["-sB1"])
             .arg(&d)
             .output()
             .ok()
-            .filter(|o| o.status.success());
+            .filter(|o| o.status.success() && cfg!(target_os = "linux"));
         if let Some(o) = gnu {
             let n: u64 = String::from_utf8_lossy(&o.stdout)
                 .split_whitespace()
