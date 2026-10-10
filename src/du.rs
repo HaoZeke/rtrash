@@ -376,6 +376,12 @@ struct LinkSet {
 }
 
 impl LinkSet {
+    /// Whether `st` is the first sighting of its file. See
+    /// [`Ctx::first_link`] for what link count 0 and file ID 0 mean.
+    fn first_link(&self, st: &du_fs::Stat) -> bool {
+        st.nlink == 1 || st.ino == 0 || self.insert(st.dev, st.ino)
+    }
+
     const SHARDS: usize = 16;
 
     fn new() -> Self {
@@ -430,9 +436,11 @@ impl Ctx<'_> {
 
     /// Count a non-directory once even when it has several hard links.
     /// A link count of 0 means the platform did not report one, so the
-    /// file is tracked like a linked one.
+    /// file is tracked like a linked one. A file ID of 0 means there is no
+    /// ID to compare (some file systems and Windows layers report none), so
+    /// the file counts on its own rather than as a copy of every other.
     fn first_link(&self, st: &du_fs::Stat) -> bool {
-        st.nlink == 1 || self.seen.insert(st.dev, st.ino)
+        self.seen.first_link(st)
     }
 
     fn key(&self, apparent: u64, disk: u64) -> u64 {
@@ -1392,6 +1400,30 @@ mod tests {
             }
         }
         assert_eq!(used.len(), LinkSet::SHARDS, "sequential inodes spread out");
+    }
+
+    #[test]
+    fn file_id_zero_never_merges_files() {
+        let set = LinkSet::new();
+        let st = |nlink, ino| du_fs::Stat {
+            mode: 0o100_000, // regular file
+            size: 10,
+            blocks: 1,
+            nlink,
+            ino,
+            dev: 3,
+            mtime: 0,
+        };
+        // No link count and no file ID, as on a volume without IDs: every
+        // file counts.
+        for _ in 0..3 {
+            assert!(set.first_link(&st(0, 0)));
+        }
+        // No link count but a real ID: the second sighting is a hard link.
+        assert!(set.first_link(&st(0, 42)));
+        assert!(!set.first_link(&st(0, 42)));
+        assert!(set.first_link(&st(2, 43)));
+        assert!(!set.first_link(&st(2, 43)));
     }
 
     #[test]
