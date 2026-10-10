@@ -1,4 +1,5 @@
-# Quality bar: fmt, clippy (-D warnings), nextest (locked), supply-chain (cargo-deny).
+# Quality bar: fmt, clippy (-D warnings), nextest (locked), supply-chain (cargo-deny),
+# shell completion syntax. Spelling runs through prek (codespell) in pre_commit.yml.
 name: CI
 
 on:
@@ -45,6 +46,26 @@ jobs:
 
       - name: Test without the TUI feature
         run: cargo nextest run --locked --profile ci --no-default-features
+
+  completions:
+    name: completion syntax (bash · zsh · fish)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zsh and fish
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh fish
+
+      - name: Parse each completion script
+        run: |
+          bash -n completions/rtrash.bash
+          zsh -n completions/_rtrash
+          fish --no-execute completions/rtrash.fish
+
+      - name: Load the zsh and fish completions
+        run: |
+          zsh -f -c 'fpath=(completions $fpath); autoload -Uz compinit; compinit -u -D; autoload -Uz +X _rtrash'
+          fish --no-config -c 'source completions/rtrash.fish; complete -C "rtrash restore --js" | string match -q -- "--json*"'
 
   deny:
     name: cargo-deny

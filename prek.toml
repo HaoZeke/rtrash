@@ -43,9 +43,9 @@ repo = "https://github.com/codespell-project/codespell"
 rev = "v2.4.1"
 hooks = [
   { id = "codespell", args = [
-    "--skip=*.lock,*.svg,CHANGELOG.md,completions/*,man/*,benches/*",
+    "--skip=*.lock,*.svg,CHANGELOG.md,benches/*",
     "-L",
-    "ratatui,alph",
+    "ratatui,alph,ue",
   ] },
 ]
 

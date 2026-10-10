@@ -621,7 +621,7 @@ mod tests {
         // A cloud placeholder is a reparse point that holds data.
         let cloud = 0x20 | FILE_ATTRIBUTE_REPARSE_POINT;
         buf.extend(fileid_record("cloud.txt", cloud, 0x9000_001A, false));
-        buf.extend(fileid_record("caf\u{e9}", 0x20, 0, true));
+        buf.extend(fileid_record("\u{e9}t\u{e9}", 0x20, 0, true));
         let mut e = Entries::default();
         assert!(parse(&buf, 9, &mut e));
         let names: Vec<String> = (0..e.len())
@@ -629,7 +629,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["data.bin", "sub", "junction", "cloud.txt", "caf\u{e9}"]
+            ["data.bin", "sub", "junction", "cloud.txt", "\u{e9}t\u{e9}"]
         );
         let f = e.stat(0).unwrap();
         assert!(f.is_file());
