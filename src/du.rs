@@ -56,6 +56,10 @@ directories appear as one `trash` row and are never printed by --print0.
                           directory gives way to the subdirectory that has
                           its newest change)
   -C, --count           add an ITEMS column (each hard-linked file once)
+      --unique          add a UNIQUE column: the bytes in extents no other
+                          file shares, roughly what deleting a row frees on
+                          btrfs, XFS or APFS (reflinks, clones, snapshots);
+                          slower, since it maps every file's extents
       --max-depth=N     list only entries at most N levels below PATH
       --threads=N       walk with N threads (default: one per CPU, or three
                           per CPU up to 64 when the first PATH looks uncached)
@@ -227,6 +231,8 @@ pub struct ScanOpts {
     pub no_files: bool,
     /// `--exclude`, `--exclude-caches` and `--gitignore`.
     pub filter: Option<Arc<du_filter::Spec>>,
+    /// `--unique`: map file extents to find the bytes no other file shares.
+    pub unique: bool,
 }
 
 impl Default for ScanOpts {
@@ -243,6 +249,7 @@ impl Default for ScanOpts {
             trash_roots: Vec::new(),
             no_files: false,
             filter: None,
+            unique: false,
         }
     }
 }
@@ -267,6 +274,8 @@ pub struct Item {
     pub repos: Vec<PathBuf>,
     /// Riskiest git state and the repo that decided it (after `annotate_git`).
     pub git: Option<(GitState, PathBuf)>,
+    /// Allocated bytes no other file shares (`--unique` scans only).
+    pub unique: Option<u64>,
 }
 
 impl Item {
@@ -390,6 +399,8 @@ pub struct RootTotals {
     pub artefact: Option<&'static str>,
     /// Entries left out by the filters (not opened, not counted).
     pub excluded: u64,
+    /// Bytes in extents no other file shares (`--unique` scans only).
+    pub unique: Option<u64>,
 }
 
 /// Result of scanning one or more paths.
@@ -400,6 +411,18 @@ pub struct Report {
     pub files: Vec<Item>,
     /// Entries that could not be read (permission denied, vanished).
     pub unreadable: u64,
+    /// `--unique` scans: bytes of the shared extents the scanned files
+    /// point at, each extent counted once, and with every reference.
+    pub shared: Option<SharedTotals>,
+}
+
+/// What the shared extents of a `--unique` scan add up to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SharedTotals {
+    /// Space they take, each extent counted once.
+    pub distinct: u64,
+    /// Bytes the files reference, with repeats.
+    pub referenced: u64,
 }
 
 /// Trash on the file systems that were scanned: emptying it is what
@@ -578,9 +601,41 @@ struct Ctx<'a> {
     excluded: AtomicU64,
     top_dirs: SharedTop,
     top_files: SharedTop,
+    /// Shared extents met so far (`--unique`).
+    shared: std::sync::Mutex<crate::du_extent::SharedSet>,
 }
 
 impl Ctx<'_> {
+    /// Bytes of a counted file that no other file shares; `disk` without
+    /// `--unique` or an extent map. Shared extents go to `self.shared`.
+    fn unique_of(&self, dir: &du_fs::Dir, name: &CStr, st: &du_fs::Stat, disk: u64) -> u64 {
+        #[cfg(unix)]
+        {
+            if !st.is_file() || disk == 0 {
+                return disk;
+            }
+            let Ok(f) = dir.open_file(name) else {
+                return disk;
+            };
+            self.note_shares(st.dev, crate::du_extent::file_share(&f, disk))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (dir, name, st);
+            disk
+        }
+    }
+
+    #[cfg(unix)]
+    fn note_shares(&self, dev: u64, s: crate::du_extent::FileShare) -> u64 {
+        if !s.shared.is_empty() {
+            if let Ok(mut set) = self.shared.lock() {
+                set.add(dev, &s.shared);
+            }
+        }
+        s.unique
+    }
+
     fn listable(&self, depth: usize, mtime: i64) -> bool {
         if let Some(max) = self.opts.max_depth {
             if depth > max {
@@ -617,6 +672,8 @@ impl Ctx<'_> {
 struct Node {
     apparent: u64,
     disk: u64,
+    /// Bytes no other file shares (`--unique`), else 0.
+    unique: u64,
     mtime: i64,
     /// Files and directories below this one.
     items: u64,
@@ -642,6 +699,7 @@ struct FileCandidate {
     entry: usize,
     apparent: u64,
     disk: u64,
+    unique: u64,
     mtime: i64,
 }
 
@@ -683,6 +741,7 @@ fn enter(
         return Some(Node {
             apparent: 0,
             disk: st.sizes().1,
+            unique: st.sizes().1,
             mtime: st.mtime,
             items: 0,
             repos: Vec::new(),
@@ -712,6 +771,7 @@ const WIDE_CHUNK: usize = 64;
 struct Stats {
     apparent: u64,
     disk: u64,
+    unique: u64,
     mtime: i64,
     /// Files counted (each hard-linked file once).
     files: u64,
@@ -736,6 +796,7 @@ fn stat_entries(
     let mut out = Stats {
         apparent: 0,
         disk: 0,
+        unique: 0,
         mtime: i64::MIN,
         files: 0,
         subdirs: Vec::new(),
@@ -786,6 +847,12 @@ fn stat_entries(
         let (a, d) = m.sizes();
         out.apparent = out.apparent.saturating_add(a);
         out.disk = out.disk.saturating_add(d);
+        let u = if opts.unique {
+            ctx.unique_of(dir, name, &m, d)
+        } else {
+            0
+        };
+        out.unique = out.unique.saturating_add(u);
         out.mtime = out.mtime.max(m.mtime);
         if list_files
             && m.is_file()
@@ -796,6 +863,7 @@ fn stat_entries(
                 entry: i,
                 apparent: a,
                 disk: d,
+                unique: u,
                 mtime: m.mtime,
             });
         }
@@ -820,6 +888,8 @@ fn walk_dir(
     let mut node = Node {
         apparent: 0,
         disk: st.sizes().1,
+        // A directory's own blocks belong to it alone.
+        unique: if opts.unique { st.sizes().1 } else { 0 },
         mtime: st.mtime,
         items: 0,
         repos: Vec::new(),
@@ -897,6 +967,7 @@ fn walk_dir(
     for p in parts {
         node.apparent = node.apparent.saturating_add(p.apparent);
         node.disk = node.disk.saturating_add(p.disk);
+        node.unique = node.unique.saturating_add(p.unique);
         node.mtime = node.mtime.max(p.mtime);
         node.items += p.files;
         subdirs.extend(p.subdirs);
@@ -956,6 +1027,7 @@ fn walk_dir(
                 artefact: None,
                 repos: Vec::new(),
                 git: None,
+                unique: opts.unique.then_some(c.unique),
             });
             if !kept {
                 break;
@@ -996,6 +1068,7 @@ fn walk_dir(
         node.items += 1 + child.items;
         node.apparent = node.apparent.saturating_add(child.apparent);
         node.disk = node.disk.saturating_add(child.disk);
+        node.unique = node.unique.saturating_add(child.unique);
         node.mtime = node.mtime.max(child.mtime);
         for r in child.repos {
             if node.repos.len() < MAX_REPOS {
@@ -1089,6 +1162,7 @@ impl Node {
             artefact,
             repos: self.repos.clone(),
             git: None,
+            unique: ctx.opts.unique.then_some(self.unique),
         });
     }
 }
@@ -1117,6 +1191,7 @@ pub fn scan_with(
     };
     let mut files = TopN::new(file_cap, opts.sort);
     let mut unreadable = 0u64;
+    let mut shared = crate::du_extent::SharedSet::default();
     for p in paths {
         let abs = absolute(p)?;
         let meta = du_fs::lstat(&abs)?;
@@ -1142,8 +1217,9 @@ pub fn scan_with(
             excluded: AtomicU64::new(0),
             top_dirs: SharedTop::new(opts.top, opts.sort),
             top_files: SharedTop::new(file_cap, opts.sort),
+            shared: Default::default(),
         };
-        let (apparent, disk, artefact) = if meta.is_dir() {
+        let (apparent, disk, unique, artefact) = if meta.is_dir() {
             enter(
                 &ctx,
                 None,
@@ -1153,11 +1229,16 @@ pub fn scan_with(
                 true,
                 ctx.filter.as_ref().and_then(|f| f.root_chain.as_ref()),
             )
-            .map(|n| (n.apparent, n.disk, n.artefact))
-            .unwrap_or((0, 0, None))
+            .map(|n| (n.apparent, n.disk, n.unique, n.artefact))
+            .unwrap_or((0, 0, 0, None))
         } else {
             ctx.files.fetch_add(1, Ordering::Relaxed);
             let (a, d) = meta.sizes();
+            let u = if opts.unique {
+                root_file_unique(&ctx, &abs, &meta, d)
+            } else {
+                0
+            };
             if meta.is_file() && !opts.artefacts_only && ctx.listable(0, meta.mtime) {
                 ctx.top_files.offer(ctx.key(a, d, 1, meta.mtime), || Item {
                     path: abs.clone(),
@@ -1169,9 +1250,10 @@ pub fn scan_with(
                     artefact: None,
                     repos: Vec::new(),
                     git: None,
+                    unique: opts.unique.then_some(u),
                 });
             }
-            (a, d, None)
+            (a, d, u, None)
         };
         unreadable += ctx.unreadable.load(Ordering::Relaxed);
         roots.push(RootTotals {
@@ -1183,16 +1265,43 @@ pub fn scan_with(
             dirs: ctx.dirs.load(Ordering::Relaxed),
             artefact,
             excluded: ctx.excluded.load(Ordering::Relaxed),
+            unique: opts.unique.then_some(unique),
         });
         dirs.merge_vec(ctx.top_dirs.into_vec());
         files.merge_vec(ctx.top_files.into_vec());
+        if let Ok(s) = ctx.shared.into_inner() {
+            shared.merge(s);
+        }
     }
     Ok(Report {
         roots,
         dirs: dirs.into_vec(),
         files: files.into_vec(),
         unreadable,
+        shared: opts.unique.then(|| SharedTotals {
+            distinct: shared.distinct(),
+            referenced: shared.referenced,
+        }),
     })
+}
+
+/// Unique bytes of a PATH that is itself a file.
+fn root_file_unique(ctx: &Ctx<'_>, path: &Path, st: &du_fs::Stat, disk: u64) -> u64 {
+    #[cfg(unix)]
+    {
+        if !st.is_file() || disk == 0 {
+            return disk;
+        }
+        match fs::File::open(path) {
+            Ok(f) => ctx.note_shares(st.dev, crate::du_extent::file_share(&f, disk)),
+            Err(_) => disk,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (ctx, path, st);
+        disk
+    }
 }
 
 fn absolute(p: &Path) -> io::Result<PathBuf> {
@@ -1363,6 +1472,12 @@ fn json_opt(v: Option<&str>) -> String {
     }
 }
 
+/// `,"unique":N` on `--unique` scans; nothing otherwise, so other output
+/// keeps its shape.
+fn unique_json(u: Option<u64>) -> String {
+    u.map(|u| format!(",\"unique\":{u}")).unwrap_or_default()
+}
+
 fn item_json(it: &Item) -> String {
     let git_state = it.git.as_ref().map(|(s, _)| s.as_str());
     let git_repo = it
@@ -1370,11 +1485,12 @@ fn item_json(it: &Item) -> String {
         .as_ref()
         .map(|(_, r)| r.to_string_lossy().into_owned());
     format!(
-        "{{\"path\":\"{}\",\"type\":\"{}\",\"disk\":{},\"apparent\":{},\"mtime\":{},\"items\":{},\"artefact\":{},\"git\":{},\"git_repo\":{}}}",
+        "{{\"path\":\"{}\",\"type\":\"{}\",\"disk\":{},\"apparent\":{}{},\"mtime\":{},\"items\":{},\"artefact\":{},\"git\":{},\"git_repo\":{}}}",
         json_escape(&it.path.to_string_lossy()),
         if it.is_dir { "dir" } else { "file" },
         it.disk,
         it.apparent,
+        unique_json(it.unique),
         it.mtime,
         it.items,
         json_opt(it.artefact),
@@ -1423,10 +1539,11 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
         .iter()
         .map(|t| {
             format!(
-                "{{\"path\":\"{}\",\"disk\":{},\"apparent\":{},\"files\":{},\"links\":{},\"dirs\":{},\"excluded\":{},\"artefact\":{}}}",
+                "{{\"path\":\"{}\",\"disk\":{},\"apparent\":{}{},\"files\":{},\"links\":{},\"dirs\":{},\"excluded\":{},\"artefact\":{}}}",
                 json_escape(&t.path.to_string_lossy()),
                 t.disk,
                 t.apparent,
+                unique_json(t.unique),
                 t.files,
                 t.links,
                 t.dirs,
@@ -1437,8 +1554,17 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
         .collect();
     let dirs: Vec<String> = r.dirs.iter().map(item_json).collect();
     let files: Vec<String> = r.files.iter().map(item_json).collect();
+    let shared = r
+        .shared
+        .map(|s| {
+            format!(
+                ",\"shared\":{{\"distinct\":{},\"referenced\":{}}}",
+                s.distinct, s.referenced
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{},\"trash\":{}}}",
+        "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{}{shared},\"trash\":{}}}",
         roots.join(","),
         dirs.join(","),
         files.join(","),
@@ -1465,10 +1591,20 @@ fn print_table(title: &str, items: &[Item], now: i64, count: bool) {
             String::new()
         }
     };
+    // The UNIQUE column shows on `--unique` scans only.
+    let with_unique = items.iter().any(|it| it.unique.is_some());
+    let uniques = |v: &str| {
+        if with_unique {
+            format!("{v:>10}  ")
+        } else {
+            String::new()
+        }
+    };
     println!(
-        "{:>10}  {:>10}  {}{:>4}  {:<width$}  PATH",
+        "{:>10}  {:>10}  {}{}{:>4}  {:<width$}  PATH",
         "DISK",
         "APPARENT",
+        uniques("UNIQUE"),
         counts("ITEMS"),
         "AGE",
         "NOTE"
@@ -1479,9 +1615,10 @@ fn print_table(title: &str, items: &[Item], now: i64, count: bool) {
             path.push(std::path::MAIN_SEPARATOR);
         }
         println!(
-            "{:>10}  {:>10}  {}{:>4}  {:<width$}  {}",
+            "{:>10}  {:>10}  {}{}{:>4}  {:<width$}  {}",
             format_bytes(it.disk),
             format_bytes(it.apparent),
+            uniques(&it.unique.map(format_bytes).unwrap_or_default()),
             counts(&it.items.to_string()),
             format_age(it.mtime, now),
             notes(it),
@@ -1489,6 +1626,18 @@ fn print_table(title: &str, items: &[Item], now: i64, count: bool) {
         );
     }
     println!();
+}
+
+/// The `--unique` summary of shared extents.
+fn shared_line(s: SharedTotals) -> String {
+    if s.referenced == 0 {
+        return "Shared extents: none (every byte belongs to one file)".into();
+    }
+    format!(
+        "Shared extents: {} on disk, referenced as {} (reflinks, clones or snapshots)",
+        format_bytes(s.distinct),
+        format_bytes(s.referenced)
+    )
 }
 
 fn print_trash(t: &TrashSummary) {
@@ -1755,6 +1904,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--json" => json = true,
                 "--print0" => print0 = true,
                 "--stacks" => stacks = true,
+                "--unique" => opts.unique = true,
                 "--no-git" => use_git = false,
                 "--home-only" => home_only = true,
                 a if a.starts_with("--trash-dir=") => {
@@ -1821,6 +1971,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     if stacks && (output.is_some() || json || print0 || pick || interactive) {
         eprintln!("{prog}: --stacks prints folded stacks; it takes no other output mode");
+        return 2;
+    }
+    if opts.unique && (from_file.is_some() || output.is_some() || stacks || interactive) {
+        eprintln!(
+            "{prog}: --unique adds a column to a live listing; it takes no -f, -o, --stacks or -i"
+        );
         return 2;
     }
     if stacks && !matches!(opts.sort, SortKey::Disk | SortKey::Apparent) {
@@ -2021,14 +2177,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             } else {
                 String::new()
             };
+            let unique = t
+                .unique
+                .map(|u| format!(", {} unique", format_bytes(u)))
+                .unwrap_or_default();
             println!(
-                "Total {}{kind}: {} on disk, {} apparent, {}{links}, {}{excluded}",
+                "Total {}{kind}: {} on disk{unique}, {} apparent, {}{links}, {}{excluded}",
                 t.path.display(),
                 format_bytes(t.disk),
                 format_bytes(t.apparent),
                 plural(t.files, "file", "files"),
                 plural(t.dirs, "directory", "directories")
             );
+        }
+        if let Some(s) = report.shared {
+            println!("{}", shared_line(s));
         }
         print_trash(&trash);
     }
@@ -2056,6 +2219,7 @@ mod tests {
             artefact: None,
             repos: Vec::new(),
             git: None,
+            unique: None,
         }
     }
 
@@ -2222,6 +2386,62 @@ mod tests {
     }
 
     #[test]
+    fn unique_scan_sums_up_and_shows_in_json() {
+        let root = std::env::temp_dir().join(format!("rtrash-du-unique-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::write(root.join("a/big"), vec![1u8; 300_000]).unwrap();
+        fs::write(root.join("small"), vec![2u8; 5000]).unwrap();
+        let plain = scan(std::slice::from_ref(&root), &ScanOpts::default()).unwrap();
+        assert!(plain.shared.is_none());
+        assert!(plain.files.iter().all(|f| f.unique.is_none()));
+        assert!(!report_json(&plain, &TrashSummary::default()).contains("\"unique\":"));
+        let opts = ScanOpts {
+            unique: true,
+            ..ScanOpts::default()
+        };
+        let r = scan(std::slice::from_ref(&root), &opts).unwrap();
+        let t = &r.roots[0];
+        // Fresh files share nothing, so unique equals disk use, whether the
+        // file system maps extents or not.
+        // APFS reports a private size of its own, which may round
+        // differently from the allocated blocks; elsewhere they match.
+        let fits = |u: Option<u64>, disk: u64| match u {
+            Some(u) if cfg!(target_os = "macos") => u <= disk,
+            Some(u) => u == disk,
+            None => false,
+        };
+        assert!(fits(t.unique, t.disk), "{:?} of {}", t.unique, t.disk);
+        for f in &r.files {
+            assert!(fits(f.unique, f.disk), "{}", f.path.display());
+        }
+        assert_eq!(r.shared, Some(SharedTotals::default()));
+        let j = report_json(&r, &TrashSummary::default());
+        assert!(
+            j.contains(&format!("\"unique\":{}", t.unique.unwrap())),
+            "{j}"
+        );
+        assert!(
+            j.contains("\"shared\":{\"distinct\":0,\"referenced\":0}"),
+            "{j}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn shared_line_names_both_totals() {
+        assert!(shared_line(SharedTotals::default()).contains("none"));
+        let s = shared_line(SharedTotals {
+            distinct: 1 << 20,
+            referenced: 3 << 20,
+        });
+        assert!(
+            s.contains(&format_bytes(1 << 20)) && s.contains(&format_bytes(3 << 20)),
+            "{s}"
+        );
+    }
+
+    #[test]
     fn trash_summary_shows_the_cap_only_when_known() {
         let mut t = TrashSummary {
             roots: vec![PathBuf::from("C:\\")],
@@ -2255,6 +2475,7 @@ mod tests {
             dirs: vec![risky, trash],
             files: vec![item("/w/f.bin", 1, 1)],
             unreadable: 0,
+            shared: None,
         };
         let rows = pick_rows(&report);
         let paths: Vec<_> = rows.iter().map(|r| r.path.clone()).collect();

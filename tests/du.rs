@@ -1170,3 +1170,38 @@ fn stacks_fold_each_directory_by_its_own_size() {
         assert_eq!(t.du(bad).status.code(), Some(2), "{bad:?}");
     }
 }
+
+#[test]
+fn unique_adds_a_column_and_a_shared_summary() {
+    let t = Tree::new("unique");
+    t.file("u/a/big", 200_000);
+    t.file("u/small", 3000);
+    let out = t.du(&["--unique", "--no-git", "u"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("UNIQUE"), "{text}");
+    assert!(text.contains(" unique, "), "{text}");
+    assert!(text.contains("Shared extents: "), "{text}");
+    // The plain listing keeps its shape.
+    let plain = String::from_utf8(t.du(&["--no-git", "u"]).stdout).unwrap();
+    assert!(
+        !plain.contains("UNIQUE") && !plain.contains("Shared extents"),
+        "{plain}"
+    );
+    let json = t.json(&["--unique", "--no-git", "u"]);
+    assert!(
+        json.contains("\"unique\":") && json.contains("\"shared\":{"),
+        "{json}"
+    );
+    for bad in [
+        &["--unique", "--stacks"][..],
+        &["--unique", "-o", "-"],
+        &["--unique", "-i"],
+    ] {
+        assert_eq!(t.du(bad).status.code(), Some(2), "{bad:?}");
+    }
+}

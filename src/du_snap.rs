@@ -188,6 +188,7 @@ pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
                 artefact: artefact_static(f[4]),
                 repos: Vec::new(),
                 git: None,
+                unique: None,
             }),
             // Records from a newer writer: skip, so old readers keep working.
             _ => {}
@@ -284,6 +285,7 @@ pub fn to_report(snap: Snapshot, sort: SortKey, top: usize) -> Report {
         dirs: keep.into_vec(),
         files: Vec::new(),
         unreadable: 0,
+        shared: None,
     }
 }
 
@@ -507,6 +509,7 @@ mod tests {
             artefact: None,
             repos: Vec::new(),
             git: None,
+            unique: None,
         }
     }
 
@@ -526,6 +529,7 @@ mod tests {
             dirs: vec![target.clone(), item("/w/100%\nnew", 512)],
             files: Vec::new(),
             unreadable: 0,
+            shared: None,
         };
         let opts = snapshot_opts(ScanOpts {
             max_depth: Some(3),

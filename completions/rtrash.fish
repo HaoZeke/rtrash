@@ -81,6 +81,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s x -l on
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l apparent -d 'rank by apparent size instead of disk use'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l sort -d 'rank rows by this key' -x -a 'disk apparent items mtime'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s C -l count -d 'add an ITEMS column'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l unique -d 'add a UNIQUE column of bytes no other file shares'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l max-depth -d 'list only entries at most N levels deep' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l threads -d 'walk with N threads' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l all-dirs -d 'list every directory level'

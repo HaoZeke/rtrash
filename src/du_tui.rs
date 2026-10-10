@@ -877,6 +877,7 @@ mod tests {
             artefact: Some("cargo-target"),
             repos: Vec::new(),
             git: Some((crate::du_git::GitState::Dirty, PathBuf::from("/x"))),
+            unique: None,
         };
         let s = row_text(&it, true, 1024, SortKey::Disk);
         assert!(s.starts_with("[x]!"), "{s}");

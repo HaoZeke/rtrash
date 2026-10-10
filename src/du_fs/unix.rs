@@ -73,6 +73,16 @@ impl Dir {
         })
     }
 
+    /// Open the regular file `name` of this directory for reading, without
+    /// following a symlink.
+    pub fn open_file(&self, name: &CStr) -> io::Result<std::fs::File> {
+        const FLAGS: libc::c_int =
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY;
+        // SAFETY: `name` is NUL-terminated; a returned fd is owned by us.
+        let fd = retry(|| cvt(unsafe { libc::openat(self.fd.as_raw_fd(), name.as_ptr(), FLAGS) }))?;
+        Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
+    }
+
     /// Stat of the directory itself.
     pub fn stat(&self) -> io::Result<Stat> {
         let mut s = std::mem::MaybeUninit::<libc::stat>::uninit();
