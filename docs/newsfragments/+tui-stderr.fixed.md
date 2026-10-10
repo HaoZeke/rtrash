@@ -1,0 +1,1 @@
+Errors raised while a browser is open, such as a put that hits a read-only directory, no longer draw over the screen and vanish at the next redraw. The browser keeps stderr aside and prints it after it exits.
