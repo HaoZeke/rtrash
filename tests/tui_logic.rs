@@ -138,6 +138,37 @@ fn restore_selection_restores_two_of_three() {
     );
 }
 
+/// The browser owns the screen while it restores, so outcome lines must
+/// come back as data rather than land on stdout or stderr mid-draw.
+#[test]
+fn restore_selection_returns_outcome_lines() {
+    let sb = TrashSandbox::new("restore-log");
+    sb.put(&["ok.txt", "busy.txt"]);
+    fs::write(sb.work().join("busy.txt"), "blocker").unwrap();
+    let entries = sb.collect_entries();
+    let refs: Vec<&list::Entry> = entries.iter().collect();
+    let all: Vec<usize> = (0..refs.len()).collect();
+
+    let result = restore_tui::restore_selection("rtrash", &refs, &all, false);
+    assert_eq!((result.ok_count(), result.fail_count), (1, 1));
+    let ok = sb.work().join("ok.txt");
+    let busy = sb.work().join("busy.txt");
+    let restored = format!("restored '{}'", ok.display());
+    let refused = format!(
+        "rtrash: refusing to overwrite existing '{}' (use -f to force)",
+        busy.display()
+    );
+    let lines: Vec<(bool, &str)> = result
+        .log
+        .iter()
+        .map(|l| (l.is_error, l.text.as_str()))
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines.contains(&(false, restored.as_str())), "{lines:?}");
+    assert!(lines.contains(&(true, refused.as_str())), "{lines:?}");
+    assert_eq!(fs::read_to_string(&busy).unwrap(), "blocker");
+}
+
 #[test]
 fn permanently_remove_entries_subset_leaves_others() {
     let sb = TrashSandbox::new("empty-subset");

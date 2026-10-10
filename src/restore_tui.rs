@@ -55,6 +55,8 @@ struct App<'a> {
     viewport_rows: usize,
     keys: Keymap,
     newest_first: bool,
+    /// Outcome lines, printed once the terminal is back to normal.
+    log: Vec<LogLine>,
 }
 
 impl<'a> App<'a> {
@@ -85,6 +87,7 @@ impl<'a> App<'a> {
             viewport_rows: 10,
             keys,
             newest_first,
+            log: Vec::new(),
         };
         app.refilter_query(&app.filter.clone());
         app
@@ -209,6 +212,13 @@ impl<'a> App<'a> {
 
     fn perform_restores_tracked(&mut self, idxs: &[usize], force: bool) {
         let result = restore_selection(self.prog, &self.entries, idxs, force);
+        let last_error = result
+            .log
+            .iter()
+            .rev()
+            .find(|l| l.is_error)
+            .map(|l| l.text.clone());
+        self.log.extend(result.log.iter().cloned());
         // Only drop UI rows that actually restored (failed stay visible).
         for &ei in result.succeeded_idxs.iter().rev() {
             if ei < self.entries.len() {
@@ -228,6 +238,9 @@ impl<'a> App<'a> {
                 "restored {ok} · fail {fail} · {} left · Space mark · Enter again",
                 self.entries.len()
             );
+        }
+        if let Some(e) = last_error {
+            self.status = format!("{} · {e}", self.status);
         }
     }
 
@@ -605,11 +618,26 @@ pub fn run(prog: &str, entries: Vec<&Entry>, force: bool, newest_first: bool) ->
     })();
 
     tui_term::leave(&mut terminal);
+    // Printing while the TUI owned the screen would have drawn over it.
+    for line in &app.log {
+        if line.is_error {
+            eprintln!("{}", line.text);
+        } else {
+            println!("{}", line.text);
+        }
+    }
     if let Err(e) = result {
         eprintln!("{prog}: tui error: {e}");
         return 1;
     }
     0
+}
+
+/// One line of restore output, held back while the TUI owns the terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogLine {
+    pub is_error: bool,
+    pub text: String,
 }
 
 /// Result of multi-select restore: which input indices were restored.
@@ -618,6 +646,8 @@ pub struct RestoreSelectionResult {
     /// Indices into the input `entries` slice that restored successfully.
     pub succeeded_idxs: Vec<usize>,
     pub fail_count: u32,
+    /// `restored '...'` lines and errors, in the order they happened.
+    pub log: Vec<LogLine>,
 }
 
 impl RestoreSelectionResult {
@@ -626,7 +656,8 @@ impl RestoreSelectionResult {
     }
 }
 
-/// Restore a set of entry indices via the real `restore_entry` path.
+/// Restore a set of entry indices via [`restore::restore_one`], which prints
+/// nothing; the outcome lines come back in the result's `log`.
 /// `entries` is the full list; `idxs` are indices into it. Restores high→low
 /// so callers can remove succeeded indices afterward. Does not mutate `entries`.
 pub fn restore_selection(
@@ -640,21 +671,40 @@ pub fn restore_selection(
     sorted.dedup();
     let mut succeeded_idxs = Vec::new();
     let mut fail_count = 0u32;
+    let mut log = Vec::new();
     for &ei in sorted.iter().rev() {
         if ei >= entries.len() {
             fail_count += 1;
             continue;
         }
-        if restore::restore_entry(prog, entries[ei], force) == 0 {
-            succeeded_idxs.push(ei);
-        } else {
-            fail_count += 1;
+        match restore::restore_one(entries[ei], force) {
+            Ok(done) => {
+                succeeded_idxs.push(ei);
+                for w in done.warnings {
+                    log.push(LogLine {
+                        is_error: true,
+                        text: format!("{prog}: warning: {w}"),
+                    });
+                }
+                log.push(LogLine {
+                    is_error: false,
+                    text: format!("restored '{}'", done.dest.display()),
+                });
+            }
+            Err(e) => {
+                fail_count += 1;
+                log.push(LogLine {
+                    is_error: true,
+                    text: format!("{prog}: {e}"),
+                });
+            }
         }
     }
     succeeded_idxs.sort_unstable();
     RestoreSelectionResult {
         succeeded_idxs,
         fail_count,
+        log,
     }
 }
 

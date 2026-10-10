@@ -264,40 +264,65 @@ pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32
     restore_entry_quiet(prog, entry, force, false)
 }
 
-/// Restore one entry to its original path. Shared by the CLI, the piped
-/// pick and the TUI; `quiet` drops the `restored '...'` line.
+/// Restore one entry to its original path, printing the outcome. Shared by
+/// the CLI and the piped pick; `quiet` drops the `restored '...'` line.
 fn restore_entry_quiet(prog: &str, entry: &list::Entry, force: bool, quiet: bool) -> i32 {
+    match restore_one(entry, force) {
+        Ok(done) => {
+            for w in &done.warnings {
+                eprintln!("{prog}: warning: {w}");
+            }
+            if !quiet {
+                println!("restored '{}'", done.dest.display());
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{prog}: {e}");
+            1
+        }
+    }
+}
+
+/// A finished restore: where the item went, and problems that did not stop it.
+#[derive(Debug)]
+pub(crate) struct Restored {
+    pub(crate) dest: PathBuf,
+    pub(crate) warnings: Vec<String>,
+}
+
+/// Restore one entry to its original path without printing anything, so the
+/// TUI can call it while it owns the terminal. Errors come back as text
+/// without the program name.
+pub(crate) fn restore_one(entry: &list::Entry, force: bool) -> Result<Restored, String> {
+    let mut warnings = Vec::new();
     let src = entry.dir.files().join(&entry.name);
     let dest = &entry.original;
 
     // Never destroy the live destination until the trash payload is known good.
     if src.symlink_metadata().is_err() {
-        eprintln!(
-            "{prog}: trash payload missing for '{}' (stale .trashinfo?)",
+        return Err(format!(
+            "trash payload missing for '{}' (stale .trashinfo?)",
             entry.name
-        );
-        return 1;
+        ));
     }
 
     let dest_exists = dest.symlink_metadata().is_ok();
     if dest_exists && !force {
-        eprintln!(
-            "{prog}: refusing to overwrite existing '{}' (use -f to force)",
+        return Err(format!(
+            "refusing to overwrite existing '{}' (use -f to force)",
             dest.display()
-        );
-        return 1;
+        ));
     }
 
     let parent = match dest.parent() {
         Some(p) => p,
         None => {
-            eprintln!("{prog}: cannot restore to '{}': no parent", dest.display());
-            return 1;
+            return Err(format!("cannot restore to '{}': no parent", dest.display()));
         }
     };
     if let Err(e) = fs::create_dir_all(parent) {
-        eprintln!("{prog}: cannot create '{}': {e}", parent.display());
-        return 1;
+        return Err(format!("cannot create '{}': {e}", parent.display()));
     }
 
     // Stage into the destination directory first, then swap over any blocker.
@@ -309,46 +334,37 @@ fn restore_entry_quiet(prog: &str, entry: &list::Entry, force: bool, quiet: bool
     ));
     let _ = trashdir::remove_any_path(&staged);
     if let Err(e) = trashdir::relocate(&src, &staged) {
-        eprintln!(
-            "{prog}: cannot restore '{}' to staging area: {e}",
-            src.display()
-        );
+        let err = format!("cannot restore '{}' to staging area: {e}", src.display());
         let _ = trashdir::remove_any_path(&staged);
-        return 1;
+        return Err(err);
     }
 
     if dest_exists {
         // Payload is durable under `staged`; only now remove the blocker.
         if let Err(e) = trashdir::remove_any_path(dest) {
-            eprintln!("{prog}: cannot remove existing '{}': {e}", dest.display());
+            let err = format!("cannot remove existing '{}': {e}", dest.display());
             // Best-effort: put payload back into the trash name.
             let _ = trashdir::relocate(&staged, &src);
-            return 1;
+            return Err(err);
         }
     }
 
     if let Err(e) = fs::rename(&staged, dest) {
         // Same-FS rename of staged→dest; EXDEV should not happen (same parent).
-        eprintln!(
-            "{prog}: cannot place restored file at '{}': {e}",
-            dest.display()
-        );
+        let err = format!("cannot place restored file at '{}': {e}", dest.display());
         // Leave staged for recovery; try not to drop payload.
-        return 1;
+        return Err(err);
     }
 
     let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
     if let Err(e) = fs::remove_file(&info_path) {
-        eprintln!(
-            "{prog}: warning: cannot remove '{}': {e}",
-            info_path.display()
-        );
+        warnings.push(format!("cannot remove '{}': {e}", info_path.display()));
     }
     trashdir::directorysizes_remove(&entry.dir, &entry.name);
-    if !quiet {
-        println!("restored '{}'", dest.display());
-    }
-    0
+    Ok(Restored {
+        dest: dest.clone(),
+        warnings,
+    })
 }
 
 #[cfg(test)]
