@@ -7,7 +7,7 @@ function __rtrash_seen_subcommand
     set -e cmd[1]
     for c in $cmd
         switch $c
-            case put empty list status du restore rm setup completions man
+            case put empty list status du restore rm setup keys completions man
                 echo $c
                 return 0
         end
@@ -24,6 +24,7 @@ complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'du' -d 'find the lar
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'restore' -d 'restore a trashed item'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'rm' -d 'permanently delete matching trash entries'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'setup' -d 'install multi-call links, completions, man page'
+complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'keys' -d 'show or sample the TUI keybind config'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'completions' -d 'print embedded shell completion script'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'man' -d 'print embedded man page to stdout'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -s h -l help -d 'display help and exit'
@@ -114,6 +115,11 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -l with
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -s n -l dry-run -d 'print actions without writing'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -s f -l force -d 'replace existing links/files'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -s v -l verbose -d 'print each path written'
+
+# keys
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q keys' -f -s l -l list -d 'print the resolved keymap'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q keys' -f -l sample -d 'print a sample keys.toml'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q keys' -f -l path -d 'print the config path'
 
 # completions shell names
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q completions' -f -a 'bash zsh fish' -d 'shell'

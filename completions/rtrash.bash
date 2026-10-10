@@ -44,7 +44,11 @@ _rtrash_rm_opts=(
   --help --version
 )
 
-_rtrash_subcommands=(put empty list status du restore rm setup completions man)
+_rtrash_subcommands=(put empty list status du restore rm setup keys completions man)
+
+_rtrash_keys_opts=(
+  -l --list --sample --path --help
+)
 
 _rtrash_setup_opts=(
   --prefix= --bin-dir= --with-rm -n --dry-run -f --force -v --verbose --help
@@ -52,7 +56,9 @@ _rtrash_setup_opts=(
 
 _rtrash_complete_from() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
-  local -n _opts=$1
+  # Copy the named array; bash 3.2 (macOS /bin/bash) has no namerefs.
+  local -a _opts
+  eval "_opts=(\"\${${1}[@]}\")"
   # Prefer option completion when cur starts with -
   if [[ $cur == -* ]]; then
     COMPREPLY=($(compgen -W "${_opts[*]}" -- "$cur"))
@@ -105,7 +111,7 @@ _rtrash_main() {
   local i sub=
   for ((i = 1; i < ${#COMP_WORDS[@]}; i++)); do
     case "${COMP_WORDS[i]}" in
-      put | empty | list | status | du | restore | rm)
+      put | empty | list | status | du | restore | rm | setup | keys | completions | man)
         sub="${COMP_WORDS[i]}"
         break
         ;;
@@ -135,11 +141,12 @@ _rtrash_main() {
     restore) _rtrash_complete_from _rtrash_restore_opts ;;
     rm) _rtrash_complete_from _rtrash_rm_opts ;;
     setup) _rtrash_complete_from _rtrash_setup_opts ;;
+    keys) COMPREPLY=($(compgen -W "${_rtrash_keys_opts[*]}" -- "$cur")) ;;
     completions)
       if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W "--help" -- "$cur"))
       else
-        COMPREPLY=($(compgen -W "bash zsh" -- "$cur"))
+        COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
       fi
       ;;
     man)

@@ -148,6 +148,7 @@ _rtrash_dispatch() {
     'restore:restore a trashed item'
     'rm:permanently delete matching trash entries'
     'setup:install multi-call links, completions, man page'
+    'keys:show or sample the TUI keybind config'
     'completions:print embedded shell completion script'
     'man:print embedded man page to stdout'
   )
@@ -202,7 +203,14 @@ _rtrash_dispatch() {
         completions)
           _arguments -s -C \
             '(- *)'--help'[display help and exit]' \
-            '1:shell:(bash zsh)'
+            '1:shell:(bash zsh fish)'
+          ;;
+        keys)
+          _arguments -s -C \
+            '(-l --list --sample --path)'{-l,--list}'[print the resolved keymap]' \
+            '(-l --list --path)--sample[print a sample keys.toml]' \
+            '(-l --list --sample)--path[print the config path]' \
+            '(- *)'--help'[display help and exit]'
           ;;
         man)
           _arguments -s -C '(- *)'--help'[display help and exit]'

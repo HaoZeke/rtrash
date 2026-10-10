@@ -226,3 +226,99 @@ fn man_page_documents_every_help_option() {
         missing.join("\n")
     );
 }
+
+/// Run the bash completion function on `words` (the last one is the word
+/// being completed) and return what it offers. Uses /bin/bash when present,
+/// which on macOS is bash 3.2.
+#[cfg(unix)]
+fn bash_complete(words: &[&str]) -> Vec<String> {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("completions/rtrash.bash");
+    let quoted: Vec<String> = words
+        .iter()
+        .map(|w| format!("'{}'", w.replace('\'', r"'\''")))
+        .collect();
+    let prog = format!(
+        "source '{}'; COMP_WORDS=({}); COMP_CWORD={}; _rtrash_main; printf '%s\\n' \"${{COMPREPLY[@]}}\"",
+        script.display(),
+        quoted.join(" "),
+        words.len() - 1
+    );
+    let shell = if Path::new("/bin/bash").exists() {
+        "/bin/bash"
+    } else {
+        "bash"
+    };
+    let out = Command::new(shell)
+        .args(["--norc", "--noprofile", "-c", &prog])
+        .current_dir(std::env::temp_dir())
+        .output()
+        .expect("run bash");
+    assert!(
+        out.status.success(),
+        "bash: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_completion_offers_the_right_words() {
+    assert_eq!(
+        bash_complete(&["rtrash", "completions", ""]),
+        ["bash", "zsh", "fish"]
+    );
+    let keys = bash_complete(&["rtrash", "keys", "--"]);
+    assert!(keys.contains(&"--sample".to_string()), "{keys:?}");
+    assert!(!keys.contains(&"--recursive".to_string()), "{keys:?}");
+    let setup = bash_complete(&["rtrash", "setup", "--p"]);
+    assert_eq!(setup, ["--prefix="]);
+    assert_eq!(bash_complete(&["rtrash", "restore", "--la"]), ["--latest"]);
+    assert_eq!(bash_complete(&["trash-restore", "--js"]), ["--json"]);
+    assert_eq!(bash_complete(&["rtrash", "du", "--print"]), ["--print0"]);
+}
+
+/// Same check through fish, when it is installed.
+#[cfg(unix)]
+#[test]
+fn fish_completion_offers_the_right_words() {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("completions/rtrash.fish");
+    let run = |line: &str| -> Option<Vec<String>> {
+        let prog = format!("source '{}'; complete -C '{line}'", script.display());
+        let out = Command::new("fish")
+            .args(["--no-config", "-c", &prog])
+            .output()
+            .ok()?;
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Some(
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|l| l.split('\t').next().unwrap_or("").to_string())
+                .collect(),
+        )
+    };
+    let Some(shells) = run("rtrash completions ") else {
+        eprintln!("fish not installed; skipping");
+        return;
+    };
+    assert_eq!(shells, ["bash", "fish", "zsh"]);
+    let keys = run("rtrash keys --").unwrap();
+    assert!(keys.contains(&"--sample".to_string()), "{keys:?}");
+    let subs = run("rtrash k").unwrap();
+    assert!(subs.contains(&"keys".to_string()), "{subs:?}");
+}
+
+#[test]
+fn zsh_completion_knows_keys_and_every_shell() {
+    let zsh = read("completions/_rtrash");
+    assert!(zsh.contains("'keys:"), "keys subcommand missing");
+    assert!(zsh.contains("'1:shell:(bash zsh fish)'"));
+    assert!(zsh.contains("--sample["));
+}
