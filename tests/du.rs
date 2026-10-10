@@ -378,3 +378,48 @@ fn git_state_marks_rows_and_print0_holds_back_risky_ones() {
     let j = t.json(&["--no-git"]);
     assert!(!j.contains("\"git\":\""), "{j}");
 }
+
+#[test]
+fn trash_is_one_row_and_summarized() {
+    let t = Tree::new("trash");
+    let trash = t.root.join("Trash");
+    let pin = format!("--trash-dir={}", trash.display());
+    t.file("junk/old.bin", 400_000);
+    let put = Command::new(bin())
+        .args(["put", &pin, "-r", "junk"])
+        .current_dir(&t.root)
+        .output()
+        .unwrap();
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let keep = t.file("keep.bin", 100_000);
+
+    let j = t.json(&[&pin]);
+    let trash_s = s(&trash);
+    assert!(row(&j, &trash_s).contains("\"artefact\":\"trash\""), "{j}");
+    assert!(!j.contains("old.bin"), "{j}");
+    let summary = &j[j.find("\"trash\":{").unwrap()..];
+    assert!(
+        summary.contains(&format!("\"roots\":[\"{trash_s}\"]")),
+        "{summary}"
+    );
+    assert!(summary.contains("\"items\":1"), "{summary}");
+    assert!(field(summary, "bytes") >= 400_000, "{summary}");
+
+    let out = t.du(&[&pin, "--print0"]);
+    let printed = String::from_utf8(out.stdout).unwrap();
+    assert!(!printed.contains(&trash_s), "{printed:?}");
+    assert!(printed.contains(&s(&keep)), "{printed:?}");
+
+    let out = t.du(&[&pin]);
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("Trash on these file systems:"), "{text}");
+    assert!(text.contains("rtrash empty -n"), "{text}");
+    assert_eq!(
+        t.du(&["--trash-dir=/nonexistent-rtrash"]).status.code(),
+        Some(2)
+    );
+}

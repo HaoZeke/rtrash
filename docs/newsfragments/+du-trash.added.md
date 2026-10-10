@@ -1,0 +1,1 @@
+du: the summary reports the trash on the scanned filesystems and how to empty it, since trashed files keep their space until then. A trash directory found during the walk is one `trash` row that `--print0` never prints. `--trash-dir` and `--home-only` limit the summary.

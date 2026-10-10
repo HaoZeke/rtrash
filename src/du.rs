@@ -15,7 +15,8 @@ use crate::du_git::{self, GitProbe, GitState};
 use crate::fastdelete::format_bytes;
 use crate::info;
 use crate::list::json_escape;
-use crate::trashdir;
+use crate::status;
+use crate::trashdir::{self, TrashDir};
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [PATH]...
@@ -34,6 +35,11 @@ unpushed (local commits no remote has). --print0 leaves out dirty,
 unknown and unpushed rows unless --include-dirty is given. Paths inside
 .git are never listed.
 
+The closing summary shows the trash on the scanned file systems: trashed
+files still take space there until `rtrash empty` removes them (preview
+with `rtrash empty -n`, keep recent items with `rtrash empty DAYS`). Trash
+directories appear as one `trash` row and are never printed by --print0.
+
   -n, --top=N           list N directories and N files (default 20)
   -x, --one-file-system skip directories on other file systems
       --apparent        rank by apparent size (file length) instead of disk use
@@ -48,6 +54,8 @@ unknown and unpushed rows unless --include-dirty is given. Paths inside
       --older-than=DAYS only list entries whose newest modification is more
                           than DAYS days old (directories use their whole tree)
       --newer-than=DAYS only list entries modified within the last DAYS days
+      --home-only       consider only the home trash for the trash summary
+      --trash-dir=PATH  consider only this trash directory (repeatable)
       --no-git          do not ask git about listed paths
       --include-dirty   with --print0, also print paths whose git state is
                           dirty, unpushed or unknown
@@ -114,6 +122,8 @@ pub struct ScanOpts {
     pub older_cutoff: Option<i64>,
     /// Only list entries whose newest mtime is after this epoch.
     pub newer_cutoff: Option<i64>,
+    /// Trash roots: listed as one `trash` row each, contents never listed.
+    pub trash_roots: Vec<PathBuf>,
 }
 
 impl Default for ScanOpts {
@@ -127,6 +137,7 @@ impl Default for ScanOpts {
             artefacts_only: false,
             older_cutoff: None,
             newer_cutoff: None,
+            trash_roots: Vec::new(),
         }
     }
 }
@@ -225,6 +236,39 @@ pub struct Report {
     pub files: Vec<Item>,
     /// Entries that could not be read (permission denied, vanished).
     pub unreadable: u64,
+}
+
+/// Trash on the file systems that were scanned: emptying it is what
+/// actually returns space there.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrashSummary {
+    pub roots: Vec<PathBuf>,
+    pub items: u64,
+    pub bytes: u64,
+}
+
+/// Summarize the trash dirs that live on the same device as any scan root.
+pub fn trash_on_scanned_devices(dirs: &[TrashDir], report: &Report) -> TrashSummary {
+    let devs: HashSet<u64> = report
+        .roots
+        .iter()
+        .filter_map(|r| fs::symlink_metadata(&r.path).ok().map(|m| m.dev()))
+        .collect();
+    let same: Vec<TrashDir> = dirs
+        .iter()
+        .filter(|d| {
+            fs::symlink_metadata(&d.root)
+                .map(|m| devs.contains(&m.dev()))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect();
+    let (_, items, bytes) = status::summarize_dirs(&same, None, None);
+    TrashSummary {
+        roots: same.into_iter().map(|d| d.root).collect(),
+        items,
+        bytes,
+    }
 }
 
 struct Ctx<'a> {
@@ -385,7 +429,11 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
         node.top_files = TopN::new(opts.top, opts.sort);
         return node;
     }
-    let artefact = artefact_kind(&name, |c| markers.iter().any(|m| m == c));
+    let artefact = if opts.trash_roots.iter().any(|r| r == path) {
+        Some("trash")
+    } else {
+        artefact_kind(&name, |c| markers.iter().any(|m| m == c))
+    };
     if artefact.is_some() {
         // The artefact is one row; nothing below it is listed separately.
         node.top_dirs = TopN::new(opts.top, opts.sort);
@@ -581,8 +629,22 @@ fn notes(it: &Item) -> String {
     }
 }
 
+fn trash_json(t: &TrashSummary) -> String {
+    let roots: Vec<String> = t
+        .roots
+        .iter()
+        .map(|r| format!("\"{}\"", json_escape(&r.to_string_lossy())))
+        .collect();
+    format!(
+        "{{\"roots\":[{}],\"items\":{},\"bytes\":{}}}",
+        roots.join(","),
+        t.items,
+        t.bytes
+    )
+}
+
 /// JSON form of a report (one object; arrays of roots, dirs and files).
-pub fn report_json(r: &Report) -> String {
+pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
     let roots: Vec<String> = r
         .roots
         .iter()
@@ -600,11 +662,12 @@ pub fn report_json(r: &Report) -> String {
     let dirs: Vec<String> = r.dirs.iter().map(item_json).collect();
     let files: Vec<String> = r.files.iter().map(item_json).collect();
     format!(
-        "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{}}}",
+        "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{},\"trash\":{}}}",
         roots.join(","),
         dirs.join(","),
         files.join(","),
-        r.unreadable
+        r.unreadable,
+        trash_json(trash)
     )
 }
 
@@ -638,6 +701,20 @@ fn print_table(title: &str, items: &[Item], now: i64) {
         );
     }
     println!();
+}
+
+fn print_trash(t: &TrashSummary) {
+    let noun = if t.items == 1 { "item" } else { "items" };
+    println!(
+        "Trash on these file systems: {} in {} {noun}",
+        format_bytes(t.bytes),
+        t.items
+    );
+    if t.items > 0 {
+        println!(
+            "  space returns only when the trash is emptied: preview with `rtrash empty -n`, free it with `rtrash empty`, or keep the last 30 days with `rtrash empty 30`"
+        );
+    }
 }
 
 fn parse_days(s: &str) -> Result<i64, String> {
@@ -686,6 +763,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut only_files = false;
     let mut no_more_opts = false;
     let mut use_git = true;
+    let mut home_only = false;
+    let mut trash_pins: Vec<PathBuf> = Vec::new();
     let mut include_dirty = false;
     let now = info::now_epoch();
     let mut i = 0usize;
@@ -735,6 +814,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--json" => json = true,
                 "--print0" => print0 = true,
                 "--no-git" => use_git = false,
+                "--home-only" => home_only = true,
+                a if a.starts_with("--trash-dir=") => {
+                    trash_pins.push(PathBuf::from(&a["--trash-dir=".len()..]));
+                }
                 "--include-dirty" => include_dirty = true,
                 "--help" => {
                     print!("{}", HELP.replace("{prog}", prog));
@@ -763,6 +846,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         paths.push(PathBuf::from("."));
     }
 
+    let trash_dirs = trashdir::resolve_dirs_opts(&trash_pins, home_only);
+    if trash_dirs.is_empty() && !trash_pins.is_empty() {
+        eprintln!("{prog}: no valid --trash-dir pins (need files/ and info/ directories)");
+        return 2;
+    }
+    opts.trash_roots = trash_dirs
+        .iter()
+        .map(|d| fs::canonicalize(&d.root).unwrap_or_else(|_| d.root.clone()))
+        .collect();
     let mut report = match scan(&paths, &opts) {
         Ok(r) => r,
         Err(e) => {
@@ -780,12 +872,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: warning: git not found; rows carry no git state");
     }
 
+    let trash = trash_on_scanned_devices(&trash_dirs, &report);
     if json {
-        println!("{}", report_json(&report));
+        println!("{}", report_json(&report, &trash));
     } else if print0 {
         let mut out = io::stdout().lock();
         let mut held = 0usize;
         for it in report.dirs.iter().chain(report.files.iter()) {
+            if it.artefact == Some("trash") {
+                continue;
+            }
             let risky = it.git.as_ref().is_some_and(|(s, _)| s.is_risky());
             if risky && !include_dirty {
                 held += 1;
@@ -816,6 +912,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 t.dirs
             );
         }
+        print_trash(&trash);
     }
     if report.unreadable > 0 {
         eprintln!("{prog}: {} entries could not be read", report.unreadable);

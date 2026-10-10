@@ -304,6 +304,19 @@ leaves out dirty, unpushed and unknown rows.
 Paths inside
 .I .git
 are never listed.
+.PP
+The closing summary reports the trash on the scanned file systems.
+Trashed files keep their space until
+.B rtrash empty
+removes them; preview with
+.BR "rtrash empty \-n" ,
+or keep recent items with
+.BR "rtrash empty " \fIDAYS\fR.
+A trash directory found during the walk is one
+.B trash
+row, and
+.B \-\-print0
+never prints it.
 .TP
 .BR \-n ", " \-\-top =\fIN\fR
 List
@@ -381,6 +394,14 @@ days old. A directory uses the newest file anywhere below it.
 Only list entries modified within the last
 .I DAYS
 days.
+.TP
+.B \-\-home\-only
+Consider only the home trash for the trash summary and
+.B trash
+rows.
+.TP
+.BI \-\-trash\-dir =PATH
+Consider only this trash directory (repeatable).
 .TP
 .B \-\-no\-git
 Do not ask git about listed paths.

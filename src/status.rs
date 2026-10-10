@@ -111,13 +111,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     0
 }
 
-struct RootSummary {
-    path: String,
-    items: u64,
-    bytes: u64,
+pub(crate) struct RootSummary {
+    pub path: String,
+    pub items: u64,
+    pub bytes: u64,
 }
 
-fn summarize_dirs(
+pub(crate) fn summarize_dirs(
     dirs: &[TrashDir],
     older_than: Option<i64>,
     newer_than: Option<i64>,

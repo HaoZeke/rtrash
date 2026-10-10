@@ -28,8 +28,9 @@ _rtrash_status_opts=(
 
 _rtrash_du_opts=(
   -n --top= -x --one-file-system --apparent --max-depth= --all-dirs
-  --artefacts --dirs --files --older-than= --newer-than= --no-git
-  --include-dirty --json --print0 --help --version
+  --artefacts --dirs --files --older-than= --newer-than= --home-only
+  --trash-dir= --no-git --include-dirty --json --print0 --help
+  --version
 )
 
 _rtrash_restore_opts=(
