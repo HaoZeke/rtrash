@@ -51,7 +51,13 @@ jobs:
       - name: du smoke test against du(1) and a Python walk
         run: |
           cargo build --locked --release
-          scripts/du-smoke.sh target/release/rtrash "$(rustc --print sysroot)" "${CARGO_HOME:-$HOME/.cargo}/registry/src"
+          fixture=$(mktemp -d)
+          head -c 1000000 /dev/urandom > "$fixture/a.bin"
+          ln "$fixture/a.bin" "$fixture/a-link.bin"
+          ln -s "$fixture/a.bin" "$fixture/a-sym"
+          mkdir -p "$fixture/d/e"
+          echo hi > "$fixture/d/e/f"
+          scripts/du-smoke.sh target/release/rtrash "$(rustc --print sysroot)" "${CARGO_HOME:-$HOME/.cargo}/registry/src" "$fixture"
 
   windows:
     name: windows · test · du smoke
