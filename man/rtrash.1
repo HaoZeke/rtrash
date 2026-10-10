@@ -449,6 +449,62 @@ than CPUs can also help on a remote file system.
 List every directory level, including parents that one subdirectory
 dominates.
 .TP
+.BI \-\-exclude= PATTERN
+Leave out entries that match
+.I PATTERN
+(repeatable). Patterns use gitignore syntax: one without a
+.B /
+matches a name at any depth, one with a
+.B /
+matches the path relative to
+.I PATH
+(an absolute path under
+.I PATH
+works too), a trailing
+.B /
+matches directories only,
+.B *
+and
+.B ?
+stop at
+.BR / ,
+and
+.B **
+spans directories.
+Excluded entries add nothing to any size or count, and an excluded
+directory is never opened. The total reports how many entries were left
+out.
+.TP
+.BR \-X ", " \-\-exclude\-from=\fIFILE\fR
+Read patterns from
+.IR FILE ,
+one per line, with
+.B #
+comments and
+.B !
+to re-include an entry an earlier pattern left out.
+.B \-
+reads standard input.
+.TP
+.B \-\-exclude\-caches
+Leave out directories below
+.I PATH
+that hold a
+.I CACHEDIR.TAG
+starting with the standard signature line.
+.TP
+.B \-\-gitignore
+Leave out what git ignores: patterns from
+.I .gitignore
+files,
+.I .git/info/exclude
+and
+.IR $XDG_CONFIG_HOME/git/ignore ,
+applied only inside git repositories. A nested repository starts afresh,
+as in git. A
+.B core.excludesFile
+set elsewhere is not read.
+.TP
 .B \-\-artefacts
 List only regenerable build artefacts and caches.
 Each one is a single row, and nothing below it is listed on its own.

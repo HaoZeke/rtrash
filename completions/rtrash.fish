@@ -81,6 +81,10 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l max-dep
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l threads -d 'walk with N threads' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l all-dirs -d 'list every directory level'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l artefacts -d 'list only regenerable build artefacts and caches'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l exclude -d 'leave out entries that match a gitignore-style pattern' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s X -l exclude-from -d 'read exclude patterns from a file' -r -F
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l exclude-caches -d 'leave out directories with a valid CACHEDIR.TAG'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l gitignore -d 'leave out what git ignores'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dirs -d 'list directories only'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l files -d 'list files only'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l older-than -d 'only entries untouched for more than DAYS days' -r

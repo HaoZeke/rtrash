@@ -40,6 +40,7 @@ impl Tree {
             .args(args)
             .current_dir(&self.root)
             .env("XDG_DATA_HOME", self.root.join(".xdg"))
+            .env("XDG_CONFIG_HOME", self.root.join(".cfg"))
             .env("HOME", &self.root)
             .output()
             .expect("run rtrash du")
@@ -421,6 +422,127 @@ fn an_artefact_named_as_path_lists_its_contents() {
     assert!(
         text.contains(&format!("Total {nm_s} (node-modules):")),
         "{text}"
+    );
+}
+
+#[test]
+fn exclude_patterns_leave_entries_out_of_sizes_and_rows() {
+    let t = Tree::new("exclude");
+    t.file("keep/a.bin", 100_000);
+    t.file("keep/skip.iso", 400_000);
+    t.file("deep/x/skip.iso", 300_000);
+    t.file("build/out.o", 200_000);
+    t.file("deep/build/k.bin", 50_000);
+    let all = t.json(&["--no-git"]);
+    let total = field(&all, "apparent");
+
+    let j = t.json(&["--no-git", "--exclude=*.iso", "--exclude", "/build/"]);
+    assert_eq!(field(&j, "apparent"), total - 900_000, "{j}");
+    assert_eq!(field(&j, "excluded"), 3, "{j}");
+    let files = paths_in(&j, "files");
+    assert!(!files.iter().any(|f| f.ends_with(".iso")), "{j}");
+    // Anchored: only the top-level build/ goes; deep/build stays.
+    assert!(files.contains(&s(&t.root.join("deep/build/k.bin"))), "{j}");
+    assert!(!files.contains(&s(&t.root.join("build/out.o"))), "{j}");
+
+    // A negation re-includes; patterns come from a file too.
+    fs::write(
+        t.root.join("pats"),
+        "# comment\n*.iso\n!keep/skip.iso\nbuild/\n",
+    )
+    .unwrap();
+    let j = t.json(&["--no-git", "-X", "pats"]);
+    let files = paths_in(&j, "files");
+    assert!(files.contains(&s(&t.root.join("keep/skip.iso"))), "{j}");
+    assert!(!files.contains(&s(&t.root.join("deep/x/skip.iso"))), "{j}");
+    assert!(!files.contains(&s(&t.root.join("deep/build/k.bin"))), "{j}");
+
+    // An absolute pattern under PATH works like a relative one.
+    let abs = format!("--exclude={}", t.root.join("deep").display());
+    let j = t.json(&["--no-git", &abs]);
+    assert!(
+        !paths_in(&j, "files").iter().any(|f| f.contains("deep")),
+        "{j}"
+    );
+
+    let text = String::from_utf8(t.du(&["--no-git", "--exclude=*.iso"]).stdout).unwrap();
+    assert!(text.contains(", 2 excluded"), "{text}");
+    let out = t.du(&["-X", "no-such-file"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(t.du(&["--exclude="]).status.code(), Some(2));
+}
+
+#[test]
+fn exclude_caches_needs_a_valid_tag() {
+    let t = Tree::new("cachedir");
+    t.file("c/data.bin", 300_000);
+    fs::write(
+        t.root.join("c/CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n# a cache\n",
+    )
+    .unwrap();
+    t.file("fake/data.bin", 200_000);
+    fs::write(t.root.join("fake/CACHEDIR.TAG"), "not a tag\n").unwrap();
+    let j = t.json(&["--no-git", "--exclude-caches"]);
+    let dirs = paths_in(&j, "dirs");
+    assert!(!dirs.contains(&s(&t.root.join("c"))), "{j}");
+    assert!(dirs.contains(&s(&t.root.join("fake"))), "{j}");
+    assert_eq!(field(&j, "excluded"), 1, "{j}");
+    // Named as PATH, a cache is still scanned.
+    let c = s(&t.root.join("c"));
+    let j = t.json(&["--no-git", "--exclude-caches", &c]);
+    assert!(field(&j, "apparent") >= 300_000, "{j}");
+}
+
+#[test]
+fn gitignore_follows_git_rules_inside_repositories() {
+    let t = Tree::new("gitignore");
+    fs::create_dir_all(t.root.join("repo/.git/info")).unwrap();
+    fs::write(t.root.join("repo/.git/info/exclude"), "*.tmp\n").unwrap();
+    fs::write(t.root.join("repo/.gitignore"), "*.log\n/out/\n").unwrap();
+    fs::create_dir_all(t.root.join("repo/sub")).unwrap();
+    fs::write(t.root.join("repo/sub/.gitignore"), "!keep.log\n").unwrap();
+    t.file("repo/a.log", 100_000);
+    t.file("repo/sub/keep.log", 90_000);
+    t.file("repo/sub/drop.log", 80_000);
+    t.file("repo/x.tmp", 70_000);
+    t.file("repo/out/big.bin", 300_000);
+    t.file("repo/src/out/kept.bin", 60_000);
+    // A nested repository does not inherit the outer rules.
+    fs::create_dir_all(t.root.join("repo/inner/.git")).unwrap();
+    t.file("repo/inner/n.log", 50_000);
+    // Outside any repository a .gitignore means nothing.
+    fs::create_dir_all(t.root.join("loose")).unwrap();
+    fs::write(t.root.join("loose/.gitignore"), "*\n").unwrap();
+    t.file("loose/l.bin", 40_000);
+
+    let j = t.json(&["--no-git", "--gitignore"]);
+    let files = paths_in(&j, "files");
+    for kept in [
+        "repo/sub/keep.log",
+        "repo/src/out/kept.bin",
+        "repo/inner/n.log",
+        "loose/l.bin",
+    ] {
+        assert!(files.contains(&s(&t.root.join(kept))), "{kept}: {j}");
+    }
+    for gone in [
+        "repo/a.log",
+        "repo/sub/drop.log",
+        "repo/x.tmp",
+        "repo/out/big.bin",
+    ] {
+        assert!(!files.contains(&s(&t.root.join(gone))), "{gone}: {j}");
+    }
+
+    // Starting below the repository root still applies the rules above.
+    let sub = s(&t.root.join("repo/sub"));
+    let j = t.json(&["--no-git", "--gitignore", &sub]);
+    let files = paths_in(&j, "files");
+    assert!(files.contains(&s(&t.root.join("repo/sub/keep.log"))), "{j}");
+    assert!(
+        !files.contains(&s(&t.root.join("repo/sub/drop.log"))),
+        "{j}"
     );
 }
 

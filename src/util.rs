@@ -137,6 +137,15 @@ pub fn items_json(
     )
 }
 
+/// The home directory from `HOME` (`USERPROFILE` on Windows), if set
+/// to an absolute path.
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    let v = std::env::var_os("HOME").filter(|v| !v.is_empty());
+    #[cfg(windows)]
+    let v = v.or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()));
+    v.map(std::path::PathBuf::from).filter(|p| p.is_absolute())
+}
+
 /// Seconds since the Unix epoch, now.
 pub fn now_epoch() -> i64 {
     std::time::SystemTime::now()

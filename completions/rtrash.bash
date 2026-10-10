@@ -30,7 +30,8 @@ _rtrash_status_opts=(
 
 _rtrash_du_opts=(
   -n --top= -x --one-file-system --apparent --max-depth= --threads= --all-dirs
-  --artefacts --dirs --files --older-than= --newer-than= --home-only
+  --artefacts --exclude= -X --exclude-from= --exclude-caches --gitignore
+  --dirs --files --older-than= --newer-than= --home-only
   --trash-dir= --no-git --include-dirty --json --print0 --pick -i --interactive -o --output= -f --file= --help
   --version
 )

@@ -331,6 +331,9 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du --apparent` | Rank by file length; sparse files rank higher than their disk use |
 | `rtrash du --dirs --older-than=30` | Directories with nothing modified in the last 30 days |
 | `rtrash du --artefacts ~/src` | Only regenerable build output and caches: cargo `target`, `node_modules`, `__pycache__`, virtualenvs, CMake build trees, `CACHEDIR.TAG` directories |
+| `rtrash du --exclude='*.iso' -X ~/.duignore` | Leave out what matches (gitignore syntax); excluded entries add nothing to any size |
+| `rtrash du --gitignore ~/src` | Leave out what git ignores in each repository (`.gitignore`, `.git/info/exclude`, `~/.config/git/ignore`) |
+| `rtrash du --exclude-caches` | Leave out directories tagged with a valid `CACHEDIR.TAG` |
 | `rtrash du --max-depth=2 --all-dirs` | Every directory level, at most 2 below `PATH` |
 | `rtrash du --json` | One object with `roots`, `dirs`, `files`, `unreadable` |
 | `rtrash du --no-git` | Skip the git checks |
@@ -343,6 +346,8 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du -i ~/src` | Explore one directory at a time, like ncdu: `d` trashes, `u` undoes, `r` rescans; rows carry size bars, artefact and git badges |
 
 Symlinks are never followed, and a file with more than one hard link counts once, in the sizes and in the file count, so files plus directories match `du --inodes -s`; the total names the extra links. When one subdirectory accounts for 90% or more of a directory's size, only the subdirectory is listed, so each row points at the bulk itself. The scan root appears only in the closing total.
+
+Filters use gitignore syntax. A pattern without a `/` matches a name at any depth (`--exclude='*.iso'`, `--exclude=node_modules/`); a pattern with a `/` matches the path relative to the scanned `PATH` (`--exclude=/build`, `--exclude='docs/**/*.pdf'`), and an absolute path under `PATH` works too. `-X FILE` reads one pattern per line, with `#` comments and `!` to re-include. An excluded directory is never opened, so filters also speed up a scan, and the total reports how many entries were left out. `--gitignore` applies ignore files only inside git repositories, and a nested repository does not inherit the rules of the one around it, as in git. It reads the default global ignore file but not a `core.excludesFile` set elsewhere.
 
 The NOTE column tags regenerable artefacts (`cargo-target`, `node-modules`, `python-cache`, `python-env`, `cmake-build`, `cache`, and a few more listed in `man rtrash`). An artefact is one row; nothing below it is listed on its own, so the list names the `target` directory instead of the largest `.rlib` inside it. Scanning an artefact directly (`rtrash du target`) lists what is inside it, and the total names its kind. Names that are ambiguous on their own (`target`, `build`, `venv`) need a marker file such as `.rustc_info.json`, `CMakeCache.txt` or `pyvenv.cfg`.
 

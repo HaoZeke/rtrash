@@ -13,6 +13,7 @@ pub mod win_recycle;
 
 pub mod ds_store;
 pub mod du;
+pub mod du_filter;
 pub mod du_fs;
 pub mod du_git;
 pub mod du_snap;

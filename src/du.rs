@@ -9,10 +9,11 @@ use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rayon::prelude::*;
 
+use crate::du_filter::{self, Chain};
 use crate::du_fs;
 use crate::du_git::{self, GitState};
 #[cfg(unix)]
@@ -57,6 +58,17 @@ directories appear as one `trash` row and are never printed by --print0.
       --artefacts       list only regenerable build artefacts and caches
                           (cargo target dirs, node_modules, __pycache__,
                           virtualenvs, CACHEDIR.TAG directories, ...)
+      --exclude=PATTERN leave out entries that match PATTERN (repeatable;
+                          gitignore syntax: a name at any depth, or a path
+                          relative to PATH when it has a '/'; `dir/` matches
+                          directories only)
+  -X, --exclude-from=FILE  read patterns from FILE, one per line (# comments
+                          and !negations as in .gitignore; - is stdin)
+      --exclude-caches  leave out directories below PATH that hold a valid
+                          CACHEDIR.TAG
+      --gitignore       leave out what git ignores: .gitignore files,
+                          .git/info/exclude and ~/.config/git/ignore, inside
+                          git repositories
       --dirs            list directories only
       --files           list files only
       --older-than=DAYS only list entries whose newest modification is more
@@ -159,6 +171,8 @@ pub struct ScanOpts {
     pub trash_roots: Vec<PathBuf>,
     /// Collect no file rows (snapshots keep directories only).
     pub no_files: bool,
+    /// `--exclude`, `--exclude-caches` and `--gitignore`.
+    pub filter: Option<Arc<du_filter::Spec>>,
 }
 
 impl Default for ScanOpts {
@@ -174,6 +188,7 @@ impl Default for ScanOpts {
             newer_cutoff: None,
             trash_roots: Vec::new(),
             no_files: false,
+            filter: None,
         }
     }
 }
@@ -319,6 +334,8 @@ pub struct RootTotals {
     pub dirs: u64,
     /// Artefact kind of the PATH itself, when it is one.
     pub artefact: Option<&'static str>,
+    /// Entries left out by the filters (not opened, not counted).
+    pub excluded: u64,
 }
 
 /// Result of scanning one or more paths.
@@ -486,6 +503,10 @@ struct Ctx<'a> {
     /// Further names of files already counted.
     links: AtomicU64,
     dirs: AtomicU64,
+    /// Filters for this root, when any are active.
+    filter: Option<du_filter::Filter>,
+    /// Entries the filters left out.
+    excluded: AtomicU64,
     top_dirs: SharedTop,
     top_files: SharedTop,
 }
@@ -567,6 +588,7 @@ fn enter(
     known: Option<du_fs::Stat>,
     depth: usize,
     listing: bool,
+    chain: Option<&Arc<Chain>>,
 ) -> Option<Node> {
     let opened = match parent {
         Some((dir, name)) => dir.open_child(name),
@@ -609,7 +631,7 @@ fn enter(
     if ctx.opts.one_file_system && st.dev != ctx.root_dev {
         return None;
     }
-    Some(walk_dir(ctx, dir, path, &st, depth, listing))
+    walk_dir(ctx, dir, path, &st, depth, listing, chain)
 }
 
 /// Directories with more entries than this stat them in parallel.
@@ -637,6 +659,7 @@ fn stat_entries(
     range: std::ops::Range<usize>,
     depth: usize,
     list_files: bool,
+    (path, chain): (&Path, Option<&Chain>),
 ) -> Stats {
     let opts = ctx.opts;
     let mut out = Stats {
@@ -646,8 +669,22 @@ fn stat_entries(
         subdirs: Vec::new(),
         candidates: Vec::new(),
     };
+    let filter = ctx.filter.as_ref();
+    let excluded = |name: &CStr, is_dir: bool| {
+        let out = filter.is_some_and(|f| f.excluded(chain, path, name.to_bytes(), is_dir));
+        if out {
+            ctx.excluded.fetch_add(1, Ordering::Relaxed);
+        }
+        out
+    };
     for i in range {
         let (name, kind) = entries.get(i);
+        if filter.is_some()
+            && kind != du_fs::Kind::Unknown
+            && excluded(name, kind == du_fs::Kind::Dir)
+        {
+            continue;
+        }
         // A directory gets its stat from its own descriptor once open.
         // Under -x it is stat-ed first so a mount point is never opened.
         if kind == du_fs::Kind::Dir && !opts.one_file_system {
@@ -658,6 +695,9 @@ fn stat_entries(
             ctx.unreadable.fetch_add(1, Ordering::Relaxed);
             continue;
         };
+        if filter.is_some() && kind == du_fs::Kind::Unknown && excluded(name, m.is_dir()) {
+            continue;
+        }
         if m.is_dir() {
             if opts.one_file_system && m.dev != ctx.root_dev {
                 continue;
@@ -699,7 +739,8 @@ fn walk_dir(
     st: &du_fs::Stat,
     depth: usize,
     listing: bool,
-) -> Node {
+    chain: Option<&Arc<Chain>>,
+) -> Option<Node> {
     let opts = ctx.opts;
     // Like GNU du, a directory adds blocks to disk use but nothing to the
     // apparent size: its st_size is a filesystem detail, not data.
@@ -711,25 +752,41 @@ fn walk_dir(
         listable: false,
         artefact: None,
     };
-    ctx.dirs.fetch_add(1, Ordering::Relaxed);
     let (entries, failed) = dir.entries();
-    if failed {
-        ctx.unreadable.fetch_add(1, Ordering::Relaxed);
-    }
     let list_files = listing && !opts.artefacts_only && opts.top > 0;
     let mut markers: Vec<&'static str> = Vec::new();
     let mut has_dot_git = false;
     let mut bare_parts = 0u8;
+    let mut has_gitignore = false;
     for i in 0..entries.len() {
         let (name, kind) = entries.get(i);
         let bytes = name.to_bytes();
         if bytes == b".git" {
             has_dot_git = true;
         }
+        has_gitignore |= bytes == b".gitignore";
         if let Some(m) = MARKERS.iter().find(|m| m.as_bytes() == bytes) {
             markers.push(m);
         }
         bare_parts |= bare_part(bytes, kind);
+    }
+    let mut chain = chain.cloned();
+    if let Some(f) = &ctx.filter {
+        // A tagged cache below PATH is left out whole, as with
+        // `tar --exclude-caches-all`.
+        if f.exclude_caches
+            && depth > 0
+            && markers.contains(&"CACHEDIR.TAG")
+            && du_filter::has_cachedir_tag(path)
+        {
+            ctx.excluded.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        chain = f.chain_for(chain.as_ref(), path, has_dot_git, has_gitignore);
+    }
+    ctx.dirs.fetch_add(1, Ordering::Relaxed);
+    if failed {
+        ctx.unreadable.fetch_add(1, Ordering::Relaxed);
     }
     let bare = !has_dot_git && bare_parts == BARE_ALL && is_bare_repo(path);
     if has_dot_git || bare {
@@ -738,8 +795,17 @@ fn walk_dir(
             p.repo(path);
         }
     }
-    let stat_chunk =
-        |range: std::ops::Range<usize>| stat_entries(ctx, &dir, &entries, range, depth, list_files);
+    let stat_chunk = |range: std::ops::Range<usize>| {
+        stat_entries(
+            ctx,
+            &dir,
+            &entries,
+            range,
+            depth,
+            list_files,
+            (path, chain.as_deref()),
+        )
+    };
     let n = entries.len();
     // One thread stats a directory's entries unless there are many: then
     // chunks of them go to the pool, so a huge flat directory does not
@@ -832,7 +898,15 @@ fn walk_dir(
             let cname = entries.get(i).0;
             let child = path.join(du_fs::os(cname));
             let rel = parent.as_ref().map(|d| (d, cname));
-            enter(ctx, rel, &child, known, depth + 1, inner_listing)
+            enter(
+                ctx,
+                rel,
+                &child,
+                known,
+                depth + 1,
+                inner_listing,
+                chain.as_ref(),
+            )
         })
         .collect();
 
@@ -855,7 +929,7 @@ fn walk_dir(
     if listing && !is_git_dir {
         node.offer_self(ctx, path, depth, largest_child, artefact);
     }
-    node
+    Some(node)
 }
 
 /// `HEAD`, `objects/` and `refs/`: the entries every git directory has.
@@ -971,13 +1045,27 @@ pub fn scan_with(
             files: AtomicU64::new(0),
             links: AtomicU64::new(0),
             dirs: AtomicU64::new(0),
+            filter: opts
+                .filter
+                .as_deref()
+                .filter(|s| s.is_active())
+                .map(|s| du_filter::Filter::new(s, &abs)),
+            excluded: AtomicU64::new(0),
             top_dirs: SharedTop::new(opts.top, opts.sort),
             top_files: SharedTop::new(file_cap, opts.sort),
         };
         let (apparent, disk, artefact) = if meta.is_dir() {
-            enter(&ctx, None, &abs, Some(meta), 0, true)
-                .map(|n| (n.apparent, n.disk, n.artefact))
-                .unwrap_or((0, 0, None))
+            enter(
+                &ctx,
+                None,
+                &abs,
+                Some(meta),
+                0,
+                true,
+                ctx.filter.as_ref().and_then(|f| f.root_chain.as_ref()),
+            )
+            .map(|n| (n.apparent, n.disk, n.artefact))
+            .unwrap_or((0, 0, None))
         } else {
             ctx.files.fetch_add(1, Ordering::Relaxed);
             let (a, d) = meta.sizes();
@@ -1004,6 +1092,7 @@ pub fn scan_with(
             links: ctx.links.load(Ordering::Relaxed),
             dirs: ctx.dirs.load(Ordering::Relaxed),
             artefact,
+            excluded: ctx.excluded.load(Ordering::Relaxed),
         });
         dirs.merge_vec(ctx.top_dirs.into_vec());
         files.merge_vec(ctx.top_files.into_vec());
@@ -1240,13 +1329,14 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
         .iter()
         .map(|t| {
             format!(
-                "{{\"path\":\"{}\",\"disk\":{},\"apparent\":{},\"files\":{},\"links\":{},\"dirs\":{},\"artefact\":{}}}",
+                "{{\"path\":\"{}\",\"disk\":{},\"apparent\":{},\"files\":{},\"links\":{},\"dirs\":{},\"excluded\":{},\"artefact\":{}}}",
                 json_escape(&t.path.to_string_lossy()),
                 t.disk,
                 t.apparent,
                 t.files,
                 t.links,
                 t.dirs,
+                t.excluded,
                 json_opt(t.artefact)
             )
         })
@@ -1396,6 +1486,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut output: Option<PathBuf> = None;
     let mut from_file: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
+    let mut filter = du_filter::Spec::default();
     let now = crate::util::now_epoch();
     let mut i = 0usize;
     while i < args.len() {
@@ -1438,6 +1529,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 Ok(v) => from_file = Some(PathBuf::from(v)),
                 Err(e) => bail!(e),
             }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--exclude", None) {
+            match v {
+                Ok(v) if du_filter::Pattern::parse(v).is_some() => filter.patterns.push(v.into()),
+                Ok(v) => bail!(format!("--exclude: empty pattern '{v}'")),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--exclude-from", Some("-X")) {
+            match v.map(|v| (v, du_filter::read_pattern_file(Path::new(v)))) {
+                Ok((_, Ok(lines))) => filter.patterns.extend(lines),
+                Ok((v, Err(e))) => {
+                    eprintln!("{prog}: cannot read pattern file '{v}': {e}");
+                    return 1;
+                }
+                Err(e) => bail!(e),
+            }
         } else if let Some(v) = take_value(args, &mut i, arg, "--older-than", None) {
             match v.and_then(parse_days) {
                 Ok(d) => opts.older_cutoff = Some(now - d.saturating_mul(86_400)),
@@ -1455,6 +1561,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--apparent" => opts.sort = SortKey::Apparent,
                 "--all-dirs" => opts.all_dirs = true,
                 "--artefacts" => opts.artefacts_only = true,
+                "--exclude-caches" => filter.exclude_caches = true,
+                "--gitignore" => filter.gitignore = true,
                 "--dirs" => only_dirs = true,
                 "--files" => only_files = true,
                 "--json" => json = true,
@@ -1479,6 +1587,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
         i += 1;
+    }
+    if filter.is_active() {
+        if interactive {
+            // The explorer rescans one directory at a time; anchored
+            // patterns stay relative to the PATH it was opened on.
+            let first = paths.first().map_or(Path::new("."), PathBuf::as_path);
+            filter.base = absolute(first).ok();
+        }
+        opts.filter = Some(Arc::new(filter));
     }
     if only_dirs && !only_files {
         want_files = false;
@@ -1697,8 +1814,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             } else {
                 String::new()
             };
+            let excluded = if t.excluded > 0 {
+                format!(", {} excluded", t.excluded)
+            } else {
+                String::new()
+            };
             println!(
-                "Total {}{kind}: {} on disk, {} apparent, {}{links}, {}",
+                "Total {}{kind}: {} on disk, {} apparent, {}{links}, {}{excluded}",
                 t.path.display(),
                 format_bytes(t.disk),
                 format_bytes(t.apparent),
