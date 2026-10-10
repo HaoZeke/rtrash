@@ -7,6 +7,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
 
 /// Ordered from safest to riskiest; a row shows the riskiest state found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -197,6 +199,89 @@ fn repo_state(bin: &Path, repo: &Path, show_stash: bool) -> GitState {
     }
 }
 
+/// Repo probes started while the walk is still running: the walk calls
+/// [`Prefetch::repo`] as soon as it sees a repository, so git works on it
+/// next to the walk instead of after it. Only the first [`Prefetch::CAP`]
+/// repositories start early; [`classify_all`] probes the rest on demand.
+pub struct Prefetch {
+    bin: Arc<PathBuf>,
+    show_stash: Arc<OnceLock<bool>>,
+    jobs: Mutex<HashMap<PathBuf, JoinHandle<GitState>>>,
+}
+
+/// The probes a prefetch started, and whether `git status` prints
+/// stashes. A probe no row needs is never waited for.
+pub struct Prefetched {
+    jobs: Mutex<HashMap<PathBuf, JoinHandle<GitState>>>,
+    show_stash: Option<bool>,
+}
+
+impl Prefetched {
+    fn has(&self, repo: &Path) -> bool {
+        self.jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(repo)
+    }
+
+    /// The state of `repo`, waiting for its probe.
+    fn take(&self, repo: &Path) -> Option<GitState> {
+        let job = self
+            .jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(repo)?;
+        Some(job.join().unwrap_or(GitState::Unknown))
+    }
+}
+
+impl Prefetch {
+    /// Most repositories probed ahead of need. A tree of thousands of
+    /// clones then costs no more processes than the rows can use.
+    pub const CAP: usize = 64;
+
+    /// `None` when `git` is not on `PATH`.
+    pub fn start() -> Option<Prefetch> {
+        let bin = Arc::new(find_git()?);
+        let show_stash = Arc::new(OnceLock::new());
+        let (b, s) = (bin.clone(), show_stash.clone());
+        // The version probe gates every status probe; start it first.
+        std::thread::spawn(move || {
+            s.get_or_init(|| status_shows_stash(&b));
+        });
+        Some(Prefetch {
+            bin,
+            show_stash,
+            jobs: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Start probing `repo` unless it already started or the cap is hit.
+    pub fn repo(&self, repo: &Path) {
+        let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
+        if jobs.len() >= Self::CAP || jobs.contains_key(repo) {
+            return;
+        }
+        let (bin, show_stash) = (self.bin.clone(), self.show_stash.clone());
+        let path = repo.to_path_buf();
+        let job = std::thread::Builder::new().spawn(move || {
+            let show = *show_stash.get_or_init(|| status_shows_stash(&bin));
+            repo_state(&bin, &path, show)
+        });
+        if let Ok(job) = job {
+            jobs.insert(repo.to_path_buf(), job);
+        }
+    }
+
+    /// Stop taking new repositories and hand over the started probes.
+    pub fn finish(self) -> Prefetched {
+        Prefetched {
+            jobs: self.jobs,
+            show_stash: self.show_stash.get().copied(),
+        }
+    }
+}
+
 /// Paths relative to `repo` (a trailing slash marks a directory) that match
 /// an ignore rule, from one `git check-ignore --stdin -z` run.
 fn ignored_in(bin: &Path, repo: &Path, rels: &[OsString]) -> HashSet<OsString> {
@@ -241,6 +326,15 @@ fn ignored_in(bin: &Path, repo: &Path, rels: &[OsString]) -> HashSet<OsString> {
 /// Ignore checks run as one batch per repo, all repos at once, and repo
 /// states are probed in parallel; only repos some row needs are probed.
 pub fn classify_all(rows: &[RowQuery<'_>]) -> Option<Vec<Option<(GitState, PathBuf)>>> {
+    classify_all_with(rows, None)
+}
+
+/// [`classify_all`], reusing the repo states a [`Prefetch`] already has.
+pub fn classify_all_with(
+    rows: &[RowQuery<'_>],
+    prefetched: Option<&Prefetched>,
+) -> Option<Vec<Option<(GitState, PathBuf)>>> {
+    let started = |repo: &Path| prefetched.is_some_and(|p| p.has(repo));
     let enclosing: Vec<Option<PathBuf>> = rows.iter().map(|r| enclosing_repo(r.path)).collect();
     let touched = enclosing.iter().any(Option::is_some) || rows.iter().any(|r| !r.repos.is_empty());
     if !touched {
@@ -273,7 +367,9 @@ pub fn classify_all(rows: &[RowQuery<'_>]) -> Option<Vec<Option<(GitState, PathB
     // thread. Repos found inside rows are needed whatever the ignore rules
     // say; their probes start at once, next to the ignore checks.
     std::thread::scope(|scope| {
-        let show_stash = scope.spawn(|| status_shows_stash(bin));
+        let cached_stash = prefetched.and_then(|p| p.show_stash);
+        let show_stash =
+            scope.spawn(move || cached_stash.unwrap_or_else(|| status_shows_stash(bin)));
         let ignore_jobs: Vec<_> = by_repo
             .iter()
             .map(|(repo, rels)| (*repo, scope.spawn(move || ignored_in(bin, repo, rels))))
@@ -281,8 +377,15 @@ pub fn classify_all(rows: &[RowQuery<'_>]) -> Option<Vec<Option<(GitState, PathB
         let show_stash = show_stash.join().unwrap_or(false);
         let mut state_jobs: HashMap<&Path, std::thread::ScopedJoinHandle<'_, GitState>> =
             HashMap::new();
+        // Repos the walk already started on: waited for last, so the
+        // probes still to start are not held up behind them.
+        let mut early: Vec<&Path> = Vec::new();
         for row in rows {
             for r in row.repos {
+                if started(r) {
+                    early.push(r.as_path());
+                    continue;
+                }
                 state_jobs
                     .entry(r.as_path())
                     .or_insert_with(|| scope.spawn(move || repo_state(bin, r, show_stash)));
@@ -304,15 +407,26 @@ pub fn classify_all(rows: &[RowQuery<'_>]) -> Option<Vec<Option<(GitState, PathB
             .collect();
         for (repo, ign) in enclosing.iter().zip(&is_ignored) {
             if let (Some(repo), false) = (repo, ign) {
+                if started(repo) {
+                    early.push(repo.as_path());
+                    continue;
+                }
                 state_jobs
                     .entry(repo.as_path())
                     .or_insert_with(|| scope.spawn(move || repo_state(bin, repo, show_stash)));
             }
         }
-        let states: HashMap<&Path, GitState> = state_jobs
-            .into_iter()
-            .map(|(repo, h)| (repo, h.join().unwrap_or(GitState::Unknown)))
-            .collect();
+        let mut states: HashMap<&Path, GitState> = HashMap::new();
+        for repo in early {
+            if let Some(s) = prefetched.and_then(|p| p.take(repo)) {
+                states.insert(repo, s);
+            }
+        }
+        states.extend(
+            state_jobs
+                .into_iter()
+                .map(|(repo, h)| (repo, h.join().unwrap_or(GitState::Unknown))),
+        );
         Some(assemble(rows, &enclosing, &is_ignored, &states))
     })
 }
@@ -374,6 +488,41 @@ mod tests {
         assert!(status_is_dirty(
             b"1 .M N... 100644 100644 100644 a b src/x.rs\n"
         ));
+    }
+
+    #[test]
+    fn prefetched_states_match_probing_after_the_walk() {
+        let Some(bin) = find_git() else { return };
+        let root = std::env::temp_dir().join(format!("rtrash-prefetch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("r");
+        std::fs::create_dir_all(&repo).unwrap();
+        let ok = Command::new(&bin)
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            return;
+        }
+        std::fs::write(repo.join("new.txt"), b"x").unwrap();
+        let repos = [repo.clone()];
+        let rows = [RowQuery {
+            path: &root,
+            is_dir: true,
+            repos: &repos,
+        }];
+        let p = Prefetch::start().unwrap();
+        p.repo(&repo);
+        p.repo(&repo);
+        let done = p.finish();
+        assert!(done.has(&repo));
+        let early = classify_all_with(&rows, Some(&done)).unwrap();
+        let late = classify_all(&rows).unwrap();
+        assert_eq!(early, late);
+        assert_eq!(early[0].as_ref().map(|(s, _)| *s), Some(GitState::Dirty));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

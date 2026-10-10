@@ -413,6 +413,8 @@ impl LinkSet {
 
 struct Ctx<'a> {
     opts: &'a ScanOpts,
+    /// Git probes to start as repositories turn up.
+    prefetch: Option<&'a du_git::Prefetch>,
     root_dev: u64,
     /// Multiply-linked files already counted.
     seen: LinkSet,
@@ -670,6 +672,9 @@ fn walk_dir(
     let bare = !has_dot_git && bare_parts == BARE_ALL && is_bare_repo(path);
     if has_dot_git || bare {
         node.repos.push(path.to_path_buf());
+        if let Some(p) = ctx.prefetch {
+            p.repo(path);
+        }
     }
     let stat_chunk =
         |range: std::ops::Range<usize>| stat_entries(ctx, &dir, &entries, range, depth, list_files);
@@ -871,6 +876,16 @@ impl Node {
 /// Scan `paths` and return the merged report. Paths are made absolute first
 /// (without resolving a final symlink) so listed paths work from any cwd.
 pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
+    scan_with(paths, opts, None)
+}
+
+/// [`scan`], starting git probes on `prefetch` for every repository the
+/// walk meets and for the one enclosing each PATH.
+pub fn scan_with(
+    paths: &[PathBuf],
+    opts: &ScanOpts,
+    prefetch: Option<&du_git::Prefetch>,
+) -> io::Result<Report> {
     du_fs::raise_nofile_limit();
     let mut roots = Vec::new();
     let mut dirs = TopN::new(opts.top, opts.sort);
@@ -879,8 +894,14 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
     for p in paths {
         let abs = absolute(p)?;
         let meta = du_fs::lstat(&abs)?;
+        if let Some(p) = prefetch {
+            if let Some(repo) = du_git::enclosing_repo(&abs) {
+                p.repo(&repo);
+            }
+        }
         let ctx = Ctx {
             opts,
+            prefetch,
             root_dev: meta.dev,
             seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
@@ -973,6 +994,11 @@ fn strip_verbatim(p: &Path) -> PathBuf {
 /// Fill in `git` for every listed row. Returns false when `git` could not
 /// be run at all.
 pub fn annotate_git(report: &mut Report) -> bool {
+    annotate_git_with(report, None)
+}
+
+/// [`annotate_git`], reusing what a [`du_git::Prefetch`] found.
+pub fn annotate_git_with(report: &mut Report, prefetched: Option<&du_git::Prefetched>) -> bool {
     let states = {
         let queries: Vec<du_git::RowQuery<'_>> = report
             .dirs
@@ -985,7 +1011,7 @@ pub fn annotate_git(report: &mut Report) -> bool {
                 repos: &it.repos,
             })
             .collect();
-        du_git::classify_all(&queries)
+        du_git::classify_all_with(&queries, prefetched)
     };
     let Some(states) = states else {
         return false;
@@ -1340,6 +1366,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             .map(|d| fs::canonicalize(&d.root).unwrap_or_else(|_| d.root.clone()))
             .collect();
     }
+    // Git probes run beside the walk. Under --no-git, or without git on
+    // PATH, there is nothing to start.
+    let prefetch = if use_git {
+        du_git::Prefetch::start()
+    } else {
+        None
+    };
+    let scan = |paths: &[PathBuf], opts: &ScanOpts| scan_with(paths, opts, prefetch.as_ref());
     let scanned = match threads {
         Some(n) => match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
             Ok(pool) => pool.install(|| scan(&paths, &opts)),
@@ -1363,7 +1397,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if !want_files {
         report.files.clear();
     }
-    if use_git && !annotate_git(&mut report) {
+    let prefetched = prefetch.map(du_git::Prefetch::finish);
+    if use_git && !annotate_git_with(&mut report, prefetched.as_ref()) {
         eprintln!("{prog}: warning: git not found; rows carry no git state");
     }
 
