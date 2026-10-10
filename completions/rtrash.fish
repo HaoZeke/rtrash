@@ -87,6 +87,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l json -d
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l print0 -d 'print listed paths NUL-separated'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l pick -d 'mark listed rows in the put browser and trash them'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s i -l interactive -d 'explore one directory at a time; trash, undo, rescan'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s o -l output -r -d 'write a snapshot of every directory total'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s f -l file -r -d 'list from a snapshot instead of scanning'
 
 # undo
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -f

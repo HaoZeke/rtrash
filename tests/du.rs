@@ -795,3 +795,82 @@ fn trash_is_one_row_and_summarized() {
         Some(2)
     );
 }
+
+#[test]
+fn snapshots_list_back_and_diff_against_a_later_scan() {
+    let t = Tree::new("snap");
+    t.file("grow/a", 10_000);
+    t.file("shrink/b", 300_000);
+    t.file("gone/c", 5_000);
+    t.file("same/d", 1_000);
+    let snap_a = PathBuf::from(format!("{}.a.snap", t.root.display()));
+    let snap_b = PathBuf::from(format!("{}.b.snap", t.root.display()));
+    let root = t.root.to_string_lossy().into_owned();
+    let a = snap_a.to_string_lossy().into_owned();
+    let b = snap_b.to_string_lossy().into_owned();
+
+    let out = t.du(&["-o", &a, &root]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = fs::read_to_string(&snap_a).unwrap();
+    assert!(text.starts_with("# rtrash du snapshot 1\n"), "{text}");
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with("dir ") && l.ends_with("same")),
+        "{text}"
+    );
+
+    // Listing a snapshot needs no scan: the tree can change meanwhile.
+    t.file("grow/more", 2_000_000);
+    fs::remove_file(t.root.join("shrink/b")).unwrap();
+    fs::remove_dir_all(t.root.join("gone")).unwrap();
+    t.file("new/e", 50_000);
+    let listed = t.du(&["-f", &a]);
+    assert!(listed.status.success());
+    let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let first = listed.lines().nth(2).unwrap_or_default();
+    assert!(
+        first.contains("shrink"),
+        "snapshot order, not the live tree: {listed}"
+    );
+
+    // Without NEW, diff scans the roots of OLD again.
+    let live = t.du(&["diff", &a]);
+    assert!(
+        live.status.success(),
+        "{}",
+        String::from_utf8_lossy(&live.stderr)
+    );
+    let live = String::from_utf8_lossy(&live.stdout).into_owned();
+    let rows: Vec<&str> = live.lines().skip(1).collect();
+    assert!(
+        rows[0].trim_end().ends_with("grow") && rows[0].trim_start().starts_with('+'),
+        "{live}"
+    );
+    assert!(
+        live.contains("gone") && live.lines().any(|l| l.contains(" gone ")),
+        "{live}"
+    );
+    assert!(
+        live.lines()
+            .any(|l| l.contains(" new ") && l.ends_with("new")),
+        "{live}"
+    );
+    assert!(!live.lines().any(|l| l.ends_with("same")), "{live}");
+
+    // Two files, as JSON.
+    assert!(t.du(&["-o", &b, &root]).status.success());
+    let json = t.du(&["diff", "--json", "-n", "2", &a, &b]);
+    let json = String::from_utf8_lossy(&json.stdout).into_owned();
+    assert!(json.contains("\"changes\":[{"), "{json}");
+    assert_eq!(json.matches("\"delta\":").count(), 2, "{json}");
+
+    // Anything else is no snapshot.
+    let bad = t.du(&["-f", &root]);
+    assert_eq!(bad.status.code(), Some(1));
+    let _ = fs::remove_file(&snap_a);
+    let _ = fs::remove_file(&snap_b);
+}

@@ -78,6 +78,8 @@ du_opts=(
   '--print0[print listed paths NUL-separated]'
   '--pick[mark listed rows in the put browser and trash them]'
   '(-i --interactive)'{-i,--interactive}'[explore one directory at a time; trash, undo, rescan]'
+  '(-o --output)'{-o,--output=}'[write a snapshot of every directory total]:file:_files'
+  '(-f --file)'{-f,--file=}'[list from a snapshot instead of scanning]:file:_files'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
   '*:path:_files -/'

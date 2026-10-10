@@ -275,6 +275,24 @@ Output version information and exit.
 .SS du
 .B rtrash du
 [\fIOPTION\fR]... [\fIPATH\fR]...
+.br
+.B rtrash du diff
+[\fB\-n\fR \fIN\fR] [\fB\-\-apparent\fR] [\fB\-\-json\fR]
+.I OLD
+.RI [ NEW ]
+.PP
+.B du diff
+compares two snapshots written with
+.B \-o
+and lists the directories that grew or shrank most, marking those that
+appeared (new) or left (gone).
+Without
+.IR NEW ,
+it scans the roots of
+.I OLD
+again at the same depth.
+To scan a directory named diff, write
+.BR "rtrash du ./diff" .
 .PP
 Find what to delete. Walk each
 .I PATH
@@ -457,6 +475,22 @@ and the confirmation counts them.
 Needs a terminal on stdin and the
 .B tui
 feature.
+.TP
+.BR \-o ", " \-\-output =\fIFILE\fR
+Write a snapshot of every directory total, down to
+.BR \-\-max\-depth ,
+to
+.I FILE
+.RB ( \- " for stdout)"
+instead of listing.
+Snapshots hold one record per line with percent-encoded paths, so grep and
+text diff tools read them too.
+.TP
+.BR \-f ", " \-\-file =\fIFILE\fR
+List the largest directories from a snapshot instead of scanning.
+A snapshot can be stale, so it cannot drive
+.BR \-\-print0 ,
+.BR \-\-pick " or " \-\-interactive .
 .TP
 .BR \-i ", " \-\-interactive
 Explore one

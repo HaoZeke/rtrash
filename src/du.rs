@@ -70,6 +70,10 @@ directories appear as one `trash` row and are never printed by --print0.
       --json            emit a JSON object (scripts)
       --print0          print the listed paths, NUL-separated, for
                           `xargs -0 rtrash put -rf --`
+  -o, --output=FILE     write a snapshot of every directory total (to
+                          --max-depth) to FILE (- for stdout) instead of
+                          listing; compare snapshots with `du diff`
+  -f, --file=FILE       list from a snapshot instead of scanning
       --pick            open the put browser on the listed rows: mark rows
                           and trash them (needs a terminal)
   -i, --interactive     explore PATH one directory at a time: open and leave
@@ -78,6 +82,22 @@ directories appear as one `trash` row and are never printed by --print0.
       --help            display this help and exit
       --version         output version information and exit
 ";
+
+/// Every artefact kind a row can carry, `trash` included.
+pub const ARTEFACT_KINDS: &[&str] = &[
+    "cargo-target",
+    "node-modules",
+    "python-cache",
+    "python-env",
+    "gradle-cache",
+    "js-build-cache",
+    "zig-cache",
+    "pixi-env",
+    "direnv",
+    "cmake-build",
+    "cache",
+    "trash",
+];
 
 /// Classify a directory as a regenerable build artefact or cache from its
 /// name and the names of its direct children. Rules need a marker file where
@@ -137,6 +157,8 @@ pub struct ScanOpts {
     pub newer_cutoff: Option<i64>,
     /// Trash roots: listed as one `trash` row each, contents never listed.
     pub trash_roots: Vec<PathBuf>,
+    /// Collect no file rows (snapshots keep directories only).
+    pub no_files: bool,
 }
 
 impl Default for ScanOpts {
@@ -151,6 +173,7 @@ impl Default for ScanOpts {
             older_cutoff: None,
             newer_cutoff: None,
             trash_roots: Vec::new(),
+            no_files: false,
         }
     }
 }
@@ -183,12 +206,22 @@ impl Item {
     }
 }
 
+/// Lists up to this long keep sorted order on every insert.
+const SORTED_INSERT_CAP: usize = 1024;
+
 /// The N largest items seen so far, largest first.
+///
+/// Above [`SORTED_INSERT_CAP`], new items go into a buffer that is sorted
+/// and cut back to N once it holds twice that many, so a large N (a
+/// snapshot keeps every directory) costs O(n log n) rather than one
+/// insertion shift per item.
 #[derive(Debug, Clone)]
 pub struct TopN {
     cap: usize,
     sort: SortKey,
     items: Vec<Item>,
+    /// Smallest kept item after the last cut, once N items survived it.
+    floor: Option<(u64, PathBuf)>,
 }
 
 impl TopN {
@@ -197,32 +230,57 @@ impl TopN {
             cap,
             sort,
             items: Vec::new(),
+            floor: None,
         }
     }
 
-    /// Add `item` if it ranks among the kept ones; returns whether it was
-    /// kept.
+    /// Add `item` unless it ranks below the floor; returns whether it was
+    /// taken. Ties go to the smaller path, whatever order the workers
+    /// report in, so output stays deterministic.
     pub fn push(&mut self, item: Item) -> bool {
         if self.cap == 0 {
             return false;
         }
         let k = item.key(self.sort);
-        if self.items.len() == self.cap {
-            // A full list keeps the smaller path on a tie, whatever order
-            // the workers report in.
-            match self.items.last() {
-                Some(last) if (last.key(self.sort), &item.path) >= (k, &last.path) => return false,
-                _ => {}
+        if let Some((fk, fp)) = &self.floor {
+            if (*fk, &item.path) >= (k, fp) {
+                return false;
             }
         }
-        // Ties keep path order so output is deterministic across runs.
-        let pos = self.items.partition_point(|x| {
-            let xk = x.key(self.sort);
-            xk > k || (xk == k && x.path < item.path)
-        });
-        self.items.insert(pos, item);
-        self.items.truncate(self.cap);
+        if self.cap <= SORTED_INSERT_CAP {
+            // Small lists stay sorted, so the floor is known as soon as
+            // the list fills and workers prune from the start.
+            let sort = self.sort;
+            let pos = self.items.partition_point(|x| {
+                let xk = x.key(sort);
+                xk > k || (xk == k && x.path < item.path)
+            });
+            self.items.insert(pos, item);
+            self.items.truncate(self.cap);
+            if self.items.len() == self.cap {
+                self.floor = self.items.last().map(|x| (x.key(sort), x.path.clone()));
+            }
+            return true;
+        }
+        self.items.push(item);
+        if self.items.len() >= self.cap.saturating_mul(2) {
+            self.cut();
+        }
         true
+    }
+
+    /// Sort largest first (ties by path) and keep the best N.
+    fn cut(&mut self) {
+        let sort = self.sort;
+        self.items.sort_unstable_by(|a, b| {
+            b.key(sort)
+                .cmp(&a.key(sort))
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        self.items.truncate(self.cap);
+        if self.items.len() == self.cap {
+            self.floor = self.items.last().map(|x| (x.key(sort), x.path.clone()));
+        }
     }
 
     pub fn merge(&mut self, other: TopN) {
@@ -235,15 +293,14 @@ impl TopN {
         }
     }
 
-    /// Key of the smallest kept item, once the list is full.
+    /// Key of the smallest kept item once the list holds N (for a large N,
+    /// as of the last cut). Items below it can never get in.
     pub fn floor(&self) -> Option<u64> {
-        if self.items.len() < self.cap {
-            return None;
-        }
-        self.items.last().map(|x| x.key(self.sort))
+        self.floor.as_ref().map(|f| f.0)
     }
 
-    pub fn into_vec(self) -> Vec<Item> {
+    pub fn into_vec(mut self) -> Vec<Item> {
+        self.cut();
         self.items
     }
 }
@@ -345,7 +402,8 @@ impl SharedTop {
     fn new(cap: usize, sort: SortKey) -> Self {
         SharedTop {
             list: Mutex::new(TopN::new(cap, sort)),
-            floor: AtomicU64::new(0),
+            // An empty list wants nothing, so workers never take the lock.
+            floor: AtomicU64::new(if cap == 0 { u64::MAX } else { 0 }),
         }
     }
 
@@ -893,7 +951,8 @@ pub fn scan_with(
     du_fs::raise_nofile_limit();
     let mut roots = Vec::new();
     let mut dirs = TopN::new(opts.top, opts.sort);
-    let mut files = TopN::new(opts.top, opts.sort);
+    let file_cap = if opts.no_files { 0 } else { opts.top };
+    let mut files = TopN::new(file_cap, opts.sort);
     let mut unreadable = 0u64;
     for p in paths {
         let abs = absolute(p)?;
@@ -913,7 +972,7 @@ pub fn scan_with(
             links: AtomicU64::new(0),
             dirs: AtomicU64::new(0),
             top_dirs: SharedTop::new(opts.top, opts.sort),
-            top_files: SharedTop::new(opts.top, opts.sort),
+            top_files: SharedTop::new(file_cap, opts.sort),
         };
         let (apparent, disk, artefact) = if meta.is_dir() {
             enter(&ctx, None, &abs, Some(meta), 0, true)
@@ -1316,6 +1375,9 @@ fn take_value<'a>(
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    if args.first().map(String::as_str) == Some("diff") {
+        return crate::du_snap::run_diff(prog, &args[1..]);
+    }
     let mut opts = ScanOpts::default();
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut json = false;
@@ -1331,6 +1393,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut include_dirty = false;
     let mut pick = false;
     let mut interactive = false;
+    let mut output: Option<PathBuf> = None;
+    let mut from_file: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
     let now = crate::util::now_epoch();
     let mut i = 0usize;
@@ -1362,6 +1426,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             match v.and_then(|v| parse_count(v, "N")) {
                 Ok(0) => bail!("--threads must be at least 1"),
                 Ok(n) => threads = Some(n),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--output", Some("-o")) {
+            match v {
+                Ok(v) => output = Some(PathBuf::from(v)),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--file", Some("-f")) {
+            match v {
+                Ok(v) => from_file = Some(PathBuf::from(v)),
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--older-than", None) {
@@ -1436,6 +1510,54 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: --interactive takes one PATH");
         return 2;
     }
+    if output.is_some() && (from_file.is_some() || json || print0 || pick || interactive) {
+        eprintln!("{prog}: --output writes a snapshot; it takes no other output mode");
+        return 2;
+    }
+    if let Some(file) = &from_file {
+        if print0 || pick || interactive {
+            eprintln!(
+                "{prog}: a snapshot can be stale; --file lists it but cannot drive --print0, --pick or --interactive"
+            );
+            return 2;
+        }
+        let snap = match crate::du_snap::read(file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{prog}: cannot read snapshot '{}': {e}", file.display());
+                return 1;
+            }
+        };
+        let report = crate::du_snap::to_report(snap, opts.sort, opts.top);
+        let trash = TrashSummary::default();
+        if json {
+            println!("{}", report_json(&report, &trash));
+        } else {
+            let by = match opts.sort {
+                SortKey::Disk => "disk use",
+                SortKey::Apparent => "apparent size",
+            };
+            print_table(
+                &format!("Largest directories (by {by}) in {}", file.display()),
+                &report.dirs,
+                now,
+            );
+            for t in &report.roots {
+                println!(
+                    "Total {}: {} on disk, {} apparent",
+                    t.path.display(),
+                    format_bytes(t.disk),
+                    format_bytes(t.apparent)
+                );
+            }
+        }
+        return 0;
+    }
+    if output.is_some() {
+        opts = crate::du_snap::snapshot_opts(opts);
+        // Snapshots record sizes only.
+        use_git = false;
+    }
 
     #[cfg(windows)]
     {
@@ -1495,6 +1617,26 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             return 1;
         }
     };
+    if let Some(out) = &output {
+        let written = if out.as_os_str() == "-" {
+            crate::du_snap::write(&report, &opts, now, io::stdout().lock())
+        } else {
+            fs::File::create(out)
+                .and_then(|f| crate::du_snap::write(&report, &opts, now, io::BufWriter::new(f)))
+        };
+        if let Err(e) = written {
+            eprintln!("{prog}: cannot write snapshot '{}': {e}", out.display());
+            return 1;
+        }
+        if out.as_os_str() != "-" {
+            eprintln!(
+                "{prog}: wrote {} to '{}'",
+                plural(report.dirs.len() as u64, "directory", "directories"),
+                out.display()
+            );
+        }
+        return 0;
+    }
     if !want_dirs {
         report.dirs.clear();
     }
@@ -1670,6 +1812,21 @@ mod tests {
         let mut z = TopN::new(0, SortKey::Disk);
         z.push(item("/a", 1, 1));
         assert!(z.into_vec().is_empty());
+    }
+
+    #[test]
+    fn topn_large_cap_matches_sorted_insert() {
+        let items: Vec<Item> = (0..5000u64)
+            .map(|i| item(&format!("/p{:05}", (i * 7919) % 5000), (i * 31) % 97, 0))
+            .collect();
+        for cap in [3usize, 1500, 4000, usize::MAX] {
+            let mut big = TopN::new(cap, SortKey::Disk);
+            big.merge_vec(items.clone());
+            let mut want = items.clone();
+            want.sort_by(|a, b| b.disk.cmp(&a.disk).then_with(|| a.path.cmp(&b.path)));
+            want.truncate(cap);
+            assert_eq!(big.into_vec(), want, "cap {cap}");
+        }
     }
 
     #[test]
