@@ -381,7 +381,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(3),
+            Constraint::Length(tui_term::FOOTER_ROWS),
         ])
         .split(f.area());
     app.viewport_rows = chunks[1].height.saturating_sub(2) as usize;
@@ -605,5 +605,24 @@ mod fixed_rows_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, kept);
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn footer_shows_the_status_line() {
+        let rows = vec![PathRow {
+            path: PathBuf::from("/x/repo"),
+            is_dir: true,
+            label: None,
+            warn: true,
+        }];
+        let mut app = App::new("rtrash", PathBuf::from("/x"), rows);
+        app.status = "trash 1 item (1 may lose work)?".into();
+        let text = crate::tui_term::render_text(80, 12, |f| ui(f, &mut app));
+        assert!(text.contains("trash 1 item (1 may lose work)?"), "{text}");
     }
 }

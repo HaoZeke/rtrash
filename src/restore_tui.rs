@@ -387,7 +387,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(3),
+            Constraint::Length(tui_term::FOOTER_ROWS),
         ])
         .split(f.area());
 
@@ -725,5 +725,14 @@ mod tests {
         app.toggle_order();
         assert!(app.newest_first);
         assert_eq!(app.sel.marked_sorted(), vec![0]);
+    }
+
+    #[test]
+    fn footer_shows_the_status_line() {
+        let (a, b) = (entry("/x/a"), entry("/x/b"));
+        let mut app = App::new("rtrash", vec![&a, &b], false, true);
+        app.status = "overwrite existing '/x/a' ?".into();
+        let text = crate::tui_term::render_text(80, 12, |f| ui(f, &mut app));
+        assert!(text.contains("overwrite existing '/x/a' ?"), "{text}");
     }
 }
