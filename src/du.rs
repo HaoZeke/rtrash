@@ -105,6 +105,7 @@ directories appear as one `trash` row and are never printed by --print0.
                           directories, trash rows (d), undo (u) and rescan
                           (r); rows show git state and artefact kind
       --no-delete       with -i, browse only: d and u do nothing
+      --si              show sizes in powers of 1000 (kB, MB, GB)
       --help            display this help and exit
       --version         output version information and exit
 ";
@@ -1810,6 +1811,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     count = cfg.bool("du", "count").unwrap_or(count);
     opts.one_file_system = cfg.bool("du", "one_file_system").unwrap_or(false);
     use_git = cfg.bool("du", "git").unwrap_or(use_git);
+    let mut si = cfg.bool("du", "si").unwrap_or(false);
     // The config key only shapes -i; the flag alone is an error below.
     let mut read_only = cfg.bool("du", "no_delete").unwrap_or(false);
     filter.exclude_caches = cfg.bool("du", "exclude_caches").unwrap_or(false);
@@ -1918,6 +1920,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--pick" => pick = true,
                 "-i" | "--interactive" => interactive = true,
                 "--no-delete" => no_delete = true,
+                "--si" => si = true,
                 "--help" => {
                     print!("{}", HELP.replace("{prog}", prog));
                     return 0;
@@ -1966,6 +1969,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if paths.is_empty() {
         paths.push(PathBuf::from("."));
     }
+    // Text sizes everywhere in this run, the explorer included; JSON,
+    // snapshots and stacks stay in bytes.
+    crate::util::set_si_units(si);
     if no_delete && !interactive {
         eprintln!("{prog}: --no-delete applies to --interactive; other modes never delete");
         return 2;

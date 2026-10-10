@@ -1263,3 +1263,16 @@ fn no_delete_needs_the_explorer() {
     );
     assert!(out.stdout.is_empty());
 }
+
+#[test]
+fn si_prints_decimal_units_and_leaves_json_in_bytes() {
+    let t = Tree::new("si");
+    t.file("d/a.bin", 5000);
+    let text = String::from_utf8(t.du(&["--no-git", "--apparent", "--si"]).stdout).unwrap();
+    assert!(text.contains("5.0 kB"), "{text}");
+    assert!(!text.contains("KiB"), "{text}");
+    let text = String::from_utf8(t.du(&["--no-git", "--apparent"]).stdout).unwrap();
+    assert!(text.contains("4.9 KiB"), "{text}");
+    let j = t.json(&["--no-git", "--si"]);
+    assert!(j.contains("\"apparent\":5000"), "{j}");
+}

@@ -775,6 +775,14 @@ The
 config key turns it on for every
 .BR \-i .
 .TP
+.B \-\-si
+Show sizes in powers of 1000 (kB, MB, GB, TB) instead of 1024 (KiB,
+MiB, GiB), in the listing, the totals, the trash line and the explorer.
+JSON, snapshots and stacks stay in bytes.
+The
+.B si
+config key makes it the default.
+.TP
 .B \-\-help
 Display help and exit.
 .TP
@@ -1030,6 +1038,7 @@ exclude = ["*.iso"]       # \-\-exclude, before any given on the command line
 exclude_caches = false    # \-\-exclude\-caches
 gitignore = false         # \-\-gitignore
 no_delete = false         # \-\-no\-delete for every \-i
+si = false                # \-\-si
 
 [list]
 sort = "date"             # \-\-sort: date, size, name or path

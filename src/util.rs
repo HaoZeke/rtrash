@@ -192,8 +192,37 @@ pub fn plural(n: u64, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// Human-readable binary units (KiB/MiB/GiB) for CLI summaries.
+/// `du --si`: [`format_bytes`] uses powers of 1000 for the rest of the run.
+static SI_UNITS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Switch [`format_bytes`] to decimal units (kB/MB/GB), as `du --si` does.
+pub fn set_si_units(on: bool) {
+    SI_UNITS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Human-readable sizes for CLI summaries: binary units (KiB/MiB/GiB), or
+/// decimal ones after [`set_si_units`].
 pub fn format_bytes(n: u64) -> String {
+    format_bytes_in(n, SI_UNITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// [`format_bytes`] with the unit base given: decimal when `si` is set.
+pub fn format_bytes_in(n: u64, si: bool) -> String {
+    if si {
+        const K: f64 = 1000.0;
+        let x = n as f64;
+        return if n < 1000 {
+            format!("{n} B")
+        } else if x < K * K {
+            format!("{:.1} kB", x / K)
+        } else if x < K * K * K {
+            format!("{:.1} MB", x / (K * K))
+        } else if x < K * K * K * K {
+            format!("{:.2} GB", x / (K * K * K))
+        } else {
+            format!("{:.2} TB", x / (K * K * K * K))
+        };
+    }
     const K: f64 = 1024.0;
     if n < 1024 {
         format!("{n} B")
@@ -441,6 +470,16 @@ fn class_match(pat: &[u8], ch: u8) -> Option<(usize, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn si_units_use_powers_of_1000() {
+        assert_eq!(format_bytes_in(999, true), "999 B");
+        assert_eq!(format_bytes_in(5000, true), "5.0 kB");
+        assert_eq!(format_bytes_in(5000, false), "4.9 KiB");
+        assert_eq!(format_bytes_in(2_500_000, true), "2.5 MB");
+        assert_eq!(format_bytes_in(3_000_000_000, true), "3.00 GB");
+        assert_eq!(format_bytes_in(4_000_000_000_000, true), "4.00 TB");
+    }
 
     #[test]
     fn scrub_replaces_controls_and_keeps_text() {

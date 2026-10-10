@@ -80,6 +80,7 @@ const KEYS: &[(&str, &str, Kind, &str)] = &[
         Kind::Bool,
         "open -i without delete (--no-delete)",
     ),
+    ("du", "si", Kind::Bool, "sizes in powers of 1000 (--si)"),
     (
         "list",
         "sort",
