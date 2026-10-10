@@ -192,16 +192,18 @@ impl TopN {
         }
     }
 
-    pub fn push(&mut self, item: Item) {
+    /// Add `item` if it ranks among the kept ones; returns whether it was
+    /// kept.
+    pub fn push(&mut self, item: Item) -> bool {
         if self.cap == 0 {
-            return;
+            return false;
         }
         let k = item.key(self.sort);
         if self.items.len() == self.cap {
             // A full list keeps the smaller path on a tie, whatever order
             // the workers report in.
             match self.items.last() {
-                Some(last) if (last.key(self.sort), &item.path) >= (k, &last.path) => return,
+                Some(last) if (last.key(self.sort), &item.path) >= (k, &last.path) => return false,
                 _ => {}
             }
         }
@@ -212,6 +214,7 @@ impl TopN {
         });
         self.items.insert(pos, item);
         self.items.truncate(self.cap);
+        true
     }
 
     pub fn merge(&mut self, other: TopN) {
@@ -313,18 +316,22 @@ impl SharedTop {
         key >= self.floor.load(Ordering::Relaxed)
     }
 
-    fn offer(&self, key: u64, make: impl FnOnce() -> Item) {
+    /// Offer an item with this key, built only if it may get in. Returns
+    /// whether it was kept. The list only ever gets harder to enter, so an
+    /// item that ranks below a rejected one would be rejected as well.
+    fn offer(&self, key: u64, make: impl FnOnce() -> Item) -> bool {
         if !self.wants(key) {
-            return;
+            return false;
         }
         let mut list = self.list.lock().unwrap_or_else(|e| e.into_inner());
         if list.cap == 0 {
-            return;
+            return false;
         }
-        list.push(make());
+        let kept = list.push(make());
         if let Some(f) = list.floor() {
             self.floor.store(f, Ordering::Relaxed);
         }
+        kept
     }
 
     fn into_vec(self) -> Vec<Item> {
@@ -618,8 +625,24 @@ fn walk_dir(
     // is one row: nothing below either is listed on its own.
     let inner_listing = listing && !is_git_dir && artefact.is_none();
     if inner_listing {
+        // Best first: the list's own order, by key and then by name since
+        // the parent matches. No more than `top` of them can get in, and
+        // once one is turned away the rest would be too. This matters when
+        // thousands of files tie on size.
+        let name_of = |c: &FileCandidate| entries.get(c.entry).0.to_bytes();
+        let best_first = |x: &FileCandidate, y: &FileCandidate| {
+            ctx.key(y.apparent, y.disk)
+                .cmp(&ctx.key(x.apparent, x.disk))
+                .then_with(|| name_of(x).cmp(name_of(y)))
+        };
+        let top = opts.top;
+        if candidates.len() > top {
+            candidates.select_nth_unstable_by(top - 1, best_first);
+            candidates.truncate(top);
+        }
+        candidates.sort_unstable_by(best_first);
         for c in candidates {
-            ctx.top_files.offer(ctx.key(c.apparent, c.disk), || Item {
+            let kept = ctx.top_files.offer(ctx.key(c.apparent, c.disk), || Item {
                 path: path.join(du_fs::os(entries.get(c.entry).0)),
                 is_dir: false,
                 apparent: c.apparent,
@@ -629,6 +652,9 @@ fn walk_dir(
                 repos: Vec::new(),
                 git: None,
             });
+            if !kept {
+                break;
+            }
         }
     }
 

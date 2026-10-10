@@ -516,6 +516,29 @@ fn wide_directory_split_keeps_rows_and_counts() {
 }
 
 #[test]
+fn size_ties_list_the_smallest_names() {
+    let t = Tree::new("ties");
+    // Names are written in reverse so creation order does not match the
+    // expected rows, and the wide directory spans several chunks.
+    for i in (0..900).rev() {
+        t.file(&format!("flat/f{i:04}"), 10);
+    }
+    for i in (0..30).rev() {
+        t.file(&format!("narrow/g{i:02}"), 10);
+    }
+    let j = t.json(&["--no-git", "-n", "4", "--files"]);
+    let want: Vec<String> = ["flat/f0000", "flat/f0001", "flat/f0002", "flat/f0003"]
+        .iter()
+        .map(|p| s(&t.root.join(p)))
+        .collect();
+    assert_eq!(paths_in(&j, "files"), want, "{j}");
+    for n in ["1", "2", "5"] {
+        let k = t.json(&["--no-git", "-n", "4", "--files", "--threads", n]);
+        assert_eq!(k, j, "--threads {n}");
+    }
+}
+
+#[test]
 fn trash_is_one_row_and_summarized() {
     let t = Tree::new("trash");
     let trash = t.root.join("Trash");
