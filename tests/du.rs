@@ -382,6 +382,57 @@ fn git_state_marks_rows_and_print0_holds_back_risky_ones() {
 }
 
 #[test]
+fn stash_alone_marks_repo_dirty_and_ignores_batch() {
+    if !git_ok() {
+        return;
+    }
+    let t = Tree::new("git-stash");
+    let repo = t.root.join("repo");
+    t.file("repo/a.txt", 100_000);
+    t.file("repo/b/data.bin", 200_000);
+    t.file("repo/cache/x.bin", 300_000);
+    t.file("repo/logs/run.log", 50_000);
+    fs::write(repo.join(".gitignore"), "cache/\n*.log\n").unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "init"]);
+    // Detach so the commit is not on a local branch: no unpushed work.
+    git(&repo, &["checkout", "-q", "--detach"]);
+    git(&repo, &["branch", "-q", "-D", "main"]);
+    let j = t.json(&["--all-dirs"]);
+    assert!(
+        row(&j, &s(&repo.join("b"))).contains("\"git\":\"clean\""),
+        "{j}"
+    );
+    // One check-ignore batch answers rows matched by dir and file rules.
+    assert!(
+        row(&j, &s(&repo.join("cache"))).contains("\"git\":\"ignored\""),
+        "{j}"
+    );
+    assert!(
+        row(&j, &s(&repo.join("logs/run.log"))).contains("\"git\":\"ignored\""),
+        "{j}"
+    );
+    assert!(
+        row(&j, &s(&repo.join("a.txt"))).contains("\"git\":\"clean\""),
+        "{j}"
+    );
+
+    // A stash is the only change: the worktree is clean but work would be lost.
+    fs::write(repo.join("a.txt"), "changed").unwrap();
+    git(&repo, &["stash", "-q"]);
+    let j = t.json(&["--all-dirs"]);
+    assert!(
+        row(&j, &s(&repo.join("b"))).contains("\"git\":\"dirty\""),
+        "{j}"
+    );
+    assert!(
+        row(&j, &s(&repo.join("cache"))).contains("\"git\":\"ignored\""),
+        "{j}"
+    );
+}
+
+#[test]
 fn trash_is_one_row_and_summarized() {
     let t = Tree::new("trash");
     let trash = t.root.join("Trash");

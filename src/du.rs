@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 
-use crate::du_git::{self, GitProbe, GitState};
+use crate::du_git::{self, GitState};
 use crate::fastdelete::format_bytes;
 use crate::info;
 use crate::list::json_escape;
@@ -559,16 +559,30 @@ fn absolute(p: &Path) -> io::Result<PathBuf> {
 /// Fill in `git` for every listed row. Returns false when `git` could not
 /// be run at all.
 pub fn annotate_git(report: &mut Report) -> bool {
-    let mut probe = GitProbe::new();
-    for it in report.dirs.iter_mut().chain(report.files.iter_mut()) {
-        if du_git::inside_git_dir(&it.path) {
-            continue;
-        }
-        it.git = probe.classify(&it.path, it.is_dir, &it.repos);
-        if probe.unavailable {
-            it.git = None;
-            return false;
-        }
+    let states = {
+        let queries: Vec<du_git::RowQuery<'_>> = report
+            .dirs
+            .iter()
+            .chain(report.files.iter())
+            .filter(|it| !du_git::inside_git_dir(&it.path))
+            .map(|it| du_git::RowQuery {
+                path: &it.path,
+                is_dir: it.is_dir,
+                repos: &it.repos,
+            })
+            .collect();
+        du_git::classify_all(&queries)
+    };
+    let Some(states) = states else {
+        return false;
+    };
+    let rows = report
+        .dirs
+        .iter_mut()
+        .chain(report.files.iter_mut())
+        .filter(|it| !du_git::inside_git_dir(&it.path));
+    for (it, s) in rows.zip(states) {
+        it.git = s;
     }
     true
 }
