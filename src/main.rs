@@ -1,3 +1,8 @@
+// musl's malloc takes a global lock; mimalloc keeps the parallel walk fast.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[cfg(all(unix, feature = "tui"))]
 use rtrash::tui_binds;
 use rtrash::{du, empty, list, put, restore, rm, setup, status};

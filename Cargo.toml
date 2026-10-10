@@ -66,6 +66,11 @@ crossterm = { version = "0.28", optional = true }
 toml = { version = "0.8", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 
+# musl's malloc serialises threads on one lock; the parallel du walk needs a
+# faster allocator there. glibc builds keep the system allocator.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
 # Windows system Recycle Bin (shell APIs). Not used on Unix FreeDesktop builds.
 [target.'cfg(windows)'.dependencies]
 trash = { version = "5.2", default-features = true }
