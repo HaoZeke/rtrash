@@ -449,6 +449,31 @@ than CPUs can also help on a remote file system.
 List every directory level, including parents that one subdirectory
 dominates.
 .TP
+.BI \-\-sort= KEY
+Rank rows by
+.IR KEY :
+.B disk
+(the default),
+.B apparent
+(the same as
+.BR \-\-apparent ),
+.B items
+(files and directories below each directory, each hard-linked file once;
+no file rows are listed, since every file holds one item), or
+.B mtime
+(newest modification first). Under
+.BR mtime ,
+a directory gives way to the subdirectory that contains its newest change,
+so the rows name where the change happened. Snapshots do not record item
+counts, so
+.B \-\-file
+takes every key but
+.BR items .
+.TP
+.BR \-C ", " \-\-count
+Add an ITEMS column. The JSON rows always carry
+.BR items .
+.TP
 .BI \-\-exclude= PATTERN
 Leave out entries that match
 .I PATTERN

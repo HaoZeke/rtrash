@@ -50,6 +50,12 @@ directories appear as one `trash` row and are never printed by --print0.
   -n, --top=N           list N directories and N files (default 20)
   -x, --one-file-system skip directories on other file systems
       --apparent        rank by apparent size (file length) instead of disk use
+      --sort=KEY        rank by KEY: disk (default), apparent, items (files
+                          and directories below each directory; lists no
+                          files) or mtime (newest modification first; a
+                          directory gives way to the subdirectory that has
+                          its newest change)
+  -C, --count           add an ITEMS column (each hard-linked file once)
       --max-depth=N     list only entries at most N levels below PATH
       --threads=N       walk with N threads (default: one per CPU, or three
                           per CPU up to 64 when the first PATH looks uncached)
@@ -146,11 +152,56 @@ pub fn artefact_kind(name: &str, has_child: impl Fn(&str) -> bool) -> Option<&'s
     None
 }
 
-/// Which size orders the lists.
+/// What orders the lists, largest (or newest) first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
     Disk,
     Apparent,
+    /// Files and directories below a directory.
+    Items,
+    /// Newest modification below a directory.
+    Mtime,
+}
+
+impl SortKey {
+    pub fn parse(s: &str) -> Option<SortKey> {
+        Some(match s {
+            "disk" | "size" => SortKey::Disk,
+            "apparent" => SortKey::Apparent,
+            "items" | "count" => SortKey::Items,
+            "mtime" | "time" | "age" => SortKey::Mtime,
+            _ => return None,
+        })
+    }
+
+    /// The table heading for a list of `what` ordered by this key.
+    pub fn title(self, what: &str) -> String {
+        match self {
+            SortKey::Disk => format!("Largest {what} (by disk use)"),
+            SortKey::Apparent => format!("Largest {what} (by apparent size)"),
+            SortKey::Items => format!("{} with the most items", capitalize(what)),
+            SortKey::Mtime => format!("Most recently modified {what}"),
+        }
+    }
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
+}
+
+/// The ranking value of an entry under `sort`. Times map to `u64` in
+/// order, so the same largest-first list keeps the newest.
+pub fn sort_key(sort: SortKey, apparent: u64, disk: u64, items: u64, mtime: i64) -> u64 {
+    match sort {
+        SortKey::Disk => disk,
+        SortKey::Apparent => apparent,
+        SortKey::Items => items,
+        SortKey::Mtime => (mtime as u64) ^ (1 << 63),
+    }
 }
 
 /// Scan settings shared by every worker.
@@ -204,6 +255,9 @@ pub struct Item {
     pub disk: u64,
     /// Newest modification time in the tree (seconds since the epoch).
     pub mtime: i64,
+    /// Files and directories below a directory (a file has 1). Each
+    /// hard-linked file counts once.
+    pub items: u64,
     /// Kind of regenerable artefact (`cargo-target`, `node-modules`, ...).
     pub artefact: Option<&'static str>,
     /// Git repositories at or below this directory (capped).
@@ -213,11 +267,8 @@ pub struct Item {
 }
 
 impl Item {
-    fn key(&self, sort: SortKey) -> u64 {
-        match sort {
-            SortKey::Disk => self.disk,
-            SortKey::Apparent => self.apparent,
-        }
+    pub fn key(&self, sort: SortKey) -> u64 {
+        sort_key(sort, self.apparent, self.disk, self.items, self.mtime)
     }
 }
 
@@ -540,11 +591,8 @@ impl Ctx<'_> {
         self.seen.first_link(st)
     }
 
-    fn key(&self, apparent: u64, disk: u64) -> u64 {
-        match self.opts.sort {
-            SortKey::Disk => disk,
-            SortKey::Apparent => apparent,
-        }
+    fn key(&self, apparent: u64, disk: u64, items: u64, mtime: i64) -> u64 {
+        sort_key(self.opts.sort, apparent, disk, items, mtime)
     }
 }
 
@@ -552,6 +600,8 @@ struct Node {
     apparent: u64,
     disk: u64,
     mtime: i64,
+    /// Files and directories below this one.
+    items: u64,
     repos: Vec<PathBuf>,
     /// The filters would let this directory onto the list. A parent only
     /// hands its row to a dominant child that can show up in its place.
@@ -616,6 +666,7 @@ fn enter(
             apparent: 0,
             disk: st.sizes().1,
             mtime: st.mtime,
+            items: 0,
             repos: Vec::new(),
             listable: false,
             artefact: None,
@@ -644,6 +695,8 @@ struct Stats {
     apparent: u64,
     disk: u64,
     mtime: i64,
+    /// Files counted (each hard-linked file once).
+    files: u64,
     /// Subdirectories, with their stat when it was taken here (for -x or
     /// an entry of unknown type).
     subdirs: Vec<(usize, Option<du_fs::Stat>)>,
@@ -666,6 +719,7 @@ fn stat_entries(
         apparent: 0,
         disk: 0,
         mtime: i64::MIN,
+        files: 0,
         subdirs: Vec::new(),
         candidates: Vec::new(),
     };
@@ -710,13 +764,14 @@ fn stat_entries(
             continue;
         }
         ctx.files.fetch_add(1, Ordering::Relaxed);
+        out.files += 1;
         let (a, d) = m.sizes();
         out.apparent = out.apparent.saturating_add(a);
         out.disk = out.disk.saturating_add(d);
         out.mtime = out.mtime.max(m.mtime);
         if list_files
             && m.is_file()
-            && ctx.top_files.wants(ctx.key(a, d))
+            && ctx.top_files.wants(ctx.key(a, d, 1, m.mtime))
             && ctx.listable(depth + 1, m.mtime)
         {
             out.candidates.push(FileCandidate {
@@ -748,6 +803,7 @@ fn walk_dir(
         apparent: 0,
         disk: st.sizes().1,
         mtime: st.mtime,
+        items: 0,
         repos: Vec::new(),
         listable: false,
         artefact: None,
@@ -824,6 +880,7 @@ fn walk_dir(
         node.apparent = node.apparent.saturating_add(p.apparent);
         node.disk = node.disk.saturating_add(p.disk);
         node.mtime = node.mtime.max(p.mtime);
+        node.items += p.files;
         subdirs.extend(p.subdirs);
         candidates.extend(p.candidates);
     }
@@ -859,8 +916,8 @@ fn walk_dir(
         // thousands of files tie on size.
         let name_of = |c: &FileCandidate| entries.get(c.entry).0.to_bytes();
         let best_first = |x: &FileCandidate, y: &FileCandidate| {
-            ctx.key(y.apparent, y.disk)
-                .cmp(&ctx.key(x.apparent, x.disk))
+            ctx.key(y.apparent, y.disk, 1, y.mtime)
+                .cmp(&ctx.key(x.apparent, x.disk, 1, x.mtime))
                 .then_with(|| name_of(x).cmp(name_of(y)))
         };
         let top = opts.top;
@@ -870,12 +927,14 @@ fn walk_dir(
         }
         candidates.sort_unstable_by(best_first);
         for c in candidates {
-            let kept = ctx.top_files.offer(ctx.key(c.apparent, c.disk), || Item {
+            let key = ctx.key(c.apparent, c.disk, 1, c.mtime);
+            let kept = ctx.top_files.offer(key, || Item {
                 path: path.join(du_fs::os(entries.get(c.entry).0)),
                 is_dir: false,
                 apparent: c.apparent,
                 disk: c.disk,
                 mtime: c.mtime,
+                items: 1,
                 artefact: None,
                 repos: Vec::new(),
                 git: None,
@@ -913,8 +972,10 @@ fn walk_dir(
     let mut largest_child = 0u64;
     for child in children.into_iter().flatten() {
         if child.listable {
-            largest_child = largest_child.max(ctx.key(child.apparent, child.disk));
+            let k = ctx.key(child.apparent, child.disk, child.items, child.mtime);
+            largest_child = largest_child.max(k);
         }
+        node.items += 1 + child.items;
         node.apparent = node.apparent.saturating_add(child.apparent);
         node.disk = node.disk.saturating_add(child.disk);
         node.mtime = node.mtime.max(child.mtime);
@@ -991,8 +1052,12 @@ impl Node {
         if ctx.opts.artefacts_only && artefact.is_none() {
             return;
         }
-        let own = ctx.key(self.apparent, self.disk);
-        let dominated = own > 0 && largest.saturating_mul(10) >= own.saturating_mul(9);
+        let own = ctx.key(self.apparent, self.disk, self.items, self.mtime);
+        let dominated = match ctx.opts.sort {
+            // The newest change lies in a subdirectory: list that instead.
+            SortKey::Mtime => largest == own,
+            _ => own > 0 && largest.saturating_mul(10) >= own.saturating_mul(9),
+        };
         if artefact.is_none() && !ctx.opts.all_dirs && dominated {
             return;
         }
@@ -1002,6 +1067,7 @@ impl Node {
             apparent: self.apparent,
             disk: self.disk,
             mtime: self.mtime,
+            items: self.items,
             artefact,
             repos: self.repos.clone(),
             git: None,
@@ -1025,7 +1091,12 @@ pub fn scan_with(
     du_fs::raise_nofile_limit();
     let mut roots = Vec::new();
     let mut dirs = TopN::new(opts.top, opts.sort);
-    let file_cap = if opts.no_files { 0 } else { opts.top };
+    // Every file holds one item, so a count ranks no files.
+    let file_cap = if opts.no_files || opts.sort == SortKey::Items {
+        0
+    } else {
+        opts.top
+    };
     let mut files = TopN::new(file_cap, opts.sort);
     let mut unreadable = 0u64;
     for p in paths {
@@ -1070,12 +1141,13 @@ pub fn scan_with(
             ctx.files.fetch_add(1, Ordering::Relaxed);
             let (a, d) = meta.sizes();
             if meta.is_file() && !opts.artefacts_only && ctx.listable(0, meta.mtime) {
-                ctx.top_files.offer(ctx.key(a, d), || Item {
+                ctx.top_files.offer(ctx.key(a, d, 1, meta.mtime), || Item {
                     path: abs.clone(),
                     is_dir: false,
                     apparent: a,
                     disk: d,
                     mtime: meta.mtime,
+                    items: 1,
                     artefact: None,
                     repos: Vec::new(),
                     git: None,
@@ -1280,12 +1352,13 @@ fn item_json(it: &Item) -> String {
         .as_ref()
         .map(|(_, r)| r.to_string_lossy().into_owned());
     format!(
-        "{{\"path\":\"{}\",\"type\":\"{}\",\"disk\":{},\"apparent\":{},\"mtime\":{},\"artefact\":{},\"git\":{},\"git_repo\":{}}}",
+        "{{\"path\":\"{}\",\"type\":\"{}\",\"disk\":{},\"apparent\":{},\"mtime\":{},\"items\":{},\"artefact\":{},\"git\":{},\"git_repo\":{}}}",
         json_escape(&it.path.to_string_lossy()),
         if it.is_dir { "dir" } else { "file" },
         it.disk,
         it.apparent,
         it.mtime,
+        it.items,
         json_opt(it.artefact),
         json_opt(git_state),
         json_opt(git_repo.as_deref())
@@ -1353,7 +1426,7 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
     )
 }
 
-fn print_table(title: &str, items: &[Item], now: i64) {
+fn print_table(title: &str, items: &[Item], now: i64, count: bool) {
     if items.is_empty() {
         return;
     }
@@ -1364,9 +1437,20 @@ fn print_table(title: &str, items: &[Item], now: i64) {
         .max()
         .unwrap_or(4)
         .max(4);
+    let counts = |v: &str| {
+        if count {
+            format!("{v:>9}  ")
+        } else {
+            String::new()
+        }
+    };
     println!(
-        "{:>10}  {:>10}  {:>4}  {:<width$}  PATH",
-        "DISK", "APPARENT", "AGE", "NOTE"
+        "{:>10}  {:>10}  {}{:>4}  {:<width$}  PATH",
+        "DISK",
+        "APPARENT",
+        counts("ITEMS"),
+        "AGE",
+        "NOTE"
     );
     for it in items {
         let mut path = it.path.display().to_string();
@@ -1374,9 +1458,10 @@ fn print_table(title: &str, items: &[Item], now: i64) {
             path.push(std::path::MAIN_SEPARATOR);
         }
         println!(
-            "{:>10}  {:>10}  {:>4}  {:<width$}  {}",
+            "{:>10}  {:>10}  {}{:>4}  {:<width$}  {}",
             format_bytes(it.disk),
             format_bytes(it.apparent),
+            counts(&it.items.to_string()),
             format_age(it.mtime, now),
             notes(it),
             path
@@ -1453,6 +1538,13 @@ fn take_value<'a>(
     if let Some(v) = arg.strip_prefix(&format!("{long}=")) {
         return Some(Ok(v));
     }
+    // `-n5`: a short option with its value attached.
+    if let Some(v) = short
+        .and_then(|s| arg.strip_prefix(s))
+        .filter(|v| !v.is_empty())
+    {
+        return Some(Ok(v));
+    }
     if arg == long || Some(arg) == short {
         *i += 1;
         return Some(
@@ -1487,6 +1579,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut from_file: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
     let mut filter = du_filter::Spec::default();
+    let mut count = false;
     let now = crate::util::now_epoch();
     let mut i = 0usize;
     while i < args.len() {
@@ -1529,6 +1622,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 Ok(v) => from_file = Some(PathBuf::from(v)),
                 Err(e) => bail!(e),
             }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--sort", None) {
+            match v.map(|v| (v, SortKey::parse(v))) {
+                Ok((_, Some(k))) => opts.sort = k,
+                Ok((v, None)) => bail!(format!(
+                    "invalid --sort '{v}' (use disk, apparent, items or mtime)"
+                )),
+                Err(e) => bail!(e),
+            }
         } else if let Some(v) = take_value(args, &mut i, arg, "--exclude", None) {
             match v {
                 Ok(v) if du_filter::Pattern::parse(v).is_some() => filter.patterns.push(v.into()),
@@ -1559,6 +1660,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--" => no_more_opts = true,
                 "-x" | "--one-file-system" => opts.one_file_system = true,
                 "--apparent" => opts.sort = SortKey::Apparent,
+                "-C" | "--count" => count = true,
                 "--all-dirs" => opts.all_dirs = true,
                 "--artefacts" => opts.artefacts_only = true,
                 "--exclude-caches" => filter.exclude_caches = true,
@@ -1645,19 +1747,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 return 1;
             }
         };
+        if opts.sort == SortKey::Items {
+            eprintln!("{prog}: snapshots do not record item counts; --sort=items needs a scan");
+            return 2;
+        }
         let report = crate::du_snap::to_report(snap, opts.sort, opts.top);
         let trash = TrashSummary::default();
         if json {
             println!("{}", report_json(&report, &trash));
         } else {
-            let by = match opts.sort {
-                SortKey::Disk => "disk use",
-                SortKey::Apparent => "apparent size",
-            };
             print_table(
-                &format!("Largest directories (by {by}) in {}", file.display()),
+                &format!("{} in {}", opts.sort.title("directories"), file.display()),
                 &report.dirs,
                 now,
+                false,
             );
             for t in &report.roots {
                 println!(
@@ -1801,12 +1904,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             );
         }
     } else {
-        let by = match opts.sort {
-            SortKey::Disk => "disk use",
-            SortKey::Apparent => "apparent size",
-        };
-        print_table(&format!("Largest directories (by {by})"), &report.dirs, now);
-        print_table(&format!("Largest files (by {by})"), &report.files, now);
+        let count = count || opts.sort == SortKey::Items;
+        print_table(&opts.sort.title("directories"), &report.dirs, now, count);
+        print_table(&opts.sort.title("files"), &report.files, now, count);
         for t in &report.roots {
             let kind = t.artefact.map(|k| format!(" ({k})")).unwrap_or_default();
             let links = if t.links > 0 {
@@ -1850,6 +1950,7 @@ mod tests {
             apparent,
             disk,
             mtime: 0,
+            items: 1,
             artefact: None,
             repos: Vec::new(),
             git: None,

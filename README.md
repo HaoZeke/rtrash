@@ -329,6 +329,8 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du /workspace` | 20 largest directories and 20 largest files, ranked by disk use |
 | `rtrash du -n 5 -x ~` | Top 5 of each, staying on the file system of `~` |
 | `rtrash du --apparent` | Rank by file length; sparse files rank higher than their disk use |
+| `rtrash du --sort=items` | Directories with the most files and subdirectories below them (inode hogs such as `node_modules`); `-C` adds an item count column to any listing |
+| `rtrash du --sort=mtime` | Most recently modified first; a directory gives way to the subdirectory that contains its newest change |
 | `rtrash du --dirs --older-than=30` | Directories with nothing modified in the last 30 days |
 | `rtrash du --artefacts ~/src` | Only regenerable build output and caches: cargo `target`, `node_modules`, `__pycache__`, virtualenvs, CMake build trees, `CACHEDIR.TAG` directories |
 | `rtrash du --exclude='*.iso' -X ~/.duignore` | Leave out what matches (gitignore syntax); excluded entries add nothing to any size |

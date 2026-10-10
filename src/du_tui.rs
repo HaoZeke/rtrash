@@ -61,17 +61,20 @@ struct App {
     undo: Vec<UndoGroup>,
 }
 
+/// The size a row shows and its bar measures: apparent size under
+/// `--apparent`, disk use otherwise.
 fn key_of(it: &Item, sort: SortKey) -> u64 {
     match sort {
-        SortKey::Disk => it.disk,
         SortKey::Apparent => it.apparent,
+        _ => it.disk,
     }
 }
 
+/// Rows in the order of `sort`: by size, item count or newest change.
 fn sort_rows(rows: &mut [Item], sort: SortKey) {
     rows.sort_by(|a, b| {
-        key_of(b, sort)
-            .cmp(&key_of(a, sort))
+        b.key(sort)
+            .cmp(&a.key(sort))
             .then_with(|| a.path.cmp(&b.path))
     });
 }
@@ -553,6 +556,9 @@ fn row_text(it: &Item, marked: bool, whole: u64, sort: SortKey) -> String {
     if let Some((s, _)) = &it.git {
         badges.push(format!("git:{}", s.as_str()));
     }
+    if sort == SortKey::Items && it.is_dir {
+        badges.push(crate::util::plural(it.items, "item", "items"));
+    }
     let badges = if badges.is_empty() {
         String::new()
     } else {
@@ -579,8 +585,8 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let sort = app.opts.sort;
     let view = app.view();
     let whole = match sort {
-        SortKey::Disk => view.disk,
         SortKey::Apparent => view.apparent,
+        _ => view.disk,
     };
     let title = format!(
         " {} · {} · {} entries · {} marked ",
@@ -812,6 +818,7 @@ mod tests {
             apparent: 0,
             disk: 512,
             mtime: 0,
+            items: 3,
             artefact: Some("cargo-target"),
             repos: Vec::new(),
             git: Some((crate::du_git::GitState::Dirty, PathBuf::from("/x"))),
@@ -822,6 +829,8 @@ mod tests {
         assert!(s.ends_with("[cargo-target git:dirty]"), "{s}");
         it.git = None;
         assert!(!row_text(&it, false, 1024, SortKey::Disk).contains('!'));
+        let s = row_text(&it, false, 1024, SortKey::Items);
+        assert!(s.ends_with("[cargo-target 3 items]"), "{s}");
     }
 
     #[test]

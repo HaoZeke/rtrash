@@ -184,6 +184,7 @@ pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
                 disk: num(1)?,
                 apparent: num(2)?,
                 mtime: f[3].parse().map_err(|_| bad(n, "bad mtime"))?,
+                items: 0,
                 artefact: artefact_static(f[4]),
                 repos: Vec::new(),
                 git: None,
@@ -227,10 +228,11 @@ impl Change {
     }
 }
 
+/// Sizes to compare; `du diff` offers disk use and apparent size only.
 fn size(it: &Item, sort: SortKey) -> u64 {
     match sort {
-        SortKey::Disk => it.disk,
         SortKey::Apparent => it.apparent,
+        _ => it.disk,
     }
 }
 
@@ -238,8 +240,8 @@ fn size(it: &Item, sort: SortKey) -> u64 {
 pub fn diff(old: &Snapshot, new: &Snapshot, sort: SortKey) -> Vec<Change> {
     let mut sizes: HashMap<&Path, (Option<u64>, Option<u64>)> = HashMap::new();
     let root_size = |r: &RootTotals| match sort {
-        SortKey::Disk => r.disk,
         SortKey::Apparent => r.apparent,
+        _ => r.disk,
     };
     for r in &old.roots {
         sizes.entry(&r.path).or_default().0 = Some(root_size(r));
@@ -427,6 +429,7 @@ mod tests {
             apparent: disk / 2,
             disk,
             mtime: 7,
+            items: 0,
             artefact: None,
             repos: Vec::new(),
             git: None,

@@ -322,6 +322,108 @@ fn age_filters_use_newest_mtime() {
 }
 
 #[test]
+fn sort_by_items_counts_files_and_dirs_below() {
+    let t = Tree::new("items");
+    for i in 0..3 {
+        t.file(&format!("many/f{i}"), 10);
+    }
+    t.file("many/s/g0", 10);
+    t.file("many/s/g1", 10);
+    t.file("few/big.bin", 500_000);
+    let j = t.json(&["--no-git", "--sort=items"]);
+    // many: 3 files, the s directory and its 2 files.
+    assert_eq!(paths_in(&j, "dirs")[0], s(&t.root.join("many")), "{j}");
+    assert!(
+        row(&j, &s(&t.root.join("many"))).contains("\"items\":6,"),
+        "{j}"
+    );
+    assert!(
+        row(&j, &s(&t.root.join("few"))).contains("\"items\":1,"),
+        "{j}"
+    );
+    assert!(paths_in(&j, "files").is_empty(), "{j}");
+    // By size the order flips.
+    let j = t.json(&["--no-git", "--sort", "disk"]);
+    assert_eq!(paths_in(&j, "dirs")[0], s(&t.root.join("few")), "{j}");
+
+    let text = String::from_utf8(t.du(&["--no-git", "--sort=count"]).stdout).unwrap();
+    assert!(
+        text.starts_with("Directories with the most items\n"),
+        "{text}"
+    );
+    assert!(text.contains("ITEMS"), "{text}");
+    let text = String::from_utf8(t.du(&["--no-git", "-C", "-n1"]).stdout).unwrap();
+    assert!(text.contains("ITEMS"), "{text}");
+    assert_eq!(text.matches(&*s(&t.root.join("few"))).count(), 2, "{text}");
+    assert_eq!(t.du(&["--sort=bogus"]).status.code(), Some(2));
+}
+
+#[test]
+fn hard_links_count_once_in_items() {
+    if cfg!(windows) && std::env::var_os("WINEPREFIX").is_some() {
+        return;
+    }
+    let t = Tree::new("items-links");
+    let a = t.file("d/a.bin", 1000);
+    fs::hard_link(&a, t.root.join("d/b.bin")).unwrap();
+    t.file("d/c.bin", 1000);
+    let j = t.json(&["--no-git", "--sort=items", "--all-dirs"]);
+    assert!(
+        row(&j, &s(&t.root.join("d"))).contains("\"items\":2,"),
+        "{j}"
+    );
+}
+
+#[test]
+fn sort_by_mtime_lists_where_the_newest_change_is() {
+    let t = Tree::new("mtime-sort");
+    let long_ago = SystemTime::now() - Duration::from_secs(90 * 86_400);
+    let a_bit_ago = SystemTime::now() - Duration::from_secs(5 * 86_400);
+    let old = t.file("old/stale.bin", 900_000);
+    let mid = t.file("mid/m.bin", 10);
+    let fresh = t.file("proj/src/fresh.rs", 10);
+    let other = t.file("proj/doc/a.md", 10);
+    set_mtime(&old, long_ago);
+    set_mtime(&mid, a_bit_ago);
+    set_mtime(&other, long_ago);
+    for d in ["old", "mid", "proj/src", "proj/doc", "proj"] {
+        set_mtime(&t.root.join(d), long_ago);
+    }
+    let j = t.json(&["--no-git", "--sort=mtime"]);
+    let dirs = paths_in(&j, "dirs");
+    // proj gives way to proj/src, which holds its newest change.
+    assert_eq!(
+        dirs[..2],
+        [s(&t.root.join("proj/src")), s(&t.root.join("mid"))],
+        "{j}"
+    );
+    assert!(!dirs.contains(&s(&t.root.join("proj"))), "{j}");
+    assert_eq!(
+        paths_in(&j, "files")[..3],
+        [s(&fresh), s(&mid), s(&old)],
+        "{j}"
+    );
+    let text = String::from_utf8(t.du(&["--no-git", "--sort=mtime"]).stdout).unwrap();
+    assert!(
+        text.starts_with("Most recently modified directories\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn snapshots_cannot_rank_by_items() {
+    let t = Tree::new("snap-items");
+    t.file("a/x", 10);
+    let out = t.du(&["-o", "s.snap"]);
+    assert!(out.status.success());
+    assert_eq!(
+        t.du(&["-f", "s.snap", "--sort=items"]).status.code(),
+        Some(2)
+    );
+    assert!(t.du(&["-f", "s.snap", "--sort=mtime"]).status.success());
+}
+
+#[test]
 fn print0_and_text_output() {
     let t = Tree::new("print0");
     let f = t.file("d/f.bin", 50_000);
