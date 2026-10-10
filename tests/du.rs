@@ -1205,3 +1205,45 @@ fn unique_adds_a_column_and_a_shared_summary() {
         assert_eq!(t.du(bad).status.code(), Some(2), "{bad:?}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn exclude_matches_names_that_are_not_utf8() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let t = Tree::new("bytes");
+    t.file("b/keep", 4000);
+    let odd = t.root.join("b").join(OsStr::from_bytes(b"n\xe9.log"));
+    fs::write(&odd, vec![b'x'; 300_000]).unwrap();
+    let run = |extra: &[&OsStr]| {
+        let out = Command::new(bin())
+            .args(["du", "--json", "--no-git"])
+            .args(extra)
+            .arg("b")
+            .current_dir(&t.root)
+            .env("XDG_DATA_HOME", t.root.join(".xdg"))
+            .env("XDG_CONFIG_HOME", t.root.join(".cfg"))
+            .env("HOME", &t.root)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let plain = run(&[]);
+    assert!(plain.contains(".log"), "{plain}");
+    // The pattern carries the same raw byte as the name.
+    let excl = run(&[OsStr::from_bytes(b"--exclude=n\xe9*")]);
+    assert!(!excl.contains(".log"), "{excl}");
+    assert!(excl.contains("\"excluded\":1"), "{excl}");
+    // From a pattern file too.
+    let pf = t.root.join("pats");
+    fs::write(&pf, b"*\xe9.log\n").unwrap();
+    let mut arg = b"--exclude-from=".to_vec();
+    arg.extend_from_slice(pf.as_os_str().as_bytes());
+    let from = run(&[OsStr::from_bytes(&arg)]);
+    assert!(!from.contains(".log"), "{from}");
+}

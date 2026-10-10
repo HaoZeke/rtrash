@@ -560,6 +560,9 @@ spans directories.
 Excluded entries add nothing to any size or count, and an excluded
 directory is never opened. The total reports how many entries were left
 out.
+On Unix, matching works on bytes: a pattern, ignore file or
+.B \-X
+file holding bytes that are not UTF-8 matches names with the same bytes.
 .TP
 .BR \-X ", " \-\-exclude\-from=\fIFILE\fR
 Read patterns from

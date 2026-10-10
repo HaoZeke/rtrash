@@ -62,7 +62,7 @@ impl Pattern {
         let mut segs: Vec<Vec<u8>> = s
             .split('/')
             .filter(|p| !p.is_empty())
-            .map(|p| p.as_bytes().to_vec())
+            .map(pattern_bytes)
             .collect();
         // `**/name` is the same as `name`.
         if segs.len() == 2 && segs[0] == b"**" && segs[1] != b"**" {
@@ -98,6 +98,27 @@ impl Pattern {
         let rel: Vec<&[u8]> = rel.iter().map(Vec::as_slice).collect();
         path_match(&self.segs, &rel)
     }
+}
+
+/// The bytes a pattern segment matches. On Unix a stray byte, kept in an
+/// argument or ignore file as a private-use character, stands for that
+/// raw byte again, so it matches names that are not UTF-8.
+fn pattern_bytes(seg: &str) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        crate::util::os_from_str(seg).into_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        seg.as_bytes().to_vec()
+    }
+}
+
+/// Read an ignore or pattern file. Bytes that are not UTF-8 stay as they
+/// are, so one stray byte neither drops the whole file nor any pattern.
+fn read_text(path: &Path) -> io::Result<String> {
+    fs::read(path).map(crate::util::str_from_bytes)
 }
 
 /// Match path segments against pattern segments, `**` spanning zero or
@@ -340,9 +361,11 @@ impl Spec {
 /// Read `--exclude-from` lines (gitignore syntax; `-` is stdin).
 pub fn read_pattern_file(path: &Path) -> io::Result<Vec<String>> {
     let text = if path.as_os_str() == "-" {
-        io::read_to_string(io::stdin())?
+        let mut b = Vec::new();
+        io::Read::read_to_end(&mut io::stdin(), &mut b)?;
+        crate::util::str_from_bytes(b)
     } else {
-        fs::read_to_string(path)?
+        read_text(path)?
     };
     Ok(text
         .lines()
@@ -407,7 +430,7 @@ impl Filter {
             parent?.clone()
         };
         if has_gitignore {
-            if let Ok(text) = fs::read_to_string(dir.join(".gitignore")) {
+            if let Ok(text) = read_text(&dir.join(".gitignore")) {
                 let r = Rules::new(dir.to_path_buf(), &text);
                 if !r.is_empty() {
                     chain = Chain::push(Some(chain), r);
@@ -425,14 +448,14 @@ fn global_ignore() -> Option<String> {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| crate::util::home_dir().map(|h| h.join(".config")))?;
-    fs::read_to_string(base.join("git").join("ignore")).ok()
+    read_text(&base.join("git").join("ignore")).ok()
 }
 
 /// The rules every path in repository `repo` starts from: the global
 /// ignore file, then `.git/info/exclude`.
 fn repo_base_chain(repo: &Path) -> Arc<Chain> {
     let mut chain = Arc::new(Chain::default());
-    let info = fs::read_to_string(repo.join(".git").join("info").join("exclude")).ok();
+    let info = read_text(&repo.join(".git").join("info").join("exclude")).ok();
     for text in [global_ignore(), info].into_iter().flatten() {
         let r = Rules::new(repo.to_path_buf(), &text);
         if !r.is_empty() {
@@ -458,7 +481,7 @@ fn enclosing_chain(repo: &Path, root: &Path) -> Arc<Chain> {
         steps.push(dir.clone());
     }
     for d in steps {
-        if let Ok(text) = fs::read_to_string(d.join(".gitignore")) {
+        if let Ok(text) = read_text(&d.join(".gitignore")) {
             let r = Rules::new(d, &text);
             if !r.is_empty() {
                 chain = Chain::push(Some(chain), r);
@@ -491,6 +514,38 @@ mod tests {
         let dir = p.parent().unwrap();
         let name = p.file_name().unwrap().as_encoded_bytes();
         r.decide(dir, name, is_dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stray_bytes_in_patterns_match_raw_names() {
+        use std::os::unix::ffi::OsStrExt;
+        // An argument or ignore line with byte 0xE9 keeps it as a
+        // private-use character; the pattern must match the raw byte.
+        let line = crate::util::str_from_bytes(b"n\xe9e*".to_vec());
+        let r = Rules::new(PathBuf::from("/b"), &line);
+        let raw = std::ffi::OsStr::from_bytes(b"n\xe9e menu");
+        assert_eq!(r.decide(Path::new("/b"), raw.as_bytes(), false), Some(true));
+        let other = std::ffi::OsStr::from_bytes("née menu".as_bytes());
+        assert_eq!(r.decide(Path::new("/b"), other.as_bytes(), false), None);
+        // An anchored pattern with a stray byte in a directory segment.
+        let line = crate::util::str_from_bytes(b"d\xff/*.log".to_vec());
+        let r = Rules::new(PathBuf::from("/b"), &line);
+        let dir = Path::new("/b").join(std::ffi::OsStr::from_bytes(b"d\xff"));
+        assert_eq!(r.decide(&dir, b"x.log", false), Some(true));
+    }
+
+    #[test]
+    fn ignore_file_with_a_stray_byte_keeps_every_rule() {
+        let dir = std::env::temp_dir().join(format!("rtrash-filter-bytes-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("ignore");
+        fs::write(&f, b"*.tmp\nn\xe9e\n").unwrap();
+        let lines = read_pattern_file(&f).unwrap();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        let r = Rules::new(PathBuf::from("/b"), &lines.join("\n"));
+        assert_eq!(r.decide(Path::new("/b"), b"a.tmp", false), Some(true));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

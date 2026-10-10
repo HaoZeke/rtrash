@@ -49,6 +49,15 @@ pub fn str_from_os(s: std::ffi::OsString) -> String {
     }
 }
 
+/// Bytes read from a file as a string that keeps stray bytes, the way
+/// [`str_from_os`] keeps them in names; [`os_from_str`] turns it back.
+pub fn str_from_bytes(b: Vec<u8>) -> String {
+    match String::from_utf8(b) {
+        Ok(s) => s,
+        Err(e) => escape_bytes(e.as_bytes()),
+    }
+}
+
 /// [`str_from_os`] for a borrowed name.
 pub fn str_from_os_ref(s: &std::ffi::OsStr) -> String {
     match s.to_str() {
