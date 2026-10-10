@@ -691,17 +691,38 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
     let _ = sync_dir(&trash.info());
 
     let dest = join_name(&trash.files(), &name);
+    // Ok(true) when the payload is a copy and the original still exists.
     let moved = match rename_noreplace(abs, &dest) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(false),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            copy_recursive(abs, &dest, meta).and_then(|_| remove_any(abs, meta))
+            // A directory inside that this user can't empty would stop the
+            // removal halfway; refuse before copying, as a rename would.
+            tree_removable(abs, meta).and_then(|()| copy_recursive(abs, &dest, meta).map(|()| true))
         }
         Err(e) => Err(e),
     };
-    if let Err(e) = moved {
-        let _ = fs::remove_file(join_info(&trash.info(), &name));
-        let _ = remove_any_path(&dest);
-        return Err(e);
+    let copied = match moved {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = fs::remove_file(join_info(&trash.info(), &name));
+            make_tree_writable(&dest);
+            let _ = remove_any_path(&dest);
+            return Err(e);
+        }
+    };
+    if copied {
+        // The copy is whole. If the original then can't go (a read-only
+        // directory inside it), part of it may already be gone, so the
+        // trash entry stays: dropping it would lose those files.
+        if let Err(e) = remove_any(abs, meta) {
+            return Err(io::Error::new(
+                e.kind(),
+                format!(
+                    "copied into the trash as '{}', but removing the original failed: {e}",
+                    crate::util::show_name(&name)
+                ),
+            ));
+        }
     }
     Ok(name)
 }
@@ -1036,6 +1057,44 @@ fn remove_any(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
     }
 }
 
+/// Ok when every directory under `path` lets this user remove entries.
+fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    if !meta.is_dir() {
+        return Ok(());
+    }
+    let c = path_cstr(path)?;
+    if unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    for e in fs::read_dir(path)? {
+        let e = e?;
+        if e.file_type()?.is_dir() {
+            tree_removable(&e.path(), &e.metadata()?)?;
+        }
+    }
+    Ok(())
+}
+
+/// Give the owner write access to every directory under `path`, so a
+/// half-made copy of a read-only tree can be removed again.
+fn make_tree_writable(path: &Path) {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if !meta.is_dir() {
+        return;
+    }
+    let mode = meta.permissions().mode();
+    if mode & 0o700 != 0o700 {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700));
+    }
+    if let Ok(rd) = fs::read_dir(path) {
+        for e in rd.flatten() {
+            make_tree_writable(&e.path());
+        }
+    }
+}
+
 /// Remove a path whatever it is; used by empty, restore force-overwrite, and error cleanup.
 /// Directory trees use the bulk unlinkat walker (and btrfs subvolume destroy when applicable).
 pub fn remove_any_path(path: &Path) -> io::Result<()> {
@@ -1050,44 +1109,275 @@ pub fn relocate(src: &Path, dest: &Path) -> io::Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             let meta = fs::symlink_metadata(src)?;
+            tree_removable(src, &meta)?;
             copy_recursive(src, dest, &meta).and_then(|_| remove_any(src, &meta))
         }
         Err(e) => Err(e),
     }
 }
 
-/// Cross-device fallback: copy preserving symlinks-as-links, content, mode, and mtime.
-/// Shared by put (EXDEV into trash) and restore (`relocate`).
+/// Cross-device fallback, shared by put (EXDEV into trash) and restore
+/// ([`relocate`]). It keeps what a rename would have kept, as far as the
+/// target file system allows:
+///
+/// - bytes, holes in sparse files, and a reflink when both sides share a
+///   btrfs or XFS file system (a rename across btrfs subvolumes fails with
+///   EXDEV, yet a clone works there)
+/// - mode, owner (best effort), times and extended attributes, which carry
+///   ACLs, file capabilities and macOS Finder data
+/// - symlinks as links, named pipes as pipes, and device nodes when the
+///   caller may create them
+/// - hard links inside the tree, as links to one copy
+///
+/// A socket can't be copied, so moving one fails and leaves the source in
+/// place. A directory gets its mode only after its children, so a
+/// read-only tree copies too.
 pub fn copy_recursive(src: &Path, dst: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    copy_node(src, dst, meta, &mut HashMap::new())
+}
+
+/// Copies made so far of files with more than one link, by (device, inode).
+type LinkMap = HashMap<(u64, u64), PathBuf>;
+
+fn copy_node(src: &Path, dst: &Path, meta: &fs::Metadata, links: &mut LinkMap) -> io::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
     let ftype = meta.file_type();
     if ftype.is_symlink() {
         let target = fs::read_link(src)?;
         std::os::unix::fs::symlink(&target, dst)?;
-        // Symlink mtime: best-effort via lutimes/utimensat AT_SYMLINK_NOFOLLOW.
+        let _ = std::os::unix::fs::lchown(dst, Some(meta.uid()), Some(meta.gid()));
+        copy_xattrs(src, dst);
+        // Symlink mtime: best-effort via utimensat AT_SYMLINK_NOFOLLOW.
         let _ = set_times_nofollow(dst, meta);
-        Ok(())
-    } else if ftype.is_dir() {
+        return Ok(());
+    }
+    if ftype.is_dir() {
         fs::create_dir(dst)?;
-        fs::set_permissions(dst, meta.permissions())?;
         for entry in fs::read_dir(src)? {
             let entry = entry?;
             let emeta = fs::symlink_metadata(entry.path())?;
-            copy_recursive(&entry.path(), &dst.join(entry.file_name()), &emeta)?;
+            copy_node(&entry.path(), &dst.join(entry.file_name()), &emeta, links)?;
         }
-        set_times(dst, meta)?;
+        finish_meta(src, dst, meta)?;
+        return set_times(dst, meta);
+    }
+    if ftype.is_socket() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "cannot copy a socket to another file system",
+        ));
+    }
+    if meta.nlink() > 1 {
+        let key = (meta.dev(), meta.ino());
+        if let Some(first) = links.get(&key) {
+            return fs::hard_link(first, dst);
+        }
+        links.insert(key, dst.to_path_buf());
+    }
+    if ftype.is_fifo() || ftype.is_char_device() || ftype.is_block_device() {
+        make_node(dst, meta)?;
+    } else {
+        copy_file_data(src, dst, meta)?;
+    }
+    finish_meta(src, dst, meta)?;
+    set_times(dst, meta)
+}
+
+/// Owner, extended attributes and mode, in that order: a chown clears
+/// set-id bits, and the mode then trims an ACL mask the way chmod does.
+fn finish_meta(src: &Path, dst: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    let _ = std::os::unix::fs::lchown(dst, Some(meta.uid()), Some(meta.gid()));
+    copy_xattrs(src, dst);
+    fs::set_permissions(dst, meta.permissions())
+}
+
+/// A named pipe or device node like `meta`. Device nodes need privilege,
+/// so an unprivileged move of one fails and leaves the source alone.
+fn make_node(dst: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    let c = path_cstr(dst)?;
+    let rc = if meta.file_type().is_fifo() {
+        unsafe { libc::mkfifo(c.as_ptr(), 0o600) }
+    } else {
+        unsafe { libc::mknod(c.as_ptr(), meta.mode() as libc::mode_t, meta.rdev() as _) }
+    };
+    if rc == 0 {
         Ok(())
     } else {
-        fs::copy(src, dst)?;
-        fs::set_permissions(dst, meta.permissions())?;
-        set_times(dst, meta)?;
-        Ok(())
+        Err(io::Error::last_os_error())
     }
+}
+
+fn path_cstr(p: &Path) -> io::Result<std::ffi::CString> {
+    std::ffi::CString::new(p.as_os_str().as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+}
+
+/// The bytes of a regular file. Linux tries a reflink, then copies only
+/// the data runs of a sparse file, then falls back to the kernel copy
+/// (`copy_file_range` or `sendfile`) that `io::copy` uses. Elsewhere
+/// `fs::copy` already clones where it can (macOS `fclonefileat`).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn copy_file_data(src: &Path, dst: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    let mut from = fs::File::open(src)?;
+    let mut to = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dst)?;
+    if unsafe { libc::ioctl(to.as_raw_fd(), libc::FICLONE, from.as_raw_fd()) } == 0 {
+        return Ok(());
+    }
+    let len = meta.len();
+    if meta.blocks().saturating_mul(512) < len {
+        if copy_sparse(&from, &to, len).is_ok() {
+            return Ok(());
+        }
+        // A failed sparse copy may have written part of the file: start
+        // over. Only here: truncating on ext4 makes close flush the file.
+        to.set_len(0)?;
+        // SEEK_DATA moved the read offset; pwrite left the write one at 0.
+        io::Seek::rewind(&mut from)?;
+    }
+    io::copy(&mut from, &mut to)?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn copy_file_data(src: &Path, dst: &Path, _meta: &fs::Metadata) -> io::Result<()> {
+    fs::copy(src, dst).map(|_| ())
+}
+
+/// Copy the data runs SEEK_DATA and SEEK_HOLE report, leave the holes
+/// unwritten and set the length, so a mostly empty disk image stays small.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn copy_sparse(from: &fs::File, to: &fs::File, len: u64) -> io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    use std::os::unix::io::AsRawFd;
+    let fd_in = from.as_raw_fd();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut pos: u64 = 0;
+    while pos < len {
+        let data = unsafe { libc::lseek(fd_in, pos as libc::off_t, libc::SEEK_DATA) };
+        if data < 0 {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::ENXIO) {
+                break; // only a hole is left
+            }
+            return Err(e);
+        }
+        let data = data as u64;
+        let hole = unsafe { libc::lseek(fd_in, data as libc::off_t, libc::SEEK_HOLE) };
+        if hole < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let hole = (hole as u64).min(len);
+        let mut at = data;
+        while at < hole {
+            let want = ((hole - at) as usize).min(buf.len());
+            let n = from.read_at(&mut buf[..want], at)?;
+            if n == 0 {
+                break; // the file shrank under us
+            }
+            to.write_all_at(&buf[..n], at)?;
+            at += n as u64;
+        }
+        pos = hole.max(data + 1);
+    }
+    to.set_len(len)
+}
+
+/// Extended attributes, best effort: a target file system without them,
+/// or a `security.*` name this user may not set, drops that attribute.
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+fn copy_xattrs(src: &Path, dst: &Path) {
+    let (Ok(s), Ok(d)) = (path_cstr(src), path_cstr(dst)) else {
+        return;
+    };
+    let Some(names) = xattr_list(&s) else { return };
+    for name in names.split(|&b| b == 0).filter(|n| !n.is_empty()) {
+        let Ok(name) = std::ffi::CString::new(name) else {
+            continue;
+        };
+        if let Some(value) = xattr_get(&s, &name) {
+            xattr_set(&d, &name, &value);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+fn copy_xattrs(_src: &Path, _dst: &Path) {}
+
+/// Call `f` with a growing buffer until the value fits; `f(null, 0)` sizes it.
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+fn xattr_buf(f: impl Fn(*mut libc::c_void, usize) -> isize) -> Option<Vec<u8>> {
+    for _ in 0..4 {
+        let n = f(std::ptr::null_mut(), 0);
+        if n <= 0 {
+            return (n == 0).then(Vec::new);
+        }
+        let mut buf = vec![0u8; n as usize];
+        let got = f(buf.as_mut_ptr().cast(), buf.len());
+        if got >= 0 {
+            buf.truncate(got as usize);
+            return Some(buf);
+        }
+        if io::Error::last_os_error().raw_os_error() != Some(libc::ERANGE) {
+            return None;
+        }
+    }
+    None
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn xattr_list(p: &std::ffi::CStr) -> Option<Vec<u8>> {
+    xattr_buf(|b, n| unsafe { libc::llistxattr(p.as_ptr(), b.cast(), n) })
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn xattr_get(p: &std::ffi::CStr, name: &std::ffi::CStr) -> Option<Vec<u8>> {
+    xattr_buf(|b, n| unsafe { libc::lgetxattr(p.as_ptr(), name.as_ptr(), b, n) })
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn xattr_set(p: &std::ffi::CStr, name: &std::ffi::CStr, v: &[u8]) {
+    unsafe { libc::lsetxattr(p.as_ptr(), name.as_ptr(), v.as_ptr().cast(), v.len(), 0) };
+}
+
+#[cfg(target_os = "macos")]
+fn xattr_list(p: &std::ffi::CStr) -> Option<Vec<u8>> {
+    xattr_buf(|b, n| unsafe { libc::listxattr(p.as_ptr(), b.cast(), n, libc::XATTR_NOFOLLOW) })
+}
+
+#[cfg(target_os = "macos")]
+fn xattr_get(p: &std::ffi::CStr, name: &std::ffi::CStr) -> Option<Vec<u8>> {
+    xattr_buf(|b, n| unsafe {
+        libc::getxattr(p.as_ptr(), name.as_ptr(), b, n, 0, libc::XATTR_NOFOLLOW)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn xattr_set(p: &std::ffi::CStr, name: &std::ffi::CStr, v: &[u8]) {
+    unsafe {
+        libc::setxattr(
+            p.as_ptr(),
+            name.as_ptr(),
+            v.as_ptr().cast(),
+            v.len(),
+            0,
+            libc::XATTR_NOFOLLOW,
+        )
+    };
 }
 
 fn set_times(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
     let modified = meta.modified()?;
     let accessed = meta.accessed().unwrap_or(modified);
-    if meta.is_dir() {
+    // Opening a pipe for writing would wait for a reader: only regular
+    // files go through a file handle.
+    if !meta.is_file() {
         return set_times_path(path, accessed, modified, false);
     }
     match fs::OpenOptions::new().write(true).open(path) {
@@ -1311,6 +1601,119 @@ proc /proc proc rw 0 0
         assert!(mps.iter().any(|p| p == Path::new("/home")));
         assert!(mps.iter().any(|p| p == Path::new("/mnt/usb")));
         assert!(!mps.iter().any(|p| p == Path::new("/proc")));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn copy_recursive_keeps_pipes_links_holes_xattrs_and_read_only_dirs() {
+        use std::os::unix::fs::FileTypeExt;
+        let root = std::env::temp_dir().join(format!("rtrash-copy2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(src.join("ro")).unwrap();
+        // A named pipe: fs::copy used to block on it forever.
+        let fifo = path_cstr(&src.join("pipe")).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        // Two names for one file, one of them in a subdirectory.
+        fs::write(src.join("a"), b"shared").unwrap();
+        fs::hard_link(src.join("a"), src.join("ro/b")).unwrap();
+        // A sparse file: 8 MiB with 4 KiB of data at the end.
+        let sparse = src.join("sparse");
+        {
+            use std::os::unix::fs::FileExt;
+            let f = fs::File::create(&sparse).unwrap();
+            f.set_len(8 << 20).unwrap();
+            f.write_all_at(&[7u8; 4096], (8 << 20) - 4096).unwrap();
+        }
+        // A user xattr, when this file system takes one.
+        let xname = std::ffi::CString::new("user.rtrash.test").unwrap();
+        let src_c = path_cstr(&src.join("a")).unwrap();
+        xattr_set(&src_c, &xname, b"v1");
+        let has_xattr = xattr_get(&src_c, &xname).as_deref() == Some(&b"v1"[..]);
+        // Read-only directory with a child: its mode lands after the child.
+        fs::set_permissions(src.join("ro"), fs::Permissions::from_mode(0o555)).unwrap();
+
+        let dst = root.join("dst");
+        let meta = fs::symlink_metadata(&src).unwrap();
+        copy_recursive(&src, &dst, &meta).unwrap();
+
+        assert!(fs::symlink_metadata(dst.join("pipe"))
+            .unwrap()
+            .file_type()
+            .is_fifo());
+        assert_eq!(
+            fs::symlink_metadata(dst.join("pipe")).unwrap().mode() & 0o777,
+            0o644
+        );
+        let (a, b) = (
+            fs::metadata(dst.join("a")).unwrap(),
+            fs::metadata(dst.join("ro/b")).unwrap(),
+        );
+        assert_eq!(a.ino(), b.ino(), "hard links stay one file");
+        assert_eq!(a.nlink(), 2);
+        assert_eq!(fs::read(dst.join("ro/b")).unwrap(), b"shared");
+        assert_eq!(fs::metadata(dst.join("ro")).unwrap().mode() & 0o777, 0o555);
+        let (sm, dm) = (
+            fs::metadata(&sparse).unwrap(),
+            fs::metadata(dst.join("sparse")).unwrap(),
+        );
+        assert_eq!(dm.len(), 8 << 20);
+        assert_eq!(
+            fs::read(dst.join("sparse")).unwrap(),
+            fs::read(&sparse).unwrap()
+        );
+        // Elsewhere fs::copy decides; Linux copies data runs itself.
+        if cfg!(target_os = "linux") && sm.blocks() * 512 < sm.len() {
+            assert!(
+                dm.blocks() <= sm.blocks() + 128,
+                "holes kept: {} vs {} blocks",
+                dm.blocks(),
+                sm.blocks()
+            );
+        }
+        if has_xattr {
+            let dst_c = path_cstr(&dst.join("a")).unwrap();
+            assert_eq!(xattr_get(&dst_c, &xname).as_deref(), Some(&b"v1"[..]));
+        }
+        fs::set_permissions(src.join("ro"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(dst.join("ro"), fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tree_removable_spots_a_read_only_directory() {
+        let root = std::env::temp_dir().join(format!("rtrash-ro-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("t/ro")).unwrap();
+        fs::write(root.join("t/ro/f"), "x").unwrap();
+        let t = root.join("t");
+        assert!(tree_removable(&t, &fs::metadata(&t).unwrap()).is_ok());
+        fs::set_permissions(root.join("t/ro"), fs::Permissions::from_mode(0o555)).unwrap();
+        // Root may write anywhere, so only an ordinary user sees the refusal.
+        if unsafe { libc::geteuid() } != 0 {
+            let err = tree_removable(&t, &fs::metadata(&t).unwrap()).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        }
+        make_tree_writable(&t);
+        assert_eq!(
+            fs::metadata(root.join("t/ro")).unwrap().mode() & 0o700,
+            0o700
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copy_recursive_refuses_a_socket() {
+        let root = std::env::temp_dir().join(format!("rtrash-copy3-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let sock = root.join("s");
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let meta = fs::symlink_metadata(&sock).unwrap();
+        let err = copy_recursive(&sock, &root.join("out"), &meta).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert!(!root.join("out").exists());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

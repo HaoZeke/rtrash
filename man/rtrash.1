@@ -78,6 +78,14 @@ s into the trash. Accepts common
 .BR rm (1)
 flags with the same interactive/force semantics; nothing is unlinked
 permanently.
+.PP
+A trash on another file system gets a copy, and the original goes only
+once the copy is whole. The copy keeps holes in sparse files, mode, owner
+where allowed, times, extended attributes, named pipes, and hard links
+inside the tree. Within one btrfs file system it clones instead.
+A tree with a directory this user can't empty is refused before anything
+moves. Sockets can't be copied, so trashing one there fails. Restore
+follows the same rules.
 .TP
 .BR \-f ", " \-\-force
 Ignore nonexistent files and arguments, never prompt.

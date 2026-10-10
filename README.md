@@ -464,7 +464,7 @@ Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-f`/`--force` (mass patterns), `--
 Previously deferred items are implemented in the shipped put/empty path:
 
 - **Durable `.trashinfo`:** put `fsync`s the reserved info file (and best-effort the `info/` dir) before moving the payload.
-- **EXDEV fidelity:** cross-device put/restore copies preserve content, symlink-as-link, mode, and mtime (not a bare content-only copy).
+- **Cross-device fidelity:** a put or restore across file systems copies, then removes the original once the copy is whole. The copy keeps bytes, holes in sparse files, mode, owner where allowed, times, extended attributes (which carry access control lists and capabilities), symlinks as links, named pipes, and hard links inside the tree. Where both sides share one btrfs file system, such as two subvolumes, it clones instead. A tree with a directory this user can't empty is refused before anything moves.
 - **Put/empty exclusion:** each trash root takes an exclusive `flock` on `.rtrash.lock` for put and empty so the pair cannot tear mid-operation.
 - **Btrfs multi-subvol topdir:** volume topdir is the **longest mount-point prefix** from `/proc/self/mounts`, not a pure `st_dev` parent walk.
 - **Names that are not UTF-8:** put keeps the bytes of such a name in `files/` and `info/`, so two such names never fold into one. A `.trashinfo` whose `Path=` carries raw bytes from another tool still lists and restores, and an age filter can empty it. Output shows each stray byte as the Unicode replacement character.
@@ -475,7 +475,7 @@ Previously deferred items are implemented in the shipped put/empty path:
 - **Platform:** Linux FreeDesktop is the primary niche. macOS is experimental FreeDesktop **home** trash; the Finder Trash lives behind `rtrash finder`, also experimental and untested on a real Mac. Windows uses the system Recycle Bin (not FreeDesktop layout).
 - **Restore UI:** bare `rtrash restore` on a TTY opens the **ratatui restore browser** (filter, navigate, multi-restore). Use `--plain` or a piped index for non-interactive selection. Scripts and path restore stay first-class.
 - **Not a general soft-delete database:** only the FreeDesktop on-disk layout.
-- **EXDEV does not re-create xattrs/ACLs/hardlinks** (mode+mtime+symlink+bytes only).
+- **Across file systems:** hard links to files outside the trashed tree become separate copies, the copy leaves out an extended attribute the target refuses, sockets fail, and device nodes need privilege.
 - **Locks are local `flock`** (advisory on some network FS).
 
 ## Performance
