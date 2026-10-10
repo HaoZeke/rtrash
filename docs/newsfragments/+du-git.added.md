@@ -1,0 +1,1 @@
+du: each row inside or containing a git repository shows its git state (ignored, clean, dirty, unpushed, unknown), and `--print0` leaves out rows with work at risk unless `--include-dirty` is given. Paths inside `.git` are never listed; `--no-git` skips the checks.

@@ -267,3 +267,114 @@ fn artefacts_are_one_row_and_filterable() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("cargo-target"), "{text}");
 }
+
+fn git_ok() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.org"])
+        .args([
+            "-c",
+            "init.defaultBranch=main",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The JSON object of the row whose path is exactly `path`.
+fn row<'a>(json: &'a str, path: &str) -> &'a str {
+    let key = format!("{{\"path\":\"{path}\",");
+    let at = json
+        .find(&key)
+        .unwrap_or_else(|| panic!("no row {path}: {json}"));
+    &json[at..at + json[at..].find('}').unwrap() + 1]
+}
+
+#[test]
+fn git_state_marks_rows_and_print0_holds_back_risky_ones() {
+    if !git_ok() {
+        return;
+    }
+    let t = Tree::new("git");
+    // Clean repo with a remote: committed, pushed, target/ ignored.
+    let remote = t.root.join("remote.git");
+    fs::create_dir(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare"]);
+    let clean = t.root.join("clean");
+    t.file("clean/.gitignore", 0);
+    fs::write(clean.join(".gitignore"), "target/\n").unwrap();
+    t.file("clean/src/lib.rs", 200_000);
+    t.file("clean/target/.rustc_info.json", 10);
+    t.file("clean/target/debug/out.bin", 400_000);
+    git(&clean, &["init", "-q"]);
+    git(&clean, &["add", "."]);
+    git(&clean, &["commit", "-qm", "init"]);
+    git(
+        &clean,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&clean, &["push", "-q", "origin", "HEAD:main"]);
+    git(&clean, &["fetch", "-q", "origin"]);
+    // Local-only repo: its commit exists nowhere else.
+    let local = t.root.join("local");
+    t.file("local/notes.txt", 300_000);
+    git(&local, &["init", "-q"]);
+    git(&local, &["add", "."]);
+    git(&local, &["commit", "-qm", "mine"]);
+    // A large file inside .git is never listed.
+    t.file("local/.git/big-pack.bin", 900_000);
+
+    let target = s(&clean.join("target"));
+    let j = t.json(&["--all-dirs"]);
+    assert!(row(&j, &target).contains("\"git\":\"ignored\""), "{j}");
+    assert!(
+        row(&j, &s(&clean.join("src"))).contains("\"git\":\"clean\""),
+        "{j}"
+    );
+    let local_row = row(&j, &s(&local));
+    assert!(local_row.contains("\"git\":\"unpushed\""), "{local_row}");
+    assert!(
+        local_row.contains(&format!("\"git_repo\":\"{}\"", s(&local))),
+        "{local_row}"
+    );
+    assert!(!j.contains("big-pack.bin"), "{j}");
+    assert!(!j.contains(&format!("{}/.git", s(&local))), "{j}");
+
+    // Untracked work makes the clean repo dirty.
+    t.file("clean/src/new.rs", 10);
+    let j = t.json(&["--all-dirs", "--dirs"]);
+    assert!(
+        row(&j, &s(&clean.join("src"))).contains("\"git\":\"dirty\""),
+        "{j}"
+    );
+    assert!(row(&j, &target).contains("\"git\":\"ignored\""), "{j}");
+
+    let out = t.du(&["--all-dirs", "--dirs", "--print0"]);
+    let printed = String::from_utf8(out.stdout).unwrap();
+    let printed: Vec<&str> = printed.split('\0').filter(|p| !p.is_empty()).collect();
+    assert!(printed.contains(&target.as_str()), "{printed:?}");
+    assert!(!printed.contains(&s(&local).as_str()), "{printed:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--include-dirty"));
+    let out = t.du(&["--all-dirs", "--dirs", "--print0", "--include-dirty"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains(&s(&local)));
+
+    let j = t.json(&["--no-git"]);
+    assert!(!j.contains("\"git\":\""), "{j}");
+}

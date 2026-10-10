@@ -76,6 +76,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dirs -d
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l files -d 'list files only'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l older-than -d 'only entries untouched for more than DAYS days' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l newer-than -d 'only entries modified within the last DAYS days' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-git -d 'do not ask git about listed paths'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l include-dirty -d 'with --print0, also print rows with git work at risk'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l json -d 'emit a JSON object'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l print0 -d 'print listed paths NUL-separated'
 

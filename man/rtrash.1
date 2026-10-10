@@ -282,6 +282,28 @@ their newest modification. Symlinks are never followed, and a file with
 more than one hard link counts once. When one subdirectory accounts for
 90% or more of a directory's size, only the subdirectory is listed.
 The scan root itself appears only in the closing total.
+.PP
+Rows inside or containing a git repository carry a git state, found with
+the
+.B git
+binary.
+.B ignored
+means an ignore rule matches the path;
+.B clean
+means its repository has nothing uncommitted;
+.B dirty
+means uncommitted changes, untracked files or a stash;
+.B unpushed
+means commits on a local branch that no remote has;
+.B unknown
+means git gave no answer.
+A directory takes the riskiest state among its own repository and every
+repository below it.
+.B \-\-print0
+leaves out dirty, unpushed and unknown rows.
+Paths inside
+.I .git
+are never listed.
 .TP
 .BR \-n ", " \-\-top =\fIN\fR
 List
@@ -360,11 +382,19 @@ Only list entries modified within the last
 .I DAYS
 days.
 .TP
+.B \-\-no\-git
+Do not ask git about listed paths.
+.TP
+.B \-\-include\-dirty
+With
+.BR \-\-print0 ,
+also print rows whose git state is dirty, unpushed or unknown.
+.TP
 .B \-\-json
 Emit one JSON object
 (\fIroots\fR, \fIdirs\fR, \fIfiles\fR, \fIunreadable\fR); each listed entry has
-\fIpath\fR, \fItype\fR, \fIdisk\fR, \fIapparent\fR, \fImtime\fR and \fIartefact\fR
-(a tag or null).
+\fIpath\fR, \fItype\fR, \fIdisk\fR, \fIapparent\fR, \fImtime\fR, \fIartefact\fR
+(a tag or null), \fIgit\fR and \fIgit_repo\fR (state and deciding repository, or null).
 .TP
 .B \-\-print0
 Print the listed paths separated by null bytes, for

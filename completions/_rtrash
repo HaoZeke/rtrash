@@ -69,6 +69,8 @@ du_opts=(
   '--files[list files only]'
   '--older-than=[only entries untouched for more than DAYS days]:DAYS:'
   '--newer-than=[only entries modified within the last DAYS days]:DAYS:'
+  '--no-git[do not ask git about listed paths]'
+  '--include-dirty[with --print0, also print rows with git work at risk]'
   '--json[emit a JSON object]'
   '--print0[print listed paths NUL-separated]'
   '(- *)'--help'[display help and exit]'

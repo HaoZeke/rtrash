@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 
+use crate::du_git::{self, GitProbe, GitState};
 use crate::fastdelete::format_bytes;
 use crate::info;
 use crate::list::json_escape;
@@ -27,6 +28,12 @@ directory's size, only the subdirectory is listed (--all-dirs lists both).
 Regenerable artefacts are tagged and listed as one row each; their
 contents never appear on their own.
 
+Each row inside or containing a git repository gets a git state: ignored,
+clean, dirty (uncommitted changes, untracked files or a stash), unknown, or
+unpushed (local commits no remote has). --print0 leaves out dirty,
+unknown and unpushed rows unless --include-dirty is given. Paths inside
+.git are never listed.
+
   -n, --top=N           list N directories and N files (default 20)
   -x, --one-file-system skip directories on other file systems
       --apparent        rank by apparent size (file length) instead of disk use
@@ -41,6 +48,9 @@ contents never appear on their own.
       --older-than=DAYS only list entries whose newest modification is more
                           than DAYS days old (directories use their whole tree)
       --newer-than=DAYS only list entries modified within the last DAYS days
+      --no-git          do not ask git about listed paths
+      --include-dirty   with --print0, also print paths whose git state is
+                          dirty, unpushed or unknown
       --json            emit a JSON object (scripts)
       --print0          print the listed paths, NUL-separated, for
                           `xargs -0 rtrash put -rf --`
@@ -134,6 +144,10 @@ pub struct Item {
     pub mtime: i64,
     /// Kind of regenerable artefact (`cargo-target`, `node-modules`, ...).
     pub artefact: Option<&'static str>,
+    /// Git repositories at or below this directory (capped).
+    pub repos: Vec<PathBuf>,
+    /// Riskiest git state and the repo that decided it (after `annotate_git`).
+    pub git: Option<(GitState, PathBuf)>,
 }
 
 impl Item {
@@ -259,7 +273,11 @@ struct Node {
     mtime: i64,
     top_dirs: TopN,
     top_files: TopN,
+    repos: Vec<PathBuf>,
 }
+
+/// At most this many repo roots are remembered per directory.
+const MAX_REPOS: usize = 64;
 
 fn sizes(meta: &fs::Metadata) -> (u64, u64) {
     (meta.len(), meta.blocks().saturating_mul(512))
@@ -276,6 +294,7 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
         mtime: meta.mtime(),
         top_dirs: TopN::new(opts.top, opts.sort),
         top_files: TopN::new(opts.top, opts.sort),
+        repos: Vec::new(),
     };
     ctx.dirs.fetch_add(1, Ordering::Relaxed);
     let rd = match fs::read_dir(path) {
@@ -293,6 +312,9 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
             continue;
         };
         let fname = ent.file_name();
+        if fname == ".git" && node.repos.is_empty() {
+            node.repos.push(path.to_path_buf());
+        }
         if MARKERS.iter().any(|m| fname == *m) {
             markers.push(fname);
         }
@@ -324,6 +346,8 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
                 disk: d,
                 mtime: m.mtime(),
                 artefact: None,
+                repos: Vec::new(),
+                git: None,
             });
         }
     }
@@ -345,11 +369,22 @@ fn walk_dir(ctx: &Ctx<'_>, path: &Path, meta: &fs::Metadata, depth: usize) -> No
         node.mtime = node.mtime.max(child.mtime);
         node.top_files.merge(child.top_files);
         node.top_dirs.merge(child.top_dirs);
+        for r in child.repos {
+            if node.repos.len() < MAX_REPOS {
+                node.repos.push(r);
+            }
+        }
     }
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
+    if name == ".git" {
+        // Repository internals are never offered for deletion.
+        node.top_dirs = TopN::new(opts.top, opts.sort);
+        node.top_files = TopN::new(opts.top, opts.sort);
+        return node;
+    }
     let artefact = artefact_kind(&name, |c| markers.iter().any(|m| m == c));
     if artefact.is_some() {
         // The artefact is one row; nothing below it is listed separately.
@@ -400,6 +435,8 @@ impl Node {
             disk: self.disk,
             mtime: self.mtime,
             artefact,
+            repos: self.repos.clone(),
+            git: None,
         });
     }
 }
@@ -438,6 +475,8 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
                     disk: d,
                     mtime: meta.mtime(),
                     artefact: None,
+                    repos: Vec::new(),
+                    git: None,
                 });
             }
             (a, d)
@@ -467,6 +506,23 @@ fn absolute(p: &Path) -> io::Result<PathBuf> {
     trashdir::abs_nofollow(p)
 }
 
+/// Fill in `git` for every listed row. Returns false when `git` could not
+/// be run at all.
+pub fn annotate_git(report: &mut Report) -> bool {
+    let mut probe = GitProbe::new();
+    for it in report.dirs.iter_mut().chain(report.files.iter_mut()) {
+        if du_git::inside_git_dir(&it.path) {
+            continue;
+        }
+        it.git = probe.classify(&it.path, it.is_dir, &it.repos);
+        if probe.unavailable {
+            it.git = None;
+            return false;
+        }
+    }
+    true
+}
+
 /// Compact age such as `45s`, `3h`, `12d`, `2y` (time since `mtime`).
 pub fn format_age(mtime: i64, now: i64) -> String {
     let s = (now - mtime).max(0);
@@ -491,14 +547,21 @@ fn json_opt(v: Option<&str>) -> String {
 }
 
 fn item_json(it: &Item) -> String {
+    let git_state = it.git.as_ref().map(|(s, _)| s.as_str());
+    let git_repo = it
+        .git
+        .as_ref()
+        .map(|(_, r)| r.to_string_lossy().into_owned());
     format!(
-        "{{\"path\":\"{}\",\"type\":\"{}\",\"disk\":{},\"apparent\":{},\"mtime\":{},\"artefact\":{}}}",
+        "{{\"path\":\"{}\",\"type\":\"{}\",\"disk\":{},\"apparent\":{},\"mtime\":{},\"artefact\":{},\"git\":{},\"git_repo\":{}}}",
         json_escape(&it.path.to_string_lossy()),
         if it.is_dir { "dir" } else { "file" },
         it.disk,
         it.apparent,
         it.mtime,
-        json_opt(it.artefact)
+        json_opt(it.artefact),
+        json_opt(git_state),
+        json_opt(git_repo.as_deref())
     )
 }
 
@@ -507,6 +570,9 @@ fn notes(it: &Item) -> String {
     let mut v: Vec<String> = Vec::new();
     if let Some(a) = it.artefact {
         v.push(a.to_string());
+    }
+    if let Some((s, _)) = &it.git {
+        v.push(format!("git:{}", s.as_str()));
     }
     if v.is_empty() {
         "-".into()
@@ -619,6 +685,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut only_dirs = false;
     let mut only_files = false;
     let mut no_more_opts = false;
+    let mut use_git = true;
+    let mut include_dirty = false;
     let now = info::now_epoch();
     let mut i = 0usize;
     while i < args.len() {
@@ -666,6 +734,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--files" => only_files = true,
                 "--json" => json = true,
                 "--print0" => print0 = true,
+                "--no-git" => use_git = false,
+                "--include-dirty" => include_dirty = true,
                 "--help" => {
                     print!("{}", HELP.replace("{prog}", prog));
                     return 0;
@@ -706,14 +776,28 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if !want_files {
         report.files.clear();
     }
+    if use_git && !annotate_git(&mut report) {
+        eprintln!("{prog}: warning: git not found; rows carry no git state");
+    }
 
     if json {
         println!("{}", report_json(&report));
     } else if print0 {
         let mut out = io::stdout().lock();
+        let mut held = 0usize;
         for it in report.dirs.iter().chain(report.files.iter()) {
+            let risky = it.git.as_ref().is_some_and(|(s, _)| s.is_risky());
+            if risky && !include_dirty {
+                held += 1;
+                continue;
+            }
             let _ = out.write_all(it.path.as_os_str().as_encoded_bytes());
             let _ = out.write_all(b"\0");
+        }
+        if held > 0 {
+            eprintln!(
+                "{prog}: left out {held} path(s) with dirty, unpushed or unknown git state (--include-dirty prints them)"
+            );
         }
     } else {
         let by = match opts.sort {
@@ -751,6 +835,8 @@ mod tests {
             disk,
             mtime: 0,
             artefact: None,
+            repos: Vec::new(),
+            git: None,
         }
     }
 
