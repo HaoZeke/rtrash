@@ -536,33 +536,6 @@ fn lexical_clean(p: &Path) -> PathBuf {
     out
 }
 
-/// Restore one entry to its original path, for the TUI.
-#[cfg(feature = "tui")]
-pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32 {
-    restore_entry_quiet(prog, entry, force, false)
-}
-
-/// Restore one entry to its original path, printing the outcome; `quiet`
-/// drops the `restored '...'` line.
-#[cfg(feature = "tui")]
-fn restore_entry_quiet(prog: &str, entry: &list::Entry, force: bool, quiet: bool) -> i32 {
-    match restore_one(entry, force) {
-        Ok(done) => {
-            for w in &done.warnings {
-                eprintln!("{prog}: warning: {w}");
-            }
-            if !quiet {
-                println!("restored '{}'", done.dest.display());
-            }
-            0
-        }
-        Err(e) => {
-            eprintln!("{prog}: {e}");
-            1
-        }
-    }
-}
-
 /// A finished restore: where the item went, and problems that did not stop it.
 #[derive(Debug)]
 pub(crate) struct Restored {

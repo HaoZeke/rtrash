@@ -104,7 +104,7 @@ $ pip install rtrash
 | **macOS** | FreeDesktop **home** trash (experimental); Finder Trash through `rtrash finder` (experimental, untested on a real Mac) | `$XDG_DATA_HOME/Trash` or `~/.local/share/Trash`; `rtrash finder` uses `~/.Trash` with Put Back |
 | **Windows** | System **Recycle Bin** (shell APIs) | put/list/restore/empty/rm/status/du. **Not** FreeDesktop on-disk layout. Multi-call `setup` is Unix-oriented |
 
-On Linux/macOS TTY, bare `rtrash restore` opens the **interactive restore browser** (ratatui). Windows uses numbered restore selection (no TUI).
+On a TTY, bare `rtrash restore` opens the **interactive restore browser** (ratatui), on Windows too, where it lists the Recycle Bin. `--plain` keeps the numbered selection. On Windows `rtrash du -i` deletes into the Recycle Bin and `u` restores from it. `rtrash status` and the trash line of `rtrash du` show the cap of each drive (`MaxCapacity` in the registry) and how much of it is in use.
 
 ## Install
 
@@ -387,7 +387,7 @@ $ rtrash empty -n && rtrash empty 14                    # free the space
 
 **TUI keys (shared by restore / empty / put):** defaults `↑↓`/`jk` move · `PgUp`/`PgDn` page · `g`/`G` first/last · `Space` mark · `a`/`A` all/clear · `/` live fuzzy · `?` help · `Enter` action · `q`/`Esc` quit.
 
-**Fully customizable:** every action can be remapped in `$XDG_CONFIG_HOME/rtrash/keys.toml` (or `RTRASH_KEYS=path`). TOML under `[keys]`; `rtrash keys --list` shows the resolved map; `rtrash keys --sample` prints a full template. Help (`?`) reflects the live map.
+**Fully customizable:** every action can be remapped in `$XDG_CONFIG_HOME/rtrash/keys.toml` (`%APPDATA%\rtrash\keys.toml` on Windows without `XDG_CONFIG_HOME`, or `RTRASH_KEYS=path`). TOML under `[keys]`; `rtrash keys --list` shows the resolved map; `rtrash keys --sample` prints a full template. Help (`?`) reflects the live map.
 
 Browser-specific actions (also remappable): restore `toggle_force` / `toggle_order` · empty `toggle_dry_run` · put `toggle_recursive` / `toggle_force`.
 

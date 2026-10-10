@@ -10,7 +10,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::put;
 use crate::tui_binds::{Action, Keymap};
@@ -19,6 +19,7 @@ use crate::tui_keys;
 use crate::tui_list;
 use crate::tui_select::Selection;
 use crate::tui_term;
+use crate::tui_term::draw_help_overlay;
 
 #[derive(Clone)]
 pub struct PathRow {
@@ -470,41 +471,6 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             &["toggle_recursive · toggle_force — put options"],
         );
     }
-}
-
-pub(crate) fn draw_help_overlay(f: &mut ratatui::Frame, keys: &Keymap, extras: &[&str]) {
-    let area = {
-        let r = f.area();
-        let v = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(5),
-                Constraint::Percentage(90),
-                Constraint::Percentage(5),
-            ])
-            .split(r);
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(8),
-                Constraint::Percentage(84),
-                Constraint::Percentage(8),
-            ])
-            .split(v[1])[1]
-    };
-    f.render_widget(Clear, area);
-    let mut lines: Vec<Line> = keys.help_lines().into_iter().map(Line::from).collect();
-    if !extras.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from("This browser"));
-        for e in extras {
-            lines.push(Line::from(format!("  {e}")));
-        }
-    }
-    f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" help ")),
-        area,
-    );
 }
 
 /// Browse a fixed list of rows (title shown in the header) and trash the

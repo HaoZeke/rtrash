@@ -667,15 +667,23 @@ impl KeySpec {
     }
 }
 
-/// `$XDG_CONFIG_HOME/rtrash/keys.toml` or `~/.config/rtrash/keys.toml`.
+/// `$XDG_CONFIG_HOME/rtrash/keys.toml` or `~/.config/rtrash/keys.toml`;
+/// `%APPDATA%\rtrash\keys.toml` on Windows when `XDG_CONFIG_HOME` is unset,
+/// next to `config.toml`.
 pub fn default_keys_path() -> Option<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("rtrash/keys.toml"));
+            return Some(PathBuf::from(xdg).join("rtrash").join("keys.toml"));
         }
     }
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".config/rtrash/keys.toml"))
+    #[cfg(windows)]
+    if let Some(app) = std::env::var_os("APPDATA").map(PathBuf::from) {
+        if app.is_absolute() {
+            return Some(app.join("rtrash").join("keys.toml"));
+        }
+    }
+    let home = crate::util::home_dir()?;
+    Some(home.join(".config").join("rtrash").join("keys.toml"))
 }
 
 /// CLI: `rtrash keys [--list|--sample|--path]`.

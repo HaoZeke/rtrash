@@ -18,7 +18,7 @@ pub mod du_filter;
 pub mod du_fs;
 pub mod du_git;
 pub mod du_snap;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod du_tui;
 #[cfg(unix)]
 pub mod empty;
@@ -38,7 +38,7 @@ pub mod put;
 pub mod put_tui;
 #[cfg(unix)]
 pub mod restore;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod restore_tui;
 #[cfg(unix)]
 pub mod retention;
@@ -52,17 +52,17 @@ pub mod setup;
 pub mod status;
 #[cfg(unix)]
 pub mod trashdir;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod tui_binds;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod tui_fuzzy;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod tui_keys;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod tui_list;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod tui_select;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod tui_term;
 #[cfg(unix)]
 pub mod undo;

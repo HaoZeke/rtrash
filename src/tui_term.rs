@@ -140,6 +140,51 @@ fn release_stderr() {}
 pub const FOOTER_ROWS: u16 = 4;
 
 /// Draw one frame off screen and return its text, one line per row.
+/// The key help overlay every browser shares: the keymap, then `extras`
+/// under "This browser".
+pub fn draw_help_overlay(f: &mut ratatui::Frame, keys: &crate::tui_binds::Keymap, extras: &[&str]) {
+    let area = {
+        let r = f.area();
+        let v = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Percentage(5),
+                ratatui::layout::Constraint::Percentage(90),
+                ratatui::layout::Constraint::Percentage(5),
+            ])
+            .split(r);
+        ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([
+                ratatui::layout::Constraint::Percentage(8),
+                ratatui::layout::Constraint::Percentage(84),
+                ratatui::layout::Constraint::Percentage(8),
+            ])
+            .split(v[1])[1]
+    };
+    f.render_widget(ratatui::widgets::Clear, area);
+    let mut lines: Vec<ratatui::text::Line> = keys
+        .help_lines()
+        .into_iter()
+        .map(ratatui::text::Line::from)
+        .collect();
+    if !extras.is_empty() {
+        lines.push(ratatui::text::Line::from(""));
+        lines.push(ratatui::text::Line::from("This browser"));
+        for e in extras {
+            lines.push(ratatui::text::Line::from(format!("  {e}")));
+        }
+    }
+    f.render_widget(
+        ratatui::widgets::Paragraph::new(lines).block(
+            ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .title(" help "),
+        ),
+        area,
+    );
+}
+
 #[cfg(test)]
 pub(crate) fn render_text(
     width: u16,

@@ -368,6 +368,12 @@ Display help and exit.
 .TP
 .B \-\-version
 Output version information and exit.
+.PP
+On Windows, status lists each drive's Recycle Bin: items, size, and the
+cap from
+.B MaxCapacity
+in the registry with the share in use, then the total.
+A drive set to skip the Recycle Bin says so.
 .SS du
 .B rtrash du
 [\fIOPTION\fR]... [\fIPATH\fR]...
@@ -707,6 +713,11 @@ Trash directories stay closed.
 Needs a terminal on stdin and the
 .B tui
 feature.
+On Windows,
+.B d
+uses the Recycle Bin and
+.B u
+takes the newest item with that path back out.
 .TP
 .B \-\-help
 Display help and exit.
@@ -731,7 +742,8 @@ restore the item whose file name, or whose name inside the trash, is
 .IR NAME .
 Without
 .IR PATH ,
-on a TTY open the interactive restore browser (filter, navigate, restore);
+on a TTY open the interactive restore browser (filter, navigate, restore),
+on Windows as well, where it shows the Recycle Bin;
 without a TTY (or with
 .BR \-\-plain )
 print a numbered list and read a selection from stdin: indices, ranges

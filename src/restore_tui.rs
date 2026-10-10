@@ -1,7 +1,7 @@
 //! Interactive restore browser (ratatui): multi-select, fuzzy filter, multi-restore.
 
 use std::io::{self};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -10,8 +10,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
-use crate::list::Entry;
-use crate::restore;
 use crate::tui_binds::{Action, Keymap};
 use crate::tui_fuzzy;
 use crate::tui_keys;
@@ -19,11 +17,37 @@ use crate::tui_list;
 use crate::tui_select::Selection;
 use crate::tui_term;
 
+/// A trashed item the browser can show and restore: a FreeDesktop entry on
+/// Unix, a Recycle Bin item on Windows.
+pub trait TuiItem {
+    /// Where the item came from and goes back to.
+    fn original(&self) -> &Path;
+    /// Deletion time as `YYYY-MM-DDTHH:MM:SS`, when known.
+    fn date(&self) -> Option<&str>;
+    /// Put the item back without printing: where it went, plus warnings
+    /// that did not stop it. `force` replaces what sits at the original
+    /// path.
+    fn restore(&self, force: bool) -> Result<(PathBuf, Vec<String>), String>;
+}
+
+#[cfg(unix)]
+impl TuiItem for crate::list::Entry {
+    fn original(&self) -> &Path {
+        &self.original
+    }
+    fn date(&self) -> Option<&str> {
+        self.date.as_deref()
+    }
+    fn restore(&self, force: bool) -> Result<(PathBuf, Vec<String>), String> {
+        crate::restore::restore_one(self, force).map(|d| (d.dest, d.warnings))
+    }
+}
+
 /// Fuzzy-rank entry indices by original path. Empty query keeps original order.
-pub fn filter_indices(entries: &[&Entry], query: &str) -> Vec<usize> {
+pub fn filter_indices<E: TuiItem>(entries: &[&E], query: &str) -> Vec<usize> {
     let hays: Vec<String> = entries
         .iter()
-        .map(|e| e.original.to_string_lossy().into_owned())
+        .map(|e| e.original().to_string_lossy().into_owned())
         .collect();
     let refs: Vec<&str> = hays.iter().map(String::as_str).collect();
     tui_fuzzy::rank_indices(&refs, query)
@@ -38,9 +62,9 @@ enum Mode {
     ConfirmBulk,
 }
 
-struct App<'a> {
+struct App<'a, E: TuiItem> {
     prog: &'a str,
-    entries: Vec<&'a Entry>,
+    entries: Vec<&'a E>,
     filtered: Vec<usize>,
     list_state: ListState,
     sel: Selection,
@@ -59,8 +83,8 @@ struct App<'a> {
     log: Vec<LogLine>,
 }
 
-impl<'a> App<'a> {
-    fn new(prog: &'a str, entries: Vec<&'a Entry>, force: bool, newest_first: bool) -> Self {
+impl<'a, E: TuiItem> App<'a, E> {
+    fn new(prog: &'a str, entries: Vec<&'a E>, force: bool, newest_first: bool) -> Self {
         let mut list_state = ListState::default();
         if !entries.is_empty() {
             list_state.select(Some(0));
@@ -138,7 +162,7 @@ impl<'a> App<'a> {
             .and_then(|i| self.filtered.get(i).copied())
     }
 
-    fn selected_entry(&self) -> Option<&Entry> {
+    fn selected_entry(&self) -> Option<&E> {
         self.selected_entry_idx().map(|i| self.entries[i])
     }
 
@@ -180,13 +204,13 @@ impl<'a> App<'a> {
         if targets.len() == 1 {
             let ei = targets[0];
             let entry = self.entries[ei];
-            let dest_exists = entry.original.symlink_metadata().is_ok();
+            let dest_exists = entry.original().symlink_metadata().is_ok();
             if dest_exists && !self.force {
                 self.mode = Mode::ConfirmOverwrite;
                 self.pending_idxs = vec![ei];
                 self.status = format!(
                     "overwrite existing '{}' ?  y confirm · n cancel",
-                    entry.original.display()
+                    entry.original().display()
                 );
                 return;
             }
@@ -197,7 +221,7 @@ impl<'a> App<'a> {
         let need_confirm = !self.force
             && targets
                 .iter()
-                .any(|&ei| self.entries[ei].original.symlink_metadata().is_ok());
+                .any(|&ei| self.entries[ei].original().symlink_metadata().is_ok());
         if need_confirm {
             self.mode = Mode::ConfirmBulk;
             self.pending_idxs = targets;
@@ -387,14 +411,13 @@ fn footer_extras(keys: &Keymap) -> String {
     )
 }
 
-fn date_label(e: &Entry) -> String {
-    e.date
-        .as_deref()
+fn date_label<E: TuiItem>(e: &E) -> String {
+    e.date()
         .map(|d| d.replacen('T', " ", 1))
         .unwrap_or_else(|| "????-??-?? ??:??:??".into())
 }
 
-fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
+fn ui<E: TuiItem>(f: &mut ratatui::Frame, app: &mut App<'_, E>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -435,7 +458,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         .map(|&ei| {
             let e = app.entries[ei];
             let mark = if app.sel.is_marked(ei) { "[x]" } else { "[ ]" };
-            let line = format!("{mark} {:<20}  {}", date_label(e), e.original.display());
+            let line = format!("{mark} {:<20}  {}", date_label(e), e.original().display());
             ListItem::new(line)
         })
         .collect();
@@ -487,7 +510,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
 
     if matches!(app.mode, Mode::ConfirmOverwrite | Mode::ConfirmBulk) {
         if let Some(e) = app.selected_entry() {
-            draw_confirm(f, &e.original, app.pending_idxs.len());
+            draw_confirm(f, e.original(), app.pending_idxs.len());
         } else if !app.pending_idxs.is_empty() {
             draw_confirm_bulk(f, app.pending_idxs.len());
         }
@@ -582,13 +605,13 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
 }
 
 /// Run the restore TUI. Returns process exit code.
-pub fn run(prog: &str, entries: Vec<&Entry>, force: bool, newest_first: bool) -> i32 {
+pub fn run<E: TuiItem>(prog: &str, entries: Vec<&E>, force: bool, newest_first: bool) -> i32 {
     if entries.is_empty() {
         eprintln!("{prog}: no trashed files match");
         return 1;
     }
     if entries.len() == 1 {
-        return restore::restore_entry(prog, entries[0], force);
+        return restore_single(prog, entries[0], force);
     }
 
     let mut terminal = match tui_term::enter() {
@@ -656,13 +679,13 @@ impl RestoreSelectionResult {
     }
 }
 
-/// Restore a set of entry indices via [`restore::restore_one`], which prints
+/// Restore a set of entry indices via [`TuiItem::restore`], which prints
 /// nothing; the outcome lines come back in the result's `log`.
 /// `entries` is the full list; `idxs` are indices into it. Restores high→low
 /// so callers can remove succeeded indices afterward. Does not mutate `entries`.
-pub fn restore_selection(
+pub fn restore_selection<E: TuiItem>(
     prog: &str,
-    entries: &[&Entry],
+    entries: &[&E],
     idxs: &[usize],
     force: bool,
 ) -> RestoreSelectionResult {
@@ -677,10 +700,10 @@ pub fn restore_selection(
             fail_count += 1;
             continue;
         }
-        match restore::restore_one(entries[ei], force) {
-            Ok(done) => {
+        match entries[ei].restore(force) {
+            Ok((dest, warnings)) => {
                 succeeded_idxs.push(ei);
-                for w in done.warnings {
+                for w in warnings {
                     log.push(LogLine {
                         is_error: true,
                         text: format!("{prog}: warning: {w}"),
@@ -688,7 +711,7 @@ pub fn restore_selection(
                 }
                 log.push(LogLine {
                     is_error: false,
-                    text: format!("restored '{}'", done.dest.display()),
+                    text: format!("restored '{}'", dest.display()),
                 });
             }
             Err(e) => {
@@ -708,9 +731,76 @@ pub fn restore_selection(
     }
 }
 
+/// Restore one item and print the outcome, as a plain restore does.
+fn restore_single<E: TuiItem>(prog: &str, e: &E, force: bool) -> i32 {
+    match e.restore(force) {
+        Ok((dest, warnings)) => {
+            for w in &warnings {
+                eprintln!("{prog}: warning: {w}");
+            }
+            println!("restored '{}'", dest.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("{prog}: {e}");
+            1
+        }
+    }
+}
+
 #[cfg(test)]
+mod generic_tests {
+    //! Platform-free checks: the same browser logic drives Recycle Bin
+    //! items on Windows, so these run under Wine too.
+    use super::*;
+
+    struct Fake {
+        path: PathBuf,
+        date: Option<String>,
+        fail: bool,
+    }
+
+    impl TuiItem for Fake {
+        fn original(&self) -> &Path {
+            &self.path
+        }
+        fn date(&self) -> Option<&str> {
+            self.date.as_deref()
+        }
+        fn restore(&self, _force: bool) -> Result<(PathBuf, Vec<String>), String> {
+            if self.fail {
+                Err(format!("cannot restore '{}'", self.path.display()))
+            } else {
+                Ok((self.path.clone(), vec![]))
+            }
+        }
+    }
+
+    fn fake(p: &str, fail: bool) -> Fake {
+        Fake {
+            path: PathBuf::from(p),
+            date: Some("2026-10-10T12:00:00".into()),
+            fail,
+        }
+    }
+
+    #[test]
+    fn generic_items_filter_and_restore() {
+        let items = [fake("alpha.txt", false), fake("beta.txt", true)];
+        let refs: Vec<&Fake> = items.iter().collect();
+        assert_eq!(filter_indices(&refs, "alp"), vec![0]);
+        assert_eq!(date_label(refs[0]), "2026-10-10 12:00:00");
+        let r = restore_selection("trash-restore", &refs, &[0, 1], false);
+        assert_eq!(r.succeeded_idxs, vec![0]);
+        assert_eq!(r.fail_count, 1);
+        assert!(r.log.iter().any(|l| l.text == "restored 'alpha.txt'"));
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::list::Entry;
     use crate::trashdir::TrashDir;
     use std::path::PathBuf;
 

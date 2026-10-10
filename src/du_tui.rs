@@ -15,7 +15,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::du::{self, Item, ScanOpts, SortKey};
-use crate::put;
 use crate::tui_binds::{Action, Keymap};
 use crate::tui_list;
 use crate::tui_select::Selection;
@@ -40,7 +39,74 @@ enum Mode {
 }
 
 /// Rows trashed by one delete, with what is needed to put them back.
-type UndoGroup = Vec<(put::Trashed, Item)>;
+type UndoGroup = Vec<(bin::Ticket, Item)>;
+
+/// Trash and untrash for the browser: the FreeDesktop trash on Unix, the
+/// Recycle Bin on Windows.
+#[cfg(unix)]
+mod bin {
+    use std::path::{Path, PathBuf};
+
+    use crate::put;
+
+    /// What a delete left behind, enough to undo it.
+    pub type Ticket = put::Trashed;
+
+    pub fn trash(prog: &str, path: &Path, pin: Option<&PathBuf>) -> Option<Ticket> {
+        let opts = put::Opts {
+            recursive: true,
+            force: true,
+            quiet: true,
+            trash_pin: pin.cloned(),
+            ..put::Opts::default()
+        };
+        put::put_one(prog, path, &opts).ok().flatten()
+    }
+
+    pub fn untrash(t: &Ticket) -> bool {
+        let Ok(dir) = crate::trashdir::TrashDir::from_root(&t.trash_dir) else {
+            return false;
+        };
+        let entry = crate::list::Entry {
+            date: None,
+            epoch: 0,
+            original: t.original.clone(),
+            name: t.name.clone(),
+            dir,
+            batch: None,
+        };
+        crate::restore::restore_one(&entry, false).is_ok()
+    }
+}
+
+#[cfg(windows)]
+mod bin {
+    use std::path::{Path, PathBuf};
+
+    /// The original path; undo restores the newest Recycle Bin item from it.
+    pub type Ticket = PathBuf;
+
+    pub fn trash(_prog: &str, path: &Path, _pin: Option<&PathBuf>) -> Option<Ticket> {
+        trash::delete(path).ok().map(|()| path.to_path_buf())
+    }
+
+    pub fn untrash(original: &Ticket) -> bool {
+        if original.symlink_metadata().is_ok() {
+            return false;
+        }
+        let Ok(items) = trash::os_limited::list() else {
+            return false;
+        };
+        let Some(item) = items
+            .into_iter()
+            .filter(|i| i.original_path() == *original)
+            .max_by_key(|i| i.time_deleted)
+        else {
+            return false;
+        };
+        trash::os_limited::restore_all(vec![item]).is_ok()
+    }
+}
 
 struct App {
     prog: String,
@@ -378,20 +444,13 @@ impl App {
     fn delete(&mut self) {
         self.mode = Mode::Browse;
         let t = self.targets();
-        let opts = put::Opts {
-            recursive: true,
-            force: true,
-            quiet: true,
-            trash_pin: self.trash_pin.clone(),
-            ..put::Opts::default()
-        };
         let mut group: UndoGroup = Vec::new();
         let mut failed = 0usize;
         for &i in &t {
             let item = self.rows()[i].clone();
-            match put::put_one(&self.prog, &item.path, &opts) {
-                Ok(Some(done)) => group.push((done, item)),
-                Ok(None) | Err(_) => failed += 1,
+            match bin::trash(&self.prog, &item.path, self.trash_pin.as_ref()) {
+                Some(done) => group.push((done, item)),
+                None => failed += 1,
             }
         }
         let gone: Vec<PathBuf> = group.iter().map(|(_, it)| it.path.clone()).collect();
@@ -428,22 +487,7 @@ impl App {
         let mut back = 0usize;
         let mut failed = 0usize;
         for (t, item) in group {
-            let dir = match crate::trashdir::TrashDir::from_root(&t.trash_dir) {
-                Ok(d) => d,
-                Err(_) => {
-                    failed += 1;
-                    continue;
-                }
-            };
-            let entry = crate::list::Entry {
-                date: None,
-                epoch: 0,
-                original: t.original.clone(),
-                name: t.name.clone(),
-                dir,
-                batch: None,
-            };
-            if crate::restore::restore_one(&entry, false).is_err() {
+            if !bin::untrash(&t) {
                 failed += 1;
                 continue;
             }
@@ -639,7 +683,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         chunks[2],
     );
     if app.mode == Mode::Help {
-        crate::put_tui::draw_help_overlay(
+        crate::tui_term::draw_help_overlay(
             f,
             &app.keys,
             &[
@@ -726,7 +770,15 @@ mod tests {
         fs::write(w.join("big/side"), vec![7u8; 30_000]).unwrap();
         fs::write(w.join("small/s"), b"s").unwrap();
         fs::write(w.join("file"), vec![1u8; 9000]).unwrap();
-        Tree(fs::canonicalize(&root).unwrap())
+        let root = fs::canonicalize(&root).unwrap();
+        // The scan lists plain `C:\...` paths, not verbatim ones.
+        #[cfg(windows)]
+        let root = PathBuf::from(
+            root.to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .to_string(),
+        );
+        Tree(root)
     }
 
     fn app(t: &Tree) -> App {
@@ -757,6 +809,9 @@ mod tests {
         assert_eq!(a.status, "already at the top");
     }
 
+    // Windows deletes go to the real Recycle Bin, so this stays on Unix,
+    // where the pinned trash dir keeps it inside the test tree.
+    #[cfg(unix)]
     #[test]
     fn delete_trashes_updates_parents_and_undo_restores() {
         let t = tree("del");

@@ -406,7 +406,7 @@ on the Recycle Bin backend.
 
     pub fn restore_run(prog: &str, args: &[String]) -> i32 {
         let mut force = false;
-        let mut plain = true; // no TUI on Windows recycle path
+        let mut plain = false;
         let mut newest_first = false;
         let mut target: Option<PathBuf> = None;
         for arg in args {
@@ -425,14 +425,13 @@ With PATH, restore the item whose original path equals PATH.
 Without PATH, print a numbered list and read an index from stdin.
 
   -f, --force   overwrite when the destination exists (best-effort)
-      --plain   numbered selection (default on Windows)
+      --plain   numbered selection instead of the browser
       --newest-first  list the most recently deleted item first
       --oldest-first  list the oldest deleted item first (default)
       --help    display this help and exit
       --version output version information and exit
 "
                     );
-                    let _ = plain;
                     return 0;
                 }
                 "--version" => {
@@ -481,6 +480,13 @@ Without PATH, print a numbered list and read an index from stdin.
         if newest_first {
             matches.reverse();
         }
+        #[cfg(feature = "tui")]
+        if !plain && util::stdin_is_tty() {
+            let items: Vec<BinItem> = matches.into_iter().map(BinItem::new).collect();
+            let refs: Vec<&BinItem> = items.iter().collect();
+            return crate::restore_tui::run(prog, refs, force, newest_first);
+        }
+        let _ = plain;
         // Numbered pick.
         for (i, it) in matches.iter().enumerate() {
             let date = platform::epoch_to_iso_utc(it.time_deleted);
@@ -504,6 +510,54 @@ Without PATH, print a numbered list and read an index from stdin.
         }
         let item = matches.into_iter().nth(idx).unwrap();
         restore_one(prog, vec![item], force)
+    }
+
+    /// A Recycle Bin item as the restore browser sees it.
+    #[cfg(feature = "tui")]
+    pub struct BinItem {
+        item: TrashItem,
+        original: PathBuf,
+        date: String,
+    }
+
+    #[cfg(feature = "tui")]
+    impl BinItem {
+        pub fn new(item: TrashItem) -> Self {
+            let original = item.original_path();
+            let date = platform::epoch_to_iso_utc(item.time_deleted);
+            Self {
+                item,
+                original,
+                date,
+            }
+        }
+    }
+
+    #[cfg(feature = "tui")]
+    impl crate::restore_tui::TuiItem for BinItem {
+        fn original(&self) -> &Path {
+            &self.original
+        }
+        fn date(&self) -> Option<&str> {
+            Some(&self.date)
+        }
+        fn restore(&self, force: bool) -> Result<(PathBuf, Vec<String>), String> {
+            let dest = &self.original;
+            if dest.symlink_metadata().is_ok() {
+                if !force {
+                    return Err(format!(
+                        "refusing to overwrite '{}' (use -f)",
+                        dest.display()
+                    ));
+                }
+                std::fs::remove_file(dest)
+                    .or_else(|_| std::fs::remove_dir_all(dest))
+                    .map_err(|e| format!("cannot replace '{}': {e}", dest.display()))?;
+            }
+            os_limited::restore_all(vec![self.item.clone()])
+                .map(|()| (dest.clone(), Vec::new()))
+                .map_err(|e| format!("restore failed: {}", err_msg(e)))
+        }
     }
 
     fn restore_one(prog: &str, items: Vec<TrashItem>, force: bool) -> i32 {
@@ -536,7 +590,8 @@ Without PATH, print a numbered list and read an index from stdin.
                     print!(
                         "\
 Usage: {prog} [OPTION]...
-Summarize Windows Recycle Bin item count.
+Summarize the Windows Recycle Bin: items, size, and the cap of each
+drive (MaxCapacity in the registry), then the total.
 
       --help     display this help and exit
       --version  output version information and exit
@@ -556,17 +611,38 @@ Summarize Windows Recycle Bin item count.
                 }
             }
         }
-        match os_limited::list() {
-            Ok(items) => {
-                println!("Recycle Bin: {} items", items.len());
-                println!("Total: {} items", items.len());
-                0
+        // One line per drive with a bin or a cap, like the per-trash lines
+        // of the FreeDesktop status, then the total.
+        let (mut items, mut bytes) = (0u64, 0u64);
+        for root in bin_drives() {
+            let Some((n, b)) = query_bin(&root) else {
+                continue;
+            };
+            let quota = bin_quota(&root);
+            let note = cap_note(b, &quota);
+            if n == 0 && note.is_empty() {
+                continue;
             }
-            Err(e) => {
-                eprintln!("{prog}: cannot list Recycle Bin: {}", err_msg(e));
-                1
+            items += n;
+            bytes += b;
+            let mut line = format!(
+                "{}\t{}\t{}",
+                root.display(),
+                crate::util::plural(n, "item", "items"),
+                crate::util::format_bytes(b)
+            );
+            if !note.is_empty() {
+                line.push('\t');
+                line.push_str(&note);
             }
+            println!("{line}");
         }
+        println!(
+            "Total: {} ({})",
+            crate::util::plural(items, "item", "items"),
+            crate::util::format_bytes(bytes)
+        );
+        0
     }
 
     pub fn rm_run(prog: &str, args: &[String]) -> i32 {
@@ -685,6 +761,124 @@ On Windows, invoke `rtrash put|list|restore|empty|rm|status` directly.
     }
 }
 
+/// The `{GUID}` part of a volume name such as `\\?\Volume{GUID}\`, the
+/// name the Recycle Bin settings in the registry are filed under.
+pub fn volume_guid(name: &str) -> Option<&str> {
+    let start = name.find('{')?;
+    let end = start + name[start..].find('}')?;
+    Some(&name[start..=end])
+}
+
+/// How full the Recycle Bin is against its cap: `cap 4.0 GiB, 30% used`,
+/// or a note that files skip the bin. Empty when there is nothing to say.
+pub fn cap_note(bytes: u64, quota: &BinQuota) -> String {
+    if quota.nuke_on_delete {
+        return "deletes skip the Recycle Bin on this drive".into();
+    }
+    match quota.max_bytes {
+        Some(0) => "cap 0 bytes: deletes skip the Recycle Bin".into(),
+        Some(cap) => format!(
+            "cap {}, {}% used",
+            crate::util::format_bytes(cap),
+            (u128::from(bytes) * 100 / u128::from(cap)).min(999)
+        ),
+        None => String::new(),
+    }
+}
+
+/// The Recycle Bin settings of one volume. A missing `MaxCapacity` means
+/// Windows applies its own default share of the volume.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BinQuota {
+    /// `MaxCapacity` (stored in megabytes) in bytes, when set.
+    pub max_bytes: Option<u64>,
+    /// `NukeOnDelete`: deleted files skip the bin.
+    pub nuke_on_delete: bool,
+}
+
+/// The Recycle Bin settings of the volume whose root is `root`, from
+/// `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{GUID}`.
+#[cfg(windows)]
+pub fn bin_quota(root: &Path) -> BinQuota {
+    let Some(guid) = volume_guid_of(root) else {
+        return BinQuota::default();
+    };
+    let key =
+        format!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\{guid}");
+    BinQuota {
+        max_bytes: reg_dword(&key, "MaxCapacity").map(|mb| u64::from(mb) * 1024 * 1024),
+        nuke_on_delete: reg_dword(&key, "NukeOnDelete").is_some_and(|v| v != 0),
+    }
+}
+
+#[cfg(windows)]
+fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    s.encode_wide().chain(Some(0)).collect()
+}
+
+#[cfg(windows)]
+fn reg_dword(key: &str, name: &str) -> Option<u32> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let (k, n) = (wide(key.as_ref()), wide(name.as_ref()));
+    let mut data: u32 = 0;
+    let mut size: u32 = 4;
+    // SAFETY: both names are NUL-terminated and `data` is the 4 bytes `size` names.
+    let rc = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            k.as_ptr(),
+            n.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut data as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    (rc == 0).then_some(data)
+}
+
+#[cfg(windows)]
+fn volume_guid_of(root: &Path) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeNameForVolumeMountPointW;
+    let mut r = root.as_os_str().to_os_string();
+    if !r.to_string_lossy().ends_with('\\') {
+        r.push("\\");
+    }
+    let w = wide(&r);
+    let mut buf = [0u16; 64];
+    // SAFETY: `w` is NUL-terminated and `buf` holds the 50 characters a
+    // volume name needs.
+    let ok = unsafe { GetVolumeNameForVolumeMountPointW(w.as_ptr(), buf.as_mut_ptr(), 64) };
+    if ok == 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    let name = String::from_utf16_lossy(&buf[..len]);
+    volume_guid(&name).map(str::to_string)
+}
+
+/// Roots of the fixed and removable drives, such as `C:\`, where a
+/// Recycle Bin can live.
+#[cfg(windows)]
+pub fn bin_drives() -> Vec<PathBuf> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
+    // SAFETY: no arguments.
+    let mask = unsafe { GetLogicalDrives() };
+    (0..26u8)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| PathBuf::from(format!("{}:\\", char::from(b'A' + i))))
+        .filter(|root| {
+            let w = wide(root.as_os_str());
+            // SAFETY: `w` is NUL-terminated.
+            let t = unsafe { GetDriveTypeW(w.as_ptr()) };
+            t == DRIVE_FIXED || t == DRIVE_REMOVABLE
+        })
+        .collect()
+}
+
 /// Items and bytes in the Recycle Bin of the drive whose root is `root`
 /// (for example `C:\\`).
 #[cfg(windows)]
@@ -746,6 +940,34 @@ mod tests {
         assert_eq!(meta.delete_filetime, ft);
         assert_eq!(meta.original, PathBuf::from(r"C:\Users\me\doc.txt"));
         assert_eq!(filetime_to_unix_epoch(ft), 86_400);
+    }
+
+    #[test]
+    fn volume_guid_and_cap_note() {
+        let name = r"\\?\Volume{0a1b2c3d-0000-0000-0000-100000000000}\";
+        assert_eq!(
+            volume_guid(name),
+            Some("{0a1b2c3d-0000-0000-0000-100000000000}")
+        );
+        assert_eq!(volume_guid("C:\\"), None);
+        let gib = 1u64 << 30;
+        let q = BinQuota {
+            max_bytes: Some(4 * gib),
+            nuke_on_delete: false,
+        };
+        let want = format!("cap {}, 25% used", crate::util::format_bytes(4 * gib));
+        assert_eq!(cap_note(gib, &q), want);
+        assert_eq!(cap_note(gib, &BinQuota::default()), "");
+        let nuke = BinQuota {
+            max_bytes: Some(gib),
+            nuke_on_delete: true,
+        };
+        assert!(cap_note(0, &nuke).contains("skip"));
+        let zero = BinQuota {
+            max_bytes: Some(0),
+            nuke_on_delete: false,
+        };
+        assert!(cap_note(5, &zero).contains("skip"));
     }
 
     #[test]

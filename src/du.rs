@@ -409,6 +409,9 @@ pub struct TrashSummary {
     pub roots: Vec<PathBuf>,
     pub items: u64,
     pub bytes: u64,
+    /// Windows: the Recycle Bin caps of those drives added up, when every
+    /// one sets `MaxCapacity`.
+    pub cap: Option<u64>,
 }
 
 /// Summarize the trash dirs that live on the same device as any scan root.
@@ -433,6 +436,7 @@ pub fn trash_on_scanned_devices(dirs: &[TrashDir], report: &Report) -> TrashSumm
         roots: same.into_iter().map(|d| d.root).collect(),
         items,
         bytes,
+        cap: None,
     }
 }
 
@@ -449,13 +453,24 @@ pub fn recycle_bin_on_scanned_drives(report: &Report) -> TrashSummary {
             }
         }
     }
-    let mut t = TrashSummary::default();
+    let mut t = TrashSummary {
+        cap: Some(0),
+        ..TrashSummary::default()
+    };
     for d in drives {
         if let Some((items, bytes)) = crate::win_recycle::query_bin(&d) {
             t.items += items;
             t.bytes += bytes;
+            let q = crate::win_recycle::bin_quota(&d);
+            t.cap = match (t.cap, q.max_bytes) {
+                (Some(sum), Some(cap)) => Some(sum.saturating_add(cap)),
+                _ => None,
+            };
             t.roots.push(d);
         }
+    }
+    if t.roots.is_empty() {
+        t.cap = None;
     }
     t
 }
@@ -1390,8 +1405,11 @@ fn trash_json(t: &TrashSummary) -> String {
         .iter()
         .map(|r| format!("\"{}\"", json_escape(&r.to_string_lossy())))
         .collect();
+    // The cap key appears only where a cap is known (Windows), so other
+    // output keeps its shape.
+    let cap = t.cap.map(|c| format!(",\"cap\":{c}")).unwrap_or_default();
     format!(
-        "{{\"roots\":[{}],\"items\":{},\"bytes\":{}}}",
+        "{{\"roots\":[{}],\"items\":{},\"bytes\":{}{cap}}}",
         roots.join(","),
         t.items,
         t.bytes
@@ -1475,9 +1493,10 @@ fn print_table(title: &str, items: &[Item], now: i64, count: bool) {
 
 fn print_trash(t: &TrashSummary) {
     println!(
-        "Trash on these file systems: {} in {}",
+        "Trash on these file systems: {} in {}{}",
         format_bytes(t.bytes),
-        plural(t.items, "item", "items")
+        plural(t.items, "item", "items"),
+        cap_suffix(t)
     );
     if t.items > 0 {
         println!(
@@ -1486,8 +1505,26 @@ fn print_trash(t: &TrashSummary) {
     }
 }
 
+/// `, Recycle Bin cap 4.00 GiB (25% used)` when the cap is known.
+pub fn cap_suffix(t: &TrashSummary) -> String {
+    match t.cap {
+        Some(cap) if cap > 0 => format!(
+            ", Recycle Bin cap {} ({}% used)",
+            format_bytes(cap),
+            (u128::from(t.bytes) * 100 / u128::from(cap)).min(999)
+        ),
+        _ => String::new(),
+    }
+}
+
 fn pick_available() -> bool {
     cfg!(all(unix, feature = "tui")) && crate::util::stdin_is_tty()
+}
+
+/// The `--interactive` browser runs on Windows too; `--pick` reuses the
+/// Unix put browser and does not.
+fn interactive_available() -> bool {
+    cfg!(feature = "tui") && crate::util::stdin_is_tty()
 }
 
 /// Browser rows for `--pick`: directories then files, without trash rows.
@@ -1767,7 +1804,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: --pick needs a terminal and the tui feature");
         return 2;
     }
-    if interactive && !pick_available() {
+    if interactive && !interactive_available() {
         eprintln!("{prog}: --interactive needs a terminal and the tui feature");
         return 2;
     }
@@ -1859,7 +1896,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             .map(|d| fs::canonicalize(&d.root).unwrap_or_else(|_| d.root.clone()))
             .collect();
     }
-    #[cfg(all(unix, feature = "tui"))]
+    #[cfg(feature = "tui")]
     if interactive {
         return crate::du_tui::run(prog, &paths[0], opts, use_git);
     }
@@ -2182,6 +2219,26 @@ mod tests {
             artefact_kind("anything", |c| c == "CACHEDIR.TAG"),
             Some("cache")
         );
+    }
+
+    #[test]
+    fn trash_summary_shows_the_cap_only_when_known() {
+        let mut t = TrashSummary {
+            roots: vec![PathBuf::from("C:\\")],
+            items: 3,
+            bytes: 1 << 30,
+            cap: None,
+        };
+        assert_eq!(cap_suffix(&t), "");
+        assert!(!trash_json(&t).contains("cap"));
+        t.cap = Some(4 << 30);
+        assert_eq!(
+            cap_suffix(&t),
+            format!(", Recycle Bin cap {} (25% used)", format_bytes(4 << 30))
+        );
+        assert!(trash_json(&t).ends_with(&format!(",\"cap\":{}}}", 4u64 << 30)));
+        t.cap = Some(0);
+        assert_eq!(cap_suffix(&t), "");
     }
 
     #[cfg(all(unix, feature = "tui"))]

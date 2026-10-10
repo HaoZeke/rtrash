@@ -3,7 +3,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 use rtrash::tui_binds;
 use rtrash::{config, du, empty, finder, list, put, restore, rm, setup, status, undo};
 
@@ -71,11 +71,11 @@ fn main() {
             Some("finder") => finder::run(&format!("{argv0} finder"), &rest[1..]),
             Some("config") => config::run(&format!("{argv0} config"), &rest[1..]),
             Some("setup") => setup::run("setup", &rest[1..]),
-            #[cfg(all(unix, feature = "tui"))]
+            #[cfg(feature = "tui")]
             Some("keys") => tui_binds::run_cli(&argv0, &rest[1..]),
-            #[cfg(not(all(unix, feature = "tui")))]
+            #[cfg(not(feature = "tui"))]
             Some("keys") => {
-                eprintln!("{argv0}: keys requires the TUI feature on Unix");
+                eprintln!("{argv0}: keys requires the TUI feature");
                 1
             }
             Some("completions") => setup::run("completions", &rest[1..]),
