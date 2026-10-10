@@ -335,12 +335,21 @@ mod tests {
         let only_listing: Vec<_> = sa.difference(&sb).take(10).collect();
         let only_readdir: Vec<_> = sb.difference(&sa).take(10).collect();
         let mut problems = listing_stat_differences(&d, &e);
-        problems.truncate(40);
+        // How many entries differ in each field, so a capped list still
+        // shows whether a few entries or all of them are off.
+        let mut per_field = std::collections::BTreeMap::<String, usize>::new();
+        for p in &problems {
+            let field = p.rsplit("\": ").next().unwrap_or(p);
+            let field = field.split(' ').next().unwrap_or(field).to_string();
+            *per_field.entry(field).or_default() += 1;
+        }
+        let total = problems.len();
+        problems.truncate(20);
         assert!(
-            !failed && !r_failed && a == b && problems.is_empty(),
+            !failed && !r_failed && a == b && total == 0,
             "listing failed={failed} with {} entries, readdir failed={r_failed} with {}; \
              only in listing {only_listing:?}; only in readdir {only_readdir:?}; \
-             stat differences {problems:#?}",
+             {total} stat differences by field {per_field:?}, first ones {problems:#?}",
             a.len(),
             b.len(),
         );

@@ -135,6 +135,7 @@ mod bulk {
     pub const ATTR_CMN_DEVID: u32 = 0x0000_0002;
     pub const ATTR_CMN_OBJTYPE: u32 = 0x0000_0008;
     pub const ATTR_CMN_MODTIME: u32 = 0x0000_0400;
+    pub const ATTR_CMN_ACCESSMASK: u32 = 0x0002_0000;
     pub const ATTR_CMN_FILEID: u32 = 0x0200_0000;
     pub const ATTR_CMN_ERROR: u32 = 0x2000_0000;
     pub const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
@@ -147,6 +148,7 @@ mod bulk {
         | ATTR_CMN_DEVID
         | ATTR_CMN_OBJTYPE
         | ATTR_CMN_MODTIME
+        | ATTR_CMN_ACCESSMASK
         | ATTR_CMN_FILEID
         | ATTR_CMN_ERROR;
     pub const FILE: u32 = ATTR_FILE_LINKCOUNT | ATTR_FILE_ALLOCSIZE | ATTR_FILE_DATALENGTH;
@@ -178,15 +180,18 @@ mod bulk {
     // ATTR_CMN_ERROR first, then the other common attributes in bit order
     // (xnu bsd/vfs/vfs_attrlist.c, attr_pack_common). File attributes
     // follow only for entries that are not directories, so a directory's
-    // record ends at COMMON_END. Slots are 4-byte aligned, so 8-byte fields
-    // are read unaligned.
+    // record ends at COMMON_END. The fixed slots are packed back to back
+    // with no alignment beyond 4 bytes (ATTR_PACK4 and ATTR_PACK8), so
+    // 8-byte fields are read unaligned. The name's bytes live after the
+    // fixed slots and their padding never moves a fixed field.
     const RETURNED: usize = 4;
     const ERROR: usize = RETURNED + 20;
     pub const NAME: usize = ERROR + 4;
     const DEVID: usize = NAME + 8;
     const OBJTYPE: usize = DEVID + 4;
     const MODTIME: usize = OBJTYPE + 4;
-    const FILEID: usize = MODTIME + 16;
+    const ACCESSMASK: usize = MODTIME + 16;
+    const FILEID: usize = ACCESSMASK + 4;
     pub const COMMON_END: usize = FILEID + 8;
     const LINKCOUNT: usize = COMMON_END;
     const ALLOCSIZE: usize = LINKCOUNT + 4;
@@ -241,14 +246,16 @@ mod bulk {
                 VDIR => Kind::Dir,
                 _ => Kind::Other,
             };
-            let complete = common & (ATTR_CMN_DEVID | ATTR_CMN_MODTIME | ATTR_CMN_FILEID)
-                == ATTR_CMN_DEVID | ATTR_CMN_MODTIME | ATTR_CMN_FILEID
-                && has_file
-                && file & FILE == FILE;
+            const STAT_COMMON: u32 =
+                ATTR_CMN_DEVID | ATTR_CMN_MODTIME | ATTR_CMN_ACCESSMASK | ATTR_CMN_FILEID;
+            let complete = common & STAT_COMMON == STAT_COMMON && has_file && file & FILE == FILE;
             // Directories get their stat from their own descriptor, so
             // only other entries keep the one from the listing.
             let stat = (kind == Kind::Other && complete).then(|| Stat {
-                mode: mode_of(objtype),
+                // The access mask is va_mode, which already carries the
+                // type bits when the kernel has the vnode; take the type
+                // from the object type either way.
+                mode: mode_of(objtype) | (u32_at(rec, ACCESSMASK) & 0o7777),
                 size: u64_at(rec, DATALENGTH),
                 // stat(2) reports the total allocation in 512-byte blocks.
                 blocks: u64_at(rec, ALLOCSIZE).div_ceil(512),
@@ -499,43 +506,76 @@ mod fileid {
 mod tests {
     use super::*;
 
+    /// The values one crafted bulk record carries.
+    #[derive(Clone, Copy)]
+    struct Rec<'a> {
+        name: &'a str,
+        objtype: u32,
+        error: u32,
+        file_valid: bool,
+        access: u32,
+        ino: u64,
+        nlink: u32,
+        alloc: u64,
+        size: u64,
+    }
+
+    impl<'a> Rec<'a> {
+        fn new(name: &'a str, objtype: u32) -> Self {
+            Rec {
+                name,
+                objtype,
+                error: 0,
+                file_valid: true,
+                // va_mode with the type bits, as the kernel fills it in.
+                access: 0o100_644,
+                ino: 4242,
+                nlink: 2,
+                alloc: 4097,
+                size: 1234,
+            }
+        }
+    }
+
     /// One packed `getattrlistbulk` record as xnu lays it out: the error
-    /// slot right after the returned set, and file attributes only for
-    /// entries that are not directories.
-    fn bulk_record(name: &str, objtype: u32, error: u32, file_valid: bool) -> Vec<u8> {
+    /// slot right after the returned set, the common attributes in bit
+    /// order, and file attributes only for entries that are not
+    /// directories. The name's bytes follow the fixed slots, and the
+    /// record is padded to 8 bytes.
+    fn bulk_record(f: Rec<'_>) -> Vec<u8> {
         use bulk::*;
         let mut r = Vec::new();
         let common = COMMON & !ATTR_CMN_RETURNED_ATTRS;
         let push32 = |r: &mut Vec<u8>, v: u32| r.extend_from_slice(&v.to_ne_bytes());
         let push64 = |r: &mut Vec<u8>, v: u64| r.extend_from_slice(&v.to_ne_bytes());
-        let dir = objtype == 2;
+        let dir = f.objtype == 2;
         push32(&mut r, 0); // length, patched below
         push32(&mut r, common);
         push32(&mut r, 0);
         push32(&mut r, 0);
-        push32(&mut r, if file_valid && !dir { FILE } else { 0 });
+        push32(&mut r, if f.file_valid && !dir { FILE } else { 0 });
         push32(&mut r, 0);
-        push32(&mut r, error);
+        push32(&mut r, f.error);
         let name_slot = r.len();
         push32(&mut r, 0); // offset, patched below
-        push32(&mut r, name.len() as u32 + 1);
+        push32(&mut r, f.name.len() as u32 + 1);
         push32(&mut r, (-3i32) as u32); // devid
-        push32(&mut r, objtype);
+        push32(&mut r, f.objtype);
         push64(&mut r, 1_700_000_000); // mtime seconds
         push64(&mut r, 5); // nanoseconds
-        push64(&mut r, 4242); // fileid
+        push32(&mut r, f.access);
+        push64(&mut r, f.ino);
         assert_eq!(r.len(), COMMON_END);
         if !dir {
-            push32(&mut r, 2); // link count
-            push64(&mut r, 4097); // allocation
-            push64(&mut r, 1234); // data length
+            push32(&mut r, f.nlink);
+            push64(&mut r, f.alloc);
+            push64(&mut r, f.size);
             assert_eq!(r.len(), FILE_END);
         }
         let at = r.len();
         r[name_slot..name_slot + 4].copy_from_slice(&((at - name_slot) as u32).to_ne_bytes());
-        r.extend_from_slice(name.as_bytes());
+        r.extend_from_slice(f.name.as_bytes());
         r.push(0);
-        // Bulk records are padded to 8 bytes.
         while r.len() % 8 != 0 {
             r.push(0);
         }
@@ -547,10 +587,16 @@ mod tests {
     #[test]
     fn bulk_records_parse_into_entries_and_stats() {
         let mut buf = Vec::new();
-        buf.extend(bulk_record("file.bin", 1, 0, true));
-        buf.extend(bulk_record("sub", 2, 0, true));
-        buf.extend(bulk_record("gone", 1, libc::EACCES as u32, true));
-        buf.extend(bulk_record("link", 5, 0, true));
+        buf.extend(bulk_record(Rec::new("file.bin", 1)));
+        buf.extend(bulk_record(Rec::new("sub", 2)));
+        buf.extend(bulk_record(Rec {
+            error: libc::EACCES as u32,
+            ..Rec::new("gone", 1)
+        }));
+        buf.extend(bulk_record(Rec {
+            access: 0o120_755,
+            ..Rec::new("link", 5)
+        }));
         let mut e = Entries::default();
         assert!(bulk::parse(&buf, 4, &mut e));
         assert_eq!(e.len(), 4);
@@ -558,6 +604,7 @@ mod tests {
         assert_eq!((n.to_bytes(), k), (&b"file.bin"[..], Kind::Other));
         let s = e.stat(0).unwrap();
         assert!(s.is_file());
+        assert_eq!(s.mode, 0o100_644, "type and permission bits");
         assert_eq!((s.size, s.blocks, s.nlink, s.ino), (1234, 9, 2, 4242));
         assert_eq!((s.dev, s.mtime), (u64::MAX - 2, 1_700_000_000));
         assert_eq!(e.get(1).1, Kind::Dir);
@@ -566,15 +613,71 @@ mod tests {
         assert_eq!(e.stat(2), None, "a failed entry gets a plain stat later");
         let l = e.stat(3).unwrap();
         assert!(!l.is_file() && !l.is_dir());
+        assert_eq!(l.mode, 0o120_755);
         // A record cut short is refused rather than read past its end.
         let mut short = Entries::default();
         assert!(!bulk::parse(&buf[..buf.len() - 8], 4, &mut short));
         // So is a name that does not start where the fixed slots end.
-        let mut odd = bulk_record("odd", 1, 0, true);
+        let mut odd = bulk_record(Rec::new("odd", 1));
         let slot = bulk::NAME;
         let off = u32::from_ne_bytes(odd[slot..slot + 4].try_into().unwrap()) + 4;
         odd[slot..slot + 4].copy_from_slice(&off.to_ne_bytes());
         assert!(!bulk::parse(&odd, 1, &mut Entries::default()));
+    }
+
+    /// Names of every length across the 4- and 8-byte padding steps,
+    /// packed back to back in one fill, each with distinct values, so a
+    /// record that shifted any field would show it.
+    #[test]
+    fn bulk_records_keep_every_field_across_name_lengths() {
+        let names: Vec<String> = (1..=24)
+            .chain([47, 48, 49, 255])
+            .map(|n| "n".repeat(n))
+            .collect();
+        let recs: Vec<Rec<'_>> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let i = i as u64;
+                Rec {
+                    access: 0o100_000 | (0o600 + i as u32 % 0o100),
+                    ino: 10_000 + i,
+                    nlink: 1 + i as u32,
+                    alloc: 4096 * (i + 1),
+                    size: 1000 + i,
+                    ..Rec::new(n, if i % 5 == 4 { 2 } else { 1 })
+                }
+            })
+            .collect();
+        let mut buf = Vec::new();
+        for r in &recs {
+            buf.extend(bulk_record(*r));
+        }
+        let mut e = Entries::default();
+        assert!(bulk::parse(&buf, recs.len(), &mut e));
+        assert_eq!(e.len(), recs.len());
+        for (i, r) in recs.iter().enumerate() {
+            let (name, kind) = e.get(i);
+            assert_eq!(name.to_bytes(), r.name.as_bytes(), "record {i}");
+            if r.objtype == 2 {
+                assert_eq!((kind, e.stat(i)), (Kind::Dir, None), "record {i}");
+                continue;
+            }
+            let s = e.stat(i).unwrap();
+            assert_eq!(
+                (s.mode, s.ino, s.nlink, s.blocks, s.size, s.mtime),
+                (
+                    r.access,
+                    r.ino,
+                    u64::from(r.nlink),
+                    r.alloc / 512,
+                    r.size,
+                    1_700_000_000
+                ),
+                "record {i}, name length {}",
+                r.name.len()
+            );
+        }
     }
 
     /// One `FILE_ID_BOTH_DIR_INFO` record, padded to 8 bytes.
