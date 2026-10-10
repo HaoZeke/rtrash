@@ -234,12 +234,20 @@ pub fn order_entries(entries: &mut [&list::Entry], newest_first: bool) {
     }
 }
 
+/// A typed PATH in the form put records originals: absolute, cleaned, and
+/// with symlinks in its parent resolved. `/var/x/a.txt` then matches an
+/// entry recorded as `/private/var/x/a.txt` on macOS, or a path typed
+/// through any symlinked directory on Linux.
 fn absolutize(p: &Path) -> PathBuf {
-    if p.is_absolute() {
+    let abs = if p.is_absolute() {
         lexical_clean(p)
     } else {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         lexical_clean(&cwd.join(p))
+    };
+    match (abs.parent(), abs.file_name()) {
+        (Some(parent), Some(name)) => trashdir::resolve_existing(parent).join(name),
+        _ => abs,
     }
 }
 

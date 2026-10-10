@@ -354,15 +354,7 @@ fn resolve_put_trash(
     meta: &fs::Metadata,
 ) -> io::Result<trashdir::TrashDir> {
     if let Some(pin) = &opts.trash_pin {
-        let root = if pin.is_absolute() {
-            pin.clone()
-        } else {
-            std::env::current_dir()?.join(pin)
-        };
-        let td = trashdir::TrashDir {
-            root: root.clone(),
-            topdir: trashdir::infer_topdir(&root),
-        };
+        let td = trashdir::TrashDir::from_root(pin)?;
         td.ensure()?;
         return Ok(td);
     }

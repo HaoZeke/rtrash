@@ -17,6 +17,36 @@ pub struct TrashDir {
 }
 
 impl TrashDir {
+    /// A trash dir given by its root path (a `--trash-dir` pin), with the
+    /// directories above it resolved the way [`abs_nofollow`] resolves an
+    /// original location. A volume layout keeps its own `.Trash-$uid` or
+    /// `.Trash/$uid` names and gets a resolved topdir, so relative `Path=`
+    /// values match originals whose parents went through a symlink.
+    pub fn from_root(root: &Path) -> io::Result<TrashDir> {
+        let root = if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(root)
+        };
+        Ok(match infer_topdir(&root) {
+            Some(top) => {
+                let rest = root
+                    .strip_prefix(&top)
+                    .unwrap_or(Path::new(""))
+                    .to_path_buf();
+                let top = resolve_existing(&top);
+                TrashDir {
+                    root: top.join(rest),
+                    topdir: Some(top),
+                }
+            }
+            None => TrashDir {
+                root: resolve_parent(&root),
+                topdir: None,
+            },
+        })
+    }
+
     pub fn files(&self) -> PathBuf {
         self.root.join("files")
     }
@@ -99,11 +129,43 @@ pub fn uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
+/// The home trash, `$XDG_DATA_HOME/Trash`, with symlinks above `Trash`
+/// resolved. Original locations record resolved parents (see
+/// [`abs_nofollow`]), so the trash root they are reported next to is
+/// resolved the same way (on macOS `/var` is a symlink to `/private/var`).
 pub fn home_trash() -> PathBuf {
-    crate::platform::home_trash_from(
+    resolve_parent(&crate::platform::home_trash_from(
         std::env::var_os("XDG_DATA_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
-    )
+    ))
+}
+
+/// `path` with symlinks resolved in its longest existing ancestor; the
+/// components that do not exist yet are appended as written.
+pub fn resolve_existing(path: &Path) -> PathBuf {
+    for anc in path.ancestors() {
+        if anc.as_os_str().is_empty() {
+            break;
+        }
+        if let Ok(real) = anc.canonicalize() {
+            return match path.strip_prefix(anc) {
+                Ok(rest) if !rest.as_os_str().is_empty() => real.join(rest),
+                _ => real,
+            };
+        }
+    }
+    path.to_path_buf()
+}
+
+/// `path` with its parent resolved by [`resolve_existing`] and its last
+/// component kept, so a symlinked trash root stays as named.
+fn resolve_parent(path: &Path) -> PathBuf {
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            resolve_existing(parent).join(name)
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 fn dev_of(path: &Path) -> Option<u64> {
@@ -283,22 +345,15 @@ pub fn resolve_dirs_opts(pins: &[PathBuf], home_only: bool) -> Vec<TrashDir> {
     }
     pins.iter()
         .filter_map(|p| {
-            let root = if p.is_absolute() {
-                p.clone()
-            } else {
-                std::env::current_dir().ok()?.join(p)
-            };
-            if !is_valid_trash_root(&root) {
+            let td = TrashDir::from_root(p).ok()?;
+            if !is_valid_trash_root(&td.root) {
                 eprintln!(
                     "rtrash: ignoring --trash-dir='{}' (need non-symlink files/ and info/ directories)",
                     p.display()
                 );
                 return None;
             }
-            Some(TrashDir {
-                root: root.clone(),
-                topdir: infer_topdir(&root),
-            })
+            Some(td)
         })
         .collect()
 }
@@ -1004,6 +1059,9 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        fs::create_dir_all(&root).unwrap();
+        // Pins come back resolved (macOS reaches temp_dir through /var).
+        let root = fs::canonicalize(&root).unwrap();
         let pin = root.join("vol/.Trash-42");
         fs::create_dir_all(pin.join("files")).unwrap();
         fs::create_dir_all(pin.join("info")).unwrap();
@@ -1015,6 +1073,41 @@ mod tests {
         assert_eq!(abs, root.join("vol/docs/x.txt"));
         assert!(resolve_original_escape_rejected());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_existing_and_from_root_follow_symlinked_parents() {
+        let base = std::env::temp_dir().join(format!(
+            "rtrash-resolve-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(base.join("real/vol")).unwrap();
+        let real = fs::canonicalize(base.join("real")).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // The existing part resolves; the missing tail stays as written.
+        assert_eq!(
+            resolve_existing(&link.join("vol/new/x")),
+            real.join("vol/new/x")
+        );
+
+        // A home-style root resolves its parent but keeps its own name.
+        let td = TrashDir::from_root(&link.join("xdg/Trash")).unwrap();
+        assert_eq!(td.root, real.join("xdg/Trash"));
+        assert!(td.topdir.is_none());
+
+        // Volume roots resolve the topdir, so Path= stays topdir-relative.
+        for rest in [".Trash-7", ".Trash/7"] {
+            let td = TrashDir::from_root(&link.join("vol").join(rest)).unwrap();
+            assert_eq!(td.topdir.as_deref(), Some(real.join("vol").as_path()));
+            assert_eq!(td.root, real.join("vol").join(rest));
+        }
+        let _ = fs::remove_dir_all(&base);
     }
 
     fn resolve_original_escape_rejected() -> bool {

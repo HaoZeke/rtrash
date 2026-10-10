@@ -41,6 +41,9 @@ impl TrashSandbox {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("work")).unwrap();
         fs::create_dir_all(root.join("xdg")).unwrap();
+        // Originals are recorded with symlinked parents resolved (macOS
+        // /var is /private/var), so compare against the resolved root.
+        let root = fs::canonicalize(&root).unwrap();
         TrashSandbox { root }
     }
 

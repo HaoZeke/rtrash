@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 fn bin() -> &'static str {
@@ -22,6 +22,10 @@ impl Sandbox {
         let root = std::env::temp_dir().join(format!("rtrash-test-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("work")).unwrap();
+        // put records originals with symlinked parents resolved (on macOS
+        // the temp dir sits under /var, a symlink to /private/var), so the
+        // expected paths use the resolved root too.
+        let root = fs::canonicalize(&root).unwrap();
         Sandbox { root }
     }
 
@@ -142,6 +146,87 @@ fn put_json_reports_trashed_and_failed() {
         "{line}"
     );
     assert!(stderr_of(&out).contains("missing.txt"));
+}
+
+/// Run rtrash in `cwd` with the trash under `data_home`.
+fn run_in(cwd: &Path, data_home: &Path, args: &[&str]) -> Output {
+    Command::new(bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("XDG_DATA_HOME", data_home)
+        .env("HOME", data_home)
+        .output()
+        .expect("failed to run rtrash")
+}
+
+/// The JSON string value of `key` in `json`.
+fn json_str(json: &str, key: &str) -> String {
+    let at = json
+        .find(&format!("\"{key}\":\""))
+        .unwrap_or_else(|| panic!("no {key} in {json}"))
+        + key.len()
+        + 4;
+    json[at..at + json[at..].find('"').unwrap()].to_string()
+}
+
+/// A sandbox reached through a symlink, the way macOS reaches its temp
+/// dir through /var -> /private/var. Originals and trash dirs both come
+/// out resolved, and a path typed through the link still restores.
+#[test]
+fn symlinked_parents_resolve_alike_for_originals_and_trash() {
+    let sb = Sandbox::new("symlinked");
+    let link = sb.root.with_extension("link");
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(&sb.root, &link).unwrap();
+    let lwork = link.join("work");
+    let ldata = link.join("xdg");
+    fs::write(lwork.join("a.txt"), b"a").unwrap();
+
+    let out = run_in(&lwork, &ldata, &["put", "--json", "a.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let json = stdout_of(&out);
+    let original = sb.work().join("a.txt");
+    assert_eq!(json_str(&json, "original"), original.display().to_string());
+    assert_eq!(
+        json_str(&json, "trash_dir"),
+        sb.trash().display().to_string()
+    );
+    let info = fs::read_to_string(sb.trash().join("info/a.txt.trashinfo")).unwrap();
+    assert!(
+        info.contains(&format!("Path={}\n", original.display())),
+        "{info}"
+    );
+
+    // Restore by the path as typed through the link.
+    let typed = lwork.join("a.txt");
+    let out = run_in(&lwork, &ldata, &["restore", typed.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(original.exists());
+
+    // A pinned volume trash reached through the link keeps Path= relative
+    // to its topdir, and restore finds the file again.
+    let uid = {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(&sb.root).unwrap().uid()
+    };
+    fs::create_dir(sb.root.join("vol")).unwrap();
+    fs::write(sb.root.join("vol/f.txt"), b"f").unwrap();
+    let pin = link.join(format!("vol/.Trash-{uid}"));
+    let pin_arg = format!("--trash-dir={}", pin.display());
+    let lvol = link.join("vol");
+    let out = run_in(&lvol, &ldata, &["put", &pin_arg, "--json", "f.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let real_pin = sb.root.join(format!("vol/.Trash-{uid}"));
+    assert_eq!(
+        json_str(&stdout_of(&out), "trash_dir"),
+        real_pin.display().to_string()
+    );
+    let info = fs::read_to_string(real_pin.join("info/f.txt.trashinfo")).unwrap();
+    assert!(info.contains("Path=f.txt\n"), "{info}");
+    let out = run_in(&lvol, &ldata, &["restore", &pin_arg, "f.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(sb.root.join("vol/f.txt").exists());
+    let _ = fs::remove_file(&link);
 }
 
 #[test]
