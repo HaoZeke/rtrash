@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -240,6 +240,36 @@ fn sticky_and_dir(meta: &fs::Metadata) -> bool {
     meta.is_dir() && (meta.permissions().mode() & 0o1000) != 0
 }
 
+/// Why a `$topdir/.Trash` that exists cannot serve as the shared trash,
+/// or `None` when it can.
+fn shared_trash_problem(meta: &fs::Metadata) -> Option<&'static str> {
+    if meta.file_type().is_symlink() {
+        Some("is a symbolic link")
+    } else if !meta.is_dir() {
+        Some("is not a directory")
+    } else if meta.permissions().mode() & 0o1000 == 0 {
+        Some("lacks the sticky bit")
+    } else {
+        None
+    }
+}
+
+/// Warn about an unusable shared trash at most once per path and process,
+/// so trashing many files from one mount prints one line.
+fn warn_shared_trash_once(shared: &Path, why: &str, fallback: &Path) {
+    static WARNED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if warned.iter().any(|p| p == shared) {
+        return;
+    }
+    warned.push(shared.to_path_buf());
+    eprintln!(
+        "rtrash: warning: '{}' {why}; using '{}'",
+        shared.display(),
+        fallback.display()
+    );
+}
+
 /// Trash dir for a file on device `dev` at absolute path `abs`.
 /// Home trash when on the same fs; otherwise `$top/.Trash/$uid` (must be a
 /// sticky non-symlink dir) or `$top/.Trash-$uid`; home trash as last resort
@@ -285,6 +315,9 @@ pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
             if td.ensure().is_ok() {
                 return Ok(td);
             }
+        } else if let Some(why) = shared_trash_problem(&meta) {
+            // The spec asks for the failed check to be reported.
+            warn_shared_trash_once(&shared, why, &top.join(format!(".Trash-{uid}")));
         }
     }
 
@@ -567,10 +600,34 @@ pub fn abs_nofollow(path: &Path) -> io::Result<PathBuf> {
 ///
 /// Holds [`TrashLock`] for the duration of reserve → fsync → payload move so
 /// concurrent empty of the same root cannot tear the pair.
+///
+/// A trashed directory then gets its `directorysizes` line. The size walk
+/// runs in parallel and outside the lock, so a big tree does not hold up
+/// other puts and empties of the same root; the lock is taken again only
+/// to write the line.
 pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
     trash.ensure()?;
-    let _lock = TrashLock::acquire(&trash.root)?;
-    trash_move_locked(abs, meta, trash)
+    let name = {
+        let _lock = TrashLock::acquire(&trash.root)?;
+        trash_move_locked(abs, meta, trash)?
+    };
+    if meta.is_dir() {
+        record_dir_size(trash, &name);
+    }
+    Ok(name)
+}
+
+/// Write the `directorysizes` line for the trashed directory `name`.
+/// Best effort: a cache that cannot be written is rebuilt by `status`.
+pub fn record_dir_size(trash: &TrashDir, name: &str) {
+    let dest = trash.files().join(name);
+    let size = crate::fastdelete::disk_usage(&dest);
+    let Ok(mtime) = info_mtime_secs(&trash.info().join(format!("{name}.trashinfo"))) else {
+        return;
+    };
+    if let Ok(_lock) = TrashLock::acquire(&trash.root) {
+        let _ = directorysizes_upsert(trash, name, size, mtime);
+    }
 }
 
 /// Inner put path (caller holds the trash-root lock). Exposed for tests.
@@ -650,12 +707,6 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
         let _ = remove_any_path(&dest);
         return Err(e);
     }
-    // FreeDesktop directorysizes cache: only for trashed directories.
-    if meta.is_dir() {
-        let size = dir_tree_size(&dest).unwrap_or(0);
-        let mtime = info_mtime_secs(&trash.info().join(format!("{name}.trashinfo"))).unwrap_or(0);
-        let _ = directorysizes_upsert(trash, &name, size, mtime);
-    }
     Ok(name)
 }
 
@@ -708,25 +759,6 @@ fn rename_noreplace(src: &Path, dest: &Path) -> io::Result<()> {
         // O_EXCL .trashinfo reservation before the payload rename.
         fs::rename(src, dest)
     }
-}
-
-/// Total byte size of a directory tree (symlink targets not followed).
-fn dir_tree_size(path: &Path) -> io::Result<u64> {
-    let meta = fs::symlink_metadata(path)?;
-    if !meta.is_dir() {
-        return Ok(meta.len());
-    }
-    let mut total = 0u64;
-    for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let emeta = fs::symlink_metadata(entry.path())?;
-        if emeta.is_dir() {
-            total = total.saturating_add(dir_tree_size(&entry.path())?);
-        } else {
-            total = total.saturating_add(emeta.len());
-        }
-    }
-    Ok(total)
 }
 
 fn info_mtime_secs(path: &Path) -> io::Result<i64> {
@@ -802,72 +834,169 @@ pub fn directorysizes_parse_line(line: &str) -> Option<(u64, i64, String)> {
     Some((size, mtime, enc))
 }
 
-/// Cached directory payload size from `$trash/directorysizes` when the line is
-/// still valid for `name`:
-/// - a matching percent-encoded name is present;
-/// - the payload under `files/` exists and is a directory (cache is for dirs);
-/// - the cached mtime equals the current `.trashinfo` mtime (FreeDesktop intent).
+/// The `directorysizes` cache of one trash root, read once. Sizes are
+/// block usage as `du -B1` reports it ([`crate::fastdelete::disk_usage`]),
+/// which the spec asks for.
 ///
-/// Any doubt → `None` so callers use [`crate::fastdelete::disk_usage`].
-pub fn directorysizes_cached_size(trash: &TrashDir, name: &str) -> Option<u64> {
-    use crate::util::url_encode;
-    let path = trash.root.join("directorysizes");
-    let body = fs::read_to_string(path).ok()?;
-    let want = url_encode(name.as_bytes());
-    let mut hit: Option<(u64, i64)> = None;
-    for line in body.lines() {
-        let Some((size, mtime, enc)) = directorysizes_parse_line(line) else {
-            continue;
-        };
-        if enc == want {
-            hit = Some((size, mtime));
-            // Last matching line wins (upsert rewrites whole file with one line,
-            // but tolerate hand-edited duplicates conservatively).
+/// Lookups that miss walk the payload and remember the result;
+/// [`DirSizes::write_back`] then adds those lines and drops lines whose
+/// directory is gone, the spec's suggested algorithm. Safe to share
+/// between threads.
+pub struct DirSizes<'a> {
+    trash: &'a TrashDir,
+    /// Percent-encoded name to (size, trashinfo mtime).
+    lines: HashMap<String, (u64, i64)>,
+    misses: std::sync::Mutex<Vec<(String, u64, i64)>>,
+}
+
+impl<'a> DirSizes<'a> {
+    pub fn load(trash: &'a TrashDir) -> Self {
+        let mut lines = HashMap::new();
+        if let Ok(body) = fs::read_to_string(trash.root.join("directorysizes")) {
+            for line in body.lines() {
+                // A later duplicate wins, as a rewrite would keep it.
+                if let Some((size, mtime, enc)) = directorysizes_parse_line(line) {
+                    lines.insert(enc, (size, mtime));
+                }
+            }
+        }
+        DirSizes {
+            trash,
+            lines,
+            misses: std::sync::Mutex::new(Vec::new()),
         }
     }
-    let (size, mtime) = hit?;
-    let payload = trash.files().join(name);
-    let meta = fs::symlink_metadata(&payload).ok()?;
-    if !meta.is_dir() {
-        return None;
+
+    /// The cached size of directory payload `name`, when its line is still
+    /// valid: the payload is a directory and the line's mtime equals the
+    /// current `.trashinfo` mtime.
+    pub fn cached(&self, name: &str) -> Option<u64> {
+        let (size, mtime) = *self.lines.get(&crate::util::url_encode(name.as_bytes()))?;
+        let meta = fs::symlink_metadata(self.trash.files().join(name)).ok()?;
+        if !meta.is_dir() {
+            return None;
+        }
+        let info = self.trash.info().join(format!("{name}.trashinfo"));
+        (info_mtime_secs(&info).ok()? == mtime).then_some(size)
     }
-    let info = trash.info().join(format!("{name}.trashinfo"));
-    let info_mt = info_mtime_secs(&info).ok()?;
-    if info_mt != mtime {
-        return None;
+
+    /// Bytes of the payload `files/NAME`: the cache for a directory with a
+    /// valid line, otherwise a walk, remembered for [`Self::write_back`]
+    /// when the payload is a directory with a `.trashinfo`.
+    pub fn payload_bytes(&self, name: &str) -> u64 {
+        if let Some(size) = self.cached(name) {
+            return size;
+        }
+        let payload = self.trash.files().join(name);
+        let size = crate::fastdelete::disk_usage(&payload);
+        let is_dir = fs::symlink_metadata(&payload).is_ok_and(|m| m.is_dir());
+        let info = self.trash.info().join(format!("{name}.trashinfo"));
+        if is_dir {
+            if let Ok(mtime) = info_mtime_secs(&info) {
+                self.misses.lock().unwrap_or_else(|e| e.into_inner()).push((
+                    name.to_string(),
+                    size,
+                    mtime,
+                ));
+            }
+        }
+        size
     }
-    Some(size)
+
+    /// Payload plus `.trashinfo` bytes for one entry.
+    pub fn entry_bytes(&self, name: &str) -> u64 {
+        let info = self.trash.info().join(format!("{name}.trashinfo"));
+        let info_sz = if info.exists() {
+            crate::fastdelete::disk_usage(&info)
+        } else {
+            0
+        };
+        self.payload_bytes(name).saturating_add(info_sz)
+    }
+
+    /// Write the sizes walked since [`Self::load`] into the cache, and drop
+    /// lines whose payload is no longer a directory. Nothing is written when
+    /// nothing changed. Best effort: a trash root this user cannot write
+    /// keeps its old cache.
+    pub fn write_back(self) {
+        self.write_back_with(true);
+    }
+
+    /// [`Self::write_back`] for a caller that already holds the root's
+    /// [`TrashLock`].
+    pub fn write_back_locked(self) {
+        self.write_back_with(false);
+    }
+
+    fn write_back_with(self, lock: bool) {
+        let misses = self.misses.into_inner().unwrap_or_else(|e| e.into_inner());
+        let files = self.trash.files();
+        let gone = |enc: &str| {
+            let name = crate::util::url_decode(enc);
+            let name = std::ffi::OsStr::from_bytes(&name);
+            !fs::symlink_metadata(files.join(name)).is_ok_and(|m| m.is_dir())
+        };
+        if misses.is_empty() && !self.lines.keys().any(|enc| gone(enc)) {
+            return;
+        }
+        let _lock = if lock {
+            match TrashLock::acquire(&self.trash.root) {
+                Ok(l) => Some(l),
+                Err(_) => return,
+            }
+        } else {
+            None
+        };
+        // Re-read under the lock: a put may have added a line meanwhile.
+        let path = self.trash.root.join("directorysizes");
+        let mut kept: Vec<(String, u64, i64)> = fs::read_to_string(&path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(directorysizes_parse_line)
+            .map(|(size, mtime, enc)| (enc, size, mtime))
+            .filter(|(enc, _, _)| !gone(enc))
+            .collect();
+        for (name, size, mtime) in misses {
+            let enc = crate::util::url_encode(name.as_bytes());
+            kept.retain(|(e, _, _)| *e != enc);
+            kept.push((enc, size, mtime));
+        }
+        if kept.is_empty() {
+            let _ = fs::remove_file(&path);
+            return;
+        }
+        let body: String = kept
+            .iter()
+            .map(|(enc, size, mtime)| format!("{size} {mtime} {enc}\n"))
+            .collect();
+        let _ = atomic_write(&path, body.as_bytes());
+    }
+}
+
+/// Cached directory payload size from `$trash/directorysizes` when the line
+/// is still valid for `name` (see [`DirSizes::cached`]). Any doubt → `None`
+/// so callers walk instead.
+pub fn directorysizes_cached_size(trash: &TrashDir, name: &str) -> Option<u64> {
+    DirSizes::load(trash).cached(name)
 }
 
 /// Approximate reclaimable bytes for one named trash entry (payload + its
-/// `.trashinfo` when present). Directory payloads use a valid `directorysizes`
-/// cache line when available; files, orphans, and invalid cache always walk.
+/// `.trashinfo` when present). A directory payload uses a valid
+/// `directorysizes` line; callers sizing many entries should hold one
+/// [`DirSizes`] and write it back instead.
 pub fn entry_reclaim_bytes(trash: &TrashDir, name: &str) -> u64 {
-    let payload = trash.files().join(name);
-    let info = trash.info().join(format!("{name}.trashinfo"));
-    let payload_sz = directorysizes_cached_size(trash, name)
-        .unwrap_or_else(|| crate::fastdelete::disk_usage(&payload));
-    let info_sz = if info.exists() {
-        crate::fastdelete::disk_usage(&info)
-    } else {
-        0
-    };
-    payload_sz.saturating_add(info_sz)
+    DirSizes::load(trash).entry_bytes(name)
 }
 
 /// Reclaimable bytes for a path under `files/` (top-level name), using the
 /// directorysizes cache when the payload is a directory with a valid line.
 pub fn files_child_reclaim_bytes(trash: &TrashDir, path: &Path) -> u64 {
-    let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
-        return crate::fastdelete::disk_usage(path);
-    };
-    // Prefer cache only when this is the trash files/ child (same parent as files()).
-    if path.parent().is_some_and(|p| p == trash.files()) {
-        if let Some(sz) = directorysizes_cached_size(trash, &name) {
-            return sz;
+    match path.file_name() {
+        Some(name) if path.parent() == Some(trash.files().as_path()) => {
+            DirSizes::load(trash).payload_bytes(&name.to_string_lossy())
         }
+        _ => crate::fastdelete::disk_usage(path),
     }
-    crate::fastdelete::disk_usage(path)
 }
 
 /// Write `data` to `path` via a same-dir temp file and rename (atomic on POSIX).
@@ -1012,6 +1141,28 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn shared_trash_problem_names_each_failed_check() {
+        let root = std::env::temp_dir().join(format!("rtrash-shared-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let plain = root.join("plain");
+        fs::create_dir(&plain).unwrap();
+        fs::set_permissions(&plain, fs::Permissions::from_mode(0o777)).unwrap();
+        let sticky = root.join("sticky");
+        fs::create_dir(&sticky).unwrap();
+        fs::set_permissions(&sticky, fs::Permissions::from_mode(0o1777)).unwrap();
+        let file = root.join("file");
+        fs::write(&file, b"x").unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&sticky, &link).unwrap();
+        let check = |p: &Path| shared_trash_problem(&fs::symlink_metadata(p).unwrap());
+        assert_eq!(check(&plain), Some("lacks the sticky bit"));
+        assert_eq!(check(&sticky), None);
+        assert_eq!(check(&file), Some("is not a directory"));
+        assert_eq!(check(&link), Some("is a symbolic link"));
+        let _ = fs::remove_dir_all(&root);
+    }
     #[test]
     fn relocate_same_fs_moves_file() {
         let root = std::env::temp_dir().join(format!(

@@ -673,11 +673,23 @@ Home trash:
 .BR info/ ,
 .BR directorysizes ,
 and optional lock file.
+Cache sizes count allocated blocks as
+.B du \-B1
+does.
+.B status
+and
+.B "empty \-\-dry\-run"
+write walked sizes back.
 .TP
 .IR $top /.Trash/ $uid
 or
 .IR $top /.Trash\- $uid
 Per-volume trash on other mounts (see the Trash specification).
+A
+.I $top/.Trash
+that exists as a symlink or a plain file, or lacks the sticky bit,
+gets a warning, and put falls back to
+.IR $top /.Trash\- $uid .
 .SH EXIT STATUS
 .TP
 .B 0

@@ -347,19 +347,30 @@ fn read_dirfd_entries(dirfd: RawFd) -> io::Result<Vec<DirEnt>> {
     Ok(names)
 }
 
-/// Allocated disk usage of `path` in bytes (`st_blocks * 512`), like a fast
-/// in-process `du -sB1` / `du --apparent-size` hybrid: we use block allocation
-/// so sparse files report reclaimable space, not logical length.
+/// Allocated disk usage of `path` in bytes, as `du -sB1` counts it: the
+/// blocks (`st_blocks * 512`) of every file and directory in the tree, so
+/// sparse files report reclaimable space rather than logical length. A
+/// file with several hard links in the tree counts once.
 ///
 /// Symlinks count only the link inode (not the target). Missing paths are 0.
 pub fn disk_usage(path: &Path) -> u64 {
+    let seen = std::sync::Mutex::new(std::collections::HashSet::new());
+    usage_in(path, &seen)
+}
+
+fn usage_in(path: &Path, seen: &std::sync::Mutex<std::collections::HashSet<(u64, u64)>>) -> u64 {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(_) => return 0,
     };
     let own = meta.blocks().saturating_mul(512);
     if !meta.is_dir() {
-        return own;
+        let repeat = meta.nlink() > 1
+            && !seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert((meta.dev(), meta.ino()));
+        return if repeat { 0 } else { own };
     }
     // Directory tree: sum children (parallel at this level when wide).
     let Ok(rd) = fs::read_dir(path) else {
@@ -367,9 +378,9 @@ pub fn disk_usage(path: &Path) -> u64 {
     };
     let children: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     let child_sum: u64 = if children.len() >= 4 {
-        children.par_iter().map(|p| disk_usage(p)).sum()
+        children.par_iter().map(|p| usage_in(p, seen)).sum()
     } else {
-        children.iter().map(|p| disk_usage(p)).sum()
+        children.iter().map(|p| usage_in(p, seen)).sum()
     };
     own.saturating_add(child_sum)
 }
@@ -517,6 +528,38 @@ mod tests {
     fn missing_is_ok() {
         let root = tmp_root("miss");
         remove_path(&root.join("nope")).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn disk_usage_counts_hard_links_once_like_du_b1() {
+        let root = tmp_root("du-links");
+        let d = root.join("d");
+        fs::create_dir_all(d.join("sub")).unwrap();
+        fs::write(d.join("a"), vec![b'x'; 50_000]).unwrap();
+        fs::hard_link(d.join("a"), d.join("sub/a-link")).unwrap();
+        fs::write(d.join("sub/b"), vec![b'y'; 9000]).unwrap();
+        let one = fs::symlink_metadata(d.join("a")).unwrap().blocks() * 512;
+        let dirs = fs::symlink_metadata(&d).unwrap().blocks() * 512
+            + fs::symlink_metadata(d.join("sub")).unwrap().blocks() * 512;
+        let b = fs::symlink_metadata(d.join("sub/b")).unwrap().blocks() * 512;
+        assert_eq!(disk_usage(&d), dirs + one + b);
+        let gnu = std::process::Command::new("du")
+            .args(["-sB1"])
+            .arg(&d)
+            .output()
+            .ok()
+            .filter(|o| o.status.success());
+        if let Some(o) = gnu {
+            let n: u64 = String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            if n > 0 {
+                assert_eq!(disk_usage(&d), n);
+            }
+        }
         let _ = fs::remove_dir_all(&root);
     }
 

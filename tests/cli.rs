@@ -1057,7 +1057,15 @@ fn directory_put_writes_directorysizes_empty_prunes() {
     let parts: Vec<&str> = line.split_whitespace().collect();
     assert!(parts.len() >= 3, "expected size mtime name, got {line:?}");
     let size: u64 = parts[0].parse().expect("size");
-    assert_eq!(size, 12, "4+8 payload bytes");
+    // The spec asks for `du -B1` usage: blocks, the directory's own included.
+    use std::os::unix::fs::MetadataExt;
+    let payload = sb.trash().join("files/tree");
+    let blocks = |p: &std::path::Path| fs::symlink_metadata(p).unwrap().blocks() * 512;
+    let want = blocks(&payload) + blocks(&payload.join("a")) + blocks(&payload.join("b"));
+    assert_eq!(
+        size, want,
+        "block usage of the tree, not the 12 payload bytes"
+    );
     assert_eq!(parts[parts.len() - 1], "tree");
 
     // File-only put must not invent a directorysizes line for that file name.
@@ -1220,6 +1228,27 @@ fn status_uses_directorysizes_cache_when_valid() {
     assert!(
         !s2.contains("741") && !s2.contains("740.") && !s2.contains("GiB"),
         "stale cache must not dominate status: {s2}"
+    );
+}
+
+#[test]
+fn status_writes_missing_directorysizes_back_and_drops_gone_lines() {
+    let sb = Sandbox::new("status-writeback");
+    let d = sb.work().join("walked");
+    fs::create_dir(&d).unwrap();
+    fs::write(d.join("inner"), vec![b'q'; 5000]).unwrap();
+    assert!(sb.run(&["put", "-r", "walked"]).status.success());
+    let cache = sb.trash().join("directorysizes");
+    let first = fs::read_to_string(&cache).unwrap();
+    // A trash written by another tool: no line for `walked`, and a line for
+    // a directory that a third tool already removed.
+    fs::write(&cache, "4096 1 long%20gone\n").unwrap();
+    let out = sb.run(&["status", "--home-only"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let body = fs::read_to_string(&cache).unwrap();
+    assert_eq!(
+        body, first,
+        "the walked size returns and the gone line leaves"
     );
 }
 
