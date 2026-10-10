@@ -608,6 +608,23 @@ On Windows, invoke `rtrash put|list|restore|empty|rm|status` directly.
     }
 }
 
+/// Items and bytes in the Recycle Bin of the drive whose root is `root`
+/// (for example `C:\\`).
+#[cfg(windows)]
+pub fn query_bin(root: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
+    let w: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut info = SHQUERYRBINFO {
+        cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
+        i64Size: 0,
+        i64NumItems: 0,
+    };
+    // SAFETY: `w` is NUL-terminated and `info` carries its own size.
+    let hr = unsafe { SHQueryRecycleBinW(w.as_ptr(), &mut info) };
+    (hr >= 0).then(|| (info.i64NumItems.max(0) as u64, info.i64Size.max(0) as u64))
+}
+
 #[cfg(windows)]
 pub fn put_run(prog: &str, args: &[String]) -> i32 {
     os::put_run(prog, args)

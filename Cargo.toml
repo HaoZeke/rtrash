@@ -74,6 +74,13 @@ mimalloc = { version = "0.1", default-features = false }
 # Windows system Recycle Bin (shell APIs). Not used on Unix FreeDesktop builds.
 [target.'cfg(windows)'.dependencies]
 trash = { version = "5.2", default-features = true }
+# du lists directories with GetFileInformationByHandleEx.
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_UI_Shell",
+] }
 
 [profile.release]
 lto = true

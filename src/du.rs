@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::ffi::CStr;
 use std::fs;
 use std::io::{self, Write};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,11 +15,11 @@ use rayon::prelude::*;
 
 use crate::du_fs;
 use crate::du_git::{self, GitState};
-use crate::fastdelete::format_bytes;
-use crate::info;
-use crate::list::json_escape;
+#[cfg(unix)]
 use crate::status;
+#[cfg(unix)]
 use crate::trashdir::{self, TrashDir};
+use crate::util::{format_bytes, json_escape};
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [PATH]...
@@ -270,6 +271,7 @@ pub struct TrashSummary {
 }
 
 /// Summarize the trash dirs that live on the same device as any scan root.
+#[cfg(unix)]
 pub fn trash_on_scanned_devices(dirs: &[TrashDir], report: &Report) -> TrashSummary {
     let devs: HashSet<u64> = report
         .roots
@@ -291,6 +293,30 @@ pub fn trash_on_scanned_devices(dirs: &[TrashDir], report: &Report) -> TrashSumm
         items,
         bytes,
     }
+}
+
+/// Summarize the Recycle Bin of each drive that holds a scan root.
+#[cfg(windows)]
+pub fn recycle_bin_on_scanned_drives(report: &Report) -> TrashSummary {
+    let mut drives: Vec<PathBuf> = Vec::new();
+    for r in &report.roots {
+        let mut c = r.path.components();
+        if let (Some(std::path::Component::Prefix(p)), Some(root)) = (c.next(), c.next()) {
+            let d = PathBuf::from(p.as_os_str()).join(root.as_os_str());
+            if !drives.contains(&d) {
+                drives.push(d);
+            }
+        }
+    }
+    let mut t = TrashSummary::default();
+    for d in drives {
+        if let Some((items, bytes)) = crate::win_recycle::query_bin(&d) {
+            t.items += items;
+            t.bytes += bytes;
+            t.roots.push(d);
+        }
+    }
+    t
 }
 
 /// One list shared by every worker, with the key of its smallest kept
@@ -825,9 +851,39 @@ pub fn scan(paths: &[PathBuf], opts: &ScanOpts) -> io::Result<Report> {
 fn absolute(p: &Path) -> io::Result<PathBuf> {
     if p.file_name().is_none() {
         // `.`, `..`, `/`: no final component to keep unresolved.
-        return fs::canonicalize(p);
+        return canonical(p);
     }
-    trashdir::abs_nofollow(p)
+    let parent = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => canonical(d)?,
+        _ => std::env::current_dir()?,
+    };
+    Ok(parent.join(p.file_name().unwrap_or_default()))
+}
+
+#[cfg(unix)]
+fn canonical(p: &Path) -> io::Result<PathBuf> {
+    fs::canonicalize(p)
+}
+
+/// Canonical path without the verbatim `\\?\` prefix that
+/// `fs::canonicalize` adds on Windows, so rows print as users type them.
+#[cfg(windows)]
+fn canonical(p: &Path) -> io::Result<PathBuf> {
+    let c = fs::canonicalize(p)?;
+    Ok(strip_verbatim(&c))
+}
+
+#[cfg(any(windows, test))]
+fn strip_verbatim(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match s.strip_prefix(r"\\?\") {
+        // Only a drive path has a plain form: `C:\...`.
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+        _ => p.to_path_buf(),
+    }
 }
 
 /// Fill in `git` for every listed row. Returns false when `git` could not
@@ -1008,12 +1064,12 @@ fn print_trash(t: &TrashSummary) {
 }
 
 fn pick_available() -> bool {
-    cfg!(feature = "tui") && crate::util::stdin_is_tty()
+    cfg!(all(unix, feature = "tui")) && crate::util::stdin_is_tty()
 }
 
 /// Browser rows for `--pick`: directories then files, without trash rows.
 /// Rows with git work at risk carry `warn` and show `!`.
-#[cfg(feature = "tui")]
+#[cfg(all(unix, feature = "tui"))]
 pub fn pick_rows(report: &Report) -> Vec<crate::put_tui::PathRow> {
     let items: Vec<&Item> = report
         .dirs
@@ -1089,7 +1145,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut include_dirty = false;
     let mut pick = false;
     let mut threads: Option<usize> = None;
-    let now = info::now_epoch();
+    let now = crate::util::now_epoch();
     let mut i = 0usize;
     while i < args.len() {
         let arg = args[i].as_str();
@@ -1180,15 +1236,25 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         paths.push(PathBuf::from("."));
     }
 
+    #[cfg(windows)]
+    {
+        // The Recycle Bin has no FreeDesktop layout to pin.
+        let _ = (home_only, &trash_pins);
+    }
+    #[cfg(unix)]
     let trash_dirs = trashdir::resolve_dirs_opts(&trash_pins, home_only);
+    #[cfg(unix)]
     if trash_dirs.is_empty() && !trash_pins.is_empty() {
         eprintln!("{prog}: no valid --trash-dir pins (need files/ and info/ directories)");
         return 2;
     }
-    opts.trash_roots = trash_dirs
-        .iter()
-        .map(|d| fs::canonicalize(&d.root).unwrap_or_else(|_| d.root.clone()))
-        .collect();
+    #[cfg(unix)]
+    {
+        opts.trash_roots = trash_dirs
+            .iter()
+            .map(|d| fs::canonicalize(&d.root).unwrap_or_else(|_| d.root.clone()))
+            .collect();
+    }
     let scanned = match threads {
         Some(n) => match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
             Ok(pool) => pool.install(|| scan(&paths, &opts)),
@@ -1216,8 +1282,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: warning: git not found; rows carry no git state");
     }
 
+    #[cfg(unix)]
     let trash = trash_on_scanned_devices(&trash_dirs, &report);
-    #[cfg(feature = "tui")]
+    #[cfg(windows)]
+    let trash = recycle_bin_on_scanned_drives(&report);
+    #[cfg(all(unix, feature = "tui"))]
     if pick {
         let title = report
             .roots
@@ -1288,6 +1357,15 @@ mod tests {
             repos: Vec::new(),
             git: None,
         }
+    }
+
+    #[test]
+    fn verbatim_prefix_is_dropped_only_where_a_plain_form_exists() {
+        let p = |s: &str| strip_verbatim(Path::new(s));
+        assert_eq!(p(r"\\?\C:\Users\me"), PathBuf::from(r"C:\Users\me"));
+        assert_eq!(p(r"\\?\UNC\srv\share\x"), PathBuf::from(r"\\srv\share\x"));
+        assert_eq!(p(r"\\?\Volume{1}\x"), PathBuf::from(r"\\?\Volume{1}\x"));
+        assert_eq!(p("/home/me"), PathBuf::from("/home/me"));
     }
 
     #[test]

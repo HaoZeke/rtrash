@@ -11,11 +11,8 @@ pub mod platform;
 pub mod util;
 pub mod win_recycle;
 
-#[cfg(unix)]
 pub mod du;
-#[cfg(unix)]
 pub mod du_fs;
-#[cfg(unix)]
 pub mod du_git;
 #[cfg(unix)]
 pub mod empty;
@@ -57,13 +54,6 @@ pub mod tui_select;
 pub mod tui_term;
 
 // Windows CLI surface: system Recycle Bin (not FreeDesktop modules).
-#[cfg(windows)]
-pub mod du {
-    pub fn run(prog: &str, _args: &[String]) -> i32 {
-        eprintln!("{prog}: du is not available on Windows yet");
-        1
-    }
-}
 #[cfg(windows)]
 pub mod empty {
     pub fn run(prog: &str, args: &[String]) -> i32 {

@@ -53,16 +53,23 @@ pub struct RowQuery<'a> {
 /// each probe skips the search.
 pub fn find_git() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    let exe = if cfg!(windows) { "git.exe" } else { "git" };
     std::env::split_paths(&path)
-        .map(|d| d.join("git"))
+        .map(|d| d.join(exe))
         .find(|p| is_executable(p))
 }
 
+#[cfg(unix)]
 fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(p)
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_executable(p: &Path) -> bool {
+    std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false)
 }
 
 fn git(bin: &Path, repo: &Path) -> Command {

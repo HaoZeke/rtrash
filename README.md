@@ -101,7 +101,7 @@ $ pip install rtrash
 | -- | ------- | ----- |
 | **Linux** | FreeDesktop home + per-mount trash | Primary niche; multi-call `setup`, musl releases, full suite tests |
 | **macOS** | FreeDesktop **home** trash only (experimental) | `$XDG_DATA_HOME/Trash` or `~/.local/share/Trash`. **Not** Finder / system Trash |
-| **Windows** | System **Recycle Bin** (shell APIs) | put/list/restore/empty/rm/status. **Not** FreeDesktop on-disk layout. Multi-call `setup` is Unix-oriented |
+| **Windows** | System **Recycle Bin** (shell APIs) | put/list/restore/empty/rm/status/du. **Not** FreeDesktop on-disk layout. Multi-call `setup` is Unix-oriented |
 
 On Linux/macOS TTY, bare `rtrash restore` opens the **interactive restore browser** (ratatui). Windows uses numbered restore selection (no TUI).
 
