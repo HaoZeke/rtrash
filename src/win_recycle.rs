@@ -330,11 +330,14 @@ on the Recycle Bin backend.
     pub fn restore_run(prog: &str, args: &[String]) -> i32 {
         let mut force = false;
         let mut plain = true; // no TUI on Windows recycle path
+        let mut newest_first = false;
         let mut target: Option<PathBuf> = None;
         for arg in args {
             match arg.as_str() {
                 "-f" | "--force" => force = true,
                 "--plain" | "--cwd-only" | "--home-only" => plain = true,
+                "--newest-first" => newest_first = true,
+                "--oldest-first" => newest_first = false,
                 "--help" => {
                     print!(
                         "\
@@ -346,6 +349,8 @@ Without PATH, print a numbered list and read an index from stdin.
 
   -f, --force   overwrite when the destination exists (best-effort)
       --plain   numbered selection (default on Windows)
+      --newest-first  list the most recently deleted item first
+      --oldest-first  list the oldest deleted item first (default)
       --help    display this help and exit
       --version output version information and exit
 "
@@ -378,7 +383,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 return 1;
             }
         };
-        let matches: Vec<TrashItem> = match &target {
+        let mut matches: Vec<TrashItem> = match &target {
             Some(t) => {
                 let abs = std::fs::canonicalize(t).unwrap_or_else(|_| t.clone());
                 items
@@ -394,6 +399,10 @@ Without PATH, print a numbered list and read an index from stdin.
         }
         if matches.len() == 1 {
             return restore_one(prog, matches, force);
+        }
+        matches.sort_by_key(|it| it.time_deleted);
+        if newest_first {
+            matches.reverse();
         }
         // Numbered pick.
         for (i, it) in matches.iter().enumerate() {

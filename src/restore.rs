@@ -19,9 +19,15 @@ By default every trashed item in scope is listed; pass --cwd-only to limit to
 items whose original path is under the current directory. A single match
 restores immediately.
 
+The browser lists the most recently trashed item first, with the cursor on
+it. The numbered table lists oldest first, so the newest item sits next to
+the index prompt. --newest-first and --oldest-first set the order for both.
+
   -f, --force     overwrite an existing file at the original location
       --cwd-only  without PATH, only items trashed from under the current directory
       --plain     force numbered line selection even on a TTY (no TUI)
+      --newest-first  list the most recently trashed item first
+      --oldest-first  list the oldest trashed item first
       --home-only  only the home trash (skip volume trash)
       --trash-dir=PATH  only consider this trash directory (repeatable)
       --help      display this help and exit
@@ -33,6 +39,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut home_only = false;
     let mut cwd_only = false;
     let mut plain = false;
+    let mut newest_first: Option<bool> = None;
     let mut target: Option<PathBuf> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     for arg in args {
@@ -41,6 +48,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--home-only" => home_only = true,
             "--cwd-only" => cwd_only = true,
             "--plain" => plain = true,
+            "--newest-first" => newest_first = Some(true),
+            "--oldest-first" => newest_first = Some(false),
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -72,7 +81,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 2;
     }
     let entries = list::collect(&dirs);
-    let matches: Vec<&list::Entry> = match &target {
+    let mut matches: Vec<&list::Entry> = match &target {
         Some(t) => {
             let abs = absolutize(t);
             entries.iter().filter(|e| e.original == abs).collect()
@@ -96,10 +105,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     // TTY + multi-item: prefer ratatui browser when built with `tui` (unless --plain).
     #[cfg(feature = "tui")]
     if !plain && target.is_none() && matches.len() > 1 && stdin_is_tty() {
+        order_entries(&mut matches, newest_first.unwrap_or(true));
         return crate::restore_tui::run(prog, matches, force);
     }
     #[cfg(not(feature = "tui"))]
     let _ = plain;
+    order_entries(&mut matches, newest_first.unwrap_or(false));
 
     let chosen: &list::Entry = if matches.len() == 1 {
         matches[0]
@@ -140,6 +151,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     };
 
     restore_entry(prog, chosen, force)
+}
+
+/// Order entries by deletion time. `list::collect` yields oldest first, with
+/// ties broken by original path; newest first reverses that whole order, so
+/// equal timestamps keep a stable, path-sorted position in both directions.
+pub fn order_entries(entries: &mut [&list::Entry], newest_first: bool) {
+    entries.sort_by(|a, b| {
+        a.epoch
+            .cmp(&b.epoch)
+            .then_with(|| a.original.cmp(&b.original))
+    });
+    if newest_first {
+        entries.reverse();
+    }
 }
 
 fn absolutize(p: &Path) -> PathBuf {
@@ -248,4 +273,53 @@ pub(crate) fn restore_entry(prog: &str, entry: &list::Entry, force: bool) -> i32
     trashdir::directorysizes_remove(&entry.dir, &entry.name);
     println!("restored '{}'", dest.display());
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trashdir::TrashDir;
+
+    fn entry(path: &str, epoch: i64) -> list::Entry {
+        list::Entry {
+            date: None,
+            epoch,
+            original: PathBuf::from(path),
+            name: "n".into(),
+            dir: TrashDir {
+                root: PathBuf::from("/tmp/trash"),
+                topdir: None,
+            },
+        }
+    }
+
+    fn paths(entries: &[&list::Entry]) -> Vec<String> {
+        entries
+            .iter()
+            .map(|e| e.original.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn order_newest_first_puts_latest_on_top() {
+        let old = entry("/a/old", 10);
+        let mid = entry("/a/mid", 20);
+        let new = entry("/a/new", 30);
+        let mut v = vec![&mid, &old, &new];
+        order_entries(&mut v, true);
+        assert_eq!(paths(&v), ["/a/new", "/a/mid", "/a/old"]);
+        order_entries(&mut v, false);
+        assert_eq!(paths(&v), ["/a/old", "/a/mid", "/a/new"]);
+    }
+
+    #[test]
+    fn order_ties_reverse_as_a_block() {
+        let x = entry("/t/x", 5);
+        let y = entry("/t/y", 5);
+        let mut v = vec![&y, &x];
+        order_entries(&mut v, false);
+        assert_eq!(paths(&v), ["/t/x", "/t/y"]);
+        order_entries(&mut v, true);
+        assert_eq!(paths(&v), ["/t/y", "/t/x"]);
+    }
 }

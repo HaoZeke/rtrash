@@ -526,6 +526,51 @@ fn restore_interactive_picks_by_index_from_full_trash() {
     assert_eq!(trash_names(&sb).len(), 1);
 }
 
+/// Backdate one trashinfo so ordering tests do not depend on put timing.
+fn backdate_trashinfo(sb: &Sandbox, name: &str, date: &str) {
+    let info = sb.trash().join(format!("info/{name}.trashinfo"));
+    let text = fs::read_to_string(&info).unwrap();
+    let out: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if l.starts_with("DeletionDate=") {
+                format!("DeletionDate={date}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    fs::write(&info, out.join("\n") + "\n").unwrap();
+}
+
+#[test]
+fn restore_plain_order_defaults_oldest_first_and_flags_flip_it() {
+    let sb = Sandbox::new("restore-order");
+    let old = sb.touch("old.txt");
+    let new = sb.touch("new.txt");
+    assert!(sb.run(&["put", "old.txt", "new.txt"]).status.success());
+    backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+
+    // Numbered table keeps oldest first: index 0 is the backdated item.
+    let out = sb.run_with_stdin(&["restore", &pin, "--plain"], "0\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let table = stdout_of(&out);
+    let first = table.lines().next().unwrap_or("");
+    assert!(first.contains("old.txt"), "{table}");
+    assert!(old.exists() && !new.exists());
+
+    // --newest-first flips the table: index 0 is now the latest item.
+    assert!(sb.run(&["put", "old.txt"]).status.success());
+    backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
+    let out = sb.run_with_stdin(&["restore", &pin, "--plain", "--newest-first"], "0\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let table = stdout_of(&out);
+    let first = table.lines().next().unwrap_or("");
+    assert!(first.contains("new.txt"), "{table}");
+    assert!(new.exists() && !old.exists());
+}
+
 #[test]
 fn restore_cwd_only_skips_items_outside_cwd() {
     let sb = Sandbox::new("restore-cwd");

@@ -310,6 +310,7 @@ Per-root item count and reclaimable size (uses `directorysizes` when valid). Sam
 | `rtrash restore --plain` | Numbered line list + index (scripts / no TUI) |
 | `printf '0\n' \| rtrash restore` | Piped index without TUI |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
+| `rtrash restore --newest-first` / `--oldest-first` | Set the list order. The interactive browser lists newest first; `--plain` lists oldest first, so the newest item sits next to the prompt |
 | Single match | Restores immediately without prompting |
 
 **TUI keys (shared by restore / empty / put):** defaults `↑↓`/`jk` move · `PgUp`/`PgDn` page · `g`/`G` first/last · `Space` mark · `a`/`A` all/clear · `/` live fuzzy · `?` help · `Enter` action · `q`/`Esc` quit.
