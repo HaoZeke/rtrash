@@ -348,14 +348,14 @@ $ rtrash empty -n && rtrash empty 14                    # free the space
 | `rtrash restore --plain` | Numbered line list + index (scripts / no TUI) |
 | `printf '0\n' \| rtrash restore` | Piped index without TUI |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
-| `rtrash restore --newest-first` / `--oldest-first` | Set the list order. The interactive browser lists newest first; `--plain` lists oldest first, so the newest item sits next to the prompt |
+| `rtrash restore --newest-first` / `--oldest-first` | Set the list order. The interactive browser lists newest first and `o` flips it; `--plain` lists oldest first, so the newest item sits next to the prompt |
 | Single match | Restores immediately without prompting |
 
 **TUI keys (shared by restore / empty / put):** defaults `↑↓`/`jk` move · `PgUp`/`PgDn` page · `g`/`G` first/last · `Space` mark · `a`/`A` all/clear · `/` live fuzzy · `?` help · `Enter` action · `q`/`Esc` quit.
 
 **Fully customizable:** every action can be remapped in `$XDG_CONFIG_HOME/rtrash/keys.toml` (or `RTRASH_KEYS=path`). TOML under `[keys]`; `rtrash keys --list` shows the resolved map; `rtrash keys --sample` prints a full template. Help (`?`) reflects the live map.
 
-Browser-specific actions (also remappable): restore `toggle_force` · empty `toggle_dry_run` · put `toggle_recursive` / `toggle_force`.
+Browser-specific actions (also remappable): restore `toggle_force` / `toggle_order` · empty `toggle_dry_run` · put `toggle_recursive` / `toggle_force`.
 
 **TUI empty:** bare `rtrash empty` on a TTY opens the multi-select permanent-delete browser (`--plain` or non-TTY keeps classic empty).
 

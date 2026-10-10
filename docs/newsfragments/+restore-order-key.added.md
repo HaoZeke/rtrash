@@ -1,0 +1,1 @@
+restore: in the browser, `o` (the remappable `toggle_order` action) flips the list between newest and oldest first. Marks, the filter and the cursor stay on the same items, and the title shows the current order.

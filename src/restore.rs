@@ -105,8 +105,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     // TTY + multi-item: prefer ratatui browser when built with `tui` (unless --plain).
     #[cfg(feature = "tui")]
     if !plain && target.is_none() && matches.len() > 1 && stdin_is_tty() {
-        order_entries(&mut matches, newest_first.unwrap_or(true));
-        return crate::restore_tui::run(prog, matches, force);
+        let newest = newest_first.unwrap_or(true);
+        order_entries(&mut matches, newest);
+        return crate::restore_tui::run(prog, matches, force, newest);
     }
     #[cfg(not(feature = "tui"))]
     let _ = plain;

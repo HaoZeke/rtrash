@@ -51,6 +51,11 @@ impl Selection {
             .collect()
     }
 
+    /// Move every mark through `f`, for when the entries are reordered.
+    pub fn remap(&mut self, f: impl Fn(usize) -> usize) {
+        self.marked = self.marked.iter().map(|&i| f(i)).collect();
+    }
+
     /// All marked indices ascending.
     pub fn marked_sorted(&self) -> Vec<usize> {
         self.marked.iter().copied().collect()

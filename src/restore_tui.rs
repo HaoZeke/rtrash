@@ -54,17 +54,18 @@ struct App<'a> {
     /// Inner list rows from last draw (for PageUp/Down).
     viewport_rows: usize,
     keys: Keymap,
+    newest_first: bool,
 }
 
 impl<'a> App<'a> {
-    fn new(prog: &'a str, entries: Vec<&'a Entry>, force: bool) -> Self {
+    fn new(prog: &'a str, entries: Vec<&'a Entry>, force: bool, newest_first: bool) -> Self {
         let mut list_state = ListState::default();
         if !entries.is_empty() {
             list_state.select(Some(0));
         }
         let n = entries.len();
         let keys = Keymap::load();
-        let force_hint = format!("{} force", keys.display_chords(Action::ToggleForce));
+        let force_hint = footer_extras(&keys);
         let mut app = Self {
             prog,
             entries,
@@ -83,6 +84,7 @@ impl<'a> App<'a> {
             pending_idxs: Vec::new(),
             viewport_rows: 10,
             keys,
+            newest_first,
         };
         app.refilter_query(&app.filter.clone());
         app
@@ -100,6 +102,21 @@ impl<'a> App<'a> {
         let new_sel = tui_list::reselect_after_filter(prev, &self.filtered);
         self.list_state.select(new_sel);
         self.ensure_scroll();
+    }
+
+    /// Reverse the list between newest and oldest first, keeping marks,
+    /// the filter and the cursor on the same entries.
+    fn toggle_order(&mut self) {
+        let n = self.entries.len();
+        let prev = self.selected_entry_idx();
+        self.entries.reverse();
+        self.sel.remap(|i| n - 1 - i);
+        self.newest_first = !self.newest_first;
+        self.filtered = filter_indices(&self.entries, &self.filter);
+        let sel = tui_list::reselect_after_filter(prev.map(|i| n - 1 - i), &self.filtered);
+        self.list_state.select(sel);
+        self.ensure_scroll();
+        self.status = order_label(self.newest_first).into();
     }
 
     fn ensure_scroll(&mut self) {
@@ -334,10 +351,27 @@ impl<'a> App<'a> {
                 self.force = !self.force;
                 self.status = format!("force={}", self.force);
             }
+            Some(Action::ToggleOrder) => self.toggle_order(),
             Some(Action::Action) => self.try_restore(),
             _ => {}
         }
     }
+}
+
+fn order_label(newest_first: bool) -> &'static str {
+    if newest_first {
+        "newest first"
+    } else {
+        "oldest first"
+    }
+}
+
+fn footer_extras(keys: &Keymap) -> String {
+    format!(
+        "{} force  {} order",
+        keys.display_chords(Action::ToggleForce),
+        keys.display_chords(Action::ToggleOrder)
+    )
 }
 
 fn date_label(e: &Entry) -> String {
@@ -369,9 +403,10 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         format!(" fuzzy:{:?}", app.filter)
     };
     let title = format!(
-        " rtrash restore · {} item(s) · {} marked{} ",
+        " rtrash restore · {} item(s) · {} marked · {}{} ",
         app.entries.len(),
         app.sel.len(),
+        order_label(app.newest_first),
         filter_show
     );
     let header = Paragraph::new(Line::from(vec![
@@ -402,7 +437,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         .highlight_symbol("▸ ");
     f.render_stateful_widget(list, chunks[1], &mut app.list_state);
 
-    let force_hint = format!("{} force", app.keys.display_chords(Action::ToggleForce));
+    let force_hint = footer_extras(&app.keys);
     let keys = match app.mode {
         Mode::Browse => app.keys.browse_footer("restore", &force_hint),
         Mode::Filter => format!(
@@ -427,7 +462,14 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
     f.render_widget(footer, chunks[2]);
 
     if app.mode == Mode::Help {
-        draw_help(f, &app.keys, &["toggle_force — force overwrite on restore"]);
+        draw_help(
+            f,
+            &app.keys,
+            &[
+                "toggle_force — force overwrite on restore",
+                "toggle_order — newest or oldest first",
+            ],
+        );
     }
 
     if matches!(app.mode, Mode::ConfirmOverwrite | Mode::ConfirmBulk) {
@@ -527,7 +569,7 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
 }
 
 /// Run the restore TUI. Returns process exit code.
-pub fn run(prog: &str, entries: Vec<&Entry>, force: bool) -> i32 {
+pub fn run(prog: &str, entries: Vec<&Entry>, force: bool, newest_first: bool) -> i32 {
     if entries.is_empty() {
         eprintln!("{prog}: no trashed files match");
         return 1;
@@ -544,7 +586,7 @@ pub fn run(prog: &str, entries: Vec<&Entry>, force: bool) -> i32 {
         }
     };
 
-    let mut app = App::new(prog, entries, force);
+    let mut app = App::new(prog, entries, force, newest_first);
     let result = (|| -> io::Result<()> {
         loop {
             terminal.draw(|f| ui(f, &mut app))?;
@@ -661,5 +703,27 @@ mod tests {
         assert_eq!(s.marked_visible(&[2, 0, 1]), vec![2, 0]);
         s.remap_after_removals(&[0]);
         assert_eq!(s.marked_sorted(), vec![1]); // 2 -> 1
+    }
+
+    #[test]
+    fn toggle_order_reverses_and_keeps_marks_and_cursor() {
+        let (a, b, c) = (entry("/new"), entry("/mid"), entry("/old"));
+        let mut app = App::new("restore", vec![&a, &b, &c], false, true);
+        app.keys = Keymap::builtin();
+        app.sel.toggle(0);
+        app.move_sel(1); // cursor on /mid
+        app.toggle_order();
+        let order: Vec<_> = app.entries.iter().map(|e| e.original.clone()).collect();
+        assert_eq!(order, [PathBuf::from("/old"), "/mid".into(), "/new".into()]);
+        assert!(!app.newest_first);
+        assert_eq!(app.sel.marked_sorted(), vec![2], "the mark follows /new");
+        assert_eq!(
+            app.selected_entry().unwrap().original,
+            PathBuf::from("/mid")
+        );
+        assert_eq!(app.status, "oldest first");
+        app.toggle_order();
+        assert!(app.newest_first);
+        assert_eq!(app.sel.marked_sorted(), vec![0]);
     }
 }

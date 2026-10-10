@@ -52,6 +52,8 @@ pub enum Action {
     ToggleDryRun,
     /// Put: toggle recursive dirs.
     ToggleRecursive,
+    /// Restore: flip between newest and oldest first.
+    ToggleOrder,
 }
 
 impl Action {
@@ -77,6 +79,7 @@ impl Action {
         Action::ToggleForce,
         Action::ToggleDryRun,
         Action::ToggleRecursive,
+        Action::ToggleOrder,
     ];
 
     pub const BROWSE: &'static [Action] = &[
@@ -97,6 +100,7 @@ impl Action {
         Action::ToggleForce,
         Action::ToggleDryRun,
         Action::ToggleRecursive,
+        Action::ToggleOrder,
     ];
 
     pub const FILTER: &'static [Action] = &[
@@ -140,6 +144,7 @@ impl Action {
             Action::ToggleForce => "toggle_force",
             Action::ToggleDryRun => "toggle_dry_run",
             Action::ToggleRecursive => "toggle_recursive",
+            Action::ToggleOrder => "toggle_order",
         }
     }
 
@@ -170,6 +175,7 @@ impl Action {
             Action::ToggleForce => "toggle force (restore/put)",
             Action::ToggleDryRun => "toggle dry-run (empty)",
             Action::ToggleRecursive => "toggle recursive (put)",
+            Action::ToggleOrder => "newest or oldest first (restore)",
         }
     }
 }
@@ -424,6 +430,7 @@ impl Keymap {
         set(&mut binds, Action::ToggleForce, &["f"]);
         set(&mut binds, Action::ToggleDryRun, &["n"]);
         set(&mut binds, Action::ToggleRecursive, &["r"]);
+        set(&mut binds, Action::ToggleOrder, &["o"]);
         Self {
             binds,
             source: None,
