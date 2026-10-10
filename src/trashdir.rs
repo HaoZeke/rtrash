@@ -985,7 +985,9 @@ fn set_times_path(
     let to_timespec = |t: std::time::SystemTime| -> libc::timespec {
         let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
         libc::timespec {
-            tv_sec: d.as_secs() as libc::time_t,
+            // `as _` takes the field's own width: libc deprecates naming
+            // `time_t` on musl, where it widens to 64 bits in musl 1.2.
+            tv_sec: d.as_secs() as _,
             tv_nsec: d.subsec_nanos() as libc::c_long,
         }
     };
