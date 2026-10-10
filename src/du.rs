@@ -1515,7 +1515,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "tui")]
+    #[cfg(all(unix, feature = "tui"))]
     #[test]
     fn pick_rows_skip_trash_and_flag_risky() {
         let mut risky = item("/w/local", 9, 9);

@@ -1,4 +1,8 @@
 //! `rtrash du`: sizes, ordering, hard links, symlinks, filters and output modes.
+//!
+//! These run on Windows too. A few stay Unix only: sparse files (NTFS does
+//! not make them by default), symlinks (they need a privilege there), the
+//! GNU du parity check, and the FreeDesktop trash row.
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -19,7 +23,7 @@ impl Tree {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         Tree {
-            root: fs::canonicalize(&root).unwrap(),
+            root: plain(fs::canonicalize(&root).unwrap()),
         }
     }
 
@@ -60,6 +64,48 @@ impl Drop for Tree {
     }
 }
 
+/// `canonicalize` on Windows returns a `\\?\` path; rtrash prints the
+/// ordinary form, so tests compare against that.
+fn plain(p: PathBuf) -> PathBuf {
+    match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) if cfg!(windows) => PathBuf::from(rest),
+        _ => p,
+    }
+}
+
+/// Undo the JSON escapes rtrash writes into a path string.
+fn unescape(s: &str) -> String {
+    s.replace(r"\\", "\u{0}")
+        .replace(r#"\""#, "\"")
+        .replace('\u{0}', "\\")
+}
+
+/// A path as it appears between quotes in rtrash's JSON.
+fn escaped(path: &str) -> String {
+    path.replace('\\', r"\\").replace('"', r#"\""#)
+}
+
+/// Set a file or directory's modification time. Windows opens a directory
+/// only with FILE_FLAG_BACKUP_SEMANTICS.
+fn set_mtime(p: &Path, t: SystemTime) {
+    #[cfg(windows)]
+    let f = {
+        use std::os::windows::fs::OpenOptionsExt;
+        File::options()
+            .access_mode(0x100) // FILE_WRITE_ATTRIBUTES
+            .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS
+            .open(p)
+            .unwrap()
+    };
+    #[cfg(not(windows))]
+    let f = if p.is_dir() {
+        File::open(p).unwrap()
+    } else {
+        File::options().write(true).open(p).unwrap()
+    };
+    f.set_modified(t).unwrap();
+}
+
 /// Paths of one JSON array ("dirs" or "files"), in order.
 fn paths_in(json: &str, key: &str) -> Vec<String> {
     let start = json.find(&format!("\"{key}\":[")).expect(key) + key.len() + 4;
@@ -81,8 +127,18 @@ fn paths_in(json: &str, key: &str) -> Vec<String> {
     json[start..end]
         .split("\"path\":\"")
         .skip(1)
-        .map(|s| s.split('"').next().unwrap().to_string())
+        .map(|s| unescape(path_end(s)))
         .collect()
+}
+
+/// The JSON string body at the start of `s`, up to its closing quote.
+fn path_end(s: &str) -> &str {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() && b[i] != b'"' {
+        i += if b[i] == b'\\' { 2 } else { 1 };
+    }
+    &s[..i.min(b.len())]
 }
 
 fn field(json: &str, key: &str) -> u64 {
@@ -95,8 +151,15 @@ fn field(json: &str, key: &str) -> u64 {
         .unwrap()
 }
 
+/// A path as rtrash prints it. Tests build paths with `/`; on Windows the
+/// printed form uses `\\` throughout.
 fn s(p: &Path) -> String {
-    p.to_string_lossy().into_owned()
+    let text = p.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        text.replace('/', "\\")
+    } else {
+        text
+    }
 }
 
 #[test]
@@ -120,6 +183,8 @@ fn lists_largest_files_and_dirs_first() {
     assert!(j.contains("\"files\":3"), "{j}");
 }
 
+// Unix only: see the comment at the top of the file.
+#[cfg(unix)]
 #[test]
 fn apparent_ranks_sparse_file_first() {
     let t = Tree::new("sparse");
@@ -135,6 +200,25 @@ fn apparent_ranks_sparse_file_first() {
     assert_eq!(by_len[0], s(&sparse));
 }
 
+#[test]
+fn hard_links_count_once() {
+    // Wine's directory listing reports file ID 0 for every file, so it has
+    // nothing to match links by; real NTFS reports IDs.
+    if cfg!(windows) && std::env::var_os("WINEPREFIX").is_some() {
+        return;
+    }
+    let t = Tree::new("hardlinks");
+    let a = t.file("d/a.bin", 100_000);
+    fs::hard_link(&a, t.root.join("d/a-link.bin")).unwrap();
+    fs::create_dir(t.root.join("e")).unwrap();
+    fs::hard_link(&a, t.root.join("e/a-link2.bin")).unwrap();
+    let j = t.json(&["--files"]);
+    let roots = &j[..j.find("\"dirs\"").unwrap()];
+    assert_eq!(field(roots, "apparent"), 100_000, "{j}");
+    assert_eq!(paths_in(&j, "files").len(), 1, "{j}");
+}
+
+#[cfg(unix)]
 #[test]
 fn hard_links_count_once_and_symlinks_are_not_followed() {
     let t = Tree::new("links");
@@ -211,10 +295,7 @@ fn dominated_dir_stays_when_its_bulk_is_hidden() {
     // through small.bin) keeps its row.
     let long_ago = SystemTime::now() - Duration::from_secs(90 * 86_400);
     for p in ["big/inner/blob.bin", "big/inner"] {
-        File::open(t.root.join(p))
-            .unwrap()
-            .set_modified(long_ago)
-            .unwrap();
+        set_mtime(&t.root.join(p), long_ago);
     }
     let fresh = paths_in(&t.json(&["--dirs", "--newer-than=30", "--no-git"]), "dirs");
     assert!(fresh.contains(&big) && !fresh.contains(&inner), "{fresh:?}");
@@ -226,16 +307,8 @@ fn age_filters_use_newest_mtime() {
     let old = t.file("old/stale.bin", 300_000);
     let new = t.file("new/fresh.bin", 200_000);
     let long_ago = SystemTime::now() - Duration::from_secs(90 * 86_400);
-    File::options()
-        .write(true)
-        .open(&old)
-        .unwrap()
-        .set_modified(long_ago)
-        .unwrap();
-    File::open(t.root.join("old"))
-        .unwrap()
-        .set_modified(long_ago)
-        .unwrap();
+    set_mtime(&old, long_ago);
+    set_mtime(&t.root.join("old"), long_ago);
     let j = t.json(&["--older-than=30"]);
     assert_eq!(paths_in(&j, "files"), [s(&old)], "{j}");
     assert_eq!(paths_in(&j, "dirs"), [s(&t.root.join("old"))], "{j}");
@@ -249,13 +322,13 @@ fn print0_and_text_output() {
     let f = t.file("d/f.bin", 50_000);
     let out = t.du(&["--files", "--print0"]);
     assert!(out.status.success());
-    assert_eq!(out.stdout, format!("{}\0", f.display()).into_bytes());
+    assert_eq!(out.stdout, format!("{}\0", s(&f)).into_bytes());
 
     let out = t.du(&["-n", "5"]);
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("Largest directories (by disk use)"), "{text}");
     assert!(
-        text.contains(&format!("{}/", t.root.join("d").display())),
+        text.contains(&format!("{}/", s(&t.root.join("d")))),
         "{text}"
     );
     assert!(text.contains("Total "), "{text}");
@@ -339,7 +412,7 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// The JSON object of the row whose path is exactly `path`.
 fn row<'a>(json: &'a str, path: &str) -> &'a str {
-    let key = format!("{{\"path\":\"{path}\",");
+    let key = format!("{{\"path\":\"{}\",", escaped(path));
     let at = json
         .find(&key)
         .unwrap_or_else(|| panic!("no row {path}: {json}"));
@@ -469,6 +542,7 @@ fn stash_alone_marks_repo_dirty_and_ignores_batch() {
     );
 }
 
+#[cfg(unix)]
 fn gnu_du() -> bool {
     Command::new("du")
         .arg("--version")
@@ -477,6 +551,7 @@ fn gnu_du() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(unix)]
 fn du_total(flag: &str, root: &Path) -> u64 {
     let out = Command::new("du")
         .args(["-s", flag])
@@ -491,6 +566,8 @@ fn du_total(flag: &str, root: &Path) -> u64 {
         .unwrap()
 }
 
+// Unix only: see the comment at the top of the file.
+#[cfg(unix)]
 #[test]
 fn totals_match_du_with_deep_links_and_unreadable_dirs() {
     use std::os::unix::fs::PermissionsExt;
@@ -573,6 +650,8 @@ fn size_ties_list_the_smallest_names() {
     }
 }
 
+// Unix only: see the comment at the top of the file.
+#[cfg(unix)]
 #[test]
 fn trash_is_one_row_and_summarized() {
     let t = Tree::new("trash");

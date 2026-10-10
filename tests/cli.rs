@@ -1,3 +1,7 @@
+//! The FreeDesktop trash end to end: put, list, restore, empty and rm.
+//! Windows sends put to the Recycle Bin instead, so these run on Unix only.
+#![cfg(unix)]
+
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;

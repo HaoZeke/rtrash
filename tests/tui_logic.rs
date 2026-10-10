@@ -3,7 +3,7 @@
 //! (isolated XDG_DATA_HOME). No alternate-screen / ratatui event loop.
 
 // The browsers and their helpers exist only with the `tui` feature.
-#![cfg(feature = "tui")]
+#![cfg(all(unix, feature = "tui"))]
 
 use std::fs;
 use std::path::PathBuf;

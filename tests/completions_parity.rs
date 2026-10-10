@@ -1,6 +1,8 @@
 //! Every long option a subcommand prints in `--help` must appear in the
 //! bash, zsh and fish completion scripts and in the man page section for
-//! that subcommand.
+//! that subcommand. The scripts and the man page cover the Unix build,
+//! whose `--help` text differs from the Windows one.
+#![cfg(unix)]
 
 use std::fs;
 use std::path::Path;
