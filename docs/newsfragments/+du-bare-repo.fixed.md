@@ -1,0 +1,1 @@
+du treats a bare repository like a `.git` directory: it is one row with a git state (`unpushed` when no remote has its commits), and nothing inside it, such as `objects/`, is listed or printed by `--print0`.

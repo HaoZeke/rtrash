@@ -135,7 +135,10 @@ pub fn status_is_dirty(out: &[u8]) -> bool {
 
 /// State of a whole repository. The unpushed and status probes run at the
 /// same time; a stash shows in the status output when git can print it.
+/// A bare repository (no `.git` entry) has no work tree to be dirty, so
+/// only its branches and stash count.
 fn repo_state(bin: &Path, repo: &Path, show_stash: bool) -> GitState {
+    let bare = repo.join(".git").symlink_metadata().is_err();
     // Commits reachable from a local branch but from no remote ref.
     let mut log = git(bin, repo);
     log.args([
@@ -158,9 +161,9 @@ fn repo_state(bin: &Path, repo: &Path, show_stash: bool) -> GitState {
         status.arg("--show-stash");
     }
     let log = log.spawn();
-    let status = status.spawn();
+    let status = if bare { None } else { Some(status.spawn()) };
     let log = log.and_then(|c| c.wait_with_output());
-    let status = status.and_then(|c| c.wait_with_output());
+    let status = status.map(|s| s.and_then(|c| c.wait_with_output()));
     let Ok(log) = log else {
         return GitState::Unknown;
     };
@@ -170,17 +173,19 @@ fn repo_state(bin: &Path, repo: &Path, show_stash: bool) -> GitState {
     if !log.stdout.iter().all(u8::is_ascii_whitespace) {
         return GitState::Unpushed;
     }
-    let Ok(status) = status else {
-        return GitState::Unknown;
-    };
-    if !status.status.success() {
-        return GitState::Unknown;
-    }
-    if status_is_dirty(&status.stdout) {
-        return GitState::Dirty;
-    }
-    if show_stash {
-        return GitState::Clean;
+    if let Some(status) = status {
+        let Ok(status) = status else {
+            return GitState::Unknown;
+        };
+        if !status.status.success() {
+            return GitState::Unknown;
+        }
+        if status_is_dirty(&status.stdout) {
+            return GitState::Dirty;
+        }
+        if show_stash {
+            return GitState::Clean;
+        }
     }
     let mut stash = git(bin, repo);
     stash.args(["rev-parse", "-q", "--verify", "refs/stash"]);

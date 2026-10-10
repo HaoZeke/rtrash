@@ -460,6 +460,47 @@ fn row<'a>(json: &'a str, path: &str) -> &'a str {
 }
 
 #[test]
+fn bare_repos_are_one_row_with_a_git_state() {
+    if !git_ok() {
+        return;
+    }
+    let t = Tree::new("bare");
+    let work = t.root.join("work");
+    fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-q"]);
+    t.file("work/blob.bin", 300_000);
+    git(&work, &["add", "blob.bin"]);
+    git(&work, &["commit", "-q", "-m", "blob"]);
+    git(&t.root, &["clone", "-q", "--bare", "work", "mirror.git"]);
+    git(&t.root, &["init", "-q", "--bare", "empty.git"]);
+    // Git's names without a git HEAD: an ordinary directory.
+    t.file("fake/HEAD", 10);
+    t.file("fake/objects/data.bin", 200_000);
+    t.file("fake/refs/r", 10);
+    let mirror = s(&t.root.join("mirror.git"));
+
+    let j = t.json(&["--all-dirs", "-n", "50"]);
+    let inside = format!("{mirror}{}", std::path::MAIN_SEPARATOR);
+    let all: Vec<String> = paths_in(&j, "dirs")
+        .into_iter()
+        .chain(paths_in(&j, "files"))
+        .collect();
+    assert!(!all.iter().any(|p| p.starts_with(&inside)), "{j}");
+    // No remote has the mirror's commits: it may be the only copy.
+    assert!(row(&j, &mirror).contains("\"git\":\"unpushed\""), "{j}");
+    let empty = s(&t.root.join("empty.git"));
+    assert!(row(&j, &empty).contains("\"git\":\"clean\""), "{j}");
+    assert!(
+        all.contains(&s(&t.root.join("fake/objects/data.bin"))),
+        "{j}"
+    );
+
+    let out = t.du(&["--print0", "--include-dirty", "--all-dirs", "-n", "50"]);
+    let printed = String::from_utf8(out.stdout).unwrap();
+    assert!(!printed.contains(&inside), "{printed:?}");
+}
+
+#[test]
 fn git_state_marks_rows_and_print0_holds_back_risky_ones() {
     if !git_ok() {
         return;

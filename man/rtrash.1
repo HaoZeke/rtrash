@@ -307,7 +307,10 @@ repository below it.
 leaves out dirty, unpushed and unknown rows.
 Paths inside
 .I .git
-are never listed.
+or a bare repository are never listed.
+A bare repository is one row, and it reads
+.B unpushed
+when no remote has its commits.
 .PP
 The closing summary reports the trash on the scanned file systems.
 Trashed files keep their space until

@@ -37,7 +37,8 @@ Each row inside or containing a git repository gets a git state: ignored,
 clean, dirty (uncommitted changes, untracked files or a stash), unknown, or
 unpushed (local commits no remote has). --print0 leaves out dirty,
 unknown and unpushed rows unless --include-dirty is given. Paths inside
-.git are never listed.
+.git or a bare repository are never listed; a bare repository is one row,
+and it reads unpushed when no remote has its commits.
 
 The closing summary shows the trash on the scanned file systems: trashed
 files still take space there until `rtrash empty` removes them (preview
@@ -644,14 +645,22 @@ fn walk_dir(
     }
     let list_files = listing && !opts.artefacts_only && opts.top > 0;
     let mut markers: Vec<&'static str> = Vec::new();
+    let mut has_dot_git = false;
+    let mut bare_parts = 0u8;
     for i in 0..entries.len() {
-        let bytes = entries.get(i).0.to_bytes();
-        if bytes == b".git" && node.repos.is_empty() {
-            node.repos.push(path.to_path_buf());
+        let (name, kind) = entries.get(i);
+        let bytes = name.to_bytes();
+        if bytes == b".git" {
+            has_dot_git = true;
         }
         if let Some(m) = MARKERS.iter().find(|m| m.as_bytes() == bytes) {
             markers.push(m);
         }
+        bare_parts |= bare_part(bytes, kind);
+    }
+    let bare = !has_dot_git && bare_parts == BARE_ALL && is_bare_repo(path);
+    if has_dot_git || bare {
+        node.repos.push(path.to_path_buf());
     }
     let stat_chunk =
         |range: std::ops::Range<usize>| stat_entries(ctx, &dir, &entries, range, depth, list_files);
@@ -681,7 +690,9 @@ fn walk_dir(
         .file_name()
         .map(|n| n.to_string_lossy())
         .unwrap_or_default();
+    // A bare repository is all git internals, like a `.git` directory.
     let is_git_dir = name == ".git";
+    let closed = is_git_dir || bare;
     let artefact = if is_git_dir {
         None
     } else if opts
@@ -698,7 +709,7 @@ fn walk_dir(
     // itself an artefact is the exception: it was named to be looked into,
     // so its contents are listed. A trash root stays closed even then.
     let opens_as_root = depth == 0 && artefact != Some("trash");
-    let inner_listing = listing && !is_git_dir && (artefact.is_none() || opens_as_root);
+    let inner_listing = listing && !closed && (artefact.is_none() || opens_as_root);
     if inner_listing {
         // Best first: the list's own order, by key and then by name since
         // the parent matches. No more than `top` of them can get in, and
@@ -769,6 +780,40 @@ fn walk_dir(
         node.offer_self(ctx, path, depth, largest_child, artefact);
     }
     node
+}
+
+/// `HEAD`, `objects/` and `refs/`: the entries every git directory has.
+const BARE_ALL: u8 = 0b111;
+
+/// Which of the git directory entries this one is, as a bit of
+/// [`BARE_ALL`]. An entry of unknown type passes; [`is_bare_repo`]
+/// checks the real thing.
+fn bare_part(name: &[u8], kind: du_fs::Kind) -> u8 {
+    let dirish = matches!(kind, du_fs::Kind::Dir | du_fs::Kind::Unknown);
+    match name {
+        b"HEAD" if kind != du_fs::Kind::Dir => 0b001,
+        b"objects" if dirish => 0b010,
+        b"refs" if dirish => 0b100,
+        _ => 0,
+    }
+}
+
+/// Whether `path` holds a bare repository: git's own test, a `HEAD` that
+/// names a ref or a commit next to `objects/` and `refs/`. Directories
+/// inside a `.git` (submodules, worktrees) belong to that repository.
+fn is_bare_repo(path: &Path) -> bool {
+    if du_git::inside_git_dir(path) {
+        return false;
+    }
+    let mut head = [0u8; 80];
+    let n = fs::File::open(path.join("HEAD"))
+        .and_then(|mut f| io::Read::read(&mut f, &mut head))
+        .unwrap_or(0);
+    let head = &head[..n];
+    let hash_len = head.iter().take_while(|b| b.is_ascii_hexdigit()).count();
+    let names_ref = head.starts_with(b"ref: refs/");
+    let names_commit = (hash_len == 40 || hash_len == 64) && head.get(hash_len) == Some(&b'\n');
+    (names_ref || names_commit) && path.join("objects").is_dir() && path.join("refs").is_dir()
 }
 
 /// Child names that `artefact_kind` looks for.
