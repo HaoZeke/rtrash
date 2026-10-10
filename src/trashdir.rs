@@ -143,12 +143,12 @@ pub fn home_trash() -> PathBuf {
 /// `path` with symlinks resolved in its longest existing ancestor; the
 /// components that do not exist yet are appended as written.
 pub fn resolve_existing(path: &Path) -> PathBuf {
-    for anc in path.ancestors() {
-        if anc.as_os_str().is_empty() {
+    for ancestor in path.ancestors() {
+        if ancestor.as_os_str().is_empty() {
             break;
         }
-        if let Ok(real) = anc.canonicalize() {
-            return match path.strip_prefix(anc) {
+        if let Ok(real) = ancestor.canonicalize() {
+            return match path.strip_prefix(ancestor) {
                 Ok(rest) if !rest.as_os_str().is_empty() => real.join(rest),
                 _ => real,
             };
