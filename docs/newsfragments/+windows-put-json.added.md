@@ -1,0 +1,1 @@
+put: on Windows `--json` prints the same `{"trashed": [...], "failed": N}` summary as on Linux, with each item's name and folder in the Recycle Bin. `--trash-dir` and `--home-only` parse there too; a pin draws a warning, since the Recycle Bin cannot move.

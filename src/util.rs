@@ -97,6 +97,27 @@ pub fn json_escape(s: &str) -> String {
     out
 }
 
+/// The `put --json` summary: each moved item as (original path, name in
+/// the trash, trash root), plus the count of failures. Shared by the
+/// FreeDesktop and Recycle Bin backends so both print the same shape.
+pub fn put_summary_json(
+    items: &[(&std::path::Path, &str, &std::path::Path)],
+    failed: usize,
+) -> String {
+    let items: Vec<String> = items
+        .iter()
+        .map(|(original, name, dir)| {
+            format!(
+                "{{\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\"}}",
+                json_escape(&original.to_string_lossy()),
+                json_escape(name),
+                json_escape(&dir.to_string_lossy()),
+            )
+        })
+        .collect();
+    format!("{{\"trashed\":[{}],\"failed\":{failed}}}", items.join(","))
+}
+
 /// Seconds since the Unix epoch, now.
 pub fn now_epoch() -> i64 {
     std::time::SystemTime::now()

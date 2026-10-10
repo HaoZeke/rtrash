@@ -42,19 +42,11 @@ pub struct Trashed {
 
 /// JSON summary for `put --json`: every trashed item plus the failure count.
 pub fn summary_json(trashed: &[Trashed], failed: usize) -> String {
-    use crate::list::json_escape;
-    let items: Vec<String> = trashed
+    let items: Vec<(&Path, &str, &Path)> = trashed
         .iter()
-        .map(|t| {
-            format!(
-                "{{\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\"}}",
-                json_escape(&t.original.to_string_lossy()),
-                json_escape(&t.name),
-                json_escape(&t.trash_dir.to_string_lossy()),
-            )
-        })
+        .map(|t| (t.original.as_path(), t.name.as_str(), t.trash_dir.as_path()))
         .collect();
-    format!("{{\"trashed\":[{}],\"failed\":{failed}}}", items.join(","))
+    crate::util::put_summary_json(&items, failed)
 }
 
 impl Default for Opts {

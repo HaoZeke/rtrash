@@ -131,11 +131,24 @@ mod os {
         let mut verbose = false;
         let mut files: Vec<PathBuf> = Vec::new();
         let mut plain = false;
+        let mut json = false;
+        let mut pinned = false;
+        let mut no_more_opts = false;
         for arg in args {
+            if no_more_opts || arg == "-" || !arg.starts_with('-') {
+                files.push(PathBuf::from(arg));
+                continue;
+            }
             match arg.as_str() {
+                "--" => no_more_opts = true,
                 "-f" | "--force" => force = true,
                 "-v" | "--verbose" => verbose = true,
                 "--plain" => plain = true,
+                "--json" => json = true,
+                // FreeDesktop options: the Recycle Bin has one place per
+                // drive, so there is nothing to pin or narrow down.
+                "--home-only" => {}
+                a if a.starts_with("--trash-dir=") => pinned = true,
                 "-h" | "--help" => {
                     print!(
                         "\
@@ -145,6 +158,11 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
   -f, --force    ignore nonexistent files
   -v, --verbose  print each path
       --plain    accepted for CLI parity (no TUI put browser on Windows)
+      --json     print a JSON summary on stdout ({{trashed, failed}});
+                   replaces -v output
+      --trash-dir=PATH, --home-only
+                 accepted for script parity; items always go to the
+                   Recycle Bin of their drive
       --help     display this help and exit
       --version  output version information and exit
 "
@@ -173,8 +191,14 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             }
         }
         let _ = plain;
+        if pinned {
+            eprintln!("{prog}: --trash-dir has no effect on Windows; using the Recycle Bin");
+        }
         if files.is_empty() {
             if force {
+                if json {
+                    println!("{}", util::put_summary_json(&[], 0));
+                }
                 return 0;
             }
             eprintln!("{prog}: missing operand");
@@ -182,8 +206,10 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             return 2;
         }
         let mut status = 0;
+        let mut failed = 0usize;
+        let mut moved: Vec<PathBuf> = Vec::new();
         for f in &files {
-            if !f.exists() {
+            if std::fs::symlink_metadata(f).is_err() {
                 if force {
                     continue;
                 }
@@ -192,21 +218,72 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     f.display()
                 );
                 status = status.max(1);
+                failed += 1;
                 continue;
             }
+            let abs = std::fs::canonicalize(f)
+                .map(|p| strip_verbatim(&p))
+                .unwrap_or_else(|_| f.clone());
             match trash::delete(f) {
                 Ok(()) => {
-                    if verbose {
+                    if verbose && !json {
                         println!("removed '{}'", f.display());
                     }
+                    moved.push(abs);
                 }
                 Err(e) => {
                     eprintln!("{prog}: cannot trash '{}': {}", f.display(), err_msg(e));
                     status = status.max(1);
+                    failed += 1;
                 }
             }
         }
+        if json {
+            let found = locate_trashed(&moved);
+            let items: Vec<(&Path, &str, &Path)> = found
+                .iter()
+                .map(|(o, n, d)| (o.as_path(), n.as_str(), d.as_path()))
+                .collect();
+            println!("{}", util::put_summary_json(&items, failed));
+        }
         status
+    }
+
+    /// For each moved path, its name and folder in the Recycle Bin: the
+    /// newest item with that original path. The shell API does not return
+    /// them from the move itself.
+    fn locate_trashed(moved: &[PathBuf]) -> Vec<(PathBuf, String, PathBuf)> {
+        let items = os_limited::list().unwrap_or_default();
+        moved
+            .iter()
+            .map(|orig| {
+                let hit = items
+                    .iter()
+                    .filter(|it| it.original_path() == *orig)
+                    .max_by_key(|it| it.time_deleted);
+                let (name, dir) = match hit {
+                    Some(it) => {
+                        let id = PathBuf::from(&it.id);
+                        let name = id
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| it.name.to_string_lossy().into_owned());
+                        (name, id.parent().map(Path::to_path_buf).unwrap_or_default())
+                    }
+                    None => (String::new(), PathBuf::new()),
+                };
+                (orig.clone(), name, dir)
+            })
+            .collect()
+    }
+
+    /// `C:\\...` for a verbatim `\\?\C:\\...` path from canonicalize.
+    fn strip_verbatim(p: &Path) -> PathBuf {
+        let s = p.to_string_lossy();
+        match s.strip_prefix(r"\\?\") {
+            Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
+            _ => p.to_path_buf(),
+        }
     }
 
     pub fn list_run(prog: &str, args: &[String]) -> i32 {
