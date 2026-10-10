@@ -448,6 +448,9 @@ struct Node {
     disk: u64,
     mtime: i64,
     repos: Vec<PathBuf>,
+    /// The filters would let this directory onto the list. A parent only
+    /// hands its row to a dominant child that can show up in its place.
+    listable: bool,
 }
 
 /// At most this many repo roots are remembered per directory.
@@ -506,6 +509,7 @@ fn enter(
             disk: st.sizes().1,
             mtime: st.mtime,
             repos: Vec::new(),
+            listable: false,
         });
     };
     let st = match known {
@@ -616,6 +620,7 @@ fn walk_dir(
         disk: st.sizes().1,
         mtime: st.mtime,
         repos: Vec::new(),
+        listable: false,
     };
     ctx.dirs.fetch_add(1, Ordering::Relaxed);
     let (entries, failed) = dir.entries();
@@ -728,7 +733,9 @@ fn walk_dir(
 
     let mut largest_child = 0u64;
     for child in children.into_iter().flatten() {
-        largest_child = largest_child.max(ctx.key(child.apparent, child.disk));
+        if child.listable {
+            largest_child = largest_child.max(ctx.key(child.apparent, child.disk));
+        }
         node.apparent = node.apparent.saturating_add(child.apparent);
         node.disk = node.disk.saturating_add(child.disk);
         node.mtime = node.mtime.max(child.mtime);
@@ -738,6 +745,7 @@ fn walk_dir(
             }
         }
     }
+    node.listable = listing && !is_git_dir && depth > 0 && ctx.listable(depth, node.mtime);
     if listing && !is_git_dir {
         node.offer_self(ctx, path, depth, largest_child, artefact);
     }
@@ -754,7 +762,7 @@ const MARKERS: &[&str] = &[
 
 impl Node {
     /// Offer this directory to the list unless it is the scan root or one
-    /// subdirectory already accounts for 90% or more of it.
+    /// listable subdirectory already accounts for 90% or more of it.
     fn offer_self(
         &self,
         ctx: &Ctx<'_>,

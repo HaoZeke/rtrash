@@ -185,6 +185,41 @@ fn max_depth_and_top_limit_rows() {
     assert_eq!(top1, [s(&t.root.join("one/two/three/deep.bin"))]);
 }
 
+/// A directory that one subdirectory dominates still gets its own row
+/// when that subdirectory cannot be listed: past --max-depth, or a `.git`.
+#[test]
+fn dominated_dir_stays_when_its_bulk_is_hidden() {
+    let t = Tree::new("hidden-bulk");
+    t.file("big/inner/blob.bin", 900_000);
+    t.file("big/small.bin", 1_000);
+    t.file("repo/.git/objects/pack.bin", 900_000);
+    t.file("repo/README", 1_000);
+    let big = s(&t.root.join("big"));
+    let inner = s(&t.root.join("big/inner"));
+    let repo = s(&t.root.join("repo"));
+
+    let shallow = paths_in(&t.json(&["--dirs", "--max-depth=1", "--no-git"]), "dirs");
+    assert!(shallow.contains(&big), "{shallow:?}");
+    assert!(shallow.contains(&repo), "{shallow:?}");
+
+    // Without the depth cap, the inner directory takes the row as before.
+    let deep = paths_in(&t.json(&["--dirs", "--no-git"]), "dirs");
+    assert!(deep.contains(&inner) && !deep.contains(&big), "{deep:?}");
+    assert!(deep.contains(&repo), "{deep:?}");
+
+    // --newer-than drops the stale inner directory, so `big` (fresh
+    // through small.bin) keeps its row.
+    let long_ago = SystemTime::now() - Duration::from_secs(90 * 86_400);
+    for p in ["big/inner/blob.bin", "big/inner"] {
+        File::open(t.root.join(p))
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+    }
+    let fresh = paths_in(&t.json(&["--dirs", "--newer-than=30", "--no-git"]), "dirs");
+    assert!(fresh.contains(&big) && !fresh.contains(&inner), "{fresh:?}");
+}
+
 #[test]
 fn age_filters_use_newest_mtime() {
     let t = Tree::new("age");
