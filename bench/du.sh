@@ -39,7 +39,7 @@ if [ "$COLD" = auto ]; then
 fi
 
 synth_dir=""
-cleanup() { [ -n "$synth_dir" ] && rm -rf "$synth_dir"; }
+cleanup() { if [ -n "$synth_dir" ]; then rm -rf "$synth_dir"; fi; }
 trap cleanup EXIT
 
 # 100 top directories, each with 10 subdirectories of equal file counts;
