@@ -1,0 +1,1 @@
+`rtrash du` on macOS now reads `getattrlistbulk` records the way the kernel packs them. The reader expected the error slot after the file ID and file attributes on every record, but macOS packs the error slot first and leaves file attributes off directory records. Any directory with a subdirectory stopped listing early, and file sizes came from the wrong fields.

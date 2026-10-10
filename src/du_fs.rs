@@ -173,21 +173,25 @@ mod bulk {
         }
     }
 
-    // With FSOPT_PACK_INVAL_ATTRS every requested attribute has its slot,
-    // in bit order within each group, after the entry length and the
-    // returned set. Slots are 4-byte aligned, so 8-byte fields are read
-    // unaligned.
+    // With FSOPT_PACK_INVAL_ATTRS every requested attribute has its slot
+    // after the entry length and the returned set. The kernel packs
+    // ATTR_CMN_ERROR first, then the other common attributes in bit order
+    // (xnu bsd/vfs/vfs_attrlist.c, attr_pack_common). File attributes
+    // follow only for entries that are not directories, so a directory's
+    // record ends at COMMON_END. Slots are 4-byte aligned, so 8-byte fields
+    // are read unaligned.
     const RETURNED: usize = 4;
-    const NAME: usize = RETURNED + 20;
+    const ERROR: usize = RETURNED + 20;
+    pub const NAME: usize = ERROR + 4;
     const DEVID: usize = NAME + 8;
     const OBJTYPE: usize = DEVID + 4;
     const MODTIME: usize = OBJTYPE + 4;
     const FILEID: usize = MODTIME + 16;
-    const ERROR: usize = FILEID + 8;
-    const LINKCOUNT: usize = ERROR + 4;
+    pub const COMMON_END: usize = FILEID + 8;
+    const LINKCOUNT: usize = COMMON_END;
     const ALLOCSIZE: usize = LINKCOUNT + 4;
     const DATALENGTH: usize = ALLOCSIZE + 8;
-    const FIXED: usize = DATALENGTH + 8;
+    pub const FILE_END: usize = DATALENGTH + 8;
 
     fn u32_at(b: &[u8], at: usize) -> u32 {
         u32::from_ne_bytes(b[at..at + 4].try_into().unwrap())
@@ -202,11 +206,11 @@ mod bulk {
     pub fn parse(buf: &[u8], count: usize, out: &mut Entries) -> bool {
         let mut off = 0usize;
         for _ in 0..count {
-            if off + FIXED > buf.len() {
+            if off + COMMON_END > buf.len() {
                 return false;
             }
             let len = u32_at(buf, off) as usize;
-            if len < FIXED || off + len > buf.len() {
+            if len < COMMON_END || off + len > buf.len() {
                 return false;
             }
             let rec = &buf[off..off + len];
@@ -214,11 +218,17 @@ mod bulk {
             let common = u32_at(rec, RETURNED);
             let file = u32_at(rec, RETURNED + 12);
             // The name offset counts from its own attrreference slot, and
-            // its length includes the NUL.
+            // its length includes the NUL. The name sits right after the
+            // fixed slots, so its offset also tells whether the record
+            // carries the file attributes.
             let name_at = NAME as i64 + i64::from(u32_at(rec, NAME) as i32);
             let name_len = u32_at(rec, NAME + 4) as usize;
-            if common & ATTR_CMN_NAME == 0 || name_at < 0 || name_at as usize + name_len > rec.len()
-            {
+            let has_file = match usize::try_from(name_at) {
+                Ok(FILE_END) => true,
+                Ok(COMMON_END) => false,
+                _ => return false,
+            };
+            if common & ATTR_CMN_NAME == 0 || name_at as usize + name_len > rec.len() {
                 return false;
             }
             let raw = &rec[name_at as usize..name_at as usize + name_len];
@@ -233,6 +243,7 @@ mod bulk {
             };
             let complete = common & (ATTR_CMN_DEVID | ATTR_CMN_MODTIME | ATTR_CMN_FILEID)
                 == ATTR_CMN_DEVID | ATTR_CMN_MODTIME | ATTR_CMN_FILEID
+                && has_file
                 && file & FILE == FILE;
             // Directories get their stat from their own descriptor, so
             // only other entries keep the one from the listing.
@@ -488,19 +499,23 @@ mod fileid {
 mod tests {
     use super::*;
 
-    /// One packed `getattrlistbulk` record as macOS lays it out.
+    /// One packed `getattrlistbulk` record as xnu lays it out: the error
+    /// slot right after the returned set, and file attributes only for
+    /// entries that are not directories.
     fn bulk_record(name: &str, objtype: u32, error: u32, file_valid: bool) -> Vec<u8> {
         use bulk::*;
         let mut r = Vec::new();
         let common = COMMON & !ATTR_CMN_RETURNED_ATTRS;
         let push32 = |r: &mut Vec<u8>, v: u32| r.extend_from_slice(&v.to_ne_bytes());
         let push64 = |r: &mut Vec<u8>, v: u64| r.extend_from_slice(&v.to_ne_bytes());
+        let dir = objtype == 2;
         push32(&mut r, 0); // length, patched below
         push32(&mut r, common);
         push32(&mut r, 0);
         push32(&mut r, 0);
-        push32(&mut r, if file_valid { FILE } else { 0 });
+        push32(&mut r, if file_valid && !dir { FILE } else { 0 });
         push32(&mut r, 0);
+        push32(&mut r, error);
         let name_slot = r.len();
         push32(&mut r, 0); // offset, patched below
         push32(&mut r, name.len() as u32 + 1);
@@ -509,15 +524,19 @@ mod tests {
         push64(&mut r, 1_700_000_000); // mtime seconds
         push64(&mut r, 5); // nanoseconds
         push64(&mut r, 4242); // fileid
-        push32(&mut r, error);
-        push32(&mut r, 2); // link count
-        push64(&mut r, 4097); // allocation
-        push64(&mut r, 1234); // data length
+        assert_eq!(r.len(), COMMON_END);
+        if !dir {
+            push32(&mut r, 2); // link count
+            push64(&mut r, 4097); // allocation
+            push64(&mut r, 1234); // data length
+            assert_eq!(r.len(), FILE_END);
+        }
         let at = r.len();
         r[name_slot..name_slot + 4].copy_from_slice(&((at - name_slot) as u32).to_ne_bytes());
         r.extend_from_slice(name.as_bytes());
         r.push(0);
-        while r.len() % 4 != 0 {
+        // Bulk records are padded to 8 bytes.
+        while r.len() % 8 != 0 {
             r.push(0);
         }
         let len = r.len() as u32;
@@ -529,7 +548,7 @@ mod tests {
     fn bulk_records_parse_into_entries_and_stats() {
         let mut buf = Vec::new();
         buf.extend(bulk_record("file.bin", 1, 0, true));
-        buf.extend(bulk_record("sub", 2, 0, false));
+        buf.extend(bulk_record("sub", 2, 0, true));
         buf.extend(bulk_record("gone", 1, libc::EACCES as u32, true));
         buf.extend(bulk_record("link", 5, 0, true));
         let mut e = Entries::default();
@@ -550,6 +569,12 @@ mod tests {
         // A record cut short is refused rather than read past its end.
         let mut short = Entries::default();
         assert!(!bulk::parse(&buf[..buf.len() - 8], 4, &mut short));
+        // So is a name that does not start where the fixed slots end.
+        let mut odd = bulk_record("odd", 1, 0, true);
+        let slot = bulk::NAME;
+        let off = u32::from_ne_bytes(odd[slot..slot + 4].try_into().unwrap()) + 4;
+        odd[slot..slot + 4].copy_from_slice(&off.to_ne_bytes());
+        assert!(!bulk::parse(&odd, 1, &mut Entries::default()));
     }
 
     /// One `FILE_ID_BOTH_DIR_INFO` record, padded to 8 bytes.

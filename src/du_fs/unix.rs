@@ -257,6 +257,7 @@ pub fn os(name: &CStr) -> &OsStr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::fs;
 
     fn names(e: &Entries) -> Vec<(String, Kind)> {
@@ -270,26 +271,85 @@ mod tests {
         v
     }
 
+    /// Every stat the listing returned, compared field by field with
+    /// `fstatat`. Returns one line per difference.
+    fn listing_stat_differences(d: &Dir, e: &Entries) -> Vec<String> {
+        let mut out = Vec::new();
+        for i in 0..e.len() {
+            let (name, kind) = e.get(i);
+            let want = match d.stat_at(name) {
+                Ok(s) => s,
+                Err(err) => {
+                    out.push(format!("{name:?}: fstatat failed: {err}"));
+                    continue;
+                }
+            };
+            if (kind == Kind::Dir) != want.is_dir() && kind != Kind::Unknown {
+                out.push(format!("{name:?}: kind {kind:?}, mode {:o}", want.mode));
+            }
+            let Some(got) = e.stat(i) else { continue };
+            let fields = [
+                ("mode", u64::from(got.mode), u64::from(want.mode)),
+                ("size", got.size, want.size),
+                ("blocks", got.blocks, want.blocks),
+                ("nlink", got.nlink, want.nlink),
+                ("ino", got.ino, want.ino),
+                ("dev", got.dev, want.dev),
+                ("mtime", got.mtime as u64, want.mtime as u64),
+            ];
+            for (field, g, w) in fields {
+                if g != w {
+                    out.push(format!("{name:?}: {field} listing={g} fstatat={w}"));
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn both_readers_list_the_same_names_and_stats_match_std() {
         let root = std::env::temp_dir().join(format!("rtrash-du-fs-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("sub")).unwrap();
         fs::write(root.join("a.txt"), b"hello").unwrap();
+        fs::write(root.join("big.bin"), vec![7u8; 100_000]).unwrap();
+        fs::hard_link(root.join("a.txt"), root.join("a-link.txt")).unwrap();
         std::os::unix::fs::symlink("a.txt", root.join("link")).unwrap();
         for i in 0..3000 {
             // Enough names to need more than one buffer fill.
             fs::write(root.join(format!("f-{i:05}-{}", "x".repeat(40))), b"").unwrap();
         }
         let d = Dir::open(&root).unwrap();
+        // On macOS read with getattrlistbulk itself, not whichever reader
+        // the timing heuristic picks.
+        #[cfg(target_os = "macos")]
+        let (e, failed) = super::super::bulk::read(d.fd.as_raw_fd())
+            .expect("getattrlistbulk read nothing from an APFS temp directory");
+        #[cfg(not(target_os = "macos"))]
         let (e, failed) = d.entries();
-        assert!(!failed);
-        assert_eq!(e.len(), 3003);
-        let (r, failed) = read_readdir(d.fd.as_raw_fd());
-        assert!(!failed);
+        let (r, r_failed) = read_readdir(d.fd.as_raw_fd());
         let a: Vec<String> = names(&e).into_iter().map(|x| x.0).collect();
         let b: Vec<String> = names(&r).into_iter().map(|x| x.0).collect();
-        assert_eq!(a, b);
+        let (sa, sb): (BTreeSet<&String>, BTreeSet<&String>) =
+            (a.iter().collect(), b.iter().collect());
+        let only_listing: Vec<_> = sa.difference(&sb).take(10).collect();
+        let only_readdir: Vec<_> = sb.difference(&sa).take(10).collect();
+        let mut problems = listing_stat_differences(&d, &e);
+        problems.truncate(40);
+        assert!(
+            !failed && !r_failed && a == b && problems.is_empty(),
+            "listing failed={failed} with {} entries, readdir failed={r_failed} with {}; \
+             only in listing {only_listing:?}; only in readdir {only_readdir:?}; \
+             stat differences {problems:#?}",
+            a.len(),
+            b.len(),
+        );
+        assert_eq!(e.len(), 3005);
+        #[cfg(target_os = "macos")]
+        {
+            let with_stats = (0..e.len()).filter(|&i| e.stat(i).is_some()).count();
+            assert_eq!(with_stats, 3004, "every entry but sub/ carries a stat");
+        }
         #[cfg(target_os = "linux")]
         {
             let n = names(&e);
