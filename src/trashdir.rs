@@ -648,7 +648,7 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
             .unwrap_or_else(|_| abs.to_path_buf()),
         None => abs.to_path_buf(),
     };
-    let body = info::render(&recorded, &info::now_local_string());
+    let body = info::render_batch(&recorded, &info::now_local_string(), Some(info::batch_id()));
 
     let mut attempt: u64 = 0;
     let (name, mut info_file) = loop {

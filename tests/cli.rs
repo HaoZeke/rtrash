@@ -1434,3 +1434,96 @@ fn status_json_and_age_filter() {
         "{r}"
     );
 }
+
+fn batch_of(sb: &Sandbox, name: &str) -> String {
+    let body = fs::read_to_string(sb.trash().join(format!("info/{name}.trashinfo"))).unwrap();
+    body.lines()
+        .find_map(|l| l.strip_prefix("X-Rtrash-Batch="))
+        .expect("put writes a batch key")
+        .to_string()
+}
+
+#[test]
+fn undo_restores_the_last_put_run_and_only_it() {
+    let sb = Sandbox::new("undo");
+    sb.touch("first.txt");
+    assert!(sb.run(&["put", "first.txt"]).status.success());
+    sb.touch("a.txt");
+    fs::create_dir(sb.work().join("dir")).unwrap();
+    sb.touch("dir/inner");
+    assert!(sb.run(&["put", "-r", "a.txt", "dir"]).status.success());
+    // An item from another tool carries no batch key and must stay put.
+    fs::write(sb.trash().join("files/gio.txt"), b"g").unwrap();
+    fs::write(
+        sb.trash().join("info/gio.txt.trashinfo"),
+        format!(
+            "[Trash Info]\nPath={}\nDeletionDate=2099-01-01T00:00:00\n",
+            sb.work().join("gio.txt").display()
+        ),
+    )
+    .unwrap();
+    let run2 = batch_of(&sb, "a.txt");
+    assert_eq!(batch_of(&sb, "dir"), run2, "one run, one id");
+    assert_ne!(batch_of(&sb, "first.txt"), run2);
+
+    let listed = stdout_of(&sb.run(&["undo", "--list", "--home-only"]));
+    let first_line = listed.lines().next().unwrap_or_default();
+    assert!(first_line.starts_with(&run2), "{listed}");
+    assert!(first_line.contains("2 items"), "{listed}");
+    assert_eq!(listed.lines().count(), 2, "gio item is no run: {listed}");
+
+    let json = stdout_of(&sb.run(&["list", "--json", "--home-only"]));
+    assert!(json.contains(&format!("\"batch\":\"{run2}\"")), "{json}");
+    assert!(json.contains("\"batch\":null"), "{json}");
+
+    let dry = sb.run(&["undo", "-n", "--home-only"]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    assert!(!sb.work().join("a.txt").exists(), "dry run changes nothing");
+
+    let out = sb.run(&["undo", "--home-only", "--json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let s = stdout_of(&out);
+    assert!(s.starts_with(&format!("{{\"batch\":\"{run2}\"")), "{s}");
+    assert!(s.contains("\"failed\":0"), "{s}");
+    assert!(sb.work().join("a.txt").is_file());
+    assert!(sb.work().join("dir/inner").is_file());
+    assert!(!sb.work().join("first.txt").exists());
+    assert!(sb.trash().join("files/gio.txt").exists());
+
+    // The next undo takes the earlier run, by id here.
+    let run1 = batch_of(&sb, "first.txt");
+    let out = sb.run(&["undo", "--home-only", &run1]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(sb.work().join("first.txt").is_file());
+
+    // Nothing rtrash trashed is left.
+    let out = sb.run(&["undo", "--home-only"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr_of(&out).contains("no put run"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+#[test]
+fn undo_keeps_a_recreated_path_without_force() {
+    let sb = Sandbox::new("undo-conflict");
+    sb.touch("x.txt");
+    sb.touch("y.txt");
+    assert!(sb.run(&["put", "x.txt", "y.txt"]).status.success());
+    fs::write(sb.work().join("x.txt"), b"new").unwrap();
+    let out = sb.run(&["undo", "--home-only"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr_of(&out).contains("1 restored, 1 failed"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(fs::read(sb.work().join("x.txt")).unwrap(), b"new");
+    assert!(sb.work().join("y.txt").is_file());
+    // With -f the rest of the run comes back over the new file.
+    let out = sb.run(&["undo", "--home-only", "-f"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(fs::read(sb.work().join("x.txt")).unwrap(), b"payload");
+}

@@ -8,20 +8,52 @@ pub struct TrashInfo {
     /// Original path, absolute or relative to the trash topdir.
     pub path: PathBuf,
     pub deletion_date: Option<String>,
+    /// The put run that trashed the item ([`BATCH_KEY`]), when rtrash wrote it.
+    pub batch: Option<String>,
+}
+
+/// Extra `.trashinfo` key naming the put run, so `rtrash undo` can restore
+/// one run as a unit. The spec lets readers ignore keys they do not know,
+/// and other tools do.
+pub const BATCH_KEY: &str = "X-Rtrash-Batch";
+
+/// This process's put batch id: `MILLIS-PID` (milliseconds since the Unix
+/// epoch), the same for every item one run trashes. The leading number
+/// orders runs, even two in the same second.
+pub fn batch_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        format!("{ms}-{}", std::process::id())
+    })
 }
 
 pub fn render(original: &Path, date: &str) -> String {
-    format!(
+    render_batch(original, date, None)
+}
+
+/// [`render`] plus the batch key when `batch` names one.
+pub fn render_batch(original: &Path, date: &str, batch: Option<&str>) -> String {
+    let mut body = format!(
         "[Trash Info]\nPath={}\nDeletionDate={}\n",
         url_encode(original.as_os_str().as_bytes()),
         date
-    )
+    );
+    if let Some(b) = batch {
+        body.push_str(&format!("{BATCH_KEY}={b}\n"));
+    }
+    body
 }
 
 /// Parse a `.trashinfo` file body. Per spec, the first occurrence of a key wins.
 pub fn parse(content: &str) -> TrashInfo {
     let mut path = PathBuf::new();
     let mut date = None;
+    let mut batch = None;
+    let batch_prefix = format!("{BATCH_KEY}=");
     for line in content.lines() {
         if let Some(v) = line.strip_prefix("Path=") {
             if path.as_os_str().is_empty() {
@@ -31,11 +63,17 @@ pub fn parse(content: &str) -> TrashInfo {
             if date.is_none() {
                 date = Some(v.trim().to_string());
             }
+        } else if let Some(v) = line.strip_prefix(batch_prefix.as_str()) {
+            let v = v.trim();
+            if batch.is_none() && !v.is_empty() {
+                batch = Some(v.to_string());
+            }
         }
     }
     TrashInfo {
         path,
         deletion_date: date,
+        batch,
     }
 }
 
@@ -117,6 +155,15 @@ mod tests {
         let info = parse(&body);
         assert_eq!(info.path, Path::new("/home/u/my file.txt"));
         assert_eq!(info.deletion_date.as_deref(), Some("2026-07-03T12:00:00"));
+    }
+
+    #[test]
+    fn batch_key_roundtrips_and_plain_render_omits_it() {
+        let body = render_batch(Path::new("/a"), "2026-07-03T12:00:00", Some("17-42"));
+        assert!(body.ends_with("X-Rtrash-Batch=17-42\n"), "{body}");
+        assert_eq!(parse(&body).batch.as_deref(), Some("17-42"));
+        assert_eq!(parse(&render(Path::new("/a"), "x")).batch, None);
+        assert_eq!(batch_id(), batch_id());
     }
 
     #[test]

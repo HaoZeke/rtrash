@@ -38,6 +38,7 @@ $ rtrash notes.txt                 # put (also: rtrash -rf dir, multi-call trash
 $ rtrash list && rtrash status
 $ rtrash du -n 10 ~/src             # largest dirs and files to trash
 $ rtrash restore                   # TUI on a TTY; --plain for scripts
+$ rtrash undo                      # bring back everything the last put trashed
 $ rtrash empty --plain
 ```
 
@@ -197,7 +198,7 @@ From a checkout (dev): `pip install maturin && maturin develop --features python
 
 Useful flags: `rtrash setup --dry-run`, `--force` (refresh after upgrade), `--with-rm` (also link `rm` → put into trash), `--prefix=/usr/local`.
 
-Subcommands work without multi-call names: `rtrash put|empty|list|status|du|restore|rm …`.
+Subcommands work without multi-call names: `rtrash put|empty|list|status|du|restore|undo|rm …`.
 
 | Multi-call name | Meaning |
 | --------------- | ------- |
@@ -369,6 +370,23 @@ Browser-specific actions (also remappable): restore `toggle_force` / `toggle_ord
 Existing paths at the destination are preserved unless `-f` / `--force` is given; with `-f`, a blocking destination is removed first.
 Same-filesystem restore uses `rename`; cross-device restore copies then deletes the trash payload (needed when put fell back to the home trash).
 Options: `--trash-dir=PATH` (repeatable), `--home-only`, `--cwd-only`.
+
+### `rtrash undo [BATCH]`
+
+Each put run writes one batch id into every `.trashinfo` it creates, under the extra key `X-Rtrash-Batch` (other tools ignore keys they do not know).
+`rtrash undo` restores every item of the most recent run, so `rtrash -r build dist logs` comes back in one step.
+
+| Invocation | Behavior |
+|------------|----------|
+| `rtrash undo` | Restore every item the most recent put run trashed |
+| `rtrash undo --list` | Put runs, newest first: id, date, item count, first path |
+| `rtrash undo BATCH` | Restore the run with that id (from `--list`, or `batch` in `list --json`) |
+| `rtrash undo -n` | Show what would come back |
+| `rtrash undo --json` | Print `{"batch": ID, "restored": [...], "failed": N}` |
+
+Items trashed by gio, Dolphin or trash-cli carry no batch id, so undo never picks them.
+It refuses to overwrite a path that exists again unless given `-f`.
+The library shares one id across a process, so a Python session counts as one run.
 
 ### `rtrash rm PATTERN...` (also `trash-rm`)
 

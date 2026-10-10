@@ -5,7 +5,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(all(unix, feature = "tui"))]
 use rtrash::tui_binds;
-use rtrash::{du, empty, list, put, restore, rm, setup, status};
+use rtrash::{du, empty, list, put, restore, rm, setup, status, undo};
 
 const HELP: &str = "\
 Usage: rtrash <COMMAND> [ARGS]...
@@ -19,6 +19,7 @@ Commands:
   status [OPTION]...          item count and reclaimable size summary
   du [OPTION]... [PATH]...    find the largest directories and files to trash
   restore [OPTION]... [PATH]  restore a trashed item
+  undo [OPTION]... [BATCH]    restore everything the last (or BATCH) put run trashed
   rm PATTERN...               permanently delete matching trash entries
   setup [OPTION]...           install multi-call links, completions, man page
   keys [OPTION]...            show/sample TUI keybind config (customizable)
@@ -63,6 +64,7 @@ fn main() {
             Some("du") => du::run(&format!("{argv0} du"), &rest[1..]),
             Some("restore") => restore::run(&format!("{argv0} restore"), &rest[1..]),
             Some("rm") => rm::run(&format!("{argv0} rm"), &rest[1..]),
+            Some("undo") => undo::run(&format!("{argv0} undo"), &rest[1..]),
             Some("setup") => setup::run("setup", &rest[1..]),
             #[cfg(all(unix, feature = "tui"))]
             Some("keys") => tui_binds::run_cli(&argv0, &rest[1..]),

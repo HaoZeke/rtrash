@@ -3,7 +3,7 @@
 # Preferred install: rtrash setup
 # Or: rtrash completions zsh > …/zsh/site-functions/_rtrash
 
-local -a put_opts empty_opts list_opts status_opts du_opts restore_opts rm_opts
+local -a put_opts empty_opts list_opts status_opts du_opts restore_opts undo_opts rm_opts
 
 put_opts=(
   '(-f --force)'{-f,--force}'[ignore nonexistent files, never prompt]'
@@ -82,6 +82,18 @@ du_opts=(
   '*:path:_files -/'
 )
 
+undo_opts=(
+  '(-l --list)'{-l,--list}'[list put runs, newest first]'
+  '(-n --dry-run)'{-n,--dry-run}'[show what would be restored]'
+  '(-f --force)'{-f,--force}'[overwrite existing files at original locations]'
+  '--json[print the result as JSON]'
+  '--home-only[only the home trash]'
+  '*--trash-dir=[only consider this trash directory]:path:_files -/'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+  '1:batch id:'
+)
+
 restore_opts=(
   '(-f --force)'{-f,--force}'[overwrite existing file at original location]'
   '--home-only[only the home trash]'
@@ -146,6 +158,7 @@ _rtrash_dispatch() {
     'status:item count and reclaimable size summary'
     'du:find the largest directories and files to trash'
     'restore:restore a trashed item'
+    'undo:restore everything one put run trashed'
     'rm:permanently delete matching trash entries'
     'setup:install multi-call links, completions, man page'
     'keys:show or sample the TUI keybind config'
@@ -186,6 +199,9 @@ _rtrash_dispatch() {
           ;;
         restore)
           _arguments -s -C $restore_opts
+          ;;
+        undo)
+          _arguments -s -C $undo_opts
           ;;
         rm)
           _arguments -s -C $rm_opts

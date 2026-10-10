@@ -229,7 +229,9 @@ days.
 .TP
 .B \-\-json
 Emit a JSON array of objects
-(\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR).
+(\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR,
+\fIbatch\fR).
+The batch holds the put run id for items rtrash trashed, else null.
 .TP
 .B \-\-help
 Display help and exit.
@@ -528,6 +530,49 @@ Display help and exit.
 .TP
 .B \-\-version
 Output version information and exit.
+.SS undo
+.B rtrash undo
+[\fIOPTION\fR]... [\fIBATCH\fR]
+.PP
+Restore every item one put run trashed, each to its original location.
+Each put run writes one batch id into its
+.B .trashinfo
+files, under the extra key
+.BR X-Rtrash-Batch .
+Without
+.IR BATCH ,
+undo the most recent run in scope.
+Items trashed by other tools carry no batch id and never match.
+.TP
+.BR \-l ", " \-\-list
+List put runs, newest first: id, date, item count and paths.
+.TP
+.BR \-n ", " \-\-dry\-run
+Show what would come back and change nothing.
+.TP
+.BR \-f ", " \-\-force
+Overwrite existing files at the original locations.
+.TP
+.B \-\-json
+Print
+.RI { batch ", " restored ", " failed }
+as JSON on stdout; with
+.BR \-\-list ,
+an array of runs.
+.TP
+.B \-\-home\-only
+Only the home trash (skip volume trash).
+.TP
+.BI \-\-trash\-dir =PATH
+Only consider this trash directory (repeatable).
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.PP
+Exit status 0 means every item came back; 1 means nothing matched or an item failed.
 .SS setup
 .B rtrash setup
 [\fIOPTION\fR]...

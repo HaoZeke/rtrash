@@ -557,6 +557,7 @@ mod tests {
                 root: PathBuf::from("/tmp/trash"),
                 topdir: None,
             },
+            batch: None,
         };
         let mut app = App::new("rtrash", vec![&e], false);
         app.status = "purge 1 item?".into();

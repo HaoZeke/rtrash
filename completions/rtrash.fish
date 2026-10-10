@@ -7,7 +7,7 @@ function __rtrash_seen_subcommand
     set -e cmd[1]
     for c in $cmd
         switch $c
-            case put empty list status du restore rm setup keys completions man
+            case put empty list status du restore undo rm setup keys completions man
                 echo $c
                 return 0
         end
@@ -22,6 +22,7 @@ complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'list' -d 'list trash
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'status' -d 'item count and reclaimable size summary'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'du' -d 'find the largest directories and files to trash'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'restore' -d 'restore a trashed item'
+complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'undo' -d 'restore everything one put run trashed'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'rm' -d 'permanently delete matching trash entries'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'setup' -d 'install multi-call links, completions, man page'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'keys' -d 'show or sample the TUI keybind config'
@@ -85,6 +86,15 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l include
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l json -d 'emit a JSON object'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l print0 -d 'print listed paths NUL-separated'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l pick -d 'mark listed rows in the put browser and trash them'
+
+# undo
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -f
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -s l -l list -d 'list put runs, newest first'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -s n -l dry-run -d 'show what would be restored'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -s f -l force -d 'overwrite existing files at original locations'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -l json -d 'print the result as JSON'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -l home-only -d 'only the home trash'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -l trash-dir -d 'only this trash directory' -r
 
 # restore
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s f -l force -d 'overwrite existing file at original location'

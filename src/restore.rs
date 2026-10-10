@@ -390,6 +390,7 @@ mod tests {
                 root: PathBuf::from("/tmp/trash"),
                 topdir: None,
             },
+            batch: None,
         }
     }
 

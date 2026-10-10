@@ -52,6 +52,8 @@ pub mod tui_list;
 pub mod tui_select;
 #[cfg(all(unix, feature = "tui"))]
 pub mod tui_term;
+#[cfg(unix)]
+pub mod undo;
 
 // Windows CLI surface: system Recycle Bin (not FreeDesktop modules).
 #[cfg(windows)]
@@ -88,6 +90,13 @@ pub mod rm {
 pub mod setup {
     pub fn run(prog: &str, args: &[String]) -> i32 {
         crate::win_recycle::setup_run(prog, args)
+    }
+}
+#[cfg(windows)]
+pub mod undo {
+    pub fn run(prog: &str, _args: &[String]) -> i32 {
+        eprintln!("{prog}: undo needs the FreeDesktop trash; on Windows, use restore");
+        1
     }
 }
 #[cfg(windows)]

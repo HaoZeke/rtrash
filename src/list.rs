@@ -25,6 +25,8 @@ pub struct Entry {
     pub original: std::path::PathBuf,
     pub name: String,
     pub dir: TrashDir,
+    /// Put batch id from the `.trashinfo`, when rtrash wrote one.
+    pub batch: Option<String>,
 }
 
 pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
@@ -59,6 +61,7 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
                 epoch,
                 name: name.to_string(),
                 dir: dir.clone(),
+                batch: parsed.batch,
             });
         }
     }
@@ -136,12 +139,17 @@ pub use crate::util::json_escape;
 
 pub fn entry_to_json(e: &Entry) -> String {
     let date = e.date.as_deref().unwrap_or("");
+    let batch = match &e.batch {
+        Some(b) => format!("\"{}\"", json_escape(b)),
+        None => "null".to_string(),
+    };
     format!(
-        "{{\"deletion_date\":\"{}\",\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\"}}",
+        "{{\"deletion_date\":\"{}\",\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\",\"batch\":{}}}",
         json_escape(date),
         json_escape(&e.original.to_string_lossy()),
         json_escape(&e.name),
         json_escape(&e.dir.root.to_string_lossy()),
+        batch,
     )
 }
 
@@ -259,6 +267,7 @@ mod tests {
                 root: PathBuf::from("/tmp/Trash"),
                 topdir: None,
             },
+            batch: None,
         }
     }
 
