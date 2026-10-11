@@ -1655,3 +1655,49 @@ fn types_total_each_extension_and_the_rest() {
     // A plain scan keeps its JSON shape.
     assert!(!t.json(&[]).contains("\"types\""));
 }
+
+/// Under a cap on the address space the walk threads may not get their
+/// full stacks. The walk recurses once per level, so with a smaller stack
+/// it must enter fewer levels: falling back to small stacks with the full
+/// depth overflowed the stack near 600 levels and aborted.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_capped_address_space_walks_fewer_levels_instead_of_overflowing() {
+    use std::os::unix::process::CommandExt;
+    let t = Tree::new("capped-stack");
+    let levels = 1100;
+    let mut deep = t.root.join("chain");
+    for _ in 0..levels {
+        deep.push("d");
+    }
+    fs::create_dir_all(&deep).unwrap();
+    let mut cmd = Command::new(bin());
+    cmd.args(["du", "-n", "1", "chain"])
+        .current_dir(&t.root)
+        .env("XDG_DATA_HOME", t.root.join(".xdg"))
+        .env("XDG_CONFIG_HOME", t.root.join(".cfg"))
+        .env("HOME", &t.root)
+        // Eight walk threads of 256 MiB fill a 2 GiB cap on their own.
+        .env("RAYON_NUM_THREADS", "8");
+    // SAFETY: setrlimit is async-signal-safe and touches no memory of the
+    // parent, as a hook run between fork and exec must.
+    unsafe {
+        cmd.pre_exec(|| {
+            let cap = libc::rlimit {
+                rlim_cur: 2 << 30,
+                rlim_max: 2 << 30,
+            };
+            if libc::setrlimit(libc::RLIMIT_AS, &cap) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let out = cmd.output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{:?}: {err}", out.status);
+    // A quarter of the cap gives each thread 64 MiB, a quarter of the full
+    // stack, and so a quarter of the full 4096 levels.
+    assert!(err.contains("1 directory past 1024 levels"), "{err}");
+    fs::remove_dir_all(&t.root).unwrap();
+}

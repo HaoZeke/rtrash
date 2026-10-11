@@ -1,0 +1,1 @@
+`rtrash du` no longer aborts with a stack overflow on a deep tree when the system refuses its walk threads their full stacks, as under `ulimit -v`. It now picks stacks that fit the cap and enters fewer levels on smaller ones; the directories past that depth count with their own size and are reported, as those past 4096 levels already were.

@@ -475,6 +475,9 @@ pub struct Report {
     pub unread: Vec<(PathBuf, String)>,
     /// Directories nested too deep to enter: counted, contents unread.
     pub too_deep: u64,
+    /// Levels the walk entered at most: [`MAX_DEPTH`], or fewer when the
+    /// system refused the walk threads their full stacks.
+    pub depth_limit: usize,
     /// `--unique` scans: bytes of the shared extents the scanned files
     /// point at, each extent counted once, and with every reference.
     pub shared: Option<SharedTotals>,
@@ -718,7 +721,9 @@ struct Ctx<'a> {
     unreadable: AtomicU64,
     /// The first [`UNREAD_KEPT`] unreadable entries, with the reason.
     unread: Mutex<Vec<(PathBuf, String)>>,
-    /// Directories past [`MAX_DEPTH`] or [`MAX_PATH_BYTES`], not entered.
+    /// Levels the walk enters: [`MAX_DEPTH`], or fewer on small stacks.
+    depth_limit: usize,
+    /// Directories past `depth_limit` or [`MAX_PATH_BYTES`], not entered.
     too_deep: AtomicU64,
     /// Files counted, each hard-linked file once.
     files: AtomicU64,
@@ -888,9 +893,22 @@ pub(crate) const MAX_DEPTH: usize = if cfg!(all(test, target_os = "macos")) {
 pub(crate) const MAX_PATH_BYTES: usize = 32 * 1024;
 
 /// Stack of each walk thread. Rayon's default of 2 MiB ran out near 2000
-/// levels; this leaves room for [`MAX_DEPTH`] in a debug build, also when
-/// a waiting thread runs a second deep chain on top of its own.
+/// levels (near 600 in a debug build); this leaves room for [`MAX_DEPTH`]
+/// in a debug build, also when a waiting thread runs a second deep chain
+/// on top of its own.
 const WALK_STACK: usize = 256 * 1024 * 1024;
+
+/// Stacks to try for the walk threads, largest first. A cap on the
+/// address space (`ulimit -v`) or strict overcommit may refuse the
+/// threads [`WALK_STACK`] each; each smaller try walks fewer levels.
+const WALK_STACKS: [usize; 4] = [WALK_STACK, WALK_STACK / 4, WALK_STACK / 16, 2 * 1024 * 1024];
+
+/// Levels a walk thread with `stack` bytes of stack may enter: the share
+/// of [`MAX_DEPTH`] that [`WALK_STACK`] gives it, so each level keeps the
+/// room it has at full size.
+fn depth_for_stack(stack: usize) -> usize {
+    MAX_DEPTH * (stack / 1024) / (WALK_STACK / 1024)
+}
 
 /// A file that looked big enough for the list while its directory was
 /// being read; it is offered once the directory is known to be listable.
@@ -939,7 +957,7 @@ fn enter(
             artefact: None,
         }
     };
-    if depth > MAX_DEPTH || path.as_os_str().len() > MAX_PATH_BYTES {
+    if depth > ctx.depth_limit || path.as_os_str().len() > MAX_PATH_BYTES {
         let st = match known {
             Some(st) => st,
             None => match parent {
@@ -1504,27 +1522,76 @@ pub fn scan_on(
     prefetch: Option<&du_git::Prefetch>,
     threads: Option<usize>,
 ) -> io::Result<Report> {
-    let n = threads.unwrap_or(0);
-    let pool = |stack: Option<usize>| {
-        let b = rayon::ThreadPoolBuilder::new().num_threads(n);
-        match stack {
-            Some(s) => b.stack_size(s),
-            None => b,
+    scan_on_stacks(paths, opts, prefetch, threads, &WALK_STACKS)
+}
+
+/// [`scan_on`] with the first of `stacks` the system grants the walk
+/// threads. The walk recurses once per level, so the depth it enters
+/// follows the stack it got (see [`depth_for_stack`]): falling back to a
+/// small stack with the full depth overflowed it on a deep tree.
+fn scan_on_stacks(
+    paths: &[PathBuf],
+    opts: &ScanOpts,
+    prefetch: Option<&du_git::Prefetch>,
+    threads: Option<usize>,
+    stacks: &[usize],
+) -> io::Result<Report> {
+    let n = threads.unwrap_or_else(|| {
+        std::env::var("RAYON_NUM_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+    });
+    // Under a cap on the address space, start with stacks that fit in a
+    // quarter of it: the threads of a refused try may still hold theirs
+    // while the next try starts.
+    let budget = address_space_cap().map_or(usize::MAX, |cap| cap / 4);
+    let fits = stacks
+        .iter()
+        .position(|&s| s.saturating_mul(n) <= budget)
+        .unwrap_or(stacks.len().saturating_sub(1));
+    let mut last = None;
+    for &stack in &stacks[fits..] {
+        let built = rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .stack_size(stack)
+            .build();
+        match built {
+            Ok(pool) => {
+                let depth = depth_for_stack(stack);
+                return pool.install(|| scan_pooled(paths, opts, prefetch, depth));
+            }
+            Err(e) => last = Some(e),
         }
-        .build()
-    };
-    // A system that commits stacks up front (strict overcommit) may
-    // refuse the big ones; the default size still walks most trees.
-    let pool = pool(Some(WALK_STACK))
-        .or_else(|_| pool(None))
-        .map_err(|e| io::Error::other(format!("cannot start {n} threads: {e}")))?;
-    pool.install(|| scan_pooled(paths, opts, prefetch))
+    }
+    let why = last.map_or_else(|| "no stack size to try".to_string(), |e| e.to_string());
+    Err(io::Error::other(format!("cannot start {n} threads: {why}")))
+}
+
+/// The soft cap on this process's address space, if there is one.
+fn address_space_cap() -> Option<usize> {
+    #[cfg(unix)]
+    {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit only fills the struct handed to it.
+        if unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut lim) } == 0
+            && lim.rlim_cur != libc::RLIM_INFINITY
+        {
+            return usize::try_from(lim.rlim_cur).ok();
+        }
+    }
+    None
 }
 
 fn scan_pooled(
     paths: &[PathBuf],
     opts: &ScanOpts,
     prefetch: Option<&du_git::Prefetch>,
+    depth_limit: usize,
 ) -> io::Result<Report> {
     du_fs::raise_nofile_limit();
     let mut roots = Vec::new();
@@ -1557,6 +1624,7 @@ fn scan_pooled(
             seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
             unread: Mutex::new(Vec::new()),
+            depth_limit,
             too_deep: AtomicU64::new(0),
             files: AtomicU64::new(0),
             links: AtomicU64::new(0),
@@ -1658,6 +1726,7 @@ fn scan_pooled(
             unread
         },
         too_deep,
+        depth_limit,
         shared: opts.unique.then(|| SharedTotals {
             distinct: shared.distinct(),
             referenced: shared.referenced,
@@ -3010,8 +3079,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     if report.too_deep > 0 {
         eprintln!(
-            "{prog}: {} past {MAX_DEPTH} levels or {} KiB of path counted without their contents",
+            "{prog}: {} past {} levels or {} KiB of path counted without their contents",
             plural(report.too_deep, "directory", "directories"),
+            report.depth_limit,
             MAX_PATH_BYTES / 1024
         );
     }
@@ -3429,6 +3499,7 @@ mod tests {
             unreadable: 0,
             unread: Vec::new(),
             too_deep: 0,
+            depth_limit: MAX_DEPTH,
             shared: None,
             partial: false,
             types: Vec::new(),
@@ -3500,6 +3571,16 @@ mod tests {
             }
             libc::close(fd);
         }
+    }
+
+    #[test]
+    fn smaller_walk_stacks_enter_fewer_levels() {
+        assert_eq!(depth_for_stack(WALK_STACK), MAX_DEPTH);
+        assert_eq!(depth_for_stack(WALK_STACK / 4), MAX_DEPTH / 4);
+        // Rayon's default stack: the size the old fallback walked with.
+        assert_eq!(depth_for_stack(2 * 1024 * 1024), MAX_DEPTH / 128);
+        assert!(WALK_STACKS.windows(2).all(|w| w[0] > w[1]));
+        assert_eq!(WALK_STACKS[0], WALK_STACK);
     }
 
     #[cfg(unix)]
