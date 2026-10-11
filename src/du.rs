@@ -108,8 +108,9 @@ directories appear as one `trash` row and are never printed by --print0.
   -i, --interactive     explore PATH one directory at a time: open and leave
                           directories, trash rows (d), undo (u), rescan (r),
                           sort (s, n, C, M), switch disk use and apparent
-                          size (S), show details (i) and filter by name (/);
-                          rows show git state and artefact kind
+                          size (S), show details (i), filter by name (/),
+                          print paths and quit (p) or copy them (y); rows
+                          show git state and artefact kind
       --no-delete       with -i, browse only: d and u do nothing
       --si              show sizes in powers of 1000 (kB, MB, GB)
       --help            display this help and exit

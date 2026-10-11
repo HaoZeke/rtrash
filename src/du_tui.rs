@@ -202,6 +202,10 @@ struct App {
     info: Vec<String>,
     /// Name filter on the current view (`/`); empty shows every row.
     filter: String,
+    /// Paths `p` prints on stdout once the explorer has closed.
+    print_on_exit: Vec<PathBuf>,
+    /// Text `y` sends to the terminal clipboard on the next draw.
+    clipboard: Option<String>,
 }
 
 /// The size a row shows and its bar measures: apparent size under
@@ -410,6 +414,8 @@ impl App {
             size_key,
             info: Vec::new(),
             filter: String::new(),
+            print_on_exit: Vec::new(),
+            clipboard: None,
             prog: prog.to_string(),
             cur: root.clone(),
             root,
@@ -1026,6 +1032,48 @@ impl App {
         }
     }
 
+    /// The marked rows, or the cursor row when none is marked.
+    fn chosen_paths(&self) -> Vec<PathBuf> {
+        let marked = self.sel.marked_sorted();
+        let idxs = if marked.is_empty() {
+            self.list_state.selected().into_iter().collect()
+        } else {
+            marked
+        };
+        idxs.into_iter()
+            .filter_map(|i| self.rows().get(i).map(|r| r.path.clone()))
+            .collect()
+    }
+
+    /// Quit and print the chosen paths (`p`).
+    fn print_and_quit(&mut self) {
+        let paths = self.chosen_paths();
+        if paths.is_empty() {
+            self.status = "nothing to print".into();
+            return;
+        }
+        self.print_on_exit = paths;
+        self.quit = true;
+    }
+
+    /// Copy the chosen paths, one per line, to the terminal clipboard (`y`).
+    fn copy_paths(&mut self) {
+        let paths = self.chosen_paths();
+        if paths.is_empty() {
+            self.status = "nothing to copy".into();
+            return;
+        }
+        let text: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        self.status = format!(
+            "copied {} to the clipboard (OSC 52; the terminal must allow it)",
+            crate::util::plural(paths.len() as u64, "path", "paths")
+        );
+        self.clipboard = Some(text.join("\n"));
+    }
+
     /// Open the info panel on the cursor row.
     fn show_info(&mut self) {
         let Some(it) = self.selected() else {
@@ -1082,6 +1130,8 @@ impl App {
                         KeyCode::Char('C') => return self.sort_by(Order::Key(SortKey::Items)),
                         KeyCode::Char('M') => return self.sort_by(Order::Key(SortKey::Mtime)),
                         KeyCode::Char('i') => return self.show_info(),
+                        KeyCode::Char('p') => return self.print_and_quit(),
+                        KeyCode::Char('y') => return self.copy_paths(),
                         _ => {}
                     }
                 }
@@ -1280,6 +1330,35 @@ fn mode_string(mode: u32) -> String {
         });
     }
     s
+}
+
+/// Standard base64 with padding.
+fn base64(bytes: &[u8]) -> String {
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if i <= chunk.len() {
+                out.push(ABC[((n >> shift) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The OSC 52 sequence that puts `text` on the system clipboard in
+/// terminals that allow it (xterm, kitty, iTerm2, WezTerm, Windows
+/// Terminal; tmux with set-clipboard on).
+fn osc52(text: &str) -> String {
+    format!("\x1b]52;c;{}\x07", base64(text.as_bytes()))
 }
 
 /// `s` cut to at most `max` characters by dropping its start, marked
@@ -1516,6 +1595,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 "s n C M — sort by size, name, items or newest change; again reverses",
                 "S — show apparent sizes instead of disk use, or back",
                 "i — details of the cursor row (any key closes them)",
+                "p — quit and print the marked paths (or the cursor row) · y — copy them",
                 "/ — show only rows whose name matches (a part, or a glob with * ? [); Esc clears",
                 "! — git work at risk (dirty, unpushed or unknown)",
             ],
@@ -1527,6 +1607,11 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
     loop {
         app.poll_jobs();
         terminal.draw(|f| ui(f, app))?;
+        if let Some(text) = app.clipboard.take() {
+            let mut out = io::stdout();
+            io::Write::write_all(&mut out, osc52(&text).as_bytes())?;
+            io::Write::flush(&mut out)?;
+        }
         if app.quit {
             // Let running scans wind down instead of walking on unseen.
             for job in app.jobs.values() {
@@ -1578,6 +1663,11 @@ pub fn run(prog: &str, root: &Path, opts: ScanOpts, git: bool, read_only: bool) 
     if let Err(e) = result {
         eprintln!("{prog}: tui error: {e}");
         return 1;
+    }
+    let mut out = io::stdout().lock();
+    for p in &app.print_on_exit {
+        let _ = io::Write::write_all(&mut out, p.as_os_str().as_encoded_bytes());
+        let _ = io::Write::write_all(&mut out, b"\n");
     }
     0
 }
@@ -2190,6 +2280,43 @@ mod tests {
         a.on_key(KeyCode::Char('S'), KeyModifiers::SHIFT);
         assert_eq!(a.sorting.label(), "disk use, reversed");
         assert_eq!(names(&a).last().unwrap(), "big");
+    }
+
+    #[test]
+    fn p_quits_with_the_marked_paths_and_y_copies_them() {
+        let t = tree("printcopy");
+        let mut a = app(&t);
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert_eq!(
+            a.clipboard.take().unwrap(),
+            t.0.join("w").join("big").to_string_lossy()
+        );
+        assert!(a.status.contains("copied 1 path"), "{}", a.status);
+        a.sel.toggle(1);
+        a.sel.toggle(2);
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        let text = a.clipboard.take().unwrap();
+        assert_eq!(text.lines().count(), 2, "{text}");
+        assert!(!a.quit);
+        a.on_key(KeyCode::Char('p'), KeyModifiers::NONE);
+        assert!(a.quit);
+        assert_eq!(a.print_on_exit, [t.0.join("w/file"), t.0.join("w/small")]);
+    }
+
+    #[test]
+    fn osc52_wraps_base64() {
+        for (raw, enc) in [
+            ("", ""),
+            ("a", "YQ=="),
+            ("ab", "YWI="),
+            ("abc", "YWJj"),
+            ("abcd", "YWJjZA=="),
+            ("abcde", "YWJjZGU="),
+            ("abcdef", "YWJjZGVm"),
+        ] {
+            assert_eq!(base64(raw.as_bytes()), enc);
+        }
+        assert_eq!(osc52("hi"), "\x1b]52;c;aGk=\x07");
     }
 
     #[test]
