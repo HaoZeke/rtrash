@@ -286,6 +286,18 @@ Also multi-call
 List trashed items as
 .RB \(oq "DELETION-DATE ORIGINAL-PATH" \(cq,
 oldest first.
+A record named
+.IR .trashinfo ,
+.I ..trashinfo
+or
+.I ...trashinfo
+names no item, since its payload in
+.I files/
+would be
+.I files/
+itself or the whole trash; no command lists it or acts on it, and a full
+.B empty
+clears it.
 .TP
 .B \-\-home\-only
 Only the home trash

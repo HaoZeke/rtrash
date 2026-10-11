@@ -145,6 +145,17 @@ pub fn join_name(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     dir.join(os_from_str(name))
 }
 
+/// The item name behind the info file name `fname`, or `None` when it is no
+/// `.trashinfo` file or names no payload. `files/` joined with "", "." or
+/// ".." points at `files/` itself or the trash root, so a stray `.trashinfo`,
+/// `..trashinfo` or `...trashinfo` must never become an item that `rm`,
+/// `empty` or `restore` acts on.
+pub fn trash_item_name(fname: &str) -> Option<&str> {
+    let name = fname.strip_suffix(".trashinfo")?;
+    let payload = !matches!(name, "" | "." | "..") && !name.contains('/');
+    payload.then_some(name)
+}
+
 /// `dir/NAME.trashinfo` for a name kept by [`str_from_os`].
 pub fn join_info(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     dir.join(os_from_str(&format!("{name}.trashinfo")))
@@ -533,5 +544,21 @@ mod tests {
         assert!(fnmatch("*", "anything"));
         assert!(fnmatch("exact", "exact"));
         assert!(!fnmatch("exact", "exactx"));
+    }
+
+    #[test]
+    fn info_names_that_point_at_the_trash_are_no_items() {
+        assert_eq!(trash_item_name("a.txt.trashinfo"), Some("a.txt"));
+        assert_eq!(trash_item_name(".hidden.trashinfo"), Some(".hidden"));
+        assert_eq!(trash_item_name("....trashinfo"), Some("..."));
+        for bad in [
+            ".trashinfo",
+            "..trashinfo",
+            "...trashinfo",
+            "a/b.trashinfo",
+            "a.txt",
+        ] {
+            assert_eq!(trash_item_name(bad), None, "{bad}");
+        }
     }
 }

@@ -306,7 +306,7 @@ fn empty_one(
             let info_path = entry.path();
             let fname = entry.file_name();
             let fname = crate::util::str_from_os_ref(&fname);
-            let Some(name) = fname.strip_suffix(".trashinfo") else {
+            let Some(name) = crate::util::trash_item_name(&fname) else {
                 continue;
             };
             let take = match cutoff {

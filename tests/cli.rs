@@ -146,6 +146,39 @@ fn put_refuses_the_trash_and_what_contains_or_sits_in_it() {
 }
 
 #[test]
+fn info_files_that_name_no_payload_are_never_items() {
+    let sb = Sandbox::new("info-no-payload");
+    fs::write(sb.work().join("keep"), b"x").unwrap();
+    assert!(sb.run(&["put", "keep"]).status.success());
+    // Joined to files/, these names point at files/ itself and at the
+    // trash root; `rm evil` used to delete every item through them.
+    for (n, info) in [(1, ".trashinfo"), (2, "..trashinfo"), (3, "...trashinfo")] {
+        let record = format!(
+            "[Trash Info]\nPath={}/evil{n}\nDeletionDate=2000-01-01T00:00:00\n",
+            sb.work().display()
+        );
+        fs::write(sb.trash().join("info").join(info), record).unwrap();
+    }
+    let out = sb.run(&["list"]);
+    let listed = stdout_of(&out);
+    assert!(listed.contains("/keep"), "{listed}");
+    assert!(!listed.contains("evil"), "{listed}");
+    for n in 1..=3 {
+        let evil = format!("evil{n}");
+        // No match: rm, like trash-rm, still exits 0.
+        let out = sb.run(&["rm", &evil]);
+        assert!(!stdout_of(&out).contains("removed"), "{}", stdout_of(&out));
+        assert!(!sb.run(&["restore", &evil]).status.success());
+        assert!(sb.trash().join("files/keep").exists(), "{evil}");
+    }
+    // An age cut that the hostile records pass removes nothing through them.
+    assert!(sb.run(&["empty", "1"]).status.success());
+    assert!(sb.trash().join("files/keep").exists());
+    assert!(sb.trash().join("info/keep.trashinfo").exists());
+    assert!(!sb.work().join("evil3").exists());
+}
+
+#[test]
 fn put_json_reports_trashed_and_failed() {
     let sb = Sandbox::new("put-json");
     sb.touch("a.txt");

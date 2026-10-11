@@ -54,7 +54,7 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
         // One read per item: spread a big trash over the rayon pool.
         out.par_extend(paths.into_par_iter().filter_map(|path| {
             let fname = crate::util::str_from_os_ref(path.file_name()?);
-            let name = fname.strip_suffix(".trashinfo")?;
+            let name = crate::util::trash_item_name(&fname)?;
             let content = fs::read(&path).ok()?;
             let parsed = info::parse_bytes(&content);
             let epoch = parsed
