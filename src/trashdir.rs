@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs;
 use std::io::{self, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -1277,7 +1279,157 @@ fn remove_any(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
     }
 }
 
+/// Owned directory descriptors one walk keeps open. Deeper frames close
+/// their shallowest ancestors and reopen them through `..`.
+const WALK_FD_BUDGET: usize = 16;
+
+/// One directory on an explicit walk stack.
+struct WalkDir {
+    fd: Option<OwnedFd>,
+    /// Device and inode, recorded when `fd` is closed.
+    id: (u64, u64),
+    entries: Vec<OsString>,
+}
+
+fn open_dir_nofollow(path: &Path) -> io::Result<OwnedFd> {
+    let c = path_cstr(path)?;
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn openat_dir(dirfd: RawFd, name: &CStr) -> io::Result<OwnedFd> {
+    let fd = unsafe {
+        libc::openat(
+            dirfd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn name_cstr(name: &OsStr) -> io::Result<CString> {
+    CString::new(name.as_bytes()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+}
+
+fn fstatat_nofollow(dirfd: RawFd, name: &CStr) -> io::Result<libc::stat> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dirfd, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(st)
+}
+
+fn is_type(st: &libc::stat, kind: libc::mode_t) -> bool {
+    (st.st_mode & libc::S_IFMT) == kind
+}
+
+fn fd_dev_ino(fd: RawFd) -> io::Result<(u64, u64)> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((st.st_dev as u64, st.st_ino as u64))
+}
+
+/// Open the parent of `child` through `..` and check it is still `id`.
+fn reopen_parent_dir(child: RawFd, id: (u64, u64)) -> io::Result<OwnedFd> {
+    let fd = unsafe {
+        libc::openat(
+            child,
+            c"..".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    if fd_dev_ino(fd.as_raw_fd())? != id {
+        return Err(io::Error::other(
+            "the directory moved while it was being copied",
+        ));
+    }
+    Ok(fd)
+}
+
+/// Names in `dirfd`, not `.` or `..`. The descriptor stays open.
+fn read_names(dirfd: RawFd) -> io::Result<Vec<OsString>> {
+    let dup = unsafe { libc::fcntl(dirfd, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let dir = unsafe { libc::fdopendir(dup) };
+    if dir.is_null() {
+        let e = io::Error::last_os_error();
+        unsafe { libc::close(dup) };
+        return Err(e);
+    }
+    let mut names = Vec::new();
+    loop {
+        let ent = unsafe { libc::readdir(dir) };
+        if ent.is_null() {
+            break;
+        }
+        let bytes = unsafe { CStr::from_ptr((*ent).d_name.as_ptr()) }.to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        names.push(OsString::from(OsStr::from_bytes(bytes)));
+    }
+    unsafe { libc::closedir(dir) };
+    Ok(names)
+}
+
+fn walk_fd(frame: &WalkDir) -> RawFd {
+    frame.fd.as_ref().map_or(-1, |f| f.as_raw_fd())
+}
+
+/// Close the shallowest open frame once more than [`WALK_FD_BUDGET`]
+/// directories are open, so depth never costs a descriptor per level.
+fn trim_walk(stack: &mut [WalkDir], lo: &mut usize) -> io::Result<()> {
+    if stack.len() - *lo <= WALK_FD_BUDGET {
+        return Ok(());
+    }
+    let f = &mut stack[*lo];
+    if let Some(old) = f.fd.take() {
+        f.id = fd_dev_ino(old.as_raw_fd())?;
+    }
+    *lo += 1;
+    Ok(())
+}
+
+/// Reopen `stack[parent]` from `child` when its descriptor was closed.
+fn restore_parent(
+    stack: &mut [WalkDir],
+    parent: usize,
+    child: RawFd,
+    lo: &mut usize,
+) -> io::Result<()> {
+    if stack[parent].fd.is_none() {
+        stack[parent].fd = Some(reopen_parent_dir(child, stack[parent].id)?);
+        *lo = parent;
+    }
+    *lo = (*lo).min(stack.len());
+    Ok(())
+}
+
 /// Ok when every directory under `path` lets this user remove entries.
+/// The walk keeps its own stack: a chain of any depth stays off the thread
+/// stack, and paths past `PATH_MAX` are reached by descriptor.
 fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
     if !meta.is_dir() {
         return Ok(());
@@ -1286,17 +1438,50 @@ fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
     if unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    for e in fs::read_dir(path)? {
-        let e = e?;
-        if e.file_type()?.is_dir() {
-            tree_removable(&e.path(), &e.metadata()?)?;
+    let root = open_dir_nofollow(path)?;
+    let entries = read_names(root.as_raw_fd())?;
+    let mut stack = vec![WalkDir {
+        fd: Some(root),
+        id: (0, 0),
+        entries,
+    }];
+    // Frames below `lo` have their descriptors closed; the root never does.
+    let mut lo = 1usize;
+    loop {
+        let top = stack.len() - 1;
+        let Some(name) = stack[top].entries.pop() else {
+            if top == 0 {
+                return Ok(());
+            }
+            let done = stack.pop().expect("child frame");
+            let parent = top - 1;
+            restore_parent(&mut stack, parent, walk_fd(&done), &mut lo)?;
+            continue;
+        };
+        let dirfd = walk_fd(&stack[top]);
+        let name_c = name_cstr(&name)?;
+        let st = fstatat_nofollow(dirfd, &name_c)?;
+        // A symlink is not a directory, even when its target is one.
+        if !is_type(&st, libc::S_IFDIR) {
+            continue;
         }
+        if unsafe { libc::faccessat(dirfd, name_c.as_ptr(), libc::W_OK | libc::X_OK, 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let child = openat_dir(dirfd, &name_c)?;
+        let entries = read_names(child.as_raw_fd())?;
+        stack.push(WalkDir {
+            fd: Some(child),
+            id: (0, 0),
+            entries,
+        });
+        trim_walk(&mut stack, &mut lo)?;
     }
-    Ok(())
 }
 
 /// Give the owner write access to every directory under `path`, so a
-/// half-made copy of a read-only tree can be removed again.
+/// half-made copy of a read-only tree can be removed again. Same walk as
+/// [`tree_removable`]: no recursion, and no path long enough to fail.
 fn make_tree_writable(path: &Path) {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return;
@@ -1308,11 +1493,69 @@ fn make_tree_writable(path: &Path) {
     if mode & 0o700 != 0o700 {
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o700));
     }
-    if let Ok(rd) = fs::read_dir(path) {
-        for e in rd.flatten() {
-            make_tree_writable(&e.path());
+    let Ok(root) = open_dir_nofollow(path) else {
+        return;
+    };
+    let Ok(entries) = read_names(root.as_raw_fd()) else {
+        return;
+    };
+    let mut stack = vec![WalkDir {
+        fd: Some(root),
+        id: (0, 0),
+        entries,
+    }];
+    let mut lo = 1usize;
+    loop {
+        let top = stack.len() - 1;
+        let Some(name) = stack[top].entries.pop() else {
+            if top == 0 {
+                return;
+            }
+            let done = stack.pop().expect("child frame");
+            let parent = top - 1;
+            if restore_parent(&mut stack, parent, walk_fd(&done), &mut lo).is_err() {
+                return;
+            }
+            continue;
+        };
+        let dirfd = walk_fd(&stack[top]);
+        let Ok(name_c) = name_cstr(&name) else {
+            continue;
+        };
+        let Ok(st) = fstatat_nofollow(dirfd, &name_c) else {
+            continue;
+        };
+        if !is_type(&st, libc::S_IFDIR) {
+            continue;
+        }
+        let Ok(child) = openat_dir(dirfd, &name_c) else {
+            continue;
+        };
+        chmod_dir_fd(child.as_raw_fd());
+        let Ok(entries) = read_names(child.as_raw_fd()) else {
+            continue;
+        };
+        stack.push(WalkDir {
+            fd: Some(child),
+            id: (0, 0),
+            entries,
+        });
+        if trim_walk(&mut stack, &mut lo).is_err() {
+            return;
         }
     }
+}
+
+fn chmod_dir_fd(fd: RawFd) {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return;
+    }
+    let mode = st.st_mode;
+    if (mode & 0o700) == 0o700 {
+        return;
+    }
+    unsafe { libc::fchmod(fd, (mode & 0o7777) | 0o700) };
 }
 
 /// Remove a path whatever it is; used by empty, restore force-overwrite, and error cleanup.
@@ -1372,14 +1615,7 @@ fn copy_node(src: &Path, dst: &Path, meta: &fs::Metadata, links: &mut LinkMap) -
         return Ok(());
     }
     if ftype.is_dir() {
-        fs::create_dir(dst)?;
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            let emeta = fs::symlink_metadata(entry.path())?;
-            copy_node(&entry.path(), &dst.join(entry.file_name()), &emeta, links)?;
-        }
-        finish_meta(src, dst, meta)?;
-        return set_times(dst, meta);
+        return copy_dir_iter(src, dst, meta, links);
     }
     if ftype.is_socket() {
         return Err(io::Error::new(
@@ -1401,6 +1637,402 @@ fn copy_node(src: &Path, dst: &Path, meta: &fs::Metadata, links: &mut LinkMap) -
     }
     finish_meta(src, dst, meta)?;
     set_times(dst, meta)
+}
+
+/// One directory in [`copy_dir_iter`]'s heap stack.
+struct DirCopy {
+    src: Option<OwnedFd>,
+    dst: Option<OwnedFd>,
+    name: OsString,
+    src_id: (u64, u64),
+    dst_id: (u64, u64),
+    entries: Vec<OsString>,
+    /// The path of this directory still fits in `PATH_MAX`, so its metadata
+    /// can be applied with the same calls a shallow tree uses.
+    by_path: bool,
+    mode: libc::mode_t,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    atime: libc::timespec,
+    mtime: libc::timespec,
+}
+
+/// Copy the directory `src` onto `dst` without recursion. Children whose
+/// paths still fit in `PATH_MAX` use [`copy_node`]; deeper ones are copied
+/// by descriptor. At most [`WALK_FD_BUDGET`] directories stay open on each
+/// side.
+fn copy_dir_iter(
+    src: &Path,
+    dst: &Path,
+    meta: &fs::Metadata,
+    links: &mut LinkMap,
+) -> io::Result<()> {
+    fs::create_dir(dst)?;
+    let sfd = open_dir_nofollow(src)?;
+    let dfd = open_dir_nofollow(dst)?;
+    let entries = read_names(sfd.as_raw_fd())?;
+    let mut stack = vec![blank_dir(sfd, dfd, entries)];
+    let mut lo = 1usize;
+    loop {
+        let top = stack.len() - 1;
+        if let Some(name) = stack[top].entries.pop() {
+            copy_one_entry(src, dst, links, &mut stack, &mut lo, &name)?;
+            continue;
+        }
+        if top == 0 {
+            break;
+        }
+        finish_child_dir(src, dst, &mut stack, &mut lo)?;
+    }
+    finish_meta(src, dst, meta)?;
+    set_times(dst, meta)
+}
+
+fn blank_dir(src: OwnedFd, dst: OwnedFd, entries: Vec<OsString>) -> DirCopy {
+    DirCopy {
+        src: Some(src),
+        dst: Some(dst),
+        name: OsString::new(),
+        src_id: (0, 0),
+        dst_id: (0, 0),
+        entries,
+        by_path: true,
+        mode: 0,
+        uid: 0,
+        gid: 0,
+        atime: libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        mtime: libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+    }
+}
+
+fn copy_one_entry(
+    src_root: &Path,
+    dst_root: &Path,
+    links: &mut LinkMap,
+    stack: &mut Vec<DirCopy>,
+    lo: &mut usize,
+    name: &OsStr,
+) -> io::Result<()> {
+    let top = stack.len() - 1;
+    let name_c = name_cstr(name)?;
+    let src_fd = dir_fd(&stack[top].src)?;
+    let dst_fd = dir_fd(&stack[top].dst)?;
+    let st = fstatat_nofollow(src_fd, &name_c)?;
+    if is_type(&st, libc::S_IFSOCK) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "cannot copy a socket to another file system",
+        ));
+    }
+    let by_path = joined_len(src_root, stack, name) < libc::PATH_MAX as usize
+        && joined_len(dst_root, stack, name) < libc::PATH_MAX as usize;
+    if is_type(&st, libc::S_IFDIR) {
+        return push_child_dir(dst_root, stack, lo, (src_fd, dst_fd), name, &st, by_path);
+    }
+    if by_path {
+        let sp = joined(src_root, stack, name);
+        let dp = joined(dst_root, stack, name);
+        let emeta = fs::symlink_metadata(&sp)?;
+        return copy_node(&sp, &dp, &emeta, links);
+    }
+    copy_entry_deep(src_fd, dst_fd, &name_c, &st)
+}
+
+fn dir_fd(fd: &Option<OwnedFd>) -> io::Result<RawFd> {
+    fd.as_ref()
+        .map(|f| f.as_raw_fd())
+        .ok_or_else(|| io::Error::other("directory descriptor closed"))
+}
+
+fn push_child_dir(
+    dst_root: &Path,
+    stack: &mut Vec<DirCopy>,
+    lo: &mut usize,
+    fds: (RawFd, RawFd),
+    name: &OsStr,
+    st: &libc::stat,
+    by_path: bool,
+) -> io::Result<()> {
+    let (src_fd, dst_fd) = fds;
+    let name_c = name_cstr(name)?;
+    if by_path {
+        fs::create_dir(joined(dst_root, stack, name))?;
+    } else if unsafe { libc::mkdirat(dst_fd, name_c.as_ptr(), 0o700) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let child_src = openat_dir(src_fd, &name_c)?;
+    let child_dst = openat_dir(dst_fd, &name_c)?;
+    let entries = read_names(child_src.as_raw_fd())?;
+    let (atime, mtime) = stat_times(st);
+    stack.push(DirCopy {
+        src: Some(child_src),
+        dst: Some(child_dst),
+        name: name.to_os_string(),
+        src_id: (0, 0),
+        dst_id: (0, 0),
+        entries,
+        by_path,
+        mode: st.st_mode,
+        uid: st.st_uid,
+        gid: st.st_gid,
+        atime,
+        mtime,
+    });
+    trim_dir_copy(stack, lo)
+}
+
+fn trim_dir_copy(stack: &mut [DirCopy], lo: &mut usize) -> io::Result<()> {
+    if stack.len() - *lo <= WALK_FD_BUDGET {
+        return Ok(());
+    }
+    let f = &mut stack[*lo];
+    if let Some(old) = f.src.take() {
+        f.src_id = fd_dev_ino(old.as_raw_fd())?;
+    }
+    if let Some(old) = f.dst.take() {
+        f.dst_id = fd_dev_ino(old.as_raw_fd())?;
+    }
+    *lo += 1;
+    Ok(())
+}
+
+fn finish_child_dir(
+    src_root: &Path,
+    dst_root: &Path,
+    stack: &mut Vec<DirCopy>,
+    lo: &mut usize,
+) -> io::Result<()> {
+    let done = stack.pop().expect("child frame");
+    let parent = stack.len() - 1;
+    if stack[parent].src.is_none() || stack[parent].dst.is_none() {
+        let src = reopen_parent_dir(dir_fd(&done.src)?, stack[parent].src_id)?;
+        let dst = reopen_parent_dir(dir_fd(&done.dst)?, stack[parent].dst_id)?;
+        stack[parent].src = Some(src);
+        stack[parent].dst = Some(dst);
+        *lo = parent;
+    }
+    *lo = (*lo).min(stack.len());
+    if done.by_path {
+        let sp = joined(src_root, stack, &done.name);
+        let dp = joined(dst_root, stack, &done.name);
+        let sm = fs::symlink_metadata(&sp)?;
+        finish_meta(&sp, &dp, &sm)?;
+        return set_times(&dp, &sm);
+    }
+    apply_fd_meta(
+        dir_fd(&done.src)?,
+        dir_fd(&done.dst)?,
+        done.mode,
+        done.uid,
+        done.gid,
+        done.atime,
+        done.mtime,
+    )
+}
+
+fn joined(root: &Path, stack: &[DirCopy], name: &OsStr) -> PathBuf {
+    let mut p = root.to_path_buf();
+    for f in stack.iter().skip(1) {
+        p.push(&f.name);
+    }
+    if !name.is_empty() {
+        p.push(name);
+    }
+    p
+}
+
+fn joined_len(root: &Path, stack: &[DirCopy], name: &OsStr) -> usize {
+    let mut n = root.as_os_str().len();
+    for f in stack.iter().skip(1) {
+        n = n.saturating_add(1).saturating_add(f.name.len());
+    }
+    if !name.is_empty() {
+        n = n.saturating_add(1).saturating_add(name.len());
+    }
+    n
+}
+
+fn stat_times(st: &libc::stat) -> (libc::timespec, libc::timespec) {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        (
+            libc::timespec {
+                tv_sec: st.st_atime as _,
+                tv_nsec: st.st_atime_nsec as _,
+            },
+            libc::timespec {
+                tv_sec: st.st_mtime as _,
+                tv_nsec: st.st_mtime_nsec as _,
+            },
+        )
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        (st.st_atimespec, st.st_mtimespec)
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    )))]
+    {
+        (
+            libc::timespec {
+                tv_sec: st.st_atime as _,
+                tv_nsec: 0,
+            },
+            libc::timespec {
+                tv_sec: st.st_mtime as _,
+                tv_nsec: 0,
+            },
+        )
+    }
+}
+
+fn apply_fd_meta(
+    src: RawFd,
+    dst: RawFd,
+    mode: libc::mode_t,
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    atime: libc::timespec,
+    mtime: libc::timespec,
+) -> io::Result<()> {
+    unsafe { libc::fchown(dst, uid, gid) };
+    copy_xattrs_fd(src, dst);
+    if unsafe { libc::fchmod(dst, mode & 0o7777) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let times = [atime, mtime];
+    if unsafe { libc::futimens(dst, times.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// A non-directory whose path does not fit in `PATH_MAX`.
+fn copy_entry_deep(src_dir: RawFd, dst_dir: RawFd, name: &CStr, st: &libc::stat) -> io::Result<()> {
+    if is_type(st, libc::S_IFLNK) {
+        return copy_symlink_at(src_dir, dst_dir, name, st);
+    }
+    if is_type(st, libc::S_IFIFO) {
+        if unsafe { libc::mkfifoat(dst_dir, name.as_ptr(), 0o600) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return finish_node_at(dst_dir, name, st);
+    }
+    if is_type(st, libc::S_IFCHR) || is_type(st, libc::S_IFBLK) {
+        if unsafe { libc::mknodat(dst_dir, name.as_ptr(), st.st_mode, st.st_rdev) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return finish_node_at(dst_dir, name, st);
+    }
+    copy_file_at(src_dir, dst_dir, name, st)
+}
+
+fn finish_node_at(dirfd: RawFd, name: &CStr, st: &libc::stat) -> io::Result<()> {
+    unsafe { libc::fchownat(dirfd, name.as_ptr(), st.st_uid, st.st_gid, 0) };
+    if unsafe { libc::fchmodat(dirfd, name.as_ptr(), st.st_mode & 0o7777, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let (atime, mtime) = stat_times(st);
+    let times = [atime, mtime];
+    if unsafe { libc::utimensat(dirfd, name.as_ptr(), times.as_ptr(), 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn copy_symlink_at(src_dir: RawFd, dst_dir: RawFd, name: &CStr, st: &libc::stat) -> io::Result<()> {
+    let mut buf = vec![0u8; (st.st_size as usize).saturating_add(1).max(64)];
+    let target = loop {
+        let n =
+            unsafe { libc::readlinkat(src_dir, name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let n = n as usize;
+        if n < buf.len() {
+            buf.truncate(n);
+            break buf;
+        }
+        buf.resize(buf.len().saturating_mul(2).max(n.saturating_add(1)), 0);
+    };
+    let target =
+        CString::new(target).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    if unsafe { libc::symlinkat(target.as_ptr(), dst_dir, name.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe {
+        libc::fchownat(
+            dst_dir,
+            name.as_ptr(),
+            st.st_uid,
+            st.st_gid,
+            libc::AT_SYMLINK_NOFOLLOW,
+        );
+    }
+    let (atime, mtime) = stat_times(st);
+    let times = [atime, mtime];
+    if unsafe {
+        libc::utimensat(
+            dst_dir,
+            name.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn copy_file_at(src_dir: RawFd, dst_dir: RawFd, name: &CStr, st: &libc::stat) -> io::Result<()> {
+    let sfd = unsafe {
+        libc::openat(
+            src_dir,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if sfd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let dfd = unsafe {
+        libc::openat(
+            dst_dir,
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if dfd < 0 {
+        let e = io::Error::last_os_error();
+        unsafe { libc::close(sfd) };
+        return Err(e);
+    }
+    let mut from = unsafe { fs::File::from_raw_fd(sfd) };
+    let mut to = unsafe { fs::File::from_raw_fd(dfd) };
+    copy_opened(&mut from, &mut to, st.st_size as u64, st.st_blocks as u64)?;
+    unsafe { libc::fchown(to.as_raw_fd(), st.st_uid, st.st_gid) };
+    copy_xattrs_fd(from.as_raw_fd(), to.as_raw_fd());
+    if unsafe { libc::fchmod(to.as_raw_fd(), st.st_mode & 0o7777) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let (atime, mtime) = stat_times(st);
+    let times = [atime, mtime];
+    if unsafe { libc::futimens(to.as_raw_fd(), times.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Owner, extended attributes and mode, in that order: a chown clears
@@ -1440,34 +2072,42 @@ fn path_cstr(p: &Path) -> io::Result<std::ffi::CString> {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn copy_file_data(src: &Path, dst: &Path, meta: &fs::Metadata) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
-    use std::os::unix::io::AsRawFd;
     let mut from = fs::File::open(src)?;
     let mut to = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(dst)?;
-    if unsafe { libc::ioctl(to.as_raw_fd(), libc::FICLONE, from.as_raw_fd()) } == 0 {
-        return Ok(());
-    }
-    let len = meta.len();
-    if meta.blocks().saturating_mul(512) < len {
-        if copy_sparse(&from, &to, len).is_ok() {
-            return Ok(());
-        }
-        // A failed sparse copy may have written part of the file: start
-        // over. Only here: truncating on ext4 makes close flush the file.
-        to.set_len(0)?;
-        // SEEK_DATA moved the read offset; pwrite left the write one at 0.
-        io::Seek::rewind(&mut from)?;
-    }
-    io::copy(&mut from, &mut to)?;
-    Ok(())
+    copy_opened(&mut from, &mut to, meta.len(), meta.blocks())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn copy_file_data(src: &Path, dst: &Path, _meta: &fs::Metadata) -> io::Result<()> {
     fs::copy(src, dst).map(|_| ())
+}
+
+/// Bytes from `from` into `to`, keeping a reflink or holes on Linux.
+fn copy_opened(from: &mut fs::File, to: &mut fs::File, len: u64, blocks: u64) -> io::Result<()> {
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _ = (len, blocks);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        if unsafe { libc::ioctl(to.as_raw_fd(), libc::FICLONE, from.as_raw_fd()) } == 0 {
+            return Ok(());
+        }
+        if blocks.saturating_mul(512) < len {
+            if copy_sparse(from, to, len).is_ok() {
+                return Ok(());
+            }
+            // A failed sparse copy may have written part of the file: start
+            // over. Only here: truncating on ext4 makes close flush the file.
+            to.set_len(0)?;
+            // SEEK_DATA moved the read offset; pwrite left the write one at 0.
+            io::Seek::rewind(from)?;
+        }
+    }
+    io::copy(from, to)?;
+    Ok(())
 }
 
 /// Copy the data runs SEEK_DATA and SEEK_HOLE report, leave the holes
@@ -1529,6 +2169,44 @@ fn copy_xattrs(src: &Path, dst: &Path) {
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
 fn copy_xattrs(_src: &Path, _dst: &Path) {}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn copy_xattrs_fd(src: RawFd, dst: RawFd) {
+    let Some(names) = xattr_buf(|b, n| unsafe { libc::flistxattr(src, b.cast(), n) }) else {
+        return;
+    };
+    for name in names.split(|&b| b == 0).filter(|n| !n.is_empty()) {
+        let Ok(name) = CString::new(name) else {
+            continue;
+        };
+        if let Some(value) = xattr_buf(|b, n| unsafe { libc::fgetxattr(src, name.as_ptr(), b, n) })
+        {
+            unsafe { libc::fsetxattr(dst, name.as_ptr(), value.as_ptr().cast(), value.len(), 0) };
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn copy_xattrs_fd(src: RawFd, dst: RawFd) {
+    let Some(names) = xattr_buf(|b, n| unsafe { libc::flistxattr(src, b.cast(), n, 0) }) else {
+        return;
+    };
+    for name in names.split(|&b| b == 0).filter(|n| !n.is_empty()) {
+        let Ok(name) = CString::new(name) else {
+            continue;
+        };
+        if let Some(value) =
+            xattr_buf(|b, n| unsafe { libc::fgetxattr(src, name.as_ptr(), b, n, 0, 0) })
+        {
+            unsafe {
+                libc::fsetxattr(dst, name.as_ptr(), value.as_ptr().cast(), value.len(), 0, 0);
+            }
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+fn copy_xattrs_fd(_src: RawFd, _dst: RawFd) {}
 
 /// Call `f` with a growing buffer until the value fits; `f(null, 0)` sizes it.
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
@@ -1865,6 +2543,101 @@ proc /proc proc rw 0 0
         assert!(mps.iter().any(|p| p == Path::new("/home")));
         assert!(mps.iter().any(|p| p == Path::new("/mnt/usb")));
         assert!(!mps.iter().any(|p| p == Path::new("/proc")));
+    }
+
+    /// Levels for the deep copy. macOS CI hung past 25 minutes at 20,000;
+    /// 1,000 still passes its 1024-byte `PATH_MAX`. Linux keeps the depth
+    /// that overflowed the stack.
+    #[cfg(unix)]
+    const DEEP_COPY: usize = if cfg!(target_os = "macos") {
+        1_000
+    } else {
+        20_000
+    };
+
+    /// A chain of `levels` directories named `d` under `root`, with `leaf`
+    /// written at the bottom. Built with `mkdirat`: the path passes `PATH_MAX`.
+    #[cfg(unix)]
+    fn deep_chain(root: &Path, levels: usize) {
+        let c = path_cstr(root).unwrap();
+        // SAFETY: descriptor calls on NUL-terminated names; each descriptor
+        // is closed once the next one is open.
+        unsafe {
+            let mut fd = libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+            assert!(fd >= 0, "{}", io::Error::last_os_error());
+            for _ in 0..levels {
+                assert_eq!(libc::mkdirat(fd, c"d".as_ptr(), 0o755), 0);
+                let next = libc::openat(fd, c"d".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+                assert!(next >= 0, "{}", io::Error::last_os_error());
+                libc::close(fd);
+                fd = next;
+            }
+            let f = libc::openat(
+                fd,
+                c"leaf".as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+                0o644,
+            );
+            assert!(f >= 0, "{}", io::Error::last_os_error());
+            assert_eq!(libc::write(f, b"leaf".as_ptr().cast(), 4), 4);
+            libc::close(f);
+            libc::close(fd);
+        }
+    }
+
+    /// Read `leaf` at the bottom of a `deep_chain` by descriptor.
+    #[cfg(unix)]
+    fn read_deep_leaf(root: &Path, levels: usize) -> Vec<u8> {
+        let c = path_cstr(root).unwrap();
+        unsafe {
+            let mut fd = libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+            assert!(fd >= 0);
+            for _ in 0..levels {
+                let next = libc::openat(fd, c"d".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+                libc::close(fd);
+                fd = next;
+                assert!(fd >= 0);
+            }
+            let f = libc::openat(fd, c"leaf".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+            libc::close(fd);
+            assert!(f >= 0);
+            let mut buf = [0u8; 8];
+            let n = libc::read(f, buf.as_mut_ptr().cast(), buf.len());
+            libc::close(f);
+            assert!(n >= 0);
+            buf[..n as usize].to_vec()
+        }
+    }
+
+    #[test]
+    fn copy_and_delete_a_tree_deeper_than_the_stack() {
+        // A put across devices checks the tree, copies it, and deletes the
+        // original. Recursing on any of those three overflowed the stack,
+        // and paths this deep no longer fit in PATH_MAX.
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-deepcopy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        deep_chain(&src, DEEP_COPY);
+        let meta = fs::symlink_metadata(&src).unwrap();
+        tree_removable(&src, &meta).unwrap();
+        let dst = root.join("dst");
+        copy_recursive(&src, &dst, &meta).unwrap();
+        assert_eq!(read_deep_leaf(&dst, DEEP_COPY), b"leaf");
+        // Cleanup of a partial copy takes the same walk.
+        make_tree_writable(&dst);
+        remove_any_path(&src).unwrap();
+        remove_any_path(&dst).unwrap();
+        assert!(!src.exists());
+        assert!(!dst.exists());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
