@@ -1276,3 +1276,53 @@ fn si_prints_decimal_units_and_leaves_json_in_bytes() {
     let j = t.json(&["--no-git", "--si"]);
     assert!(j.contains("\"apparent\":5000"), "{j}");
 }
+
+/// Ctrl-C while `du` waits on `-X -` stops the scan before it starts, so
+/// the result is the PATH's own files, marked partial, with exit 130.
+#[cfg(unix)]
+#[test]
+fn ctrl_c_keeps_a_partial_listing() {
+    let t = Tree::new("ctrlc");
+    t.file("top.bin", 7000);
+    t.file("sub/deep/far.bin", 90_000);
+    let interrupted = |extra: &[&str]| {
+        let mut child = Command::new(bin())
+            .args(["du", "--no-git", "-X", "-"])
+            .args(extra)
+            .arg(&t.root)
+            .current_dir(&t.root)
+            .env("XDG_DATA_HOME", t.root.join(".xdg"))
+            .env("XDG_CONFIG_HOME", t.root.join(".cfg"))
+            .env("HOME", &t.root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Long enough for the handler to be in place before the signal.
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let sent = Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        drop(child.stdin.take());
+        child.wait_with_output().unwrap()
+    };
+    let out = interrupted(&[]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(130), "{text}{err}");
+    assert!(text.contains("top.bin"), "{text}");
+    assert!(!text.contains("far.bin"), "{text}");
+    assert!(text.contains("Partial scan"), "{text}");
+    assert!(err.contains("interrupted"), "{err}");
+
+    let out = interrupted(&["--json"]);
+    assert_eq!(out.status.code(), Some(130));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("\"partial\":true"));
+
+    let out = interrupted(&["--print0"]);
+    assert_eq!(out.status.code(), Some(130));
+    assert!(out.stdout.is_empty());
+}

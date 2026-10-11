@@ -18,6 +18,7 @@ pub mod du_extent;
 pub mod du_filter;
 pub mod du_fs;
 pub mod du_git;
+pub mod du_interrupt;
 pub mod du_snap;
 #[cfg(feature = "tui")]
 pub mod du_tui;

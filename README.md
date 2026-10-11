@@ -340,6 +340,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du --exclude-caches` | Leave out directories tagged with a valid `CACHEDIR.TAG` |
 | `rtrash du --max-depth=2 --all-dirs` | Every directory level, at most 2 below `PATH` |
 | `rtrash du --json` | One object with `roots`, `dirs`, `files`, `unreadable` |
+| Ctrl-C during `rtrash du` | Stops the scan and prints what it counted, marked partial (`"partial": true` in JSON), with exit status 130; `--print0`, `--pick`, `-o` and `--stacks` print nothing then. A second Ctrl-C ends it at once |
 | `rtrash du --no-git` | Skip the git checks |
 | `rtrash du --trash-dir=PATH` / `--home-only` | Limit the trash summary to these trash directories |
 | `rtrash du --print0 … \| xargs -0 rtrash put -rf --` | Trash the listed paths |
@@ -348,7 +349,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du diff base.snap` | What grew or shrank since the snapshot (scans again); `du diff OLD NEW` compares two snapshots, `--json` for scripts |
 | `rtrash du -f base.snap` | List the largest directories from a snapshot without scanning |
 | `rtrash du --stacks ~ \| inferno-flamegraph --countname=bytes > du.svg` | Folded stacks of each directory's own bytes for a flame graph (`flamegraph.pl`, inferno, speedscope); works with `-f FILE` |
-| `rtrash du -i ~/src` | Explore one directory at a time, like ncdu: `d` trashes, `u` undoes, `r` rescans; rows carry size bars, artefact and git badges. Directories open at once and scan in the background, so you can browse before the sizes are in |
+| `rtrash du -i ~/src` | Explore one directory at a time, like ncdu: `d` trashes, `u` undoes, `r` rescans; rows carry size bars, artefact and git badges. Directories open at once and scan in the background, so you can browse before the sizes are in; `q` or Ctrl-C stops a running scan and keeps its partial sizes |
 | `rtrash du -i --no-delete /srv` | The same explorer, read-only: `d` and `u` only show a note (config key `no_delete` makes it the default) |
 | `rtrash du --si` | Sizes in powers of 1000 (kB, MB, GB), as disk vendors and `df -H` count; JSON stays in bytes (config key `si`) |
 

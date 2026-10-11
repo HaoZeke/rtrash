@@ -214,13 +214,23 @@ pub fn sort_key(sort: SortKey, apparent: u64, disk: u64, items: u64, mtime: i64)
 }
 
 /// Live counters of one scan, read by whoever runs it in the background
-/// (the `du -i` explorer shows them while a directory is still scanning).
+/// (the `du -i` explorer shows them while a directory is still scanning),
+/// and a request to stop it early.
 #[derive(Debug, Default)]
 pub struct ScanControl {
     /// Files counted so far, each hard-linked file once.
     pub files: AtomicU64,
     /// Disk use of those files.
     pub disk: AtomicU64,
+    /// Set to stop: directories not yet entered are skipped, and the
+    /// report comes back marked partial.
+    pub stop: std::sync::atomic::AtomicBool,
+}
+
+impl ScanControl {
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
 }
 
 /// Scan settings shared by every worker.
@@ -429,6 +439,9 @@ pub struct Report {
     /// `--unique` scans: bytes of the shared extents the scanned files
     /// point at, each extent counted once, and with every reference.
     pub shared: Option<SharedTotals>,
+    /// The scan was stopped early: sizes are lower bounds and some
+    /// directories are missing.
+    pub partial: bool,
 }
 
 /// What the shared extents of a `--unique` scan add up to.
@@ -618,6 +631,8 @@ struct Ctx<'a> {
     top_files: SharedTop,
     /// Shared extents met so far (`--unique`).
     shared: std::sync::Mutex<crate::du_extent::SharedSet>,
+    /// A directory was skipped because the scan was asked to stop.
+    cut: std::sync::atomic::AtomicBool,
 }
 
 impl Ctx<'_> {
@@ -731,6 +746,12 @@ fn enter(
     listing: bool,
     chain: Option<&Arc<Chain>>,
 ) -> Option<Node> {
+    // Stopped: skip what is not entered yet. The PATH itself still lists
+    // its own files, so a stop always leaves something to show.
+    if depth > 0 && ctx.opts.control.as_ref().is_some_and(|c| c.stopped()) {
+        ctx.cut.store(true, Ordering::Relaxed);
+        return None;
+    }
     let opened = match parent {
         Some((dir, name)) => dir.open_child(name),
         None => du_fs::Dir::open(path),
@@ -1211,6 +1232,7 @@ pub fn scan_with(
     let mut files = TopN::new(file_cap, opts.sort);
     let mut unreadable = 0u64;
     let mut shared = crate::du_extent::SharedSet::default();
+    let mut partial = false;
     for p in paths {
         let abs = absolute(p)?;
         let meta = du_fs::lstat(&abs)?;
@@ -1237,6 +1259,7 @@ pub fn scan_with(
             top_dirs: SharedTop::new(opts.top, opts.sort),
             top_files: SharedTop::new(file_cap, opts.sort),
             shared: Default::default(),
+            cut: Default::default(),
         };
         let (apparent, disk, unique, artefact) = if meta.is_dir() {
             enter(
@@ -1275,6 +1298,7 @@ pub fn scan_with(
             (a, d, u, None)
         };
         unreadable += ctx.unreadable.load(Ordering::Relaxed);
+        partial |= ctx.cut.load(Ordering::Relaxed);
         roots.push(RootTotals {
             path: abs,
             apparent,
@@ -1301,6 +1325,7 @@ pub fn scan_with(
             distinct: shared.distinct(),
             referenced: shared.referenced,
         }),
+        partial,
     })
 }
 
@@ -1582,8 +1607,10 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
             )
         })
         .unwrap_or_default();
+    // Only a stopped scan says so; complete reports keep their old shape.
+    let partial = if r.partial { ",\"partial\":true" } else { "" };
     format!(
-        "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{}{shared},\"trash\":{}}}",
+        "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{}{shared}{partial},\"trash\":{}}}",
         roots.join(","),
         dirs.join(","),
         files.join(","),
@@ -1781,6 +1808,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if args.first().map(String::as_str) == Some("diff") {
         return crate::du_snap::run_diff(prog, &args[1..]);
     }
+    // Ctrl-C stops the scan and keeps what it counted. Installed before
+    // the options are read, so one pressed while `-X -` waits on stdin
+    // counts too.
+    let stop = Arc::new(ScanControl::default());
+    crate::du_interrupt::install(stop.clone());
     let mut opts = ScanOpts::default();
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut json = false;
@@ -2087,10 +2119,18 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             .map(|d| fs::canonicalize(&d.root).unwrap_or_else(|_| d.root.clone()))
             .collect();
     }
+    if interactive {
+        // The explorer reads Ctrl-C as a key.
+        crate::du_interrupt::uninstall();
+        if crate::du_interrupt::pressed() {
+            return 130;
+        }
+    }
     #[cfg(feature = "tui")]
     if interactive {
         return crate::du_tui::run(prog, &paths[0], opts, use_git, read_only);
     }
+    opts.control = Some(stop);
     // Git probes run beside the walk. Under --no-git, or without git on
     // PATH, there is nothing to start.
     let prefetch = if use_git {
@@ -2119,6 +2159,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         },
         None => scan(&paths, &opts),
     };
+    // From here a Ctrl-C ends the process again.
+    crate::du_interrupt::uninstall();
     let mut report = match scanned {
         Ok(r) => r,
         Err(e) => {
@@ -2126,6 +2168,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             return 1;
         }
     };
+    if report.partial && (stacks || output.is_some() || print0 || pick) {
+        // A partial list would pass for a whole one: trashing from it or
+        // diffing against it misleads.
+        eprintln!(
+            "{prog}: interrupted; --print0, --pick, --output and --stacks print nothing for a partial scan"
+        );
+        return 130;
+    }
     if stacks {
         let apparent = opts.sort == SortKey::Apparent;
         return stacks_out(prog, &report.roots, &report.dirs, apparent);
@@ -2228,6 +2278,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         if let Some(s) = report.shared {
             println!("{}", shared_line(s));
         }
+        if report.partial {
+            println!("Partial scan: stopped by Ctrl-C, so sizes are lower bounds");
+        }
         print_trash(&trash);
     }
     if report.unreadable > 0 {
@@ -2235,6 +2288,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "{prog}: {} could not be read",
             plural(report.unreadable, "entry", "entries")
         );
+    }
+    if report.partial {
+        eprintln!("{prog}: interrupted; the listing covers what was scanned before Ctrl-C");
+        return 130;
     }
     0
 }
@@ -2421,6 +2478,33 @@ mod tests {
     }
 
     #[test]
+    fn stopped_scan_keeps_the_root_files_and_says_partial() {
+        let root = std::env::temp_dir().join(format!("rtrash-du-stop-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(root.join("a/b/deep"), vec![1u8; 300_000]).unwrap();
+        fs::write(root.join("top"), vec![2u8; 5000]).unwrap();
+        let whole = scan(std::slice::from_ref(&root), &ScanOpts::default()).unwrap();
+        assert!(!whole.partial);
+        assert_eq!(whole.roots[0].apparent, 305_000);
+        assert!(!report_json(&whole, &TrashSummary::default()).contains("partial"));
+        let control = Arc::new(ScanControl::default());
+        control.stop.store(true, Ordering::Relaxed);
+        let opts = ScanOpts {
+            control: Some(control.clone()),
+            ..ScanOpts::default()
+        };
+        let r = scan(std::slice::from_ref(&root), &opts).unwrap();
+        assert!(r.partial);
+        assert_eq!(r.roots[0].apparent, 5000);
+        assert_eq!(r.roots[0].files, 1);
+        assert_eq!(control.files.load(Ordering::Relaxed), 1);
+        assert!(r.files.iter().any(|f| f.path.ends_with("top")));
+        assert!(report_json(&r, &TrashSummary::default()).contains(",\"partial\":true,"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn unique_scan_sums_up_and_shows_in_json() {
         let root = std::env::temp_dir().join(format!("rtrash-du-unique-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -2511,6 +2595,7 @@ mod tests {
             files: vec![item("/w/f.bin", 1, 1)],
             unreadable: 0,
             shared: None,
+            partial: false,
         };
         let rows = pick_rows(&report);
         let paths: Vec<_> = rows.iter().map(|r| r.path.clone()).collect();

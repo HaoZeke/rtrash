@@ -682,6 +682,7 @@ Emit one JSON object
 \fIdirs\fR and \fIartefact\fR; each listed entry has
 \fIpath\fR, \fItype\fR, \fIdisk\fR, \fIapparent\fR, \fImtime\fR, \fIartefact\fR
 (a tag or null), \fIgit\fR and \fIgit_repo\fR (state and deciding repository, or null).
+A scan stopped by Ctrl-C adds \fIpartial\fR: true.
 .TP
 .B \-\-print0
 Print the listed paths separated by null bytes, for
@@ -751,6 +752,14 @@ background, files with their sizes and directories with
 until their totals come in, and the title counts files and bytes so far.
 Moving, opening another directory and going up all work meanwhile;
 trashing waits until the view has its sizes.
+.B q
+or Ctrl-C while the current directory scans stops that scan and keeps
+what it counted: the title shows
+.BR (partial) ,
+directories it never reached keep their placeholder rows, and
+.B r
+rescans in full.
+Pressed again, or with no scan running, the key quits.
 Rows show the artefact kind and git state; risky git state shows
 .BR ! .
 Trash directories stay closed.
@@ -1286,6 +1295,20 @@ Failure (e.g. could not trash or purge an item).
 .TP
 .B 2
 Usage error.
+.TP
+.B 130
+.B du
+stopped by Ctrl-C.
+The text listing and
+.B \-\-json
+still show what was scanned, marked partial;
+.BR \-\-print0 ,
+.BR \-\-pick ,
+.B \-\-output
+and
+.B \-\-stacks
+print nothing, since a partial list would pass for a whole one.
+A second Ctrl-C ends the process at once.
 .PP
 Put mode mirrors common
 .BR rm (1)

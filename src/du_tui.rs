@@ -39,6 +39,8 @@ struct View {
     /// A quick listing shown while the scan runs: directory sizes are
     /// still unknown and nothing can be deleted yet.
     scanning: bool,
+    /// The scan was stopped (q or Ctrl-C): sizes are lower bounds.
+    partial: bool,
 }
 
 /// A scan running in the background.
@@ -206,6 +208,7 @@ fn scan_view(dir: &Path, opts: &ScanOpts, git: bool) -> io::Result<View> {
         apparent,
         cursor: 0,
         scanning: false,
+        partial: report.partial,
     })
 }
 
@@ -256,6 +259,7 @@ fn quick_view(dir: &Path) -> io::Result<View> {
         apparent,
         cursor: 0,
         scanning: true,
+        partial: false,
     })
 }
 
@@ -348,7 +352,10 @@ impl App {
 
     /// Start a background scan of `dir`.
     fn spawn(&mut self, dir: PathBuf, refresh: bool) {
-        let control = Arc::new(ScanControl::default());
+        self.spawn_with(dir, refresh, Arc::new(ScanControl::default()));
+    }
+
+    fn spawn_with(&mut self, dir: PathBuf, refresh: bool, control: Arc<ScanControl>) {
         let opts = ScanOpts {
             control: Some(control.clone()),
             ..self.opts.clone()
@@ -410,6 +417,21 @@ impl App {
             .then(|| self.selected().map(|r| r.path.clone()))
             .flatten();
         fresh.cursor = self.cache.get(&dir).map_or(0, |v| v.cursor);
+        if fresh.partial {
+            // Directories the stopped scan never reached keep their
+            // quick-listing rows, so the view still names every entry.
+            if let Some(old) = self.cache.get(&dir) {
+                let missing: Vec<Item> = old
+                    .rows
+                    .iter()
+                    .filter(|r| !fresh.rows.iter().any(|f| f.path == r.path))
+                    .cloned()
+                    .collect();
+                fresh.rows.extend(missing);
+                sort_rows(&mut fresh.rows, self.opts.sort);
+            }
+        }
+        let stopped = fresh.partial;
         if refresh {
             self.apply_fresh(&dir, fresh);
         } else {
@@ -421,7 +443,24 @@ impl App {
                 .and_then(|p| self.rows().iter().position(|r| r.path == p))
                 .unwrap_or(0);
             self.select(at);
-            self.status = format!("scanned · {} entries", self.rows().len());
+            self.status = if stopped {
+                "scan stopped · sizes are lower bounds · r rescans".into()
+            } else {
+                format!("scanned · {} entries", self.rows().len())
+            };
+        }
+    }
+
+    /// Stop the scan of the current view, keeping what it counted.
+    /// Returns false when there is none to stop, so the key can quit.
+    fn stop_scan(&mut self) -> bool {
+        match self.jobs.get(&self.cur) {
+            Some(job) if !job.control.stopped() => {
+                job.control.stop.store(true, Ordering::Relaxed);
+                self.status = "stopping the scan… (press again to quit)".into();
+                true
+            }
+            _ => false,
         }
     }
 
@@ -555,10 +594,14 @@ impl App {
             return;
         }
         if self.background {
+            // The parents never took a stopped view's sizes, so a rescan
+            // of one replaces it instead of carrying a change upward.
+            let mut partial = false;
             if let Some(v) = self.cache.get_mut(&cur) {
                 v.scanning = true;
+                partial = v.partial;
             }
-            self.spawn(cur, true);
+            self.spawn(cur, !partial);
             self.status = "rescanning…".into();
             return;
         }
@@ -770,7 +813,11 @@ impl App {
                     }
                 }
                 match self.keys.resolve_browse(code, mods) {
-                    Some(Action::Quit | Action::QuitHard) => self.quit = true,
+                    Some(Action::Quit | Action::QuitHard) => {
+                        if !self.stop_scan() {
+                            self.quit = true;
+                        }
+                    }
                     Some(Action::MoveDown) => self.move_sel(1),
                     Some(Action::MoveUp) => self.move_sel(-1),
                     Some(Action::PageDown) => self.page(true),
@@ -867,13 +914,14 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         SortKey::Apparent => view.apparent,
         _ => view.disk,
     };
+    let stopped = if view.partial { " (partial)" } else { "" };
     let size = match app.progress() {
         Some((files, disk)) => format!(
             "scanning: {} so far, {}",
             crate::util::plural(files, "file", "files"),
             format_bytes(disk)
         ),
-        None => format_bytes(whole),
+        None => format!("{}{stopped}", format_bytes(whole)),
     };
     let title = format!(
         " {} · {size} · {} entries · {} marked ",
@@ -965,6 +1013,10 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
         app.poll_jobs();
         terminal.draw(|f| ui(f, app))?;
         if app.quit {
+            // Let running scans wind down instead of walking on unseen.
+            for job in app.jobs.values() {
+                job.control.stop.store(true, Ordering::Relaxed);
+            }
             return Ok(());
         }
         // Redraw often while a scan runs so its counters move.
@@ -1219,6 +1271,53 @@ mod tests {
         a.refresh();
         settle(&mut a);
         assert_eq!(a.view().disk, before);
+    }
+
+    #[test]
+    fn q_stops_a_scan_first_and_quits_next() {
+        let t = tree("stopkey");
+        let mut a = app(&t);
+        // A scan that never reports, so the test owns the timing.
+        let (_tx, rx) = mpsc::channel();
+        let control = Arc::new(ScanControl::default());
+        a.jobs.insert(
+            t.0.join("w"),
+            Job {
+                control: control.clone(),
+                rx,
+                refresh: false,
+            },
+        );
+        a.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(control.stopped());
+        assert!(!a.quit, "{}", a.status);
+        a.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn stopped_scan_keeps_partial_sizes_and_every_entry() {
+        let t = tree("stopped");
+        let mut a = app(&t);
+        a.background = true;
+        let w = t.0.join("w");
+        a.cache.insert(w.clone(), quick_view(&w).unwrap());
+        let control = Arc::new(ScanControl::default());
+        control.stop.store(true, Ordering::Relaxed);
+        a.spawn_with(w.clone(), false, control);
+        settle(&mut a);
+        let v = a.view();
+        assert!(v.partial && !v.scanning);
+        // The stop skipped big/ and small/; their quick rows stay listed.
+        assert_eq!(names(&a), ["file", "big", "small"]);
+        assert!(a.status.contains("scan stopped"), "{}", a.status);
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("(partial)"), "{text}");
+        // A rescan replaces the partial view with a whole one.
+        a.refresh();
+        settle(&mut a);
+        assert!(!a.view().partial);
+        assert_eq!(names(&a), ["big", "file", "small"]);
     }
 
     #[test]
