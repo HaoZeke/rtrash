@@ -145,7 +145,7 @@ pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "neither an rtrash du snapshot (write one with du -o FILE) nor an ncdu export",
+                "neither an rtrash du snapshot (write one with du -o FILE) nor an ncdu export (JSON or binary)",
             ))
         }
     }
@@ -271,11 +271,24 @@ fn push_frame(out: &mut String, name: &str) {
     );
 }
 
-/// Read a snapshot, or an ncdu export (`ncdu -o FILE`), told apart by
+/// Read a snapshot, or an ncdu export (`ncdu -o FILE` or the binary
+/// `ncdu -O FILE`), told apart by
 /// its first bytes.
 pub fn read(path: &Path) -> io::Result<Snapshot> {
     let f = fs::File::open(path)?;
     let mut r = io::BufReader::new(f);
+    if crate::du_ncdu_bin::looks_like_binary(r.fill_buf()?) {
+        // The format carries no date: the scan ended when the file was
+        // written.
+        let created = r
+            .get_ref()
+            .metadata()?
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as i64);
+        return crate::du_ncdu_bin::parse(r, created);
+    }
     if crate::du_ncdu::looks_like_export(r.fill_buf()?) {
         return crate::du_ncdu::parse(r);
     }

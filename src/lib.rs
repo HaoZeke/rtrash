@@ -21,6 +21,7 @@ pub mod du_fs;
 pub mod du_git;
 pub mod du_interrupt;
 pub mod du_ncdu;
+pub mod du_ncdu_bin;
 pub mod du_snap;
 #[cfg(feature = "tui")]
 pub mod du_tui;

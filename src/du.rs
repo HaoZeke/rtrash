@@ -113,7 +113,7 @@ directories appear as one `trash` row and are never printed by --print0.
       --ncdu=FILE       write an ncdu export of PATH to FILE (- for
                           stdout) for `ncdu -f FILE` or `du -f FILE`
   -f, --file=FILE       list from a snapshot, or an ncdu export (ncdu -o,
-                          gdu -o), instead of scanning
+                          ncdu -O, gdu -o), instead of scanning
       --stacks          print folded stacks of every directory's own size
                           for flame graph tools (flamegraph.pl, inferno,
                           speedscope) instead of listing; works with -f

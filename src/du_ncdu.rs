@@ -28,18 +28,18 @@ pub fn looks_like_export(head: &[u8]) -> bool {
 
 /// One info object, with the fields the totals need.
 #[derive(Debug, Default)]
-struct Info {
-    name: Vec<u8>,
-    asize: u64,
-    dsize: u64,
-    dev: Option<u64>,
-    ino: u64,
-    nlink: u64,
-    hlnkc: bool,
-    excluded: bool,
-    read_error: bool,
+pub(crate) struct Info {
+    pub(crate) name: Vec<u8>,
+    pub(crate) asize: u64,
+    pub(crate) dsize: u64,
+    pub(crate) dev: Option<u64>,
+    pub(crate) ino: u64,
+    pub(crate) nlink: u64,
+    pub(crate) hlnkc: bool,
+    pub(crate) excluded: bool,
+    pub(crate) read_error: bool,
     /// [`MTIME_UNKNOWN`] when the export has none.
-    mtime: i64,
+    pub(crate) mtime: i64,
 }
 
 /// An open directory: its totals so far and where its name starts in
@@ -351,114 +351,22 @@ pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
     }
     lx.expect(b',')?;
 
-    let mut root = RootTotals::default();
-    let mut dirs: Vec<Item> = Vec::new();
-    let mut seen: HashSet<(u64, u64)> = HashSet::new();
-    let mut path: Vec<u8> = Vec::new();
-    let mut stack: Vec<Frame> = Vec::new();
-
-    // The root directory.
+    // The root directory, then its entries in order.
     lx.expect(b'[')?;
-    let top = lx.info()?;
-    path.extend_from_slice(&top.name);
-    // Names join with the separator the root uses: `\` for an export
-    // written on Windows (`C:\Users`), `/` otherwise.
-    let sep = if path.contains(&b'\\') && !path.contains(&b'/') {
-        b'\\'
-    } else {
-        b'/'
-    };
-    // Keep a bare root (`/`, `C:\`) whole.
-    let bare = if sep == b'/' { 1 } else { 3 };
-    while path.len() > bare && path.last() == Some(&sep) {
-        path.pop();
-    }
-    root.path = bytes_path(path.clone());
-    stack.push(open_dir(&top, 0, 0));
-    root.dirs = 1;
-    while let Some(frame) = stack.last() {
-        let (parent_dev, parent_excluded) = (frame.dev, frame.excluded);
+    let mut tree = Builder::new(&lx.info()?);
+    loop {
         // After an element, either `,` and the next one, or `]`.
         if !lx.more(b']')? {
-            let done = stack.pop().expect("open frame");
-            path.truncate(done.path_len);
-            if let Some(i) = done.row {
-                let row = &mut dirs[i];
-                row.disk = done.disk;
-                row.apparent = done.apparent;
-                row.items = done.items;
-                row.mtime = done.mtime;
-            }
-            let Some(parent) = stack.last_mut() else {
-                root.disk = done.disk;
-                root.apparent = done.apparent;
+            if tree.close() {
                 break;
-            };
-            if !done.excluded {
-                parent.disk = parent.disk.saturating_add(done.disk);
-                parent.apparent = parent.apparent.saturating_add(done.apparent);
-                parent.items = parent.items.saturating_add(done.items + 1);
-                parent.mtime = parent.mtime.max(done.mtime);
             }
             continue;
         }
         match lx.peek_token()? {
-            Some(b'{') => {
-                let f = lx.info()?;
-                if parent_excluded {
-                    continue;
-                }
-                if f.excluded {
-                    root.excluded += 1;
-                    continue;
-                }
-                let dev = f.dev.unwrap_or(parent_dev);
-                if (f.nlink > 1 || f.hlnkc) && !seen.insert((dev, f.ino)) {
-                    root.links += 1;
-                    continue;
-                }
-                root.files += 1;
-                let p = stack.last_mut().expect("open frame");
-                p.disk = p.disk.saturating_add(f.dsize);
-                p.apparent = p.apparent.saturating_add(f.asize);
-                p.items += 1;
-                p.mtime = p.mtime.max(f.mtime);
-            }
+            Some(b'{') => tree.file(&lx.info()?),
             Some(b'[') => {
                 lx.bump();
-                let d = lx.info()?;
-                let path_len = path.len();
-                if path.last() != Some(&sep) {
-                    path.push(sep);
-                }
-                path.extend_from_slice(&d.name);
-                let mut fr = open_dir(&d, path_len, parent_dev);
-                if parent_excluded || d.excluded {
-                    fr.excluded = true;
-                    if !parent_excluded {
-                        root.excluded += 1;
-                    }
-                } else if d.read_error {
-                    // As in a scan: an unreadable directory adds its own
-                    // blocks but gets no row.
-                    root.dirs += 1;
-                } else {
-                    root.dirs += 1;
-                    fr.row = Some(dirs.len());
-                    dirs.push(Item {
-                        path: bytes_path(path.clone()),
-                        is_dir: true,
-                        apparent: 0,
-                        disk: 0,
-                        mtime: MTIME_UNKNOWN,
-                        items: 0,
-                        artefact: None,
-                        repos: Vec::new(),
-                        git: None,
-                        unique: None,
-                    });
-                }
-                stack.push(fr);
+                tree.open(&lx.info()?);
             }
             _ => return Err(lx.err("expected an info object or a directory array")),
         }
@@ -467,13 +375,156 @@ pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
     if lx.peek_token()?.is_some() {
         return Err(lx.err("data after the end of the export"));
     }
-    Ok(Snapshot {
-        created,
-        max_depth: None,
-        one_file_system: false,
-        roots: vec![root],
-        dirs,
-    })
+    Ok(tree.finish(created))
+}
+
+/// Totals and directory rows of an ncdu tree, fed one entry at a time in
+/// a depth-first walk: [`Builder::open`] enters a directory, and
+/// [`Builder::close`] leaves it. Both export formats read through it.
+pub(crate) struct Builder {
+    root: RootTotals,
+    dirs: Vec<Item>,
+    seen: HashSet<(u64, u64)>,
+    /// Path of the innermost open directory.
+    path: Vec<u8>,
+    stack: Vec<Frame>,
+    sep: u8,
+}
+
+impl Builder {
+    /// Start at the root directory, whose name is its full path.
+    pub(crate) fn new(top: &Info) -> Self {
+        let mut path = top.name.clone();
+        // Names join with the separator the root uses: `\` for an export
+        // written on Windows (`C:\Users`), `/` otherwise.
+        let sep = if path.contains(&b'\\') && !path.contains(&b'/') {
+            b'\\'
+        } else {
+            b'/'
+        };
+        // Keep a bare root (`/`, `C:\`) whole.
+        let bare = if sep == b'/' { 1 } else { 3 };
+        while path.len() > bare && path.last() == Some(&sep) {
+            path.pop();
+        }
+        let root = RootTotals {
+            path: bytes_path(path.clone()),
+            dirs: 1,
+            ..RootTotals::default()
+        };
+        Builder {
+            root,
+            dirs: Vec::new(),
+            seen: HashSet::new(),
+            path,
+            stack: vec![open_dir(top, 0, 0)],
+            sep,
+        }
+    }
+
+    /// A file, or any entry that is not an open directory, in the
+    /// innermost open directory.
+    pub(crate) fn file(&mut self, f: &Info) {
+        let Some(p) = self.stack.last_mut() else {
+            return;
+        };
+        if p.excluded {
+            return;
+        }
+        if f.excluded {
+            self.root.excluded += 1;
+            return;
+        }
+        let dev = f.dev.unwrap_or(p.dev);
+        if (f.nlink > 1 || f.hlnkc) && !self.seen.insert((dev, f.ino)) {
+            self.root.links += 1;
+            return;
+        }
+        self.root.files += 1;
+        p.disk = p.disk.saturating_add(f.dsize);
+        p.apparent = p.apparent.saturating_add(f.asize);
+        p.items += 1;
+        p.mtime = p.mtime.max(f.mtime);
+    }
+
+    /// Enter directory `d`, inside the innermost open one.
+    pub(crate) fn open(&mut self, d: &Info) {
+        let Some(parent) = self.stack.last() else {
+            return;
+        };
+        let (parent_dev, parent_excluded) = (parent.dev, parent.excluded);
+        let path_len = self.path.len();
+        if self.path.last() != Some(&self.sep) {
+            self.path.push(self.sep);
+        }
+        self.path.extend_from_slice(&d.name);
+        let mut fr = open_dir(d, path_len, parent_dev);
+        if parent_excluded || d.excluded {
+            fr.excluded = true;
+            if !parent_excluded {
+                self.root.excluded += 1;
+            }
+        } else if d.read_error {
+            // As in a scan: an unreadable directory adds its own blocks
+            // but gets no row.
+            self.root.dirs += 1;
+        } else {
+            self.root.dirs += 1;
+            fr.row = Some(self.dirs.len());
+            self.dirs.push(Item {
+                path: bytes_path(self.path.clone()),
+                is_dir: true,
+                apparent: 0,
+                disk: 0,
+                mtime: MTIME_UNKNOWN,
+                items: 0,
+                artefact: None,
+                repos: Vec::new(),
+                git: None,
+                unique: None,
+            });
+        }
+        self.stack.push(fr);
+    }
+
+    /// Leave the innermost open directory, adding its totals to its
+    /// parent. True once that was the root.
+    pub(crate) fn close(&mut self) -> bool {
+        let Some(done) = self.stack.pop() else {
+            return true;
+        };
+        self.path.truncate(done.path_len);
+        if let Some(i) = done.row {
+            let row = &mut self.dirs[i];
+            row.disk = done.disk;
+            row.apparent = done.apparent;
+            row.items = done.items;
+            row.mtime = done.mtime;
+        }
+        let Some(parent) = self.stack.last_mut() else {
+            self.root.disk = done.disk;
+            self.root.apparent = done.apparent;
+            return true;
+        };
+        if !done.excluded {
+            parent.disk = parent.disk.saturating_add(done.disk);
+            parent.apparent = parent.apparent.saturating_add(done.apparent);
+            parent.items = parent.items.saturating_add(done.items + 1);
+            parent.mtime = parent.mtime.max(done.mtime);
+        }
+        false
+    }
+
+    /// The snapshot, once [`Builder::close`] has left the root.
+    pub(crate) fn finish(self, created: i64) -> Snapshot {
+        Snapshot {
+            created,
+            max_depth: None,
+            one_file_system: false,
+            roots: vec![self.root],
+            dirs: self.dirs,
+        }
+    }
 }
 
 fn open_dir(info: &Info, path_len: usize, parent_dev: u64) -> Frame {

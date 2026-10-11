@@ -1,6 +1,7 @@
 //! Deterministic fuzz loops over every parser that reads files other tools
 //! write: `.trashinfo`, `directorysizes`, `.DS_Store`, Recycle Bin `$I`,
-//! du snapshots, the config file and exclude patterns. Each loop mutates a
+//! du snapshots, ncdu exports (JSON and binary), the config file and
+//! exclude patterns. Each loop mutates a
 //! valid seed (bit flips, byte overwrites, truncation, splices) and also
 //! feeds pure noise. A parser may reject input; it must never panic. The
 //! generator is a fixed-seed xorshift, so a failure replays exactly.
@@ -221,6 +222,31 @@ root 4096 10 1 1 /w\ndir 4096 10 1700000000 - /w\ndir 8 8 -5 cargo /w/t%20x\n";
     for _ in 0..rounds() {
         let input = rng.mutate(seed);
         let _ = rtrash::du_snap::parse(&input[..]);
+    }
+}
+
+#[test]
+fn ncdu_json_export_parser_survives_noise() {
+    let seed = include_bytes!("data/ncdu-2.9.1-export.json");
+    let mut rng = Rng(0x0005_7a95_407d_0002);
+    for _ in 0..rounds() {
+        let input = rng.input(seed);
+        let _ = rtrash::du_ncdu::parse(&input[..]);
+    }
+}
+
+#[test]
+fn ncdu_binary_export_parser_survives_noise() {
+    let seed = include_bytes!("data/ncdu-2.9.1-export.ncdu");
+    let mut rng = Rng(0x0005_7a95_407d_0003);
+    for _ in 0..rounds() {
+        let mut input = rng.input(seed);
+        // Keep the signature on most rounds, so the noise reaches the
+        // blocks behind it.
+        if rng.below(4) != 0 && input.len() >= 8 {
+            input[..8].copy_from_slice(rtrash::du_ncdu_bin::SIGNATURE);
+        }
+        let _ = rtrash::du_ncdu_bin::parse(std::io::Cursor::new(input), 0);
     }
 }
 

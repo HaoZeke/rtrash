@@ -1262,6 +1262,38 @@ fn ncdu_exports_list_and_diff_like_snapshots() {
 }
 
 #[test]
+fn ncdu_binary_exports_list_and_diff_like_their_json_form() {
+    let t = Tree::new("ncdu-bin");
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let bin = data.join("ncdu-2.9.1-export.ncdu");
+    let json = data.join("ncdu-2.9.1-export.json");
+    let (b, j) = (bin.to_str().unwrap(), json.to_str().unwrap());
+    let out = t.du(&["-f", b, "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.contains(r#""disk":49152,"apparent":9009,"files":4,"links":1,"dirs":7,"excluded":1"#),
+        "{out}"
+    );
+    // The same scan in both formats: nothing changed between them.
+    let d = t.du(&["diff", j, b]);
+    assert!(d.status.success(), "{}", String::from_utf8_lossy(&d.stderr));
+    let d = String::from_utf8_lossy(&d.stdout).into_owned();
+    assert!(!d.contains("/tmp/ncdu-fixture/"), "{d}");
+    // A cut-off export says where it broke.
+    let cut = t.root.join("cut.ncdu");
+    fs::write(&cut, &fs::read(&bin).unwrap()[..200]).unwrap();
+    let bad = t.du(&["-f", cut.to_str().unwrap()]);
+    assert_eq!(bad.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&bad.stderr).into_owned();
+    assert!(err.contains("ncdu binary export"), "{err}");
+}
+
+#[test]
 fn ncdu_exports_written_by_du_read_back_with_the_scan_totals() {
     let t = Tree::new("ncdu-out");
     t.file("t/a/f", 40_000);
