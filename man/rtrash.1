@@ -218,6 +218,13 @@ Purge trashed items. With
 only items trashed more than
 .I DAYS
 days ago.
+An item whose
+.B DeletionDate
+is missing or unreadable has no known age, so
+.I DAYS
+keeps it, as trash-cli does; a full
+.B empty
+removes it.
 .TP
 .BR \-n ", " \-\-dry\-run
 Report what would be removed without removing anything; also prints

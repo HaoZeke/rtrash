@@ -98,8 +98,9 @@ impl SizeFilter {
 
 /// `--older-than` and `--newer-than`, in days, on when an item was
 /// trashed. The cutoff is `empty DAYS`'s: older keeps items trashed at or
-/// before it, and an item with no date counts as old; newer keeps items
-/// trashed after it, and leaves out items with no date.
+/// before it, newer keeps items trashed after it, and both leave out an
+/// item with no readable date, whose age is unknown (trash-cli's
+/// `trash-empty DAYS` keeps such items too).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AgeFilter {
     pub older_than: Option<i64>,
@@ -117,7 +118,7 @@ impl AgeFilter {
         let cutoff = |days: i64| now - days.saturating_mul(86_400);
         let old = self
             .older_than
-            .map_or(true, |d| epoch.map_or(true, |t| t <= cutoff(d)));
+            .map_or(true, |d| epoch.is_some_and(|t| t <= cutoff(d)));
         let new = self
             .newer_than
             .map_or(true, |d| epoch.is_some_and(|t| t > cutoff(d)));
@@ -217,7 +218,7 @@ mod tests {
         };
         assert!(old.keeps_at(Some(now - 30 * 86_400), now));
         assert!(!old.keeps_at(Some(now - 30 * 86_400 + 1), now));
-        assert!(old.keeps_at(None, now));
+        assert!(!old.keeps_at(None, now));
         let new = AgeFilter {
             older_than: None,
             newer_than: Some(1),

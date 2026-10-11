@@ -118,7 +118,8 @@ pub fn orphans(dirs: &[TrashDir]) -> Vec<Entry> {
     out
 }
 
-/// Age filter aligned with `empty DAYS`: missing/unparsable date counts as old.
+/// Age filter aligned with `empty DAYS`: a missing or unreadable date never
+/// counts as old.
 pub fn is_older_than(entry: &Entry, days: i64) -> bool {
     let age = crate::filters::AgeFilter {
         older_than: Some(days),
@@ -533,9 +534,9 @@ mod tests {
     }
 
     #[test]
-    fn age_older_includes_missing_date() {
+    fn age_filters_leave_out_a_missing_date() {
         let e = entry_with(None, 0);
-        assert!(is_older_than(&e, 0));
+        assert!(!is_older_than(&e, 0));
         assert!(!is_newer_than(&e, 365));
     }
 

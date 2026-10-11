@@ -237,13 +237,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
 }
 
-/// Older-than-cutoff check; entries with a missing or unparsable
-/// DeletionDate count as old (they are broken metadata, purge them).
+/// Older-than-cutoff check. An entry with a missing or unreadable
+/// DeletionDate is no older than the cutoff as far as anyone can tell, so
+/// an age cut keeps it; a full empty still removes it.
 fn is_old(date: Option<&str>, cutoff: i64) -> bool {
-    match date.and_then(info::parse_local_to_epoch) {
-        Some(t) => t <= cutoff,
-        None => true,
-    }
+    date.and_then(info::parse_local_to_epoch)
+        .is_some_and(|t| t <= cutoff)
 }
 
 /// The end-of-run list of what stayed in the trash, one line per item;
@@ -546,9 +545,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_date_counts_as_old() {
-        assert!(is_old(None, 0));
-        assert!(is_old(Some("garbage"), 0));
+    fn missing_date_is_never_old() {
+        // An unknown age never passes an age cut.
+        assert!(!is_old(None, i64::MAX));
+        assert!(!is_old(Some("garbage"), i64::MAX));
     }
 
     #[test]

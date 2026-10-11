@@ -467,6 +467,46 @@ fn restore_errors_scrub_control_characters_on_a_terminal() {
 }
 
 #[test]
+fn age_cuts_keep_items_whose_age_is_unknown() {
+    let sb = Sandbox::new("age-unknown");
+    fs::create_dir_all(sb.trash().join("files")).unwrap();
+    fs::create_dir_all(sb.trash().join("info")).unwrap();
+    let w = sb.work();
+    for (name, date) in [
+        ("old", "DeletionDate=2000-01-01T00:00:00\n"),
+        ("undated", ""),
+        ("garbled", "DeletionDate=yesterday\n"),
+    ] {
+        fs::write(sb.trash().join("files").join(name), b"x").unwrap();
+        let record = format!("[Trash Info]\nPath={}/{name}\n{date}", w.display());
+        fs::write(sb.trash().join(format!("info/{name}.trashinfo")), record).unwrap();
+    }
+    let pattern = format!("{}/*", w.display());
+    // --home-only keeps rm and empty off the host's volume trashes.
+    let out = sb.run(&["rm", "--home-only", "--older-than=1", &pattern]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.trash().join("files/old").exists());
+    fs::write(sb.trash().join("files/old"), b"x").unwrap();
+    let record = format!(
+        "[Trash Info]\nPath={}/old\nDeletionDate=2000-01-01T00:00:00\n",
+        w.display()
+    );
+    fs::write(sb.trash().join("info/old.trashinfo"), record).unwrap();
+    assert!(sb.run(&["empty", "--home-only", "1"]).status.success());
+    assert!(!sb.trash().join("files/old").exists());
+    for name in ["undated", "garbled"] {
+        assert!(sb.trash().join("files").join(name).exists(), "{name}");
+        assert!(
+            sb.trash().join(format!("info/{name}.trashinfo")).exists(),
+            "{name}"
+        );
+    }
+    // A full empty still clears them.
+    assert!(sb.run(&["empty", "--home-only"]).status.success());
+    assert!(!sb.trash().join("files/undated").exists());
+}
+
+#[test]
 fn put_json_reports_trashed_and_failed() {
     let sb = Sandbox::new("put-json");
     sb.touch("a.txt");

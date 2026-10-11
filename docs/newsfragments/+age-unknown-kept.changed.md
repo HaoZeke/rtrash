@@ -1,0 +1,1 @@
+An age cut (`rtrash empty DAYS`, `--older-than` on `rm`, `list` and `status`) now keeps an item whose `DeletionDate` is missing or unreadable, as trash-cli's `trash-empty DAYS` does. Such an item used to count as old, so the first age cut deleted it, however recently it was trashed. A full `rtrash empty`, or `rm` without an age bound, still removes it.
