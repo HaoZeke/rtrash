@@ -31,7 +31,7 @@ rtrash setup
 
 ~rtrash setup~ installs multi-call links, bash/zsh/fish completions, and the man page under =~/.local= from assets *embedded in the binary* (no source checkout). Flags: ~--dry-run~, ~--force~ (after upgrades), ~--with-rm~, ~--prefix=DIR~. Packagers: ~rtrash completions bash|zsh|fish~, ~rtrash man~, or ~rtrash setup --prefix=/usr~.
 
-MSRV *1.77*.
+MSRV *1.88*.
 Default =cargo install= is a normal dynamically linked Linux binary.
 Tip of main: =cargo install --git https://github.com/HaoZeke/rtrash=.
 

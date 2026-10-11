@@ -5,7 +5,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, round27]
   pull_request:
     branches: [main]
 
@@ -150,3 +150,27 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read rust-version
+        id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Python headers for --all-features
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq python3-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check locked dependencies at the declared minimum
+        run: cargo check --all-features --locked

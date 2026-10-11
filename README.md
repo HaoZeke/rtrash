@@ -159,7 +159,7 @@ CI: [`.github/workflows/release-musl.yml`](.github/workflows/release-musl.yml) b
 
 ### 3. From crates.io (`cargo install`)
 
-Requires a Rust toolchain (MSRV **1.77**).
+Requires a Rust toolchain (MSRV **1.88**).
 Dynamically linked glibc binary by default (compiles on the install host).
 
 ```console
