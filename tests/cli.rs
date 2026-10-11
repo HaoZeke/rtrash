@@ -69,9 +69,10 @@ impl Sandbox {
     }
 
     /// Like `run`, but a child still running after `secs` is killed and
-    /// the test fails, so a hang shows as a failure. The child may map at
-    /// most 2 GiB, so a read without bound fails the test instead of
-    /// filling the machine's memory.
+    /// the test fails, so a hang shows as a failure. Where the platform
+    /// allows an address-space cap, the child may map at most 2 GiB, so a
+    /// read without bound fails the test instead of filling the machine's
+    /// memory.
     fn run_within(&self, secs: u64, args: &[&str]) -> Output {
         let out_path = self.root.join("run-within.out");
         let err_path = self.root.join("run-within.err");
@@ -217,8 +218,11 @@ fn info_files_that_name_no_payload_are_never_items() {
     assert!(!sb.work().join("evil3").exists());
 }
 
-/// Let the child behind `cmd` map at most 2 GiB: past that, an allocation
-/// fails and the child aborts.
+/// Let the child behind `cmd` map at most 2 GiB where the platform allows
+/// it: past that, an allocation fails and the child aborts. Linux enforces
+/// `RLIMIT_AS`, and a refusal there is still an error. Other systems apply
+/// the same limit only when `setrlimit` succeeds; macOS refuses `RLIMIT_AS`
+/// with `EINVAL`, and failing the spawn on that would hide the test.
 fn cap_memory(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     // SAFETY: setrlimit is async-signal-safe and touches no memory of the
@@ -229,9 +233,13 @@ fn cap_memory(cmd: &mut Command) {
                 rlim_cur: 2 << 30,
                 rlim_max: 2 << 30,
             };
-            if libc::setrlimit(libc::RLIMIT_AS, &cap) != 0 {
+            let limited = libc::setrlimit(libc::RLIMIT_AS, &cap) == 0;
+            #[cfg(target_os = "linux")]
+            if !limited {
                 return Err(std::io::Error::last_os_error());
             }
+            #[cfg(not(target_os = "linux"))]
+            let _ = limited;
             Ok(())
         });
     }
@@ -240,7 +248,7 @@ fn cap_memory(cmd: &mut Command) {
 /// The largest resident size any child of this test process has reached,
 /// in MiB. No command of the suite comes near 512 MiB, so a test can bound
 /// it to catch a read that grows without end under [`cap_memory`].
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn peak_child_rss_mib() -> i64 {
     // SAFETY: getrusage only fills the zeroed struct handed to it.
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
@@ -248,8 +256,16 @@ fn peak_child_rss_mib() -> i64 {
         unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) },
         0
     );
-    // Linux counts ru_maxrss in KiB.
-    usage.ru_maxrss as i64 / 1024
+    let rss = usage.ru_maxrss as i64;
+    // Linux counts ru_maxrss in KiB. macOS counts it in bytes.
+    #[cfg(target_os = "linux")]
+    {
+        rss / 1024
+    }
+    #[cfg(target_os = "macos")]
+    {
+        rss / (1024 * 1024)
+    }
 }
 
 #[test]
@@ -286,8 +302,8 @@ fn records_and_a_sizes_cache_that_are_no_regular_files_hang_nothing() {
     }
     assert!(t.join("files/keep").exists() && t.join("files/d/f").exists());
     // A link to /dev/zero never ends, so reading the whole record or cache
-    // would take all the memory. Under the cap such a read fails at 2 GiB
-    // instead, and the peak size of the children shows that it ran.
+    // would take all the memory. The commands must finish, and where the
+    // platform can measure it the children stay small.
     for p in [t.join("info/fifo.trashinfo"), t.join("directorysizes")] {
         let _ = fs::remove_file(&p);
         std::os::unix::fs::symlink("/dev/zero", &p).unwrap();
@@ -297,7 +313,7 @@ fn records_and_a_sizes_cache_that_are_no_regular_files_hang_nothing() {
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success(), "{args:?}: {err}");
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert!(peak_child_rss_mib() < 512, "{} MiB", peak_child_rss_mib());
     assert!(t.join("files/keep").exists() && t.join("files/d/f").exists());
 }
@@ -2364,8 +2380,8 @@ fn finder_reads_its_records_from_a_small_regular_file_only() {
     fs::write(trash.join("item"), b"x").unwrap();
     let ds = trash.join(".DS_Store");
     // Nothing writes to the named pipe, so reading it waits forever. A
-    // link to /dev/zero never ends: under the cap a whole read fails at
-    // 2 GiB, and the peak size of the children shows that it ran.
+    // link to /dev/zero never ends: the command must finish, and where the
+    // platform can measure it the children stay small.
     assert!(Command::new("mkfifo").arg(&ds).status().unwrap().success());
     for zero in [false, true] {
         if zero {
@@ -2376,7 +2392,7 @@ fn finder_reads_its_records_from_a_small_regular_file_only() {
         assert!(out.status.success(), "{}", stderr_of(&out));
         assert!(stdout_of(&out).contains("item"), "{}", stdout_of(&out));
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert!(peak_child_rss_mib() < 512, "{} MiB", peak_child_rss_mib());
 }
 
