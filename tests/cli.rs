@@ -2357,6 +2357,31 @@ fn put_prunes_to_rtrash_max_size_but_keeps_its_own_items() {
 
 #[cfg(unix)]
 #[test]
+fn finder_reads_its_records_from_a_small_regular_file_only() {
+    let sb = Sandbox::new("finder-ds-store");
+    let trash = sb.root.join(".Trash");
+    fs::create_dir(&trash).unwrap();
+    fs::write(trash.join("item"), b"x").unwrap();
+    let ds = trash.join(".DS_Store");
+    // Nothing writes to the named pipe, so reading it waits forever. A
+    // link to /dev/zero never ends: under the cap a whole read fails at
+    // 2 GiB, and the peak size of the children shows that it ran.
+    assert!(Command::new("mkfifo").arg(&ds).status().unwrap().success());
+    for zero in [false, true] {
+        if zero {
+            fs::remove_file(&ds).unwrap();
+            std::os::unix::fs::symlink("/dev/zero", &ds).unwrap();
+        }
+        let out = sb.run_within(20, &["finder", "list"]);
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        assert!(stdout_of(&out).contains("item"), "{}", stdout_of(&out));
+    }
+    #[cfg(target_os = "linux")]
+    assert!(peak_child_rss_mib() < 512, "{} MiB", peak_child_rss_mib());
+}
+
+#[cfg(unix)]
+#[test]
 fn finder_list_and_restore_use_put_back_records() {
     use rtrash::ds_store::{write, Record, Value};
     let sb = Sandbox::new("finder");

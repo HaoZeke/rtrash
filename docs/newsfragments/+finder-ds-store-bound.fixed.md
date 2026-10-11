@@ -1,0 +1,1 @@
+`rtrash finder list` and `restore` read the `.DS_Store` of a trash only when it is a regular file of at most 64 MiB. A trash on a foreign drive with a named pipe there hung both commands, and a link to `/dev/zero` took memory until the system killed the process.

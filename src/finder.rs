@@ -71,10 +71,15 @@ pub fn volume_root(trash: &Path) -> PathBuf {
     }
 }
 
+/// Largest `.DS_Store` read; the ones Finder writes stay far below it.
+const DS_STORE_CAP: u64 = 64 << 20;
+
 /// Every item in `trash`, sorted by name, with its Put Back location.
-/// A missing or damaged `.DS_Store` leaves the locations unknown.
+/// A missing or damaged `.DS_Store` leaves the locations unknown, as does
+/// one that is no regular file or is larger than [`DS_STORE_CAP`]: a trash
+/// on a foreign drive may hold a named pipe or a link to `/dev/zero` there.
 pub fn items(trash: &Path) -> std::io::Result<Vec<Item>> {
-    let records = fs::read(trash.join(".DS_Store"))
+    let records = crate::info::read_bounded(&trash.join(".DS_Store"), DS_STORE_CAP)
         .ok()
         .and_then(|b| ds_store::parse(&b).ok())
         .unwrap_or_default();
