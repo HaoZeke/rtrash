@@ -208,8 +208,19 @@ struct App {
     print_on_exit: Vec<PathBuf>,
     /// Text `y` sends to the terminal clipboard on the next draw.
     clipboard: Option<String>,
-    /// Directory `b` opens a shell in, on the next turn of the loop.
-    shell_in: Option<PathBuf>,
+    /// What gets the terminal on the next turn of the loop (`b`, `v`).
+    hand_off: Option<HandOff>,
+    /// Program and arguments `o` opens a row with (tests set their own).
+    opener: Vec<std::ffi::OsString>,
+}
+
+/// A program the explorer hands the terminal to.
+#[derive(Debug, PartialEq, Eq)]
+enum HandOff {
+    /// A shell in this directory (`b`).
+    Shell(PathBuf),
+    /// The pager on this file (`v`).
+    Pager(PathBuf),
 }
 
 /// The size a row shows and its bar measures: apparent size under
@@ -421,7 +432,8 @@ impl App {
             hide_dots: false,
             print_on_exit: Vec::new(),
             clipboard: None,
-            shell_in: None,
+            hand_off: None,
+            opener: tui_term::opener(),
             prog: prog.to_string(),
             cur: root.clone(),
             root,
@@ -1116,7 +1128,51 @@ impl App {
             self.status = "read-only (--no-delete): no shell".into();
             return;
         }
-        self.shell_in = Some(self.cur.clone());
+        self.hand_off = Some(HandOff::Shell(self.cur.clone()));
+    }
+
+    /// Show the cursor file in the pager (`v`, as in gdu).
+    fn view_file(&mut self) {
+        match self.selected() {
+            Some(it) if !it.is_dir => self.hand_off = Some(HandOff::Pager(it.path.clone())),
+            Some(_) => self.status = "v shows files; o opens a directory".into(),
+            None => self.status = "nothing to view".into(),
+        }
+    }
+
+    /// Back from the pager: say so, or why it could not start.
+    fn after_pager(&mut self, status: io::Result<std::process::ExitStatus>) {
+        self.status = match status {
+            Ok(s) if s.success() => "pager closed".into(),
+            Ok(s) => format!("pager closed ({s})"),
+            Err(e) => format!("cannot start the pager: {e} (set PAGER to choose one)"),
+        };
+    }
+
+    /// Open the cursor row with its default application (`o`, as in gdu):
+    /// a file in its program, a directory in the file manager. The
+    /// opener runs on its own, so the explorer keeps the screen.
+    fn open_row(&mut self) {
+        let Some(path) = self.selected().map(|it| it.path.clone()) else {
+            self.status = "nothing to open".into();
+            return;
+        };
+        let name = self.opener[0].to_string_lossy().into_owned();
+        let spawned = std::process::Command::new(&self.opener[0])
+            .args(&self.opener[1..])
+            .arg(&path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        self.status = match spawned {
+            Ok(mut child) => {
+                // Reap it whenever it ends; its result is not ours to show.
+                std::thread::spawn(move || child.wait());
+                format!("opening {} with {name}", crate::util::term_path(&path))
+            }
+            Err(e) => format!("cannot run {name}: {e}"),
+        };
     }
 
     /// Back from the shell: say how it ended and rescan the directory,
@@ -1193,6 +1249,8 @@ impl App {
                         KeyCode::Char('p') => return self.print_and_quit(),
                         KeyCode::Char('y') => return self.copy_paths(),
                         KeyCode::Char('b') => return self.ask_shell(),
+                        KeyCode::Char('v') => return self.view_file(),
+                        KeyCode::Char('o') => return self.open_row(),
                         KeyCode::Char('.') => return self.toggle_dots(),
                         _ => {}
                     }
@@ -1675,6 +1733,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 } else {
                     "b — open a shell in this directory; exit it to come back"
                 },
+                "v — show the cursor file in $PAGER · o — open the row with its default program",
                 ". — hide names that start with a dot, or show them again",
                 "/ — show only rows whose name matches (a part, or a glob with * ? [); Esc clears",
                 "! — git work at risk (dirty, unpushed or unknown)",
@@ -1692,15 +1751,24 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
             io::Write::write_all(&mut out, osc52(&text).as_bytes())?;
             io::Write::flush(&mut out)?;
         }
-        if let Some(dir) = app.shell_in.take() {
-            let banner = format!(
-                "{}: shell in {}; exit it to return to the explorer",
-                app.prog,
-                crate::util::term_path(&dir)
-            );
-            let status = tui_term::run_shell(terminal, &dir, &banner);
-            app.after_shell(status);
-            continue;
+        match app.hand_off.take() {
+            Some(HandOff::Shell(dir)) => {
+                let banner = format!(
+                    "{}: shell in {}; exit it to return to the explorer",
+                    app.prog,
+                    crate::util::term_path(&dir)
+                );
+                let status = tui_term::run_shell(terminal, &dir, &banner);
+                app.after_shell(status);
+                continue;
+            }
+            Some(HandOff::Pager(file)) => {
+                let cmds = tui_term::pager_commands(&file);
+                let status = tui_term::run_in_terminal(terminal, cmds, &app.cur, None);
+                app.after_pager(status);
+                continue;
+            }
+            None => {}
         }
         if app.quit {
             // Let running scans wind down instead of walking on unseen.
@@ -1809,12 +1877,52 @@ mod tests {
     }
 
     #[test]
+    fn v_pages_files_only() {
+        let t = tree("view");
+        let mut a = app(&t);
+        // Rows: big (a directory), file, small.
+        a.on_key(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert!(a.hand_off.is_none());
+        assert!(a.status.contains("o opens a directory"), "{}", a.status);
+        a.move_sel(1);
+        a.on_key(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert_eq!(a.hand_off.take(), Some(HandOff::Pager(t.0.join("w/file"))));
+        a.after_pager(Err(io::Error::from(io::ErrorKind::NotFound)));
+        assert!(a.status.contains("set PAGER"), "{}", a.status);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn o_opens_the_row_with_the_opener_and_keeps_the_screen() {
+        let t = tree("open");
+        let mut a = app(&t);
+        a.opener = ["/bin/sh", "-c", "cp \"$1\" \"$1.opened\"", "sh"]
+            .map(std::ffi::OsString::from)
+            .to_vec();
+        a.move_sel(1); // file
+        a.on_key(KeyCode::Char('o'), KeyModifiers::NONE);
+        assert!(a.hand_off.is_none());
+        assert!(a.status.starts_with("opening "), "{}", a.status);
+        let copy = t.0.join("w/file.opened");
+        for _ in 0..100 {
+            if copy.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(fs::read(&copy).unwrap().len(), 9000);
+        a.opener = vec!["/nonexistent/opener".into()];
+        a.on_key(KeyCode::Char('o'), KeyModifiers::NONE);
+        assert!(a.status.starts_with("cannot run "), "{}", a.status);
+    }
+
+    #[test]
     fn b_asks_for_a_shell_in_the_current_directory_unless_read_only() {
         let t = tree("shell");
         let mut a = app(&t);
         a.open(); // big
         a.on_key(KeyCode::Char('b'), KeyModifiers::NONE);
-        assert_eq!(a.shell_in.take(), Some(t.0.join("w/big")));
+        assert_eq!(a.hand_off.take(), Some(HandOff::Shell(t.0.join("w/big"))));
         // Back from the shell, the directory is read again.
         fs::write(t.0.join("w/big/new"), vec![1u8; 50_000]).unwrap();
         a.after_shell(Err(io::Error::from(io::ErrorKind::NotFound)));
@@ -1822,7 +1930,7 @@ mod tests {
         assert!(names(&a).contains(&"new".to_string()), "{:?}", names(&a));
         a.read_only = true;
         a.on_key(KeyCode::Char('b'), KeyModifiers::NONE);
-        assert!(a.shell_in.is_none());
+        assert!(a.hand_off.is_none());
         assert!(a.status.contains("no shell"), "{}", a.status);
     }
 

@@ -51,6 +51,56 @@ fn shell_or_default(set: Option<std::ffi::OsString>) -> std::ffi::OsString {
     }
 }
 
+/// The pagers `v` tries, in order, to show `file`: `$PAGER`, split at
+/// spaces, else `less` and then `more` (just `more` on Windows).
+pub fn pager_commands(file: &std::path::Path) -> Vec<std::process::Command> {
+    let fallback: &[&str] = if cfg!(windows) {
+        &["more"]
+    } else {
+        &["less", "more"]
+    };
+    pager_lines(std::env::var_os("PAGER"), fallback)
+        .into_iter()
+        .map(|line| {
+            let mut cmd = std::process::Command::new(&line[0]);
+            cmd.args(&line[1..]).arg(file);
+            cmd
+        })
+        .collect()
+}
+
+/// `set` split at spaces, unless it is missing or blank: then each of
+/// `fallback`. No line is empty.
+fn pager_lines(set: Option<std::ffi::OsString>, fallback: &[&str]) -> Vec<Vec<std::ffi::OsString>> {
+    let words: Vec<std::ffi::OsString> = set
+        .as_deref()
+        .map(|s| {
+            s.to_string_lossy()
+                .split_whitespace()
+                .map(std::ffi::OsString::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    if words.is_empty() {
+        fallback.iter().map(|p| vec![p.into()]).collect()
+    } else {
+        vec![words]
+    }
+}
+
+/// The program that opens a path with its default application:
+/// `xdg-open`, `open` on macOS, `explorer.exe` on Windows.
+pub fn opener() -> Vec<std::ffi::OsString> {
+    let program = if cfg!(windows) {
+        "explorer.exe"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    vec![program.into()]
+}
+
 /// Hand the terminal to an interactive shell in `dir`, after printing
 /// `banner`, and take the screen back once the shell exits, also when it
 /// could not start. While the shell runs, Ctrl-C reaches it and the
@@ -60,9 +110,34 @@ pub fn run_shell(
     dir: &std::path::Path,
     banner: &str,
 ) -> io::Result<std::process::ExitStatus> {
+    run_in_terminal(
+        terminal,
+        vec![std::process::Command::new(shell_program())],
+        dir,
+        Some(banner),
+    )
+}
+
+/// Hand the terminal to the first of `cmds` that exists, run in `dir`
+/// after printing `banner` when there is one, as [`run_shell`] does for a
+/// shell. With none found, the error is the last one's.
+pub fn run_in_terminal(
+    terminal: &mut Term,
+    cmds: Vec<std::process::Command>,
+    dir: &std::path::Path,
+    banner: Option<&str>,
+) -> io::Result<std::process::ExitStatus> {
     leave(terminal);
-    println!("{banner}");
-    let status = wait_for(std::process::Command::new(shell_program()), dir);
+    if let Some(b) = banner {
+        println!("{b}");
+    }
+    let mut status = Err(io::Error::from(io::ErrorKind::NotFound));
+    for cmd in cmds {
+        status = wait_for(cmd, dir);
+        if !matches!(&status, Err(e) if e.kind() == io::ErrorKind::NotFound) {
+            break;
+        }
+    }
     hold_stderr();
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
@@ -315,6 +390,24 @@ mod tests {
 #[cfg(test)]
 mod shell_tests {
     use super::*;
+
+    #[test]
+    fn the_pager_comes_from_the_environment_split_at_spaces() {
+        let fallback = &["less", "more"];
+        assert_eq!(
+            pager_lines(Some("most -s".into()), fallback),
+            [["most", "-s"]]
+        );
+        assert_eq!(
+            pager_lines(Some("  ".into()), fallback),
+            [["less"], ["more"]]
+        );
+        assert_eq!(pager_lines(None, &["more"]), [["more"]]);
+        for cmd in pager_commands(std::path::Path::new("f.txt")) {
+            assert_eq!(cmd.get_args().last().unwrap(), "f.txt");
+        }
+        assert_eq!(opener().len(), 1);
+    }
 
     #[test]
     fn the_shell_comes_from_the_environment_or_the_platform() {

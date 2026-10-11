@@ -938,6 +938,28 @@ or
 The explorer leaves the screen while the shell runs, and Ctrl-C there
 stops only the programs the shell runs.
 Once the shell exits, the explorer comes back and rescans the directory.
+.B v
+shows the cursor file in
+.B $PAGER
+(split at spaces; else
+.IR less ,
+or
+.I more
+where there is no
+.I less
+and on Windows), and the explorer comes back when the pager exits.
+.B o
+opens the cursor row with its default program, as gdu does: a file in
+the program that handles its type, a directory in the file manager.
+It runs
+.I xdg\-open
+(macOS
+.IR open ,
+Windows
+.IR explorer.exe )
+on its own, so the explorer keeps the screen.
+Neither key changes anything, so both work with
+.BR \-\-no\-delete .
 .B .
 hides names that start with a dot, in this view and every view opened
 after it, until pressed again; the title then says

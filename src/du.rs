@@ -124,8 +124,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           sort (s, n, C, M), switch disk use and apparent
                           size (S), show details (i), filter by name (/),
                           hide dot names (.), print paths and quit (p) or
-                          copy them (y), open a shell there (b); rows show
-                          git state and artefact kind
+                          copy them (y), open a shell there (b), page a
+                          file (v) or open a row with its program (o); rows
+                          show git state and artefact kind
       --no-delete       with -i, browse only: d, u and b do nothing
       --si              show sizes in powers of 1000 (kB, MB, GB)
       --help            display this help and exit
