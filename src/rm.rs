@@ -152,7 +152,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     // path typed through a symlinked directory matches in that form too.
     let resolved: Vec<String> = patterns.iter().filter_map(|p| resolve_pattern(p)).collect();
     patterns.extend(resolved);
-    let entries = list::filter_age(list::collect(&dirs), older_than, newer_than);
+    let mut entries = list::filter_age(list::collect(&dirs), older_than, newer_than);
+    // Payloads with no .trashinfo match by their name or their path under
+    // files/; having no date, they stay out of an age-filtered rm.
+    if older_than.is_none() && newer_than.is_none() {
+        entries.extend(list::orphans(&dirs));
+    }
     let mut status = 0i32;
     let mut removed = 0u64;
     let mut bytes = 0u64;

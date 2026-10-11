@@ -477,6 +477,77 @@ fn empty_removes_everything() {
         .is_none());
 }
 
+/// A makepkg build tree: `pkg` and its inner directory are mode 0311,
+/// so the owner can enter but not list them.
+fn locked_build_tree(at: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(at.join("pkg/linux/usr/lib")).unwrap();
+    fs::write(at.join("pkg/linux/usr/lib/vmlinuz"), b"k").unwrap();
+    fs::write(at.join("PKGBUILD"), b"p").unwrap();
+    for d in ["pkg/linux/usr/lib", "pkg/linux", "pkg"] {
+        fs::set_permissions(at.join(d), fs::Permissions::from_mode(0o311)).unwrap();
+    }
+}
+
+#[test]
+fn empty_opens_up_owned_directories_it_cannot_list() {
+    let sb = Sandbox::new("empty-locked");
+    // One trashed through put, one orphan with no .trashinfo.
+    fs::create_dir(sb.work().join("build")).unwrap();
+    locked_build_tree(&sb.work().join("build"));
+    let out = sb.run(&["put", "-r", "build"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    locked_build_tree(&sb.trash().join("files/linux-6.9"));
+
+    let out = sb.empty(&[]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty(), "{:?}", trash_names(&sb));
+
+    // An age-filtered empty removes item by item; same repair.
+    fs::create_dir(sb.work().join("build")).unwrap();
+    locked_build_tree(&sb.work().join("build"));
+    sb.run(&["put", "-r", "build"]);
+    let out = sb.empty(&["0"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty(), "{:?}", trash_names(&sb));
+}
+
+#[test]
+fn orphans_show_in_list_and_status_and_go_with_rm() {
+    let sb = Sandbox::new("orphans");
+    sb.touch("kept");
+    sb.run(&["put", "kept"]);
+    let orphan = sb.trash().join("files/linux-6.9");
+    locked_build_tree(&orphan);
+
+    let out = sb.run(&["list", "--home-only"]);
+    let text = stdout_of(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    assert!(lines[0].ends_with("/work/kept"), "{text}");
+    assert_eq!(
+        lines[1],
+        format!("????-??-?? ??:??:?? {}", orphan.display())
+    );
+    let json = stdout_of(&sb.run(&["list", "--home-only", "--json"]));
+    assert!(json.contains("\"name\":\"linux-6.9\""), "{json}");
+    assert_eq!(json.matches("\"orphan\":true").count(), 1, "{json}");
+    // No date, so an age filter leaves the orphan out.
+    let old = stdout_of(&sb.run(&["list", "--home-only", "--older-than=0"]));
+    assert!(!old.contains("linux-6.9"), "{old}");
+
+    let st = stdout_of(&sb.run(&["status", "--home-only"]));
+    assert!(st.contains("2 items (1 without .trashinfo)"), "{st}");
+    let st = stdout_of(&sb.run(&["status", "--home-only", "--json"]));
+    assert!(st.contains("\"items\":2,"), "{st}");
+    assert!(st.contains("\"orphans\":1"), "{st}");
+
+    let out = sb.run(&["rm", "--home-only", "linux-6.9"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb).len(), 1);
+    assert!(!orphan.exists());
+}
+
 #[test]
 fn empty_days_keeps_recent_items() {
     let sb = Sandbox::new("empty-days");

@@ -7,6 +7,8 @@ use crate::trashdir::{self, TrashDir};
 const HELP: &str = "\
 Usage: {prog} [OPTION]...
 List trashed items as 'DELETION-DATE ORIGINAL-PATH', oldest first.
+Payloads with no .trashinfo come last, dated ????-??-??, under their path
+in the trash (\"orphan\":true in JSON); an age filter leaves them out.
 
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  list only this trash directory (repeatable);
@@ -74,6 +76,41 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
             .then_with(|| a.original.cmp(&b.original))
             .then_with(|| a.name.cmp(&b.name))
     });
+    out
+}
+
+/// Payloads in `files/` with no `.trashinfo` (left by a crash or another
+/// tool), as entries with no date whose original path is the payload
+/// itself, oldest-first order kept by name.
+pub fn orphans(dirs: &[TrashDir]) -> Vec<Entry> {
+    let mut out = Vec::new();
+    for dir in dirs {
+        let Ok(rd) = fs::read_dir(dir.files()) else {
+            continue;
+        };
+        let info_dir = dir.info();
+        let mut found: Vec<Entry> = rd
+            .flatten()
+            .filter_map(|ent| {
+                let name = crate::util::str_from_os_ref(&ent.file_name());
+                let info = crate::util::join_info(&info_dir, &name);
+                // symlink_metadata: a dangling .trashinfo symlink still counts.
+                if fs::symlink_metadata(&info).is_ok() {
+                    return None;
+                }
+                Some(Entry {
+                    date: None,
+                    epoch: 0,
+                    original: ent.path(),
+                    name,
+                    dir: dir.clone(),
+                    batch: None,
+                })
+            })
+            .collect();
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        out.extend(found);
+    }
     out
 }
 
@@ -288,10 +325,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: no valid --trash-dir pins");
         return 2;
     }
-    let entries = filter_age(collect(&dirs), older_than, newer_than);
+    let mut entries = filter_age(collect(&dirs), older_than, newer_than);
+    // Orphans have no date, so only an unfiltered listing shows them; they
+    // come last, after every recorded item.
+    let recorded = entries.len();
+    if older_than.is_none() && newer_than.is_none() {
+        entries.extend(orphans(&dirs));
+    }
     let with_size = with_size || sort == SortKey::Size;
     let sizes = with_size.then(|| entry_sizes(&dirs, &entries));
-    let order = sorted_order(&entries, sizes.as_deref(), sort, reverse);
+    let mut order = sorted_order(&entries, sizes.as_deref(), sort, reverse);
+    if sort == SortKey::Date {
+        // Keep orphans after the recorded items whichever way dates run.
+        order.sort_by_key(|&i| i >= recorded);
+    }
+    let orphan_rows: Vec<bool> = order.iter().map(|&i| i >= recorded).collect();
     let rows: Vec<&Entry> = order.iter().map(|&i| &entries[i]).collect();
     let row_sizes: Option<Vec<u64>> = sizes.map(|s| order.iter().map(|&i| s[i]).collect());
     // Owner of each row's trash root, looked up once per root.
@@ -308,24 +356,25 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             .collect()
     });
     if json {
-        match &owners {
-            None => println!("{}", sized_json_array(&rows, row_sizes.as_deref())),
-            Some(owners) => {
-                let items: Vec<String> = rows
-                    .iter()
-                    .enumerate()
-                    .map(|(k, e)| {
-                        let obj = entry_to_json_sized(e, row_sizes.as_ref().map(|s| s[k]));
-                        let body = obj.strip_suffix('}').unwrap_or(&obj);
-                        format!("  {body},\"owner\":\"{}\"}}", json_escape(&owners[k]))
-                    })
-                    .collect();
-                if items.is_empty() {
-                    println!("[\n]");
-                } else {
-                    println!("[\n{}\n]", items.join(",\n"));
+        let items: Vec<String> = rows
+            .iter()
+            .enumerate()
+            .map(|(k, e)| {
+                let obj = entry_to_json_sized(e, row_sizes.as_ref().map(|s| s[k]));
+                let mut body = obj.strip_suffix('}').unwrap_or(&obj).to_string();
+                if orphan_rows[k] {
+                    body.push_str(",\"orphan\":true");
                 }
-            }
+                if let Some(owners) = &owners {
+                    body.push_str(&format!(",\"owner\":\"{}\"", json_escape(&owners[k])));
+                }
+                format!("  {body}}}")
+            })
+            .collect();
+        if items.is_empty() {
+            println!("[\n]");
+        } else {
+            println!("[\n{}\n]", items.join(",\n"));
         }
     } else {
         use std::io::Write;

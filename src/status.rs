@@ -116,6 +116,8 @@ pub(crate) struct RootSummary {
     pub path: String,
     pub items: u64,
     pub bytes: u64,
+    /// Of `items`, payloads with no `.trashinfo`.
+    pub orphans: u64,
 }
 
 pub(crate) fn summarize_dirs(
@@ -139,31 +141,24 @@ pub(crate) fn summarize_dirs(
             use rayon::prelude::*;
             entries.par_iter().map(|e| sizes.entry_bytes(&e.name)).sum()
         };
-        let counted: std::collections::HashSet<String> =
-            entries.iter().map(|e| e.name.clone()).collect();
         sizes.write_back();
-        // Orphans only on unfiltered full status (age filter has no date for orphans).
+        // Orphans (payloads with no .trashinfo) count as items, but only on
+        // an unfiltered status: they have no date for an age filter.
+        let mut orphans = 0u64;
         if older_than.is_none() && newer_than.is_none() {
-            if let Ok(rd) = std::fs::read_dir(dir.files()) {
-                for ent in rd.flatten() {
-                    let name = crate::util::str_from_os_ref(&ent.file_name());
-                    if counted.contains(&name) {
-                        continue;
-                    }
-                    let has_info = crate::util::join_info(&dir.info(), &name).exists();
-                    if !has_info {
-                        bytes = bytes.saturating_add(fastdelete::disk_usage(&ent.path()));
-                    }
-                }
+            for o in list::orphans(std::slice::from_ref(dir)) {
+                orphans += 1;
+                bytes = bytes.saturating_add(fastdelete::disk_usage(&o.original));
             }
         }
-        let n = entries.len() as u64;
+        let n = entries.len() as u64 + orphans;
         total_items = total_items.saturating_add(n);
         total_bytes = total_bytes.saturating_add(bytes);
         roots.push(RootSummary {
             path: dir.root.display().to_string(),
             items: n,
             bytes,
+            orphans,
         });
     }
     (roots, total_items, total_bytes)
@@ -177,8 +172,13 @@ pub fn print_status(dirs: &[TrashDir], older_than: Option<i64>, newer_than: Opti
     }
     let (roots, total_items, total_bytes) = summarize_dirs(dirs, older_than, newer_than);
     for r in &roots {
+        let orphans = if r.orphans > 0 {
+            format!(" ({} without .trashinfo)", r.orphans)
+        } else {
+            String::new()
+        };
         println!(
-            "{}\t{}\t{}",
+            "{}\t{}{orphans}\t{}",
             r.path,
             plural(r.items, "item", "items"),
             fastdelete::format_bytes(r.bytes)
@@ -199,10 +199,11 @@ fn print_status_json(dirs: &[TrashDir], older_than: Option<i64>, newer_than: Opt
             out.push_str(",\n");
         }
         out.push_str(&format!(
-            "    {{\"path\":\"{}\",\"items\":{},\"bytes\":{}}}",
+            "    {{\"path\":\"{}\",\"items\":{},\"bytes\":{},\"orphans\":{}}}",
             list::json_escape(&r.path),
             r.items,
-            r.bytes
+            r.bytes,
+            r.orphans
         ));
     }
     if !roots.is_empty() {

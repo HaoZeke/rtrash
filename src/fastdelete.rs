@@ -6,6 +6,7 @@
 //! - parallel sibling deletion (rayon) at each directory level with many names
 //! - btrfs subvolume destroy when a directory is a real subvolume root (ino 256)
 
+use rayon::prelude::*;
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs;
 use std::io;
@@ -13,9 +14,6 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use rayon::prelude::*;
 
 const BTRFS_SUPER_MAGIC: i64 = 0x9123683E;
 const BTRFS_FIRST_FREE_OBJECTID: u64 = 256;
@@ -154,12 +152,19 @@ pub fn try_btrfs_subvolume_delete(path: &Path) -> io::Result<bool> {
 
 fn remove_dir_tree(path: &Path) -> io::Result<()> {
     let dir_c = cstring_path(path)?;
-    let fd = unsafe {
+    let open = || unsafe {
         libc::open(
             dir_c.as_ptr(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
         )
     };
+    let mut fd = open();
+    if fd < 0
+        && io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+        && own_dir_opened_up(libc::AT_FDCWD, &dir_c)
+    {
+        fd = open();
+    }
     if fd < 0 {
         let e = io::Error::last_os_error();
         if e.kind() == io::ErrorKind::NotFound {
@@ -168,65 +173,145 @@ fn remove_dir_tree(path: &Path) -> io::Result<()> {
         if e.raw_os_error() == Some(libc::ELOOP) || e.raw_os_error() == Some(libc::ENOTDIR) {
             return fs::remove_file(path);
         }
-        return Err(e);
+        return Err(at(path, e));
     }
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    remove_dirfd_contents(fd.as_raw_fd(), 0)?;
+    remove_dirfd_contents(fd.as_raw_fd(), path, 0)?;
     drop(fd);
     match fs::remove_dir(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
+        Err(e) => Err(at(path, e)),
     }
 }
 
-fn remove_dirfd_contents(dirfd: RawFd, depth: u32) -> io::Result<()> {
-    let entries = read_dirfd_entries(dirfd)?;
+/// An error that already names the path it happened at.
+#[derive(Debug)]
+struct AtPath {
+    path: std::path::PathBuf,
+    err: io::Error,
+}
+
+impl std::fmt::Display for AtPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.path.display(), self.err)
+    }
+}
+
+impl std::error::Error for AtPath {}
+
+/// `e` tagged with `path`, unless a deeper call already tagged it.
+fn at(path: &Path, e: io::Error) -> io::Error {
+    if e.get_ref().is_some_and(|r| r.is::<AtPath>()) {
+        return e;
+    }
+    io::Error::new(
+        e.kind(),
+        AtPath {
+            path: path.to_path_buf(),
+            err: e,
+        },
+    )
+}
+
+/// The OS error code of `e`, looking through an [`AtPath`] tag.
+fn os_code(e: &io::Error) -> Option<i32> {
+    match e.get_ref().and_then(|r| r.downcast_ref::<AtPath>()) {
+        Some(a) => a.err.raw_os_error(),
+        None => e.raw_os_error(),
+    }
+}
+
+/// A directory the current user owns but cannot list, enter or change
+/// (a build tree with mode 0311, say): give the owner rwx back and say
+/// whether that happened. Never touches what someone else owns or what
+/// is not a directory.
+fn own_dir_opened_up(dirfd: RawFd, name_c: &CStr) -> bool {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::fstatat(dirfd, name_c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+    if rc != 0 || !owned_dir_short_of_rwx(&st) {
+        return false;
+    }
+    let mode = (st.st_mode as libc::mode_t & 0o7777) | 0o700;
+    unsafe { libc::fchmodat(dirfd, name_c.as_ptr(), mode, 0) == 0 }
+}
+
+/// [`own_dir_opened_up`] for a directory that is already open.
+fn own_dirfd_opened_up(fd: RawFd) -> bool {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 || !owned_dir_short_of_rwx(&st) {
+        return false;
+    }
+    let mode = (st.st_mode as libc::mode_t & 0o7777) | 0o700;
+    unsafe { libc::fchmod(fd, mode) == 0 }
+}
+
+fn owned_dir_short_of_rwx(st: &libc::stat) -> bool {
+    (st.st_mode as libc::mode_t & libc::S_IFMT) == libc::S_IFDIR
+        && st.st_uid == unsafe { libc::geteuid() }
+        && (st.st_mode as libc::mode_t & 0o700) != 0o700
+}
+
+fn remove_dirfd_contents(dirfd: RawFd, path: &Path, depth: u32) -> io::Result<()> {
+    let entries = read_dirfd_entries(dirfd).map_err(|e| at(path, e))?;
     // Nested levels stay sequential: parallelising every directory oversubscribes
     // rayon when the top-level full-empty wipe is already highly parallel.
     // (Top-level `wipe_children_parallel` is the parallel boundary.)
     let _ = (depth, PAR_SIBLING_THRESHOLD, PAR_MAX_DEPTH);
+    // Keep going past a failure so everything removable goes; report the
+    // first failure once the directory is done.
+    let mut first: Option<io::Error> = None;
+    let mut opened_up = false;
     for e in &entries {
-        remove_entry(dirfd, e, depth)?;
+        let mut r = remove_entry(dirfd, path, e, depth);
+        // Unlinking needs write and search on this directory: when the
+        // user owns it, grant them once and retry.
+        if !opened_up && r.as_ref().is_err_and(|e| os_code(e) == Some(libc::EACCES)) {
+            opened_up = true;
+            if own_dirfd_opened_up(dirfd) {
+                r = remove_entry(dirfd, path, e, depth);
+            }
+        }
+        if let Err(err) = r {
+            first.get_or_insert(err);
+        }
     }
-    Ok(())
+    first.map_or(Ok(()), Err)
 }
 
-fn remove_entry(dirfd: RawFd, ent: &DirEnt, depth: u32) -> io::Result<()> {
+fn remove_entry(dirfd: RawFd, path: &Path, ent: &DirEnt, depth: u32) -> io::Result<()> {
     let name_c = CString::new(ent.name.as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let child = || path.join(&ent.name);
+    #[cfg(test)]
+    if tests::fails(&ent.name) {
+        return Err(at(&child(), io::Error::from_raw_os_error(libc::EPERM)));
+    }
 
     // Fast path: known non-directories — single unlinkat, no openat probe.
     match ent.dtype {
         DT_REG | DT_LNK | DT_FIFO | DT_SOCK | DT_CHR | DT_BLK => {
-            return unlinkat_file(dirfd, &name_c);
+            return unlinkat_file(dirfd, &name_c).map_err(|e| at(&child(), e));
         }
-        DT_DIR => return remove_dir_child(dirfd, &ent.name, &name_c, depth),
+        DT_DIR => return remove_dir_child(dirfd, path, &ent.name, &name_c, depth),
         DT_UNKNOWN => {}
         _ => {}
     }
 
-    // DT_UNKNOWN or exotic: probe with openat as directory.
-    let child_fd = unsafe {
-        libc::openat(
-            dirfd,
-            name_c.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-        )
-    };
-    if child_fd >= 0 {
-        // We already opened; finish as directory (subvol check on parent).
-        unsafe { libc::close(child_fd) };
-        return remove_dir_child(dirfd, &ent.name, &name_c, depth);
+    // DT_UNKNOWN or exotic: is it a directory? lstat says without opening.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::fstatat(dirfd, name_c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+    if rc != 0 {
+        let err = io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::ENOENT) => Ok(()),
+            _ => Err(at(&child(), err)),
+        };
     }
-    let err = io::Error::last_os_error();
-    match err.raw_os_error() {
-        Some(libc::ENOTDIR) | Some(libc::ELOOP) | Some(libc::EACCES) => {
-            unlinkat_file(dirfd, &name_c)
-        }
-        Some(libc::ENOENT) => Ok(()),
-        _ => Err(err),
+    if (st.st_mode as libc::mode_t & libc::S_IFMT) == libc::S_IFDIR {
+        return remove_dir_child(dirfd, path, &ent.name, &name_c, depth);
     }
+    unlinkat_file(dirfd, &name_c).map_err(|e| at(&child(), e))
 }
 
 fn unlinkat_file(dirfd: RawFd, name_c: &CString) -> io::Result<()> {
@@ -240,20 +325,35 @@ fn unlinkat_file(dirfd: RawFd, name_c: &CString) -> io::Result<()> {
     Ok(())
 }
 
-fn remove_dir_child(dirfd: RawFd, name: &OsStr, name_c: &CString, depth: u32) -> io::Result<()> {
+fn remove_dir_child(
+    dirfd: RawFd,
+    path: &Path,
+    name: &OsStr,
+    name_c: &CString,
+    depth: u32,
+) -> io::Result<()> {
+    let child = path.join(name);
     // Subvolume destroy only at the first level of a tree (cheap for the common
     // non-subvolume case: one failed/skipped ioctl path per top-level payload,
     // not per nested directory).
-    if depth == 0 && try_btrfs_subvol_at(dirfd, name)? {
+    if depth == 0 && try_btrfs_subvol_at(dirfd, name).map_err(|e| at(&child, e))? {
         return Ok(());
     }
-    let child_fd = unsafe {
+    let open = || unsafe {
         libc::openat(
             dirfd,
             name_c.as_ptr(),
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
         )
     };
+    let mut child_fd = open();
+    // No read permission on a directory the user owns: open it up and retry.
+    if child_fd < 0
+        && io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+        && own_dir_opened_up(dirfd, name_c)
+    {
+        child_fd = open();
+    }
     if child_fd < 0 {
         let e = io::Error::last_os_error();
         if e.kind() == io::ErrorKind::NotFound {
@@ -261,18 +361,19 @@ fn remove_dir_child(dirfd: RawFd, name: &OsStr, name_c: &CString, depth: u32) ->
         }
         // Race: became a non-dir.
         if e.raw_os_error() == Some(libc::ENOTDIR) || e.raw_os_error() == Some(libc::ELOOP) {
-            return unlinkat_file(dirfd, name_c);
+            return unlinkat_file(dirfd, name_c).map_err(|e| at(&child, e));
         }
-        return Err(e);
+        return Err(at(&child, e));
     }
     let child_fd = unsafe { OwnedFd::from_raw_fd(child_fd) };
-    remove_dirfd_contents(child_fd.as_raw_fd(), depth.saturating_add(1))?;
+    let inner = remove_dirfd_contents(child_fd.as_raw_fd(), &child, depth.saturating_add(1));
     drop(child_fd);
+    inner?;
     let rc = unsafe { libc::unlinkat(dirfd, name_c.as_ptr(), libc::AT_REMOVEDIR) };
     if rc != 0 {
         let e = io::Error::last_os_error();
         if e.kind() != io::ErrorKind::NotFound {
-            return Err(e);
+            return Err(at(&child, e));
         }
     }
     Ok(())
@@ -387,9 +488,25 @@ fn usage_in(path: &Path, seen: &std::sync::Mutex<std::collections::HashSet<(u64,
 
 pub use crate::util::format_bytes;
 
+/// What wiping the children of one directory did.
+#[derive(Debug, Default)]
+pub struct Wipe {
+    /// Top-level children removed.
+    pub removed: u64,
+    /// Top-level children left behind, each with the first error under it
+    /// (the error names the path where it happened).
+    pub failed: Vec<(OsString, io::Error)>,
+}
+
 /// Wipe every top-level child of `dir` in parallel. Missing `dir` is success.
-/// Returns the number of top-level children removed.
-pub fn wipe_children_parallel(dir: &Path) -> io::Result<u64> {
+/// A child that cannot be removed is left and reported in [`Wipe::failed`];
+/// the rest still go. An error means `dir` itself could not be read.
+pub fn wipe_children_parallel(dir: &Path) -> io::Result<Wipe> {
+    wipe_children_except(dir, |_| false)
+}
+
+/// [`wipe_children_parallel`], leaving the children `keep` names.
+pub fn wipe_children_except(dir: &Path, keep: impl Fn(&OsStr) -> bool + Sync) -> io::Result<Wipe> {
     let dir_c = cstring_path(dir)?;
     // Never follow a symlink posing as files/ or info/ (full-empty footgun).
     let fd = unsafe {
@@ -401,57 +518,50 @@ pub fn wipe_children_parallel(dir: &Path) -> io::Result<u64> {
     if fd < 0 {
         let e = io::Error::last_os_error();
         if e.kind() == io::ErrorKind::NotFound {
-            return Ok(0);
+            return Ok(Wipe::default());
         }
         return Err(e);
     }
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    let entries = read_dirfd_entries(fd.as_raw_fd())?;
-    let n = entries.len() as u64;
-    if n == 0 {
-        return Ok(0);
-    }
+    let entries: Vec<DirEnt> = read_dirfd_entries(fd.as_raw_fd())?
+        .into_iter()
+        .filter(|e| !keep(&e.name))
+        .collect();
     // Always parallelise top-level wipe (full empty of files/ or info/).
-    let err_slot: AtomicU64 = AtomicU64::new(0);
-    // Store first error message is hard without mutex; collect errors.
-    let mut first_err: Option<io::Error> = None;
     let results: Vec<io::Result<()>> = entries
         .par_iter()
-        .map(|e| remove_entry(fd.as_raw_fd(), e, 0))
+        .map(|e| remove_entry(fd.as_raw_fd(), dir, e, 0))
         .collect();
-    for r in results {
-        if let Err(e) = r {
-            if first_err.is_none() {
-                first_err = Some(e);
-            }
-            err_slot.fetch_add(1, Ordering::Relaxed);
+    let mut out = Wipe::default();
+    for (e, r) in entries.into_iter().zip(results) {
+        match r {
+            Ok(()) => out.removed += 1,
+            Err(err) => out.failed.push((e.name, err)),
         }
     }
-    if let Some(e) = first_err {
-        return Err(e);
-    }
-    Ok(n)
+    Ok(out)
 }
 
-/// Wipe `files/` then `info/` (sequential roots, parallel children each).
-/// Always attempts **both** roots even if the first returns an error, so a
-/// partial failure does not leave one side fully intact and the other half-gone
-/// without trying to finish the pair.
-pub fn wipe_two_parallel(a: &Path, b: &Path) -> io::Result<(u64, u64)> {
-    let ra = wipe_children_parallel(a);
-    let rb = wipe_children_parallel(b);
-    match (ra, rb) {
-        (Ok(na), Ok(nb)) => Ok((na, nb)),
-        (Err(e), Ok(nb)) => {
-            let _ = nb;
-            Err(e)
-        }
-        (Ok(na), Err(e)) => {
-            let _ = na;
-            Err(e)
-        }
-        (Err(e), Err(_)) => Err(e),
-    }
+/// Wipe `files/`, then `info/` except the `.trashinfo` of each payload that
+/// stayed behind, so a payload that could not go keeps its record instead
+/// of turning into an orphan. Both roots are always tried.
+pub fn wipe_two_parallel(files: &Path, info: &Path) -> (io::Result<Wipe>, io::Result<Wipe>) {
+    let ra = wipe_children_parallel(files);
+    let kept: std::collections::HashSet<OsString> = match &ra {
+        Ok(w) => w
+            .failed
+            .iter()
+            .map(|(n, _)| {
+                let mut i = n.clone();
+                i.push(".trashinfo");
+                i
+            })
+            .collect(),
+        // files/ unreadable: keep every record.
+        Err(_) => return (ra, Ok(Wipe::default())),
+    };
+    let rb = wipe_children_except(info, |n| kept.contains(n));
+    (ra, rb)
 }
 
 fn cstring_path(path: &Path) -> io::Result<CString> {
@@ -463,6 +573,123 @@ fn cstring_path(path: &Path) -> io::Result<CString> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Entry names [`remove_entry`] refuses, to stand in for an item no
+    /// ordinary user can make undeletable.
+    static FAIL: std::sync::Mutex<Vec<OsString>> = std::sync::Mutex::new(Vec::new());
+
+    pub(super) fn fails(name: &OsStr) -> bool {
+        FAIL.lock().unwrap().iter().any(|n| n == name)
+    }
+
+    fn chmod(p: &Path, mode: u32) {
+        fs::set_permissions(p, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn owned_dirs_without_owner_access_are_opened_up_and_removed() {
+        // A makepkg tree: `pkg` at 0311 (no read), plus no-write and
+        // no-access directories, each holding files.
+        let root = tmp_root("locked");
+        let files = root.join("files");
+        let tree = files.join("linux-6.1");
+        for d in ["pkg/linux/usr", "ro/sub", "none"] {
+            fs::create_dir_all(tree.join(d)).unwrap();
+        }
+        fs::write(tree.join("pkg/linux/usr/f"), b"x").unwrap();
+        fs::write(tree.join("pkg/g"), b"x").unwrap();
+        fs::write(tree.join("ro/sub/f"), b"x").unwrap();
+        fs::write(tree.join("none/f"), b"x").unwrap();
+        chmod(&tree.join("pkg/linux"), 0o311);
+        chmod(&tree.join("pkg"), 0o311);
+        chmod(&tree.join("ro/sub"), 0o500);
+        chmod(&tree.join("ro"), 0o500);
+        chmod(&tree.join("none"), 0o000);
+        let w = wipe_children_parallel(&files).unwrap();
+        assert!(w.failed.is_empty(), "{:?}", w.failed);
+        assert_eq!(w.removed, 1);
+        assert!(!tree.exists());
+        // remove_path takes the same route for a single payload, top
+        // directory included.
+        fs::create_dir_all(tree.join("a")).unwrap();
+        fs::write(tree.join("a/f"), b"x").unwrap();
+        chmod(&tree.join("a"), 0o311);
+        chmod(&tree, 0o311);
+        remove_path(&tree).unwrap();
+        assert!(!tree.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn opening_up_leaves_other_modes_and_files_alone() {
+        let root = tmp_root("modes");
+        let d = root.join("d");
+        fs::create_dir(&d).unwrap();
+        fs::write(root.join("f"), b"x").unwrap();
+        chmod(&root.join("f"), 0o000);
+        chmod(&d, 0o2311);
+        let c = |p: &Path| CString::new(p.as_os_str().as_bytes()).unwrap();
+        // Not a directory: untouched.
+        assert!(!own_dir_opened_up(libc::AT_FDCWD, &c(&root.join("f"))));
+        assert_eq!(fs::metadata(root.join("f")).unwrap().mode() & 0o7777, 0o000);
+        // Our directory: owner rwx added, the other bits kept.
+        assert!(own_dir_opened_up(libc::AT_FDCWD, &c(&d)));
+        assert_eq!(fs::metadata(&d).unwrap().mode() & 0o7777, 0o2711);
+        // Already rwx for the owner: nothing to do.
+        assert!(!own_dir_opened_up(libc::AT_FDCWD, &c(&d)));
+        // A directory someone else owns is never changed.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        st.st_mode = (libc::S_IFDIR | 0o311) as _;
+        st.st_uid = unsafe { libc::geteuid() };
+        assert!(owned_dir_short_of_rwx(&st));
+        st.st_uid = st.st_uid.wrapping_add(1);
+        assert!(!owned_dir_short_of_rwx(&st));
+        chmod(&root.join("f"), 0o600);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn wipe_keeps_going_and_keeps_the_record_of_what_stayed() {
+        let root = tmp_root("keep");
+        let (files, info) = (root.join("files"), root.join("info"));
+        fs::create_dir_all(files.join("tree/deep")).unwrap();
+        fs::create_dir_all(&info).unwrap();
+        let stuck = format!("stuck-{}", std::process::id());
+        fs::write(files.join("tree/deep").join(&stuck), b"x").unwrap();
+        fs::write(files.join("tree/other"), b"x").unwrap();
+        for n in ["a", "b"] {
+            fs::write(files.join(n), b"x").unwrap();
+        }
+        for n in ["a", "b", "tree"] {
+            fs::write(info.join(format!("{n}.trashinfo")), b"x").unwrap();
+        }
+        FAIL.lock().unwrap().push(stuck.clone().into());
+        let (wf, wi) = wipe_two_parallel(&files, &info);
+        FAIL.lock().unwrap().retain(|n| n != stuck.as_str());
+        let (wf, wi) = (wf.unwrap(), wi.unwrap());
+        assert_eq!(wf.removed, 2);
+        assert_eq!(wf.failed.len(), 1);
+        assert_eq!(wf.failed[0].0, "tree");
+        // The error names the deepest path, once.
+        let msg = wf.failed[0].1.to_string();
+        let deep = files.join("tree/deep").join(&stuck);
+        assert_eq!(
+            msg,
+            format!(
+                "{}: {}",
+                deep.display(),
+                io::Error::from_raw_os_error(libc::EPERM)
+            )
+        );
+        // Siblings of the stuck file went; the stuck one and its record stay.
+        assert!(!files.join("tree/other").exists());
+        assert!(deep.exists());
+        assert_eq!(wi.removed, 2);
+        assert!(info.join("tree.trashinfo").exists());
+        assert!(!info.join("a.trashinfo").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
 
     fn tmp_root(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
@@ -498,8 +725,9 @@ mod tests {
         fs::write(root.join("f1"), b"1").unwrap();
         fs::create_dir(root.join("d")).unwrap();
         fs::write(root.join("d/x"), b"2").unwrap();
-        let n = wipe_children_parallel(&root).unwrap();
-        assert_eq!(n, 2);
+        let w = wipe_children_parallel(&root).unwrap();
+        assert_eq!(w.removed, 2);
+        assert!(w.failed.is_empty());
         assert!(root.is_dir());
         assert!(fs::read_dir(&root).unwrap().next().is_none());
         let _ = fs::remove_dir_all(&root);
@@ -516,9 +744,9 @@ mod tests {
             fs::write(a.join(format!("f{i}")), b"x").unwrap();
             fs::write(b.join(format!("g{i}")), b"y").unwrap();
         }
-        let (na, nb) = wipe_two_parallel(&a, &b).unwrap();
-        assert_eq!(na, 20);
-        assert_eq!(nb, 20);
+        let (wa, wb) = wipe_two_parallel(&a, &b);
+        assert_eq!(wa.unwrap().removed, 20);
+        assert_eq!(wb.unwrap().removed, 20);
         assert!(fs::read_dir(&a).unwrap().next().is_none());
         assert!(fs::read_dir(&b).unwrap().next().is_none());
         let _ = fs::remove_dir_all(&root);

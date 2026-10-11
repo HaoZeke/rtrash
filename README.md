@@ -296,6 +296,10 @@ Purges every trash directory visible to the user (home trash plus mounted volume
 With `DAYS` (or `--older-than=DAYS`), only items trashed more than `DAYS` days ago go.
 Entries are removed in parallel.
 Orphaned `files/` entries (no `.trashinfo`) and entries with broken metadata are purged on a full empty, and the `directorysizes` cache is pruned when present.
+A directory you own but cannot list or change, such as a build tree's `pkg` at mode 0311, gets owner `rwx` back and then goes.
+Nothing someone else owns is changed.
+An item that still cannot go stays in the trash, with its `.trashinfo`.
+The rest still goes, and `empty` exits 1 after listing each item left and why.
 Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts), `--json` (summary: `dry_run`, `removed`, `bytes`, `days`, `max_size`).
 
 **Retention by size:** `rtrash empty --max-size=10G` removes items, oldest first, until the trash directories in scope fit in 10 GiB together; `--prune=largest` removes the largest first, and `DAYS` runs before the size cut.
@@ -305,6 +309,8 @@ Set `RTRASH_MAX_SIZE=10G` (and optionally `RTRASH_PRUNE=largest`), or `max_size`
 
 Prints `DELETION-DATE ORIGINAL-PATH` per item, oldest first, in the `trash-list` output format (`YYYY-MM-DD HH:MM:SS` plus the original path).
 Scans the home trash and per-mount trash directories owned by the current user, or only the directories given with `--trash-dir=PATH` (repeatable).
+Orphans (payloads in `files/` with no `.trashinfo`) come last, with a `????-??-??` date and their path inside the trash.
+In JSON they carry `"orphan": true`; an age filter leaves them out.
 
 | Flag | Meaning |
 |------|---------|
@@ -320,6 +326,7 @@ Scans the home trash and per-mount trash directories owned by the current user, 
 ### `rtrash status`
 
 Per-root item count and reclaimable size (uses `directorysizes` when valid). Same discovery pins as list. Also accepts `--json`, `--older-than=DAYS`, `--newer-than=DAYS`.
+Orphans count as items, noted as `(N without .trashinfo)` per root and as `orphans` in JSON.
 
 ### `rtrash du [PATH]...`
 
@@ -462,6 +469,7 @@ The other `[du]` keys are `count`, `one_file_system`, `threads`, `git`, `exclude
 
 Permanently deletes trash entries whose original path, basename, or trash name matches a shell-style glob `PATTERN` (quote globs from the shell).
 Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
+An orphan matches by its name in `files/` or its path there.
 Does **not** restore.
 Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-f`/`--force` (mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--json` (summary + `matches` array).
 

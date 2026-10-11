@@ -17,6 +17,8 @@ use crate::util::url_decode;
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [DAYS]
 Purge trashed items. With DAYS, only items trashed more than DAYS days ago.
+An item that cannot be removed stays; each one is listed at the end, with
+the reason, and the exit status is 1.
 On a TTY without DAYS, opens the interactive empty browser (multi-select
 permanent delete). Use --plain to skip the TUI.
 
@@ -138,7 +140,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     #[cfg(feature = "tui")]
     if !opts.plain && !opts.json && opts.days.is_none() && opts.max_size.is_none() && stdin_is_tty()
     {
-        let entries = list::collect(&dirs);
+        let mut entries = list::collect(&dirs);
+        // Orphans too, so the browser can clear everything a plain empty would.
+        entries.extend(list::orphans(&dirs));
         let refs: Vec<&list::Entry> = entries.iter().collect();
         return crate::empty_tui::run(prog, refs, opts.dry_run);
     }
@@ -147,6 +151,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let removed = AtomicU64::new(0);
     let bytes = AtomicU64::new(0);
     let errors = AtomicU64::new(0);
+    let failures: Failures = Default::default();
 
     // A size budget alone removes nothing by age.
     let age_pass = !(opts.max_size.is_some() && cutoff.is_none());
@@ -160,7 +165,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 continue;
             }
         };
-        empty_one(prog, dir, cutoff, &opts, &removed, &bytes, &errors);
+        empty_one(
+            prog, dir, cutoff, &opts, &removed, &bytes, &errors, &failures,
+        );
     }
 
     if let Some(max) = opts.max_size {
@@ -221,6 +228,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
     }
+    let failures = failures.into_inner().unwrap_or_else(|p| p.into_inner());
+    eprint!("{}", failure_report(prog, &failures));
     if errors.load(Ordering::Relaxed) > 0 {
         1
     } else {
@@ -237,6 +246,34 @@ fn is_old(date: Option<&str>, cutoff: i64) -> bool {
     }
 }
 
+/// The end-of-run list of what stayed in the trash, one line per item;
+/// empty when everything went.
+fn failure_report(prog: &str, failures: &[(PathBuf, String)]) -> String {
+    if failures.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "{prog}: could not remove {}:\n",
+        crate::util::plural(failures.len() as u64, "item", "items")
+    );
+    for (path, why) in failures {
+        out.push_str(&format!("  {}: {why}\n", crate::util::err_path(path)));
+    }
+    out
+}
+
+/// Items that could not be removed: where, and why.
+type Failures = std::sync::Mutex<Vec<(PathBuf, String)>>;
+
+fn fail(failures: &Failures, errors: &AtomicU64, path: PathBuf, e: &io::Error) {
+    errors.fetch_add(1, Ordering::Relaxed);
+    failures
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push((path, e.to_string()));
+}
+
+#[allow(clippy::too_many_arguments)]
 fn empty_one(
     prog: &str,
     dir: &TrashDir,
@@ -245,6 +282,7 @@ fn empty_one(
     removed: &AtomicU64,
     bytes: &AtomicU64,
     errors: &AtomicU64,
+    failures: &Failures,
 ) {
     let info_dir = dir.info();
     let files_dir = dir.files();
@@ -255,7 +293,7 @@ fn empty_one(
         if opts.dry_run {
             full_empty_dry_run(dir, opts, removed, bytes);
         } else {
-            full_empty_wipe(prog, dir, opts, removed, errors);
+            full_empty_wipe(prog, dir, opts, removed, errors, failures);
         }
         return;
     }
@@ -346,10 +384,7 @@ fn empty_one(
                         Ok(()) => {}
                         // A concurrent empty may have won the race.
                         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                        Err(e) => {
-                            eprintln!("{prog}: cannot remove '{}': {e}", crate::util::err_path(ip));
-                            errors.fetch_add(1, Ordering::Relaxed);
-                        }
+                        Err(e) => fail(failures, errors, ip.clone(), &e),
                     }
                 }
                 if opts.verbose {
@@ -357,13 +392,7 @@ fn empty_one(
                 }
                 removed.fetch_add(1, Ordering::Relaxed);
             }
-            Err(e) => {
-                eprintln!(
-                    "{prog}: cannot remove '{}': {e}",
-                    crate::util::err_path(display)
-                );
-                errors.fetch_add(1, Ordering::Relaxed);
-            }
+            Err(e) => fail(failures, errors, display.clone(), &e),
         }
     });
 
@@ -417,6 +446,7 @@ fn full_empty_wipe(
     opts: &Opts,
     removed: &AtomicU64,
     errors: &AtomicU64,
+    failures: &Failures,
 ) {
     let info_dir = dir.info();
     let files_dir = dir.files();
@@ -430,10 +460,18 @@ fn full_empty_wipe(
         }
     }
 
-    match crate::fastdelete::wipe_two_parallel(&files_dir, &info_dir) {
-        Ok((n_files, _n_info)) => {
+    // A payload that cannot go stays, with its .trashinfo; the rest of the
+    // trash still empties, and the failures are reported at the end.
+    let (wf, wi) = crate::fastdelete::wipe_two_parallel(&files_dir, &info_dir);
+    let mut kept: Vec<String> = Vec::new();
+    match wf {
+        Ok(w) => {
             // Top-level `files/` children ≈ trashed items (incl. orphans).
-            removed.fetch_add(n_files, Ordering::Relaxed);
+            removed.fetch_add(w.removed, Ordering::Relaxed);
+            for (name, e) in w.failed {
+                kept.push(crate::util::str_from_os_ref(&name));
+                fail(failures, errors, files_dir.join(&name), &e);
+            }
         }
         Err(e) => {
             eprintln!(
@@ -444,9 +482,16 @@ fn full_empty_wipe(
             return;
         }
     }
+    match wi {
+        Ok(w) => {
+            for (name, e) in w.failed {
+                fail(failures, errors, info_dir.join(&name), &e);
+            }
+        }
+        Err(e) => fail(failures, errors, info_dir.clone(), &e),
+    }
 
-    // Full empty: nothing kept — drop directorysizes entirely.
-    prune_directorysizes(dir, &[]);
+    prune_directorysizes(dir, &kept);
 }
 
 /// Rewrite the spec's `directorysizes` cache keeping only surviving entries;
@@ -478,6 +523,25 @@ fn prune_directorysizes(dir: &TrashDir, kept: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_report_lists_each_item_with_its_reason() {
+        assert_eq!(failure_report("rtrash", &[]), "");
+        let f = vec![
+            (
+                PathBuf::from("/t/files/a"),
+                "/t/files/a/x: Permission denied".to_string(),
+            ),
+            (
+                PathBuf::from("/t/files/b"),
+                "Operation not permitted".to_string(),
+            ),
+        ];
+        assert_eq!(
+            failure_report("rtrash", &f),
+            "rtrash: could not remove 2 items:\n  /t/files/a: /t/files/a/x: Permission denied\n  /t/files/b: Operation not permitted\n"
+        );
+    }
 
     #[test]
     fn missing_date_counts_as_old() {

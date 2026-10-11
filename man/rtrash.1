@@ -258,6 +258,16 @@ Display help and exit.
 .TP
 .B \-\-version
 Output version information and exit.
+.PP
+A directory the user owns but cannot list or change (mode 0311, say)
+gets owner
+.B rwx
+back and then goes; nothing another account owns is changed.
+An item that still cannot go stays, with its
+.BR .trashinfo .
+The rest still goes, and
+.B empty
+exits 1 after listing each item left and the reason.
 .SS list
 .B rtrash list
 [\fIOPTION\fR]...
@@ -349,6 +359,17 @@ Display help and exit.
 .TP
 .B \-\-version
 Output version information and exit.
+.PP
+Orphans (payloads in
+.B files/
+with no
+.BR .trashinfo )
+come last, dated
+.B ????-??-??
+and shown by their path inside the trash, with
+.B \(dqorphan\(dq:true
+in JSON.
+An age filter leaves them out.
 .SS status
 .B rtrash status
 [\fIOPTION\fR]...
@@ -383,6 +404,12 @@ Display help and exit.
 .TP
 .B \-\-version
 Output version information and exit.
+.PP
+Orphans count as items, noted as
+.RB \(oq "(N without .trashinfo)" \(cq
+per root and as
+.B orphans
+in JSON; an age filter leaves them out.
 .PP
 On Windows, status lists each drive's Recycle Bin: items, size, and the
 cap from
@@ -1154,6 +1181,11 @@ deleted from the trash
 (\fBfiles/\fR and
 .BR .trashinfo ),
 not restored.
+An orphan (no
+.BR .trashinfo )
+matches by its name in
+.B files/
+or its path there.
 An absolute
 .I PATTERN
 also matches with symlinks resolved in its directory part (up to the
