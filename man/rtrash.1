@@ -790,6 +790,23 @@ instead of listing.
 Snapshots hold one record per line with percent-encoded paths, so grep and
 text diff tools read them too.
 .TP
+.B \-\-devices
+List every mounted file system instead of scanning: size, use, free space,
+use percent (rounded up, as
+.BR df (1)
+rounds it), type, device and mount point.
+As with
+.BR df ,
+pseudo file systems, file systems with no blocks and second mounts of one
+device (bind mounts) are left out.
+On Windows the fixed and removable drives are listed, with their labels.
+With
+.BR \-\-json ,
+one object with a \fIdevices\fR array of \fImount\fR, \fIdevice\fR, \fItype\fR,
+\fIsize\fR, \fIused\fR, \fIavailable\fR and \fIuse_percent\fR.
+Takes no
+.IR PATH .
+.TP
 .BI \-\-ncdu= FILE
 Write an ncdu export of the one
 .I PATH

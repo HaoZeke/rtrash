@@ -357,6 +357,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du --pick` | Mark rows in the put browser and trash them; rows with git work at risk show `!` |
 | `rtrash du -o base.snap ~/src` | Write a snapshot of every directory total instead of listing (`-` for stdout) |
 | `rtrash du diff base.snap` | What grew or shrank since the snapshot (scans again); `du diff OLD NEW` compares two snapshots, `--json` for scripts |
+| `rtrash du --devices` | Size, use and free space of every mounted file system, as `df` and `gdu -d` show them (`--json` for scripts) |
 | `rtrash du --ncdu=usr.json /usr` | Write an ncdu export for `ncdu -f usr.json` (or `du -f`); `-x` and the filters apply |
 | `rtrash du -f base.snap` | List the largest directories from a snapshot without scanning; an ncdu export (`ncdu -o`, `gdu -o`) works too, here and in `du diff` |
 | `rtrash du --stacks ~ \| inferno-flamegraph --countname=bytes > du.svg` | Folded stacks of each directory's own bytes for a flame graph (`flamegraph.pl`, inferno, speedscope); works with `-f FILE` |

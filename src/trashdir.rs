@@ -692,8 +692,14 @@ const PSEUDO_FS: &[&str] = &[
     "ramfs",
 ];
 
+/// Whether `fstype` is a pseudo file system: no files of its own to
+/// trash or measure.
+pub fn is_pseudo_fs(fstype: &str) -> bool {
+    PSEUDO_FS.contains(&fstype) || fstype.starts_with("cgroup")
+}
+
 /// Mount-point escapes per fstab(5): `\040` space, `\011` tab, `\012` newline, `\134` backslash.
-fn unescape_mount(s: &str) -> PathBuf {
+pub fn unescape_mount(s: &str) -> PathBuf {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -747,7 +753,7 @@ pub fn mount_points_from_table(content: &str) -> Vec<PathBuf> {
         let (Some(mp), Some(fstype)) = (fields.next(), fields.next()) else {
             continue;
         };
-        if PSEUDO_FS.contains(&fstype) || fstype.starts_with("cgroup") {
+        if is_pseudo_fs(fstype) {
             continue;
         }
         let mp = unescape_mount(mp);

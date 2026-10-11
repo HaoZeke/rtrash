@@ -103,6 +103,8 @@ directories appear as one `trash` row and are never printed by --print0.
   -o, --output=FILE     write a snapshot of every directory total (to
                           --max-depth) to FILE (- for stdout) instead of
                           listing; compare snapshots with `du diff`
+      --devices         list every mounted file system with its size, use
+                          and free space (as df does), instead of scanning
       --ncdu=FILE       write an ncdu export of PATH to FILE (- for
                           stdout) for `ncdu -f FILE` or `du -f FILE`
   -f, --file=FILE       list from a snapshot, or an ncdu export (ncdu -o,
@@ -1584,6 +1586,24 @@ fn root_file_unique(ctx: &Ctx<'_>, path: &Path, st: &du_fs::Stat, disk: u64) -> 
     }
 }
 
+/// `du --devices`: the mounted file systems, as text or JSON.
+fn devices_out(prog: &str, paths: &[PathBuf], json: bool, si: bool, other_mode: bool) -> i32 {
+    if !paths.is_empty() || other_mode {
+        eprintln!("{prog}: --devices lists every mounted file system; it takes no PATH and no other mode but --json");
+        return 2;
+    }
+    crate::util::set_si_units(si);
+    match crate::du_dev::devices() {
+        Ok(devs) if json => println!("{}", crate::du_dev::json(&devs)),
+        Ok(devs) => print!("{}", crate::du_dev::table(&devs)),
+        Err(e) => {
+            eprintln!("{prog}: cannot list devices: {e}");
+            return 1;
+        }
+    }
+    0
+}
+
 /// `du --ncdu=FILE`: write `path` as an ncdu export.
 fn ncdu_out(prog: &str, path: &Path, out: &Path, opts: &ScanOpts, now: i64) -> i32 {
     let spec = opts.filter.as_deref();
@@ -2298,6 +2318,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut no_delete = false;
     let mut output: Option<PathBuf> = None;
     let mut ncdu: Option<PathBuf> = None;
+    let mut devices = false;
     let mut from_file: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
     let mut filter = du_filter::Spec::default();
@@ -2448,6 +2469,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--gitignore" => filter.gitignore = true,
                 "--dirs" => only_dirs = true,
                 "--files" => only_files = true,
+                "--devices" => devices = true,
                 "--json" => json = true,
                 "--print0" => print0 = true,
                 "--stacks" => stacks = true,
@@ -2507,6 +2529,23 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if interactive && !interactive_available() {
         eprintln!("{prog}: --interactive needs a terminal and the tui feature");
         return 2;
+    }
+    if devices {
+        return devices_out(
+            prog,
+            &paths,
+            json,
+            si,
+            ncdu.is_some()
+                || output.is_some()
+                || from_file.is_some()
+                || stacks
+                || print0
+                || pick
+                || interactive
+                || opts.unique
+                || opts.types,
+        );
     }
     if paths.is_empty() {
         paths.push(PathBuf::from("."));

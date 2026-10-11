@@ -1292,6 +1292,30 @@ fn ncdu_exports_written_by_du_read_back_with_the_scan_totals() {
 }
 
 #[test]
+fn devices_list_mounted_file_systems_and_take_no_path() {
+    let t = Tree::new("devices");
+    let out = t.du(&["--devices"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        text.lines().next().unwrap_or_default().contains("USE%"),
+        "{text}"
+    );
+    assert!(
+        text.lines().count() >= 2,
+        "at least one file system: {text}"
+    );
+    let json = t.du(&["--devices", "--json"]);
+    assert!(String::from_utf8_lossy(&json.stdout).starts_with("{\"devices\":[{\"mount\":"));
+    assert_eq!(t.du(&["--devices", "."]).status.code(), Some(2));
+    assert_eq!(t.du(&["--devices", "--ncdu=-"]).status.code(), Some(2));
+}
+
+#[test]
 fn stacks_fold_each_directory_by_its_own_size() {
     let t = Tree::new("stacks");
     t.file("t/top", 3);

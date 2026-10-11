@@ -14,6 +14,7 @@ pub mod win_recycle;
 pub mod config;
 pub mod ds_store;
 pub mod du;
+pub mod du_dev;
 pub mod du_extent;
 pub mod du_filter;
 pub mod du_fs;
