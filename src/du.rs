@@ -103,8 +103,8 @@ directories appear as one `trash` row and are never printed by --print0.
                           and trash them (needs a terminal)
   -i, --interactive     explore PATH one directory at a time: open and leave
                           directories, trash rows (d), undo (u), rescan (r),
-                          sort (s, n, C, M) and show details (i); rows show
-                          git state and artefact kind
+                          sort (s, n, C, M), show details (i) and filter by
+                          name (/); rows show git state and artefact kind
       --no-delete       with -i, browse only: d and u do nothing
       --si              show sizes in powers of 1000 (kB, MB, GB)
       --help            display this help and exit

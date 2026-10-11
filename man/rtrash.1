@@ -798,6 +798,16 @@ opens the details of the cursor row: full path, kind, disk use and its
 share of the directory, apparent size, item count, newest change, git
 state and, on Unix, mode, owner, group and link count.
 Any key closes them.
+.B /
+filters the current directory by name as you type: a part of the name,
+or a glob when the text holds
+.BR * ", " ? " or " [ ,
+with case ignored.
+Enter keeps the filter, and Esc, or
+.B q
+in the list, clears it.
+Marking all, trashing and the title count cover only the rows shown,
+and opening or leaving the directory ends the filter.
 Rows show the artefact kind and git state; risky git state shows
 .BR ! .
 Trash directories stay closed.

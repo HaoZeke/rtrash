@@ -41,6 +41,8 @@ struct View {
     scanning: bool,
     /// The scan was stopped (q or Ctrl-C): sizes are lower bounds.
     partial: bool,
+    /// Rows the name filter hides (current view only).
+    stash: Vec<Item>,
 }
 
 /// A scan running in the background.
@@ -58,6 +60,8 @@ enum Mode {
     Help,
     /// Details of the cursor row (`i`).
     Info,
+    /// Typing a name filter (`/`).
+    Filter,
 }
 
 /// What the explorer orders rows by: a size, count or age key, or name.
@@ -196,6 +200,8 @@ struct App {
     size_key: SortKey,
     /// Lines of the info panel while it is open.
     info: Vec<String>,
+    /// Name filter on the current view (`/`); empty shows every row.
+    filter: String,
 }
 
 /// The size a row shows and its bar measures: apparent size under
@@ -273,6 +279,7 @@ fn scan_view(dir: &Path, opts: &ScanOpts, git: bool, sorting: Sorting) -> io::Re
         cursor: 0,
         scanning: false,
         partial: report.partial,
+        stash: Vec::new(),
     })
 }
 
@@ -324,6 +331,7 @@ fn quick_view(dir: &Path) -> io::Result<View> {
         cursor: 0,
         scanning: true,
         partial: false,
+        stash: Vec::new(),
     })
 }
 
@@ -400,6 +408,7 @@ impl App {
             sorting: Sorting::of(opts.sort),
             size_key,
             info: Vec::new(),
+            filter: String::new(),
             prog: prog.to_string(),
             cur: root.clone(),
             root,
@@ -495,6 +504,7 @@ impl App {
                 let missing: Vec<Item> = old
                     .rows
                     .iter()
+                    .chain(&old.stash)
                     .filter(|r| !fresh.rows.iter().any(|f| f.path == r.path))
                     .cloned()
                     .collect();
@@ -508,6 +518,9 @@ impl App {
             self.apply_fresh(&dir, fresh);
         } else {
             self.cache.insert(dir.clone(), fresh);
+        }
+        if on_screen && !self.filter.is_empty() {
+            self.refilter();
         }
         if on_screen {
             self.sel.clear();
@@ -594,6 +607,11 @@ impl App {
 
     /// Switch to `dir`, scanning it when it has no cached view.
     fn go(&mut self, dir: PathBuf, cursor_on: Option<&Path>) {
+        // The filter belongs to the view it was typed in.
+        if !self.filter.is_empty() {
+            self.filter.clear();
+            self.refilter();
+        }
         let cursor = self.list_state.selected().unwrap_or(0);
         if let Some(v) = self.cache.get_mut(&self.cur) {
             v.cursor = cursor;
@@ -685,6 +703,9 @@ impl App {
             }
         };
         self.apply_fresh(&cur, fresh);
+        if !self.filter.is_empty() {
+            self.refilter();
+        }
         self.sel.clear();
         let at = self.list_state.selected().unwrap_or(0);
         self.select(at);
@@ -843,6 +864,9 @@ impl App {
             }
             adjust_chain(&mut self.cache, &self.root, &parent, d, a, true);
         }
+        if !self.filter.is_empty() {
+            self.refilter();
+        }
         let at = self.list_state.selected().unwrap_or(0);
         self.select(at);
         self.status = match failed {
@@ -892,6 +916,90 @@ impl App {
         self.status = format!("sorted by {}", self.sorting.label());
     }
 
+    /// Show only the rows of the current view whose name matches the
+    /// filter; the rest wait in the view's stash. The cursor and marks
+    /// stay on their rows when those stay visible.
+    fn refilter(&mut self) {
+        let keep = self.selected().map(|r| r.path.clone());
+        let marked: Vec<PathBuf> = self
+            .sel
+            .marked_sorted()
+            .into_iter()
+            .filter_map(|i| self.rows().get(i).map(|r| r.path.clone()))
+            .collect();
+        let pat = self.filter.to_lowercase();
+        let sorting = self.sorting;
+        let Some(v) = self.cache.get_mut(&self.cur) else {
+            return;
+        };
+        let mut all = std::mem::take(&mut v.rows);
+        all.append(&mut v.stash);
+        let (shown, hidden): (Vec<Item>, Vec<Item>) =
+            all.into_iter().partition(|it| name_matches(it, &pat));
+        v.rows = shown;
+        v.stash = hidden;
+        sort_rows(&mut v.rows, sorting);
+        let pos = |a: &App, p: &Path| a.rows().iter().position(|r| r.path == p);
+        self.sel.clear();
+        for p in &marked {
+            if let Some(i) = pos(self, p) {
+                self.sel.mark(i);
+            }
+        }
+        let at = keep.and_then(|p| pos(self, &p)).unwrap_or(0);
+        *self.list_state.offset_mut() = 0;
+        self.select(at);
+    }
+
+    fn filter_status(&self) -> String {
+        format!(
+            "/{} · {} shown · Enter keeps · Esc clears",
+            self.filter,
+            self.rows().len()
+        )
+    }
+
+    fn on_key_filter(&mut self, code: KeyCode, mods: KeyModifiers) {
+        match self.keys.resolve_filter(code, mods) {
+            Some(Action::FilterCommit) => {
+                self.mode = Mode::Browse;
+                self.status = if self.filter.is_empty() {
+                    "filter cleared".into()
+                } else {
+                    format!(
+                        "{} matching {:?} · Esc clears",
+                        self.rows().len(),
+                        self.filter
+                    )
+                };
+            }
+            Some(Action::FilterCancel) => {
+                self.filter.clear();
+                self.refilter();
+                self.mode = Mode::Browse;
+                self.status = "filter cleared".into();
+            }
+            Some(Action::MoveDown) => self.move_sel(1),
+            Some(Action::MoveUp) => self.move_sel(-1),
+            Some(Action::QuitHard) => self.quit = true,
+            _ => {
+                if code == KeyCode::Backspace {
+                    self.filter.pop();
+                } else if let KeyCode::Char(c) = code {
+                    if c.is_control() || mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    {
+                        return;
+                    }
+                    self.filter.push(c);
+                } else {
+                    return;
+                }
+                self.refilter();
+                self.status = self.filter_status();
+            }
+        }
+    }
+
     /// Open the info panel on the cursor row.
     fn show_info(&mut self) {
         let Some(it) = self.selected() else {
@@ -906,6 +1014,7 @@ impl App {
 
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         match self.mode {
+            Mode::Filter => self.on_key_filter(code, mods),
             Mode::Info => {
                 if self.keys.resolve_help(code, mods) == Some(Action::QuitHard) {
                     self.quit = true;
@@ -950,10 +1059,20 @@ impl App {
                     }
                 }
                 match self.keys.resolve_browse(code, mods) {
-                    Some(Action::Quit | Action::QuitHard) => {
-                        if !self.stop_scan() {
+                    Some(Action::QuitHard) => self.quit = true,
+                    // A running scan stops first, then the filter clears.
+                    Some(Action::Quit) if !self.stop_scan() => {
+                        if self.filter.is_empty() {
                             self.quit = true;
+                        } else {
+                            self.filter.clear();
+                            self.refilter();
+                            self.status = "filter cleared · press again to quit".into();
                         }
+                    }
+                    Some(Action::OpenFilter) => {
+                        self.mode = Mode::Filter;
+                        self.status = self.filter_status();
                     }
                     Some(Action::MoveDown) => self.move_sel(1),
                     Some(Action::MoveUp) => self.move_sel(-1),
@@ -981,6 +1100,25 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// Whether the file name of `it` matches `pat` (lowercase): a glob when
+/// it holds `*`, `?` or `[`, else a part of the name. Case is ignored.
+fn name_matches(it: &Item, pat: &str) -> bool {
+    if pat.is_empty() {
+        return true;
+    }
+    let name = it
+        .path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    if pat.contains(['*', '?', '[']) {
+        crate::util::fnmatch(pat, &name)
+    } else {
+        name.contains(pat)
     }
 }
 
@@ -1212,11 +1350,16 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     };
     // Sizes, counts and markers always fit; a long path gives way from
     // the left, as in ncdu.
-    let tail = format!(
-        " · {size} · {} entries · {} marked ",
-        view.rows.len(),
-        app.sel.len()
-    );
+    let entries = if app.filter.is_empty() {
+        format!("{} entries", view.rows.len())
+    } else {
+        format!(
+            "{} of {} entries",
+            view.rows.len(),
+            view.rows.len() + view.stash.len()
+        )
+    };
+    let tail = format!(" · {size} · {entries} · {} marked ", app.sel.len());
     let room = (chunks[0].width as usize)
         .saturating_sub(2)
         .saturating_sub(tail.chars().count() + 1);
@@ -1234,9 +1377,14 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             Style::default().add_modifier(Modifier::BOLD),
         ))
         .block(Block::default().borders(Borders::ALL).title(format!(
-            "rtrash du{} · by {}",
+            "rtrash du{} · by {}{}",
             if app.read_only { " (read-only)" } else { "" },
-            app.sorting.label()
+            app.sorting.label(),
+            if app.filter.is_empty() {
+                String::new()
+            } else {
+                format!(" · matching {:?}", app.filter)
+            }
         ))),
         chunks[0],
     );
@@ -1253,6 +1401,11 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             "{} confirm  {} cancel",
             app.keys.display_chords(Action::ConfirmYes),
             app.keys.display_chords(Action::ConfirmNo)
+        ),
+        Mode::Filter => format!(
+            "type a name part or a glob (* ? [)  {} keep  {} clear",
+            app.keys.display_chords(Action::FilterCommit),
+            app.keys.display_chords(Action::FilterCancel)
         ),
         _ => format!(
             "{}/{} move  {}/→ open  ←/h up  {}r rescan  {} mark  {} help  {} quit",
@@ -1315,6 +1468,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 },
                 "s n C M — sort by size, name, items or newest change; again reverses",
                 "i — details of the cursor row (any key closes them)",
+                "/ — show only rows whose name matches (a part, or a glob with * ? [); Esc clears",
                 "! — git work at risk (dirty, unpushed or unknown)",
             ],
         );
@@ -1841,6 +1995,110 @@ mod tests {
         assert_eq!(mode_string(0o041777), "drwxrwxrwt");
         assert_eq!(mode_string(0o102644), "-rw-r-Sr--");
         assert_eq!(mode_string(0o120777), "lrwxrwxrwx");
+    }
+
+    fn typ(a: &mut App, text: &str) {
+        for c in text.chars() {
+            let mods = if c.is_uppercase() {
+                KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::NONE
+            };
+            a.on_key(KeyCode::Char(c), mods);
+        }
+    }
+
+    #[test]
+    fn filter_shows_matching_rows_and_clears_on_leave() {
+        let t = tree("filter");
+        let mut a = app(&t);
+        a.keys = Keymap::builtin();
+        a.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Filter);
+        // Case is ignored.
+        typ(&mut a, "Fi");
+        assert_eq!(names(&a), ["file"]);
+        assert!(a.status.contains("1 shown"), "{}", a.status);
+        a.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Browse);
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("matching \"Fi\""), "{text}");
+        assert!(text.contains("1 of 3 entries"), "{text}");
+        // Marking all marks only what the filter shows.
+        a.on_key(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(a.targets().len(), 1);
+        // q clears the filter before it quits.
+        a.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(!a.quit);
+        assert_eq!(names(&a), ["big", "file", "small"]);
+        a.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn filter_takes_globs_and_letters_bound_to_moves() {
+        let t = tree("filterglob");
+        let mut a = app(&t);
+        a.keys = Keymap::builtin();
+        a.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        typ(&mut a, "*a*");
+        assert_eq!(names(&a), ["small"]);
+        a.on_key(KeyCode::Backspace, KeyModifiers::NONE);
+        a.on_key(KeyCode::Backspace, KeyModifiers::NONE);
+        a.on_key(KeyCode::Backspace, KeyModifiers::NONE);
+        typ(&mut a, "jk");
+        assert_eq!(a.filter, "jk");
+        assert!(a.rows().is_empty());
+        a.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Browse);
+        assert!(a.filter.is_empty());
+        assert_eq!(names(&a), ["big", "file", "small"]);
+    }
+
+    #[test]
+    fn filter_stays_through_rescans_and_ends_on_open() {
+        let t = tree("filterscan");
+        let mut a = app(&t);
+        a.keys = Keymap::builtin();
+        a.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        typ(&mut a, "i");
+        a.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(names(&a), ["big", "file"]);
+        fs::write(t.0.join("w/fig"), vec![2u8; 50_000]).unwrap();
+        fs::write(t.0.join("w/other"), vec![2u8; 50_000]).unwrap();
+        a.refresh();
+        assert_eq!(names(&a), ["big", "fig", "file"]);
+        // Hidden rows wait in the stash with their fresh sizes.
+        let hidden: Vec<_> = a.view().stash.iter().map(|r| r.disk).collect();
+        assert_eq!(hidden.len(), 2);
+        assert!(hidden.iter().any(|&d| d >= 50_000), "{hidden:?}");
+        a.select(0);
+        a.open();
+        assert!(a.filter.is_empty());
+        a.back();
+        assert_eq!(names(&a), ["big", "fig", "other", "file", "small"]);
+    }
+
+    // Deletes go to the real Recycle Bin on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn delete_while_filtered_trashes_only_shown_rows() {
+        let t = tree("filterdel");
+        let mut a = app(&t);
+        a.keys = Keymap::builtin();
+        a.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        typ(&mut a, "sma");
+        a.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('a'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(!t.0.join("w/small").exists());
+        assert!(t.0.join("w/big").exists() && t.0.join("w/file").exists());
+        // Undo brings it back into the filtered view.
+        a.on_key(KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(names(&a), ["small"]);
+        a.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(names(&a), ["big", "file", "small"]);
     }
 
     #[test]
