@@ -1007,6 +1007,18 @@ mod tests {
         p
     }
 
+    /// Levels in the deep-tree tests. On macOS each step down a chain
+    /// costs more the deeper it lies: in CI, 4099 levels take over a
+    /// minute there and 20000 levels ran past 25 minutes. 1000 levels
+    /// still pass its 1024-byte `PATH_MAX` and the fd budget. Linux
+    /// keeps the depth that overflowed the stack.
+    const DEEP: usize = if cfg!(target_os = "macos") {
+        1000
+    } else {
+        20_000
+    };
+    const _: () = assert!(DEEP * 2 > libc::PATH_MAX as usize && DEEP > FD_BUDGET * 4);
+
     /// A chain of `levels` directories named `d` under `root`, with a
     /// file at every level in `files` and the level `locked` left at
     /// mode 0500 once the chain is built. Built with `mkdirat`, since its paths pass `PATH_MAX`.
@@ -1043,12 +1055,13 @@ mod tests {
 
     #[test]
     fn deep_trees_go_without_recursion_or_an_fd_per_level() {
-        // 20000 levels: paths pass PATH_MAX, and a frame per level would
-        // overflow a 2 MiB rayon stack and need 20000 fds.
+        // Paths pass PATH_MAX. On Linux, 20000 levels with a frame per
+        // level would overflow a 2 MiB rayon stack and need 20000 fds.
         let root = tmp_root("deep");
         let one = root.join("one");
         fs::create_dir(&one).unwrap();
-        deep_chain(&one, 20_000, &[0, 99, 15_000, 19_999], 15_000);
+        let locked = DEEP * 3 / 4;
+        deep_chain(&one, DEEP, &[0, 99, locked, DEEP - 1], locked);
         remove_path(&one).unwrap();
         assert!(!one.exists());
         // The parallel wipe runs the same walk on rayon worker threads.
@@ -1056,7 +1069,7 @@ mod tests {
         fs::create_dir(&files).unwrap();
         for n in ["a", "b"] {
             fs::create_dir(files.join(n)).unwrap();
-            deep_chain(&files.join(n), 20_000, &[19_999], usize::MAX);
+            deep_chain(&files.join(n), DEEP, &[DEEP - 1], usize::MAX);
         }
         let w = wipe_children_parallel(&files).unwrap();
         assert!(w.failed.is_empty(), "{:?}", w.failed);
@@ -1067,12 +1080,12 @@ mod tests {
 
     #[test]
     fn disk_usage_counts_trees_past_path_max() {
-        // 20000 levels, files near the top and at the bottom: paths pass
-        // PATH_MAX, where opening by path used to fail and count nothing.
+        // Files near the top and at the bottom: paths pass PATH_MAX,
+        // where opening by path used to fail and count nothing.
         let root = tmp_root("deep-usage");
         let tree = root.join("t");
         fs::create_dir(&tree).unwrap();
-        let levels = 20_000;
+        let levels = DEEP;
         deep_chain(&tree, levels, &[5, levels - 1], usize::MAX);
         // The expected sum, from one more walk down the chain.
         let c = CString::new(tree.as_os_str().as_bytes()).unwrap();
