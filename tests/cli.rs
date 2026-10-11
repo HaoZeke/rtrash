@@ -205,13 +205,13 @@ fn info_files_that_name_no_payload_are_never_items() {
     for n in 1..=3 {
         let evil = format!("evil{n}");
         // No match: rm, like trash-rm, still exits 0.
-        let out = sb.run(&["rm", &evil]);
+        let out = sb.run(&["rm", "--home-only", &evil]);
         assert!(!stdout_of(&out).contains("removed"), "{}", stdout_of(&out));
-        assert!(!sb.run(&["restore", &evil]).status.success());
+        assert!(!sb.run(&["restore", "--home-only", &evil]).status.success());
         assert!(sb.trash().join("files/keep").exists(), "{evil}");
     }
     // An age cut that the hostile records pass removes nothing through them.
-    assert!(sb.run(&["empty", "1"]).status.success());
+    assert!(sb.run(&["empty", "--home-only", "1"]).status.success());
     assert!(sb.trash().join("files/keep").exists());
     assert!(sb.trash().join("info/keep.trashinfo").exists());
     assert!(!sb.work().join("evil3").exists());
@@ -1089,6 +1089,15 @@ fn empty_without_pin_clears_home_trash() {
     sb.touch("home-only.txt");
     assert!(sb.run(&["put", "home-only.txt"]).status.success());
     assert!(sb.trash().join("files/home-only.txt").exists());
+    // A bare empty also empties every volume trash of the host. Run it
+    // only when no item outside this sandbox is listed, so nothing of
+    // the host's can go.
+    let listed = stdout_of(&sb.run(&["list"]));
+    let root = sb.root.display().to_string();
+    if let Some(foreign) = listed.lines().find(|l| !l.contains(&root)) {
+        eprintln!("skipping: a bare empty would remove the host's '{foreign}'");
+        return;
+    }
     // Bare empty (no pin) must clear this sandbox home trash via XDG_DATA_HOME.
     let out = sb.run(&["empty"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -1192,13 +1201,15 @@ fn restore_interactive_picks_by_index_from_full_trash() {
     assert!(!a.exists() && !b.exists());
 
     // Bare `restore` lists every trashed item; pick index 0 via piped stdin.
-    let list = sb.run(&["list"]);
+    // --home-only: the host's volume trashes would add rows, and index 0
+    // could restore one of their items.
+    let list = sb.run(&["list", "--home-only"]);
     assert!(list.status.success(), "{}", stderr_of(&list));
     let list_out = stdout_of(&list);
     let n_lines = list_out.lines().filter(|l| !l.trim().is_empty()).count();
     assert_eq!(n_lines, 2, "list: {list_out}");
 
-    let out = sb.run_with_stdin(&["restore"], "0\n");
+    let out = sb.run_with_stdin(&["restore", "--home-only"], "0\n");
     assert!(
         out.status.success(),
         "stdout={} stderr={}",
@@ -1574,7 +1585,8 @@ fn trash_rm_removes_match_keeps_other() {
         .success());
     assert_eq!(trash_names(&sb).len(), 3);
 
-    let out = sb.run(&["rm", "*.o"]);
+    // --home-only: a bare rm would also delete the host's trashed *.o.
+    let out = sb.run(&["rm", "--home-only", "*.o"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let mut names = trash_names(&sb);
     names.sort();
@@ -1590,7 +1602,7 @@ fn trash_rm_literal_basename() {
     sb.touch("foo");
     sb.touch("foobar");
     assert!(sb.run(&["put", "foo", "foobar"]).status.success());
-    let out = sb.run(&["rm", "foo"]);
+    let out = sb.run(&["rm", "--home-only", "foo"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let mut names = trash_names(&sb);
     names.sort();
@@ -2608,10 +2620,10 @@ fn names_that_are_not_utf8_put_list_rm_restore_and_empty() {
     assert_eq!(fs::read(sb.work().join(a)).unwrap(), b"a");
 
     // A days filter leaves recent items; a full empty takes the pair.
-    let keep = sb.run(&["empty", "-f", "30"]);
+    let keep = sb.run(&["empty", "--home-only", "-f", "30"]);
     assert!(keep.status.success(), "{}", stderr_of(&keep));
     assert!(sb.trash().join("files").join(d).exists());
-    let all = sb.run(&["empty", "-f"]);
+    let all = sb.run(&["empty", "--home-only", "-f"]);
     assert!(all.status.success(), "{}", stderr_of(&all));
     assert_eq!(fs::read_dir(sb.trash().join("files")).unwrap().count(), 0);
     assert_eq!(fs::read_dir(sb.trash().join("info")).unwrap().count(), 0);
@@ -2644,7 +2656,7 @@ fn trashinfo_with_raw_bytes_lists_restores_and_ages_out() {
     // Same file again, now aged out by `empty DAYS`.
     fs::write(info.join("raw.trashinfo"), &body).unwrap();
     fs::write(files.join("raw"), "r").unwrap();
-    let empty = sb.run(&["empty", "-f", "1"]);
+    let empty = sb.run(&["empty", "--home-only", "-f", "1"]);
     assert!(empty.status.success(), "{}", stderr_of(&empty));
     assert!(!files.join("raw").exists());
     assert!(!info.join("raw.trashinfo").exists());
@@ -2673,7 +2685,7 @@ fn missing_payload_lists_refuses_restore_and_empties() {
     assert!(!sb.work().join("ghost").exists());
     let status = sb.run(&["status"]);
     assert!(status.status.success(), "{}", stderr_of(&status));
-    let empty = sb.run(&["empty", "-f", "1"]);
+    let empty = sb.run(&["empty", "--home-only", "-f", "1"]);
     assert!(empty.status.success(), "{}", stderr_of(&empty));
     assert!(!info.join("ghost.trashinfo").exists());
 }
