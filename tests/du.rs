@@ -1206,7 +1206,9 @@ fn unique_adds_a_column_and_a_shared_summary() {
     }
 }
 
-#[cfg(unix)]
+// The Apple File System refuses names that are not UTF-8 (EILSEQ), so
+// this runs on Linux only, like the CLI tests for such names.
+#[cfg(target_os = "linux")]
 #[test]
 fn exclude_matches_names_that_are_not_utf8() {
     use std::ffi::OsStr;
