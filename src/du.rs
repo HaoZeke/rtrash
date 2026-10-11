@@ -121,7 +121,8 @@ directories appear as one `trash` row and are never printed by --print0.
                           speedscope) instead of listing; works with -f
       --pick            open the put browser on the listed rows: mark rows
                           and trash them (needs a terminal)
-  -i, --interactive     explore PATH one directory at a time: open and leave
+  -i, --interactive     explore PATH one directory at a time (several PATHs
+                          get a view of their own above them): open and leave
                           directories, trash rows (d), undo (u), rescan (r),
                           sort (s, n, C, M), switch disk use and apparent
                           size (S), show details (i), filter by name (/),
@@ -2690,10 +2691,6 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     read_only |= no_delete;
     #[cfg(not(feature = "tui"))]
     let _ = read_only;
-    if interactive && paths.len() > 1 {
-        eprintln!("{prog}: --interactive takes one PATH");
-        return 2;
-    }
     if output.is_some() && (from_file.is_some() || json || print0 || pick || interactive) {
         eprintln!("{prog}: --output writes a snapshot; it takes no other output mode");
         return 2;
@@ -2836,7 +2833,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     #[cfg(feature = "tui")]
     if interactive {
-        return crate::du_tui::run(prog, &paths[0], opts, use_git, read_only);
+        return crate::du_tui::run(prog, &paths, opts, use_git, read_only);
     }
     opts.control = Some(stop);
     // Git probes run beside the walk. Under --no-git, or without git on

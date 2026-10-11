@@ -973,6 +973,19 @@ background, files with their sizes and directories with
 until their totals come in, and the title counts files and bytes so far.
 Moving, opening another directory and going up all work meanwhile;
 trashing waits until the view has its sizes.
+Given several directories
+.RB ( "du \-i a b" ,
+as
+.B "dua i a b"
+does), the explorer opens on a view of its own with one row per
+directory, named by its path, and going up from one of them returns to
+it; the views of the directories come with that first scan.
+A directory given twice counts once, and one inside another is refused,
+since it would count twice.
+.B d
+works on these rows too, and
+.B b
+needs one of the directories open.
 .B q
 or Ctrl-C while the current directory scans stops that scan and keeps
 what it counted: the title shows

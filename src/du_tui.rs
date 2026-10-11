@@ -7,6 +7,10 @@
 //! listing of its entries (files with their sizes, directories pending),
 //! and the full view replaces it when the scan finishes. You can move,
 //! open other directories and go back meanwhile.
+//!
+//! Given several directories (`du -i a b`, as `dua i a b`), the explorer
+//! opens on a view of its own above them, one row per directory, kept in
+//! the cache under the empty path, which names no directory.
 
 use std::collections::HashMap;
 use std::io;
@@ -48,7 +52,7 @@ struct View {
 /// A scan running in the background.
 struct Job {
     control: Arc<ScanControl>,
-    rx: mpsc::Receiver<io::Result<View>>,
+    rx: mpsc::Receiver<io::Result<Scanned>>,
     /// A rescan (`r`) of a view whose sizes the parents already hold.
     refresh: bool,
 }
@@ -174,7 +178,10 @@ mod bin {
 
 struct App {
     prog: String,
+    /// The top view: the one root, or the empty path above several.
     root: PathBuf,
+    /// The directories given, each a row of the top view when several.
+    roots: Vec<PathBuf>,
     cur: PathBuf,
     opts: ScanOpts,
     git: bool,
@@ -355,11 +362,166 @@ fn quick_view(dir: &Path) -> io::Result<View> {
     })
 }
 
-/// Add (`grow`) or remove sizes along the chain from `dir` up to `root`:
-/// each view's totals, and the row that leads to `dir` in its parent.
+/// Whether `dir` is the view above several roots.
+fn is_top_of_roots(dir: &Path) -> bool {
+    dir.as_os_str().is_empty()
+}
+
+/// A finished scan: the view, and the views of the roots below it when
+/// it is the view of several roots (each scanned on the way).
+type Scanned = (View, Vec<(PathBuf, View)>);
+
+/// The view of several roots: one row per root, from a one-level scan of
+/// each, whose views come back too so that opening a root costs nothing.
+/// A file linked from two roots counts in both.
+fn scan_roots(
+    roots: &[PathBuf],
+    opts: &ScanOpts,
+    git: bool,
+    sorting: Sorting,
+) -> io::Result<Scanned> {
+    let mut rows = Vec::new();
+    let mut below = Vec::new();
+    let mut partial = false;
+    for root in roots {
+        let view = scan_view(root, opts, git, sorting)?;
+        let mut repos: Vec<PathBuf> = Vec::new();
+        for r in view.rows.iter().flat_map(|r| &r.repos) {
+            if !repos.contains(r) {
+                repos.push(r.clone());
+            }
+        }
+        let mtime = std::fs::metadata(root)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as i64);
+        rows.push(Item {
+            path: root.clone(),
+            is_dir: true,
+            apparent: view.apparent,
+            disk: view.disk,
+            mtime: view.rows.iter().map(|r| r.mtime).fold(mtime, i64::max),
+            items: view
+                .rows
+                .iter()
+                .map(|r| if r.is_dir { r.items + 1 } else { 1 })
+                .sum(),
+            artefact: root
+                .file_name()
+                .and_then(|n| du::artefact_kind(&n.to_string_lossy(), |c| root.join(c).exists())),
+            repos,
+            git: None,
+            unique: None,
+        });
+        partial |= view.partial;
+        below.push((root.clone(), view));
+        if opts.control.as_ref().is_some_and(|c| c.stopped()) {
+            partial = true;
+            break;
+        }
+    }
+    if git {
+        let queries: Vec<crate::du_git::RowQuery<'_>> = rows
+            .iter()
+            .map(|it| crate::du_git::RowQuery {
+                path: &it.path,
+                is_dir: true,
+                repos: &it.repos,
+            })
+            .collect();
+        if let Some(states) = crate::du_git::classify_all_with(&queries, None) {
+            for (it, s) in rows.iter_mut().zip(states) {
+                it.git = s;
+            }
+        }
+    }
+    let disk = rows.iter().map(|r| r.disk).sum();
+    let apparent = rows.iter().map(|r| r.apparent).sum();
+    sort_rows(&mut rows, sorting);
+    let view = View {
+        rows,
+        disk,
+        apparent,
+        cursor: 0,
+        scanning: false,
+        partial,
+        stash: Vec::new(),
+    };
+    Ok((view, below))
+}
+
+/// The view of several roots before their scan ends: every root, its
+/// size to come.
+fn quick_roots(roots: &[PathBuf]) -> View {
+    let rows = roots
+        .iter()
+        .map(|r| Item {
+            path: r.clone(),
+            is_dir: true,
+            apparent: 0,
+            disk: 0,
+            mtime: 0,
+            items: 0,
+            artefact: None,
+            repos: Vec::new(),
+            git: None,
+            unique: None,
+        })
+        .collect();
+    View {
+        rows,
+        disk: 0,
+        apparent: 0,
+        cursor: 0,
+        scanning: true,
+        partial: false,
+        stash: Vec::new(),
+    }
+}
+
+/// [`scan_view`] of `dir`, or [`scan_roots`] for the view above them.
+fn scan_any(
+    dir: &Path,
+    roots: &[PathBuf],
+    opts: &ScanOpts,
+    git: bool,
+    sorting: Sorting,
+) -> io::Result<Scanned> {
+    if is_top_of_roots(dir) {
+        scan_roots(roots, opts, git, sorting)
+    } else {
+        scan_view(dir, opts, git, sorting).map(|v| (v, Vec::new()))
+    }
+}
+
+/// [`quick_view`] of `dir`, or [`quick_roots`] for the view above them.
+fn quick_any(dir: &Path, roots: &[PathBuf]) -> io::Result<View> {
+    if is_top_of_roots(dir) {
+        Ok(quick_roots(roots))
+    } else {
+        quick_view(dir)
+    }
+}
+
+/// The view above `dir`: the parent directory, the view of the roots
+/// for one of several roots, and none at the top.
+fn up(roots: &[PathBuf], dir: &Path) -> Option<PathBuf> {
+    if is_top_of_roots(dir) {
+        return None;
+    }
+    if roots.iter().any(|r| r == dir) {
+        return (roots.len() > 1).then(PathBuf::new);
+    }
+    dir.parent().map(Path::to_path_buf)
+}
+
+/// Add (`grow`) or remove sizes along the chain from `dir` up to the
+/// top: each view's totals, and the row that leads to `dir` in the view
+/// above it.
 fn adjust_chain(
     cache: &mut HashMap<PathBuf, View>,
-    root: &Path,
+    roots: &[PathBuf],
     dir: &Path,
     disk: u64,
     apparent: u64,
@@ -378,10 +540,7 @@ fn adjust_chain(
             apply(&mut v.disk, disk);
             apply(&mut v.apparent, apparent);
         }
-        if d == root {
-            break;
-        }
-        let Some(parent) = d.parent().map(Path::to_path_buf) else {
+        let Some(parent) = up(roots, &d) else {
             break;
         };
         if let Some(v) = cache.get_mut(&parent) {
@@ -398,20 +557,39 @@ impl App {
     /// An explorer whose first view is scanned before it returns.
     #[cfg(test)]
     fn new(prog: &str, root: PathBuf, opts: ScanOpts, git: bool) -> io::Result<Self> {
-        let view = scan_view(&root, &opts, git, Sorting::of(opts.sort))?;
-        Ok(Self::with_view(prog, root, opts, git, view))
+        Self::new_in(prog, vec![root], opts, git)
     }
 
-    /// An explorer that opens on a quick listing and scans in the background.
-    fn start(prog: &str, root: PathBuf, opts: ScanOpts, git: bool) -> io::Result<Self> {
-        let view = quick_view(&root)?;
-        let mut app = Self::with_view(prog, root.clone(), opts, git, view);
-        app.background = true;
-        app.spawn(root, false);
+    /// [`App::new`] on one or several roots.
+    #[cfg(test)]
+    fn new_in(prog: &str, roots: Vec<PathBuf>, opts: ScanOpts, git: bool) -> io::Result<Self> {
+        let top = Self::top_of(&roots);
+        let (view, below) = scan_any(&top, &roots, &opts, git, Sorting::of(opts.sort))?;
+        let mut app = Self::with_view(prog, roots, opts, git, view);
+        app.take_below(below);
         Ok(app)
     }
 
-    fn with_view(prog: &str, root: PathBuf, opts: ScanOpts, git: bool, view: View) -> Self {
+    /// An explorer that opens on a quick listing and scans in the background.
+    fn start(prog: &str, roots: Vec<PathBuf>, opts: ScanOpts, git: bool) -> io::Result<Self> {
+        let top = Self::top_of(&roots);
+        let view = quick_any(&top, &roots)?;
+        let mut app = Self::with_view(prog, roots, opts, git, view);
+        app.background = true;
+        app.spawn(top, false);
+        Ok(app)
+    }
+
+    /// The key of the top view of `roots`.
+    fn top_of(roots: &[PathBuf]) -> PathBuf {
+        match roots {
+            [one] => one.clone(),
+            _ => PathBuf::new(),
+        }
+    }
+
+    fn with_view(prog: &str, roots: Vec<PathBuf>, opts: ScanOpts, git: bool, view: View) -> Self {
+        let root = Self::top_of(&roots);
         let mut cache = HashMap::new();
         let n = view.rows.len();
         cache.insert(root.clone(), view);
@@ -437,6 +615,7 @@ impl App {
             prog: prog.to_string(),
             cur: root.clone(),
             root,
+            roots,
             opts,
             git,
             trash_pin: None,
@@ -467,8 +646,9 @@ impl App {
         };
         let (tx, rx) = mpsc::channel();
         let (d, git, sorting) = (dir.clone(), self.git, self.sorting);
+        let roots = self.roots.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(scan_view(&d, &opts, git, sorting));
+            let _ = tx.send(scan_any(&d, &roots, &opts, git, sorting));
         });
         self.jobs.insert(
             dir,
@@ -482,7 +662,7 @@ impl App {
 
     /// Take in every finished scan. Returns whether any finished.
     fn poll_jobs(&mut self) -> bool {
-        let done: Vec<(PathBuf, io::Result<View>)> = self
+        let done: Vec<(PathBuf, io::Result<Scanned>)> = self
             .jobs
             .iter()
             .filter_map(|(dir, job)| match job.rx.try_recv() {
@@ -497,7 +677,10 @@ impl App {
         for (dir, result) in done {
             let refresh = self.jobs.remove(&dir).is_some_and(|j| j.refresh);
             match result {
-                Ok(v) => self.take_view(dir, v, refresh),
+                Ok((v, below)) => {
+                    self.take_view(dir, v, refresh);
+                    self.take_below(below);
+                }
                 Err(e) => {
                     if let Some(v) = self.cache.get_mut(&dir) {
                         v.scanning = false;
@@ -513,7 +696,7 @@ impl App {
     /// same row when `dir` is on screen.
     fn take_view(&mut self, dir: PathBuf, mut fresh: View, refresh: bool) {
         // Trashed while it scanned: there is nothing left to show.
-        if dir != self.cur && !dir.exists() {
+        if dir != self.cur && dir != self.root && !dir.exists() {
             self.cache.remove(&dir);
             return;
         }
@@ -558,6 +741,27 @@ impl App {
             } else {
                 format!("scanned · {} entries", self.rows().len())
             };
+        }
+    }
+
+    /// Cache the views of roots scanned for the view above them, except
+    /// where a view of that root already has sizes or a scan of its own.
+    fn take_below(&mut self, below: Vec<(PathBuf, View)>) {
+        for (dir, mut v) in below {
+            let has_sizes = self.cache.get(&dir).is_some_and(|c| !c.scanning);
+            if has_sizes || self.jobs.contains_key(&dir) {
+                continue;
+            }
+            sort_rows(&mut v.rows, self.sorting);
+            let on_screen = dir == self.cur;
+            self.cache.insert(dir, v);
+            if on_screen {
+                if self.narrowed() {
+                    self.refilter();
+                }
+                let at = self.list_state.selected().unwrap_or(0);
+                self.select(at);
+            }
         }
     }
 
@@ -642,7 +846,7 @@ impl App {
             v.cursor = cursor;
         }
         if !self.cache.contains_key(&dir) && self.background {
-            match quick_view(&dir) {
+            match quick_any(&dir, &self.roots) {
                 Ok(v) => {
                     self.cache.insert(dir.clone(), v);
                     self.spawn(dir.clone(), false);
@@ -654,9 +858,10 @@ impl App {
             }
         }
         if !self.cache.contains_key(&dir) {
-            match scan_view(&dir, &self.opts, self.git, self.sorting) {
-                Ok(v) => {
+            match scan_any(&dir, &self.roots, &self.opts, self.git, self.sorting) {
+                Ok((v, below)) => {
                     self.cache.insert(dir.clone(), v);
+                    self.take_below(below);
                 }
                 Err(e) => {
                     self.status = format!("cannot scan '{}': {e}", dir.display());
@@ -695,13 +900,10 @@ impl App {
     }
 
     fn back(&mut self) {
-        if self.cur == self.root {
-            self.status = "already at the top".into();
-            return;
-        }
         let child = self.cur.clone();
-        if let Some(parent) = child.parent() {
-            self.go(parent.to_path_buf(), Some(&child));
+        match up(&self.roots, &child) {
+            Some(parent) => self.go(parent, Some(&child)),
+            None => self.status = "already at the top".into(),
         }
     }
 
@@ -724,14 +926,15 @@ impl App {
             self.status = "rescanning…".into();
             return;
         }
-        let fresh = match scan_view(&cur, &self.opts, self.git, self.sorting) {
-            Ok(v) => v,
+        let (fresh, below) = match scan_any(&cur, &self.roots, &self.opts, self.git, self.sorting) {
+            Ok(r) => r,
             Err(e) => {
                 self.status = format!("cannot scan '{}': {e}", cur.display());
                 return;
             }
         };
         self.apply_fresh(&cur, fresh);
+        self.take_below(below);
         if self.narrowed() {
             self.refilter();
         }
@@ -751,34 +954,34 @@ impl App {
             .cache
             .insert(cur.clone(), fresh.clone())
             .expect("current view");
-        if cur != self.root {
-            if let Some(parent) = cur.parent() {
-                let (grow, d, a) = if fresh.disk >= old.disk {
-                    (
-                        true,
-                        fresh.disk - old.disk,
-                        fresh.apparent.saturating_sub(old.apparent),
-                    )
-                } else {
-                    (
-                        false,
-                        old.disk - fresh.disk,
-                        old.apparent.saturating_sub(fresh.apparent),
-                    )
-                };
-                // Restore the view's own totals; the chain then fixes the rest.
-                adjust_chain(&mut self.cache, &self.root, parent, d, a, grow);
-                if let Some(pv) = self.cache.get_mut(parent) {
-                    if let Some(row) = pv
-                        .rows
-                        .iter_mut()
-                        .chain(&mut pv.stash)
-                        .find(|r| r.path == cur)
-                    {
-                        row.disk = fresh.disk;
-                        row.apparent = fresh.apparent;
-                    }
-                }
+        let Some(parent) = up(&self.roots, &cur) else {
+            return;
+        };
+        let parent = parent.as_path();
+        let (grow, d, a) = if fresh.disk >= old.disk {
+            (
+                true,
+                fresh.disk - old.disk,
+                fresh.apparent.saturating_sub(old.apparent),
+            )
+        } else {
+            (
+                false,
+                old.disk - fresh.disk,
+                old.apparent.saturating_sub(fresh.apparent),
+            )
+        };
+        // Restore the view's own totals; the chain then fixes the rest.
+        adjust_chain(&mut self.cache, &self.roots, parent, d, a, grow);
+        if let Some(pv) = self.cache.get_mut(parent) {
+            if let Some(row) = pv
+                .rows
+                .iter_mut()
+                .chain(&mut pv.stash)
+                .find(|r| r.path == cur)
+            {
+                row.disk = fresh.disk;
+                row.apparent = fresh.apparent;
             }
         }
     }
@@ -854,7 +1057,7 @@ impl App {
         // Views below a trashed directory describe paths that are gone.
         self.cache
             .retain(|p, _| !gone.iter().any(|g| p.starts_with(g)));
-        adjust_chain(&mut self.cache, &self.root, &cur, disk, apparent, false);
+        adjust_chain(&mut self.cache, &self.roots, &cur, disk, apparent, false);
         self.sel.clear();
         let at = self.list_state.selected().unwrap_or(0);
         self.select(at);
@@ -886,7 +1089,7 @@ impl App {
                 continue;
             }
             back += 1;
-            let Some(parent) = item.path.parent().map(Path::to_path_buf) else {
+            let Some(parent) = up(&self.roots, &item.path) else {
                 continue;
             };
             let (d, a) = (item.disk, item.apparent);
@@ -896,7 +1099,7 @@ impl App {
                     sort_rows(&mut v.rows, self.sorting);
                 }
             }
-            adjust_chain(&mut self.cache, &self.root, &parent, d, a, true);
+            adjust_chain(&mut self.cache, &self.roots, &parent, d, a, true);
         }
         if self.narrowed() {
             self.refilter();
@@ -1126,6 +1329,10 @@ impl App {
     fn ask_shell(&mut self) {
         if self.read_only {
             self.status = "read-only (--no-delete): no shell".into();
+            return;
+        }
+        if is_top_of_roots(&self.cur) {
+            self.status = "open one of the directories first; b opens a shell there".into();
             return;
         }
         self.hand_off = Some(HandOff::Shell(self.cur.clone()));
@@ -1515,11 +1722,21 @@ fn bar(part: u64, whole: u64, width: usize) -> String {
 
 #[cfg(test)]
 fn row_text(it: &Item, marked: bool, whole: u64, sort: SortKey) -> String {
-    row_text_in(it, marked, whole, sort, sort == SortKey::Apparent, false)
+    row_text_in(
+        it,
+        marked,
+        whole,
+        sort,
+        sort == SortKey::Apparent,
+        false,
+        false,
+    )
 }
 
-/// [`row_text`]; `apparent` shows apparent sizes instead of disk use, and
-/// `pending` shows a directory whose size is still coming.
+/// [`row_text`]; `apparent` shows apparent sizes instead of disk use,
+/// `pending` shows a directory whose size is still coming, and `whole_path`
+/// names the row by its path (the rows of several roots) instead of its
+/// last part.
 fn row_text_in(
     it: &Item,
     marked: bool,
@@ -1527,16 +1744,20 @@ fn row_text_in(
     sort: SortKey,
     apparent: bool,
     pending: bool,
+    whole_path: bool,
 ) -> String {
+    let name = if whole_path {
+        it.path.to_string_lossy()
+    } else {
+        it.path.file_name().unwrap_or_default().to_string_lossy()
+    };
     if pending && it.is_dir {
         let mark = if marked { "[x]" } else { "[ ]" };
-        let name = it.path.file_name().unwrap_or_default().to_string_lossy();
         return format!("{mark} {:>10} [{}] {name}/", "…", " ".repeat(10));
     }
     let mark = if marked { "[x]" } else { "[ ]" };
     let risky = it.git.as_ref().is_some_and(|(s, _)| s.is_risky());
     let warn = if risky { "!" } else { " " };
-    let name = it.path.file_name().unwrap_or_default().to_string_lossy();
     let slash = if it.is_dir { "/" } else { "" };
     let mut badges = Vec::new();
     if let Some(a) = it.artefact {
@@ -1602,7 +1823,12 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let room = (chunks[0].width as usize)
         .saturating_sub(2)
         .saturating_sub(tail.chars().count() + 1);
-    let title = format!(" {}{tail}", fit_left(&app.cur.display().to_string(), room));
+    let place = if is_top_of_roots(&app.cur) {
+        crate::util::plural(app.roots.len() as u64, "directory", "directories")
+    } else {
+        app.cur.display().to_string()
+    };
+    let title = format!(" {}{tail}", fit_left(&place, room));
     let pending = view.scanning;
     let items: Vec<ListItem> = view
         .rows
@@ -1616,6 +1842,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 sort,
                 apparent,
                 pending,
+                is_top_of_roots(&app.cur),
             ))
         })
         .collect();
@@ -1764,7 +1991,12 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
             }
             Some(HandOff::Pager(file)) => {
                 let cmds = tui_term::pager_commands(&file);
-                let status = tui_term::run_in_terminal(terminal, cmds, &app.cur, None);
+                // Above several roots, the pager runs where the file is.
+                let cwd = match file.parent() {
+                    Some(p) if is_top_of_roots(&app.cur) => p.to_path_buf(),
+                    _ => app.cur.clone(),
+                };
+                let status = tui_term::run_in_terminal(terminal, cmds, &cwd, None);
                 app.after_pager(status);
                 continue;
             }
@@ -1789,20 +2021,50 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
     }
 }
 
-/// Run the explorer on `root`. Returns the process exit code.
-pub fn run(prog: &str, root: &Path, opts: ScanOpts, git: bool, read_only: bool) -> i32 {
-    let root = match root.canonicalize() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("{prog}: cannot access '{}': {e}", root.display());
-            return 1;
+/// The directories `-i` explores: each given one resolved, repeats
+/// dropped, and an error for a file or for one inside another (it would
+/// show its sizes twice). The error is the exit code, already reported.
+fn explorer_roots(prog: &str, roots: &[PathBuf]) -> Result<Vec<PathBuf>, i32> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for given in roots {
+        let root = match given.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{prog}: cannot access '{}': {e}", given.display());
+                return Err(1);
+            }
+        };
+        if !root.is_dir() {
+            eprintln!("{prog}: -i needs a directory: '{}'", root.display());
+            return Err(2);
         }
-    };
-    if !root.is_dir() {
-        eprintln!("{prog}: -i needs a directory: '{}'", root.display());
-        return 2;
+        if seen.contains(&root) {
+            continue;
+        }
+        if let Some(outer) = seen
+            .iter()
+            .find(|s| root.starts_with(s) || s.starts_with(&root))
+        {
+            eprintln!(
+                "{prog}: -i: '{}' and '{}' overlap; give one of them",
+                outer.display(),
+                root.display()
+            );
+            return Err(2);
+        }
+        seen.push(root);
     }
-    let mut app = match App::start(prog, root, opts, git) {
+    Ok(seen)
+}
+
+/// Run the explorer on `roots`: one directory, or several under a view
+/// of their own. Returns the process exit code.
+pub fn run(prog: &str, roots: &[PathBuf], opts: ScanOpts, git: bool, read_only: bool) -> i32 {
+    let seen = match explorer_roots(prog, roots) {
+        Ok(r) => r,
+        Err(code) => return code,
+    };
+    let mut app = match App::start(prog, seen, opts, git) {
         Ok(a) => App { read_only, ..a },
         Err(e) => {
             eprintln!("{prog}: cannot scan: {e}");
@@ -2075,7 +2337,7 @@ mod tests {
     #[test]
     fn background_scan_opens_at_once_and_fills_in() {
         let t = tree("bg");
-        let mut a = App::start("rtrash", t.0.join("w"), ScanOpts::default(), false).unwrap();
+        let mut a = App::start("rtrash", vec![t.0.join("w")], ScanOpts::default(), false).unwrap();
         a.trash_pin = Some(t.0.join("Trash"));
         // The quick listing is up before the scan ends.
         assert_eq!(a.rows().len(), 3);
@@ -2439,8 +2701,8 @@ mod tests {
         a.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
         let dot = a.cur.join(".cache");
         let before = a.view().stash.iter().find(|r| r.path == dot).unwrap().disk;
-        let root = a.root.clone();
-        adjust_chain(&mut a.cache, &root, &dot, 1000, 1000, false);
+        let roots = a.roots.clone();
+        adjust_chain(&mut a.cache, &roots, &dot, 1000, 1000, false);
         let after = a.view().stash.iter().find(|r| r.path == dot).unwrap().disk;
         assert_eq!(after, before - 1000);
     }
@@ -2601,5 +2863,143 @@ mod tests {
         a.open();
         assert_eq!(a.cur, t.0.join("w"));
         assert!(a.targets().is_empty());
+    }
+
+    fn app_on(t: &Tree, dirs: &[&str]) -> App {
+        let roots = dirs.iter().map(|d| t.0.join(d)).collect();
+        let mut a = App::new_in("rtrash", roots, ScanOpts::default(), false).unwrap();
+        a.trash_pin = Some(t.0.join("Trash"));
+        a
+    }
+
+    #[test]
+    fn several_roots_open_on_a_view_of_their_own() {
+        let t = tree("roots");
+        let (big, small) = (t.0.join("w/big"), t.0.join("w/small"));
+        let mut a = app_on(&t, &["w/small", "w/big"]);
+        assert!(is_top_of_roots(&a.cur));
+        let paths: Vec<&Path> = a.rows().iter().map(|r| r.path.as_path()).collect();
+        assert_eq!(paths, [big.as_path(), small.as_path()]);
+        let sum: u64 = a.rows().iter().map(|r| r.disk).sum();
+        assert_eq!(a.view().disk, sum);
+        assert!(a.rows()[0].disk >= 230_000, "{:?}", a.rows()[0]);
+        let text = tui_term::render_text(160, 14, |f| ui(f, &mut a));
+        assert!(text.contains(" 2 directories · "), "{text}");
+        // Rows of roots show their paths, since their names can repeat.
+        assert!(text.contains(&format!("{}/", big.display())), "{text}");
+
+        // Each root's view came with the scan, so opening one walks
+        // nothing again.
+        assert!(a.cache.get(&small).is_some_and(|v| !v.scanning));
+        assert_eq!(a.cache[&big].disk, a.rows()[0].disk);
+        // A root opens like any directory, and going up from it returns
+        // to the roots, on its row.
+        a.select(1);
+        a.on_key(KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(a.cur, small);
+        a.on_key(KeyCode::Left, KeyModifiers::NONE);
+        assert!(is_top_of_roots(&a.cur));
+        assert_eq!(a.selected().unwrap().path, small);
+        a.on_key(KeyCode::Left, KeyModifiers::NONE);
+        assert_eq!(a.status, "already at the top");
+        // No shell for the view above the roots, which is no directory.
+        a.on_key(KeyCode::Char('b'), KeyModifiers::NONE);
+        assert!(a.hand_off.is_none());
+        assert!(
+            a.status.contains("open one of the directories"),
+            "{}",
+            a.status
+        );
+
+        // A rescan of the roots view counts them again.
+        a.on_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(a.view().disk, sum);
+        assert_eq!(a.rows().len(), 2);
+    }
+
+    #[test]
+    fn several_roots_load_in_the_background_like_one() {
+        let t = tree("roots-bg");
+        let roots = vec![t.0.join("w/big"), t.0.join("w/small")];
+        let mut a = App::start("rtrash", roots, ScanOpts::default(), false).unwrap();
+        assert!(a.view().scanning);
+        assert_eq!(a.rows().len(), 2);
+        // Open a root before the roots view has its sizes.
+        a.select(0);
+        a.on_key(KeyCode::Right, KeyModifiers::NONE);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !a.jobs.is_empty() && std::time::Instant::now() < deadline {
+            a.poll_jobs();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(a.jobs.is_empty(), "scans still running");
+        // The roots view kept its result while off screen.
+        let top = &a.cache[&PathBuf::new()];
+        assert!(!top.scanning);
+        assert!(top.disk >= 230_000, "{}", top.disk);
+    }
+
+    #[test]
+    fn explorer_roots_drop_repeats_and_refuse_overlaps_and_files() {
+        let t = tree("roots-check");
+        let w = t.0.join("w");
+        let got = explorer_roots("rtrash", &[w.join("big"), w.join("small"), w.join("big")]);
+        assert_eq!(got.unwrap().len(), 2);
+        assert_eq!(
+            explorer_roots("rtrash", &[w.clone(), w.join("big")]),
+            Err(2)
+        );
+        assert_eq!(
+            explorer_roots("rtrash", &[w.join("big/inner"), w.join("big")]),
+            Err(2)
+        );
+        assert_eq!(
+            explorer_roots("rtrash", &[w.join("big"), w.join("file")]),
+            Err(2)
+        );
+        assert_eq!(explorer_roots("rtrash", &[w.join("missing")]), Err(1));
+    }
+
+    // Deletes go to the real Recycle Bin on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn trashing_below_several_roots_carries_up_to_their_view() {
+        let t = tree("roots-del");
+        let mut a = app_on(&t, &["w/big", "w/small"]);
+        a.keys = Keymap::builtin();
+        let top_before = a.view().disk;
+        // In a root: the file goes, and the roots view follows.
+        a.select(0);
+        a.on_key(KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(a.cur, t.0.join("w/big"));
+        let side = a
+            .rows()
+            .iter()
+            .position(|r| r.path.ends_with("side"))
+            .unwrap();
+        let side_disk = a.rows()[side].disk;
+        a.select(side);
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(!t.0.join("w/big/side").exists());
+        let top = &a.cache[&PathBuf::new()];
+        assert_eq!(top.disk, top_before - side_disk);
+        assert_eq!(top.rows.iter().map(|r| r.disk).sum::<u64>(), top.disk);
+        // A root itself can go from the roots view, and come back.
+        a.on_key(KeyCode::Left, KeyModifiers::NONE);
+        let small = a
+            .rows()
+            .iter()
+            .position(|r| r.path.ends_with("small"))
+            .unwrap();
+        a.select(small);
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(!t.0.join("w/small").exists());
+        assert_eq!(a.rows().len(), 1);
+        a.on_key(KeyCode::Char('u'), KeyModifiers::NONE);
+        assert!(t.0.join("w/small").exists());
+        assert_eq!(a.rows().len(), 2);
+        assert_eq!(a.view().disk, top_before - side_disk);
     }
 }

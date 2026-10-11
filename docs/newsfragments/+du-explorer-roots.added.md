@@ -1,0 +1,1 @@
+`rtrash du -i a b` explores more than one directory at once, as `dua i a b` does. The explorer opens on a view with one row per directory and goes back to it from each of them. Trashing and undo carry size changes up to that view.
