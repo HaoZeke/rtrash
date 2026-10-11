@@ -1374,13 +1374,20 @@ fn status_uses_directorysizes_cache_when_valid() {
     .unwrap();
     let out = sb.run(&["status", "--home-only"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let s = stdout_of(&out);
+    // Only the Total line: the rows carry the sandbox path, whose process
+    // id may hold any digits (a pid with 741 in it broke this test).
+    let total = |s: &str| {
+        s.lines()
+            .find(|l| l.starts_with("Total:"))
+            .unwrap_or("")
+            .to_string()
+    };
+    let s = total(&stdout_of(&out));
     // 777000000 B ≈ 741.0 MiB via format_bytes — must appear when cache is used.
-    assert!(
-        s.contains("MiB") || s.contains("GiB") || s.contains("777"),
-        "status must reflect huge directorysizes cache line: {s}"
+    assert_eq!(
+        s, "Total: 1 item (741.0 MiB)",
+        "status must use the cache line"
     );
-    assert!(!s.contains("Total: 0 items"), "{s}");
     // Corrupt mtime → fallback walk; total should shrink below the forged cache.
     fs::write(
         sb.trash().join("directorysizes"),
@@ -1389,10 +1396,10 @@ fn status_uses_directorysizes_cache_when_valid() {
     .unwrap();
     let out2 = sb.run(&["status", "--home-only"]);
     assert!(out2.status.success(), "{}", stderr_of(&out2));
-    let s2 = stdout_of(&out2);
+    let s2 = total(&stdout_of(&out2));
     // Fallback walk of a 2 KiB file must not still report ~741 MiB.
     assert!(
-        !s2.contains("741") && !s2.contains("740.") && !s2.contains("GiB"),
+        s2.starts_with("Total: 1 item (") && s2.ends_with(" KiB)"),
         "stale cache must not dominate status: {s2}"
     );
 }
