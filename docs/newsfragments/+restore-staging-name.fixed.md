@@ -1,0 +1,1 @@
+`rtrash restore` no longer deletes a file that already has the hidden name it stages an item under (`.rtrash-restore-` with its process number and the item's name). It picks a free name instead, so an item that an interrupted restore left under such a name is not lost.

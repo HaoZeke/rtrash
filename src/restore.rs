@@ -569,6 +569,23 @@ pub(crate) fn restore_one(entry: &list::Entry, force: bool) -> Result<Restored, 
     restore_one_to(entry, &entry.original, force)
 }
 
+/// A free hidden name in `parent` to stage item `name` under. Whatever
+/// already has such a name stays: it may be an item a crashed restore left
+/// there, or anyone's file.
+fn staging_path(parent: &Path, name: &str) -> PathBuf {
+    let pid = std::process::id();
+    (0u32..)
+        .map(|n| {
+            let tag = match n {
+                0 => format!(".rtrash-restore-{pid}-{name}"),
+                n => format!(".rtrash-restore-{pid}-{n}-{name}"),
+            };
+            crate::util::join_name(parent, &tag)
+        })
+        .find(|p| p.symlink_metadata().is_err())
+        .unwrap_or_else(|| crate::util::join_name(parent, name))
+}
+
 /// After a failed restore, move the payload from `staged` back to `src`,
 /// its name in the trash, where its record still points; `err` says what
 /// failed, and gains where the payload is if it cannot go back.
@@ -660,11 +677,7 @@ pub(crate) fn restore_one_to(
 
     // Stage into the destination directory first, then swap over any blocker.
     // On failure the live dest (if any) is left intact.
-    let staged = crate::util::join_name(
-        parent,
-        &format!(".rtrash-restore-{}-{}", std::process::id(), entry.name),
-    );
-    let _ = trashdir::remove_any_path(&staged);
+    let staged = staging_path(parent, &entry.name);
     if let Err(e) = trashdir::relocate(&src, &staged) {
         let err = format!("cannot restore '{}' to staging area: {e}", src.display());
         let _ = trashdir::remove_any_path(&staged);
@@ -701,6 +714,30 @@ pub(crate) fn restore_one_to(
 mod tests {
     use super::*;
     use crate::trashdir::TrashDir;
+
+    #[test]
+    fn restore_stages_beside_what_has_its_staging_name() {
+        let root = std::env::temp_dir().join(format!("rtrash-stage-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let trash = TrashDir {
+            root: root.join("Trash"),
+            topdir: None,
+        };
+        trash.ensure().unwrap();
+        fs::write(trash.files().join("item"), b"payload").unwrap();
+        let out = root.join("out");
+        fs::create_dir(&out).unwrap();
+        // What a crashed restore by a process with this pid would leave.
+        let left = out.join(format!(".rtrash-restore-{}-item", std::process::id()));
+        fs::write(&left, b"left behind").unwrap();
+        let mut e = entry(out.join("item").to_str().unwrap(), 0);
+        e.name = "item".into();
+        e.dir = trash;
+        restore_one_to(&e, &out.join("item"), false).unwrap();
+        assert_eq!(fs::read(out.join("item")).unwrap(), b"payload");
+        assert_eq!(fs::read(&left).unwrap(), b"left behind");
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     fn entry(path: &str, epoch: i64) -> list::Entry {
         list::Entry {
