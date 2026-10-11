@@ -150,6 +150,14 @@ spells the same thing in GNU terms.
 .B \-\-no\-preserve\-root
 Do not treat those specially.
 .PP
+Whatever the flags, put refuses a path that is, or contains, the trash
+directory it would move into (a directory cannot move inside itself),
+and an item already inside that trash, which would lose its record
+there; to delete trashed items, use
+.B rtrash rm
+or
+.BR "rtrash empty" .
+.PP
 Put also skips paths on the safe-rm list: safe-rm's built-in system
 directories (such as
 .BR /usr ,

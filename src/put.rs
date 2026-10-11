@@ -413,6 +413,25 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             return Err(1);
         }
     };
+    // Moving a directory into itself fails with a bare EINVAL, and an
+    // item already in the trash would be trashed again, its info lost.
+    match trash_overlap(&abs, &trash.root) {
+        Some(Overlap::Contains) => {
+            eprintln!(
+                "{prog}: cannot trash '{name}': it contains the trash directory '{}' it would move into",
+                trash.root.display()
+            );
+            return Err(1);
+        }
+        Some(Overlap::Inside) => {
+            eprintln!(
+                "{prog}: cannot trash '{name}': it is inside the trash directory '{}'; `rtrash rm` or `rtrash empty` deletes trashed items",
+                trash.root.display()
+            );
+            return Err(1);
+        }
+        None => {}
+    }
     match trashdir::trash_move(&abs, &meta, &trash) {
         Ok(trash_name) => {
             if opts.verbose && !opts.quiet {
@@ -432,6 +451,28 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             eprintln!("{prog}: cannot trash '{name}': {e}");
             Err(1)
         }
+    }
+}
+
+/// How a path to trash meets the trash directory it would go to.
+#[derive(Debug, PartialEq, Eq)]
+enum Overlap {
+    /// The path is the trash directory or contains it.
+    Contains,
+    /// The path is inside the trash directory.
+    Inside,
+}
+
+/// Whether `abs` (absolute, its parent resolved) is, contains or sits inside
+/// the trash at `root`, compared with the trash's symlinks resolved.
+fn trash_overlap(abs: &Path, root: &Path) -> Option<Overlap> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if root.starts_with(abs) {
+        Some(Overlap::Contains)
+    } else if abs.starts_with(&root) {
+        Some(Overlap::Inside)
+    } else {
+        None
     }
 }
 
@@ -460,6 +501,35 @@ fn resolve_put_trash(
 #[cfg(test)]
 mod json_tests {
     use super::*;
+
+    #[test]
+    fn paths_containing_or_inside_the_trash_are_told_apart() {
+        let t = std::env::temp_dir().join(format!("rtrash-overlap-{}", std::process::id()));
+        let root = t.join("data/Trash");
+        fs::create_dir_all(root.join("files")).unwrap();
+        let t = t.canonicalize().unwrap();
+        assert_eq!(trash_overlap(&t, &root), Some(Overlap::Contains));
+        assert_eq!(
+            trash_overlap(&t.join("data/Trash"), &root),
+            Some(Overlap::Contains)
+        );
+        assert_eq!(
+            trash_overlap(&t.join("data/Trash/files/x"), &root),
+            Some(Overlap::Inside)
+        );
+        assert_eq!(trash_overlap(&t.join("data/Trashy"), &root), None);
+        assert_eq!(trash_overlap(&t.join("other"), &root), None);
+        // A trash reached through a symlink is the same trash.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(t.join("data"), t.join("link")).unwrap();
+            assert_eq!(
+                trash_overlap(&t.join("data"), &t.join("link/Trash")),
+                Some(Overlap::Contains)
+            );
+        }
+        let _ = fs::remove_dir_all(&t);
+    }
 
     #[test]
     fn summary_json_lists_items_and_failures() {

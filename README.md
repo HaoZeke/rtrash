@@ -266,7 +266,7 @@ $ rtrash list              # b.c still listed
 
 ### `rtrash put` (also `rm`, `trash`, `trash-put`, or bare `rtrash`)
 
-Accepts the common `rm(1)` flags with the same semantics, except that files move to the trash: `-f`, `-i`, `-I`, `--interactive[=WHEN]`, `-r`/`-R`, `-d`, `-v`, `--one-file-system` (accepted for rm compatibility; no-op because entries move whole and are never walked like `rm -x`), `--preserve-root[=all]` (default), `--no-preserve-root`, `--`. Directories need `-r` (or `-d` when empty), `.`/`..`/`/` get refused, and so do your home directory and mount points (unless `--no-preserve-root`); exit codes mirror rm (0 success, 1 failure, 2 usage error).
+Accepts the common `rm(1)` flags with the same semantics, except that files move to the trash: `-f`, `-i`, `-I`, `--interactive[=WHEN]`, `-r`/`-R`, `-d`, `-v`, `--one-file-system` (accepted for rm compatibility; no-op because entries move whole and are never walked like `rm -x`), `--preserve-root[=all]` (default), `--no-preserve-root`, `--`. Directories need `-r` (or `-d` when empty), `.`/`..`/`/` get refused, and so do your home directory and mount points (unless `--no-preserve-root`), the trash directory itself, a directory containing it, and items already in it; exit codes mirror rm (0 success, 1 failure, 2 usage error).
 
 Safety rails beyond rm:
 

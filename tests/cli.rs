@@ -123,6 +123,29 @@ fn put_moves_file_and_writes_info() {
 }
 
 #[test]
+fn put_refuses_the_trash_and_what_contains_or_sits_in_it() {
+    let sb = Sandbox::new("put-own-trash");
+    fs::write(sb.work().join("f"), b"x").unwrap();
+    assert!(sb.run(&["put", "f"]).status.success());
+    // The data directory contains the trash it would move into.
+    let out = sb.run(&["put", "-r", "../xdg"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("it contains the trash directory"), "{err}");
+    assert!(!err.contains("Invalid argument"), "{err}");
+    let out = sb.run(&["put", "-rf", "../xdg/Trash"]);
+    assert_eq!(out.status.code(), Some(1));
+    // A trashed item stays where it is, with its info.
+    let out = sb.run(&["put", "../xdg/Trash/files/f"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("inside the trash directory"), "{err}");
+    assert!(sb.trash().join("files/f").exists());
+    assert!(sb.trash().join("info/f.trashinfo").exists());
+    assert!(sb.root.join("xdg").is_dir());
+}
+
+#[test]
 fn put_json_reports_trashed_and_failed() {
     let sb = Sandbox::new("put-json");
     sb.touch("a.txt");
