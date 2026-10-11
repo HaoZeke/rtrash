@@ -463,8 +463,10 @@ mod fileid {
                 return false;
             }
             let units: Vec<u16> = rec[name_at..name_at + name_len]
-                .chunks_exact(2)
-                .map(|c| u16::from_ne_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_ne_bytes(*c))
                 .collect();
             #[cfg(windows)]
             let name = {
@@ -576,7 +578,7 @@ mod tests {
         r[name_slot..name_slot + 4].copy_from_slice(&((at - name_slot) as u32).to_ne_bytes());
         r.extend_from_slice(f.name.as_bytes());
         r.push(0);
-        while r.len() % 8 != 0 {
+        while !r.len().is_multiple_of(8) {
             r.push(0);
         }
         let len = r.len() as u32;
@@ -718,7 +720,7 @@ mod tests {
         for (i, u) in units.iter().enumerate() {
             put(&mut r, at + 2 * i, &u.to_ne_bytes());
         }
-        while r.len() % 8 != 0 {
+        while !r.len().is_multiple_of(8) {
             r.push(0);
         }
         if !last {

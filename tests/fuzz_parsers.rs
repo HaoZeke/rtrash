@@ -83,7 +83,7 @@ impl Rng {
 
     /// Mutated seed half the time, noise the other half.
     fn input(&mut self, seed: &[u8]) -> Vec<u8> {
-        if self.next() % 2 == 0 {
+        if self.next().is_multiple_of(2) {
             self.mutate(seed)
         } else {
             self.bytes(seed.len() * 2 + 8)

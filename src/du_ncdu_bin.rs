@@ -129,8 +129,10 @@ impl<R: Read + Seek> Blocks<R> {
             return Err(bad("index block header and footer differ"));
         }
         let words: Vec<u64> = index[4..index.len() - 4]
-            .chunks_exact(8)
-            .map(|c| u64::from_be_bytes(c.try_into().expect("8 bytes")))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| u64::from_be_bytes(*c))
             .collect();
         let (root, pointers) = words.split_last().ok_or_else(|| bad("empty index"))?;
         let index_at = len - ilen;

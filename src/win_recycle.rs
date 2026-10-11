@@ -84,8 +84,10 @@ fn decode_utf16le_path(bytes: &[u8]) -> Option<PathBuf> {
         return None;
     }
     let mut units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     // Strip trailing NULs.
     while units.last().copied() == Some(0) {

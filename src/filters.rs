@@ -46,8 +46,7 @@ impl SizeFilter {
 
     /// Whether an item of `bytes` passes both bounds.
     pub fn keeps(&self, bytes: u64) -> bool {
-        self.larger_than.map_or(true, |n| bytes > n)
-            && self.smaller_than.map_or(true, |n| bytes < n)
+        self.larger_than.is_none_or(|n| bytes > n) && self.smaller_than.is_none_or(|n| bytes < n)
     }
 
     /// Take `--larger-than` or `--smaller-than` at `args[*i]`, as
@@ -118,10 +117,10 @@ impl AgeFilter {
         let cutoff = |days: i64| now - days.saturating_mul(86_400);
         let old = self
             .older_than
-            .map_or(true, |d| epoch.is_some_and(|t| t <= cutoff(d)));
+            .is_none_or(|d| epoch.is_some_and(|t| t <= cutoff(d)));
         let new = self
             .newer_than
-            .map_or(true, |d| epoch.is_some_and(|t| t > cutoff(d)));
+            .is_none_or(|d| epoch.is_some_and(|t| t > cutoff(d)));
         old && new
     }
 

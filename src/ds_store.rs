@@ -99,8 +99,10 @@ impl<'a> Reader<'a> {
         let units = self.u32()? as usize;
         let bytes = self.take(units.checked_mul(2).ok_or("string length overflows")?)?;
         let v: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_be_bytes(*c))
             .collect();
         Ok(String::from_utf16_lossy(&v))
     }
