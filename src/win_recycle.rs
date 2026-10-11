@@ -7,6 +7,9 @@
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
+use std::io;
+
+#[cfg(windows)]
 use crate::platform;
 #[cfg(windows)]
 use crate::util;
@@ -227,6 +230,146 @@ fn tree_bytes(root: &Path) -> u64 {
         }
     }
     total
+}
+
+/// Remove `path`, clearing the read-only attribute once and retrying when
+/// the delete is refused. A symlink is removed as a link. A directory on
+/// another volume is left in place and reported.
+#[cfg(windows)]
+pub(crate) fn remove_forcing(path: &Path) -> io::Result<()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let ft = meta.file_type();
+    if ft.is_symlink() || !ft.is_dir() {
+        return remove_retry(path, false);
+    }
+    let root_vol = volume_serial(path);
+    let mut stack = vec![WinFrame {
+        path: path.to_path_buf(),
+        kids: Vec::new(),
+        listed: false,
+    }];
+    loop {
+        let top = stack.len() - 1;
+        if !stack[top].listed {
+            match std::fs::read_dir(&stack[top].path) {
+                Ok(rd) => {
+                    stack[top].kids = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
+                    stack[top].listed = true;
+                }
+                Err(e) if access_denied(&e) && clear_readonly(&stack[top].path) => {
+                    let rd = std::fs::read_dir(&stack[top].path)?;
+                    stack[top].kids = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
+                    stack[top].listed = true;
+                }
+                Err(e) => return Err(e),
+            }
+            continue;
+        }
+        if let Some(child) = stack[top].kids.pop() {
+            match std::fs::symlink_metadata(&child) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+                Ok(m) => {
+                    let ft = m.file_type();
+                    if ft.is_symlink() || !ft.is_dir() {
+                        remove_retry(&child, false)?;
+                        continue;
+                    }
+                    if root_vol.is_some()
+                        && volume_serial(&child).is_some_and(|v| Some(v) != root_vol)
+                    {
+                        return Err(io::Error::other(
+                            "refusing to enter a directory on another device",
+                        ));
+                    }
+                    stack.push(WinFrame {
+                        path: child,
+                        kids: Vec::new(),
+                        listed: false,
+                    });
+                }
+            }
+            continue;
+        }
+        let done = stack.pop().expect("frame");
+        remove_retry(&done.path, true)?;
+        if stack.is_empty() {
+            return Ok(());
+        }
+    }
+}
+
+#[cfg(windows)]
+struct WinFrame {
+    path: PathBuf,
+    kids: Vec<PathBuf>,
+    listed: bool,
+}
+
+#[cfg(windows)]
+fn access_denied(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::PermissionDenied
+}
+
+#[cfg(windows)]
+fn clear_readonly(path: &Path) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_READONLY, INVALID_FILE_ATTRIBUTES,
+    };
+    let wide = wide(path.as_os_str());
+    let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    if attrs == INVALID_FILE_ATTRIBUTES || attrs & FILE_ATTRIBUTE_READONLY == 0 {
+        return false;
+    }
+    unsafe { SetFileAttributesW(wide.as_ptr(), attrs & !FILE_ATTRIBUTE_READONLY) != 0 }
+}
+
+#[cfg(windows)]
+fn remove_retry(path: &Path, dir: bool) -> io::Result<()> {
+    let once = || {
+        if dir {
+            std::fs::remove_dir(path)
+        } else {
+            std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path))
+        }
+    };
+    match once() {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) if access_denied(&e) => {
+            let _ = clear_readonly(path);
+            if let Some(parent) = path.parent() {
+                let _ = clear_readonly(parent);
+            }
+            match once() {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(windows)]
+fn volume_serial(path: &Path) -> Option<u32> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .ok()?;
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+    (ok != 0).then_some(info.dwVolumeSerialNumber)
 }
 
 // ---- Windows CLI surface (system Recycle Bin via `trash` crate) ----
@@ -706,8 +849,7 @@ Without PATH, print a numbered list and read an index from stdin.
                         dest.display()
                     ));
                 }
-                std::fs::remove_file(dest)
-                    .or_else(|_| std::fs::remove_dir_all(dest))
+                super::remove_forcing(dest)
                     .map_err(|e| format!("cannot replace '{}': {e}", dest.display()))?;
             }
             os_limited::restore_all(vec![self.item.clone()])
@@ -727,7 +869,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 return 1;
             }
             if dest.exists() && force {
-                let _ = std::fs::remove_file(&dest).or_else(|_| std::fs::remove_dir_all(&dest));
+                let _ = super::remove_forcing(&dest);
             }
         }
         match os_limited::restore_all(items) {
@@ -1214,6 +1356,35 @@ mod tests {
         std::fs::write(dir.join("$IFOLDER"), [1u8; 3]).unwrap();
         assert_eq!(recycled_size(&dir.join("$RFOLDER")), 1000);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn remove_forcing_clears_readonly_and_leaves_a_link_target() {
+        let dir = std::env::temp_dir().join(format!("rtrash-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(nested.join("inner")).unwrap();
+        std::fs::write(nested.join("inner/f"), b"x").unwrap();
+        std::fs::write(nested.join("f"), b"y").unwrap();
+        let outside = dir.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("precious"), b"keep").unwrap();
+        let _ = std::os::windows::fs::symlink_dir(&outside, nested.join("link"));
+        for p in [
+            nested.join("inner/f"),
+            nested.join("inner"),
+            nested.join("f"),
+            nested.clone(),
+        ] {
+            let mut perms = std::fs::symlink_metadata(&p).unwrap().permissions();
+            perms.set_readonly(true);
+            std::fs::set_permissions(&p, perms).unwrap();
+        }
+        remove_forcing(&nested).unwrap();
+        assert!(!nested.exists());
+        assert_eq!(std::fs::read(outside.join("precious")).unwrap(), b"keep");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

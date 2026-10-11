@@ -1439,6 +1439,7 @@ fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     let root = open_dir_nofollow(path)?;
+    let root_dev = fd_dev_ino(root.as_raw_fd())?.0;
     let entries = read_names(root.as_raw_fd())?;
     let mut stack = vec![WalkDir {
         fd: Some(root),
@@ -1464,6 +1465,11 @@ fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
         // A symlink is not a directory, even when its target is one.
         if !is_type(&st, libc::S_IFDIR) {
             continue;
+        }
+        if st.st_dev as u64 != root_dev {
+            return Err(io::Error::other(
+                "refusing to enter a directory on another device",
+            ));
         }
         if unsafe { libc::faccessat(dirfd, name_c.as_ptr(), libc::W_OK | libc::X_OK, 0) } != 0 {
             return Err(io::Error::last_os_error());
@@ -2737,6 +2743,50 @@ proc /proc proc rw 0 0
         );
         assert!(!owner_name(&mp).is_empty());
         let _ = fs::remove_dir_all(&mp);
+    }
+
+    #[test]
+    fn tree_removable_stops_at_another_device() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-xdev-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let tree = root.join("t");
+        let mnt = tree.join("mnt");
+        fs::create_dir_all(&mnt).unwrap();
+        let mounted = std::process::Command::new("sudo")
+            .args(["-n", "mount", "-t", "tmpfs", "tmpfs"])
+            .arg(&mnt)
+            .status()
+            .is_ok_and(|s| s.success());
+        if !mounted {
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+        struct Umount<'a>(&'a Path);
+        impl Drop for Umount<'_> {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("sudo")
+                    .args(["-n", "umount"])
+                    .arg(self.0)
+                    .status();
+            }
+        }
+        let _umount = Umount(&mnt);
+        fs::write(mnt.join("precious"), b"keep").unwrap();
+        let err = tree_removable(&tree, &fs::symlink_metadata(&tree).unwrap()).unwrap_err();
+        assert_eq!(fs::read(mnt.join("precious")).unwrap(), b"keep");
+        drop(_umount);
+        assert!(
+            err.to_string().contains("another device"),
+            "refused the mount: {err}"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

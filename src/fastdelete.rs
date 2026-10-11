@@ -160,7 +160,7 @@ fn remove_dir_tree(path: &Path) -> io::Result<()> {
     };
     let mut fd = open();
     if fd < 0
-        && io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+        && permission_denied(io::Error::last_os_error().raw_os_error())
         && own_dir_opened_up(libc::AT_FDCWD, &dir_c)
     {
         fd = open();
@@ -220,6 +220,11 @@ fn os_code(e: &io::Error) -> Option<i32> {
         Some(a) => a.err.raw_os_error(),
         None => e.raw_os_error(),
     }
+}
+
+/// `EACCES` or `EPERM`: the kernel refused the directory operation.
+fn permission_denied(code: Option<i32>) -> bool {
+    matches!(code, Some(c) if c == libc::EACCES || c == libc::EPERM)
 }
 
 /// A directory the current user owns but cannot list, enter or change
@@ -299,6 +304,7 @@ fn remove_dirfd_contents(dirfd: RawFd, path: &Path, depth: u32) -> io::Result<()
 /// [`remove_dirfd_contents`] for a directory already listed, with
 /// `entries` in reverse order.
 fn remove_listed(dirfd: RawFd, path: &Path, depth: u32, entries: Vec<DirEnt>) -> io::Result<()> {
+    let root_dev = fd_id(dirfd).map_err(|e| at(path, e))?.0;
     let mut stack = vec![Frame {
         fd: None,
         name: OsString::new(),
@@ -325,12 +331,12 @@ fn remove_listed(dirfd: RawFd, path: &Path, depth: u32, entries: Vec<DirEnt>) ->
             let opened = stack[top].opened_up;
             let (r, opened_now) = {
                 let child = || frame_path(path, &stack, top).join(&ent.name);
-                let mut r = remove_or_open(fd, &ent, d, &child);
+                let mut r = remove_or_open(fd, &ent, d, &child, root_dev);
                 // Unlinking needs write and search on this directory: when
                 // the user owns it, grant them once and retry.
-                let retry = !opened && r.as_ref().is_err_and(|e| os_code(e) == Some(libc::EACCES));
+                let retry = !opened && r.as_ref().is_err_and(|e| permission_denied(os_code(e)));
                 if retry && own_dirfd_opened_up(fd) {
-                    r = remove_or_open(fd, &ent, d, &child);
+                    r = remove_or_open(fd, &ent, d, &child, root_dev);
                 }
                 (r, retry)
             };
@@ -388,7 +394,7 @@ fn remove_listed(dirfd: RawFd, path: &Path, depth: u32, entries: Vec<DirEnt>) ->
         let mut r = rmdir_at(pfd, &name_c);
         if !stack[p].opened_up
             && r.as_ref()
-                .is_err_and(|e| e.raw_os_error() == Some(libc::EACCES))
+                .is_err_and(|e| permission_denied(e.raw_os_error()))
         {
             stack[p].opened_up = true;
             if own_dirfd_opened_up(pfd) {
@@ -452,6 +458,7 @@ fn remove_or_open(
     ent: &DirEnt,
     depth: u32,
     child: &dyn Fn() -> std::path::PathBuf,
+    root_dev: u64,
 ) -> io::Result<Option<(OwnedFd, Vec<DirEnt>)>> {
     let name_c = CString::new(ent.name.as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -464,12 +471,35 @@ fn remove_or_open(
             .map(|_| None)
             .map_err(|e| at(&child(), e));
     }
+    // A mount point's lstat reports the other device. Leave it in place.
+    if entry_device(dirfd, &name_c)
+        .map_err(|e| at(&child(), e))?
+        .is_some_and(|dev| dev != root_dev)
+    {
+        return Err(at(
+            &child(),
+            io::Error::other("refusing to enter a directory on another device"),
+        ));
+    }
     let Some(fd) = open_child_dir(dirfd, &ent.name, &name_c, depth, child)? else {
         return Ok(None);
     };
     let mut entries = read_dirfd_entries(fd.as_raw_fd()).map_err(|e| at(&child(), e))?;
     entries.reverse();
     Ok(Some((fd, entries)))
+}
+
+/// Device of the directory `name`, or `None` if it vanished.
+fn entry_device(dirfd: RawFd, name: &CStr) -> io::Result<Option<u64>> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatat(dirfd, name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        let err = io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::ENOENT) => Ok(None),
+            _ => Err(err),
+        };
+    }
+    Ok(Some(st.st_dev as u64))
 }
 
 /// Whether `ent` is a directory, from `d_type` or, when that is unknown,
@@ -520,7 +550,7 @@ fn open_child_dir(
     let mut child_fd = open();
     // No read permission on a directory the user owns: open it up and retry.
     if child_fd < 0
-        && io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+        && permission_denied(io::Error::last_os_error().raw_os_error())
         && own_dir_opened_up(dirfd, name_c)
     {
         child_fd = open();
@@ -544,7 +574,8 @@ fn open_child_dir(
 /// Remove one top-level entry of `dirfd` (a file, or a whole tree).
 fn remove_entry(dirfd: RawFd, path: &Path, ent: &DirEnt, depth: u32) -> io::Result<()> {
     let child = || path.join(&ent.name);
-    let Some((fd, entries)) = remove_or_open(dirfd, ent, depth, &child)? else {
+    let root_dev = fd_id(dirfd).map_err(|e| at(path, e))?.0;
+    let Some((fd, entries)) = remove_or_open(dirfd, ent, depth, &child, root_dev)? else {
         return Ok(());
     };
     let name_c = CString::new(ent.name.as_bytes())
@@ -1051,6 +1082,73 @@ mod tests {
                 libc::close(lock);
             }
         }
+    }
+
+    /// `sudo -n mount -t tmpfs` onto `mnt`. False when this host cannot.
+    fn mount_tmpfs(mnt: &Path) -> bool {
+        std::process::Command::new("sudo")
+            .args(["-n", "mount", "-t", "tmpfs", "tmpfs"])
+            .arg(mnt)
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    fn umount(mnt: &Path) {
+        let _ = std::process::Command::new("sudo")
+            .args(["-n", "umount"])
+            .arg(mnt)
+            .status();
+    }
+
+    struct Umount<'a>(&'a Path);
+    impl Drop for Umount<'_> {
+        fn drop(&mut self) {
+            umount(self.0);
+        }
+    }
+
+    #[test]
+    fn removal_opens_owned_dirs_and_stops_at_another_device() {
+        // 0500 and 0000 are directories this user owns but cannot search.
+        // The symlink and the mount must both stay out of the walk.
+        let root = tmp_root("cross");
+        let real = root.join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("precious"), b"keep").unwrap();
+        let tree = root.join("tree");
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("gone"), b"x").unwrap();
+        std::os::unix::fs::symlink(&real, tree.join("link")).unwrap();
+        for (name, mode) in [("locked", 0o500), ("none", 0o000)] {
+            let d = tree.join(name);
+            fs::create_dir(&d).unwrap();
+            fs::write(d.join("f"), b"x").unwrap();
+            chmod(&d, mode);
+        }
+        let mnt = tree.join("mnt");
+        fs::create_dir(&mnt).unwrap();
+        if !mount_tmpfs(&mnt) {
+            remove_path(&tree).unwrap();
+            assert!(!tree.exists());
+            assert_eq!(fs::read(real.join("precious")).unwrap(), b"keep");
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+        let _umount = Umount(&mnt);
+        fs::write(mnt.join("precious"), b"keep-mnt").unwrap();
+        let err = remove_path(&tree).unwrap_err();
+        assert!(
+            err.to_string().contains("another device"),
+            "reported the mount: {err}"
+        );
+        assert!(!tree.join("gone").exists());
+        assert!(!tree.join("locked").exists());
+        assert!(!tree.join("none").exists());
+        assert!(!tree.join("link").exists());
+        assert_eq!(fs::read(real.join("precious")).unwrap(), b"keep");
+        assert_eq!(fs::read(mnt.join("precious")).unwrap(), b"keep-mnt");
+        drop(_umount);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
