@@ -389,7 +389,7 @@ impl Plan<'_> {
         match restore_one_to(e, &dest, force) {
             Ok(done) => {
                 for w in &done.warnings {
-                    eprintln!("{prog}: warning: {w}");
+                    eprintln!("{prog}: warning: {}", crate::util::err_text(w));
                 }
                 if !self.quiet {
                     println!("restored '{}'", crate::util::term_path(&done.dest));
@@ -397,7 +397,8 @@ impl Plan<'_> {
                 Outcome::Restored(done.dest)
             }
             Err(err) => {
-                eprintln!("{prog}: {err}");
+                // The error quotes paths from the record verbatim.
+                eprintln!("{prog}: {}", crate::util::err_text(&err));
                 Outcome::Failed
             }
         }

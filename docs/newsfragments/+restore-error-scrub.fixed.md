@@ -1,0 +1,1 @@
+`rtrash restore` errors and warnings, and the lines the restore browser prints when it closes, now show control characters as `?` on a terminal, as `list` does. A `Path=` with an escape sequence could clear or redraw the screen through a "refusing to overwrite" error.

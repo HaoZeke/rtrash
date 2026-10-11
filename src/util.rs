@@ -376,6 +376,15 @@ pub fn term_path(p: &std::path::Path) -> String {
     }
 }
 
+/// Text for a message on stderr: scrubbed when stderr is a terminal.
+pub fn err_text(s: &str) -> std::borrow::Cow<'_, str> {
+    if stderr_is_tty() {
+        scrub(s)
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
 /// A path for messages on stderr: scrubbed when stderr is a terminal.
 pub fn err_path(p: &std::path::Path) -> String {
     let shown = p.display().to_string();

@@ -423,6 +423,49 @@ fn a_restore_that_cannot_place_the_item_leaves_it_in_the_trash() {
     assert!(left.is_empty(), "{left:?}");
 }
 
+/// restore errors quote the record's Path= verbatim; on a terminal its
+/// escape sequences must show as `?`, as list shows them.
+#[cfg(target_os = "linux")]
+#[test]
+fn restore_errors_scrub_control_characters_on_a_terminal() {
+    if !Path::new("/usr/bin/script").exists() {
+        eprintln!("skipping: no script(1) to give rtrash a terminal");
+        return;
+    }
+    let sb = Sandbox::new("restore-scrub");
+    // The destination exists, so restore refuses and quotes it.
+    let dest = sb.work().join("a\x1b[2Jb");
+    fs::create_dir(&dest).unwrap();
+    let record = format!(
+        "[Trash Info]\nPath={}/a%1B%5B2Jb\nDeletionDate=2024-01-02T03:04:05\n",
+        sb.work().display()
+    );
+    fs::create_dir_all(sb.trash().join("files")).unwrap();
+    fs::create_dir_all(sb.trash().join("info")).unwrap();
+    fs::write(sb.trash().join("files/evil"), b"x").unwrap();
+    fs::write(sb.trash().join("info/evil.trashinfo"), record).unwrap();
+    let piped = sb.run(&["restore", "--home-only", "--name=evil"]);
+    assert!(
+        stderr_of(&piped).contains("a\x1b[2Jb"),
+        "{}",
+        stderr_of(&piped)
+    );
+    let cmd = format!("{} restore --home-only --name=evil", bin());
+    let tty = Command::new("/usr/bin/script")
+        .args(["-qec", &cmd, "/dev/null"])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to run script");
+    let shown = stdout_of(&tty);
+    assert!(shown.contains("refusing to overwrite"), "{shown:?}");
+    assert!(shown.contains("a?[2Jb"), "{shown:?}");
+    assert!(!shown.contains('\x1b'), "{shown:?}");
+}
+
 #[test]
 fn put_json_reports_trashed_and_failed() {
     let sb = Sandbox::new("put-json");

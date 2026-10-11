@@ -642,11 +642,12 @@ pub fn run<E: TuiItem>(prog: &str, entries: Vec<&E>, force: bool, newest_first: 
 
     tui_term::leave(&mut terminal);
     // Printing while the TUI owned the screen would have drawn over it.
+    // The lines quote paths from the records verbatim.
     for line in &app.log {
         if line.is_error {
-            eprintln!("{}", line.text);
+            eprintln!("{}", crate::util::err_text(&line.text));
         } else {
-            println!("{}", line.text);
+            println!("{}", crate::util::term_text(&line.text));
         }
     }
     if let Err(e) = result {
@@ -736,13 +737,13 @@ fn restore_single<E: TuiItem>(prog: &str, e: &E, force: bool) -> i32 {
     match e.restore(force) {
         Ok((dest, warnings)) => {
             for w in &warnings {
-                eprintln!("{prog}: warning: {w}");
+                eprintln!("{prog}: warning: {}", crate::util::err_text(w));
             }
-            println!("restored '{}'", dest.display());
+            println!("restored '{}'", crate::util::term_path(&dest));
             0
         }
         Err(e) => {
-            eprintln!("{prog}: {e}");
+            eprintln!("{prog}: {}", crate::util::err_text(&e));
             1
         }
     }
