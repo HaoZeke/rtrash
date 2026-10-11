@@ -28,8 +28,11 @@ pub const SIGNATURE: &[u8; 8] = b"\xbfncduEX1";
 /// Largest block, and largest decompressed block, the format allows.
 const BLOCK_MAX: usize = (1 << 24) - 1;
 
-/// Decompressed blocks kept at once (as ncdu does).
-const CACHED: usize = 8;
+/// Decompressed blocks kept at once, and their most bytes together (the
+/// newest block stays whatever its size). Entries of one directory can
+/// lie across many blocks, and the walk visits each twice.
+const CACHED: usize = 64;
+const CACHED_BYTES: usize = 16 << 20;
 
 /// Whether `head` (the first bytes of a file) starts a binary export.
 pub fn looks_like_binary(head: &[u8]) -> bool {
@@ -45,7 +48,9 @@ fn bad(what: impl std::fmt::Display) -> io::Error {
 
 /// Read a binary export into a snapshot dated `created`. Totals follow
 /// the JSON reader: sizes are summed from the items, not taken from the
-/// cumulative fields, so both formats of one scan read alike.
+/// cumulative fields, so both formats of one scan read alike. Entries
+/// are read in the order they were written, as the JSON reader reads
+/// them, so a hard link is charged to the same directory by both.
 pub fn parse(r: impl Read + Seek, created: i64) -> io::Result<Snapshot> {
     let mut file = Blocks::open(r)?;
     let root = file.item(file.root)?;
@@ -53,27 +58,22 @@ pub fn parse(r: impl Read + Seek, created: i64) -> io::Result<Snapshot> {
         return Err(bad("the root item is not a directory"));
     }
     let mut tree = Builder::new(&root.info);
-    // Per open directory, the next entry to read, walking back from the
-    // last one.
-    let mut next: Vec<Option<u64>> = vec![root.sub];
     let mut visits = 1u64;
-    while let Some(slot) = next.last_mut() {
-        let Some(at) = *slot else {
-            next.pop();
+    // Per open directory, the entries still to read, the next one last.
+    let mut open: Vec<Vec<u64>> = vec![file.entries(root.sub, &mut visits)?];
+    while let Some(entries) = open.last_mut() {
+        let Some(at) = entries.pop() else {
+            open.pop();
             if tree.close() {
                 break;
             }
             continue;
         };
-        visits += 1;
-        if visits > file.loaded_bytes {
-            return Err(bad("item references form a loop"));
-        }
         let it = file.item(at)?;
-        *slot = it.prev;
         if it.kind == 0 {
             tree.open(&it.info);
-            next.push(it.sub);
+            let below = file.entries(it.sub, &mut visits)?;
+            open.push(below);
         } else {
             tree.file(&it.info);
         }
@@ -194,17 +194,36 @@ impl<R: Read + Seek> Blocks<R> {
         if !std::mem::replace(&mut self.seen[n], true) {
             self.loaded_bytes += data.len() as u64;
         }
-        let slot = if self.cache.len() < CACHED {
-            self.cache.push((n, self.tick, data));
-            self.cache.len() - 1
-        } else {
+        // Make room: drop the least recently used blocks.
+        let mut held: usize = self.cache.iter().map(|c| c.2.len()).sum();
+        while !self.cache.is_empty()
+            && (self.cache.len() >= CACHED || held + data.len() > CACHED_BYTES)
+        {
             let i = (0..self.cache.len())
                 .min_by_key(|&i| self.cache[i].1)
-                .expect("a full cache");
-            self.cache[i] = (n, self.tick, data);
-            i
-        };
-        Ok(&self.cache[slot].2)
+                .expect("a block");
+            held -= self.cache.swap_remove(i).2.len();
+        }
+        self.cache.push((n, self.tick, data));
+        Ok(&self.cache.last().expect("just pushed").2)
+    }
+
+    /// The entries of a directory whose last entry is `last`, found by
+    /// walking back along `prev`: the last first, so popping them gives
+    /// the order they were written in. `visits` counts the items read, and
+    /// more of them than the loaded blocks can hold means a loop.
+    fn entries(&mut self, last: Option<u64>, visits: &mut u64) -> io::Result<Vec<u64>> {
+        let mut out = Vec::new();
+        let mut next = last;
+        while let Some(at) = next {
+            *visits += 1;
+            if *visits > self.loaded_bytes {
+                return Err(bad("item references form a loop"));
+            }
+            out.push(at);
+            next = self.prev_of(at)?;
+        }
+        Ok(out)
     }
 
     /// The item at absolute reference `at`.
@@ -213,22 +232,35 @@ impl<R: Read + Seek> Blocks<R> {
         let data = self.block(n)?;
         let mut item =
             Item::parse(data, off).map_err(|e| bad(format_args!("item {n}:{off}: {e}")))?;
-        let resolve = |r: Option<Ref>| -> io::Result<Option<u64>> {
-            Ok(match r {
-                None => None,
-                Some(Ref::Absolute(a)) => Some(a),
-                Some(Ref::Back(b)) => {
-                    let to = (off as u64).checked_sub(b).ok_or_else(|| {
-                        bad(format_args!("item {n}:{off} points before its block"))
-                    })?;
-                    Some(((n as u64) << 24) | to)
-                }
-            })
-        };
-        item.prev = resolve(item.prev_ref.take())?;
-        item.sub = resolve(item.sub_ref.take())?;
+        item.prev = resolve(n, off, item.prev_ref.take())?;
+        item.sub = resolve(n, off, item.sub_ref.take())?;
         Ok(item)
     }
+
+    /// The `prev` of the item at `at`, skipping the rest of it: the walk
+    /// along a directory's entries reads nothing more, and reads each
+    /// entry in full afterwards.
+    fn prev_of(&mut self, at: u64) -> io::Result<Option<u64>> {
+        let (n, off) = ((at >> 24) as usize, (at & 0xff_ffff) as usize);
+        let data = self.block(n)?;
+        let prev =
+            Item::prev_only(data, off).map_err(|e| bad(format_args!("item {n}:{off}: {e}")))?;
+        resolve(n, off, prev)
+    }
+}
+
+/// An item reference made absolute, for the item at `off` in block `n`.
+fn resolve(n: usize, off: usize, r: Option<Ref>) -> io::Result<Option<u64>> {
+    Ok(match r {
+        None => None,
+        Some(Ref::Absolute(a)) => Some(a),
+        Some(Ref::Back(b)) => {
+            let to = (off as u64)
+                .checked_sub(b)
+                .ok_or_else(|| bad(format_args!("item {n}:{off} points before its block")))?;
+            Some(((n as u64) << 24) | to)
+        }
+    })
 }
 
 fn read_u32(r: &mut impl Read) -> io::Result<u32> {
@@ -259,6 +291,31 @@ struct Item {
 }
 
 impl Item {
+    /// Only the `prev` reference of the item at `off`.
+    fn prev_only(data: &[u8], off: usize) -> Result<Option<Ref>, String> {
+        let mut c = Cbor { data, pos: off };
+        let (major, len) = c.head()?;
+        if major != 5 {
+            return Err("not a CBOR map".into());
+        }
+        let mut prev = None;
+        let mut left = len;
+        loop {
+            match left {
+                Some(0) => break,
+                Some(ref mut k) => *k -= 1,
+                None if c.peek()? == 0xff => break,
+                None => {}
+            }
+            if c.uint()? == 2 {
+                prev = Some(c.reference()?);
+            } else {
+                c.skip()?;
+            }
+        }
+        Ok(prev)
+    }
+
     fn parse(data: &[u8], off: usize) -> Result<Item, String> {
         let mut c = Cbor { data, pos: off };
         let (major, len) = c.head()?;
@@ -1012,6 +1069,7 @@ mod tests {
                 (1, V::Bytes("f1")),
                 (3, V::U(10)),
                 (4, V::U(4096)),
+                (18, V::U(1_700_000_000)),
             ],
             false,
         );
@@ -1082,8 +1140,10 @@ mod tests {
         assert_eq!(r.path, Path::new("/r"));
         assert_eq!((r.files, r.links, r.dirs, r.excluded), (2, 1, 2, 1));
         assert_eq!(r.disk, 4096 + 4096 + 4096 + 8192);
+        // Read in the order written, the link candidate in /r comes
+        // before its second name in /r/d, so /r is charged for it.
         let d = row(&snap, "/r/d");
-        assert_eq!((d.disk, d.apparent, d.items), (4096 + 4096 + 8192, 10, 2));
+        assert_eq!((d.disk, d.apparent, d.items), (4096 + 4096, 10, 1));
         assert_eq!(d.mtime, 1_700_000_000);
     }
 
@@ -1261,6 +1321,37 @@ mod tests {
         assert_eq!(f[&11], 3012);
         let (_, f) = dir_at(&bin, &["logs", "old"]);
         assert_eq!((f[&3] + 4, f[&11]), (f[&7], 1));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_links_in_sibling_directories_read_alike_in_both_formats() {
+        use std::fs;
+        let root = tmp("siblings");
+        for d in ["a", "b", "c"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        fs::write(root.join("b/f"), vec![1u8; 50_000]).unwrap();
+        fs::hard_link(root.join("b/f"), root.join("a/l")).unwrap();
+        fs::hard_link(root.join("b/f"), root.join("c/l")).unwrap();
+        let mut bin = Vec::new();
+        crate::du_ncdu::export_binary(&root, false, None, &mut bin).unwrap();
+        let mut json = Vec::new();
+        crate::du_ncdu::export(&root, false, None, 5, &mut json).unwrap();
+        let rows = |s: &Snapshot| {
+            let mut v: Vec<String> = s.dirs.iter().map(|d| format!("{d:?}")).collect();
+            v.sort();
+            v
+        };
+        let (a, b) = (
+            read(&bin).unwrap(),
+            crate::du_ncdu::parse(&json[..]).unwrap(),
+        );
+        // Each format charges the file to the directory walked first.
+        assert_eq!(rows(&a), rows(&b));
+        let charged = a.dirs.iter().filter(|d| d.disk > 40_000).count();
+        assert_eq!(charged, 1, "{:?}", a.dirs);
         let _ = fs::remove_dir_all(&root);
     }
 
