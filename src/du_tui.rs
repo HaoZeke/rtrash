@@ -58,6 +58,44 @@ enum Mode {
     Help,
 }
 
+/// What the explorer orders rows by: a size, count or age key, or name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Order {
+    Key(SortKey),
+    Name,
+}
+
+/// The row order, flipped by `reverse`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Sorting {
+    order: Order,
+    reverse: bool,
+}
+
+impl Sorting {
+    fn of(sort: SortKey) -> Self {
+        Sorting {
+            order: Order::Key(sort),
+            reverse: false,
+        }
+    }
+
+    fn label(self) -> String {
+        let what = match self.order {
+            Order::Key(SortKey::Disk) => "disk use",
+            Order::Key(SortKey::Apparent) => "apparent size",
+            Order::Key(SortKey::Items) => "items",
+            Order::Key(SortKey::Mtime) => "newest change",
+            Order::Name => "name",
+        };
+        if self.reverse {
+            format!("{what}, reversed")
+        } else {
+            what.to_string()
+        }
+    }
+}
+
 /// Rows trashed by one delete, with what is needed to put them back.
 type UndoGroup = Vec<(bin::Ticket, Item)>;
 
@@ -150,6 +188,10 @@ struct App {
     /// Scan in the background (the terminal session); tests scan inline.
     background: bool,
     jobs: HashMap<PathBuf, Job>,
+    /// The current row order (`s`, `n`, `C` and `M` change it).
+    sorting: Sorting,
+    /// The size `s` sorts by and rows show: apparent under `--apparent`.
+    size_key: SortKey,
 }
 
 /// The size a row shows and its bar measures: apparent size under
@@ -161,12 +203,27 @@ fn key_of(it: &Item, sort: SortKey) -> u64 {
     }
 }
 
-/// Rows in the order of `sort`: by size, item count or newest change.
-fn sort_rows(rows: &mut [Item], sort: SortKey) {
+/// Rows in the order of `s`: largest, most items or newest change first,
+/// or by name from A; `reverse` flips it.
+fn sort_rows(rows: &mut [Item], s: Sorting) {
+    let name = |it: &Item| {
+        it.path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase()
+    };
     rows.sort_by(|a, b| {
-        b.key(sort)
-            .cmp(&a.key(sort))
-            .then_with(|| a.path.cmp(&b.path))
+        let o = match s.order {
+            Order::Key(k) => b.key(k).cmp(&a.key(k)),
+            Order::Name => name(a).cmp(&name(b)),
+        }
+        .then_with(|| a.path.cmp(&b.path));
+        if s.reverse {
+            o.reverse()
+        } else {
+            o
+        }
     });
 }
 
@@ -176,9 +233,12 @@ fn is_trash(it: &Item) -> bool {
 
 /// Scan `dir` one level deep: every child directory and file with its
 /// total, git state and artefact kind.
-fn scan_view(dir: &Path, opts: &ScanOpts, git: bool) -> io::Result<View> {
+fn scan_view(dir: &Path, opts: &ScanOpts, git: bool, sorting: Sorting) -> io::Result<View> {
     let o = ScanOpts {
         top: usize::MAX,
+        // A count ranks no files in a listing; the explorer needs them all
+        // and orders rows itself.
+        sort: SortKey::Disk,
         max_depth: Some(1),
         all_dirs: true,
         artefacts_only: false,
@@ -201,7 +261,7 @@ fn scan_view(dir: &Path, opts: &ScanOpts, git: bool) -> io::Result<View> {
         .chain(report.files)
         .filter(|it| it.path != dir)
         .collect();
-    sort_rows(&mut rows, opts.sort);
+    sort_rows(&mut rows, sorting);
     Ok(View {
         rows,
         disk,
@@ -249,7 +309,7 @@ fn quick_view(dir: &Path) -> io::Result<View> {
         }
     }
     dirs.sort_by(|a, b| a.path.cmp(&b.path));
-    sort_rows(&mut files, SortKey::Disk);
+    sort_rows(&mut files, Sorting::of(SortKey::Disk));
     let disk = files.iter().map(|f| f.disk).sum();
     let apparent = files.iter().map(|f| f.apparent).sum();
     dirs.extend(files);
@@ -306,7 +366,7 @@ impl App {
     /// An explorer whose first view is scanned before it returns.
     #[cfg(test)]
     fn new(prog: &str, root: PathBuf, opts: ScanOpts, git: bool) -> io::Result<Self> {
-        let view = scan_view(&root, &opts, git)?;
+        let view = scan_view(&root, &opts, git, Sorting::of(opts.sort))?;
         Ok(Self::with_view(prog, root, opts, git, view))
     }
 
@@ -328,7 +388,13 @@ impl App {
             list_state.select(Some(0));
         }
         let keys = Keymap::load();
+        let size_key = match opts.sort {
+            SortKey::Apparent => SortKey::Apparent,
+            _ => SortKey::Disk,
+        };
         App {
+            sorting: Sorting::of(opts.sort),
+            size_key,
             prog: prog.to_string(),
             cur: root.clone(),
             root,
@@ -361,9 +427,9 @@ impl App {
             ..self.opts.clone()
         };
         let (tx, rx) = mpsc::channel();
-        let (d, git) = (dir.clone(), self.git);
+        let (d, git, sorting) = (dir.clone(), self.git, self.sorting);
         std::thread::spawn(move || {
-            let _ = tx.send(scan_view(&d, &opts, git));
+            let _ = tx.send(scan_view(&d, &opts, git, sorting));
         });
         self.jobs.insert(
             dir,
@@ -428,9 +494,10 @@ impl App {
                     .cloned()
                     .collect();
                 fresh.rows.extend(missing);
-                sort_rows(&mut fresh.rows, self.opts.sort);
             }
         }
+        // The order may have changed while the scan ran.
+        sort_rows(&mut fresh.rows, self.sorting);
         let stopped = fresh.partial;
         if refresh {
             self.apply_fresh(&dir, fresh);
@@ -539,7 +606,7 @@ impl App {
             }
         }
         if !self.cache.contains_key(&dir) {
-            match scan_view(&dir, &self.opts, self.git) {
+            match scan_view(&dir, &self.opts, self.git, self.sorting) {
                 Ok(v) => {
                     self.cache.insert(dir.clone(), v);
                 }
@@ -605,7 +672,7 @@ impl App {
             self.status = "rescanning…".into();
             return;
         }
-        let fresh = match scan_view(&cur, &self.opts, self.git) {
+        let fresh = match scan_view(&cur, &self.opts, self.git, self.sorting) {
             Ok(v) => v,
             Err(e) => {
                 self.status = format!("cannot scan '{}': {e}", cur.display());
@@ -766,7 +833,7 @@ impl App {
             if let Some(v) = self.cache.get_mut(&parent) {
                 if !v.rows.iter().any(|r| r.path == item.path) {
                     v.rows.push(item);
-                    sort_rows(&mut v.rows, self.opts.sort);
+                    sort_rows(&mut v.rows, self.sorting);
                 }
             }
             adjust_chain(&mut self.cache, &self.root, &parent, d, a, true);
@@ -777,6 +844,47 @@ impl App {
             0 => format!("restored {back} item(s)"),
             f => format!("restored {back}, {f} failed (path taken again?)"),
         };
+    }
+
+    /// The key rows show and bars measure: the sort key, or the size kind
+    /// when sorted by name.
+    fn shown(&self) -> SortKey {
+        match self.sorting.order {
+            Order::Key(k) => k,
+            Order::Name => self.size_key,
+        }
+    }
+
+    /// Order every view by `order`, or reverse the order when it is the
+    /// current one. The cursor and marks stay on the same rows.
+    fn sort_by(&mut self, order: Order) {
+        let reverse = self.sorting.order == order && !self.sorting.reverse;
+        self.sorting = Sorting { order, reverse };
+        let keep = self.selected().map(|r| r.path.clone());
+        let marked: Vec<PathBuf> = self
+            .sel
+            .marked_sorted()
+            .into_iter()
+            .filter_map(|i| self.rows().get(i).map(|r| r.path.clone()))
+            .collect();
+        let cur = self.cur.clone();
+        for (dir, v) in self.cache.iter_mut() {
+            sort_rows(&mut v.rows, self.sorting);
+            // A saved cursor would point at whatever row moved there.
+            if *dir != cur {
+                v.cursor = 0;
+            }
+        }
+        let pos = |a: &App, p: &Path| a.rows().iter().position(|r| r.path == p);
+        self.sel.clear();
+        for p in &marked {
+            if let Some(i) = pos(self, p) {
+                self.sel.mark(i);
+            }
+        }
+        let at = keep.and_then(|p| pos(self, &p)).unwrap_or(0);
+        self.select(at);
+        self.status = format!("sorted by {}", self.sorting.label());
     }
 
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
@@ -809,6 +917,10 @@ impl App {
                         KeyCode::Char('d') | KeyCode::Delete => return self.ask_delete(),
                         KeyCode::Char('u') => return self.undo_last(),
                         KeyCode::Char('r') => return self.refresh(),
+                        KeyCode::Char('s') => return self.sort_by(Order::Key(self.size_key)),
+                        KeyCode::Char('n') => return self.sort_by(Order::Name),
+                        KeyCode::Char('C') => return self.sort_by(Order::Key(SortKey::Items)),
+                        KeyCode::Char('M') => return self.sort_by(Order::Key(SortKey::Mtime)),
                         _ => {}
                     }
                 }
@@ -899,6 +1011,9 @@ fn row_text_in(it: &Item, marked: bool, whole: u64, sort: SortKey, pending: bool
     if sort == SortKey::Items && it.is_dir {
         badges.push(crate::util::plural(it.items, "item", "items"));
     }
+    if sort == SortKey::Mtime {
+        badges.push(du::format_age(it.mtime, crate::util::now_epoch()));
+    }
     let badges = if badges.is_empty() {
         String::new()
     } else {
@@ -922,7 +1037,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .split(f.area());
     app.viewport_rows = chunks[1].height.saturating_sub(2) as usize;
     app.ensure_scroll();
-    let sort = app.opts.sort;
+    let sort = app.shown();
     let view = app.view();
     let whole = match sort {
         SortKey::Apparent => view.apparent,
@@ -960,15 +1075,11 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             title,
             Style::default().add_modifier(Modifier::BOLD),
         ))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(if app.read_only {
-                    "rtrash du (read-only)"
-                } else {
-                    "rtrash du"
-                }),
-        ),
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            "rtrash du{} · by {}",
+            if app.read_only { " (read-only)" } else { "" },
+            app.sorting.label()
+        ))),
         chunks[0],
     );
     f.render_stateful_widget(
@@ -1021,6 +1132,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 } else {
                     "u — undo the last delete · r — rescan this directory"
                 },
+                "s n C M — sort by size, name, items or newest change; again reverses",
                 "! — git work at risk (dirty, unpushed or unknown)",
             ],
         );
@@ -1399,6 +1511,80 @@ mod tests {
         assert!(text.contains("rtrash du (read-only)"), "{text}");
         assert!(!text.contains("d trash"), "{text}");
         assert!(text.contains("r rescan"), "{text}");
+    }
+
+    #[test]
+    fn sort_keys_reorder_rows_and_keep_cursor_and_marks() {
+        let t = tree("sortkeys");
+        let mut a = app(&t);
+        assert_eq!(names(&a), ["big", "file", "small"]);
+        a.select(1);
+        a.sel.toggle(2);
+        // `s` again on the current key reverses it.
+        a.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert_eq!(names(&a), ["small", "file", "big"]);
+        assert_eq!(a.status, "sorted by disk use, reversed");
+        assert_eq!(a.selected().unwrap().path, t.0.join("w/file"));
+        assert!(a.sel.is_marked(0) && a.sel.len() == 1);
+        a.on_key(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(names(&a), ["big", "file", "small"]);
+        a.on_key(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(names(&a), ["small", "file", "big"]);
+        a.on_key(KeyCode::Char('C'), KeyModifiers::SHIFT);
+        assert_eq!(a.status, "sorted by items");
+        assert_eq!(names(&a)[0], "big");
+        // Views opened later come in the new order.
+        a.on_key(KeyCode::Char('n'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('n'), KeyModifiers::NONE);
+        a.select(usize::MAX);
+        a.open();
+        assert_eq!(names(&a), ["side", "inner"]);
+        a.on_key(KeyCode::Char('M'), KeyModifiers::SHIFT);
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("rtrash du · by newest change"), "{text}");
+    }
+
+    #[test]
+    fn name_and_newest_change_orders() {
+        let row = |name: &str, mtime: i64| Item {
+            path: PathBuf::from(name),
+            is_dir: false,
+            apparent: 1,
+            disk: 1,
+            mtime,
+            items: 1,
+            artefact: None,
+            repos: Vec::new(),
+            git: None,
+            unique: None,
+        };
+        let mut rows = vec![row("b", 5), row("C", 9), row("a", 1)];
+        let order = |rows: &[Item]| -> Vec<String> {
+            rows.iter().map(|r| r.path.display().to_string()).collect()
+        };
+        sort_rows(&mut rows, Sorting::of(SortKey::Mtime));
+        assert_eq!(order(&rows), ["C", "b", "a"]);
+        let by_name = Sorting {
+            order: Order::Name,
+            reverse: false,
+        };
+        sort_rows(&mut rows, by_name);
+        assert_eq!(order(&rows), ["a", "b", "C"]);
+        let now = crate::util::now_epoch();
+        let s = row_text(&row("x", now - 3 * 86_400), false, 1, SortKey::Mtime);
+        assert!(s.ends_with("[3d]"), "{s}");
+    }
+
+    #[test]
+    fn launched_by_items_still_lists_files() {
+        let t = tree("byitems");
+        let opts = ScanOpts {
+            sort: SortKey::Items,
+            ..ScanOpts::default()
+        };
+        let a = App::new("rtrash", t.0.join("w"), opts, false).unwrap();
+        assert_eq!(names(&a), ["big", "file", "small"]);
+        assert_eq!(a.sorting.label(), "items");
     }
 
     #[test]

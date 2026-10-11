@@ -763,7 +763,9 @@ Works on a snapshot with
 .BR \-i ", " \-\-interactive
 Explore one
 .I PATH
-a directory at a time, largest first, with a size bar per row.
+a directory at a time, in the
+.B \-\-sort
+order (largest first by default), with a size bar per row.
 Right, l or Enter opens a directory; left, h or Backspace goes up.
 .B d
 moves the cursor row (or the marked rows) to the trash after a
@@ -787,6 +789,10 @@ directories it never reached keep their placeholder rows, and
 .B r
 rescans in full.
 Pressed again, or with no scan running, the key quits.
+.BR s ", " n ", " C " and " M
+order the rows by size, name, item count and newest change, in every
+directory; the key of the current order reverses it.
+The window title names the order.
 Rows show the artefact kind and git state; risky git state shows
 .BR ! .
 Trash directories stay closed.
