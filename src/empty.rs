@@ -312,7 +312,9 @@ fn empty_one(
             let take = match cutoff {
                 None => true,
                 Some(cut) => {
-                    let parsed = fs::read(&info_path).map(|c| info::parse_bytes(&c)).ok();
+                    let parsed = info::read_bounded(&info_path, info::RECORD_CAP)
+                        .map(|c| info::parse_bytes(&c))
+                        .ok();
                     is_old(
                         parsed.as_ref().and_then(|i| i.deletion_date.as_deref()),
                         cut,
@@ -498,7 +500,7 @@ fn full_empty_wipe(
 /// drop the file outright when nothing survives.
 fn prune_directorysizes(dir: &TrashDir, kept: &[String]) {
     let path = dir.root.join("directorysizes");
-    let Ok(content) = fs::read_to_string(&path) else {
+    let Ok(content) = trashdir::read_sizes(&path) else {
         return;
     };
     if kept.is_empty() {

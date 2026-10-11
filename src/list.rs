@@ -55,7 +55,7 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
         out.par_extend(paths.into_par_iter().filter_map(|path| {
             let fname = crate::util::str_from_os_ref(path.file_name()?);
             let name = crate::util::trash_item_name(&fname)?;
-            let content = fs::read(&path).ok()?;
+            let content = info::read_bounded(&path, info::RECORD_CAP).ok()?;
             let parsed = info::parse_bytes(&content);
             let epoch = parsed
                 .deletion_date

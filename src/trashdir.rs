@@ -973,6 +973,18 @@ fn info_mtime_secs(path: &Path) -> io::Result<i64> {
     Ok(d.as_secs() as i64)
 }
 
+/// Largest `directorysizes` cache read; a bigger one is ignored, and the
+/// sizes are walked instead.
+const SIZES_CAP: u64 = 64 << 20;
+
+/// The `directorysizes` cache at `path` as text, read by
+/// [`info::read_bounded`] so a FIFO or device there cannot hang or flood a
+/// command.
+pub(crate) fn read_sizes(path: &Path) -> io::Result<String> {
+    let body = info::read_bounded(path, SIZES_CAP)?;
+    String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
 /// Insert or replace a `directorysizes` line: `size mtime percent-encoded-name`.
 /// Writes via temp file + rename (FreeDesktop: avoid concurrent cache corruption).
 pub fn directorysizes_upsert(
@@ -986,7 +998,7 @@ pub fn directorysizes_upsert(
     let enc = url_encode(crate::util::os_from_str(name).as_bytes());
     let line = format!("{size} {mtime} {enc}\n");
     let mut out = String::new();
-    if let Ok(existing) = fs::read_to_string(&path) {
+    if let Ok(existing) = read_sizes(&path) {
         for l in existing.lines() {
             let keep = l.rsplit(' ').next().is_some_and(|e| e != enc.as_str());
             if keep && !l.is_empty() {
@@ -1003,7 +1015,7 @@ pub fn directorysizes_upsert(
 pub fn directorysizes_remove(trash: &TrashDir, name: &str) {
     use crate::util::url_encode;
     let path = trash.root.join("directorysizes");
-    let Ok(existing) = fs::read_to_string(&path) else {
+    let Ok(existing) = read_sizes(&path) else {
         return;
     };
     let enc = url_encode(crate::util::os_from_str(name).as_bytes());
@@ -1054,7 +1066,7 @@ pub struct DirSizes<'a> {
 impl<'a> DirSizes<'a> {
     pub fn load(trash: &'a TrashDir) -> Self {
         let mut lines = HashMap::new();
-        if let Ok(body) = fs::read_to_string(trash.root.join("directorysizes")) {
+        if let Ok(body) = read_sizes(&trash.root.join("directorysizes")) {
             for line in body.lines() {
                 // A later duplicate wins, as a rewrite would keep it.
                 if let Some((size, mtime, enc)) = directorysizes_parse_line(line) {
@@ -1159,7 +1171,7 @@ impl<'a> DirSizes<'a> {
         };
         // Re-read under the lock: a put may have added a line meanwhile.
         let path = self.trash.root.join("directorysizes");
-        let mut kept: Vec<(String, u64, i64)> = fs::read_to_string(&path)
+        let mut kept: Vec<(String, u64, i64)> = read_sizes(&path)
             .unwrap_or_default()
             .lines()
             .filter_map(directorysizes_parse_line)

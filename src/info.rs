@@ -48,6 +48,43 @@ pub fn render_batch(original: &Path, date: &str, batch: Option<&str>) -> String 
     body
 }
 
+/// Largest `.trashinfo` read: a path of `PATH_MAX` bytes, each escaped to
+/// three, fits many times over.
+pub const RECORD_CAP: u64 = 1 << 20;
+
+/// Read a regular file of at most `cap` bytes. A FIFO, device or directory
+/// where a record or the `directorysizes` cache should be (a symlink to one
+/// counts) is refused before it is opened, and the open itself never waits,
+/// so a planted FIFO cannot hang a listing and `/dev/zero` cannot fill the
+/// memory.
+pub fn read_bounded(path: &Path, cap: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind, Read};
+    use std::os::unix::fs::OpenOptionsExt;
+    let not_regular = || Error::new(ErrorKind::InvalidData, "not a regular file");
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(not_regular());
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)?;
+    // The path may have changed between the two looks; trust the open file.
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(not_regular());
+    }
+    let too_big = || Error::new(ErrorKind::InvalidData, format!("larger than {cap} bytes"));
+    if meta.len() > cap {
+        return Err(too_big());
+    }
+    let mut body = Vec::with_capacity(meta.len() as usize);
+    file.take(cap + 1).read_to_end(&mut body)?;
+    if body.len() as u64 > cap {
+        return Err(too_big());
+    }
+    Ok(body)
+}
+
 /// Parse a `.trashinfo` file body. Per spec, the first occurrence of a key wins.
 pub fn parse(content: &str) -> TrashInfo {
     parse_bytes(content.as_bytes())
@@ -200,6 +237,32 @@ fn mktime_local(year: i32, mon: i32, mday: i32, hour: i32, min: i32, sec: i32) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_reads_take_small_regular_files_only() {
+        let dir = std::env::temp_dir().join(format!("rtrash-bounded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("r.trashinfo");
+        std::fs::write(&file, b"[Trash Info]\nPath=/a\n").unwrap();
+        assert_eq!(read_bounded(&file, 64).unwrap(), b"[Trash Info]\nPath=/a\n");
+        // A symlink to a regular file still reads; the cap holds.
+        let link = dir.join("l.trashinfo");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(read_bounded(&link, 64).is_ok());
+        assert!(read_bounded(&file, 8).is_err());
+        // A FIFO with no writer: refused at once instead of waiting.
+        let fifo = dir.join("f.trashinfo");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        assert!(read_bounded(&fifo, RECORD_CAP).is_err());
+        // An endless device, through a symlink, and a directory.
+        let zero = dir.join("z.trashinfo");
+        std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+        assert!(read_bounded(&zero, RECORD_CAP).is_err());
+        assert!(read_bounded(&dir, RECORD_CAP).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn render_and_parse_roundtrip() {

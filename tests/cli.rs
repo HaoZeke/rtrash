@@ -68,6 +68,45 @@ impl Sandbox {
         child.wait_with_output().expect("failed to wait rtrash")
     }
 
+    /// Like `run`, but a child still running after `secs` is killed and
+    /// the test fails, so a hang shows as a failure. The child may map at
+    /// most 2 GiB, so a read without bound fails the test instead of
+    /// filling the machine's memory.
+    fn run_within(&self, secs: u64, args: &[&str]) -> Output {
+        let out_path = self.root.join("run-within.out");
+        let err_path = self.root.join("run-within.err");
+        let mut cmd = Command::new(bin());
+        cap_memory(&mut cmd);
+        let mut child = cmd
+            .args(args)
+            .current_dir(self.work())
+            .env("XDG_DATA_HOME", self.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", self.root.join(".config"))
+            .env("HOME", &self.root)
+            .stdin(Stdio::null())
+            .stdout(fs::File::create(&out_path).unwrap())
+            .stderr(fs::File::create(&err_path).unwrap())
+            .spawn()
+            .expect("failed to spawn rtrash");
+        let start = std::time::Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if start.elapsed() > std::time::Duration::from_secs(secs) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("rtrash {args:?} still running after {secs} s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        Output {
+            status,
+            stdout: fs::read(&out_path).unwrap(),
+            stderr: fs::read(&err_path).unwrap(),
+        }
+    }
+
     fn touch(&self, name: &str) -> PathBuf {
         let p = self.work().join(name);
         fs::write(&p, b"payload").unwrap();
@@ -176,6 +215,91 @@ fn info_files_that_name_no_payload_are_never_items() {
     assert!(sb.trash().join("files/keep").exists());
     assert!(sb.trash().join("info/keep.trashinfo").exists());
     assert!(!sb.work().join("evil3").exists());
+}
+
+/// Let the child behind `cmd` map at most 2 GiB: past that, an allocation
+/// fails and the child aborts.
+fn cap_memory(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setrlimit is async-signal-safe and touches no memory of the
+    // parent, as a hook run between fork and exec must.
+    unsafe {
+        cmd.pre_exec(|| {
+            let cap = libc::rlimit {
+                rlim_cur: 2 << 30,
+                rlim_max: 2 << 30,
+            };
+            if libc::setrlimit(libc::RLIMIT_AS, &cap) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// The largest resident size any child of this test process has reached,
+/// in MiB. No command of the suite comes near 512 MiB, so a test can bound
+/// it to catch a read that grows without end under [`cap_memory`].
+#[cfg(target_os = "linux")]
+fn peak_child_rss_mib() -> i64 {
+    // SAFETY: getrusage only fills the zeroed struct handed to it.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) },
+        0
+    );
+    // Linux counts ru_maxrss in KiB.
+    usage.ru_maxrss as i64 / 1024
+}
+
+#[test]
+fn records_and_a_sizes_cache_that_are_no_regular_files_hang_nothing() {
+    let sb = Sandbox::new("fifo-records");
+    fs::write(sb.work().join("keep"), b"x").unwrap();
+    fs::create_dir(sb.work().join("d")).unwrap();
+    fs::write(sb.work().join("d/f"), b"x").unwrap();
+    assert!(sb.run(&["put", "-r", "keep", "d"]).status.success());
+    let t = sb.trash();
+    let mkfifo = |p: PathBuf| {
+        let _ = fs::remove_file(&p);
+        assert!(Command::new("mkfifo").arg(&p).status().unwrap().success());
+    };
+    // Nothing writes to these FIFOs, so reading one waits forever.
+    mkfifo(t.join("info/fifo.trashinfo"));
+    fs::write(t.join("files/fifo"), b"x").unwrap();
+    mkfifo(t.join("directorysizes"));
+    let out = sb.run_within(20, &["list"]);
+    let listed = stdout_of(&out);
+    assert!(
+        listed.contains("/keep") && listed.contains("/d"),
+        "{listed}"
+    );
+    // --home-only keeps rm, restore and empty off the host's volume trashes.
+    for args in [
+        &["list", "--size"][..],
+        &["status"],
+        &["rm", "--home-only", "nothing-matches"],
+        &["restore", "--home-only", "nothing-matches"],
+        &["empty", "--home-only", "1"],
+    ] {
+        sb.run_within(20, args);
+    }
+    assert!(t.join("files/keep").exists() && t.join("files/d/f").exists());
+    // A link to /dev/zero never ends, so reading the whole record or cache
+    // would take all the memory. Under the cap such a read fails at 2 GiB
+    // instead, and the peak size of the children shows that it ran.
+    for p in [t.join("info/fifo.trashinfo"), t.join("directorysizes")] {
+        let _ = fs::remove_file(&p);
+        std::os::unix::fs::symlink("/dev/zero", &p).unwrap();
+    }
+    for args in [&["list"][..], &["list", "--size"], &["status"]] {
+        let out = sb.run_within(20, args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{args:?}: {err}");
+    }
+    #[cfg(target_os = "linux")]
+    assert!(peak_child_rss_mib() < 512, "{} MiB", peak_child_rss_mib());
+    assert!(t.join("files/keep").exists() && t.join("files/d/f").exists());
 }
 
 #[test]
