@@ -10,8 +10,8 @@ Files are **moved** into the same trash layout used by desktop file managers, no
 | Location | Role |
 |----------|------|
 | `$XDG_DATA_HOME/Trash` | Home trash (default `~/.local/share/Trash`) |
-| `$top/.Trash/$uid` | Per-mount shared trash (sticky, non-symlink) |
-| `$top/.Trash-$uid` | Per-mount private trash |
+| `$top/.Trash/$uid` | Per-mount shared trash (`.Trash` sticky, non-symlink; `$uid` owned by the user, non-symlink) |
+| `$top/.Trash-$uid` | Per-mount private trash (owned by the user, non-symlink) |
 | `files/` + `info/*.trashinfo` | Payload + `Path=` / `DeletionDate=` |
 
 Atomic reservation: create-new on `.trashinfo` **before** moving the payload.

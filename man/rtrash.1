@@ -1418,6 +1418,10 @@ A
 that exists as a symlink or a plain file, or lacks the sticky bit,
 gets a warning, and put falls back to
 .IR $top /.Trash\- $uid .
+Either per-user directory must be a real directory owned by the user;
+one that is a symlink or belongs to someone else gets a warning, put
+falls back to the next choice and in the end the home trash, and list,
+empty and rm skip it.
 .SH EXIT STATUS
 .TP
 .B 0

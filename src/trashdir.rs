@@ -255,20 +255,115 @@ fn shared_trash_problem(meta: &fs::Metadata) -> Option<&'static str> {
     }
 }
 
-/// Warn about an unusable shared trash at most once per path and process,
-/// so trashing many files from one mount prints one line.
-fn warn_shared_trash_once(shared: &Path, why: &str, fallback: &Path) {
+/// Why a per-user volume trash (`$top/.Trash/$uid` or `$top/.Trash-$uid`)
+/// that exists must not be used by `uid`, or `None` when it can. Only the
+/// owner's own real directory will do: a directory another user made
+/// there first, or a symlink, would hand them whatever gets trashed.
+fn user_trash_problem(meta: &fs::Metadata, uid: u32) -> Option<&'static str> {
+    if meta.file_type().is_symlink() {
+        Some("is a symbolic link")
+    } else if !meta.is_dir() {
+        Some("is not a directory")
+    } else if meta.uid() != uid {
+        Some("belongs to another user")
+    } else {
+        None
+    }
+}
+
+/// Warn at most once per path and process, so trashing or listing many
+/// files from one mount prints one line.
+fn warn_once(path: &Path, message: String) {
     static WARNED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
     let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
-    if warned.iter().any(|p| p == shared) {
+    if warned.iter().any(|p| p == path) {
         return;
     }
-    warned.push(shared.to_path_buf());
-    eprintln!(
-        "rtrash: warning: '{}' {why}; using '{}'",
-        shared.display(),
-        fallback.display()
+    warned.push(path.to_path_buf());
+    eprintln!("rtrash: warning: {message}");
+}
+
+/// Warn that `shared` cannot serve, naming the trash used instead.
+fn warn_shared_trash_once(shared: &Path, why: &str, fallback: &Path) {
+    warn_once(
+        shared,
+        format!(
+            "'{}' {why}; using '{}'",
+            shared.display(),
+            fallback.display()
+        ),
     );
+}
+
+/// Make the per-user volume trash at `root` ready for `uid`: create it
+/// (mode 0700) when missing, then use it only when it is that user's own
+/// real directory. Refusing returns an error and warns once.
+fn ensure_user_trash(td: &TrashDir, uid: u32, fallback: &Path) -> io::Result<()> {
+    match fs::DirBuilder::new().mode(0o700).create(&td.root) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let meta = fs::symlink_metadata(&td.root)?;
+    if let Some(why) = user_trash_problem(&meta, uid) {
+        warn_shared_trash_once(&td.root, why, fallback);
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
+    }
+    td.ensure()
+}
+
+/// The trash `uid` uses on the volume mounted at `top`: `$top/.Trash/$uid`
+/// when `$top/.Trash` is a sticky directory and not a symlink, else
+/// `$top/.Trash-$uid`. Either must be the user's own real directory, made
+/// here when missing. `None` sends the caller to the home trash.
+fn select_on_volume(top: &Path, uid: u32) -> Option<TrashDir> {
+    let own = top.join(format!(".Trash-{uid}"));
+    let shared = top.join(".Trash");
+    if let Ok(meta) = fs::symlink_metadata(&shared) {
+        if sticky_and_dir(&meta) {
+            let td = TrashDir {
+                root: shared.join(uid.to_string()),
+                topdir: Some(top.to_path_buf()),
+            };
+            if ensure_user_trash(&td, uid, &own).is_ok() {
+                return Some(td);
+            }
+        } else if let Some(why) = shared_trash_problem(&meta) {
+            // The spec asks for the failed check to be reported.
+            warn_shared_trash_once(&shared, why, &own);
+        }
+    }
+    let td = TrashDir {
+        root: own,
+        topdir: Some(top.to_path_buf()),
+    };
+    ensure_user_trash(&td, uid, &home_trash())
+        .is_ok()
+        .then_some(td)
+}
+
+/// The existing trash directories of `uid` on the volume mounted at `mp`,
+/// under the rules [`select_on_volume`] puts by: anything else there is
+/// skipped with a warning, so `list`, `empty` and `rm` never act through
+/// a symlink or in a directory another user planted.
+fn volume_trashes_of(mp: &Path, uid: u32) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let shared = mp.join(".Trash");
+    let shared_ok = fs::symlink_metadata(&shared).is_ok_and(|m| sticky_and_dir(&m));
+    let mut consider = |cand: PathBuf| {
+        let Ok(meta) = fs::symlink_metadata(&cand) else {
+            return;
+        };
+        match user_trash_problem(&meta, uid) {
+            None => out.push(cand),
+            Some(why) => warn_once(&cand, format!("skipping '{}', which {why}", cand.display())),
+        }
+    };
+    if shared_ok {
+        consider(shared.join(uid.to_string()));
+    }
+    consider(mp.join(format!(".Trash-{uid}")));
+    out
 }
 
 /// Trash dir for a file on device `dev` at absolute path `abs`.
@@ -303,33 +398,9 @@ pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
         return Ok(home);
     }
 
-    let top = mount_top_of_path(abs);
-    let uid = uid();
-
-    let shared = top.join(".Trash");
-    if let Ok(meta) = fs::symlink_metadata(&shared) {
-        if sticky_and_dir(&meta) {
-            let td = TrashDir {
-                root: shared.join(uid.to_string()),
-                topdir: Some(top.clone()),
-            };
-            if td.ensure().is_ok() {
-                return Ok(td);
-            }
-        } else if let Some(why) = shared_trash_problem(&meta) {
-            // The spec asks for the failed check to be reported.
-            warn_shared_trash_once(&shared, why, &top.join(format!(".Trash-{uid}")));
-        }
-    }
-
-    let td = TrashDir {
-        root: top.join(format!(".Trash-{uid}")),
-        topdir: Some(top),
-    };
-    if td.ensure().is_ok() {
+    if let Some(td) = select_on_volume(&mount_top_of_path(abs), uid()) {
         return Ok(td);
     }
-
     home.ensure()?;
     Ok(home)
 }
@@ -420,7 +491,8 @@ pub fn is_valid_trash_root(root: &Path) -> bool {
 }
 
 /// All trash dirs visible to this user: home trash plus every non-pseudo
-/// mounted volume’s existing user trash (trash-cli multi-volume default).
+/// mounted volume’s existing user trash (trash-cli multi-volume default),
+/// when it passes the checks a put would make ([`volume_trashes_of`]).
 /// Does not create missing volume trash dirs — only discovers existing ones.
 pub fn all() -> Vec<TrashDir> {
     let mut seen = HashSet::new();
@@ -435,12 +507,8 @@ pub fn all() -> Vec<TrashDir> {
     }
     let uid = uid();
     for mp in mount_points() {
-        for cand in [
-            mp.join(".Trash").join(uid.to_string()),
-            mp.join(format!(".Trash-{uid}")),
-        ] {
-            if !seen.contains(&cand) && cand.is_dir() {
-                seen.insert(cand.clone());
+        for cand in volume_trashes_of(&mp, uid) {
+            if seen.insert(cand.clone()) {
                 out.push(TrashDir {
                     root: cand,
                     topdir: Some(mp.clone()),
@@ -1545,6 +1613,50 @@ fn set_times_path(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn volume_trash_must_be_the_users_own_real_directory() {
+        let top = std::env::temp_dir().join(format!("rtrash-voltop-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&top);
+        fs::create_dir_all(&top).unwrap();
+        let me = uid();
+        let own = top.join(format!(".Trash-{me}"));
+        // Missing: made as `.Trash-$uid`, mode 0700, when there is no
+        // shared `.Trash`.
+        let td = select_on_volume(&top, me).unwrap();
+        assert_eq!(td.root, own);
+        assert_eq!(
+            fs::metadata(&own).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(td.files().is_dir() && td.info().is_dir());
+        assert_eq!(volume_trashes_of(&top, me), std::slice::from_ref(&own));
+        // A directory that belongs to someone else: the scan as uid + 1
+        // finds the one it makes owned by this user instead.
+        assert!(select_on_volume(&top, me + 1).is_none());
+        assert!(volume_trashes_of(&top, me + 1).is_empty());
+        // A symlink is refused even when it leads to a directory of ours.
+        fs::remove_dir_all(&own).unwrap();
+        let elsewhere = top.join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &own).unwrap();
+        assert!(select_on_volume(&top, me).is_none());
+        assert!(volume_trashes_of(&top, me).is_empty());
+        assert!(!elsewhere.join("files").exists());
+        // A sticky shared `.Trash` gets the uid directory inside it.
+        fs::remove_file(&own).unwrap();
+        let shared = top.join(".Trash");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777)).unwrap();
+        let td = select_on_volume(&top, me).unwrap();
+        assert_eq!(td.root, shared.join(me.to_string()));
+        assert_eq!(volume_trashes_of(&top, me), std::slice::from_ref(&td.root));
+        // Without the sticky bit the shared one is neither used nor listed.
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(volume_trashes_of(&top, me).is_empty());
+        assert_eq!(select_on_volume(&top, me).unwrap().root, own);
+        fs::remove_dir_all(&top).unwrap();
+    }
 
     #[test]
     fn shared_trash_problem_names_each_failed_check() {
