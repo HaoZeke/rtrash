@@ -1232,10 +1232,14 @@ mod tests {
         let t = tree("ui");
         let mut a = app(&t);
         let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
-        assert!(
-            text.contains(&format!("{} · ", t.0.join("w").display())),
-            "{text}"
-        );
+        // A long temp dir (macOS) gets its start cut, so the title only
+        // promises the path's end, then the total and the counts.
+        let tail = format!("{}w · ", std::path::MAIN_SEPARATOR);
+        let title = text
+            .lines()
+            .find(|l| l.contains(&tail))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(title.contains(" entries · 0 marked"), "{title}");
         assert!(text.contains("big/"), "{text}");
         assert!(text.contains("d trash  u undo  r rescan"), "{text}");
     }
