@@ -847,6 +847,20 @@ impl App {
     }
 }
 
+/// `s` cut to at most `max` characters by dropping its start, marked
+/// with `…`, so the end of a path stays readable.
+fn fit_left(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let keep: String = s.chars().skip(n - (max - 1)).collect();
+    format!("…{keep}")
+}
+
 /// Bar of `width` cells for `part` of `whole`.
 fn bar(part: u64, whole: u64, width: usize) -> String {
     let filled = if whole == 0 {
@@ -923,12 +937,17 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         ),
         None => format!("{}{stopped}", format_bytes(whole)),
     };
-    let title = format!(
-        " {} · {size} · {} entries · {} marked ",
-        app.cur.display(),
+    // Sizes, counts and markers always fit; a long path gives way from
+    // the left, as in ncdu.
+    let tail = format!(
+        " · {size} · {} entries · {} marked ",
         view.rows.len(),
         app.sel.len()
     );
+    let room = (chunks[0].width as usize)
+        .saturating_sub(2)
+        .saturating_sub(tail.chars().count() + 1);
+    let title = format!(" {}{tail}", fit_left(&app.cur.display().to_string(), room));
     let pending = view.scanning;
     let items: Vec<ListItem> = view
         .rows
@@ -1271,6 +1290,28 @@ mod tests {
         a.refresh();
         settle(&mut a);
         assert_eq!(a.view().disk, before);
+    }
+
+    #[test]
+    fn fit_left_keeps_the_end() {
+        assert_eq!(fit_left("/a/b/c", 10), "/a/b/c");
+        assert_eq!(fit_left("/very/long/path/leaf", 8), "…th/leaf");
+        assert_eq!(fit_left("/x", 0), "");
+    }
+
+    #[test]
+    fn long_path_leaves_room_for_sizes_and_markers() {
+        let t = tree("longtitle");
+        let mut a = app(&t);
+        // Deeper than the screen is wide.
+        let deep = t.0.join("w").join("d".repeat(60)).join("e".repeat(60));
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("f"), b"x").unwrap();
+        a.go(deep.clone(), None);
+        a.cache.get_mut(&deep).unwrap().partial = true;
+        let text = tui_term::render_text(60, 14, |f| ui(f, &mut a));
+        assert!(text.contains("(partial) · 1 entries · 0 marked"), "{text}");
+        assert!(text.contains("…eeee"), "{text}");
     }
 
     #[test]
