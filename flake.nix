@@ -25,6 +25,10 @@
         };
       in
       {
+        checks = {
+          inherit rtrash;
+        };
+
         packages.default = rtrash;
 
         devShells.default = craneLib.devShell {
