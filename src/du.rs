@@ -64,6 +64,11 @@ directories appear as one `trash` row and are never printed by --print0.
                           file shares, roughly what deleting a row frees on
                           btrfs, XFS or APFS (reflinks, clones, snapshots);
                           slower, since it maps every file's extents
+      --shared          count each extent that reflinks, clones or snapshots
+                          share once per row and total, as btrfs and XFS
+                          flag them on Linux; slower, since it maps every
+                          file's extents (APFS and other file systems
+                          count every file in full)
       --max-depth=N     list only entries at most N levels below PATH
       --threads=N       walk with N threads (default: one per CPU, or three
                           per CPU up to 64 when the first PATH looks uncached)
@@ -272,6 +277,8 @@ pub struct ScanOpts {
     pub filter: Option<Arc<du_filter::Spec>>,
     /// `--unique`: map file extents to find the bytes no other file shares.
     pub unique: bool,
+    /// `--shared`: count each shared extent once per row and total.
+    pub shared_once: bool,
     /// Counters to update as the walk goes (one add per directory chunk).
     pub control: Option<Arc<ScanControl>>,
     /// `--types`: total the files of each file type.
@@ -293,6 +300,7 @@ impl Default for ScanOpts {
             no_files: false,
             filter: None,
             unique: false,
+            shared_once: false,
             control: None,
             types: false,
         }
@@ -446,6 +454,9 @@ pub struct RootTotals {
     pub excluded: u64,
     /// Bytes in extents no other file shares (`--unique` scans only).
     pub unique: Option<u64>,
+    /// `--shared` scans: disk use counting every reference to a shared
+    /// extent, where `disk` counts each once.
+    pub disk_all: Option<u64>,
 }
 
 /// Result of scanning one or more paths.
@@ -740,34 +751,46 @@ impl Ctx<'_> {
         }
     }
 
-    /// Bytes of a counted file that no other file shares; `disk` without
-    /// `--unique` or an extent map. Shared extents go to `self.shared`.
-    fn unique_of(&self, dir: &du_fs::Dir, name: &CStr, st: &du_fs::Stat, disk: u64) -> u64 {
+    /// The extents of a counted file: its bytes no other file shares and
+    /// its shared extents. Without an extent map the whole file counts
+    /// as unique. On `--unique` scans the shared extents also go to
+    /// `self.shared`.
+    fn share_of(
+        &self,
+        dir: &du_fs::Dir,
+        name: &CStr,
+        st: &du_fs::Stat,
+        disk: u64,
+    ) -> crate::du_extent::FileShare {
+        let whole = crate::du_extent::FileShare {
+            unique: disk,
+            shared: Vec::new(),
+        };
         #[cfg(unix)]
         {
             if !st.is_file() || disk == 0 {
-                return disk;
+                return whole;
             }
             let Ok(f) = dir.open_file(name) else {
-                return disk;
+                return whole;
             };
             self.note_shares(st.dev, crate::du_extent::file_share(&f, disk))
         }
         #[cfg(not(unix))]
         {
             let _ = (dir, name, st);
-            disk
+            whole
         }
     }
 
     #[cfg(unix)]
-    fn note_shares(&self, dev: u64, s: crate::du_extent::FileShare) -> u64 {
-        if !s.shared.is_empty() {
+    fn note_shares(&self, dev: u64, s: crate::du_extent::FileShare) -> crate::du_extent::FileShare {
+        if self.opts.unique && !s.shared.is_empty() {
             if let Ok(mut set) = self.shared.lock() {
                 set.add(dev, &s.shared);
             }
         }
-        s.unique
+        s
     }
 
     fn listable(&self, depth: usize, mtime: i64) -> bool {
@@ -808,6 +831,12 @@ struct Node {
     disk: u64,
     /// Bytes no other file shares (`--unique`), else 0.
     unique: u64,
+    /// `--shared`: bytes outside shared extents, and the shared extents
+    /// as merged `(device, start, end)` ranges; `disk_all` counts every
+    /// reference. `disk` is then `base` plus what the ranges cover.
+    base: u64,
+    ranges: Vec<(u64, u64, u64)>,
+    disk_all: u64,
     mtime: i64,
     /// Files and directories below this one.
     items: u64,
@@ -896,6 +925,9 @@ fn enter(
             apparent: 0,
             disk: st.sizes().1,
             unique: st.sizes().1,
+            base: st.sizes().1,
+            ranges: Vec::new(),
+            disk_all: st.sizes().1,
             mtime: st.mtime,
             items: 0,
             repos: Vec::new(),
@@ -969,6 +1001,9 @@ struct Stats {
     apparent: u64,
     disk: u64,
     unique: u64,
+    /// `--shared`: as in [`Node`], for these entries.
+    base: u64,
+    ranges: Vec<(u64, u64, u64)>,
     mtime: i64,
     /// Files counted (each hard-linked file once).
     files: u64,
@@ -976,6 +1011,33 @@ struct Stats {
     /// an entry of unknown type).
     subdirs: Vec<(usize, Option<du_fs::Stat>)>,
     candidates: Vec<FileCandidate>,
+}
+
+/// `--shared`: add a file of `raw` allocated bytes with `shared`
+/// extents on `dev` to `base` and `ranges`, and return its own size with
+/// each shared byte counted once. The parts never add up to more than
+/// `raw`: an extent map can give compressed data its uncompressed length.
+fn count_once(
+    dev: u64,
+    raw: u64,
+    shared: &[crate::du_extent::Extent],
+    base: &mut u64,
+    ranges: &mut Vec<(u64, u64, u64)>,
+) -> u64 {
+    if shared.is_empty() {
+        *base = base.saturating_add(raw);
+        return raw;
+    }
+    let referenced: u64 = shared.iter().map(|e| e.length).sum();
+    let own = raw.saturating_sub(referenced);
+    *base = base.saturating_add(own);
+    let mut mine: Vec<(u64, u64, u64)> = shared
+        .iter()
+        .map(|e| (dev, e.physical, e.physical.saturating_add(e.length)))
+        .collect();
+    let once = crate::du_extent::coalesce(&mut mine);
+    ranges.extend(mine);
+    raw.min(own.saturating_add(once))
 }
 
 /// Stat entries `range` of `dir`: sum the files and collect the
@@ -994,6 +1056,8 @@ fn stat_entries(
         apparent: 0,
         disk: 0,
         unique: 0,
+        base: 0,
+        ranges: Vec::new(),
         mtime: i64::MIN,
         files: 0,
         subdirs: Vec::new(),
@@ -1048,13 +1112,19 @@ fn stat_entries(
         }
         ctx.files.fetch_add(1, Ordering::Relaxed);
         out.files += 1;
-        let (a, d) = m.sizes();
+        let (a, raw) = m.sizes();
         out.apparent = out.apparent.saturating_add(a);
-        out.disk = out.disk.saturating_add(d);
-        let u = if opts.unique {
-            ctx.unique_of(dir, name, &m, d)
+        out.disk = out.disk.saturating_add(raw);
+        let (u, d) = if opts.unique || opts.shared_once {
+            let s = ctx.share_of(dir, name, &m, raw);
+            let d = if opts.shared_once {
+                count_once(m.dev, raw, &s.shared, &mut out.base, &mut out.ranges)
+            } else {
+                raw
+            };
+            (if opts.unique { s.unique } else { 0 }, d)
         } else {
-            0
+            (0, raw)
         };
         out.unique = out.unique.saturating_add(u);
         out.mtime = out.mtime.max(m.mtime);
@@ -1116,6 +1186,9 @@ fn walk_dir(
         disk: st.sizes().1,
         // A directory's own blocks belong to it alone.
         unique: if opts.unique { st.sizes().1 } else { 0 },
+        base: st.sizes().1,
+        ranges: Vec::new(),
+        disk_all: st.sizes().1,
         mtime: st.mtime,
         items: 0,
         repos: Vec::new(),
@@ -1193,6 +1266,9 @@ fn walk_dir(
     for p in parts {
         node.apparent = node.apparent.saturating_add(p.apparent);
         node.disk = node.disk.saturating_add(p.disk);
+        node.disk_all = node.disk_all.saturating_add(p.disk);
+        node.base = node.base.saturating_add(p.base);
+        node.ranges.extend(p.ranges);
         node.unique = node.unique.saturating_add(p.unique);
         node.mtime = node.mtime.max(p.mtime);
         node.items += p.files;
@@ -1294,6 +1370,9 @@ fn walk_dir(
         node.items += 1 + child.items;
         node.apparent = node.apparent.saturating_add(child.apparent);
         node.disk = node.disk.saturating_add(child.disk);
+        node.disk_all = node.disk_all.saturating_add(child.disk_all);
+        node.base = node.base.saturating_add(child.base);
+        node.ranges.extend(child.ranges);
         node.unique = node.unique.saturating_add(child.unique);
         node.mtime = node.mtime.max(child.mtime);
         for r in child.repos {
@@ -1301,6 +1380,10 @@ fn walk_dir(
                 node.repos.push(r);
             }
         }
+    }
+    if opts.shared_once {
+        let once = crate::du_extent::coalesce(&mut node.ranges);
+        node.disk = node.disk_all.min(node.base.saturating_add(once));
     }
     node.listable = listing && !is_git_dir && depth > 0 && ctx.listable(depth, node.mtime);
     node.artefact = artefact;
@@ -1486,7 +1569,7 @@ fn scan_pooled(
             cut: Default::default(),
             types: Default::default(),
         };
-        let (apparent, disk, unique, artefact) = if meta.is_dir() {
+        let (apparent, disk, disk_all, unique, artefact) = if meta.is_dir() {
             enter(
                 &ctx,
                 None,
@@ -1496,20 +1579,26 @@ fn scan_pooled(
                 true,
                 ctx.filter.as_ref().and_then(|f| f.root_chain.as_ref()),
             )
-            .map(|n| (n.apparent, n.disk, n.unique, n.artefact))
-            .unwrap_or((0, 0, 0, None))
+            .map(|n| (n.apparent, n.disk, n.disk_all, n.unique, n.artefact))
+            .unwrap_or((0, 0, 0, 0, None))
         } else {
             ctx.files.fetch_add(1, Ordering::Relaxed);
-            let (a, d) = meta.sizes();
+            let (a, raw) = meta.sizes();
             if opts.types {
                 let name = abs.file_name().unwrap_or_default();
                 let mut m = ctx.types.lock().unwrap_or_else(|e| e.into_inner());
-                add_type(&mut m, name.as_encoded_bytes(), a, d);
+                add_type(&mut m, name.as_encoded_bytes(), a, raw);
             }
-            let u = if opts.unique {
-                root_file_unique(&ctx, &abs, &meta, d)
+            let (u, d) = if opts.unique || opts.shared_once {
+                let s = root_file_share(&ctx, &abs, &meta, raw);
+                let d = if opts.shared_once {
+                    count_once(meta.dev, raw, &s.shared, &mut 0, &mut Vec::new())
+                } else {
+                    raw
+                };
+                (s.unique, d)
             } else {
-                0
+                (0, raw)
             };
             if meta.is_file() && !opts.artefacts_only && ctx.listable(0, meta.mtime) {
                 ctx.top_files.offer(ctx.key(a, d, 1, meta.mtime), || Item {
@@ -1525,7 +1614,7 @@ fn scan_pooled(
                     unique: opts.unique.then_some(u),
                 });
             }
-            (a, d, u, None)
+            (a, d, raw, u, None)
         };
         unreadable += ctx.unreadable.load(Ordering::Relaxed);
         unread.extend(ctx.unread.into_inner().unwrap_or_else(|e| e.into_inner()));
@@ -1541,6 +1630,7 @@ fn scan_pooled(
             artefact,
             excluded: ctx.excluded.load(Ordering::Relaxed),
             unique: opts.unique.then_some(unique),
+            disk_all: opts.shared_once.then_some(disk_all),
         });
         dirs.merge_vec(ctx.top_dirs.into_vec());
         files.merge_vec(ctx.top_files.into_vec());
@@ -1573,22 +1663,31 @@ fn scan_pooled(
     })
 }
 
-/// Unique bytes of a PATH that is itself a file.
-fn root_file_unique(ctx: &Ctx<'_>, path: &Path, st: &du_fs::Stat, disk: u64) -> u64 {
+/// [`Ctx::share_of`] for a PATH that is itself a file.
+fn root_file_share(
+    ctx: &Ctx<'_>,
+    path: &Path,
+    st: &du_fs::Stat,
+    disk: u64,
+) -> crate::du_extent::FileShare {
+    let whole = crate::du_extent::FileShare {
+        unique: disk,
+        shared: Vec::new(),
+    };
     #[cfg(unix)]
     {
         if !st.is_file() || disk == 0 {
-            return disk;
+            return whole;
         }
         match fs::File::open(path) {
             Ok(f) => ctx.note_shares(st.dev, crate::du_extent::file_share(&f, disk)),
-            Err(_) => disk,
+            Err(_) => whole,
         }
     }
     #[cfg(not(unix))]
     {
         let _ = (ctx, path, st);
-        disk
+        whole
     }
 }
 
@@ -1894,9 +1993,12 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
         .iter()
         .map(|t| {
             format!(
-                "{{\"path\":\"{}\",\"disk\":{},\"apparent\":{}{},\"files\":{},\"links\":{},\"dirs\":{},\"excluded\":{},\"artefact\":{}}}",
+                "{{\"path\":\"{}\",\"disk\":{}{},\"apparent\":{}{},\"files\":{},\"links\":{},\"dirs\":{},\"excluded\":{},\"artefact\":{}}}",
                 json_escape(&t.path.to_string_lossy()),
                 t.disk,
+                t.disk_all
+                    .map(|d| format!(",\"disk_all\":{d}"))
+                    .unwrap_or_default(),
                 t.apparent,
                 unique_json(t.unique),
                 t.files,
@@ -2480,6 +2582,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--print0" => print0 = true,
                 "--stacks" => stacks = true,
                 "--unique" => opts.unique = true,
+                "--shared" => opts.shared_once = true,
                 "--types" => opts.types = true,
                 "--no-git" => use_git = false,
                 "--home-only" => home_only = true,
@@ -2550,6 +2653,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 || pick
                 || interactive
                 || opts.unique
+                || opts.shared_once
                 || opts.types,
         );
     }
@@ -2583,6 +2687,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             || pick
             || interactive
             || opts.unique
+            || opts.shared_once
             || opts.types
         {
             eprintln!("{prog}: --ncdu writes an ncdu export; it takes no other output mode");
@@ -2601,6 +2706,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if opts.unique && (from_file.is_some() || output.is_some() || stacks || interactive) {
         eprintln!(
             "{prog}: --unique adds a column to a live listing; it takes no -f, -o, --stacks or -i"
+        );
+        return 2;
+    }
+    if opts.shared_once
+        && (from_file.is_some() || output.is_some() || stacks || interactive || opts.types)
+    {
+        eprintln!(
+            "{prog}: --shared changes the sizes of a live listing; it takes no -f, -o, --stacks, -i or --types"
         );
         return 2;
     }
@@ -2830,8 +2943,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 .unique
                 .map(|u| format!(", {} unique", format_bytes(u)))
                 .unwrap_or_default();
+            let once = t
+                .disk_all
+                .map(|d| {
+                    format!(
+                        " with shared extents once ({} counting each reference)",
+                        format_bytes(d)
+                    )
+                })
+                .unwrap_or_default();
             println!(
-                "Total {}{kind}: {} on disk{unique}, {} apparent, {}{links}, {}{excluded}",
+                "Total {}{kind}: {} on disk{once}{unique}, {} apparent, {}{links}, {}{excluded}",
                 crate::util::term_path(&t.path),
                 format_bytes(t.disk),
                 format_bytes(t.apparent),
@@ -3108,6 +3230,88 @@ mod tests {
         assert_eq!(control.files.load(Ordering::Relaxed), 1);
         assert!(r.files.iter().any(|f| f.path.ends_with("top")));
         assert!(report_json(&r, &TrashSummary::default()).contains(",\"partial\":true,"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn count_once_counts_each_shared_byte_of_a_file_once() {
+        use crate::du_extent::Extent;
+        let sh = |physical, length| Extent {
+            physical,
+            length,
+            shared: true,
+        };
+        let (mut base, mut ranges) = (0, Vec::new());
+        // No shared extents: all of it is the file's own.
+        assert_eq!(count_once(1, 4096, &[], &mut base, &mut ranges), 4096);
+        assert_eq!((base, ranges.len()), (4096, 0));
+        // 8 KiB of its own, and two references that overlap by 4 KiB.
+        let d = count_once(
+            1,
+            32768,
+            &[sh(0, 12288), sh(8192, 12288)],
+            &mut base,
+            &mut ranges,
+        );
+        assert_eq!(d, 8192 + 20480);
+        assert_eq!(base, 4096 + 8192);
+        assert_eq!(ranges, vec![(1, 0, 20480)]);
+        // Compressed data can map longer than its blocks: never more than
+        // the file's allocated size.
+        let mut b2 = 0;
+        assert_eq!(
+            count_once(1, 4096, &[sh(0, 131072)], &mut b2, &mut Vec::new()),
+            4096
+        );
+        assert_eq!(b2, 0);
+    }
+
+    /// Clone `from` to a new file `to` with `FICLONE`; false where the
+    /// file system cannot.
+    #[cfg(target_os = "linux")]
+    fn reflink(from: &Path, to: &Path) -> bool {
+        const FICLONE: libc::c_ulong = 0x4004_9409;
+        let src = fs::File::open(from).unwrap();
+        let dst = fs::File::create(to).unwrap();
+        use std::os::fd::AsRawFd;
+        // SAFETY: both fds are open; FICLONE takes the source fd.
+        let r = unsafe { libc::ioctl(dst.as_raw_fd(), FICLONE as _, src.as_raw_fd()) };
+        r == 0
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shared_scan_counts_reflinked_copies_once() {
+        let root = std::env::temp_dir().join(format!("rtrash-du-shared-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("x")).unwrap();
+        let a = root.join("a");
+        fs::write(&a, vec![3u8; 1 << 20]).unwrap();
+        fs::File::open(&a).unwrap().sync_all().unwrap();
+        fs::write(root.join("x/own"), vec![4u8; 100_000]).unwrap();
+        let cloned = reflink(&a, &root.join("x/b"));
+        let opts = ScanOpts {
+            shared_once: true,
+            ..ScanOpts::default()
+        };
+        let r = scan(std::slice::from_ref(&root), &opts).unwrap();
+        let t = &r.roots[0];
+        let all = t.disk_all.unwrap();
+        let blocks = fs::symlink_metadata(&a).unwrap().blocks() * 512;
+        if cloned {
+            // b counts in full in x, but only once in the whole tree.
+            assert_eq!(t.disk + blocks, all, "{t:?}");
+            let x = r.dirs.iter().find(|d| d.path.ends_with("x")).unwrap();
+            assert!(x.disk >= blocks, "{x:?}");
+        } else {
+            // Nothing shared here (no reflinks on this file system).
+            assert_eq!(t.disk, all, "{t:?}");
+        }
+        let plain = scan(std::slice::from_ref(&root), &ScanOpts::default()).unwrap();
+        assert_eq!(plain.roots[0].disk, all);
+        assert!(plain.roots[0].disk_all.is_none());
+        let j = report_json(&r, &TrashSummary::default());
+        assert!(j.contains(&format!("\"disk_all\":{all}")), "{j}");
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -610,6 +610,29 @@ Mapping extents costs time on every file, so the plain listing skips it.
 Not with
 .BR \-f ", " \-o ", " \-\-stacks " or " \-i .
 .TP
+.B \-\-shared
+Count each shared extent once in every row and total, so reflinked
+copies and snapshots no longer add up to more than they take on disk.
+On Linux the walk asks
+.B FS_IOC_FIEMAP
+for every file; btrfs and the XFS family flag the extents that
+reflinks and snapshots share.
+A row counts its files' own extents, plus the shared ones it points
+at, each once.
+An extent shared with files outside the row still counts in full in
+that row, since the row uses it.
+APFS reports no shared ranges, so on macOS, as on file systems that
+share nothing, every file counts in full.
+The DISK column and the ranking then show these sizes, and the
+totals also give the size that counts each reference.
+JSON roots gain
+.BR disk_all .
+It costs as much as
+.B \-\-unique
+and can go with it.
+Not with
+.BR \-f ", " \-o ", " \-\-stacks ", " \-i ", " \-\-types " or " \-\-ncdu .
+.TP
 .BI \-\-exclude= PATTERN
 Leave out entries that match
 .I PATTERN

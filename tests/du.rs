@@ -1391,6 +1391,37 @@ fn unique_adds_a_column_and_a_shared_summary() {
     }
 }
 
+#[test]
+fn shared_counts_shared_extents_once_in_sizes() {
+    let t = Tree::new("shared");
+    t.file("s/a/big", 200_000);
+    t.file("s/small", 3000);
+    let out = t.du(&["--shared", "--no-git", "s"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        text.contains(" on disk with shared extents once ("),
+        "{text}"
+    );
+    let json = t.json(&["--shared", "--no-git", "s"]);
+    assert!(json.contains("\"disk_all\":"), "{json}");
+    let plain = t.json(&["--no-git", "s"]);
+    assert!(!plain.contains("\"disk_all\""), "{plain}");
+    for bad in [
+        &["--shared", "--stacks"][..],
+        &["--shared", "-o", "-"],
+        &["--shared", "-i"],
+        &["--shared", "--types"],
+        &["--shared", "--ncdu=-"],
+    ] {
+        assert_eq!(t.du(bad).status.code(), Some(2), "{bad:?}");
+    }
+}
+
 // The Apple File System refuses names that are not UTF-8 (EILSEQ), so
 // this runs on Linux only, like the CLI tests for such names.
 #[cfg(target_os = "linux")]

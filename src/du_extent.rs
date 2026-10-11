@@ -93,6 +93,23 @@ pub fn union_len(ranges: &[(u64, u64)]) -> u64 {
     total
 }
 
+/// Merge `ranges`, half-open `(device, start, end)` triples, in place:
+/// sorted, with overlapping or touching ranges on one device joined.
+/// Returns the bytes they cover, each counted once.
+pub fn coalesce(ranges: &mut Vec<(u64, u64, u64)>) -> u64 {
+    ranges.retain(|&(_, s, e)| e > s);
+    ranges.sort_unstable();
+    let mut out: Vec<(u64, u64, u64)> = Vec::with_capacity(ranges.len());
+    for &(d, s, e) in ranges.iter() {
+        match out.last_mut() {
+            Some(last) if last.0 == d && s <= last.2 => last.2 = last.2.max(e),
+            _ => out.push((d, s, e)),
+        }
+    }
+    *ranges = out;
+    ranges.iter().map(|&(_, s, e)| e - s).sum()
+}
+
 /// What one file adds to a `--unique` scan.
 #[derive(Debug, Default)]
 pub struct FileShare {
@@ -308,6 +325,22 @@ mod tests {
             length,
             shared,
         }
+    }
+
+    #[test]
+    fn coalesce_joins_ranges_per_device() {
+        let mut v = vec![
+            (2, 0, 10),
+            (1, 50, 60),
+            (1, 0, 20),
+            (1, 10, 30),
+            (1, 30, 40),
+            (1, 5, 5),
+        ];
+        assert_eq!(coalesce(&mut v), 10 + 40 + 10);
+        assert_eq!(v, vec![(1, 0, 40), (1, 50, 60), (2, 0, 10)]);
+        let mut none = Vec::new();
+        assert_eq!(coalesce(&mut none), 0);
     }
 
     #[test]

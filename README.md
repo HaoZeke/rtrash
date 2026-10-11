@@ -341,6 +341,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du --sort=items` | Directories with the most files and subdirectories below them (inode hogs such as `node_modules`); `-C` adds an item count column to any listing |
 | `rtrash du --types ~/data` | Lists file types instead of directories and files: disk use, apparent size and file count per extension, with case ignored, ranked by disk use, `--apparent` or `--sort=items`. JSON adds a `types` array |
 | `rtrash du --unique` | Adds a UNIQUE column: the bytes in extents no other file shares, roughly what deleting a row frees where reflinks, clones or snapshots share data (Btrfs on Linux, the Apple File System on macOS). The closing summary shows the shared extents once each and as referenced. It maps every file's extents, so it runs slower; the default listing skips it |
+| `rtrash du --shared` | Counts each extent that reflinks, clones or snapshots share once per row and in the totals, so copies on Btrfs or XFS no longer add up to more than they take on disk; the total also gives the size that counts each reference. Linux only; it maps every file's extents, like `--unique` |
 | `rtrash du --sort=mtime` | Most recently modified first; a directory gives way to the subdirectory that contains its newest change |
 | `rtrash du --dirs --older-than=30` | Directories with nothing modified in the last 30 days |
 | `rtrash du --since=2026-09-01 --until=2026-10-01` | Entries last modified in September, in local time; `YYYY-MM-DDTHH:MM[:SS]` sets an hour too |
