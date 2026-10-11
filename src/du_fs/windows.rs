@@ -153,6 +153,12 @@ impl Dir {
     /// Read every entry. Returns the entries read and whether reading
     /// stopped on an error.
     pub fn entries(&self) -> (Entries, bool) {
+        self.entries_upto(usize::MAX)
+    }
+
+    /// [`Self::entries`], stopping once `max` or more are in: the rest of
+    /// the buffer that crossed the mark comes along.
+    pub fn entries_upto(&self, max: usize) -> (Entries, bool) {
         thread_local! {
             static BUF: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
         }
@@ -184,6 +190,9 @@ impl Dir {
                     unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, buf.len() * 8) };
                 if !parse(bytes, self.stat.dev, &mut out) {
                     return (out, true);
+                }
+                if out.len() >= max {
+                    return (out, false);
                 }
             }
         })

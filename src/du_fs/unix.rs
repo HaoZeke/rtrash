@@ -99,18 +99,26 @@ impl Dir {
     /// Read every entry except `.` and `..`. Returns the entries read and
     /// whether reading stopped on an error.
     pub fn entries(&self) -> (Entries, bool) {
+        self.entries_upto(usize::MAX)
+    }
+
+    /// [`Self::entries`], stopping once `max` or more are in: the rest of
+    /// the buffer that crossed the mark comes along. macOS reads them
+    /// all, since its bulk reader times whole listings.
+    pub fn entries_upto(&self, max: usize) -> (Entries, bool) {
         #[cfg(target_os = "linux")]
         {
-            read_getdents(self.fd.as_raw_fd())
+            read_getdents(self.fd.as_raw_fd(), max)
         }
         #[cfg(target_os = "macos")]
         {
+            let _ = max;
             super::bulk::read(self.fd.as_raw_fd())
-                .unwrap_or_else(|| read_readdir(self.fd.as_raw_fd()))
+                .unwrap_or_else(|| read_readdir(self.fd.as_raw_fd(), usize::MAX))
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            read_readdir(self.fd.as_raw_fd())
+            read_readdir(self.fd.as_raw_fd(), max)
         }
     }
 }
@@ -143,7 +151,7 @@ pub fn lstat(path: &Path) -> io::Result<Stat> {
 const GETDENTS_BUF: usize = 64 * 1024;
 
 #[cfg(target_os = "linux")]
-fn read_getdents(fd: RawFd) -> (Entries, bool) {
+fn read_getdents(fd: RawFd, max: usize) -> (Entries, bool) {
     use std::cell::RefCell;
     thread_local! {
         static BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -177,6 +185,9 @@ fn read_getdents(fd: RawFd) -> (Entries, bool) {
                 Err(_) => return (out, true),
             };
             parse_dirents(&buf[..n], &mut out);
+            if out.len() >= max {
+                return (out, false);
+            }
         }
     })
 }
@@ -213,7 +224,7 @@ fn kind_of(d_type: u8) -> Kind {
 /// unknown, so every entry gets a stat. A read error ends the listing
 /// like the end of the directory does.
 #[cfg_attr(target_os = "linux", allow(dead_code))]
-fn read_readdir(fd: RawFd) -> (Entries, bool) {
+fn read_readdir(fd: RawFd, max: usize) -> (Entries, bool) {
     let mut out = Entries::default();
     // SAFETY: the duplicate descriptor belongs to the DIR stream from
     // fdopendir on, and closedir releases it. Each dirent is read before
@@ -229,7 +240,7 @@ fn read_readdir(fd: RawFd) -> (Entries, bool) {
             return (out, true);
         }
         libc::rewinddir(dir);
-        loop {
+        while out.len() < max {
             let ent = libc::readdir(dir);
             if ent.is_null() {
                 break;
@@ -337,7 +348,7 @@ mod tests {
             .expect("getattrlistbulk read nothing from an APFS temp directory");
         #[cfg(not(target_os = "macos"))]
         let (e, failed) = d.entries();
-        let (r, r_failed) = read_readdir(d.fd.as_raw_fd());
+        let (r, r_failed) = read_readdir(d.fd.as_raw_fd(), usize::MAX);
         let a: Vec<String> = names(&e).into_iter().map(|x| x.0).collect();
         let b: Vec<String> = names(&r).into_iter().map(|x| x.0).collect();
         let (sa, sb): (BTreeSet<&String>, BTreeSet<&String>) =
@@ -375,6 +386,15 @@ mod tests {
             assert!(n.contains(&("sub".into(), Kind::Dir)));
             assert!(n.contains(&("link".into(), Kind::Other)));
         }
+
+        // A bounded read stops after the buffer that reaches the mark.
+        // Fresh descriptors, since a read moves the offset.
+        let (p, failed) = Dir::open(&root).unwrap().entries_upto(10);
+        assert!(!failed && p.len() >= 10, "{}", p.len());
+        #[cfg(not(target_os = "macos"))]
+        assert!(p.len() < e.len(), "{} of {}", p.len(), e.len());
+        let (r5, _) = read_readdir(Dir::open(&root).unwrap().fd.as_raw_fd(), 5);
+        assert_eq!(r5.len(), 5);
 
         use std::os::unix::fs::MetadataExt;
         let m = fs::symlink_metadata(root.join("link")).unwrap();

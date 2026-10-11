@@ -1524,7 +1524,9 @@ fn looks_cold(path: &Path) -> bool {
         slowest = slowest.max(took);
         calls += 1;
     };
-    let (entries, _) = dir.entries();
+    // A bounded read: listing all of a huge directory here would cost
+    // as much as the walk's own listing of it, for 48 entries.
+    let (entries, _) = dir.entries_upto(PROBE_STATS);
     let mut subdirs = 0;
     for i in 0..entries.len().min(PROBE_STATS) {
         let (name, kind) = entries.get(i);
@@ -1540,7 +1542,7 @@ fn looks_cold(path: &Path) -> bool {
         let mut child = None;
         timed(&mut || child = dir.open_child(name).ok());
         let Some(child) = child else { continue };
-        let (inner, _) = child.entries();
+        let (inner, _) = child.entries_upto(PROBE_STATS / PROBE_SUBDIRS);
         for j in 0..inner.len().min(PROBE_STATS / PROBE_SUBDIRS) {
             if inner.stat(j).is_none() {
                 timed(&mut || {
