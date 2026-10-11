@@ -516,23 +516,65 @@ impl Cbor<'_> {
 /// Uncompressed bytes a data block collects before it is written.
 const BLOCK_TARGET: usize = 128 << 10;
 
+/// Blocks waiting for the compressing thread, beyond the one it works on.
+const QUEUED_BLOCKS: usize = 2;
+
 /// Writes the binary export the export walk sends it.
 ///
 /// Items go out in post-order: each entry as the walk reaches it, and a
 /// directory when it closes, since only then are its cumulative sizes
-/// and its last entry known. Every reference is absolute. Items gather
-/// in a block of about [`BLOCK_TARGET`] bytes that goes out compressed
-/// once full, and the index block follows the last one, so the output
-/// needs no seeking and `-` (stdout) works.
+/// and its last entry known. A reference within one block is relative,
+/// as ncdu writes it, and absolute across blocks. Items gather in a
+/// block of about [`BLOCK_TARGET`] bytes, which a second thread
+/// compresses while the walk goes on; frames are written in order as
+/// they come back, and the index block follows the last one, so the
+/// output needs no seeking and `-` (stdout) works.
 pub struct Writer<'w, W: Write> {
     w: &'w mut W,
     /// Bytes written so far.
     at: u64,
     block: Vec<u8>,
+    /// Data blocks handed to the compressing thread so far; the number
+    /// of the one being filled.
+    sent: usize,
     /// Per data block written: offset (high 40 bits) and length.
     pointers: Vec<u64>,
     stack: Vec<OpenDir>,
     root: Option<u64>,
+    zstd: Compressor,
+}
+
+/// A thread that compresses blocks in the order it gets them.
+struct Compressor {
+    /// `None` once the last block is sent.
+    tx: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+    rx: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+}
+
+impl Compressor {
+    fn start() -> Self {
+        let (tx, blocks) = std::sync::mpsc::sync_channel::<Vec<u8>>(QUEUED_BLOCKS);
+        let (done, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for block in blocks {
+                let frame = ruzstd::encoding::compress_to_vec(
+                    &block[..],
+                    ruzstd::encoding::CompressionLevel::Fastest,
+                );
+                if done.send(with_content_size(frame, block.len())).is_err() {
+                    break;
+                }
+            }
+        });
+        Compressor { tx: Some(tx), rx }
+    }
+
+    fn send(&self, block: Vec<u8>) -> io::Result<()> {
+        self.tx
+            .as_ref()
+            .and_then(|tx| tx.send(block).ok())
+            .ok_or_else(|| bad("the compressing thread stopped"))
+    }
 }
 
 /// Hard links below a directory, by device and inode.
@@ -676,6 +718,20 @@ impl ItemOut {
         self.1 += 1;
     }
 
+    /// A reference from an item at `here` to the earlier item at `to`
+    /// (both absolute): relative in the same block, as ncdu writes it
+    /// (shorter, and better compressed), absolute otherwise.
+    fn reference(&mut self, key: u64, to: u64, here: u64) {
+        put_head(&mut self.0, 0, key);
+        match here.checked_sub(to) {
+            Some(back) if back > 0 && to >> 24 == here >> 24 => {
+                put_head(&mut self.0, 1, back - 1);
+            }
+            _ => put_head(&mut self.0, 0, to),
+        }
+        self.1 += 1;
+    }
+
     /// The map, with its length in front.
     fn bytes(self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.0.len() + 9);
@@ -708,9 +764,11 @@ impl<'w, W: Write> Writer<'w, W> {
             w,
             at: 0,
             block: Vec::with_capacity(BLOCK_TARGET + 4096),
+            sent: 0,
             pointers: Vec::new(),
             stack: Vec::new(),
             root: None,
+            zstd: Compressor::start(),
         }
     }
 
@@ -720,28 +778,63 @@ impl<'w, W: Write> Writer<'w, W> {
         Ok(())
     }
 
-    /// Add an item to the current block; its absolute reference.
-    fn put(&mut self, item: Vec<u8>) -> io::Result<u64> {
-        if !self.block.is_empty() && self.block.len() + item.len() > BLOCK_TARGET {
+    /// Add an item to the current block, with its `prev` and `sub`
+    /// references (keys 2 and 12) once its place is known; its absolute
+    /// reference.
+    fn put(&mut self, mut item: ItemOut, prev: Option<u64>, sub: Option<u64>) -> io::Result<u64> {
+        // Room for both references at their longest.
+        let most = item.0.len() + 9 + 2 * 10;
+        if !self.block.is_empty() && self.block.len() + most > BLOCK_TARGET {
             self.flush_block()?;
         }
-        if self.block.len() + item.len() > BLOCK_MAX {
+        if self.block.len() + most > BLOCK_MAX {
             return Err(bad("item too large for a block"));
         }
-        let at = ((self.pointers.len() as u64) << 24) | self.block.len() as u64;
-        self.block.extend(item);
+        let at = ((self.sent as u64) << 24) | self.block.len() as u64;
+        if let Some(p) = prev {
+            item.reference(2, p, at);
+        }
+        if let Some(s) = sub {
+            item.reference(12, s, at);
+        }
+        self.block.extend(item.bytes());
         Ok(at)
     }
 
+    /// Hand the block being filled to the compressing thread, and write
+    /// the frames that came back meanwhile.
     fn flush_block(&mut self) -> io::Result<()> {
         if self.block.is_empty() {
             return Ok(());
         }
-        let frame = ruzstd::encoding::compress_to_vec(
-            &self.block[..],
-            ruzstd::encoding::CompressionLevel::Fastest,
-        );
-        let frame = with_content_size(frame, self.block.len())?;
+        if self.sent >= 1 << 24 {
+            return Err(bad("too many blocks"));
+        }
+        let block = std::mem::replace(&mut self.block, Vec::with_capacity(BLOCK_TARGET + 4096));
+        self.zstd.send(block)?;
+        self.sent += 1;
+        while let Ok(frame) = self.zstd.rx.try_recv() {
+            self.write_frame(frame?)?;
+        }
+        Ok(())
+    }
+
+    /// Wait for every frame still being compressed and write it.
+    fn drain(&mut self) -> io::Result<()> {
+        self.zstd.tx = None;
+        while self.pointers.len() < self.sent {
+            let frame = self
+                .zstd
+                .rx
+                .recv()
+                .map_err(|_| bad("the compressing thread stopped"))?;
+            self.write_frame(frame?)?;
+        }
+        Ok(())
+    }
+
+    /// Write the next data block, numbered in the order blocks were sent.
+    fn write_frame(&mut self, frame: Vec<u8>) -> io::Result<()> {
         let len = frame.len() + 12;
         if len > BLOCK_MAX || self.at >= 1 << 40 {
             return Err(bad("block or file too large for the format"));
@@ -753,7 +846,6 @@ impl<'w, W: Write> Writer<'w, W> {
         self.write(&number.to_be_bytes())?;
         self.write(&frame)?;
         self.write(&head)?;
-        self.block.clear();
         Ok(())
     }
 
@@ -761,7 +853,8 @@ impl<'w, W: Write> Writer<'w, W> {
     /// before it, and count it there.
     fn entry(
         &mut self,
-        mut item: ItemOut,
+        item: ItemOut,
+        sub: Option<u64>,
         cum: (u64, u64),
         items: u64,
         error: bool,
@@ -770,20 +863,19 @@ impl<'w, W: Write> Writer<'w, W> {
             .stack
             .last_mut()
             .ok_or_else(|| bad("entry outside a directory"))?;
-        if let Some(prev) = parent.last {
-            item.uint(2, prev);
-        }
+        let prev = parent.last;
         parent.cum_asize = parent.cum_asize.saturating_add(cum.0);
         parent.cum_dsize = parent.cum_dsize.saturating_add(cum.1);
         parent.items = parent.items.saturating_add(items + 1);
         parent.sub_error |= error;
-        let at = self.put(item.bytes())?;
+        let at = self.put(item, prev, sub)?;
         self.stack.last_mut().expect("parent").last = Some(at);
         Ok(())
     }
 
-    /// The item of a closed directory. Like ncdu, the shared sizes are
-    /// those of hard links below it that have links elsewhere too.
+    /// The item of a closed directory, but for its last entry (`sub`),
+    /// which [`Writer::put`] adds. Like ncdu, the shared sizes are those of
+    /// hard links below it that have links elsewhere too.
     fn dir_item(d: &OpenDir) -> ItemOut {
         let (mut shr_a, mut shr_d) = (0u64, 0u64);
         for l in d.links.values().filter(|l| l.seen < l.nlink) {
@@ -806,9 +898,6 @@ impl<'w, W: Write> Writer<'w, W> {
             it.uint(10, shr_d);
         }
         it.uint(11, d.items);
-        if let Some(sub) = d.last {
-            it.uint(12, sub);
-        }
         if d.mtime > 0 {
             it.uint(18, d.mtime as u64);
         }
@@ -872,7 +961,7 @@ impl<W: Write> Sink for Writer<'_, W> {
                 (Self::dir_item(&d), (d.cum_asize, d.cum_dsize), true)
             }
         };
-        self.entry(item, cum, 0, error)
+        self.entry(item, None, cum, 0, error)
     }
 
     fn open(
@@ -891,12 +980,13 @@ impl<W: Write> Sink for Writer<'_, W> {
         let mut d = self.stack.pop().ok_or_else(|| bad("close without open"))?;
         let item = Self::dir_item(&d);
         let Some(parent) = self.stack.last_mut() else {
-            self.root = Some(self.put(item.bytes())?);
+            self.root = Some(self.put(item, None, d.last)?);
             return Ok(());
         };
         let dup = merge_links(&mut parent.links, std::mem::take(&mut d.links));
         self.entry(
             item,
+            d.last,
             (
                 d.cum_asize.saturating_sub(dup.0),
                 d.cum_dsize.saturating_sub(dup.1),
@@ -909,6 +999,7 @@ impl<W: Write> Sink for Writer<'_, W> {
     fn finish(&mut self) -> io::Result<()> {
         let root = self.root.ok_or_else(|| bad("no root written"))?;
         self.flush_block()?;
+        self.drain()?;
         let len = 8 + 8 * self.pointers.len() + 8;
         if len >= 1 << 28 {
             return Err(bad("too many blocks for the index"));
@@ -1253,6 +1344,20 @@ mod tests {
             .read_to_end(&mut out)
             .unwrap();
         assert_eq!(out, data);
+        // A block that repeats for longer than 64 KiB, the match lengths
+        // ruzstd 0.9.1 fixed the encoding of, reads back whole.
+        let zeros = vec![0u8; BLOCK_TARGET];
+        let z = ruzstd::encoding::compress_to_vec(
+            &zeros[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        let z = with_content_size(z, zeros.len()).unwrap();
+        let mut back = Vec::new();
+        ruzstd::decoding::StreamingDecoder::new(&z[..])
+            .unwrap()
+            .read_to_end(&mut back)
+            .unwrap();
+        assert_eq!(back, zeros);
         // A header with a size already, or not zstd at all, is refused.
         assert!(with_content_size(frame, 1).is_err());
         assert!(with_content_size(b"not zstd".to_vec(), 1).is_err());
@@ -1321,6 +1426,49 @@ mod tests {
         assert_eq!(f[&11], 3012);
         let (_, f) = dir_at(&bin, &["logs", "old"]);
         assert_eq!((f[&3] + 4, f[&11]), (f[&7], 1));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn references_in_one_block_are_relative_and_a_failed_write_stops() {
+        use std::fs;
+        let root = tmp("refs");
+        fs::create_dir_all(root.join("d")).unwrap();
+        fs::write(root.join("d/a"), b"a").unwrap();
+        fs::write(root.join("d/b"), b"b").unwrap();
+        let mut bin = Vec::new();
+        crate::du_ncdu::export_binary(&root, false, None, &mut bin).unwrap();
+        let mut b = Blocks::open(io::Cursor::new(&bin[..])).unwrap();
+        let at = b.root;
+        let data = b.block(0).unwrap();
+        let top = Item::parse(data, (at & 0xff_ffff) as usize).unwrap();
+        assert!(matches!(top.sub_ref, Some(Ref::Back(_))), "{top:?}");
+        // The two files of d: the second points back at the first.
+        let d_at = b.item(at).unwrap().sub.unwrap();
+        let last_at = b.item(d_at).unwrap().sub.unwrap();
+        let off = (last_at & 0xff_ffff) as usize;
+        let raw = Item::parse(b.block(0).unwrap(), off).unwrap();
+        assert!(matches!(raw.prev_ref, Some(Ref::Back(_))), "{raw:?}");
+        assert!(b.item(last_at).unwrap().prev.is_some());
+
+        // A writer that fails partway: an error, and no thread left waiting.
+        struct Fails(usize);
+        impl Write for Fails {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                if self.0 < b.len() {
+                    return Err(io::Error::other("disk full"));
+                }
+                self.0 -= b.len();
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        for room in [0, 8, 20, bin.len() - 10] {
+            let r = crate::du_ncdu::export_binary(&root, false, None, &mut Fails(room));
+            assert!(r.is_err(), "room {room}");
+        }
         let _ = fs::remove_dir_all(&root);
     }
 

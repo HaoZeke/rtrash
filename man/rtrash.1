@@ -923,7 +923,9 @@ adding up the tree.
 Hard links count as ncdu counts them: once in every directory with a link
 below it, with the part shared with links elsewhere recorded too.
 The fast zstd level is the only one this build has, so the export is
-larger than ncdu's own, by about half.
+larger than ncdu's own, by about a third.
+A second thread compresses while the walk goes on, so the export takes
+about as long as the JSON one.
 .TP
 .BR \-f ", " \-\-file =\fIFILE\fR
 List the largest directories from a snapshot instead of scanning.

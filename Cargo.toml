@@ -58,7 +58,7 @@ python = ["dep:pyo3"]
 libc = "0.2"
 rayon = "1.10"
 # Decoder only, pure Rust, no dependencies: reads ncdu 2 binary exports.
-ruzstd = { version = "0.8", default-features = false, features = ["std"] }
+ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 pyo3 = { version = "0.29", optional = true, features = ["extension-module"] }
 ratatui = { version = "0.29", optional = true, default-features = false, features = [
   "crossterm",
