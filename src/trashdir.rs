@@ -545,7 +545,12 @@ pub fn owner_name(path: &Path) -> String {
     let Ok(meta) = fs::metadata(path) else {
         return "?".to_string();
     };
-    let uid = meta.uid();
+    uid_name(meta.uid())
+}
+
+/// The account name of `uid`, or the number when the user database has no
+/// name for it.
+pub fn uid_name(uid: u32) -> String {
     let mut buf = vec![0 as libc::c_char; 1024];
     let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
     let mut res: *mut libc::passwd = std::ptr::null_mut();

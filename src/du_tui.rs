@@ -56,6 +56,8 @@ enum Mode {
     Browse,
     Confirm,
     Help,
+    /// Details of the cursor row (`i`).
+    Info,
 }
 
 /// What the explorer orders rows by: a size, count or age key, or name.
@@ -192,6 +194,8 @@ struct App {
     sorting: Sorting,
     /// The size `s` sorts by and rows show: apparent under `--apparent`.
     size_key: SortKey,
+    /// Lines of the info panel while it is open.
+    info: Vec<String>,
 }
 
 /// The size a row shows and its bar measures: apparent size under
@@ -395,6 +399,7 @@ impl App {
         App {
             sorting: Sorting::of(opts.sort),
             size_key,
+            info: Vec::new(),
             prog: prog.to_string(),
             cur: root.clone(),
             root,
@@ -887,8 +892,27 @@ impl App {
         self.status = format!("sorted by {}", self.sorting.label());
     }
 
+    /// Open the info panel on the cursor row.
+    fn show_info(&mut self) {
+        let Some(it) = self.selected() else {
+            self.status = "nothing to show".into();
+            return;
+        };
+        let v = self.view();
+        let pending = v.scanning && it.is_dir;
+        self.info = info_lines(it, v.disk, pending, crate::util::now_epoch());
+        self.mode = Mode::Info;
+    }
+
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         match self.mode {
+            Mode::Info => {
+                if self.keys.resolve_help(code, mods) == Some(Action::QuitHard) {
+                    self.quit = true;
+                }
+                // Any other key closes the panel.
+                self.mode = Mode::Browse;
+            }
             Mode::Help => match self.keys.resolve_help(code, mods) {
                 Some(Action::Help | Action::Quit | Action::FilterCancel) => {
                     self.mode = Mode::Browse;
@@ -921,6 +945,7 @@ impl App {
                         KeyCode::Char('n') => return self.sort_by(Order::Name),
                         KeyCode::Char('C') => return self.sort_by(Order::Key(SortKey::Items)),
                         KeyCode::Char('M') => return self.sort_by(Order::Key(SortKey::Mtime)),
+                        KeyCode::Char('i') => return self.show_info(),
                         _ => {}
                     }
                 }
@@ -957,6 +982,139 @@ impl App {
             }
         }
     }
+}
+
+/// `n` bytes in the explorer's units, with the exact count.
+fn bytes_line(n: u64) -> String {
+    format!(
+        "{} ({})",
+        format_bytes(n),
+        crate::util::plural(n, "byte", "bytes")
+    )
+}
+
+/// The info panel for `it`: path, kind, sizes, share of `whole`, items,
+/// newest change, git state and, on Unix, mode, owner and links.
+/// `pending` marks a directory whose size is still coming.
+fn info_lines(it: &Item, whole: u64, pending: bool, now: i64) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut path = crate::util::term_path(&it.path);
+    if it.is_dir {
+        path.push(std::path::MAIN_SEPARATOR);
+    }
+    out.push(format!("path      {path}"));
+    let kind = if it.is_dir { "directory" } else { "file" };
+    out.push(match it.artefact {
+        Some(a) => format!("kind      {kind}, {a}"),
+        None => format!("kind      {kind}"),
+    });
+    if pending {
+        out.push("disk use  … (scan running)".into());
+    } else {
+        let share = if whole == 0 {
+            String::new()
+        } else {
+            let pct = it.disk as f64 * 100.0 / whole as f64;
+            format!(" · {pct:.1}% of this directory")
+        };
+        out.push(format!("disk use  {}{share}", bytes_line(it.disk)));
+        out.push(format!("apparent  {}", bytes_line(it.apparent)));
+        if let Some(u) = it.unique {
+            out.push(format!("unique    {}", bytes_line(u)));
+        }
+        if it.is_dir {
+            out.push(format!(
+                "items     {} below",
+                crate::util::plural(it.items, "file or directory", "files and directories")
+            ));
+        }
+    }
+    if it.mtime > 0 {
+        let newest = if it.is_dir && !pending {
+            " (newest in the tree)"
+        } else {
+            ""
+        };
+        out.push(format!(
+            "changed   {} ago, {} UTC{newest}",
+            du::format_age(it.mtime, now),
+            crate::platform::epoch_to_iso_utc(it.mtime).replace('T', " ")
+        ));
+    }
+    if let Some((s, repo)) = &it.git {
+        out.push(format!(
+            "git       {} in {}",
+            s.as_str(),
+            crate::util::term_path(repo)
+        ));
+    }
+    #[cfg(unix)]
+    if let Ok(m) = std::fs::symlink_metadata(&it.path) {
+        use std::os::unix::fs::MetadataExt;
+        out.push(format!(
+            "mode      {} ({:04o}) · owner {} · group {} · {}",
+            mode_string(m.mode()),
+            m.mode() & 0o7777,
+            crate::trashdir::uid_name(m.uid()),
+            m.gid(),
+            crate::util::plural(m.nlink(), "link", "links")
+        ));
+    }
+    #[cfg(windows)]
+    if let Ok(m) = std::fs::symlink_metadata(&it.path) {
+        if m.permissions().readonly() {
+            out.push("mode      read-only".into());
+        }
+    }
+    out
+}
+
+/// `lines` broken into rows of at most `width` characters.
+fn hard_wrap(lines: &[String], width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for l in lines {
+        let chars: Vec<char> = l.chars().collect();
+        if chars.is_empty() {
+            out.push(String::new());
+        }
+        for row in chars.chunks(width) {
+            out.push(row.iter().collect());
+        }
+    }
+    out
+}
+
+/// `ls -l` style type and permission letters for `mode`.
+#[cfg(unix)]
+fn mode_string(mode: u32) -> String {
+    let kind = match mode & 0o170000 {
+        0o040000 => 'd',
+        0o120000 => 'l',
+        0o010000 => 'p',
+        0o140000 => 's',
+        0o020000 => 'c',
+        0o060000 => 'b',
+        _ => '-',
+    };
+    let mut s = String::from(kind);
+    for (shift, special, lower, upper) in [
+        (6, 0o4000, 's', 'S'),
+        (3, 0o2000, 's', 'S'),
+        (0, 0o1000, 't', 'T'),
+    ] {
+        let bits = (mode >> shift) & 7;
+        s.push(if bits & 4 != 0 { 'r' } else { '-' });
+        s.push(if bits & 2 != 0 { 'w' } else { '-' });
+        let x = bits & 1 != 0;
+        s.push(match (mode & special != 0, x) {
+            (true, true) => lower,
+            (true, false) => upper,
+            (false, true) => 'x',
+            (false, false) => '-',
+        });
+    }
+    s
 }
 
 /// `s` cut to at most `max` characters by dropping its start, marked
@@ -1116,6 +1274,29 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             .block(Block::default().borders(Borders::ALL).title("keys")),
         chunks[2],
     );
+    if app.mode == Mode::Info {
+        let r = f.area();
+        let w = r.width.saturating_sub(4).min(100);
+        // Long paths break by character, so the height counts every row.
+        let lines = hard_wrap(&app.info, w.saturating_sub(2) as usize);
+        let h = (lines.len() as u16 + 2).min(r.height);
+        let area = ratatui::layout::Rect {
+            x: r.x + (r.width - w) / 2,
+            y: r.y + (r.height - h) / 2,
+            width: w,
+            height: h,
+        };
+        f.render_widget(ratatui::widgets::Clear, area);
+        let lines: Vec<Line> = lines.into_iter().map(Line::from).collect();
+        f.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("info · any key closes"),
+            ),
+            area,
+        );
+    }
     if app.mode == Mode::Help {
         crate::tui_term::draw_help_overlay(
             f,
@@ -1133,6 +1314,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     "u — undo the last delete · r — rescan this directory"
                 },
                 "s n C M — sort by size, name, items or newest change; again reverses",
+                "i — details of the cursor row (any key closes them)",
                 "! — git work at risk (dirty, unpushed or unknown)",
             ],
         );
@@ -1585,6 +1767,80 @@ mod tests {
         let a = App::new("rtrash", t.0.join("w"), opts, false).unwrap();
         assert_eq!(names(&a), ["big", "file", "small"]);
         assert_eq!(a.sorting.label(), "items");
+    }
+
+    #[test]
+    fn info_lists_sizes_share_items_age_and_git() {
+        let now = crate::util::now_epoch();
+        let it = Item {
+            path: PathBuf::from("/no/such/target"),
+            is_dir: true,
+            apparent: 300,
+            disk: 512,
+            mtime: now - 3 * 86_400,
+            items: 3,
+            artefact: Some("cargo-target"),
+            repos: Vec::new(),
+            git: Some((crate::du_git::GitState::Dirty, PathBuf::from("/no/such"))),
+            unique: Some(100),
+        };
+        let text = info_lines(&it, 1024, false, now).join("\n");
+        assert!(text.contains("kind      directory, cargo-target"), "{text}");
+        assert!(
+            text.contains("(512 bytes) · 50.0% of this directory"),
+            "{text}"
+        );
+        assert!(text.contains("apparent  "), "{text}");
+        assert!(text.contains("(300 bytes)"), "{text}");
+        assert!(text.contains("unique    "), "{text}");
+        assert!(text.contains("3 files and directories below"), "{text}");
+        assert!(text.contains("changed   3d ago, "), "{text}");
+        assert!(text.contains("(newest in the tree)"), "{text}");
+        assert!(text.contains("git       dirty in "), "{text}");
+        // The path is gone, so there is no mode line.
+        assert!(!text.contains("mode "), "{text}");
+        let pending = info_lines(&it, 1024, true, now).join("\n");
+        assert!(pending.contains("disk use  … (scan running)"), "{pending}");
+        assert!(!pending.contains("items "), "{pending}");
+    }
+
+    #[test]
+    fn i_opens_the_info_panel_and_any_key_closes_it() {
+        let t = tree("info");
+        let mut a = app(&t);
+        a.select(1);
+        assert_eq!(a.selected().unwrap().path, t.0.join("w/file"));
+        a.on_key(KeyCode::Char('i'), KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Info);
+        let text = tui_term::render_text(120, 20, |f| ui(f, &mut a));
+        assert!(text.contains("info · any key closes"), "{text}");
+        assert!(text.contains("(9000 bytes)"), "{text}");
+        assert!(text.contains("kind      file"), "{text}");
+        #[cfg(unix)]
+        assert!(text.contains("mode      -rw"), "{text}");
+        // A key closes the panel and does nothing else.
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Browse);
+        assert!(t.0.join("w/file").exists());
+        let text = tui_term::render_text(120, 20, |f| ui(f, &mut a));
+        assert!(!text.contains("info · any key closes"), "{text}");
+    }
+
+    #[test]
+    fn hard_wrap_breaks_by_character() {
+        let l = vec!["abcdefg".to_string(), String::new(), "xy".to_string()];
+        assert_eq!(hard_wrap(&l, 3), ["abc", "def", "g", "", "xy"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mode_letters_match_ls() {
+        assert_eq!(mode_string(0o040755), "drwxr-xr-x");
+        assert_eq!(mode_string(0o100644), "-rw-r--r--");
+        assert_eq!(mode_string(0o104755), "-rwsr-xr-x");
+        assert_eq!(mode_string(0o041777), "drwxrwxrwt");
+        assert_eq!(mode_string(0o102644), "-rw-r-Sr--");
+        assert_eq!(mode_string(0o120777), "lrwxrwxrwx");
     }
 
     #[test]

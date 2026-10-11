@@ -102,9 +102,9 @@ directories appear as one `trash` row and are never printed by --print0.
       --pick            open the put browser on the listed rows: mark rows
                           and trash them (needs a terminal)
   -i, --interactive     explore PATH one directory at a time: open and leave
-                          directories, trash rows (d), undo (u), rescan (r)
-                          and sort (s, n, C, M); rows show git state and
-                          artefact kind
+                          directories, trash rows (d), undo (u), rescan (r),
+                          sort (s, n, C, M) and show details (i); rows show
+                          git state and artefact kind
       --no-delete       with -i, browse only: d and u do nothing
       --si              show sizes in powers of 1000 (kB, MB, GB)
       --help            display this help and exit
