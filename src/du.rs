@@ -845,7 +845,13 @@ fn children_open_by_path(_: &Path) -> bool {
 /// past either counts with its own blocks, is reported, and its contents
 /// stay unread: the walk recurses once per level and keeps the path of
 /// each, so a hostile tree could otherwise exhaust the stack or memory.
-pub(crate) const MAX_DEPTH: usize = 4096;
+/// Unit tests on macOS use 1000 levels: the tests build chains past this
+/// limit, and there each step down a chain costs more the deeper it lies.
+pub(crate) const MAX_DEPTH: usize = if cfg!(all(test, target_os = "macos")) {
+    1000
+} else {
+    4096
+};
 pub(crate) const MAX_PATH_BYTES: usize = 32 * 1024;
 
 /// Stack of each walk thread. Rayon's default of 2 MiB ran out near 2000
@@ -3276,9 +3282,11 @@ mod tests {
         let root = std::env::temp_dir().join(format!("rtrash-du-deep-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        // Level 2500 lies past PATH_MAX, so it opens relative to a held
-        // directory. Levels past MAX_DEPTH are not entered.
-        deep_chain(&root, MAX_DEPTH + 3, 2500);
+        // The file's level lies past PATH_MAX, so it opens relative to a
+        // held directory. Levels past MAX_DEPTH are not entered.
+        const FILE_AT: usize = libc::PATH_MAX as usize * 5 / 8;
+        const _: () = assert!(FILE_AT * 2 > libc::PATH_MAX as usize && FILE_AT < MAX_DEPTH);
+        deep_chain(&root, MAX_DEPTH + 3, FILE_AT);
         let opts = ScanOpts {
             top: 0,
             ..ScanOpts::default()
