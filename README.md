@@ -349,7 +349,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du --gitignore ~/src` | Leave out what git ignores in each repository (`.gitignore`, `.git/info/exclude`, `~/.config/git/ignore`) |
 | `rtrash du --exclude-caches` | Leave out directories tagged with a valid `CACHEDIR.TAG` |
 | `rtrash du --max-depth=2 --all-dirs` | Every directory level, at most 2 below `PATH` |
-| `rtrash du --json` | One object with `roots`, `dirs`, `files`, `unreadable` |
+| `rtrash du --json` | One object with `roots`, `dirs`, `files`, `unreadable`, plus `too_deep` when the walk met directories past its limits of 4096 levels and 32 KiB of path (counted without their contents) |
 | Ctrl-C during `rtrash du` | Stops the scan and prints what it counted, marked partial (`"partial": true` in JSON), with exit status 130; `--print0`, `--pick`, `-o` and `--stacks` print nothing then. A second Ctrl-C ends it at once |
 | `rtrash du --no-git` | Skip the git checks |
 | `rtrash du --trash-dir=PATH` / `--home-only` | Limit the trash summary to these trash directories |

@@ -757,6 +757,9 @@ Emit one JSON object
 \fIpath\fR, \fItype\fR, \fIdisk\fR, \fIapparent\fR, \fImtime\fR, \fIartefact\fR
 (a tag or null), \fIgit\fR and \fIgit_repo\fR (state and deciding repository, or null).
 A scan stopped by Ctrl-C adds \fIpartial\fR: true.
+The walk enters at most 4096 levels and paths of up to 32 KiB; a
+directory past either counts with its own blocks but not its contents,
+stderr says how many there were, and the object adds \fItoo_deep\fR.
 .TP
 .B \-\-print0
 Print the listed paths separated by null bytes, for

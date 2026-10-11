@@ -451,6 +451,8 @@ pub struct Report {
     pub files: Vec<Item>,
     /// Entries that could not be read (permission denied, vanished).
     pub unreadable: u64,
+    /// Directories nested too deep to enter: counted, contents unread.
+    pub too_deep: u64,
     /// `--unique` scans: bytes of the shared extents the scanned files
     /// point at, each extent counted once, and with every reference.
     pub shared: Option<SharedTotals>,
@@ -692,6 +694,8 @@ struct Ctx<'a> {
     /// Multiply-linked files already counted.
     seen: LinkSet,
     unreadable: AtomicU64,
+    /// Directories past [`MAX_DEPTH`] or [`MAX_PATH_BYTES`], not entered.
+    too_deep: AtomicU64,
     /// Files counted, each hard-linked file once.
     files: AtomicU64,
     /// Further names of files already counted.
@@ -796,8 +800,34 @@ const MAX_REPOS: usize = 64;
 
 /// Below this depth a directory stays open while its subdirectories are
 /// read, so they open relative to it. Deeper directories close first and
-/// their children open by full path, which bounds open descriptors.
+/// their children open by full path, which bounds open descriptors,
+/// unless the path is too long for that ([`children_open_by_path`]).
 const FD_HOLD_DEPTH: usize = 64;
+
+/// Whether the subdirectories of the directory at `path` can open by full
+/// path: theirs, one name longer, must stay under `PATH_MAX`.
+#[cfg(unix)]
+fn children_open_by_path(path: &Path) -> bool {
+    path.as_os_str().len() < libc::PATH_MAX as usize - 256
+}
+
+/// Windows opens every directory by path, so holding one changes nothing.
+#[cfg(windows)]
+fn children_open_by_path(_: &Path) -> bool {
+    true
+}
+
+/// The deepest level, and the longest path, the walk enters. A directory
+/// past either counts with its own blocks, is reported, and its contents
+/// stay unread: the walk recurses once per level and keeps the path of
+/// each, so a hostile tree could otherwise exhaust the stack or memory.
+const MAX_DEPTH: usize = 4096;
+const MAX_PATH_BYTES: usize = 32 * 1024;
+
+/// Stack of each walk thread. Rayon's default of 2 MiB ran out near 2000
+/// levels; this leaves room for [`MAX_DEPTH`] in a debug build, also when
+/// a waiting thread runs a second deep chain on top of its own.
+const WALK_STACK: usize = 256 * 1024 * 1024;
 
 /// A file that looked big enough for the list while its directory was
 /// being read; it is offered once the directory is known to be listable.
@@ -828,6 +858,35 @@ fn enter(
         ctx.cut.store(true, Ordering::Relaxed);
         return None;
     }
+    // A directory known only by its stat: its own blocks count, as with
+    // du(1), and nothing below it.
+    let shut = |st: du_fs::Stat| {
+        ctx.dirs.fetch_add(1, Ordering::Relaxed);
+        Node {
+            apparent: 0,
+            disk: st.sizes().1,
+            unique: st.sizes().1,
+            mtime: st.mtime,
+            items: 0,
+            repos: Vec::new(),
+            listable: false,
+            artefact: None,
+        }
+    };
+    if depth > MAX_DEPTH || path.as_os_str().len() > MAX_PATH_BYTES {
+        let st = match known {
+            Some(st) => st,
+            None => match parent {
+                Some((dir, name)) => dir.stat_at(name).ok()?,
+                None => du_fs::lstat(path).ok()?,
+            },
+        };
+        if !st.is_dir() || (ctx.opts.one_file_system && st.dev != ctx.root_dev) {
+            return None;
+        }
+        ctx.too_deep.fetch_add(1, Ordering::Relaxed);
+        return Some(shut(st));
+    }
     let opened = match parent {
         Some((dir, name)) => dir.open_child(name),
         None => du_fs::Dir::open(path),
@@ -841,25 +900,14 @@ fn enter(
         None
     };
     let Ok(dir) = opened else {
-        // Unreadable directory: its own blocks still count, as with du(1).
         let Some(st) = known.or_else(|| stat_again().ok()) else {
             return unreadable();
         };
         if !st.is_dir() || (ctx.opts.one_file_system && st.dev != ctx.root_dev) {
             return unreadable();
         }
-        ctx.dirs.fetch_add(1, Ordering::Relaxed);
         ctx.unreadable.fetch_add(1, Ordering::Relaxed);
-        return Some(Node {
-            apparent: 0,
-            disk: st.sizes().1,
-            unique: st.sizes().1,
-            mtime: st.mtime,
-            items: 0,
-            repos: Vec::new(),
-            listable: false,
-            artefact: None,
-        });
+        return Some(shut(st));
     };
     let st = match known {
         Some(st) => st,
@@ -1170,7 +1218,7 @@ fn walk_dir(
         }
     }
 
-    let parent = if depth < FD_HOLD_DEPTH {
+    let parent = if depth < FD_HOLD_DEPTH || !children_open_by_path(path) {
         Some(dir)
     } else {
         drop(dir);
@@ -1315,6 +1363,39 @@ pub fn scan_with(
     opts: &ScanOpts,
     prefetch: Option<&du_git::Prefetch>,
 ) -> io::Result<Report> {
+    scan_on(paths, opts, prefetch, None)
+}
+
+/// [`scan_with`] on `threads` walk threads, or rayon's default count
+/// (`RAYON_NUM_THREADS`, else one per CPU), each with [`WALK_STACK`].
+pub fn scan_on(
+    paths: &[PathBuf],
+    opts: &ScanOpts,
+    prefetch: Option<&du_git::Prefetch>,
+    threads: Option<usize>,
+) -> io::Result<Report> {
+    let n = threads.unwrap_or(0);
+    let pool = |stack: Option<usize>| {
+        let b = rayon::ThreadPoolBuilder::new().num_threads(n);
+        match stack {
+            Some(s) => b.stack_size(s),
+            None => b,
+        }
+        .build()
+    };
+    // A system that commits stacks up front (strict overcommit) may
+    // refuse the big ones; the default size still walks most trees.
+    let pool = pool(Some(WALK_STACK))
+        .or_else(|_| pool(None))
+        .map_err(|e| io::Error::other(format!("cannot start {n} threads: {e}")))?;
+    pool.install(|| scan_pooled(paths, opts, prefetch))
+}
+
+fn scan_pooled(
+    paths: &[PathBuf],
+    opts: &ScanOpts,
+    prefetch: Option<&du_git::Prefetch>,
+) -> io::Result<Report> {
     du_fs::raise_nofile_limit();
     let mut roots = Vec::new();
     let mut dirs = TopN::new(opts.top, opts.sort);
@@ -1326,6 +1407,7 @@ pub fn scan_with(
     };
     let mut files = TopN::new(file_cap, opts.sort);
     let mut unreadable = 0u64;
+    let mut too_deep = 0u64;
     let mut shared = crate::du_extent::SharedSet::default();
     let mut partial = false;
     let mut types = TypeMap::new();
@@ -1343,6 +1425,7 @@ pub fn scan_with(
             root_dev: meta.dev,
             seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
+            too_deep: AtomicU64::new(0),
             files: AtomicU64::new(0),
             links: AtomicU64::new(0),
             dirs: AtomicU64::new(0),
@@ -1400,6 +1483,7 @@ pub fn scan_with(
             (a, d, u, None)
         };
         unreadable += ctx.unreadable.load(Ordering::Relaxed);
+        too_deep += ctx.too_deep.load(Ordering::Relaxed);
         partial |= ctx.cut.load(Ordering::Relaxed);
         roots.push(RootTotals {
             path: abs,
@@ -1427,6 +1511,7 @@ pub fn scan_with(
         dirs: dirs.into_vec(),
         files: files.into_vec(),
         unreadable,
+        too_deep,
         shared: opts.unique.then(|| SharedTotals {
             distinct: shared.distinct(),
             referenced: shared.referenced,
@@ -1737,8 +1822,13 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
             .collect();
         format!(",\"types\":[{}]", rows.join(","))
     };
+    let too_deep = if r.too_deep > 0 {
+        format!(",\"too_deep\":{}", r.too_deep)
+    } else {
+        String::new()
+    };
     format!(
-        "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{}{shared}{partial}{types},\"trash\":{}}}",
+        "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{}{too_deep}{shared}{partial}{types},\"trash\":{}}}",
         roots.join(","),
         dirs.join(","),
         files.join(","),
@@ -2440,7 +2530,6 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     } else {
         None
     };
-    let scan = |paths: &[PathBuf], opts: &ScanOpts| scan_with(paths, opts, prefetch.as_ref());
     // Without --threads or RAYON_NUM_THREADS, an uncached tree gets more
     // threads than CPUs.
     let threads = threads.or_else(|| {
@@ -2451,16 +2540,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let first = absolute(first).ok()?;
         looks_cold(&first).then(cold_threads)
     });
-    let scanned = match threads {
-        Some(n) => match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
-            Ok(pool) => pool.install(|| scan(&paths, &opts)),
-            Err(e) => {
-                eprintln!("{prog}: cannot start {n} threads: {e}");
-                return 1;
-            }
-        },
-        None => scan(&paths, &opts),
-    };
+    let scanned = scan_on(&paths, &opts, prefetch.as_ref(), threads);
     // From here a Ctrl-C ends the process again.
     crate::du_interrupt::uninstall();
     let mut report = match scanned {
@@ -2593,6 +2673,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!(
             "{prog}: {} could not be read",
             plural(report.unreadable, "entry", "entries")
+        );
+    }
+    if report.too_deep > 0 {
+        eprintln!(
+            "{prog}: {} past {MAX_DEPTH} levels or {} KiB of path counted without their contents",
+            plural(report.too_deep, "directory", "directories"),
+            MAX_PATH_BYTES / 1024
         );
     }
     if report.partial {
@@ -2924,6 +3011,7 @@ mod tests {
             dirs: vec![risky, trash],
             files: vec![item("/w/f.bin", 1, 1)],
             unreadable: 0,
+            too_deep: 0,
             shared: None,
             partial: false,
             types: Vec::new(),
@@ -2966,5 +3054,60 @@ mod tests {
         tighten(&mut cut, 10, i64::max);
         tighten(&mut cut, 5, i64::max);
         assert_eq!(cut, Some(10));
+    }
+
+    /// A chain of `levels` directories named `d` under `root`, made with
+    /// paths relative to each level, since the whole path passes
+    /// `PATH_MAX`; `file_at` gets a 5000 byte file `f`.
+    #[cfg(unix)]
+    fn deep_chain(root: &Path, levels: usize, file_at: usize) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(root.as_os_str().as_bytes()).unwrap();
+        // SAFETY: plain descriptor calls on NUL-terminated names; each
+        // descriptor is closed once the next one is open.
+        unsafe {
+            let mut fd = libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+            assert!(fd >= 0);
+            for i in 0..levels {
+                assert_eq!(libc::mkdirat(fd, c"d".as_ptr(), 0o755), 0);
+                let next = libc::openat(fd, c"d".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+                assert!(next >= 0);
+                libc::close(fd);
+                fd = next;
+                if i == file_at {
+                    let f = libc::openat(fd, c"f".as_ptr(), libc::O_WRONLY | libc::O_CREAT, 0o644);
+                    assert!(f >= 0);
+                    assert_eq!(libc::write(f, [7u8; 5000].as_ptr().cast(), 5000), 5000);
+                    libc::close(f);
+                }
+            }
+            libc::close(fd);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deep_trees_count_past_path_max_and_stop_at_max_depth() {
+        let root = std::env::temp_dir().join(format!("rtrash-du-deep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        // Level 2500 lies past PATH_MAX, so it opens relative to a held
+        // directory. Levels past MAX_DEPTH are not entered.
+        deep_chain(&root, MAX_DEPTH + 3, 2500);
+        let opts = ScanOpts {
+            top: 0,
+            ..ScanOpts::default()
+        };
+        // One thread: the whole chain runs on a single walk stack.
+        let r = scan_on(std::slice::from_ref(&root), &opts, None, Some(1)).unwrap();
+        assert_eq!(r.unreadable, 0);
+        assert_eq!(r.too_deep, 1);
+        assert_eq!(r.roots[0].files, 1);
+        assert_eq!(r.roots[0].apparent, 5000);
+        // The root, MAX_DEPTH levels walked, and the one counted shut.
+        assert_eq!(r.roots[0].dirs as usize, MAX_DEPTH + 2);
+        let j = report_json(&r, &TrashSummary::default());
+        assert!(j.contains("\"too_deep\":1,"), "{j}");
+        fs::remove_dir_all(&root).unwrap();
     }
 }
