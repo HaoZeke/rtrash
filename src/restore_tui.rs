@@ -869,6 +869,29 @@ mod tests {
     }
 
     #[test]
+    fn filter_takes_every_letter() {
+        let (a, b) = (entry("/x/jk"), entry("/x/b"));
+        let mut app = App::new("rtrash", vec![&a, &b], false, true);
+        app.keys = Keymap::builtin();
+        app.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in ['j', 'k', 'J'] {
+            let mods = if c.is_uppercase() {
+                KeyModifiers::SHIFT
+            } else {
+                KeyModifiers::NONE
+            };
+            app.on_key(KeyCode::Char(c), mods);
+        }
+        assert_eq!(app.filter_draft, "jkJ");
+        // Arrows still move, and Enter commits.
+        app.on_key(KeyCode::Backspace, KeyModifiers::NONE);
+        app.on_key(KeyCode::Down, KeyModifiers::NONE);
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.filter, "jk");
+        assert_eq!(app.mode, Mode::Browse);
+    }
+
+    #[test]
     fn footer_shows_the_status_line() {
         let (a, b) = (entry("/x/a"), entry("/x/b"));
         let mut app = App::new("rtrash", vec![&a, &b], false, true);

@@ -458,7 +458,16 @@ impl Keymap {
         self.resolve_among(code, mods, Action::BROWSE)
     }
 
+    /// A key typed into a filter. Plain letters, digits and symbols (Shift
+    /// allowed) always type, even when a binding such as `j` for move_down
+    /// names them, so a filter can hold any text; arrows, Enter, Esc and
+    /// chords with Ctrl or Alt resolve as bound.
     pub fn resolve_filter(&self, code: KeyCode, mods: KeyModifiers) -> Option<Action> {
+        if let KeyCode::Char(c) = code {
+            if !c.is_control() && (mods - KeyModifiers::SHIFT).is_empty() {
+                return None;
+            }
+        }
         self.resolve_among(code, mods, Action::FILTER)
     }
 
@@ -752,6 +761,31 @@ confirm mode and action in browse mode (e.g. enter).
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_types_letters_bound_to_moves() {
+        let m = Keymap::builtin();
+        assert_eq!(
+            m.resolve_filter(KeyCode::Char('j'), KeyModifiers::NONE),
+            None
+        );
+        assert_eq!(
+            m.resolve_filter(KeyCode::Char('K'), KeyModifiers::SHIFT),
+            None
+        );
+        assert_eq!(
+            m.resolve_filter(KeyCode::Down, KeyModifiers::NONE),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            m.resolve_filter(KeyCode::Enter, KeyModifiers::NONE),
+            Some(Action::FilterCommit)
+        );
+        assert_eq!(
+            m.resolve_filter(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Some(Action::QuitHard)
+        );
+    }
 
     #[test]
     fn parse_chords() {
