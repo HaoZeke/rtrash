@@ -24,13 +24,16 @@
           strictDeps = true;
           nativeBuildInputs = [ pkgs.installShellFiles ];
           postInstall = pkgs.lib.optionalString (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''
-            for n in trash trash-put trash-empty trash-list trash-restore trash-rm; do
-              ln -s rtrash $out/bin/$n
+            for n in rtrash trash trash-put trash-empty trash-list trash-restore trash-rm; do
+              if [ "$n" != "rtrash" ]; then
+                ln -s rtrash $out/bin/$n
+              fi
+              installShellCompletion --cmd $n \
+                --bash <($out/bin/rtrash completions bash) \
+                --zsh <($out/bin/rtrash completions zsh) \
+                --fish <($out/bin/rtrash completions fish)
             done
-            installShellCompletion --cmd rtrash \
-              --bash <($out/bin/rtrash completions bash) \
-              --zsh <($out/bin/rtrash completions zsh) \
-              --fish <($out/bin/rtrash completions fish)
+
             $out/bin/rtrash man > rtrash.1
             installManPage rtrash.1
           '';
