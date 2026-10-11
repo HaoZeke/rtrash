@@ -28,9 +28,9 @@ const MAGIC: &str = "# rtrash du snapshot 1";
 
 const DIFF_HELP: &str = "\
 Usage: {prog} diff [OPTION]... OLD [NEW]
-Compare two du snapshots (written with du -o FILE) and list the directories
-that grew or shrank most. Without NEW, scan the roots of OLD again, with
-the depth OLD used, and compare against that.
+Compare two du snapshots (written with du -o FILE, or ncdu exports) and list
+the directories that grew or shrank most. Without NEW, scan the roots of OLD
+again, with the depth OLD used, and compare against that.
 
   -n, --top=N      list the N largest changes (default 20)
       --apparent   compare apparent sizes instead of disk use
@@ -145,7 +145,7 @@ pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "not an rtrash du snapshot (write one with du -o FILE)",
+                "neither an rtrash du snapshot (write one with du -o FILE) nor an ncdu export",
             ))
         }
     }
@@ -271,9 +271,15 @@ fn push_frame(out: &mut String, name: &str) {
     );
 }
 
+/// Read a snapshot, or an ncdu export (`ncdu -o FILE`), told apart by
+/// its first bytes.
 pub fn read(path: &Path) -> io::Result<Snapshot> {
     let f = fs::File::open(path)?;
-    parse(io::BufReader::new(f))
+    let mut r = io::BufReader::new(f);
+    if crate::du_ncdu::looks_like_export(r.fill_buf()?) {
+        return crate::du_ncdu::parse(r);
+    }
+    parse(r)
 }
 
 /// A snapshot as a du report, ranked by `sort` and cut to `top` rows.

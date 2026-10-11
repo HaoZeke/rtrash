@@ -103,7 +103,8 @@ directories appear as one `trash` row and are never printed by --print0.
   -o, --output=FILE     write a snapshot of every directory total (to
                           --max-depth) to FILE (- for stdout) instead of
                           listing; compare snapshots with `du diff`
-  -f, --file=FILE       list from a snapshot instead of scanning
+  -f, --file=FILE       list from a snapshot, or an ncdu export (ncdu -o,
+                          gdu -o), instead of scanning
       --stacks          print folded stacks of every directory's own size
                           for flame graph tools (flamegraph.pl, inferno,
                           speedscope) instead of listing; works with -f
@@ -1728,8 +1729,16 @@ pub fn annotate_git_with(report: &mut Report, prefetched: Option<&du_git::Prefet
     true
 }
 
-/// Compact age such as `45s`, `3h`, `12d`, `2y` (time since `mtime`).
+/// An `Item::mtime` that is not known (an ncdu export written without
+/// `-e` records none).
+pub const MTIME_UNKNOWN: i64 = i64::MIN;
+
+/// Compact age such as `45s`, `3h`, `12d`, `2y` (time since `mtime`), or
+/// `-` for [`MTIME_UNKNOWN`].
 pub fn format_age(mtime: i64, now: i64) -> String {
+    if mtime == MTIME_UNKNOWN {
+        return "-".into();
+    }
     let s = (now - mtime).max(0);
     if s < 60 {
         format!("{s}s")
@@ -1770,7 +1779,11 @@ fn item_json(it: &Item) -> String {
         it.disk,
         it.apparent,
         unique_json(it.unique),
-        it.mtime,
+        if it.mtime == MTIME_UNKNOWN {
+            "null".to_string()
+        } else {
+            it.mtime.to_string()
+        },
         it.items,
         json_opt(it.artefact),
         json_opt(git_state),
@@ -2931,6 +2944,7 @@ mod tests {
         assert_eq!(format_age(0, 3 * 86_400), "3d");
         assert_eq!(format_age(0, 800 * 86_400), "2y");
         assert_eq!(format_age(10, 0), "0s");
+        assert_eq!(format_age(MTIME_UNKNOWN, 0), "-");
     }
 
     #[test]

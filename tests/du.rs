@@ -1201,6 +1201,67 @@ fn snapshots_list_back_and_diff_against_a_later_scan() {
 }
 
 #[test]
+fn ncdu_exports_list_and_diff_like_snapshots() {
+    let t = Tree::new("ncdu");
+    let doc = |big: u64| {
+        format!(
+            r#"[1,2,{{"progname":"ncdu","progver":"1.22","timestamp":1700000000}},
+[{{"name":"/srv/data","dsize":4096,"dev":3}},
+[{{"name":"big","dsize":4096}},{{"name":"f","asize":{big},"dsize":{big},"ino":7,"nlink":2}}],
+[{{"name":"small","dsize":4096}},{{"name":"g","asize":100,"dsize":4096}},{{"name":"f2","dsize":{big},"ino":7,"nlink":2}}],
+{{"name":"skipped","excluded":"pattern"}}]]"#
+        )
+    };
+    let old = t.root.join("old.json");
+    let new = t.root.join("new.json");
+    fs::write(&old, doc(1_000_000)).unwrap();
+    fs::write(&new, doc(3_000_000)).unwrap();
+    let (o, n) = (old.to_str().unwrap(), new.to_str().unwrap());
+
+    let json = t.du(&["-f", o, "--json"]);
+    assert!(
+        json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let json = String::from_utf8_lossy(&json.stdout).into_owned();
+    // The second name of f counts as a link, not as bytes.
+    assert!(
+        json.contains(
+            r#""disk":1016384,"apparent":1000100,"files":2,"links":1,"dirs":3,"excluded":1"#
+        ),
+        "{json}"
+    );
+    let listed = String::from_utf8_lossy(&t.du(&["-f", o]).stdout).into_owned();
+    let rows: Vec<&str> = listed
+        .lines()
+        .filter(|l| l.contains("/srv/data/"))
+        .collect();
+    assert!(
+        rows[0].trim_end_matches(['/', '\\']).ends_with("big"),
+        "{listed}"
+    );
+    assert!(rows[1].contains("small"), "{listed}");
+
+    let d = t.du(&["diff", o, n]);
+    assert!(d.status.success(), "{}", String::from_utf8_lossy(&d.stderr));
+    let d = String::from_utf8_lossy(&d.stdout).into_owned();
+    let first = d.lines().nth(1).unwrap_or_default();
+    assert!(
+        first.trim_start().starts_with('+') && first.contains("/srv/data"),
+        "{d}"
+    );
+    assert!(!d.contains("small"), "{d}");
+
+    // A broken export names the byte where reading stopped.
+    fs::write(&old, "[1,2,{},[{\"name\":\"/x\"}").unwrap();
+    let bad = t.du(&["-f", o]);
+    assert_eq!(bad.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&bad.stderr).into_owned();
+    assert!(err.contains("ncdu export, byte "), "{err}");
+}
+
+#[test]
 fn stacks_fold_each_directory_by_its_own_size() {
     let t = Tree::new("stacks");
     t.file("t/top", 3);
