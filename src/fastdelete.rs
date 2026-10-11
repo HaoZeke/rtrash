@@ -642,22 +642,134 @@ fn read_dirfd_entries(dirfd: RawFd) -> io::Result<Vec<DirEnt>> {
 /// Symlinks count only the link inode (not the target). Missing paths are 0.
 pub fn disk_usage(path: &Path) -> u64 {
     let seen = std::sync::Mutex::new(std::collections::HashSet::new());
-    usage_in(path, &seen)
+    usage_in(path, &seen, 0)
 }
 
-fn usage_in(path: &Path, seen: &std::sync::Mutex<std::collections::HashSet<(u64, u64)>>) -> u64 {
+/// One directory of [`deep_usage`]'s walk.
+struct UsageFrame {
+    fd: Option<OwnedFd>,
+    /// Device and inode, recorded when `fd` is closed.
+    id: (u64, u64),
+    entries: Vec<DirEnt>,
+}
+
+/// Bytes below the directory at `path` (its own blocks not included),
+/// walked by descriptor with an explicit stack: any depth, at most
+/// [`FD_BUDGET`] open directories, each reopened through `..` only after
+/// checking it is the same one. What cannot be read counts as nothing.
+fn deep_usage(path: &Path, seen: &Seen) -> u64 {
+    let Ok(c) = cstring_path(path) else {
+        return 0;
+    };
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let fd = unsafe { libc::open(c.as_ptr(), flags) };
+    if fd < 0 {
+        return 0;
+    }
+    let root = unsafe { OwnedFd::from_raw_fd(fd) };
+    let Ok(entries) = read_dirfd_entries(root.as_raw_fd()) else {
+        return 0;
+    };
+    let mut stack = vec![UsageFrame {
+        fd: Some(root),
+        id: (0, 0),
+        entries,
+    }];
+    // Frames below `lo` have their descriptors closed; the root never.
+    let mut lo = 1;
+    let mut total = 0u64;
+    while let Some(top) = stack.len().checked_sub(1) {
+        let Some(ent) = stack[top].entries.pop() else {
+            let done = stack.pop().expect("open frame");
+            let Some(p) = top.checked_sub(1) else {
+                break;
+            };
+            if stack[p].fd.is_none() {
+                let cfd = done.fd.as_ref().map_or(-1, |f| f.as_raw_fd());
+                match reopen_parent(cfd, stack[p].id) {
+                    Ok(fd) => stack[p].fd = Some(fd),
+                    // The tree moved: count no further.
+                    Err(_) => break,
+                }
+                lo = p;
+            }
+            lo = lo.min(stack.len());
+            continue;
+        };
+        let dirfd = stack[top].fd.as_ref().map_or(-1, |f| f.as_raw_fd());
+        let Ok(name_c) = CString::new(ent.name.as_bytes()) else {
+            continue;
+        };
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatat(dirfd, name_c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0
+        {
+            continue;
+        }
+        let own = (st.st_blocks as u64).saturating_mul(512);
+        if (st.st_mode as libc::mode_t & libc::S_IFMT) != libc::S_IFDIR {
+            if !counted_before(seen, st.st_nlink as u64, st.st_dev as u64, st.st_ino as u64) {
+                total = total.saturating_add(own);
+            }
+            continue;
+        }
+        total = total.saturating_add(own);
+        let fd = unsafe { libc::openat(dirfd, name_c.as_ptr(), flags) };
+        if fd < 0 {
+            continue;
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let Ok(entries) = read_dirfd_entries(fd.as_raw_fd()) else {
+            continue;
+        };
+        stack.push(UsageFrame {
+            fd: Some(fd),
+            id: (0, 0),
+            entries,
+        });
+        if stack.len() - lo > FD_BUDGET {
+            let f = &mut stack[lo];
+            if let Some(old) = f.fd.take() {
+                match fd_id(old.as_raw_fd()) {
+                    Ok(id) => f.id = id,
+                    Err(_) => break,
+                }
+            }
+            lo += 1;
+        }
+    }
+    total
+}
+
+type Seen = std::sync::Mutex<std::collections::HashSet<(u64, u64)>>;
+
+/// Levels [`usage_in`] recurses through by path before handing a subtree
+/// to [`deep_usage`].
+const USAGE_PATH_DEPTH: usize = 256;
+
+/// Whether a hard-linked file was counted already; records it if not.
+fn counted_before(seen: &Seen, nlink: u64, dev: u64, ino: u64) -> bool {
+    nlink > 1
+        && !seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((dev, ino))
+}
+
+fn usage_in(path: &Path, seen: &Seen, depth: usize) -> u64 {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(_) => return 0,
     };
     let own = meta.blocks().saturating_mul(512);
     if !meta.is_dir() {
-        let repeat = meta.nlink() > 1
-            && !seen
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert((meta.dev(), meta.ino()));
+        let repeat = counted_before(seen, meta.nlink(), meta.dev(), meta.ino());
         return if repeat { 0 } else { own };
+    }
+    // Near PATH_MAX, paths stop opening, and deep trees would grow the
+    // stack: walk the rest by descriptor, without recursion.
+    let limit = (libc::PATH_MAX as usize).saturating_sub(256);
+    if depth >= USAGE_PATH_DEPTH || path.as_os_str().len() >= limit {
+        return own.saturating_add(deep_usage(path, seen));
     }
     // Directory tree: sum children (parallel at this level when wide).
     let Ok(rd) = fs::read_dir(path) else {
@@ -665,9 +777,12 @@ fn usage_in(path: &Path, seen: &std::sync::Mutex<std::collections::HashSet<(u64,
     };
     let children: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     let child_sum: u64 = if children.len() >= 4 {
-        children.par_iter().map(|p| usage_in(p, seen)).sum()
+        children
+            .par_iter()
+            .map(|p| usage_in(p, seen, depth + 1))
+            .sum()
     } else {
-        children.iter().map(|p| usage_in(p, seen)).sum()
+        children.iter().map(|p| usage_in(p, seen, depth + 1)).sum()
     };
     own.saturating_add(child_sum)
 }
@@ -947,6 +1062,45 @@ mod tests {
         assert!(w.failed.is_empty(), "{:?}", w.failed);
         assert_eq!(w.removed, 2);
         assert!(fs::read_dir(&files).unwrap().next().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn disk_usage_counts_trees_past_path_max() {
+        // 20000 levels, files near the top and at the bottom: paths pass
+        // PATH_MAX, where opening by path used to fail and count nothing.
+        let root = tmp_root("deep-usage");
+        let tree = root.join("t");
+        fs::create_dir(&tree).unwrap();
+        let levels = 20_000;
+        deep_chain(&tree, levels, &[5, levels - 1], usize::MAX);
+        // The expected sum, from one more walk down the chain.
+        let c = CString::new(tree.as_os_str().as_bytes()).unwrap();
+        let mut want = fs::symlink_metadata(&tree).unwrap().blocks() * 512;
+        // SAFETY: plain descriptor calls on NUL-terminated names.
+        unsafe {
+            let mut fd = libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+            for i in 0..levels {
+                let next = libc::openat(fd, c"d".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+                libc::close(fd);
+                fd = next;
+                let mut st: libc::stat = std::mem::zeroed();
+                assert_eq!(libc::fstat(fd, &mut st), 0);
+                want += st.st_blocks as u64 * 512;
+                if i == 5 || i == levels - 1 {
+                    let f = libc::openat(fd, c"f".as_ptr(), libc::O_WRONLY);
+                    assert_eq!(libc::write(f, [1u8; 9000].as_ptr().cast(), 9000), 9000);
+                    assert_eq!(libc::fsync(f), 0);
+                    assert_eq!(libc::fstat(f, &mut st), 0);
+                    libc::close(f);
+                    want += st.st_blocks as u64 * 512;
+                }
+            }
+            libc::close(fd);
+        }
+        assert!(want > 0);
+        assert_eq!(disk_usage(&tree), want);
+        remove_path(&tree).unwrap();
         let _ = fs::remove_dir_all(&root);
     }
 
