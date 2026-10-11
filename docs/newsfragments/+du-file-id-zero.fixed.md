@@ -1,0 +1,1 @@
+du no longer merges every file into one when the filesystem reports no file IDs. On Windows a directory listing can return file ID 0, for instance on volumes without IDs; du then counted only the first file of the whole tree. It now counts such files one by one.

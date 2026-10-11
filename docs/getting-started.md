@@ -139,6 +139,7 @@ rtrash a.txt b.txt
 rtrash restore              # TUI on TTY
 rtrash restore --cwd-only   # only originals under $PWD
 rtrash restore --plain      # line mode even on TTY
+rtrash restore --plain --newest-first   # latest item at index 0
 ```
 
 

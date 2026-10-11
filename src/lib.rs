@@ -11,12 +11,29 @@ pub mod platform;
 pub mod util;
 pub mod win_recycle;
 
+pub mod config;
+pub mod ds_store;
+pub mod du;
+pub mod du_dev;
+pub mod du_extent;
+pub mod du_filter;
+pub mod du_fs;
+pub mod du_git;
+pub mod du_interrupt;
+pub mod du_ncdu;
+pub mod du_ncdu_bin;
+pub mod du_snap;
+#[cfg(feature = "tui")]
+pub mod du_tui;
 #[cfg(unix)]
 pub mod empty;
 #[cfg(all(unix, feature = "tui"))]
 pub mod empty_tui;
 #[cfg(unix)]
 pub mod fastdelete;
+pub mod filters;
+#[cfg(unix)]
+pub mod finder;
 #[cfg(unix)]
 pub mod info;
 #[cfg(unix)]
@@ -27,28 +44,34 @@ pub mod put;
 pub mod put_tui;
 #[cfg(unix)]
 pub mod restore;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod restore_tui;
 #[cfg(unix)]
+pub mod retention;
+#[cfg(unix)]
 pub mod rm;
+#[cfg(unix)]
+pub mod safety;
 #[cfg(unix)]
 pub mod setup;
 #[cfg(unix)]
 pub mod status;
 #[cfg(unix)]
 pub mod trashdir;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod tui_binds;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod tui_fuzzy;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod tui_keys;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod tui_list;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod tui_select;
-#[cfg(all(unix, feature = "tui"))]
+#[cfg(feature = "tui")]
 pub mod tui_term;
+#[cfg(unix)]
+pub mod undo;
 
 // Windows CLI surface: system Recycle Bin (not FreeDesktop modules).
 #[cfg(windows)]
@@ -85,6 +108,20 @@ pub mod rm {
 pub mod setup {
     pub fn run(prog: &str, args: &[String]) -> i32 {
         crate::win_recycle::setup_run(prog, args)
+    }
+}
+#[cfg(windows)]
+pub mod undo {
+    pub fn run(prog: &str, _args: &[String]) -> i32 {
+        eprintln!("{prog}: undo needs the FreeDesktop trash; on Windows, use restore");
+        1
+    }
+}
+#[cfg(windows)]
+pub mod finder {
+    pub fn run(prog: &str, _args: &[String]) -> i32 {
+        eprintln!("{prog}: the Finder Trash exists on macOS only");
+        1
     }
 }
 #[cfg(windows)]

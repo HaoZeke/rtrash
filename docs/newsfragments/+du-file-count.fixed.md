@@ -1,0 +1,1 @@
+du counts a file with more than one hard link once in its file count, as it already did in the sizes, so files plus directories match `du --inodes -s`. The total names the extra links ("1 file (+2 hard links)"), and the JSON root has a new `links` field.

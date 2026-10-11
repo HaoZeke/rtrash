@@ -10,7 +10,9 @@ const HELP: &str = "\
 Usage: {prog} [OPTION]... PATTERN...
 Permanently remove trashed items whose original path or basename matches
 a PATTERN (shell-style glob; quote globs from the shell). Matching entries
-are deleted from the trash (files/ + .trashinfo), not restored.
+are deleted from the trash (files/ + .trashinfo), not restored. An absolute
+PATTERN also matches with symlinks in its directory part resolved, the way
+put records original paths.
 
 Note: multi-call name `rm` means *put into trash* (safe). This command
 (subcommand `rtrash rm` or multi-call `trash-rm`) permanently deletes
@@ -20,6 +22,9 @@ matching *trash* entries — not a synonym for put.
       --home-only  only the home trash (skip volume trash)
       --older-than=DAYS only match items trashed more than DAYS days ago
       --newer-than=DAYS only match items trashed within the last DAYS days
+      --larger-than=SIZE  only match items taking more than SIZE on disk
+      --smaller-than=SIZE only match items taking less than SIZE on disk
+                     (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
   -n, --dry-run    list matches and reclaimable size; do not delete
   -f, --force      allow mass patterns that match everything (e.g. '*')
   -v, --verbose    print each permanently removed original path
@@ -56,9 +61,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut newer_than: Option<i64> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut patterns: Vec<String> = Vec::new();
+    let mut size = list::SizeFilter::default();
 
     let mut i = 0usize;
     while i < args.len() {
+        match size.take(args, &mut i) {
+            Some(Ok(())) => {
+                i += 1;
+                continue;
+            }
+            Some(Err(e)) => {
+                eprintln!("{prog}: {e}");
+                return 2;
+            }
+            None => {}
+        }
         let arg = &args[i];
         match arg.as_str() {
             "-v" | "--verbose" => verbose = true,
@@ -75,7 +92,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 return 0;
             }
             a if a.starts_with("--trash-dir=") => {
-                trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
+                trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
             a if a.starts_with("--older-than=") => {
                 match parse_nonneg_days(&a["--older-than=".len()..]) {
@@ -121,6 +138,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         i += 1;
     }
 
+    if let Err(e) = size.check() {
+        eprintln!("{prog}: {e}");
+        return 2;
+    }
     if patterns.is_empty() {
         eprintln!("{prog}: missing operand");
         eprintln!("Try '{prog} --help' for more information.");
@@ -146,18 +167,27 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: no valid --trash-dir pins");
         return 2;
     }
-    let entries = list::filter_age(list::collect(&dirs), older_than, newer_than);
+    // put records originals with their parent directory resolved, so a
+    // path typed through a symlinked directory matches in that form too.
+    let resolved: Vec<String> = patterns.iter().filter_map(|p| resolve_pattern(p)).collect();
+    patterns.extend(resolved);
+    let mut entries = list::filter_age(list::collect(&dirs), older_than, newer_than);
+    // Payloads with no .trashinfo match by their name or their path under
+    // files/; having no date, they stay out of an age-filtered rm.
+    if older_than.is_none() && newer_than.is_none() {
+        entries.extend(list::orphans(&dirs));
+    }
     let mut status = 0i32;
     let mut removed = 0u64;
     let mut bytes = 0u64;
     let mut matched_paths: Vec<String> = Vec::new();
 
     for entry in &entries {
-        let path_s = entry.original.to_string_lossy();
+        let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
         let base = entry
             .original
             .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
+            .map(crate::util::str_from_os_ref)
             .unwrap_or_default();
         let hit = patterns.iter().any(|pat| {
             fnmatch(pat, path_s.as_ref())
@@ -167,21 +197,24 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         if !hit {
             continue;
         }
-        let payload = entry.dir.files().join(&entry.name);
-        let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
+        let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
+        let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
         let sz =
             crate::fastdelete::disk_usage(&payload) + crate::fastdelete::disk_usage(&info_path);
+        if !size.keeps(sz) {
+            continue;
+        }
         if dry_run {
             bytes = bytes.saturating_add(sz);
             if !json {
                 if verbose {
                     println!(
                         "would permanently remove {} ({})",
-                        entry.original.display(),
+                        crate::util::term_path(&entry.original),
                         crate::fastdelete::format_bytes(sz)
                     );
                 } else {
-                    println!("{}", entry.original.display());
+                    println!("{}", crate::util::term_path(&entry.original));
                 }
             }
             matched_paths.push(entry.original.to_string_lossy().into_owned());
@@ -189,13 +222,19 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             continue;
         }
         if let Err(e) = trashdir::remove_any_path(&payload) {
-            eprintln!("{prog}: cannot remove '{}': {e}", payload.display());
+            eprintln!(
+                "{prog}: cannot remove '{}': {e}",
+                crate::util::err_path(&payload)
+            );
             status = 1;
             continue;
         }
         if let Err(e) = std::fs::remove_file(&info_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("{prog}: cannot remove '{}': {e}", info_path.display());
+                eprintln!(
+                    "{prog}: cannot remove '{}': {e}",
+                    crate::util::err_path(&info_path)
+                );
                 status = 1;
                 continue;
             }
@@ -203,7 +242,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         trashdir::directorysizes_remove(&entry.dir, &entry.name);
         bytes = bytes.saturating_add(sz);
         if !json && verbose {
-            println!("removed '{}'", entry.original.display());
+            println!("removed '{}'", crate::util::term_path(&entry.original));
         }
         matched_paths.push(entry.original.to_string_lossy().into_owned());
         removed += 1;
@@ -241,9 +280,72 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     status
 }
 
+/// An absolute PATTERN with symlinks resolved in its literal directory
+/// part: the components before the first one with a glob character, or
+/// the parent when there is none. The rest stays as typed, so a glob or
+/// the final name is never followed. `None` when nothing changes.
+fn resolve_pattern(pat: &str) -> Option<String> {
+    let path = crate::util::arg_path(pat);
+    if !path.is_absolute() {
+        return None;
+    }
+    let is_glob = |c: &std::ffi::OsStr| c.to_string_lossy().contains(['*', '?', '[', '\\']);
+    let comps: Vec<_> = path.components().collect();
+    let split = comps
+        .iter()
+        .position(|c| is_glob(c.as_os_str()))
+        .unwrap_or(comps.len().saturating_sub(1))
+        .max(1);
+    let prefix: PathBuf = comps[..split].iter().collect();
+    let rest: PathBuf = comps[split..].iter().collect();
+    let out = trashdir::resolve_existing(&prefix).join(rest);
+    let out = crate::util::str_from_os_ref(out.as_os_str());
+    // A trailing slash typed by the user is part of the pattern.
+    let out = if pat.ends_with('/') && !out.ends_with('/') {
+        out + "/"
+    } else {
+        out
+    };
+    (out != pat).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::resolve_pattern;
     use crate::util::fnmatch;
+
+    #[test]
+    fn absolute_patterns_resolve_their_literal_directories() {
+        let base = std::env::temp_dir().join(format!("rtrash-rm-pat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("real/sub")).unwrap();
+        // Resolved up front: macOS reaches temp_dir through /var.
+        let base = std::fs::canonicalize(&base).unwrap();
+        let real = std::fs::canonicalize(base.join("real")).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let l = link.display();
+        let r = real.display();
+        assert_eq!(
+            resolve_pattern(&format!("{l}/a.txt")),
+            Some(format!("{r}/a.txt"))
+        );
+        assert_eq!(
+            resolve_pattern(&format!("{l}/sub/*.o")),
+            Some(format!("{r}/sub/*.o"))
+        );
+        // The glob part and everything after it stay as typed.
+        assert_eq!(
+            resolve_pattern(&format!("{l}/s*/x")),
+            Some(format!("{r}/s*/x"))
+        );
+        // A link as the final name is not followed: it names the trashed item.
+        assert_eq!(resolve_pattern(&format!("{r}/sub")), None);
+        assert_eq!(resolve_pattern(&format!("{}/link", base.display())), None);
+        assert_eq!(resolve_pattern("*.o"), None);
+        assert_eq!(resolve_pattern("foo"), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn pattern_matches_basename_glob() {

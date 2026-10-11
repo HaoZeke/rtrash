@@ -1,0 +1,1 @@
+du no longer drops a directory whose bulk sits in a subdirectory it cannot list. With `--max-depth`, an age filter, or a large `.git`, the parent row used to vanish along with the hidden child; it now stays.

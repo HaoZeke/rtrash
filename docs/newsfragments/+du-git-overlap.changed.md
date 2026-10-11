@@ -1,0 +1,1 @@
+du starts the git probes for a repository as soon as the walk meets it, so git runs beside the walk instead of after it. On a folder of eleven clones the git part of a run dropped from about 32 ms to 17 ms (49 ms to 36 ms in total).

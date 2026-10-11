@@ -1,0 +1,1 @@
+Shell completions now know the `keys` subcommand and offer `fish` after `rtrash completions`. Bash no longer offers put options after `rtrash keys` or `rtrash setup`. The bash script also runs under bash 3.2, the macOS `/bin/bash`.

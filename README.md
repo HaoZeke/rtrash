@@ -36,7 +36,9 @@
 $ cargo binstall rtrash && rtrash setup
 $ rtrash notes.txt                 # put (also: rtrash -rf dir, multi-call trash-put)
 $ rtrash list && rtrash status
+$ rtrash du -n 10 ~/src             # largest dirs and files to trash
 $ rtrash restore                   # TUI on a TTY; --plain for scripts
+$ rtrash undo                      # bring back everything the last put trashed
 $ rtrash empty --plain
 ```
 
@@ -99,10 +101,10 @@ $ pip install rtrash
 | OS | Backend | Notes |
 | -- | ------- | ----- |
 | **Linux** | FreeDesktop home + per-mount trash | Primary niche; multi-call `setup`, musl releases, full suite tests |
-| **macOS** | FreeDesktop **home** trash only (experimental) | `$XDG_DATA_HOME/Trash` or `~/.local/share/Trash`. **Not** Finder / system Trash |
-| **Windows** | System **Recycle Bin** (shell APIs) | put/list/restore/empty/rm/status. **Not** FreeDesktop on-disk layout. Multi-call `setup` is Unix-oriented |
+| **macOS** | FreeDesktop **home** trash (experimental); Finder Trash through `rtrash finder` (experimental, untested on a real Mac) | `$XDG_DATA_HOME/Trash` or `~/.local/share/Trash`; `rtrash finder` uses `~/.Trash` with Put Back |
+| **Windows** | System **Recycle Bin** (shell APIs) | put/list/restore/empty/rm/status/du. **Not** FreeDesktop on-disk layout. Multi-call `setup` is Unix-oriented |
 
-On Linux/macOS TTY, bare `rtrash restore` opens the **interactive restore browser** (ratatui). Windows uses numbered restore selection (no TUI).
+On a TTY, bare `rtrash restore` opens the **interactive restore browser** (ratatui), on Windows too, where it lists the Recycle Bin. `--plain` keeps the numbered selection. On Windows `rtrash du -i` deletes into the Recycle Bin and `u` restores from it. `rtrash status` and the trash line of `rtrash du` show the cap of each drive (`MaxCapacity` in the registry) and how much of it is in use. The age filters (`--older-than`, `--newer-than`, `empty DAYS`) and size filters (`--larger-than`, `--smaller-than`) work on the Recycle Bin too, for `list`, `status` and `rm`, and `empty` takes the age ones; sizes come from each item's `$I` record.
 
 ## Install
 
@@ -196,7 +198,7 @@ From a checkout (dev): `pip install maturin && maturin develop --features python
 
 Useful flags: `rtrash setup --dry-run`, `--force` (refresh after upgrade), `--with-rm` (also link `rm` → put into trash), `--prefix=/usr/local`.
 
-Subcommands work without multi-call names: `rtrash put|empty|list|status|restore|rm …`.
+Subcommands work without multi-call names: `rtrash put|empty|list|status|du|restore|undo|rm …`.
 
 | Multi-call name | Meaning |
 | --------------- | ------- |
@@ -264,17 +266,29 @@ $ rtrash list              # b.c still listed
 
 ### `rtrash put` (also `rm`, `trash`, `trash-put`, or bare `rtrash`)
 
-Accepts the common `rm(1)` flags with the same semantics, except that files move to the trash: `-f`, `-i`, `-I`, `--interactive[=WHEN]`, `-r`/`-R`, `-d`, `-v`, `--one-file-system` (accepted for rm compatibility; no-op because entries move whole and are never walked like `rm -x`), `--preserve-root` (default), `--no-preserve-root`, `--`. Directories need `-r` (or `-d` when empty), `.`/`..`/`/` are refused (unless `--no-preserve-root` for `/`), and exit codes mirror rm (0 success, 1 failure, 2 usage error).
+Accepts the common `rm(1)` flags with the same semantics, except that files move to the trash: `-f`, `-i`, `-I`, `--interactive[=WHEN]`, `-r`/`-R`, `-d`, `-v`, `--one-file-system` (accepted for rm compatibility; no-op because entries move whole and are never walked like `rm -x`), `--preserve-root[=all]` (default), `--no-preserve-root`, `--`. Directories need `-r` (or `-d` when empty), `.`/`..`/`/` get refused, and so do your home directory and mount points (unless `--no-preserve-root`), the trash directory itself, a directory containing it, and items already in it; exit codes mirror rm (0 success, 1 failure, 2 usage error).
+
+Safety rails beyond rm:
+
+- **safe-rm list.** Put skips safe-rm's built-in system directories and every path or shell pattern listed in `/etc/safe-rm.conf`, `/usr/local/etc/safe-rm.conf`, `$XDG_CONFIG_HOME/safe-rm` or `~/.safe-rm`, so an existing safe-rm setup keeps working.
+- **Repository warning.** Trashing a directory with a git repository at its top that has uncommitted or unpushed work prints a warning naming `rtrash undo`.
 
 As with GNU rm, **the last of `-f` / `-i` / `-I` (and the matching long forms) wins** for prompt vs force behavior.
 `-f` also ignores missing paths.
 
 Trash placement follows the spec: the home trash (`$XDG_DATA_HOME/Trash`, defaulting under `~/.local/share`) for same-filesystem files, `$top/.Trash/$uid` (must be a sticky non-symlink directory) or `$top/.Trash-$uid` on other mounts, with a copy-into-home-trash fallback when the volume cannot host a trash directory.
+When `$top/.Trash` exists but fails the check (a symlink, a plain file, or no sticky bit), put warns once and uses `$top/.Trash-$uid`, as the spec asks.
+The per-user directory, `$top/.Trash/$uid` or `$top/.Trash-$uid`, must also be a real directory owned by you; one that is a symlink or belongs to another user gets a warning, put moves on to the next choice (in the end the home trash), and `list`, `empty` and `rm` skip it.
 Names are reserved atomically (create-new / `O_EXCL` on the `.trashinfo`), so concurrent invocations never clobber each other; collisions get `name.2`, `name.3`, ...
 
 **Script pins:** `--trash-dir=PATH` puts into that FreeDesktop root (creates `files/` and `info/` if needed); `--home-only` always uses the home trash.
 
+**Script output:** `--json` prints one object, `{"trashed": [...], "failed": N}`. Each trashed entry lists the original path, the name under `files/`, and the trash root, so a script can hand the names to `rtrash rm` or restore by path later.
+
 Putting a **directory** updates that trash dir’s FreeDesktop `directorysizes` cache (`size mtime percent-encoded-name`).
+Sizes count allocated blocks the way `du -B1` does, the directories' own blocks included and each hard-linked file once.
+Put measures the tree in parallel after the move, outside the trash lock.
+When `status` or `empty --dry-run` has to walk a directory with no valid line, it writes the size back and drops lines for directories that left the trash, so the next run reads the cache.
 Putting ordinary files does not add directory lines.
 
 ### `rtrash empty [DAYS]` (also `trash-empty`)
@@ -283,23 +297,95 @@ Purges every trash directory visible to the user (home trash plus mounted volume
 With `DAYS` (or `--older-than=DAYS`), only items trashed more than `DAYS` days ago go.
 Entries are removed in parallel.
 Orphaned `files/` entries (no `.trashinfo`) and entries with broken metadata are purged on a full empty, and the `directorysizes` cache is pruned when present.
-Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts), `--json` (summary: `dry_run`, `removed`, `bytes`, `days`).
+A directory you own but cannot list or change, such as a build tree's `pkg` at mode 0311, gets owner `rwx` back and then goes.
+Nothing someone else owns is changed.
+An item that still cannot go stays in the trash, with its `.trashinfo`.
+The rest still goes, and `empty` exits 1 after listing each item left and why.
+Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts), `--json` (summary: `dry_run`, `removed`, `bytes`, `days`, `max_size`).
+
+**Retention by size:** `rtrash empty --max-size=10G` removes items, oldest first, until the trash directories in scope fit in 10 GiB together; `--prune=largest` removes the largest first, and `DAYS` runs before the size cut.
+Set `RTRASH_MAX_SIZE=10G` (and optionally `RTRASH_PRUNE=largest`), or `max_size` under `[policy]` in the config file, to prune after every put: each trash directory the put used goes back under the budget, and the items that put just trashed always stay.
 
 ### `rtrash list` (also `trash-list`)
 
 Prints `DELETION-DATE ORIGINAL-PATH` per item, oldest first, in the `trash-list` output format (`YYYY-MM-DD HH:MM:SS` plus the original path).
 Scans the home trash and per-mount trash directories owned by the current user, or only the directories given with `--trash-dir=PATH` (repeatable).
+Orphans (payloads in `files/` with no `.trashinfo`) come last, with a `????-??-??` date and their path inside the trash.
+In JSON they carry `"orphan": true`; an age filter leaves them out.
 
 | Flag | Meaning |
 |------|---------|
-| `--json` | JSON array of `{deletion_date, original, name, trash_dir}` |
+| `--json` | JSON array of `{deletion_date, original, name, trash_dir, batch}` (plus `size` in bytes with `--size`) |
+| `--size` | Add each item's disk usage (payload plus `.trashinfo`, as `status` counts it) |
+| `--sort=date\|size\|name\|path` | Row order; `size` lists the largest first and implies `--size` |
+| `--reverse` | Reverse the order |
 | `--older-than=DAYS` | Only items trashed more than DAYS days ago (same cutoff as `empty DAYS`) |
 | `--newer-than=DAYS` | Only items trashed within the last DAYS days |
+| `--larger-than=SIZE` / `--smaller-than=SIZE` | Only items taking more (or less) than SIZE on disk, as `--size` shows it; SIZE as in `empty --max-size` (`500M`, `1.5G`). Orphans have a size, so they stay in |
 | `--home-only` | Home trash only |
+| `--all-users` | Every account's trash this user can read (root reads all), with an owner column and a JSON `owner` field; read-only. Root restores or removes another account's items by pinning that trash with `--trash-dir` |
 
 ### `rtrash status`
 
-Per-root item count and reclaimable size (uses `directorysizes` when valid). Same discovery pins as list. Also accepts `--json`, `--older-than=DAYS`, `--newer-than=DAYS`.
+Per-root item count and reclaimable size (uses `directorysizes` when valid). Same discovery pins as list. Also accepts `--json`, `--older-than=DAYS`, `--newer-than=DAYS`, `--larger-than=SIZE`, `--smaller-than=SIZE`.
+Orphans count as items, noted as `(N without .trashinfo)` per root and as `orphans` in JSON.
+
+### `rtrash du [PATH]...`
+
+Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists the largest directories and files, with on-disk size, apparent size, and the age of the newest modification below each entry.
+
+| Invocation | Behavior |
+|------------|----------|
+| `rtrash du /workspace` | 20 largest directories and 20 largest files, ranked by disk use |
+| `rtrash du -n 5 -x ~` | Top 5 of each, staying on the file system of `~` |
+| `rtrash du --apparent` | Rank by file length; sparse files rank higher than their disk use |
+| `rtrash du --sort=items` | Directories with the most files and subdirectories below them (inode hogs such as `node_modules`); `-C` adds an item count column to any listing |
+| `rtrash du --types ~/data` | Lists file types instead of directories and files: disk use, apparent size and file count per extension, with case ignored, ranked by disk use, `--apparent` or `--sort=items`. JSON adds a `types` array |
+| `rtrash du --unique` | Adds a UNIQUE column: the bytes in extents no other file shares, roughly what deleting a row frees where reflinks, clones or snapshots share data (Btrfs on Linux, the Apple File System on macOS). The closing summary shows the shared extents once each and as referenced. It maps every file's extents, so it runs slower; the default listing skips it |
+| `rtrash du --shared` | Counts each extent that reflinks, clones or snapshots share once per row and in the totals, so copies on Btrfs or XFS no longer add up to more than they take on disk; the total also gives the size that counts each reference. Linux only; it maps every file's extents, like `--unique` |
+| `rtrash du --sort=mtime` | Most recently modified first; a directory gives way to the subdirectory that contains its newest change |
+| `rtrash du --dirs --older-than=30` | Directories with nothing modified in the last 30 days |
+| `rtrash du --since=2026-09-01 --until=2026-10-01` | Entries last modified in September, in local time; `YYYY-MM-DDTHH:MM[:SS]` sets an hour too |
+| `rtrash du --artefacts ~/src` | Only regenerable build output and caches: cargo `target`, `node_modules`, `__pycache__`, virtualenvs, CMake build trees, `CACHEDIR.TAG` directories |
+| `rtrash du --exclude='*.iso' -X ~/.duignore` | Leave out what matches (gitignore syntax); excluded entries add nothing to any size |
+| `rtrash du --gitignore ~/src` | Leave out what git ignores in each repository (`.gitignore`, `.git/info/exclude`, `~/.config/git/ignore`) |
+| `rtrash du --exclude-caches` | Leave out directories tagged with a valid `CACHEDIR.TAG` |
+| `rtrash du --max-depth=2 --all-dirs` | Every directory level, at most 2 below `PATH` |
+| `rtrash du --json` | One object with `roots`, `dirs`, `files`, `unreadable`, `unreadable_paths` (up to 100 entries with `path` and `error`), plus `too_deep` when the walk met directories past its limits of 4096 levels and 32 KiB of path (counted without their contents) |
+| Ctrl-C during `rtrash du` | Stops the scan and prints what it counted, marked partial (`"partial": true` in JSON), with exit status 130; `--print0`, `--pick`, `-o` and `--stacks` print nothing then. A second Ctrl-C ends it at once |
+| `rtrash du --no-git` | Skip the git checks |
+| `rtrash du --trash-dir=PATH` / `--home-only` | Limit the trash summary to these trash directories |
+| `rtrash du --print0 … \| xargs -0 rtrash put -rf --` | Trash the listed paths |
+| `rtrash du --pick` | Mark rows in the put browser and trash them; rows with git work at risk show `!` |
+| `rtrash du -o base.snap ~/src` | Write a snapshot of every directory total instead of listing (`-` for stdout) |
+| `rtrash du diff base.snap` | What grew or shrank since the snapshot (scans again); `du diff OLD NEW` compares two snapshots, `--json` for scripts |
+| `rtrash du --devices` | Size, use and free space of every mounted file system, as `df` and `gdu -d` show them (`--json` for scripts) |
+| `rtrash du --ncdu=usr.json /usr` | Write an ncdu export for `ncdu -f usr.json` (or `du -f`); `-x` and the filters apply |
+| `rtrash du --ncdu-binary=usr.ncdu /usr` | The same in ncdu 2's binary format (`ncdu -O`), for ncdu 2.6 and later: about a fifth of the JSON export's size, with each directory's totals stored |
+| `rtrash du -f base.snap` | List the largest directories from a snapshot without scanning; an ncdu export (`ncdu -o`, `gdu -o`, or ncdu 2's binary `ncdu -O`) works too, here and in `du diff` |
+| `rtrash du --stacks ~ \| inferno-flamegraph --countname=bytes > du.svg` | Folded stacks of each directory's own bytes for a flame graph (`flamegraph.pl`, inferno, speedscope); works with `-f FILE` |
+| `rtrash du -i ~/src` | Explore one directory at a time, like ncdu (`du -i ~/src ~/work`, as `dua i a b`, opens on a view with one row per directory): `d` trashes, `u` undoes, `r` rescans, and `s`, `n`, `C` and `M` sort by size, name, item count or newest change, `S` switches between disk use and apparent size, `i` shows a row's details, `/` filters the directory by name or glob, `.` hides names that start with a dot, `p` quits and prints the marked paths, `y` copies them to the clipboard (OSC 52), `b` opens a shell in the directory, as in ncdu and gdu, `v` shows a file in `$PAGER`, and `o` opens a row with its default program (gdu's `v` and `o`); rows carry size bars, artefact and git badges. Directories open at once and scan in the background, so you can browse before the sizes are in; `q` or Ctrl-C stops a running scan and keeps its partial sizes |
+| `rtrash du -i --no-delete /srv` | The same explorer, read-only: `d`, `u` and `b` only show a note (config key `no_delete` makes it the default) |
+| `rtrash du --si` | Sizes in powers of 1000 (kB, MB, GB), as disk vendors and `df -H` count; JSON stays in bytes (config key `si`) |
+
+Symlinks are never followed, and a file with more than one hard link counts once, in the sizes and in the file count, so files plus directories match `du --inodes -s`; the total names the extra links. When one subdirectory accounts for 90% or more of a directory's size, only the subdirectory is listed, so each row points at the bulk itself. The scan root appears only in the closing total.
+
+Filters use gitignore syntax. A pattern without a `/` matches a name at any depth (`--exclude='*.iso'`, `--exclude=node_modules/`); a pattern with a `/` matches the path relative to the scanned `PATH` (`--exclude=/build`, `--exclude='docs/**/*.pdf'`), and an absolute path under `PATH` works too. `-X FILE` reads one pattern per line, with `#` comments and `!` to re-include. An excluded directory is never opened, so filters also speed up a scan, and the total reports how many entries were left out. `--gitignore` applies ignore files only inside git repositories, and a nested repository does not inherit the rules of the one around it, as in git. It reads the default global ignore file but not a `core.excludesFile` set elsewhere. On Unix the match works on bytes, so a pattern with bytes that are not UTF-8 matches names that carry them, and such a byte in an ignore file no longer drops the file.
+
+The NOTE column tags regenerable artefacts (`cargo-target`, `node-modules`, `python-cache`, `python-env`, `cmake-build`, `cache`, and a few more listed in `man rtrash`). An artefact is one row; nothing below it is listed on its own, so the list names the `target` directory instead of the largest `.rlib` inside it. Scanning an artefact directly (`rtrash du target`) lists what is inside it, and the total names its kind. Names that are ambiguous on their own (`target`, `build`, `venv`) need a marker file such as `.rustc_info.json`, `CMakeCache.txt` or `pyvenv.cfg`.
+
+du also labels each row in or above a git repository with a git state: `git:ignored`, `git:clean`, `git:dirty` (uncommitted changes, untracked files or a stash), `git:unpushed` (local commits that no remote has), or `git:unknown`. A directory takes the riskiest state among its own repository and every repository below it, so a folder of clones with one unpushed branch shows `git:unpushed`. `--print0` leaves out dirty, unpushed and unknown rows unless `--include-dirty` is given, and nothing inside `.git` or a bare repository is ever listed. A bare repository is one row; it shows `git:unpushed` when no remote has its commits, since it may be the only copy.
+
+The last line reports the trash on the scanned filesystems. Trashing a build tree frees nothing until the trash is emptied, so the summary points at `rtrash empty -n` (preview), `rtrash empty` (free it all) and `rtrash empty 30` (keep the last 30 days). A trash directory inside the scanned tree shows up as one `trash` row, and `--print0` never prints it.
+
+A cleanup pass on a source tree:
+
+```console
+$ rtrash du --artefacts --older-than=14 ~/src          # review
+$ rtrash du --artefacts --older-than=14 --print0 ~/src | xargs -0 rtrash put -rf --
+$ rtrash du --artefacts --pick ~/src                   # or mark rows by hand
+$ rtrash empty -n && rtrash empty 14                    # free the space
+```
 
 ### `rtrash restore [PATH]` (also `trash-restore`)
 
@@ -308,15 +394,21 @@ Per-root item count and reclaimable size (uses `directorysizes` when valid). Sam
 | `rtrash restore PATH` | Restore the item whose original path was `PATH` (exact match) |
 | `rtrash restore` | **TUI** (TTY): fuzzy filter, multi-select (Space/a/A), bulk restore; session until `q` |
 | `rtrash restore --plain` | Numbered line list + index (scripts / no TUI) |
-| `printf '0\n' \| rtrash restore` | Piped index without TUI |
+| `printf '0-2,5\n' \| rtrash restore` | Piped selection without TUI: indices, ranges, commas, or `all` |
+| `rtrash restore --glob='*.rs' --all` | Restore every item whose file name matches; a pattern with a `/` matches the original path |
+| `rtrash restore --regex='/src/.*\.c$' --all` | Restore every item whose original path matches the regular expression |
+| `rtrash restore --to=DIR …` | Restore into `DIR`, keeping each file name |
+| `rtrash restore --conflict=rename\|skip\|overwrite …` | When the destination exists: restore as `NAME.1.EXT`, leave the item in the trash, or replace it (`-f`); the default refuses |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
+| `rtrash restore --name=NAME --latest --json` | Restore the newest item named `NAME` (file name or trash name) without a prompt and print `{"restored": [...], "failed": N, "skipped": N}` |
+| `rtrash restore --newest-first` / `--oldest-first` | Set the list order. The interactive browser lists newest first and `o` flips it; `--plain` lists oldest first, so the newest item sits next to the prompt |
 | Single match | Restores immediately without prompting |
 
 **TUI keys (shared by restore / empty / put):** defaults `↑↓`/`jk` move · `PgUp`/`PgDn` page · `g`/`G` first/last · `Space` mark · `a`/`A` all/clear · `/` live fuzzy · `?` help · `Enter` action · `q`/`Esc` quit.
 
-**Fully customizable:** every action can be remapped in `$XDG_CONFIG_HOME/rtrash/keys.toml` (or `RTRASH_KEYS=path`). TOML under `[keys]`; `rtrash keys --list` shows the resolved map; `rtrash keys --sample` prints a full template. Help (`?`) reflects the live map.
+**Fully customizable:** every action can be remapped in `$XDG_CONFIG_HOME/rtrash/keys.toml` (`%APPDATA%\rtrash\keys.toml` on Windows without `XDG_CONFIG_HOME`, or `RTRASH_KEYS=path`). TOML under `[keys]`; `rtrash keys --list` shows the resolved map; `rtrash keys --sample` prints a full template. Help (`?`) reflects the live map. While a filter is open, plain letters, digits and symbols always type into it; arrows, Enter, Esc and Ctrl or Alt chords keep their bindings.
 
-Browser-specific actions (also remappable): restore `toggle_force` · empty `toggle_dry_run` · put `toggle_recursive` / `toggle_force`.
+Browser-specific actions (also remappable): restore `toggle_force` / `toggle_order` · empty `toggle_dry_run` · put `toggle_recursive` / `toggle_force`.
 
 **TUI empty:** bare `rtrash empty` on a TTY opens the multi-select permanent-delete browser (`--plain` or non-TTY keeps classic empty).
 
@@ -326,29 +418,87 @@ Existing paths at the destination are preserved unless `-f` / `--force` is given
 Same-filesystem restore uses `rename`; cross-device restore copies then deletes the trash payload (needed when put fell back to the home trash).
 Options: `--trash-dir=PATH` (repeatable), `--home-only`, `--cwd-only`.
 
+### `rtrash undo [BATCH]`
+
+Each put run writes one batch id into every `.trashinfo` it creates, under the extra key `X-Rtrash-Batch` (other tools ignore keys they do not know).
+`rtrash undo` restores every item of the most recent run, so `rtrash -r build dist logs` comes back in one step.
+
+| Invocation | Behavior |
+|------------|----------|
+| `rtrash undo` | Restore every item the most recent put run trashed |
+| `rtrash undo --list` | Put runs, newest first: id, date, item count, first path |
+| `rtrash undo BATCH` | Restore the run with that id (from `--list`, or `batch` in `list --json`) |
+| `rtrash undo -n` | Show what would come back |
+| `rtrash undo --json` | Print `{"batch": ID, "restored": [...], "failed": N}` |
+
+Items trashed by gio, Dolphin or trash-cli carry no batch id, so undo never picks them.
+It refuses to overwrite a path that exists again unless given `-f`.
+The library shares one id across a process, so a Python session counts as one run.
+
+### `rtrash finder put|list|restore` (macOS Finder Trash)
+
+> **Experimental and untested on a real Mac.** The `.DS_Store` reader passes tests on files written by rtrash and by the Python `ds_store` package, and put compiles for macOS. Neither has run against Finder yet.
+
+| Invocation | Behavior |
+|------------|----------|
+| `rtrash finder put FILE...` | Ask Finder (through `osascript`) to trash each file, so Finder's own Put Back works. macOS only; symbolic links get refused |
+| `rtrash finder list` | `NAME -> ORIGINAL-PATH` for each item in `~/.Trash`, read from the Put Back records in its `.DS_Store` (`?` when none) |
+| `rtrash finder restore NAME\|ORIGINAL...` | Move items back to their Put Back location; `--all`, `--conflict=…` and `--json` work as for restore |
+| `--trash-dir=DIR` | Another Finder trash, such as `/Volumes/X/.Trashes/501` (Put Back paths count from the volume root) |
+
+List and restore only read files, so they also work on Linux against a copied trash.
+
+### `rtrash config`
+
+Defaults live in `$XDG_CONFIG_HOME/rtrash/config.toml`. Without `XDG_CONFIG_HOME` the file is `~/.config/rtrash/config.toml`, or `%APPDATA%\rtrash\config.toml` on Windows. Environment variables and command-line options win over it. `RTRASH_CONFIG=FILE` reads another file, and an empty value turns the file off. Run `rtrash config` to see the settings in effect, with a warning for each line it cannot read. Add `--path` to see where it looks, or `--default` for a template with every key commented out.
+
+```toml
+[du]
+top = 30
+sort = "disk"            # disk, apparent, items or mtime
+exclude = ["*.iso", "/scratch/"]
+gitignore = true
+
+[list]
+sort = "size"
+size = true
+
+[policy]
+max_size = "50G"         # the prune after every put (RTRASH_MAX_SIZE wins)
+prune = "oldest"         # or largest (RTRASH_PRUNE wins)
+
+[protect]
+paths = ["/srv/data", "/home/*/keep"]   # put refuses these, like safe-rm entries
+```
+
+The other `[du]` keys are `count`, `one_file_system`, `threads`, `git`, `exclude_caches`, `no_delete` and `si`, and `[list]` also takes `reverse`. Unknown keys and values of the wrong type earn a warning and are skipped, and the rest of the file still applies.
+
 ### `rtrash rm PATTERN...` (also `trash-rm`)
 
 Permanently deletes trash entries whose original path, basename, or trash name matches a shell-style glob `PATTERN` (quote globs from the shell).
 Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
+An orphan matches by its name in `files/` or its path there.
 Does **not** restore.
-Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-f`/`--force` (mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--json` (summary + `matches` array).
+Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-f`/`--force` (mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).
 
 ## FreeDesktop durability notes
 
 Previously deferred items are implemented in the shipped put/empty path:
 
 - **Durable `.trashinfo`:** put `fsync`s the reserved info file (and best-effort the `info/` dir) before moving the payload.
-- **EXDEV fidelity:** cross-device put/restore copies preserve content, symlink-as-link, mode, and mtime (not a bare content-only copy).
+- **Cross-device fidelity:** a put or restore across file systems copies, then removes the original once the copy is whole. The copy keeps bytes, holes in sparse files, mode, owner where allowed, times, extended attributes (which carry access control lists and capabilities), symlinks as links, named pipes, and hard links inside the tree. Where both sides share one btrfs file system, such as two subvolumes, it clones instead. A tree with a directory this user can't empty is refused before anything moves.
 - **Put/empty exclusion:** each trash root takes an exclusive `flock` on `.rtrash.lock` for put and empty so the pair cannot tear mid-operation.
 - **Btrfs multi-subvol topdir:** volume topdir is the **longest mount-point prefix** from `/proc/self/mounts`, not a pure `st_dev` parent walk.
+- **Names that are not UTF-8:** put keeps the bytes of such a name in `files/` and `info/`, so two such names never fold into one. A `.trashinfo` whose `Path=` carries raw bytes from another tool still lists and restores, and an age filter can empty it. Output shows each stray byte as the Unicode replacement character.
+- **Terminal-safe names:** when stdout is a terminal, text output shows control characters and bidirectional overrides in names as `?`, as `ls` does, so a hostile `Path=` in a shared trash can't rewrite the screen or fake rows. Pipes, files, and `--json` keep the raw name.
 - **Default multi-volume empty:** with no `--trash-dir`, empty/list/restore/rm discover home trash plus existing user trash on every non-pseudo mount (including `/`), matching trash-cli’s multi-volume default. Pin with `--trash-dir` in scripts.
 
 ## Limitations
 
-- **Platform:** Linux FreeDesktop is the primary niche. macOS is experimental FreeDesktop **home** trash (not Finder). Windows uses the system Recycle Bin (not FreeDesktop layout).
+- **Platform:** Linux FreeDesktop is the primary niche. macOS is experimental FreeDesktop **home** trash; the Finder Trash lives behind `rtrash finder`, also experimental and untested on a real Mac. Windows uses the system Recycle Bin (not FreeDesktop layout).
 - **Restore UI:** bare `rtrash restore` on a TTY opens the **ratatui restore browser** (filter, navigate, multi-restore). Use `--plain` or a piped index for non-interactive selection. Scripts and path restore stay first-class.
 - **Not a general soft-delete database:** only the FreeDesktop on-disk layout.
-- **EXDEV does not re-create xattrs/ACLs/hardlinks** (mode+mtime+symlink+bytes only).
+- **Across file systems:** hard links to files outside the trashed tree become separate copies, the copy leaves out an extended attribute the target refuses, sockets fail, and device nodes need privilege.
 - **Locks are local `flock`** (advisory on some network FS).
 
 ## Performance
@@ -364,6 +514,7 @@ These numbers are **not continuously re-verified in CI** and will vary by filesy
 
 Full empty was further optimized for large trashcans: no pre-scan when not verbose, `d_type`-fast `unlinkat` for regular files, and **serial** wipes of the `files/` then `info/` roots with **parallel children** inside each.
 Emptying uses an in-process bulk tree delete (readdir/`unlinkat` walk inspired by empty-source `rsync --delete`, not a shell-out to rsync).
+The walk keeps its own stack and at most 16 open directories, so trees of any depth go.
 On btrfs, if a trash payload is a real subvolume root, empty uses `BTRFS_IOC_SNAP_DESTROY` instead of walking the tree.
 Interactive `put` mainly wins on process startup versus trash-cli.
 

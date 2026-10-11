@@ -3,7 +3,7 @@
 # Preferred install: rtrash setup
 # Or: rtrash completions zsh > …/zsh/site-functions/_rtrash
 
-local -a put_opts empty_opts list_opts status_opts restore_opts rm_opts
+local -a put_opts empty_opts list_opts status_opts du_opts restore_opts undo_opts finder_opts rm_opts config_opts
 
 put_opts=(
   '(-f --force)'{-f,--force}'[ignore nonexistent files, never prompt]'
@@ -14,11 +14,12 @@ put_opts=(
   '(-d --dir)'{-d,--dir}'[remove empty directories]'
   '(-v --verbose)'{-v,--verbose}'[explain what is being done]'
   '--one-file-system[accepted for rm compatibility (no-op)]'
-  '--preserve-root[do not remove / (default)]'
-  '--no-preserve-root[do not treat / specially]'
+  '--preserve-root=-[refuse /, home and mount points (default)]::mode:(all)'
+  '--no-preserve-root[do not treat those specially]'
   '--trash-dir=[put into this trash root (creates layout if needed)]:path:_files -/'
   '--home-only[always use the home trash]'
   '--plain[skip TUI; require file operands on a TTY]'
+  '--json[print a JSON summary of trashed items]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
 )
@@ -30,6 +31,8 @@ empty_opts=(
   '*--trash-dir=[empty only this trash directory]:path:_files -/'
   '--home-only[only the home trash]'
   '--older-than=[only items trashed more than DAYS days ago]:days:'
+  '--max-size=[remove items until the trash fits in SIZE]:size:'
+  '--prune=[which items --max-size removes first]:policy:(oldest largest)'
   '--json[emit a JSON summary]'
   '--plain[skip TUI]'
   '(- *)'--help'[display help and exit]'
@@ -42,7 +45,13 @@ list_opts=(
   '*--trash-dir=[list only this trash directory]:path:_files -/'
   '--older-than=[only items trashed more than DAYS days ago]:days:'
   '--newer-than=[only items trashed within the last DAYS days]:days:'
+  '--larger-than=[only items taking more than SIZE on disk]:size:'
+  '--smaller-than=[only items taking less than SIZE on disk]:size:'
   '--json[emit a JSON array]'
+  '--size[add each item size]'
+  '--sort=[row order]:key:(date size name path)'
+  '--reverse[reverse the order]'
+  '--all-users[list every readable user trash with an owner column]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
 )
@@ -52,15 +61,105 @@ status_opts=(
   '*--trash-dir=[only this trash directory]:path:_files -/'
   '--older-than=[only count items trashed more than DAYS days ago]:days:'
   '--newer-than=[only count items trashed within the last DAYS days]:days:'
+  '--larger-than=[only count items taking more than SIZE on disk]:size:'
+  '--smaller-than=[only count items taking less than SIZE on disk]:size:'
   '--json[emit a JSON object]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
+)
+
+du_opts=(
+  '(-n --top)'{-n,--top=}'[list N directories and N files]:N:'
+  '(-x --one-file-system)'{-x,--one-file-system}'[skip directories on other file systems]'
+  '--apparent[rank by apparent size instead of disk use]'
+  '--sort=[rank rows by this key]:key:(disk apparent items mtime)'
+  '(-C --count)'{-C,--count}'[add an ITEMS column]'
+  '--unique[add a UNIQUE column of bytes no other file shares]'
+  '--shared[count each shared extent once in sizes]'
+  '--types[list disk use per file type instead of directories and files]'
+  '--max-depth=[list only entries at most N levels deep]:N:'
+  '--threads=[walk with N threads]:N:'
+  '--all-dirs[list every directory level]'
+  '--artefacts[list only regenerable build artefacts and caches]'
+  '*--exclude=[leave out entries that match a gitignore-style pattern]:pattern:'
+  '*'{-X,--exclude-from=}'[read exclude patterns from a file]:file:_files'
+  '--exclude-caches[leave out directories with a valid CACHEDIR.TAG]'
+  '--gitignore[leave out what git ignores]'
+  '--dirs[list directories only]'
+  '--files[list files only]'
+  '--older-than=[only entries untouched for more than DAYS days]:DAYS:'
+  '--newer-than=[only entries modified within the last DAYS days]:DAYS:'
+  '--since=[only entries modified at or after DATE]:DATE:'
+  '--until=[only entries last modified before DATE]:DATE:'
+  '--home-only[only the home trash in the trash summary]'
+  '--trash-dir=[only this trash directory in the summary]:path:_files -/'
+  '--no-git[do not ask git about listed paths]'
+  '--include-dirty[with --print0, also print rows with git work at risk]'
+  '--json[emit a JSON object]'
+  '--print0[print listed paths NUL-separated]'
+  '--pick[mark listed rows in the put browser and trash them]'
+  '(-i --interactive)'{-i,--interactive}'[explore one directory at a time; trash, undo, rescan]'
+  '--no-delete[with -i, browse only: no trash or undo]'
+  '--si[sizes in powers of 1000 (kB, MB, GB)]'
+  '(-o --output)'{-o,--output=}'[write a snapshot of every directory total]:file:_files'
+  '--stacks[print folded stacks for flame graph tools]'
+  '--devices[list every mounted file system with its size and free space]'
+  '(--ncdu-binary)--ncdu=[write an ncdu export of PATH]:file:_files'
+  '(--ncdu)--ncdu-binary=[write an ncdu binary export of PATH (ncdu -O)]:file:_files'
+  '(-f --file)'{-f,--file=}'[list from a snapshot or an ncdu export instead of scanning]:file:_files'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+  '*:path:_files -/'
+)
+
+finder_opts=(
+  '1:action:(put list restore)'
+  '*--trash-dir=[use this Finder trash]:path:_files -/'
+  '--all[restore every item with a Put Back record]'
+  '(-f --force)'{-f,--force}'[put: ignore missing files; restore: overwrite]'
+  '--conflict=[when the destination exists]:policy:(refuse overwrite rename skip)'
+  '(-v --verbose)'{-v,--verbose}'[put: name each trashed file]'
+  '--json[print JSON]'
+  '(- *)'--help'[display help and exit]'
+  '*:file:_files'
+)
+
+config_opts=(
+  '(--default)--path[print where the config file is looked for]'
+  '(--path)--default[print a config file with every setting commented out]'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+)
+
+undo_opts=(
+  '(-l --list)'{-l,--list}'[list put runs, newest first]'
+  '(-n --dry-run)'{-n,--dry-run}'[show what would be restored]'
+  '(-f --force)'{-f,--force}'[overwrite existing files at original locations]'
+  '--conflict=[when an original location is taken]:policy:(refuse overwrite rename skip)'
+  '--json[print the result as JSON]'
+  '--home-only[only the home trash]'
+  '*--trash-dir=[only consider this trash directory]:path:_files -/'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+  '1:batch id:'
 )
 
 restore_opts=(
   '(-f --force)'{-f,--force}'[overwrite existing file at original location]'
   '--home-only[only the home trash]'
   '*--trash-dir=[only consider this trash directory]:path:_files -/'
+  '--cwd-only[only items trashed from under the current directory]'
+  '--plain[numbered selection even on a TTY]'
+  '(--oldest-first)--newest-first[list the most recently trashed item first]'
+  '(--newest-first)--oldest-first[list the oldest trashed item first]'
+  '(1 --glob --regex)--name=[match by file name or trash name]:name:'
+  '(1 --name --regex)--glob=[match by shell pattern]:pattern:'
+  '(1 --name --glob)--regex=[match original paths by regex]:regex:'
+  '(--all)--latest[of several matches, restore the newest]'
+  '(--latest)--all[of several matches, restore every one]'
+  '--to=[restore into this directory]:dir:_files -/'
+  '--conflict=[when the destination exists]:policy:(refuse overwrite rename skip)'
+  '--json[print the result as JSON]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
   '1:path:_files'
@@ -71,6 +170,8 @@ rm_opts=(
   '--home-only[only the home trash]'
   '--older-than=[only match items trashed more than DAYS days ago]:days:'
   '--newer-than=[only match items trashed within the last DAYS days]:days:'
+  '--larger-than=[only match items taking more than SIZE on disk]:size:'
+  '--smaller-than=[only match items taking less than SIZE on disk]:size:'
   '(-n --dry-run)'{-n,--dry-run}'[list matches and reclaimable size; do not delete]'
   '(-f --force)'{-f,--force}'[allow mass patterns that match everything]'
   '(-v --verbose)'{-v,--verbose}'[print each permanently removed original path]'
@@ -112,9 +213,14 @@ _rtrash_dispatch() {
     'empty:purge trashed items'
     'list:list trashed items'
     'status:item count and reclaimable size summary'
+    'du:find the largest directories and files to trash'
     'restore:restore a trashed item'
+    'undo:restore everything one put run trashed'
     'rm:permanently delete matching trash entries'
+    'finder:macOS Finder Trash with Put Back'
+    'config:show the config file and the settings it makes'
     'setup:install multi-call links, completions, man page'
+    'keys:show or sample the TUI keybind config'
     'completions:print embedded shell completion script'
     'man:print embedded man page to stdout'
   )
@@ -147,8 +253,20 @@ _rtrash_dispatch() {
         status)
           _arguments -s -C $status_opts
           ;;
+        du)
+          _arguments -s -C $du_opts
+          ;;
         restore)
           _arguments -s -C $restore_opts
+          ;;
+        undo)
+          _arguments -s -C $undo_opts
+          ;;
+        finder)
+          _arguments -s -C $finder_opts
+          ;;
+        config)
+          _arguments -s -C $config_opts
           ;;
         rm)
           _arguments -s -C $rm_opts
@@ -166,7 +284,14 @@ _rtrash_dispatch() {
         completions)
           _arguments -s -C \
             '(- *)'--help'[display help and exit]' \
-            '1:shell:(bash zsh)'
+            '1:shell:(bash zsh fish)'
+          ;;
+        keys)
+          _arguments -s -C \
+            '(-l --list --sample --path)'{-l,--list}'[print the resolved keymap]' \
+            '(-l --list --path)--sample[print a sample keys.toml]' \
+            '(-l --list --sample)--path[print the config path]' \
+            '(- *)'--help'[display help and exit]'
           ;;
         man)
           _arguments -s -C '(- *)'--help'[display help and exit]'

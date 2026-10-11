@@ -7,7 +7,9 @@ CI (`.github/workflows/ci.yml`) runs the same commands on `main`/PRs. Prefer **`
 ```shell
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --all-targets --no-default-features -- -D warnings
 cargo nextest run --locked --profile ci   # or: cargo test --locked
+cargo nextest run --locked --profile ci --no-default-features
 cargo deny check                          # needs cargo-deny; policy in deny.toml
 ```
 
@@ -25,6 +27,8 @@ export RTRASH_BIN=$PWD/target/release/rtrash
 asv machine --yes
 asv run -E existing:$(command -v python3) --quick
 ```
+
+**Disk usage timing:** `bench/du.sh` compares `rtrash du` with other disk usage tools through hyperfine; see [docs/benchmarks.md](docs/benchmarks.md#rtrash-du-against-other-disk-usage-tools).
 
 `prek` covers fast hygiene (whitespace, yaml/toml, large files, codespell). It does **not** compile the crate on every commit.
 

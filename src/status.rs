@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use crate::fastdelete;
 use crate::list;
 use crate::trashdir::{self, TrashDir};
+use crate::util::plural;
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]...
@@ -16,6 +17,9 @@ valid; otherwise the same disk_usage walk as empty --dry-run.
       --trash-dir=PATH  only this trash directory (repeatable)
       --older-than=DAYS only count items trashed more than DAYS days ago
       --newer-than=DAYS only count items trashed within the last DAYS days
+      --larger-than=SIZE  only count items taking more than SIZE on disk
+      --smaller-than=SIZE only count items taking less than SIZE on disk
+                     (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
       --json            emit a JSON object (scripts)
       --help            display this help and exit
       --version         output version information and exit
@@ -39,8 +43,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut json = false;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
+    let mut size = list::SizeFilter::default();
     let mut i = 0usize;
     while i < args.len() {
+        match size.take(args, &mut i) {
+            Some(Ok(())) => {
+                i += 1;
+                continue;
+            }
+            Some(Err(e)) => {
+                eprintln!("{prog}: {e}");
+                return 2;
+            }
+            None => {}
+        }
         let arg = &args[i];
         match arg.as_str() {
             "--home-only" => home_only = true,
@@ -54,7 +70,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 return 0;
             }
             a if a.starts_with("--trash-dir=") => {
-                trash_dirs.push(PathBuf::from(&a["--trash-dir=".len()..]));
+                trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
             a if a.starts_with("--older-than=") => {
                 match parse_nonneg_days(&a["--older-than=".len()..]) {
@@ -98,106 +114,138 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         i += 1;
     }
+    if let Err(e) = size.check() {
+        eprintln!("{prog}: {e}");
+        return 2;
+    }
     let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);
     if dirs.is_empty() && !trash_dirs.is_empty() {
         eprintln!("{prog}: no valid --trash-dir pins");
         return 2;
     }
     if json {
-        print_status_json(&dirs, older_than, newer_than);
+        print_status_json(&dirs, older_than, newer_than, size);
     } else {
-        print_status(&dirs, older_than, newer_than);
+        print_status(&dirs, older_than, newer_than, size);
     }
     0
 }
 
-struct RootSummary {
-    path: String,
-    items: u64,
-    bytes: u64,
+pub(crate) struct RootSummary {
+    pub path: String,
+    pub items: u64,
+    pub bytes: u64,
+    /// Of `items`, payloads with no `.trashinfo`.
+    pub orphans: u64,
 }
 
-fn summarize_dirs(
+pub(crate) fn summarize_dirs(
     dirs: &[TrashDir],
     older_than: Option<i64>,
     newer_than: Option<i64>,
+    size: list::SizeFilter,
 ) -> (Vec<RootSummary>, u64, u64) {
     let mut roots = Vec::new();
     let mut total_items = 0u64;
     let mut total_bytes = 0u64;
     for dir in dirs {
-        let entries = list::filter_age(
+        let mut entries = list::filter_age(
             list::collect(std::slice::from_ref(dir)),
             older_than,
             newer_than,
         );
-        let mut bytes = 0u64;
-        let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for e in &entries {
-            bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes(dir, &e.name));
-            counted.insert(e.name.clone());
+        // One read of the cache per root; walked directories are written
+        // back at the end, so the next status is a lookup.
+        let sizes = trashdir::DirSizes::load(dir);
+        let mut each: Vec<u64> = {
+            use rayon::prelude::*;
+            entries
+                .par_iter()
+                .map(|e| sizes.entry_bytes(&e.name))
+                .collect()
+        };
+        sizes.write_back();
+        if size.is_set() {
+            let mut kept = each.iter();
+            entries.retain(|_| kept.next().is_some_and(|&n| size.keeps(n)));
+            each.retain(|&n| size.keeps(n));
         }
-        // Orphans only on unfiltered full status (age filter has no date for orphans).
+        let mut bytes: u64 = each.iter().sum();
+        // Orphans (payloads with no .trashinfo) count as items, but only on
+        // an unfiltered status: they have no date for an age filter.
+        let mut orphans = 0u64;
         if older_than.is_none() && newer_than.is_none() {
-            if let Ok(rd) = std::fs::read_dir(dir.files()) {
-                for ent in rd.flatten() {
-                    let name = ent.file_name().to_string_lossy().into_owned();
-                    if counted.contains(&name) {
-                        continue;
-                    }
-                    let has_info = dir.info().join(format!("{name}.trashinfo")).exists();
-                    if !has_info {
-                        bytes = bytes.saturating_add(fastdelete::disk_usage(&ent.path()));
-                    }
+            for o in list::orphans(std::slice::from_ref(dir)) {
+                let n = fastdelete::disk_usage(&o.original);
+                if size.keeps(n) {
+                    orphans += 1;
+                    bytes = bytes.saturating_add(n);
                 }
             }
         }
-        let n = entries.len() as u64;
+        let n = entries.len() as u64 + orphans;
         total_items = total_items.saturating_add(n);
         total_bytes = total_bytes.saturating_add(bytes);
         roots.push(RootSummary {
             path: dir.root.display().to_string(),
             items: n,
             bytes,
+            orphans,
         });
     }
     (roots, total_items, total_bytes)
 }
 
-pub fn print_status(dirs: &[TrashDir], older_than: Option<i64>, newer_than: Option<i64>) {
+pub fn print_status(
+    dirs: &[TrashDir],
+    older_than: Option<i64>,
+    newer_than: Option<i64>,
+    size: list::SizeFilter,
+) {
     if dirs.is_empty() {
         eprintln!("No trash directories found");
         eprintln!("Total: 0 items (0 B)");
         return;
     }
-    let (roots, total_items, total_bytes) = summarize_dirs(dirs, older_than, newer_than);
+    let (roots, total_items, total_bytes) = summarize_dirs(dirs, older_than, newer_than, size);
     for r in &roots {
+        let orphans = if r.orphans > 0 {
+            format!(" ({} without .trashinfo)", r.orphans)
+        } else {
+            String::new()
+        };
         println!(
-            "{}\t{} items\t{}",
+            "{}\t{}{orphans}\t{}",
             r.path,
-            r.items,
+            plural(r.items, "item", "items"),
             fastdelete::format_bytes(r.bytes)
         );
     }
     println!(
-        "Total: {} items ({})",
-        total_items,
+        "Total: {} ({})",
+        plural(total_items, "item", "items"),
         fastdelete::format_bytes(total_bytes)
     );
 }
 
-fn print_status_json(dirs: &[TrashDir], older_than: Option<i64>, newer_than: Option<i64>) {
-    let (roots, total_items, total_bytes) = summarize_dirs(dirs, older_than, newer_than);
+fn print_status_json(
+    dirs: &[TrashDir],
+    older_than: Option<i64>,
+    newer_than: Option<i64>,
+    size: list::SizeFilter,
+) {
+    let (roots, total_items, total_bytes) = summarize_dirs(dirs, older_than, newer_than, size);
     let mut out = String::from("{\n  \"roots\": [\n");
     for (i, r) in roots.iter().enumerate() {
         if i > 0 {
             out.push_str(",\n");
         }
         out.push_str(&format!(
-            "    {{\"path\":\"{}\",\"items\":{},\"bytes\":{}}}",
+            "    {{\"path\":\"{}\",\"items\":{},\"bytes\":{},\"orphans\":{}}}",
             list::json_escape(&r.path),
             r.items,
-            r.bytes
+            r.bytes,
+            r.orphans
         ));
     }
     if !roots.is_empty() {

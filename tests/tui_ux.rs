@@ -1,6 +1,9 @@
 //! Structural + pure UX checks for restore/empty/put TUI consistency.
 //! Does not open an alternate-screen session.
 
+// The browsers and their helpers exist only with the `tui` feature.
+#![cfg(all(unix, feature = "tui"))]
+
 use std::fs;
 use std::path::PathBuf;
 

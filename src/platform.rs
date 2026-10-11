@@ -82,8 +82,12 @@ pub const fn volume_trash_discovery() -> bool {
 /// Pure helper shared by FreeDesktop list and Windows recycle list.
 pub fn format_deletion_list_line(date: Option<&str>, original: &Path) -> String {
     match date {
-        Some(d) if !d.is_empty() => format!("{d} {}", original.display()),
-        _ => format!("? {}", original.display()),
+        Some(d) if !d.is_empty() => format!(
+            "{} {}",
+            crate::util::term_text(d),
+            crate::util::term_path(original)
+        ),
+        _ => format!("? {}", crate::util::term_path(original)),
     }
 }
 

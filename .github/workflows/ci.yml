@@ -1,4 +1,6 @@
-# Quality bar: fmt, clippy (-D warnings), nextest (locked), supply-chain (cargo-deny).
+# Quality bar: fmt, clippy (-D warnings), nextest (locked), supply-chain (cargo-deny),
+# shell completion syntax, and tests plus a du smoke test on Windows and macOS.
+# Spelling runs through prek (codespell) in pre_commit.yml.
 name: CI
 
 on:
@@ -32,6 +34,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Clippy (no TUI feature, tests included)
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
@@ -39,6 +44,102 @@ jobs:
 
       - name: Test (nextest, locked, ci profile)
         run: cargo nextest run --locked --profile ci
+
+      - name: Test without the TUI feature
+        run: cargo nextest run --locked --profile ci --no-default-features
+
+      - name: du smoke test against du(1) and a Python walk
+        run: |
+          cargo build --locked --release
+          fixture=$(mktemp -d)
+          head -c 1000000 /dev/urandom > "$fixture/a.bin"
+          ln "$fixture/a.bin" "$fixture/a-link.bin"
+          ln -s "$fixture/a.bin" "$fixture/a-sym"
+          mkdir -p "$fixture/d/e"
+          echo hi > "$fixture/d/e/f"
+          scripts/du-smoke.sh target/release/rtrash "$(rustc --print sysroot)" "${CARGO_HOME:-$HOME/.cargo}/registry/src" "$fixture"
+
+  windows:
+    name: windows · test · du smoke
+    runs-on: windows-latest
+    steps:
+      # Keep LF endings so tests that read checked-in files see what Unix sees.
+      - run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Test without the TUI feature
+        run: cargo test --locked --no-default-features
+
+      - name: du smoke test against PowerShell
+        shell: pwsh
+        run: |
+          cargo build --locked --release
+          $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME '.cargo' }
+          ./scripts/du-smoke.ps1 -Rtrash target/release/rtrash.exe -Trees (rustc --print sysroot), (Join-Path $cargoHome 'registry/src')
+
+  macos:
+    name: ${{ matrix.os }} · test · du smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        # Apple silicon, and the last Intel image GitHub offers.
+        os: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Test without the TUI feature
+        run: cargo test --locked --no-default-features
+
+      - name: du smoke test with getattrlistbulk and with stat
+        run: |
+          cargo build --locked --release
+          fixture=$(mktemp -d)
+          head -c 1000000 /dev/urandom > "$fixture/a.bin"
+          ln "$fixture/a.bin" "$fixture/a-link.bin"
+          ln -s "$fixture/a.bin" "$fixture/a-sym"
+          mkdir -p "$fixture/d/e"
+          echo hi > "$fixture/d/e/f"
+          for bulk in 1 0; do
+            echo "RTRASH_DU_BULK=$bulk"
+            RTRASH_DU_BULK=$bulk scripts/du-smoke.sh target/release/rtrash \
+              "$(rustc --print sysroot)" "${CARGO_HOME:-$HOME/.cargo}/registry/src" "$fixture"
+          done
+
+  completions:
+    name: completion syntax (bash · zsh · fish)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zsh and fish
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh fish
+
+      - name: Parse each completion script
+        run: |
+          bash -n completions/rtrash.bash
+          zsh -n completions/_rtrash
+          fish --no-execute completions/rtrash.fish
+
+      - name: Load the zsh and fish completions
+        run: |
+          zsh -f -c 'fpath=(completions $fpath); autoload -Uz compinit; compinit -u -D; autoload -Uz +X _rtrash'
+          fish --no-config -c 'source completions/rtrash.fish; complete -C "rtrash restore --js" | string match -q -- "--json*"'
 
   deny:
     name: cargo-deny

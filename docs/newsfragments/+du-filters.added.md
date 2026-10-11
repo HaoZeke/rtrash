@@ -1,0 +1,2 @@
+`rtrash du` takes filters in gitignore syntax: `--exclude=PATTERN` (repeatable), `-X FILE` for a pattern file, `--exclude-caches` for directories with a valid `CACHEDIR.TAG`, and `--gitignore` to leave out what git ignores inside each repository.
+Excluded entries add nothing to any size or count, an excluded directory is never opened, and the total reports how many entries were left out (`excluded` in the JSON roots).

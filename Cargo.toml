@@ -57,6 +57,8 @@ python = ["dep:pyo3"]
 [dependencies]
 libc = "0.2"
 rayon = "1.10"
+# Decoder only, pure Rust, no dependencies: reads ncdu 2 binary exports.
+ruzstd = { version = "0.9.1", default-features = false, features = ["std"] }
 pyo3 = { version = "0.29", optional = true, features = ["extension-module"] }
 ratatui = { version = "0.29", optional = true, default-features = false, features = [
   "crossterm",
@@ -66,9 +68,29 @@ crossterm = { version = "0.28", optional = true }
 toml = { version = "0.8", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
 
+# musl's malloc serialises threads on one lock; the parallel du walk needs a
+# faster allocator there. glibc builds keep the system allocator.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
+# restore --regex. The lite engine keeps the binary small; patterns match
+# paths, so Unicode classes do not matter.
+[target.'cfg(unix)'.dependencies]
+regex-lite = "0.1"
+
 # Windows system Recycle Bin (shell APIs). Not used on Unix FreeDesktop builds.
 [target.'cfg(windows)'.dependencies]
 trash = { version = "5.2", default-features = true }
+# du lists directories with GetFileInformationByHandleEx.
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_Registry",
+  "Win32_System_Time",
+  "Win32_UI_Shell",
+] }
 
 [profile.release]
 lto = true

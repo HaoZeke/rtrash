@@ -1,0 +1,1 @@
+du picks more threads when the tree looks uncached: without `--threads` or `RAYON_NUM_THREADS`, it times a few stats under the first PATH, and when they wait on the disk it walks with three threads per CPU, up to 64. A cold scan of the rustup home went from about 470 ms to 370 to 384 ms; cached scans keep one thread per CPU.

@@ -80,3 +80,73 @@ Timed `rtrash empty --trash-dir=…` only; **7 trials** each after warm-up.
 | speedup | **~1.91×** | ~1.71× | **~2.00×** | **~1.91×** |
 
 Every timed trial: `ec=0`, `top_before=8001`, `files_left=0`, `info_left=0`.
+
+## rtrash du against other disk usage tools
+
+`bench/du.sh` times `rtrash du` next to du(1), diskus, dust, dua, pdu and gdu with [hyperfine](https://github.com/sharkdp/hyperfine).
+Tools that are not installed are skipped.
+
+```shell
+cargo install --locked hyperfine diskus du-dust dua-cli parallel-disk-usage
+cargo build --release
+RTRASH=$PWD/target/release/rtrash bench/du.sh ~/.rustup /usr synthetic
+```
+
+Besides those tools, each tree gets three `rtrash du` variants: the default (`-n 20`, with git states), `--no-git`, and `-n 0 --no-git`, which walks and sums but lists nothing.
+Pass the word `synthetic` as a tree to generate `SYNTH_FILES` (default 500000) files of 100 bytes each under `$TMPDIR`; the script removes that tree when it exits.
+
+Every tree is timed with a warm cache.
+Cold-cache runs on each tree happen when `sudo -n` can write `/proc/sys/vm/drop_caches`; set `COLD=0` to skip them.
+`RUNS`, `WARMUP` and `COLD_RUNS` set the run counts, and `OUT` names the directory that receives the Markdown and JSON tables.
+
+### Measured results (Linux x86_64, 2026-10-10)
+
+The results show that the speed work on `rtrash du` paid off most on git repositories and on the musl build.
+The host has 8 CPUs, 16 GiB of RAM and an overlayfs root on ext4.
+Other jobs ran on the box at a load average between 7 and 15.
+Read differences under about 20% as noise.
+Tools: coreutils du 9.7, diskus 0.9.0, dust 1.2.6, dua 2.45.1, pdu 0.24.0 and gdu 5.25.0.
+Warm runs: 2 warmups and 10 timed runs. Cold runs: 3, each after dropping the page cache.
+
+| Tree | Files | Dirs |
+|:---|---:|---:|
+| `~/.rustup` | 179188 | 4384 |
+| a source tree with 11 git repositories | 15121 | 3428 |
+| `/usr` | 84643 | 12105 |
+| synthetic | 500000 | 1101 |
+
+Mean wall time in milliseconds, ± one standard deviation.
+"Before" means rtrash 0.1.4 at `242a601`, and "after" means the current tree.
+
+| Tree, cache | `rtrash du` before | `rtrash du` after | `--no-git` after | du -s | diskus | dust | dua | pdu | gdu |
+|:---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| .rustup warm | 123.9 ± 26 | 96.1 ± 13 | 85.4 ± 13 | 313.0 | 308.9 | 357.8 | 219.8 | 284.0 | 344.1 |
+| .rustup cold | 415.4 ± 93 | 371.1 ± 25 | 432.3 ± 121 | 1337.4 | 430.3 | 601.2 | 607.7 | 492.1 | 554.3 |
+| source tree warm | 109.9 ± 17 | 42.8 ± 5 | 20.0 ± 2 | 44.0 | 35.9 | 46.5 | 41.3 | 44.9 | 77.9 |
+| source tree cold | 234.2 ± 44 | 115.3 ± 9 | 93.4 ± 29 | 245.9 | 85.3 | 129.5 | 139.3 | 93.4 | 138.8 |
+| /usr warm | 72.6 ± 11 | 69.1 ± 13 | 62.9 ± 8 | 180.9 | 102.9 | 153.6 | 172.8 | 116.5 | 191.8 |
+| /usr cold | 197.4 ± 25 | 216.3 ± 11 | 215.6 ± 23 | 680.7 | 190.2 | 319.4 | 350.2 | 231.8 | 317.0 |
+| synthetic warm | 194.4 ± 13 | 192.4 ± 18 | 197.2 ± 25 | 791.6 | 393.2 | 547.5 | 641.0 | 401.5 | 482.4 |
+| synthetic cold | 1020.4 ± 30 | 978.6 ± 17 | 1005.7 ± 16 | 4343.7 | 1066.8 | 1392.4 | 1947.7 | 1299.0 | 1063.7 |
+
+After the change, the source tree gained the most, from 110 to 43 milliseconds by default.
+Each repository now gets one batched ignore check, and the status and log probes of all repositories run in parallel.
+Peak memory fell from between 6 and 12 MiB to between 4 and 8 MiB, because only the kept rows get a path.
+
+The release tarballs contain a static musl build, and that build gained even more.
+Its `stat` goes through the full path, and its allocator takes one global lock.
+The walker now reads entries with `getdents64` and stats them relative to the open directory, and musl builds link mimalloc.
+Three sets of 10 warm runs each, `rtrash du -n 20`:
+
+| Tree | glibc before | glibc after | musl before | musl after |
+|:---|---:|---:|---:|---:|
+| .rustup | 104.3 ± 13.0 | 95.6 ± 13.0 | 564.6 ± 46.7 | 100.8 ± 18.7 |
+| source tree | 94.4 ± 9.5 | 44.9 ± 6.6 | 148.6 ± 15.5 | 67.4 ± 12.6 |
+| /usr | 80.3 ± 10.7 | 64.8 ± 8.9 | 293.8 ± 18.3 | 71.7 ± 17.2 |
+| 200000 files in one directory | 308.3 ± 27.2 | 126.0 ± 14.4 | 433.5 ± 23.9 | 144.4 ± 24.5 |
+
+Files in one wide directory gain from a split: past 256 entries, the stats go out to the thread pool in chunks.
+A thread pool larger than the CPU count helps a cold walk, which waits on I/O.
+With `--threads 24`, `.rustup` cold took 339 milliseconds instead of 409.
+
+Cold or warm, with 24 threads or the default, the totals still match coreutils `du -sB1` (disk) and `du -sb` (apparent) to the byte on `.rustup`, the source tree and `/usr`, for both builds.

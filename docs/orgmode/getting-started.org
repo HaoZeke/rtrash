@@ -95,6 +95,7 @@ rtrash a.txt b.txt
 rtrash restore              # TUI on TTY
 rtrash restore --cwd-only
 rtrash restore --plain
+rtrash restore --plain --newest-first
 #+end_src
 
 * Changelog

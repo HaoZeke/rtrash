@@ -1,0 +1,1 @@
+Restore gains `--to=DIR`, `--glob=PATTERN` and `--regex=REGEX` matching, `--all`, and `--conflict=refuse|overwrite|rename|skip`; the numbered prompt takes ranges such as `0-2,5` or `all`. The restore JSON adds `skipped` and each item's `restored_to`. List gains `--size`, `--sort=date|size|name|path` and `--reverse`.

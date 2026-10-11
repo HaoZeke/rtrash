@@ -45,6 +45,25 @@ is permanent delete of matching
 , not the same as multi-call
 .B rm
 (which puts).
+.PP
+File names need not be UTF-8. An argument or a trashed name with other
+bytes keeps them through every command. Output shows each such byte as
+the Unicode replacement character.
+.PP
+When standard output is a terminal, names and paths in text output show
+each control character (C0, DEL, and C1) and each bidirectional override
+as
+.BR ? ,
+as
+.BR ls (1)
+does. A name or a
+.B Path=
+line in a shared trash can't move the cursor, recolor the screen, or fake
+extra rows that way. A pipe, a file, and
+.B \-\-json
+still get the raw name. Errors about a trashed item on standard error
+follow the same rule when standard error is a terminal. The browsers
+drop control characters when they draw.
 .SH GLOBAL OPTIONS
 When
 .B rtrash
@@ -74,6 +93,14 @@ s into the trash. Accepts common
 .BR rm (1)
 flags with the same interactive/force semantics; nothing is unlinked
 permanently.
+.PP
+A trash on another file system gets a copy, and the original goes only
+once the copy is whole. The copy keeps holes in sparse files, mode, owner
+where allowed, times, extended attributes, named pipes, and hard links
+inside the tree. Within one btrfs file system it clones instead.
+A tree with a directory this user can't empty is refused before anything
+moves. Sockets can't be copied, so trashing one there fails. Restore
+follows the same rules.
 .TP
 .BR \-f ", " \-\-force
 Ignore nonexistent files and arguments, never prompt.
@@ -110,15 +137,44 @@ Accepted for rm compatibility (no-op: entries are moved whole, never
 traversed like
 .BR "rm \-x" ).
 .TP
-.B \-\-preserve\-root
+.BR \-\-preserve\-root [ =all ]
 Do not remove
-.RB \(oq / \(cq
-(default).
+.RB \(oq / \(cq ,
+your home directory, or a directory on another device than its parent
+(a mount point; renaming fails there, and a copy would drag the whole
+file system into the trash).
+The default;
+.B =all
+spells the same thing in GNU terms.
 .TP
 .B \-\-no\-preserve\-root
-Do not treat
-.RB \(oq / \(cq
-specially.
+Do not treat those specially.
+.PP
+Whatever the flags, put refuses a path that is, or contains, the trash
+directory it would move into (a directory cannot move inside itself),
+and an item already inside that trash, which would lose its record
+there; to delete trashed items, use
+.B rtrash rm
+or
+.BR "rtrash empty" .
+.PP
+Put also skips paths on the safe-rm list: safe-rm's built-in system
+directories (such as
+.BR /usr ,
+.BR /etc ,
+.BR /home )
+plus every path or shell pattern, one per line, in
+.BR /etc/safe\-rm.conf ,
+.BR /usr/local/etc/safe\-rm.conf ,
+.B $XDG_CONFIG_HOME/safe\-rm
+and
+.BR ~/.safe\-rm .
+No flag overrides that list.
+Before it trashes a directory with a git repository at its top that
+has uncommitted, unpushed or unreadable work, put prints a warning;
+.B rtrash undo
+brings the run back.
+.TP
 .TP
 .BI \-\-trash\-dir =PATH
 Put into this FreeDesktop trash root (creates
@@ -129,6 +185,21 @@ if needed). Scripts and tests use this instead of XDG discovery.
 .TP
 .B \-\-home\-only
 Always use the home trash (skip volume trash selection).
+.TP
+.B \-\-plain
+Never open the put browser; require
+.I FILE
+operands even on a TTY.
+.TP
+.B \-\-json
+Print one JSON object on stdout:
+\fItrashed\fR (one entry per moved item with \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR)
+and \fIfailed\fR (operands that could not be trashed).
+Implies
+.B \-\-plain
+and replaces
+.B \-v
+output.
 .TP
 .B \-\-help
 Display help and exit.
@@ -170,15 +241,41 @@ Same as positional
 .I DAYS
 (list/status flag style).
 .TP
+.BI \-\-max\-size =SIZE
+Remove items until the trash directories in scope, taken together, fit in
+.I SIZE
+(bytes, or with a K, M, G or T suffix in powers of 1024).
+With
+.IR DAYS ,
+the age cut runs first.
+.TP
+.BR \-\-prune =oldest|largest
+Which items
+.B \-\-max\-size
+removes first (default oldest).
+.TP
 .B \-\-json
 Emit a JSON summary on stdout
-(\fIdry_run\fR, \fIremoved\fR, \fIbytes\fR, \fIdays\fR).
+(\fIdry_run\fR, \fIremoved\fR, \fIbytes\fR, \fIdays\fR, \fImax_size\fR).
+.TP
+.B \-\-plain
+Never open the empty browser on a TTY.
 .TP
 .B \-\-help
 Display help and exit.
 .TP
 .B \-\-version
 Output version information and exit.
+.PP
+A directory the user owns but cannot list or change (mode 0311, say)
+gets owner
+.B rwx
+back and then goes; nothing another account owns is changed.
+An item that still cannot go stays, with its
+.BR .trashinfo .
+The rest still goes, and
+.B empty
+exits 1 after listing each item left and the reason.
 .SS list
 .B rtrash list
 [\fIOPTION\fR]...
@@ -189,6 +286,18 @@ Also multi-call
 List trashed items as
 .RB \(oq "DELETION-DATE ORIGINAL-PATH" \(cq,
 oldest first.
+A record named
+.IR .trashinfo ,
+.I ..trashinfo
+or
+.I ...trashinfo
+names no item, since its payload in
+.I files/
+would be
+.I files/
+itself or the whole trash; no command lists it or acts on it, and a full
+.B empty
+clears it.
 .TP
 .B \-\-home\-only
 Only the home trash
@@ -197,6 +306,29 @@ Only the home trash
 .BI \-\-trash\-dir =PATH
 List only this trash directory (repeatable); default is the home trash
 plus every mounted volume.
+.TP
+.B \-\-all\-users
+List the trash of every account this user can read, with an owner column
+after the date (and an
+.B owner
+field in JSON).
+It reads each home trash at the default
+.IR ~/.local/share/Trash ,
+since another account's
+.B XDG_DATA_HOME
+is unknown, plus every
+.I .Trash/$uid
+and
+.I .Trash\-$uid
+on mounted volumes.
+Root sees them all.
+Nothing changes on disk; to restore or remove another account's items,
+root pins that trash with
+.BR \-\-trash\-dir .
+Takes no
+.B \-\-home\-only
+or
+.BR \-\-trash\-dir .
 .TP
 .BI \-\-older\-than =DAYS
 Only items trashed more than
@@ -209,15 +341,76 @@ Only items trashed within the last
 .I DAYS
 days.
 .TP
+.BI \-\-larger\-than =SIZE
+Only items taking more than
+.I SIZE
+on disk, payload plus
+.IR .trashinfo ,
+the size
+.B list \-\-size
+shows.
+.I SIZE
+reads as in
+.BR "empty \-\-max\-size" :
+500M, 1.5G, 64k.
+Payloads with no
+.I .trashinfo
+have a size, so this filter keeps them in.
+.TP
+.BI \-\-smaller\-than =SIZE
+Only items taking less than
+.I SIZE
+on disk.
+.TP
+.B \-\-size
+Add a column with each item's disk usage: the payload plus its
+.IR .trashinfo ,
+as
+.B status
+counts it.
+Directory sizes come from
+.I directorysizes
+when valid, and walked sizes go back into it.
+.TP
+.BI \-\-sort= KEY
+Order rows by
+.B date
+(the default),
+.B size
+(largest first; implies
+.BR \-\-size ),
+.B name
+(original file name) or
+.B path
+(original path).
+Ties keep the date order.
+.TP
+.B \-\-reverse
+Reverse the order.
+.TP
 .B \-\-json
 Emit a JSON array of objects
-(\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR).
+(\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR,
+\fIbatch\fR, and \fIsize\fR in bytes with
+.BR \-\-size ).
+The batch holds the put run id for items rtrash trashed, else null.
 .TP
 .B \-\-help
 Display help and exit.
 .TP
 .B \-\-version
 Output version information and exit.
+.PP
+Orphans (payloads in
+.B files/
+with no
+.BR .trashinfo )
+come last, dated
+.B ????-??-??
+and shown by their path inside the trash, with
+.B \(dqorphan\(dq:true
+in JSON.
+An age filter leaves them out.
 .SS status
 .B rtrash status
 [\fIOPTION\fR]...
@@ -243,9 +436,691 @@ Only count items trashed within the last
 .I DAYS
 days.
 .TP
+.BI \-\-larger\-than =SIZE
+Only count items taking more than
+.I SIZE
+on disk, payload plus
+.IR .trashinfo ,
+the size
+.B list \-\-size
+shows.
+.I SIZE
+reads as in
+.BR "empty \-\-max\-size" :
+500M, 1.5G, 64k.
+Payloads with no
+.I .trashinfo
+have a size, so this filter keeps them in.
+.TP
+.BI \-\-smaller\-than =SIZE
+Only count items taking less than
+.I SIZE
+on disk.
+.TP
 .B \-\-json
 Emit a JSON object
 (\fIroots\fR, \fItotal_items\fR, \fItotal_bytes\fR).
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.PP
+Orphans count as items, noted as
+.RB \(oq "(N without .trashinfo)" \(cq
+per root and as
+.B orphans
+in JSON; an age filter leaves them out.
+.PP
+On Windows, status lists each drive's Recycle Bin: items, size, and the
+cap from
+.B MaxCapacity
+in the registry with the share in use, then the total.
+A drive set to skip the Recycle Bin says so.
+With an age or size filter it counts the passing items per drive
+instead, without the caps.
+.PP
+On Windows,
+.BR list ,
+.BR status ,
+.B rm
+and
+.B empty
+take the same age filters as here, on the deletion time Windows
+records, and all but
+.B empty
+take the size filters.
+An item's size is the one its
+.I $I
+record holds, which for a folder is its total at deletion.
+.SS du
+.B rtrash du
+[\fIOPTION\fR]... [\fIPATH\fR]...
+.br
+.B rtrash du diff
+[\fB\-n\fR \fIN\fR] [\fB\-\-apparent\fR] [\fB\-\-json\fR]
+.I OLD
+.RI [ NEW ]
+.PP
+.B du diff
+compares two snapshots written with
+.B \-o
+(or ncdu exports, see
+.BR \-f )
+and lists the directories that grew or shrank most, marking those that
+appeared (new) or left (gone).
+Without
+.IR NEW ,
+it scans the roots of
+.I OLD
+again at the same depth.
+To scan a directory named diff, write
+.BR "rtrash du ./diff" .
+.PP
+Find what to delete. Walk each
+.I PATH
+(default the current directory) in parallel and list the largest
+directories and files with their on-disk and apparent sizes and the age of
+their newest modification. Symlinks are never followed, and a file with
+more than one hard link counts once, in the sizes and in the file count,
+so files plus directories match
+.BR "du \-\-inodes \-s" ;
+the total names the extra links. When one subdirectory accounts for
+90% or more of a directory's size, only the subdirectory is listed.
+The scan root itself appears only in the closing total.
+A root that is a regenerable artefact (see
+.BR \-\-artefacts )
+has its kind named in the total, and its contents are listed, since
+naming it asks to look inside.
+.PP
+Rows inside or containing a git repository carry a git state, found with
+the
+.B git
+binary.
+.B ignored
+means an ignore rule matches the path;
+.B clean
+means its repository has nothing uncommitted;
+.B dirty
+means uncommitted changes, untracked files or a stash;
+.B unpushed
+means commits on a local branch that no remote has;
+.B unknown
+means git gave no answer.
+A directory takes the riskiest state among its own repository and every
+repository below it.
+.B \-\-print0
+leaves out dirty, unpushed and unknown rows.
+Paths inside
+.I .git
+or a bare repository are never listed.
+A bare repository is one row, and it reads
+.B unpushed
+when no remote has its commits.
+.PP
+The closing summary reports the trash on the scanned file systems.
+Trashed files keep their space until
+.B rtrash empty
+removes them; preview with
+.BR "rtrash empty \-n" ,
+or keep recent items with
+.BR "rtrash empty " \fIDAYS\fR.
+A trash directory found during the walk is one
+.B trash
+row, and
+.B \-\-print0
+never prints it.
+.TP
+.BR \-n ", " \-\-top =\fIN\fR
+List
+.I N
+directories and
+.I N
+files (default 20).
+.TP
+.BR \-x ", " \-\-one\-file\-system
+Skip directories on other file systems.
+.TP
+.B \-\-apparent
+Rank by apparent size (file length) instead of allocated disk space.
+As with coreutils
+.BR du (1),
+directories add to disk use but not to apparent size.
+.TP
+.BI \-\-max\-depth =N
+List only entries at most
+.I N
+levels below
+.IR PATH .
+Sizes still include everything below.
+.TP
+.BI \-\-threads =N
+Walk with
+.I N
+threads. The default is one per CPU, or
+.B RAYON_NUM_THREADS
+when it is set. Without either, rtrash first times a few stats and opens
+under the first
+.IR PATH ;
+when they average 10 microseconds or more, the metadata is coming off
+the disk, and the walk uses three threads per CPU, up to 64. Cached, the
+probe costs well under a millisecond and changes nothing. More threads
+than CPUs can also help on a remote file system.
+.TP
+.B \-\-all\-dirs
+List every directory level, including parents that one subdirectory
+dominates.
+.TP
+.BI \-\-sort= KEY
+Rank rows by
+.IR KEY :
+.B disk
+(the default),
+.B apparent
+(the same as
+.BR \-\-apparent ),
+.B items
+(files and directories below each directory, each hard-linked file once;
+no file rows are listed, since every file holds one item), or
+.B mtime
+(newest modification first). Under
+.BR mtime ,
+a directory gives way to the subdirectory that contains its newest change,
+so the rows name where the change happened. Snapshots do not record item
+counts, so
+.B \-\-file
+takes every key but
+.BR items .
+.TP
+.BR \-C ", " \-\-count
+Add an ITEMS column. The JSON rows always carry
+.BR items .
+.TP
+.B \-\-types
+List file types instead of directories and files: disk use, apparent
+size and file count for each extension, the text after the last dot,
+with case ignored.
+Names with no extension, including names that start with their only dot,
+make one row, and an extension over 12 characters counts as none.
+The first
+.B \-\-top
+types are listed and one line sums the rest; the totals stay.
+Ranks by disk use,
+.B \-\-apparent
+or
+.B \-\-sort=items
+(file count).
+JSON adds a
+.B types
+array of every type, each with
+.BR type ,
+.BR disk ,
+.B apparent
+and
+.BR files .
+Takes no
+.BR \-f ,
+.BR \-o ,
+.BR \-\-stacks ,
+.BR \-\-print0 ,
+.B \-\-pick
+or
+.BR \-i .
+.TP
+.B \-\-unique
+Add a UNIQUE column: the bytes of each row in extents no other file
+shares, roughly what deleting it would free.
+On Linux the walk asks
+.B FS_IOC_FIEMAP
+for every file and counts the extents not flagged shared, which btrfs
+and the XFS family set for reflinks and snapshots; other Linux file
+systems share nothing, so the column matches DISK.
+On macOS it reads the private size APFS keeps for clones.
+Elsewhere, and for files it cannot open, the column matches DISK.
+The totals add a unique figure, and a closing line gives the shared
+extents once each and as the files reference them.
+JSON rows and roots gain
+.BR unique ,
+and the report gains
+.BR shared .
+Mapping extents costs time on every file, so the plain listing skips it.
+Not with
+.BR \-f ", " \-o ", " \-\-stacks " or " \-i .
+.TP
+.B \-\-shared
+Count each shared extent once in every row and total, so reflinked
+copies and snapshots no longer add up to more than they take on disk.
+On Linux the walk asks
+.B FS_IOC_FIEMAP
+for every file; btrfs and the XFS family flag the extents that
+reflinks and snapshots share.
+A row counts its files' own extents, plus the shared ones it points
+at, each once.
+An extent shared with files outside the row still counts in full in
+that row, since the row uses it.
+APFS reports no shared ranges, so on macOS, as on file systems that
+share nothing, every file counts in full.
+The DISK column and the ranking then show these sizes, and the
+totals also give the size that counts each reference.
+JSON roots gain
+.BR disk_all .
+It costs as much as
+.B \-\-unique
+and can go with it.
+Not with
+.BR \-f ", " \-o ", " \-\-stacks ", " \-i ", " \-\-types ", " \-\-ncdu " or " \-\-ncdu\-binary .
+.TP
+.BI \-\-exclude= PATTERN
+Leave out entries that match
+.I PATTERN
+(repeatable). Patterns use gitignore syntax: one without a
+.B /
+matches a name at any depth, one with a
+.B /
+matches the path relative to
+.I PATH
+(an absolute path under
+.I PATH
+works too), a trailing
+.B /
+matches directories only,
+.B *
+and
+.B ?
+stop at
+.BR / ,
+and
+.B **
+spans directories.
+Excluded entries add nothing to any size or count, and an excluded
+directory is never opened. The total reports how many entries were left
+out.
+On Unix, matching works on bytes: a pattern, ignore file or
+.B \-X
+file holding bytes that are not UTF-8 matches names with the same bytes.
+.TP
+.BR \-X ", " \-\-exclude\-from=\fIFILE\fR
+Read patterns from
+.IR FILE ,
+one per line, with
+.B #
+comments and
+.B !
+to re-include an entry an earlier pattern left out.
+.B \-
+reads standard input.
+.TP
+.B \-\-exclude\-caches
+Leave out directories below
+.I PATH
+that hold a
+.I CACHEDIR.TAG
+starting with the standard signature line.
+.TP
+.B \-\-gitignore
+Leave out what git ignores: patterns from
+.I .gitignore
+files,
+.I .git/info/exclude
+and
+.IR $XDG_CONFIG_HOME/git/ignore ,
+applied only inside git repositories. A nested repository starts afresh,
+as in git. A
+.B core.excludesFile
+set elsewhere is not read.
+.TP
+.B \-\-artefacts
+List only regenerable build artefacts and caches.
+Each one is a single row, and nothing below it is listed on its own.
+The tags are
+.B cargo\-target
+(a directory with
+.I .rustc_info.json
+or a
+.I target
+directory with
+.IR CACHEDIR.TAG ),
+.B node\-modules ,
+.B python\-cache
+(\fI__pycache__\fR, \fI.pytest_cache\fR, \fI.mypy_cache\fR, \fI.ruff_cache\fR, \fI.hypothesis\fR),
+.B python\-env
+(a directory with
+.IR pyvenv.cfg ,
+\fI.tox\fR, \fI.nox\fR),
+.B cmake\-build
+(a directory with
+.IR CMakeCache.txt ),
+.B gradle\-cache ,
+.B js\-build\-cache
+(\fI.next\fR, \fI.nuxt\fR, \fI.parcel\-cache\fR, \fI.turbo\fR, \fI.svelte\-kit\fR),
+.B zig\-cache ,
+.B pixi\-env ,
+.B direnv ,
+and
+.B cache
+for any other directory with a
+.I CACHEDIR.TAG
+file.
+The same tags appear in the NOTE column without this flag.
+.TP
+.B \-\-dirs
+Show the directory table alone.
+.TP
+.B \-\-files
+Show the file table alone.
+.TP
+.BI \-\-older\-than =DAYS
+Only list entries whose newest modification is more than
+.I DAYS
+days old. A directory uses the newest file anywhere below it.
+.TP
+.BI \-\-newer\-than =DAYS
+Only list entries modified within the last
+.I DAYS
+days.
+.TP
+.BI \-\-since =DATE
+Only list entries modified at or after
+.IR DATE :
+.I YYYY\-MM\-DD
+for local midnight, or
+.I YYYY\-MM\-DDTHH:MM
+with optional
+.I :SS
+in local time.
+.TP
+.BI \-\-until =DATE
+Only list entries whose newest modification is before
+.IR DATE ,
+in the same form.
+With more than one of the age options, each limit applies.
+.TP
+.B \-\-home\-only
+Consider only the home trash for the trash summary and
+.B trash
+rows.
+.TP
+.BI \-\-trash\-dir =PATH
+Consider only this trash directory (repeatable).
+.TP
+.B \-\-no\-git
+Do not ask git about listed paths.
+.TP
+.B \-\-include\-dirty
+With
+.BR \-\-print0 ,
+also print rows whose git state is dirty, unpushed or unknown.
+.TP
+.B \-\-json
+Emit one JSON object
+(\fIroots\fR, \fIdirs\fR, \fIfiles\fR, \fIunreadable\fR); each root has
+\fIpath\fR, \fIdisk\fR, \fIapparent\fR, \fIfiles\fR, \fIlinks\fR (extra hard links),
+\fIdirs\fR and \fIartefact\fR; each listed entry has
+\fIpath\fR, \fItype\fR, \fIdisk\fR, \fIapparent\fR, \fImtime\fR, \fIartefact\fR
+(a tag or null), \fIgit\fR and \fIgit_repo\fR (state and deciding repository, or null).
+A scan stopped by Ctrl-C adds \fIpartial\fR: true.
+The walk enters at most 4096 levels and paths of up to 32 KiB; a
+directory past either counts with its own blocks but not its contents,
+stderr says how many there were, and the object adds \fItoo_deep\fR.
+Entries the walk could not read are counted in \fIunreadable\fR and
+named in \fIunreadable_paths\fR (up to 100, each with \fIpath\fR and \fIerror\fR);
+stderr names the first 10 and counts the rest.
+.TP
+.B \-\-print0
+Print the listed paths separated by null bytes, for
+.BR "xargs \-0 rtrash put \-rf \-\-" .
+.TP
+.B \-\-pick
+Open the put browser on the listed rows (directories, then files).
+Mark rows and press Enter to trash them after a confirmation; rows with
+dirty, unpushed or unknown git state show
+.B !
+and the confirmation counts them.
+Needs a terminal on stdin and the
+.B tui
+feature.
+.TP
+.BR \-o ", " \-\-output =\fIFILE\fR
+Write a snapshot of every directory total, down to
+.BR \-\-max\-depth ,
+to
+.I FILE
+.RB ( \- " for stdout)"
+instead of listing.
+Snapshots hold one record per line with percent-encoded paths, so grep and
+text diff tools read them too.
+.TP
+.B \-\-devices
+List every mounted file system instead of scanning: size, use, free space,
+use percent (rounded up, as
+.BR df (1)
+rounds it), type, device and mount point.
+As with
+.BR df ,
+pseudo file systems, file systems with no blocks and second mounts of one
+device (bind mounts) are left out.
+On Windows the fixed and removable drives are listed, with their labels.
+With
+.BR \-\-json ,
+one object with a \fIdevices\fR array of \fImount\fR, \fIdevice\fR, \fItype\fR,
+\fIsize\fR, \fIused\fR, \fIavailable\fR and \fIuse_percent\fR.
+Takes no
+.IR PATH .
+.TP
+.BI \-\-ncdu= FILE
+Write an ncdu export of the one
+.I PATH
+to
+.I FILE
+(\fB\-\fR for stdout) instead of listing: \fBncdu \-f\fR \fIFILE\fR browses it, and
+.B \-f
+reads it back.
+\fB\-x\fR and the filters apply; what they leave out is written by name,
+marked excluded.
+Entries that cannot be read are marked \fIread_error\fR, as are directories
+past the walk's limits of 4096 levels and 32 KiB of path, written without
+their contents.
+The export holds every file, so it grows with the tree (about 80 bytes an
+entry).
+.TP
+.BI \-\-ncdu\-binary= FILE
+Like
+.BR \-\-ncdu ,
+but in the binary format of ncdu 2.6 and later
+.RB ( "ncdu \-O" ):
+compressed with zstd to about a fifth of the JSON export, and holding each
+directory's cumulative sizes and item count, which ncdu reads instead of
+adding up the tree.
+Hard links count as ncdu counts them: once in every directory with a link
+below it, with the part shared with links elsewhere recorded too.
+The fast zstd level is the only one this build has, so the export is
+larger than ncdu's own, by about a third.
+A second thread compresses while the walk goes on, so the export takes
+about as long as the JSON one.
+.TP
+.BR \-f ", " \-\-file =\fIFILE\fR
+List the largest directories from a snapshot instead of scanning.
+\fIFILE\fR may also be an ncdu export (\fBncdu \-o\fR or \fBgdu \-o\fR, or the
+binary export of ncdu 2.6 and later, \fBncdu \-O\fR, told
+apart by its first bytes): its totals are counted as a scan counts them,
+with each hard link counted once (when the export records inodes)
+and excluded entries left out.
+gdu exports carry no directory sizes or inodes, so their totals can be lower or higher.
+An export written without \fBncdu \-e\fR has no modification times: AGE reads \-
+and the JSON \fImtime\fR is null.
+A binary export records no scan date, so du uses the file's modification
+time instead.
+A snapshot can be stale, so it cannot drive
+.BR \-\-print0 ,
+.BR \-\-pick " or " \-\-interactive .
+.TP
+.B \-\-stacks
+Print folded stacks instead of listing: one line per directory, its path
+from the scanned root as frames joined by
+.BR ; ,
+then the bytes it uses outside the directories below it.
+Flame graph tools draw these lines:
+.BR flamegraph.pl ,
+.BR inferno\-flamegraph ,
+or speedscope.
+The weight follows disk use, or
+.B \-\-apparent
+size; other sort keys exit 2.
+A
+.B ;
+or control character in a name prints as
+.BR _ .
+Works on a snapshot with
+.BR \-f .
+.TP
+.BR \-i ", " \-\-interactive
+Explore one
+.I PATH
+a directory at a time, in the
+.B \-\-sort
+order (largest first by default), with a size bar per row.
+Right, l or Enter opens a directory; left, h or Backspace goes up.
+.B d
+moves the cursor row (or the marked rows) to the trash after a
+confirmation,
+.B u
+restores the last deletion, and
+.B r
+rescans the current directory.
+Sizes of the parent directories follow each change without a rescan.
+Each directory opens at once: its entries show while the scan runs in the
+background, files with their sizes and directories with
+.B …
+until their totals come in, and the title counts files and bytes so far.
+Moving, opening another directory and going up all work meanwhile;
+trashing waits until the view has its sizes.
+Given several directories
+.RB ( "du \-i a b" ,
+as
+.B "dua i a b"
+does), the explorer opens on a view of its own with one row per
+directory, named by its path, and going up from one of them returns to
+it; the views of the directories come with that first scan.
+A directory given twice counts once, and one inside another is refused,
+since it would count twice.
+.B d
+works on these rows too, and
+.B b
+needs one of the directories open.
+.B q
+or Ctrl-C while the current directory scans stops that scan and keeps
+what it counted: the title shows
+.BR (partial) ,
+directories it never reached keep their placeholder rows, and
+.B r
+rescans in full.
+Pressed again, or with no scan running, the key quits.
+.BR s ", " n ", " C " and " M
+order the rows by size, name, item count and newest change, in every
+directory; the key of the current order reverses it.
+The window title names the order.
+.B S
+switches sizes, bars and totals between disk use and apparent size,
+and back; a size order follows the switch.
+.B i
+opens the details of the cursor row: full path, kind, disk use and its
+share of the directory, apparent size, item count, newest change, git
+state and, on Unix, mode, owner, group and link count.
+Any key closes them.
+.B p
+quits and prints the marked paths, or the cursor row when none is
+marked, on stdout once the screen is restored, one per line.
+.B y
+copies the same paths to the clipboard with the OSC 52 escape, which
+xterm, kitty, iTerm2, WezTerm and Windows Terminal accept, and tmux with
+.BR set\-clipboard " on" .
+.B b
+opens a shell in the current directory, as ncdu and gdu do:
+.B $SHELL
+or
+.I /bin/sh
+(on Windows
+.B %COMSPEC%
+or
+.IR cmd.exe ).
+The explorer leaves the screen while the shell runs, and Ctrl-C there
+stops only the programs the shell runs.
+Once the shell exits, the explorer comes back and rescans the directory.
+.B v
+shows the cursor file in
+.B $PAGER
+(split at spaces; else
+.IR less ,
+or
+.I more
+where there is no
+.I less
+and on Windows), and the explorer comes back when the pager exits.
+.B o
+opens the cursor row with its default program, as gdu does: a file in
+the program that handles its type, a directory in the file manager.
+It runs
+.I xdg\-open
+(macOS
+.IR open ,
+Windows
+.IR explorer.exe )
+on its own, so the explorer keeps the screen.
+Neither key changes anything, so both work with
+.BR \-\-no\-delete .
+.B .
+hides names that start with a dot, in this view and every view opened
+after it, until pressed again; the title then says
+.IR "dot names hidden" .
+.B /
+filters the current directory by name as you type: a part of the name,
+or a glob when the text holds
+.BR * ", " ? " or " [ ,
+with case ignored.
+Enter keeps the filter, and Esc, or
+.B q
+in the list, clears it.
+Marking all, trashing and the title count cover only the rows shown,
+and opening or leaving the directory ends the filter.
+Rows show the artefact kind and git state; risky git state shows
+.BR ! .
+Trash directories stay closed.
+Needs a terminal on stdin and the
+.B tui
+feature.
+On Windows,
+.B d
+uses the Recycle Bin and
+.B u
+takes the newest item with that path back out.
+.TP
+.B \-\-no\-delete
+With
+.BR \-i ,
+browse only:
+.BR d ,
+.B u
+and
+.B b
+show a note instead of acting, and the title reads
+.BR "(read\-only)" .
+Safe on a shared server or a tree you only want to measure.
+Without
+.B \-i
+it exits 2, since no other mode deletes.
+The
+.B no_delete
+config key turns it on for every
+.BR \-i .
+.TP
+.B \-\-si
+Show sizes in powers of 1000 (kB, MB, GB, TB) instead of 1024 (KiB,
+MiB, GiB), in the listing, the totals, the trash line and the explorer.
+JSON, snapshots and stacks stay in bytes.
+The
+.B si
+config key makes it the default.
 .TP
 .B \-\-help
 Display help and exit.
@@ -264,19 +1139,47 @@ Restore a trashed item to its original location. With
 restore the item originally at
 .IR PATH
 (exact original-path match).
+With
+.BI \-\-name= NAME ,
+restore the item whose file name, or whose name inside the trash, is
+.IR NAME .
 Without
 .IR PATH ,
-on a TTY open the interactive restore browser (filter, navigate, restore);
+on a TTY open the interactive restore browser (filter, navigate, restore),
+on Windows as well, where it shows the Recycle Bin;
 without a TTY (or with
 .BR \-\-plain )
-print a numbered list and read an index from stdin.
+print a numbered list and read a selection from stdin: indices, ranges
+and commas such as
+.BR 0\-2,5 ,
+or
+.BR all .
 Pass
 .B \-\-cwd\-only
 to limit bare restore to originals under the current directory.
 A single match restores directly; multiple matches require a selection.
 .TP
 .BR \-f ", " \-\-force
-Overwrite an existing file at the original location.
+Overwrite an existing file at the destination (same as
+.BR \-\-conflict=overwrite ).
+.TP
+.BI \-\-conflict= POLICY
+What to do when the destination exists:
+.B refuse
+(the default; the item stays in the trash and the run fails),
+.BR overwrite ,
+.B rename
+(restore next to it as
+.IR STEM .1. EXT ,
+counting up)
+or
+.B skip
+(the item stays in the trash; the run still succeeds).
+.TP
+.BI \-\-to= DIR
+Restore into the existing directory
+.I DIR
+instead of the original location, keeping each item's file name.
 .TP
 .B \-\-cwd\-only
 Without PATH, only items trashed from under the current directory.
@@ -284,11 +1187,247 @@ Without PATH, only items trashed from under the current directory.
 .B \-\-plain
 Force numbered line selection even on a TTY (skip the TUI browser).
 .TP
+.B \-\-newest\-first
+List the most recently trashed item first (default in the interactive browser).
+.TP
+.B \-\-oldest\-first
+Order from oldest to newest (default for the numbered list, so the newest row prints just above the prompt).
+.TP
+.BI \-\-name= NAME
+Match items by original file name or by name inside the trash, instead of by
+.IR PATH .
+.TP
+.BI \-\-glob= PATTERN
+Match items by shell pattern: against the original path when
+.I PATTERN
+contains a slash, else against the original file name or the name inside
+the trash.
+.TP
+.BI \-\-regex= REGEX
+Match items whose original path contains a match for
+.IR REGEX .
+Give only one of
+.BR \-\-name ,
+.B \-\-glob
+and
+.BR \-\-regex .
+.TP
+.B \-\-latest
+When several items match, restore the most recently trashed one without asking.
+.TP
+.B \-\-all
+When several items match, restore every one without asking.
+.TP
+.B \-\-json
+Print
+.B {"restored": [...], "failed": N, "skipped": N}
+on stdout; each restored item also names its
+.IR restored_to . Implies
+.BR \-\-plain ;
+the numbered table, if any, goes to stderr.
+.TP
 .B \-\-home\-only
 Only the home trash (skip volume trash).
 .TP
 .BI \-\-trash\-dir =PATH
 Only consider this trash directory (repeatable).
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.SS undo
+.B rtrash undo
+[\fIOPTION\fR]... [\fIBATCH\fR]
+.PP
+Restore every item one put run trashed, each to its original location.
+Each put run writes one batch id into its
+.B .trashinfo
+files, under the extra key
+.BR X-Rtrash-Batch .
+Without
+.IR BATCH ,
+undo the most recent run in scope.
+Items trashed by other tools carry no batch id and never match.
+.TP
+.BR \-l ", " \-\-list
+List put runs, newest first: id, date, item count and paths.
+.TP
+.BR \-n ", " \-\-dry\-run
+Show what would come back and change nothing.
+.TP
+.BR \-f ", " \-\-force
+Overwrite existing files at the original locations (same as
+.BR \-\-conflict=overwrite ).
+.TP
+.BI \-\-conflict= POLICY
+What to do when an original location is taken, as in restore:
+.B refuse
+(the default; the item stays in the trash and the run fails),
+.BR overwrite ,
+.B rename
+(restore next to it as
+.IR STEM .1. EXT ,
+counting up)
+or
+.B skip
+(the item stays in the trash; the run still succeeds).
+With
+.BR \-n ,
+each line says what the policy would do.
+.TP
+.B \-\-json
+Print
+.RI { batch ", " restored ", " failed ", " skipped }
+as JSON on stdout, each restored item with its
+.BR restored_to ;
+with
+.BR \-\-list ,
+an array of runs.
+.TP
+.B \-\-home\-only
+Only the home trash (skip volume trash).
+.TP
+.BI \-\-trash\-dir =PATH
+Only consider this trash directory (repeatable).
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.PP
+Exit status 0 means every item came back; 1 means nothing matched or an item failed.
+.SS finder
+.B rtrash finder put
+[\fB\-v\fR] [\fB\-f\fR] \fIFILE\fR...
+.br
+.B rtrash finder list
+[\fB\-\-json\fR] [\fB\-\-trash\-dir=\fIDIR\fR]
+.br
+.B rtrash finder restore
+[\fIOPTION\fR]... \fINAME\fR|\fIORIGINAL\fR...
+.PP
+Use the macOS Finder Trash, with Put Back.
+.B put
+asks Finder (through
+.BR osascript )
+to move each
+.I FILE
+to the Trash, so Finder records the original location and its own Put
+Back works; macOS only, and symbolic links get refused.
+.B list
+prints each item as
+.RB \(oq "NAME \-> ORIGINAL\-PATH" \(cq,
+reading Finder's Put Back records
+.RI ( ptbL
+and
+.IR ptbN )
+from the trash's
+.IR .DS_Store ,
+with
+.B ?
+for an item without one.
+.B restore
+moves items back, matched by their name inside the trash or by original
+path, and leaves
+.I .DS_Store
+for Finder to tidy.
+List and restore read files only, so they also run on Linux against a
+copied trash.
+Experimental: tested against crafted
+.I .DS_Store
+files, not yet against Finder.
+.TP
+.BI \-\-trash\-dir= DIR
+Use this Finder trash (default
+.IR ~/.Trash ).
+For a volume trash such as
+.IR /Volumes/X/.Trashes/501 ,
+Put Back paths count from the volume root above
+.IR .Trashes .
+.TP
+.B \-\-all
+Restore every item that has a Put Back record.
+.TP
+.BR \-f ", " \-\-force
+Put: ignore missing files.
+Restore: overwrite an existing destination (same as
+.BR \-\-conflict=overwrite ).
+.TP
+.BI \-\-conflict= POLICY
+.BR refuse " (default), " overwrite ,
+.B rename
+or
+.BR skip ,
+as for
+.BR restore .
+.TP
+.BR \-v ", " \-\-verbose
+Put: name each trashed file.
+.TP
+.B \-\-json
+List: a JSON array of
+.RI { name ", " original }.
+Restore:
+.BR {"restored": [...], "failed": N, "skipped": N} .
+.TP
+.B \-\-help
+Display help and exit.
+.SS config
+.B rtrash config
+[\fB\-\-path\fR | \fB\-\-default\fR]
+.PP
+Show the config file and the settings it makes, with a warning for each
+line that cannot be read; the exit status is 1 when there is one.
+Settings rank below environment variables and command-line options.
+The file holds TOML tables:
+.RS
+.nf
+[du]
+top = 20                  # \-\-top
+sort = "disk"             # \-\-sort: disk, apparent, items or mtime
+count = false             # \-\-count
+one_file_system = false   # \-x
+threads = 8               # \-\-threads
+git = true                # false = \-\-no\-git
+exclude = ["*.iso"]       # \-\-exclude, before any given on the command line
+exclude_caches = false    # \-\-exclude\-caches
+gitignore = false         # \-\-gitignore
+no_delete = false         # \-\-no\-delete for every \-i
+si = false                # \-\-si
+
+[list]
+sort = "date"             # \-\-sort: date, size, name or path
+size = false              # \-\-size
+reverse = false           # \-\-reverse
+
+[policy]
+max_size = "50G"          # RTRASH_MAX_SIZE
+prune = "oldest"          # RTRASH_PRUNE: oldest or largest
+
+[protect]
+paths = ["/srv/data", "/home/*/keep"]
+.fi
+.RE
+.PP
+Only these keys are read: strings, integers, booleans and arrays of
+strings. An unknown key or a value of the wrong type gets a warning and
+is skipped; the rest of the file still applies.
+.B protect.paths
+works like the safe-rm lists:
+.B put
+refuses a path that matches an entry exactly or as a shell pattern.
+A config file cannot be undone by an option, so
+.B RTRASH_CONFIG=
+(empty) runs without it.
+.TP
+.B \-\-path
+Print where the config file is looked for.
+.TP
+.B \-\-default
+Print a config file with every setting commented out.
 .TP
 .B \-\-help
 Display help and exit.
@@ -358,6 +1497,17 @@ deleted from the trash
 (\fBfiles/\fR and
 .BR .trashinfo ),
 not restored.
+An orphan (no
+.BR .trashinfo )
+matches by its name in
+.B files/
+or its path there.
+An absolute
+.I PATTERN
+also matches with symlinks resolved in its directory part (up to the
+first glob), the form
+.B put
+records, so a path typed through a symlinked directory still matches.
 .PP
 Note: multi-call name
 .B rm
@@ -386,6 +1536,27 @@ days ago.
 Only match items trashed within the last
 .I DAYS
 days.
+.TP
+.BI \-\-larger\-than =SIZE
+Only match items taking more than
+.I SIZE
+on disk, payload plus
+.IR .trashinfo ,
+the size
+.B list \-\-size
+shows.
+.I SIZE
+reads as in
+.BR "empty \-\-max\-size" :
+500M, 1.5G, 64k.
+Payloads with no
+.I .trashinfo
+have a size, so this filter keeps them in.
+.TP
+.BI \-\-smaller\-than =SIZE
+Only match items taking less than
+.I SIZE
+on disk.
 .TP
 .BR \-n ", " \-\-dry\-run
 List matches and reclaimable size; do not delete.
@@ -426,6 +1597,24 @@ when unset.
 .TP
 .B HOME
 Used when resolving the default data home.
+.TP
+.B RTRASH_CONFIG
+The config file to read instead of
+.IR $XDG_CONFIG_HOME/rtrash/config.toml .
+Empty turns the config file off.
+.TP
+.B RTRASH_MAX_SIZE
+When set to a size such as 10G, each put afterwards prunes every trash
+directory it used back under that size, removing older items first.
+Items of the same put run never go. It overrides
+.B policy.max_size
+in the config file, and an empty value turns the prune off.
+.TP
+.B RTRASH_PRUNE
+Set to
+.B largest
+to make that prune remove the largest items first (default
+.BR oldest ).
 .SH FILES
 .TP
 .I $XDG_DATA_HOME/Trash
@@ -434,11 +1623,41 @@ Home trash:
 .BR info/ ,
 .BR directorysizes ,
 and optional lock file.
+Cache sizes count allocated blocks as
+.B du \-B1
+does.
+.B status
+and
+.B "empty \-\-dry\-run"
+write walked sizes back.
+.TP
+.I $XDG_CONFIG_HOME/rtrash/config.toml
+Config file (see
+.BR config );
+.I ~/.config/rtrash/config.toml
+when
+.B XDG_CONFIG_HOME
+is unset, and
+.I %APPDATA%\(rsrtrash\(rsconfig.toml
+on Windows.
+.TP
+.IR /etc/safe\-rm.conf ", " ~/.safe\-rm
+safe-rm protected paths that put skips (see
+.BR put ).
 .TP
 .IR $top /.Trash/ $uid
 or
 .IR $top /.Trash\- $uid
 Per-volume trash on other mounts (see the Trash specification).
+A
+.I $top/.Trash
+that exists as a symlink or a plain file, or lacks the sticky bit,
+gets a warning, and put falls back to
+.IR $top /.Trash\- $uid .
+Either per-user directory must be a real directory owned by the user;
+one that is a symlink or belongs to someone else gets a warning, put
+falls back to the next choice and in the end the home trash, and list,
+empty and rm skip it.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -449,6 +1668,20 @@ Failure (e.g. could not trash or purge an item).
 .TP
 .B 2
 Usage error.
+.TP
+.B 130
+.B du
+stopped by Ctrl-C.
+The text listing and
+.B \-\-json
+still show what was scanned, marked partial;
+.BR \-\-print0 ,
+.BR \-\-pick ,
+.B \-\-output
+and
+.B \-\-stacks
+print nothing, since a partial list would pass for a whole one.
+A second Ctrl-C ends the process at once.
 .PP
 Put mode mirrors common
 .BR rm (1)

@@ -58,6 +58,11 @@ package_one() {
     fi
   fi
 
+  # musl builds link mimalloc (C); point cc-rs at musl-gcc from musl-tools.
+  local cc_var="CC_${TARGET//-/_}"
+  if [[ "${TARGET}" == *-musl && -z "${!cc_var:-}" ]] && command -v musl-gcc >/dev/null 2>&1; then
+    export "${cc_var}=musl-gcc"
+  fi
   cargo build --release --target "${TARGET}"
 
   local BIN="$ROOT/target/${TARGET}/release/rtrash"

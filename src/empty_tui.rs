@@ -55,8 +55,8 @@ pub fn permanently_remove_entries(
     let mut succeeded = Vec::with_capacity(entries.len());
     let mut bytes = 0u64;
     for entry in entries {
-        let payload = entry.dir.files().join(&entry.name);
-        let info_path = entry.dir.info().join(format!("{}.trashinfo", entry.name));
+        let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
+        let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
         if dry_run {
             bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes(&entry.dir, &entry.name));
             succeeded.push(true);
@@ -352,7 +352,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(3),
+            Constraint::Length(tui_term::FOOTER_ROWS),
         ])
         .split(f.area());
     app.viewport_rows = chunks[1].height.saturating_sub(2) as usize;
@@ -538,4 +538,30 @@ pub fn run(prog: &str, entries: Vec<&Entry>, dry_run: bool) -> i32 {
         return 1;
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trashdir::TrashDir;
+    use std::path::PathBuf;
+
+    #[test]
+    fn footer_shows_the_status_line() {
+        let e = Entry {
+            date: None,
+            epoch: 0,
+            original: PathBuf::from("/x/a"),
+            name: "a".into(),
+            dir: TrashDir {
+                root: PathBuf::from("/tmp/trash"),
+                topdir: None,
+            },
+            batch: None,
+        };
+        let mut app = App::new("rtrash", vec![&e], false);
+        app.status = "purge 1 item?".into();
+        let text = crate::tui_term::render_text(80, 12, |f| ui(f, &mut app));
+        assert!(text.contains("purge 1 item?"), "{text}");
+    }
 }

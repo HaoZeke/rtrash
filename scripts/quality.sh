@@ -10,12 +10,19 @@ cargo fmt --check
 echo "==> cargo clippy --locked --all-targets -- -D warnings"
 cargo clippy --locked --all-targets -- -D warnings
 
+echo "==> cargo clippy --locked --all-targets --no-default-features -- -D warnings"
+cargo clippy --locked --all-targets --no-default-features -- -D warnings
+
 if command -v cargo-nextest >/dev/null 2>&1 || cargo nextest --version >/dev/null 2>&1; then
   echo "==> cargo nextest run --locked --profile ci"
   cargo nextest run --locked --profile ci
+  echo "==> cargo nextest run --locked --profile ci --no-default-features"
+  cargo nextest run --locked --profile ci --no-default-features
 else
   echo "==> cargo test --locked (install cargo-nextest for CI parity)"
   cargo test --locked
+  echo "==> cargo test --locked --no-default-features"
+  cargo test --locked --no-default-features
 fi
 
 if command -v cargo-deny >/dev/null 2>&1; then

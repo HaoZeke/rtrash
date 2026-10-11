@@ -2,6 +2,9 @@
 //! Drive shipped library functions against a real FreeDesktop trash layout
 //! (isolated XDG_DATA_HOME). No alternate-screen / ratatui event loop.
 
+// The browsers and their helpers exist only with the `tui` feature.
+#![cfg(all(unix, feature = "tui"))]
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -38,6 +41,9 @@ impl TrashSandbox {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("work")).unwrap();
         fs::create_dir_all(root.join("xdg")).unwrap();
+        // Originals are recorded with symlinked parents resolved (macOS
+        // /var is /private/var), so compare against the resolved root.
+        let root = fs::canonicalize(&root).unwrap();
         TrashSandbox { root }
     }
 
@@ -133,6 +139,37 @@ fn restore_selection_restores_two_of_three() {
         left[0].original.file_name().and_then(|f| f.to_str()),
         Some("b.txt")
     );
+}
+
+/// The browser owns the screen while it restores, so outcome lines must
+/// come back as data rather than land on stdout or stderr mid-draw.
+#[test]
+fn restore_selection_returns_outcome_lines() {
+    let sb = TrashSandbox::new("restore-log");
+    sb.put(&["ok.txt", "busy.txt"]);
+    fs::write(sb.work().join("busy.txt"), "blocker").unwrap();
+    let entries = sb.collect_entries();
+    let refs: Vec<&list::Entry> = entries.iter().collect();
+    let all: Vec<usize> = (0..refs.len()).collect();
+
+    let result = restore_tui::restore_selection("rtrash", &refs, &all, false);
+    assert_eq!((result.ok_count(), result.fail_count), (1, 1));
+    let ok = sb.work().join("ok.txt");
+    let busy = sb.work().join("busy.txt");
+    let restored = format!("restored '{}'", ok.display());
+    let refused = format!(
+        "rtrash: refusing to overwrite existing '{}' (use -f to force)",
+        busy.display()
+    );
+    let lines: Vec<(bool, &str)> = result
+        .log
+        .iter()
+        .map(|l| (l.is_error, l.text.as_str()))
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(lines.contains(&(false, restored.as_str())), "{lines:?}");
+    assert!(lines.contains(&(true, refused.as_str())), "{lines:?}");
+    assert_eq!(fs::read_to_string(&busy).unwrap(), "blocker");
 }
 
 #[test]

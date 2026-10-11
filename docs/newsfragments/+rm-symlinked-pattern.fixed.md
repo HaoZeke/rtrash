@@ -1,0 +1,1 @@
+`rtrash rm` matches an absolute pattern typed through a symlinked directory, such as `/var/folders` on macOS, where `/var` is a symlink to `/private/var`. The directory part up to the first glob resolves the way put records original paths; the pattern as typed still matches too.

@@ -1,4 +1,5 @@
 //! Interactive put browser: multi-select paths in a directory and trash them.
+//! `run_rows` drives the same browser over a fixed list (used by `du --pick`).
 
 use std::fs;
 use std::io;
@@ -9,7 +10,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::put;
 use crate::tui_binds::{Action, Keymap};
@@ -18,11 +19,21 @@ use crate::tui_keys;
 use crate::tui_list;
 use crate::tui_select::Selection;
 use crate::tui_term;
+use crate::tui_term::draw_help_overlay;
 
 #[derive(Clone)]
 pub struct PathRow {
     pub path: PathBuf,
     pub is_dir: bool,
+    /// Text shown instead of the file name (and matched by the filter).
+    pub label: Option<String>,
+    /// Trashing this row could lose work (asks again in the confirm prompt).
+    pub warn: bool,
+}
+
+/// Drop rows whose path no longer exists (after a put from a fixed list).
+pub fn prune_missing(rows: &mut Vec<PathRow>) {
+    rows.retain(|r| r.path.symlink_metadata().is_ok());
 }
 
 /// List directory entries (non-hidden first), for TUI and tests.
@@ -40,6 +51,8 @@ pub fn list_dir_rows(dir: &Path) -> io::Result<Vec<PathRow>> {
         rows.push(PathRow {
             path: ent.path(),
             is_dir,
+            label: None,
+            warn: false,
         });
     }
     rows.sort_by(|a, b| {
@@ -53,12 +66,14 @@ pub fn list_dir_rows(dir: &Path) -> io::Result<Vec<PathRow>> {
 pub fn filter_indices(rows: &[PathRow], query: &str) -> Vec<usize> {
     let hays: Vec<String> = rows
         .iter()
-        .map(|r| {
-            r.path
+        .map(|r| match &r.label {
+            Some(l) => l.clone(),
+            None => r
+                .path
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
-                .into_owned()
+                .into_owned(),
         })
         .collect();
     let refs: Vec<&str> = hays.iter().map(String::as_str).collect();
@@ -96,6 +111,8 @@ enum Mode {
 struct App {
     prog: String,
     cwd: PathBuf,
+    /// Fixed list (from `run_rows`): prune after put instead of re-listing.
+    fixed: bool,
     rows: Vec<PathRow>,
     filtered: Vec<usize>,
     list_state: ListState,
@@ -127,6 +144,7 @@ impl App {
         let mut app = Self {
             prog: prog.to_string(),
             cwd,
+            fixed: false,
             rows,
             filtered: (0..n).collect(),
             list_state,
@@ -212,14 +230,29 @@ impl App {
             return;
         }
         self.mode = Mode::Confirm;
-        self.status = format!("trash {} path(s)?  y confirm · n cancel", t.len());
+        let risky = self
+            .rows
+            .iter()
+            .filter(|r| r.warn && t.contains(&r.path))
+            .count();
+        self.status = if risky > 0 {
+            format!(
+                "trash {} path(s), {risky} with git work at risk (!)?  y confirm · n cancel",
+                t.len()
+            )
+        } else {
+            format!("trash {} path(s)?  y confirm · n cancel", t.len())
+        };
     }
 
     fn do_put(&mut self) {
         let paths = self.targets();
         let code = put_selection(&self.prog, &paths, self.recursive, self.force);
-        // Refresh directory listing
-        if let Ok(rows) = list_dir_rows(&self.cwd) {
+        if self.fixed {
+            prune_missing(&mut self.rows);
+            self.sel.clear();
+            self.refilter();
+        } else if let Ok(rows) = list_dir_rows(&self.cwd) {
             self.rows = rows;
             self.sel.clear();
             self.refilter();
@@ -349,7 +382,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(5),
-            Constraint::Length(3),
+            Constraint::Length(tui_term::FOOTER_ROWS),
         ])
         .split(f.area());
     app.viewport_rows = chunks[1].height.saturating_sub(2) as usize;
@@ -384,8 +417,14 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             let r = &app.rows[ei];
             let mark = if app.sel.is_marked(ei) { "[x]" } else { "[ ]" };
             let kind = if r.is_dir { "/" } else { " " };
-            let name = r.path.file_name().unwrap_or_default().to_string_lossy();
-            ListItem::new(format!("{mark} {name}{kind}"))
+            let warn = if r.warn { "!" } else { " " };
+            match &r.label {
+                Some(l) => ListItem::new(format!("{mark}{warn}{l}{kind}")),
+                None => {
+                    let name = r.path.file_name().unwrap_or_default().to_string_lossy();
+                    ListItem::new(format!("{mark} {name}{kind}"))
+                }
+            }
         })
         .collect();
     f.render_stateful_widget(
@@ -434,39 +473,45 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     }
 }
 
-fn draw_help_overlay(f: &mut ratatui::Frame, keys: &Keymap, extras: &[&str]) {
-    let area = {
-        let r = f.area();
-        let v = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(5),
-                Constraint::Percentage(90),
-                Constraint::Percentage(5),
-            ])
-            .split(r);
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(8),
-                Constraint::Percentage(84),
-                Constraint::Percentage(8),
-            ])
-            .split(v[1])[1]
+/// Browse a fixed list of rows (title shown in the header) and trash the
+/// marked ones. Returns the process exit code.
+pub fn run_rows(prog: &str, title: &Path, rows: Vec<PathRow>) -> i32 {
+    if rows.is_empty() {
+        eprintln!("{prog}: nothing to pick");
+        return 1;
+    }
+    let mut terminal = match tui_term::enter() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{prog}: cannot start TUI: {e}");
+            return 1;
+        }
     };
-    f.render_widget(Clear, area);
-    let mut lines: Vec<Line> = keys.help_lines().into_iter().map(Line::from).collect();
-    if !extras.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from("This browser"));
-        for e in extras {
-            lines.push(Line::from(format!("  {e}")));
+    let mut app = App::new(prog, title.to_path_buf(), rows);
+    app.fixed = true;
+    let result = event_loop(&mut terminal, &mut app);
+    tui_term::leave(&mut terminal);
+    if let Err(e) = result {
+        eprintln!("{prog}: tui error: {e}");
+        return 1;
+    }
+    0
+}
+
+fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
+    loop {
+        terminal.draw(|f| ui(f, app))?;
+        if app.quit {
+            return Ok(());
+        }
+        if event::poll(Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    app.on_key(key.code, key.modifiers);
+                }
+            }
         }
     }
-    f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" help ")),
-        area,
-    );
 }
 
 pub fn run(prog: &str, start_dir: &Path) -> i32 {
@@ -488,26 +533,62 @@ pub fn run(prog: &str, start_dir: &Path) -> i32 {
         }
     };
     let mut app = App::new(prog, cwd, rows);
-    let result = (|| -> io::Result<()> {
-        loop {
-            terminal.draw(|f| ui(f, &mut app))?;
-            if app.quit {
-                break;
-            }
-            if event::poll(Duration::from_millis(200))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        app.on_key(key.code, key.modifiers);
-                    }
-                }
-            }
-        }
-        Ok(())
-    })();
+    let result = event_loop(&mut terminal, &mut app);
     tui_term::leave(&mut terminal);
     if let Err(e) = result {
         eprintln!("{prog}: tui error: {e}");
         return 1;
     }
     0
+}
+
+#[cfg(test)]
+mod fixed_rows_tests {
+    use super::*;
+
+    #[test]
+    fn prune_drops_missing_and_filter_uses_label() {
+        let dir = std::env::temp_dir().join(format!("rtrash-prune-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let kept = dir.join("kept");
+        fs::write(&kept, b"x").unwrap();
+        let mut rows = vec![
+            PathRow {
+                path: kept.clone(),
+                is_dir: false,
+                label: Some("1.0 MiB  cargo-target  /w/proj/target".into()),
+                warn: false,
+            },
+            PathRow {
+                path: dir.join("gone"),
+                is_dir: false,
+                label: None,
+                warn: true,
+            },
+        ];
+        assert_eq!(filter_indices(&rows, "cargo"), vec![0]);
+        prune_missing(&mut rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, kept);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn footer_shows_the_status_line() {
+        let rows = vec![PathRow {
+            path: PathBuf::from("/x/repo"),
+            is_dir: true,
+            label: None,
+            warn: true,
+        }];
+        let mut app = App::new("rtrash", PathBuf::from("/x"), rows);
+        app.status = "trash 1 item (1 may lose work)?".into();
+        let text = crate::tui_term::render_text(80, 12, |f| ui(f, &mut app));
+        assert!(text.contains("trash 1 item (1 may lose work)?"), "{text}");
+    }
 }

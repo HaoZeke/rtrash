@@ -1,0 +1,1 @@
+restore: scripts can now restore without the browser. `--name=NAME` picks items by file name or by name inside the trash, and `--latest` restores the newest match without a prompt. `--json` prints `{"restored": [...], "failed": N}` on stdout.

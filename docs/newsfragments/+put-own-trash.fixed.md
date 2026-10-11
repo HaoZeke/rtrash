@@ -1,0 +1,1 @@
+`rtrash put -r` on a directory that contains the trash it would move into now says so, where it used to fail with "Invalid argument". Putting an item that is already in that trash is refused too, since moving it would lose its record there.

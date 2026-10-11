@@ -1,0 +1,1 @@
+du: works on Windows. One `GetFileInformationByHandleEx` call lists many entries with sizes and file IDs, junctions and symlinks are never followed, and the closing summary reports the Recycle Bin of each scanned drive.

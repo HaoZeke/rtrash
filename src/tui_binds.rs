@@ -52,6 +52,8 @@ pub enum Action {
     ToggleDryRun,
     /// Put: toggle recursive dirs.
     ToggleRecursive,
+    /// Restore: flip between newest and oldest first.
+    ToggleOrder,
 }
 
 impl Action {
@@ -77,6 +79,7 @@ impl Action {
         Action::ToggleForce,
         Action::ToggleDryRun,
         Action::ToggleRecursive,
+        Action::ToggleOrder,
     ];
 
     pub const BROWSE: &'static [Action] = &[
@@ -97,6 +100,7 @@ impl Action {
         Action::ToggleForce,
         Action::ToggleDryRun,
         Action::ToggleRecursive,
+        Action::ToggleOrder,
     ];
 
     pub const FILTER: &'static [Action] = &[
@@ -140,6 +144,7 @@ impl Action {
             Action::ToggleForce => "toggle_force",
             Action::ToggleDryRun => "toggle_dry_run",
             Action::ToggleRecursive => "toggle_recursive",
+            Action::ToggleOrder => "toggle_order",
         }
     }
 
@@ -170,6 +175,7 @@ impl Action {
             Action::ToggleForce => "toggle force (restore/put)",
             Action::ToggleDryRun => "toggle dry-run (empty)",
             Action::ToggleRecursive => "toggle recursive (put)",
+            Action::ToggleOrder => "newest or oldest first (restore)",
         }
     }
 }
@@ -424,6 +430,7 @@ impl Keymap {
         set(&mut binds, Action::ToggleForce, &["f"]);
         set(&mut binds, Action::ToggleDryRun, &["n"]);
         set(&mut binds, Action::ToggleRecursive, &["r"]);
+        set(&mut binds, Action::ToggleOrder, &["o"]);
         Self {
             binds,
             source: None,
@@ -451,7 +458,16 @@ impl Keymap {
         self.resolve_among(code, mods, Action::BROWSE)
     }
 
+    /// A key typed into a filter. Plain letters, digits and symbols (Shift
+    /// allowed) always type, even when a binding such as `j` for move_down
+    /// names them, so a filter can hold any text; arrows, Enter, Esc and
+    /// chords with Ctrl or Alt resolve as bound.
     pub fn resolve_filter(&self, code: KeyCode, mods: KeyModifiers) -> Option<Action> {
+        if let KeyCode::Char(c) = code {
+            if !c.is_control() && (mods - KeyModifiers::SHIFT).is_empty() {
+                return None;
+            }
+        }
         self.resolve_among(code, mods, Action::FILTER)
     }
 
@@ -660,15 +676,23 @@ impl KeySpec {
     }
 }
 
-/// `$XDG_CONFIG_HOME/rtrash/keys.toml` or `~/.config/rtrash/keys.toml`.
+/// `$XDG_CONFIG_HOME/rtrash/keys.toml` or `~/.config/rtrash/keys.toml`;
+/// `%APPDATA%\rtrash\keys.toml` on Windows when `XDG_CONFIG_HOME` is unset,
+/// next to `config.toml`.
 pub fn default_keys_path() -> Option<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("rtrash/keys.toml"));
+            return Some(PathBuf::from(xdg).join("rtrash").join("keys.toml"));
         }
     }
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".config/rtrash/keys.toml"))
+    #[cfg(windows)]
+    if let Some(app) = std::env::var_os("APPDATA").map(PathBuf::from) {
+        if app.is_absolute() {
+            return Some(app.join("rtrash").join("keys.toml"));
+        }
+    }
+    let home = crate::util::home_dir()?;
+    Some(home.join(".config").join("rtrash").join("keys.toml"))
 }
 
 /// CLI: `rtrash keys [--list|--sample|--path]`.
@@ -737,6 +761,31 @@ confirm mode and action in browse mode (e.g. enter).
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_types_letters_bound_to_moves() {
+        let m = Keymap::builtin();
+        assert_eq!(
+            m.resolve_filter(KeyCode::Char('j'), KeyModifiers::NONE),
+            None
+        );
+        assert_eq!(
+            m.resolve_filter(KeyCode::Char('K'), KeyModifiers::SHIFT),
+            None
+        );
+        assert_eq!(
+            m.resolve_filter(KeyCode::Down, KeyModifiers::NONE),
+            Some(Action::MoveDown)
+        );
+        assert_eq!(
+            m.resolve_filter(KeyCode::Enter, KeyModifiers::NONE),
+            Some(Action::FilterCommit)
+        );
+        assert_eq!(
+            m.resolve_filter(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Some(Action::QuitHard)
+        );
+    }
 
     #[test]
     fn parse_chords() {

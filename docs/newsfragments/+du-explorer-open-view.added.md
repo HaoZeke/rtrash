@@ -1,0 +1,1 @@
+In the `rtrash du -i` explorer, `v` shows the cursor file in `$PAGER` and `o` opens the cursor row with its default program, a file in its application or a directory in the file manager, as gdu's `v` and `o` do.

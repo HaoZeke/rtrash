@@ -1,0 +1,1 @@
+The test suite now compiles and passes on Windows. Tests that drive the FreeDesktop trash, the shell completions or the terminal browsers stay Unix-only; the du tests handle Windows paths and set file times through the Windows API, and a new hard-link test runs on every platform.
