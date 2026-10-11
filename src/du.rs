@@ -103,6 +103,8 @@ directories appear as one `trash` row and are never printed by --print0.
   -o, --output=FILE     write a snapshot of every directory total (to
                           --max-depth) to FILE (- for stdout) instead of
                           listing; compare snapshots with `du diff`
+      --ncdu=FILE       write an ncdu export of PATH to FILE (- for
+                          stdout) for `ncdu -f FILE` or `du -f FILE`
   -f, --file=FILE       list from a snapshot, or an ncdu export (ncdu -o,
                           gdu -o), instead of scanning
       --stacks          print folded stacks of every directory's own size
@@ -841,8 +843,8 @@ fn children_open_by_path(_: &Path) -> bool {
 /// past either counts with its own blocks, is reported, and its contents
 /// stay unread: the walk recurses once per level and keeps the path of
 /// each, so a hostile tree could otherwise exhaust the stack or memory.
-const MAX_DEPTH: usize = 4096;
-const MAX_PATH_BYTES: usize = 32 * 1024;
+pub(crate) const MAX_DEPTH: usize = 4096;
+pub(crate) const MAX_PATH_BYTES: usize = 32 * 1024;
 
 /// Stack of each walk thread. Rayon's default of 2 MiB ran out near 2000
 /// levels; this leaves room for [`MAX_DEPTH`] in a debug build, also when
@@ -1582,7 +1584,42 @@ fn root_file_unique(ctx: &Ctx<'_>, path: &Path, st: &du_fs::Stat, disk: u64) -> 
     }
 }
 
-fn absolute(p: &Path) -> io::Result<PathBuf> {
+/// `du --ncdu=FILE`: write `path` as an ncdu export.
+fn ncdu_out(prog: &str, path: &Path, out: &Path, opts: &ScanOpts, now: i64) -> i32 {
+    let spec = opts.filter.as_deref();
+    let written = if out.as_os_str() == "-" {
+        let mut w = io::BufWriter::new(io::stdout().lock());
+        crate::du_ncdu::export(path, opts.one_file_system, spec, now, &mut w)
+    } else {
+        fs::File::create(out).and_then(|f| {
+            let mut w = io::BufWriter::new(f);
+            crate::du_ncdu::export(path, opts.one_file_system, spec, now, &mut w)
+        })
+    };
+    let done = match written {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("{prog}: cannot write ncdu export '{}': {e}", out.display());
+            return 1;
+        }
+    };
+    if done.unreadable > 0 {
+        eprintln!(
+            "{prog}: {} entries could not be read (marked read_error)",
+            done.unreadable
+        );
+    }
+    if done.too_deep > 0 {
+        eprintln!(
+            "{prog}: {} directories past {MAX_DEPTH} levels or {} KiB of path written without their contents",
+            done.too_deep,
+            MAX_PATH_BYTES / 1024
+        );
+    }
+    0
+}
+
+pub(crate) fn absolute(p: &Path) -> io::Result<PathBuf> {
     if p.file_name().is_none() {
         // `.`, `..`, `/`: no final component to keep unresolved.
         return canonical(p);
@@ -2260,6 +2297,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut interactive = false;
     let mut no_delete = false;
     let mut output: Option<PathBuf> = None;
+    let mut ncdu: Option<PathBuf> = None;
     let mut from_file: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
     let mut filter = du_filter::Spec::default();
@@ -2328,6 +2366,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             match v.and_then(|v| parse_count(v, "N")) {
                 Ok(0) => bail!("--threads must be at least 1"),
                 Ok(n) => threads = Some(n),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--ncdu", None) {
+            match v {
+                Ok(v) => ncdu = Some(crate::util::arg_path(v)),
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--output", Some("-o")) {
@@ -2485,6 +2528,26 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if output.is_some() && (from_file.is_some() || json || print0 || pick || interactive) {
         eprintln!("{prog}: --output writes a snapshot; it takes no other output mode");
         return 2;
+    }
+    if let Some(out) = &ncdu {
+        if output.is_some()
+            || from_file.is_some()
+            || stacks
+            || json
+            || print0
+            || pick
+            || interactive
+            || opts.unique
+            || opts.types
+        {
+            eprintln!("{prog}: --ncdu writes an ncdu export; it takes no other output mode");
+            return 2;
+        }
+        if paths.len() > 1 {
+            eprintln!("{prog}: --ncdu exports one PATH");
+            return 2;
+        }
+        return ncdu_out(prog, &paths[0], out, &opts, now);
     }
     if stacks && (output.is_some() || json || print0 || pick || interactive) {
         eprintln!("{prog}: --stacks prints folded stacks; it takes no other output mode");

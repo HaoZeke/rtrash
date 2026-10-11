@@ -1262,6 +1262,36 @@ fn ncdu_exports_list_and_diff_like_snapshots() {
 }
 
 #[test]
+fn ncdu_exports_written_by_du_read_back_with_the_scan_totals() {
+    let t = Tree::new("ncdu-out");
+    t.file("t/a/f", 40_000);
+    t.file("t/a/b/g", 9_000);
+    t.file("t/x.log", 70_000);
+    let out = t.root.join("out.json");
+    let o = out.to_str().unwrap();
+    let w = t.du(&["--ncdu", o, "--exclude=*.log", "t"]);
+    assert!(w.status.success(), "{}", String::from_utf8_lossy(&w.stderr));
+    let text = fs::read_to_string(&out).unwrap();
+    assert!(text.starts_with("[1,2,{\"progname\":\"rtrash\""), "{text}");
+    assert!(text.contains("\"excluded\":\"pattern\""), "{text}");
+    let back = t.du(&["-f", o, "--json"]);
+    let live = t.du(&["--json", "--no-git", "--exclude=*.log", "t"]);
+    let roots = |o: &std::process::Output| {
+        let s = String::from_utf8_lossy(&o.stdout).into_owned();
+        let start = s.find("\"disk\"").unwrap();
+        let end = s[start..].find(",\"dirs\"").unwrap() + start;
+        s[start..end].to_string()
+    };
+    assert_eq!(roots(&back), roots(&live));
+
+    // To stdout, and only alone.
+    let s = t.du(&["--ncdu=-", "t"]);
+    assert!(String::from_utf8_lossy(&s.stdout).starts_with("[1,2,"));
+    assert_eq!(t.du(&["--ncdu", o, "--json", "t"]).status.code(), Some(2));
+    assert_eq!(t.du(&["--ncdu", o, "t", "t/a"]).status.code(), Some(2));
+}
+
+#[test]
 fn stacks_fold_each_directory_by_its_own_size() {
     let t = Tree::new("stacks");
     t.file("t/top", 3);

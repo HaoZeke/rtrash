@@ -790,6 +790,22 @@ instead of listing.
 Snapshots hold one record per line with percent-encoded paths, so grep and
 text diff tools read them too.
 .TP
+.BI \-\-ncdu= FILE
+Write an ncdu export of the one
+.I PATH
+to
+.I FILE
+(\fB\-\fR for stdout) instead of listing: \fBncdu \-f\fR \fIFILE\fR browses it, and
+.B \-f
+reads it back.
+\fB\-x\fR and the filters apply; what they leave out is written by name,
+marked excluded.
+Entries that cannot be read are marked \fIread_error\fR, as are directories
+past the walk's limits of 4096 levels and 32 KiB of path, written without
+their contents.
+The export holds every file, so it grows with the tree (about 80 bytes an
+entry).
+.TP
 .BR \-f ", " \-\-file =\fIFILE\fR
 List the largest directories from a snapshot instead of scanning.
 \fIFILE\fR may also be an ncdu export (\fBncdu \-o\fR or \fBgdu \-o\fR, told

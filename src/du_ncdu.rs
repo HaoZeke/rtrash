@@ -1,4 +1,5 @@
-//! ncdu JSON exports (`ncdu -o FILE`), read as du snapshots.
+//! ncdu JSON exports: `ncdu -o FILE` read as du snapshots, and
+//! `rtrash du --ncdu=FILE` writing one.
 //!
 //! The format is described at <https://dev.yorhel.nl/ncdu/jsonfmt>:
 //! `[1, MINOR, {metadata}, DIR]`, where a DIR is an array whose first
@@ -10,11 +11,12 @@
 //! recursion, so exports of deep trees read like any other.
 
 use std::collections::HashSet;
-use std::io::{self, BufRead};
-use std::path::PathBuf;
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
 
 use crate::du::{Item, RootTotals, MTIME_UNKNOWN};
 use crate::du_snap::Snapshot;
+use crate::{du_filter, du_fs};
 
 /// Whether `head` (the first bytes of a file) starts an ncdu export: a
 /// JSON array, after any whitespace.
@@ -498,6 +500,288 @@ fn bytes_path(b: Vec<u8>) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(&b).into_owned())
 }
 
+/// What [`export`] left incomplete.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Exported {
+    /// Entries written, the root included.
+    pub entries: u64,
+    /// Entries marked `read_error`: a failed stat or listing.
+    pub unreadable: u64,
+    /// Directories past the walk's depth or path limits, written with
+    /// `read_error` and without their contents.
+    pub too_deep: u64,
+    /// Entries left out by `-x` or the filters, written by name only.
+    pub excluded: u64,
+}
+
+/// One open directory of the export walk.
+struct ExFrame {
+    dir: du_fs::Dir,
+    entries: du_fs::Entries,
+    /// Entry indices, files before directories (the order a scan counts
+    /// them in, so a hard link is charged where a scan charges it).
+    order: Vec<usize>,
+    next: usize,
+    dev: u64,
+    chain: Option<std::sync::Arc<du_filter::Chain>>,
+}
+
+/// Write `name` as a JSON string. Bytes are kept as they are (ncdu writes
+/// names in the file system's encoding); quotes, backslashes and control
+/// bytes are escaped.
+fn write_name(w: &mut impl Write, name: &[u8]) -> io::Result<()> {
+    w.write_all(b"{\"name\":\"")?;
+    let mut start = 0;
+    for (i, &b) in name.iter().enumerate() {
+        let esc: Option<&[u8]> = match b {
+            b'"' => Some(b"\\\""),
+            b'\\' => Some(b"\\\\"),
+            b'\n' => Some(b"\\n"),
+            b'\t' => Some(b"\\t"),
+            b'\r' => Some(b"\\r"),
+            _ => None,
+        };
+        if esc.is_none() && b >= 0x20 && b != 0x7f {
+            continue;
+        }
+        w.write_all(&name[start..i])?;
+        match esc {
+            Some(e) => w.write_all(e)?,
+            None => write!(w, "\\u{b:04x}")?,
+        }
+        start = i + 1;
+    }
+    w.write_all(&name[start..])?;
+    w.write_all(b"\"")
+}
+
+/// The fields after the name of a stat-ed entry, without the closing `}`.
+fn write_stat(w: &mut impl Write, st: &du_fs::Stat, parent_dev: Option<u64>) -> io::Result<()> {
+    let (asize, dsize) = st.sizes();
+    write!(w, ",\"asize\":{asize},\"dsize\":{dsize}")?;
+    if parent_dev != Some(st.dev) {
+        write!(w, ",\"dev\":{}", st.dev)?;
+    }
+    if !st.is_dir() && st.nlink > 1 {
+        write!(
+            w,
+            ",\"ino\":{},\"hlnkc\":true,\"nlink\":{}",
+            st.ino,
+            st.nlink.min(u32::MAX as u64)
+        )?;
+    }
+    if !st.is_dir() && !st.is_file() {
+        w.write_all(b",\"notreg\":true")?;
+    }
+    if st.mtime > 0 {
+        write!(w, ",\"mtime\":{}", st.mtime)?;
+    }
+    Ok(())
+}
+
+/// Write the tree at `root` as an ncdu export (format 1.2), streaming
+/// as it walks: `ncdu -f FILE` browses it and `rtrash du -f FILE` lists
+/// it. Directories on other file systems (with `one_file_system`) and
+/// entries the filters leave out are written by name, marked excluded.
+/// The walk keeps one open directory per level and stops at the same
+/// depth and path limits as a scan.
+pub fn export(
+    root: &Path,
+    one_file_system: bool,
+    spec: Option<&du_filter::Spec>,
+    created: i64,
+    w: &mut impl Write,
+) -> io::Result<Exported> {
+    let abs = crate::du::absolute(root)?;
+    let st = du_fs::lstat(&abs)?;
+    if !st.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "an ncdu export starts at a directory",
+        ));
+    }
+    du_fs::raise_nofile_limit();
+    let filter = spec.map(|s| du_filter::Filter::new(s, &abs));
+    let mut out = Exported::default();
+    let mut path = abs.clone();
+    let root_dev = st.dev;
+
+    write!(
+        w,
+        "[1,2,{{\"progname\":\"rtrash\",\"progver\":\"{}\",\"timestamp\":{created}}},\n[",
+        env!("CARGO_PKG_VERSION")
+    )?;
+    write_name(w, path_bytes(&abs).as_slice())?;
+    write_stat(w, &st, None)?;
+    let dir = du_fs::Dir::open(&abs)?;
+    let (entries, failed) = dir.entries();
+    if failed {
+        w.write_all(b",\"read_error\":true")?;
+        out.unreadable += 1;
+    }
+    w.write_all(b"}")?;
+    out.entries += 1;
+    let chain = filter.as_ref().and_then(|f| {
+        let (git, ignore) = repo_markers(&entries);
+        f.chain_for(f.root_chain.as_ref(), &abs, git, ignore)
+    });
+    let mut stack = vec![ExFrame {
+        dir,
+        order: files_first(&entries),
+        entries,
+        next: 0,
+        dev: st.dev,
+        chain,
+    }];
+
+    while let Some(depth) = stack.len().checked_sub(1) {
+        let top = &mut stack[depth];
+        if top.next == top.order.len() {
+            stack.pop();
+            path.pop();
+            w.write_all(b"]")?;
+            continue;
+        }
+        let i = top.order[top.next];
+        top.next += 1;
+        let (name, kind) = top.entries.get(i);
+        let excluded = |is_dir: bool, chain: Option<&du_filter::Chain>, path: &Path| {
+            filter
+                .as_ref()
+                .is_some_and(|f| f.excluded(chain, path, name.to_bytes(), is_dir))
+        };
+        w.write_all(b",\n")?;
+        out.entries += 1;
+        let chain = top.chain.clone();
+        if kind != du_fs::Kind::Unknown
+            && excluded(kind == du_fs::Kind::Dir, chain.as_deref(), &path)
+        {
+            write_name(w, name.to_bytes())?;
+            w.write_all(b",\"excluded\":\"pattern\"}")?;
+            out.excluded += 1;
+            continue;
+        }
+        let st = match top
+            .entries
+            .stat(i)
+            .map_or_else(|| top.dir.stat_at(name), Ok)
+        {
+            Ok(st) => st,
+            Err(_) => {
+                write_name(w, name.to_bytes())?;
+                w.write_all(b",\"read_error\":true}")?;
+                out.unreadable += 1;
+                continue;
+            }
+        };
+        if kind == du_fs::Kind::Unknown && excluded(st.is_dir(), chain.as_deref(), &path) {
+            write_name(w, name.to_bytes())?;
+            w.write_all(b",\"excluded\":\"pattern\"}")?;
+            out.excluded += 1;
+            continue;
+        }
+        let parent_dev = top.dev;
+        write_name_or_dir(w, name.to_bytes(), st.is_dir())?;
+        if !st.is_dir() {
+            write_stat(w, &st, Some(parent_dev))?;
+            w.write_all(b"}")?;
+            continue;
+        }
+        if one_file_system && st.dev != root_dev {
+            write!(w, ",\"dev\":{},\"excluded\":\"otherfs\"}}]", st.dev)?;
+            out.excluded += 1;
+            continue;
+        }
+        let child_path = path.join(du_fs::os(name));
+        if depth + 1 >= crate::du::MAX_DEPTH
+            || child_path.as_os_str().len() > crate::du::MAX_PATH_BYTES
+        {
+            write_stat(w, &st, Some(parent_dev))?;
+            w.write_all(b",\"read_error\":true}]")?;
+            out.too_deep += 1;
+            continue;
+        }
+        let opened = top.dir.open_child(name);
+        let Ok(dir) = opened else {
+            write_stat(w, &st, Some(parent_dev))?;
+            w.write_all(b",\"read_error\":true}]")?;
+            out.unreadable += 1;
+            continue;
+        };
+        let (entries, failed) = dir.entries();
+        let (git, ignore) = repo_markers(&entries);
+        if let Some(f) = &filter {
+            // A tagged cache is left out whole, as a scan leaves it out.
+            if f.exclude_caches
+                && has_name(&entries, b"CACHEDIR.TAG")
+                && du_filter::has_cachedir_tag(&child_path)
+            {
+                write_stat(w, &st, Some(parent_dev))?;
+                w.write_all(b",\"excluded\":\"pattern\"}]")?;
+                out.excluded += 1;
+                continue;
+            }
+        }
+        write_stat(w, &st, Some(parent_dev))?;
+        if failed {
+            w.write_all(b",\"read_error\":true")?;
+            out.unreadable += 1;
+        }
+        w.write_all(b"}")?;
+        let chain = filter
+            .as_ref()
+            .and_then(|f| f.chain_for(chain.as_ref(), &child_path, git, ignore));
+        path = child_path;
+        stack.push(ExFrame {
+            dir,
+            order: files_first(&entries),
+            entries,
+            next: 0,
+            dev: st.dev,
+            chain,
+        });
+    }
+    w.write_all(b"]\n")?;
+    w.flush()?;
+    Ok(out)
+}
+
+/// `[` then the name object for a directory, the name object alone for
+/// anything else.
+fn write_name_or_dir(w: &mut impl Write, name: &[u8], is_dir: bool) -> io::Result<()> {
+    if is_dir {
+        w.write_all(b"[")?;
+    }
+    write_name(w, name)
+}
+
+/// Indices of `entries`, known directories last.
+fn files_first(entries: &du_fs::Entries) -> Vec<usize> {
+    let mut v: Vec<usize> = (0..entries.len()).collect();
+    v.sort_by_key(|&i| entries.get(i).1 == du_fs::Kind::Dir);
+    v
+}
+
+fn has_name(entries: &du_fs::Entries, want: &[u8]) -> bool {
+    (0..entries.len()).any(|i| entries.get(i).0.to_bytes() == want)
+}
+
+/// Whether a listing holds `.git` and `.gitignore`.
+fn repo_markers(entries: &du_fs::Entries) -> (bool, bool) {
+    (has_name(entries, b".git"), has_name(entries, b".gitignore"))
+}
+
+#[cfg(unix)]
+fn path_bytes(p: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    p.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn path_bytes(p: &Path) -> Vec<u8> {
+    p.as_os_str().as_encoded_bytes().to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,5 +917,138 @@ mod tests {
         }
         assert!(looks_like_export(b"  \n[1,"));
         assert!(!looks_like_export(b"# rtrash du snapshot 1"));
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "rtrash-ncdu-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// Export `root`, read the export back, and scan `root` live.
+    fn roundtrip(
+        root: &Path,
+        spec: Option<&du_filter::Spec>,
+    ) -> (Exported, Snapshot, crate::du::Report) {
+        let mut buf = Vec::new();
+        let done = export(root, false, spec, 1_700_000_000, &mut buf).unwrap();
+        let snap =
+            parse(&buf[..]).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&buf)));
+        let opts = crate::du_snap::snapshot_opts(crate::du::ScanOpts {
+            filter: spec.map(|s| std::sync::Arc::new(s.clone())),
+            ..crate::du::ScanOpts::default()
+        });
+        let report = crate::du::scan(&[root.to_path_buf()], &opts).unwrap();
+        (done, snap, report)
+    }
+
+    #[test]
+    fn an_export_reads_back_with_the_totals_of_a_scan() {
+        use std::fs;
+        let root = tmp("rt");
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::create_dir_all(root.join("logs")).unwrap();
+        fs::write(root.join("a/f"), vec![1u8; 50_000]).unwrap();
+        fs::write(root.join("a/b/g"), vec![2u8; 9_000]).unwrap();
+        fs::write(root.join("logs/x.log"), vec![3u8; 70_000]).unwrap();
+        #[cfg(unix)]
+        {
+            // Quotes, backslashes and newlines are not file names on Windows.
+            fs::write(root.join("q\"uo\\te\nnl"), b"x").unwrap();
+            fs::hard_link(root.join("a/f"), root.join("a/b/f-link")).unwrap();
+            std::os::unix::fs::symlink("f", root.join("a/sym")).unwrap();
+        }
+        let (done, snap, scan) = roundtrip(&root, None);
+        assert_eq!((done.unreadable, done.too_deep, done.excluded), (0, 0, 0));
+        assert_eq!(snap.created, 1_700_000_000);
+        let (r, s) = (&snap.roots[0], &scan.roots[0]);
+        assert_eq!(
+            (r.disk, r.apparent, r.files, r.links, r.dirs),
+            (s.disk, s.apparent, s.files, s.links, s.dirs)
+        );
+        let mut got: Vec<_> = snap
+            .dirs
+            .iter()
+            .map(|d| (d.path.clone(), d.disk, d.apparent, d.mtime))
+            .collect();
+        let mut want: Vec<_> = scan
+            .dirs
+            .iter()
+            .map(|d| (d.path.clone(), d.disk, d.apparent, d.mtime))
+            .collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+        assert!(snap
+            .dirs
+            .iter()
+            .any(|d| d.path.ends_with("a/b") || d.path.ends_with("a\\b")));
+
+        // Filters leave the same entries out as in a scan, by name.
+        let spec = du_filter::Spec {
+            patterns: vec!["*.log".into()],
+            ..du_filter::Spec::default()
+        };
+        let (done, snap, scan) = roundtrip(&root, Some(&spec));
+        assert_eq!(done.excluded, 1);
+        assert_eq!(snap.roots[0].excluded, 1);
+        assert_eq!(snap.roots[0].disk, scan.roots[0].disk);
+        assert_eq!(snap.roots[0].apparent, scan.roots[0].apparent);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exports_mark_what_they_could_not_read_or_reach() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("err");
+        fs::create_dir_all(root.join("locked/inner")).unwrap();
+        fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+        // Deeper than a scan goes, built below PATH_MAX by renames.
+        let deep = root.join("deep");
+        fs::create_dir(&deep).unwrap();
+        let levels = crate::du::MAX_DEPTH + 10;
+        let c = std::ffi::CString::new(deep.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: plain descriptor calls on NUL-terminated names.
+        unsafe {
+            let mut fd = libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+            for _ in 0..levels {
+                assert_eq!(libc::mkdirat(fd, c"d".as_ptr(), 0o755), 0);
+                let next = libc::openat(fd, c"d".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+                libc::close(fd);
+                fd = next;
+            }
+            libc::close(fd);
+        }
+        let mut buf = Vec::new();
+        let done = export(&root, false, None, 0, &mut buf).unwrap();
+        let snap = parse(&buf[..]).unwrap();
+        let root_only = unsafe { libc::geteuid() } == 0;
+        if !root_only {
+            assert!(done.unreadable >= 1, "{done:?}");
+            let text = String::from_utf8_lossy(&buf);
+            assert!(text.contains("{\"name\":\"locked\""), "locked is named");
+        }
+        // The walk stops at the scan's depth limit, or earlier when the
+        // descriptor limit is lower: either way the export stays whole.
+        assert!(done.too_deep + done.unreadable >= 1, "{done:?}");
+        assert!(snap.roots[0].dirs as usize <= crate::du::MAX_DEPTH + 4);
+        fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o755)).unwrap();
+        crate::fastdelete::remove_path(&root).unwrap();
+    }
+
+    #[test]
+    fn names_are_escaped_for_json_but_keep_other_bytes() {
+        let mut out = Vec::new();
+        write_name(&mut out, b"a\"b\\c\nd\x01e\xffz").unwrap();
+        assert_eq!(out, b"{\"name\":\"a\\\"b\\\\c\\nd\\u0001e\xffz\"".to_vec());
     }
 }
