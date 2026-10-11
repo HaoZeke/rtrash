@@ -458,6 +458,22 @@ cap from
 .B MaxCapacity
 in the registry with the share in use, then the total.
 A drive set to skip the Recycle Bin says so.
+With an age or size filter it counts the passing items per drive
+instead, without the caps.
+.PP
+On Windows,
+.BR list ,
+.BR status ,
+.B rm
+and
+.B empty
+take the same age filters as here, on the deletion time Windows
+records, and all but
+.B empty
+take the size filters.
+An item's size is the one its
+.I $I
+record holds, which for a folder is its total at deletion.
 .SS du
 .B rtrash du
 [\fIOPTION\fR]... [\fIPATH\fR]...

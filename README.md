@@ -104,7 +104,7 @@ $ pip install rtrash
 | **macOS** | FreeDesktop **home** trash (experimental); Finder Trash through `rtrash finder` (experimental, untested on a real Mac) | `$XDG_DATA_HOME/Trash` or `~/.local/share/Trash`; `rtrash finder` uses `~/.Trash` with Put Back |
 | **Windows** | System **Recycle Bin** (shell APIs) | put/list/restore/empty/rm/status/du. **Not** FreeDesktop on-disk layout. Multi-call `setup` is Unix-oriented |
 
-On a TTY, bare `rtrash restore` opens the **interactive restore browser** (ratatui), on Windows too, where it lists the Recycle Bin. `--plain` keeps the numbered selection. On Windows `rtrash du -i` deletes into the Recycle Bin and `u` restores from it. `rtrash status` and the trash line of `rtrash du` show the cap of each drive (`MaxCapacity` in the registry) and how much of it is in use.
+On a TTY, bare `rtrash restore` opens the **interactive restore browser** (ratatui), on Windows too, where it lists the Recycle Bin. `--plain` keeps the numbered selection. On Windows `rtrash du -i` deletes into the Recycle Bin and `u` restores from it. `rtrash status` and the trash line of `rtrash du` show the cap of each drive (`MaxCapacity` in the registry) and how much of it is in use. The age filters (`--older-than`, `--newer-than`, `empty DAYS`) and size filters (`--larger-than`, `--smaller-than`) work on the Recycle Bin too, for `list`, `status` and `rm`, and `empty` takes the age ones; sizes come from each item's `$I` record.
 
 ## Install
 

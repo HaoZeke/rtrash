@@ -114,16 +114,136 @@ pub fn encode_recycle_i_v2(original: &Path, size: u64, delete_filetime: u64) -> 
     out
 }
 
+/// The `$I` index file beside the `$R` payload at `payload`: same
+/// folder, same name after the first two characters. `None` when the
+/// name does not start with `$R`.
+pub fn index_file_for(payload: &Path) -> Option<PathBuf> {
+    let name = payload.file_name()?.to_str()?;
+    let rest = name.strip_prefix("$R")?;
+    Some(payload.with_file_name(format!("$I{rest}")))
+}
+
+/// The drive root (`C:\`) a Recycle Bin path such as
+/// `C:\$Recycle.Bin\S-1-5-21-…\$R1A2B3C.txt` lies on.
+pub fn drive_root_of(path: &Path) -> Option<PathBuf> {
+    let s = path.to_str()?;
+    let b = s.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
+        .then(|| PathBuf::from(format!("{}:\\", char::from(b[0].to_ascii_uppercase()))))
+}
+
+/// The age and size filters the Recycle Bin `list`, `status` and `rm`
+/// take, with the FreeDesktop commands' flags and meanings.
+#[derive(Debug, Default)]
+pub struct BinFilters {
+    pub age: crate::filters::AgeFilter,
+    pub size: crate::filters::SizeFilter,
+}
+
+impl BinFilters {
+    pub fn is_set(&self) -> bool {
+        self.age.is_set() || self.size.is_set()
+    }
+
+    /// The items that pass: `when` gives an item's deletion time (Unix
+    /// seconds), `size` its bytes, asked only when a size bound is set.
+    pub fn apply<T>(
+        &self,
+        items: Vec<T>,
+        when: impl Fn(&T) -> i64,
+        size: impl Fn(&T) -> u64,
+    ) -> Vec<T> {
+        let now = crate::util::now_epoch();
+        items
+            .into_iter()
+            .filter(|it| self.age.keeps_at(Some(when(it)), now))
+            .filter(|it| !self.size.is_set() || self.size.keeps(size(it)))
+            .collect()
+    }
+}
+
+/// Parse the filter flags out of `args`, handing every other argument to
+/// `other`, which returns an exit status to stop with. A bad filter
+/// value prints its message and stops with 2.
+pub fn parse_with_filters(
+    prog: &str,
+    args: &[String],
+    mut other: impl FnMut(&str) -> Option<i32>,
+) -> Result<BinFilters, i32> {
+    let mut f = BinFilters::default();
+    let mut i = 0usize;
+    while i < args.len() {
+        let taken = f
+            .age
+            .take(args, &mut i)
+            .or_else(|| f.size.take(args, &mut i));
+        match taken {
+            Some(Ok(())) => {}
+            Some(Err(e)) => {
+                eprintln!("{prog}: {e}");
+                return Err(2);
+            }
+            None => {
+                if let Some(code) = other(&args[i]) {
+                    return Err(code);
+                }
+            }
+        }
+        i += 1;
+    }
+    if let Err(e) = f.size.check() {
+        eprintln!("{prog}: {e}");
+        return Err(2);
+    }
+    Ok(f)
+}
+
+/// What a Recycle Bin item takes, from its `$R` payload path: the size
+/// its `$I` record holds (Windows writes a folder's total there), else
+/// the bytes of the files under the payload.
+pub fn recycled_size(payload: &Path) -> u64 {
+    index_file_for(payload)
+        .and_then(|i| std::fs::read(i).ok())
+        .and_then(|b| parse_recycle_i(&b))
+        .map(|m| m.size)
+        .unwrap_or_else(|| tree_bytes(payload))
+}
+
+/// Bytes of the files under `root` (or of `root` itself), without
+/// following links, walked with a stack.
+fn tree_bytes(root: &Path) -> u64 {
+    let mut total = 0u64;
+    let mut todo = vec![root.to_path_buf()];
+    while let Some(p) = todo.pop() {
+        let Ok(md) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if md.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(&p) {
+                todo.extend(rd.flatten().map(|e| e.path()));
+            }
+        } else {
+            total = total.saturating_add(md.len());
+        }
+    }
+    total
+}
+
 // ---- Windows CLI surface (system Recycle Bin via `trash` crate) ----
 
 #[cfg(windows)]
 mod os {
     use super::*;
+    use crate::filters::AgeFilter;
     use trash::os_limited;
     use trash::TrashItem;
 
     fn err_msg(e: impl std::fmt::Display) -> String {
         e.to_string()
+    }
+
+    fn item_size(it: &TrashItem) -> u64 {
+        recycled_size(Path::new(&it.id))
     }
 
     pub fn put_run(prog: &str, args: &[String]) -> i32 {
@@ -287,38 +407,44 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
     }
 
     pub fn list_run(prog: &str, args: &[String]) -> i32 {
-        for arg in args {
-            match arg.as_str() {
-                "--help" => {
-                    print!(
-                        "\
+        let filters = parse_with_filters(prog, args, |arg| match arg {
+            "--help" => {
+                print!(
+                    "\
 Usage: {prog} [OPTION]...
 List items in the Windows Recycle Bin (system trash).
 
+      --older-than=DAYS only items deleted more than DAYS days ago
+      --newer-than=DAYS only items deleted within the last DAYS days
+      --larger-than=SIZE  only items over SIZE (500M, 1.5G, 64k)
+      --smaller-than=SIZE only items under SIZE
       --help     display this help and exit
       --version  output version information and exit
 
 Note: --home-only / --trash-dir are FreeDesktop options and are ignored
 on Windows (there is no FreeDesktop layout here).
 "
-                    );
-                    return 0;
-                }
-                "--version" => {
-                    println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
-                    return 0;
-                }
-                "--home-only" => {}
-                a if a.starts_with("--trash-dir=") => {}
-                a => {
-                    eprintln!("{prog}: unrecognized option '{a}'");
-                    return 2;
-                }
+                );
+                Some(0)
             }
-        }
+            "--version" => {
+                println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
+                Some(0)
+            }
+            "--home-only" => None,
+            a if a.starts_with("--trash-dir=") => None,
+            a => {
+                eprintln!("{prog}: unrecognized option '{a}'");
+                Some(2)
+            }
+        });
+        let filters = match filters {
+            Ok(f) => f,
+            Err(code) => return code,
+        };
         match os_limited::list() {
             Ok(items) => {
-                let mut items = items;
+                let mut items = filters.apply(items, |it| it.time_deleted, item_size);
                 items.sort_by_key(|i| i.time_deleted);
                 for it in items {
                     let date = platform::epoch_to_iso_utc(it.time_deleted);
@@ -339,7 +465,27 @@ on Windows (there is no FreeDesktop layout here).
     pub fn empty_run(prog: &str, args: &[String]) -> i32 {
         let mut dry_run = false;
         let mut verbose = false;
-        for arg in args {
+        let mut age = AgeFilter::default();
+        let mut i = 0usize;
+        while i < args.len() {
+            match age.take(args, &mut i) {
+                // As on Linux, `empty` takes no --newer-than.
+                Some(_) if age.newer_than.is_some() => {
+                    eprintln!("{prog}: unrecognized option '--newer-than'");
+                    return 2;
+                }
+                Some(Ok(())) => {
+                    i += 1;
+                    continue;
+                }
+                Some(Err(e)) => {
+                    eprintln!("{prog}: {e}");
+                    return 2;
+                }
+                None => {}
+            }
+            let arg = &args[i];
+            i += 1;
             match arg.as_str() {
                 "-n" | "--dry-run" => dry_run = true,
                 "-v" | "--verbose" => verbose = true,
@@ -347,16 +493,17 @@ on Windows (there is no FreeDesktop layout here).
                 "--help" => {
                     print!(
                         "\
-Usage: {prog} [OPTION]...
+Usage: {prog} [OPTION]... [DAYS]
 Permanently empty the Windows Recycle Bin (system trash).
+With DAYS, only items deleted more than DAYS days ago, as on Linux.
 
   -n, --dry-run  list what would be removed
   -v, --verbose  print each removed original path
+      --older-than=DAYS  same as DAYS
       --help     display this help and exit
       --version  output version information and exit
 
-Age filters (DAYS) and FreeDesktop --trash-dir pins are not supported
-on the Recycle Bin backend.
+FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
 "
                     );
                     return 0;
@@ -366,10 +513,13 @@ on the Recycle Bin backend.
                     return 0;
                 }
                 a if a.starts_with("--trash-dir=") => {}
-                a if !a.starts_with('-') => {
-                    eprintln!("{prog}: DAYS age filter is not supported on Windows Recycle Bin");
-                    return 2;
-                }
+                a if !a.starts_with('-') => match crate::filters::parse_days(a) {
+                    Ok(d) => age.older_than = Some(d),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                },
                 a => {
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return 2;
@@ -377,7 +527,10 @@ on the Recycle Bin backend.
             }
         }
         let items = match os_limited::list() {
-            Ok(i) => i,
+            Ok(i) => i
+                .into_iter()
+                .filter(|it| age.keeps(Some(it.time_deleted)))
+                .collect::<Vec<_>>(),
             Err(e) => {
                 eprintln!("{prog}: cannot list Recycle Bin: {}", err_msg(e));
                 return 1;
@@ -587,32 +740,42 @@ Without PATH, print a numbered list and read an index from stdin.
     }
 
     pub fn status_run(prog: &str, args: &[String]) -> i32 {
-        for arg in args {
-            match arg.as_str() {
-                "--help" => {
-                    print!(
-                        "\
+        let filters = parse_with_filters(prog, args, |arg| match arg {
+            "--help" => {
+                print!(
+                    "\
 Usage: {prog} [OPTION]...
 Summarize the Windows Recycle Bin: items, size, and the cap of each
 drive (MaxCapacity in the registry), then the total.
 
+      --older-than=DAYS only count items deleted more than DAYS days ago
+      --newer-than=DAYS only count items deleted within the last DAYS days
+      --larger-than=SIZE  only count items over SIZE (500M, 1.5G, 64k)
+      --smaller-than=SIZE only count items under SIZE
+                     (a filter counts item by item, without the caps)
       --help     display this help and exit
       --version  output version information and exit
 "
-                    );
-                    return 0;
-                }
-                "--version" => {
-                    println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
-                    return 0;
-                }
-                "--home-only" => {}
-                a if a.starts_with("--trash-dir=") => {}
-                a => {
-                    eprintln!("{prog}: unrecognized option '{a}'");
-                    return 2;
-                }
+                );
+                Some(0)
             }
+            "--version" => {
+                println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
+                Some(0)
+            }
+            "--home-only" => None,
+            a if a.starts_with("--trash-dir=") => None,
+            a => {
+                eprintln!("{prog}: unrecognized option '{a}'");
+                Some(2)
+            }
+        });
+        let filters = match filters {
+            Ok(f) => f,
+            Err(code) => return code,
+        };
+        if filters.is_set() {
+            return filtered_status(prog, &filters);
         }
         // One line per drive with a bin or a cap, like the per-trash lines
         // of the FreeDesktop status, then the total.
@@ -648,13 +811,50 @@ drive (MaxCapacity in the registry), then the total.
         0
     }
 
+    /// `status` with a filter: the shell's per-drive totals cannot be
+    /// filtered, so count the passing items, by the drive of their bin.
+    fn filtered_status(prog: &str, filters: &BinFilters) -> i32 {
+        let items = match os_limited::list() {
+            Ok(i) => filters.apply(i, |it| it.time_deleted, item_size),
+            Err(e) => {
+                eprintln!("{prog}: cannot list Recycle Bin: {}", err_msg(e));
+                return 1;
+            }
+        };
+        let mut by_drive: std::collections::BTreeMap<PathBuf, (u64, u64)> =
+            std::collections::BTreeMap::new();
+        for it in &items {
+            let root = drive_root_of(Path::new(&it.id)).unwrap_or_default();
+            let e = by_drive.entry(root).or_default();
+            e.0 += 1;
+            e.1 = e.1.saturating_add(item_size(it));
+        }
+        let (mut items, mut bytes) = (0u64, 0u64);
+        for (root, (n, b)) in &by_drive {
+            items += n;
+            bytes = bytes.saturating_add(*b);
+            println!(
+                "{}\t{}\t{}",
+                root.display(),
+                crate::util::plural(*n, "item", "items"),
+                crate::util::format_bytes(*b)
+            );
+        }
+        println!(
+            "Total: {} ({})",
+            crate::util::plural(items, "item", "items"),
+            crate::util::format_bytes(bytes)
+        );
+        0
+    }
+
     pub fn rm_run(prog: &str, args: &[String]) -> i32 {
         let mut dry_run = false;
         let mut force = false;
         let mut verbose = false;
         let mut patterns: Vec<String> = Vec::new();
-        for arg in args {
-            match arg.as_str() {
+        let filters = parse_with_filters(prog, args, |arg| {
+            match arg {
                 "-n" | "--dry-run" => dry_run = true,
                 "-f" | "--force" => force = true,
                 "-v" | "--verbose" => verbose = true,
@@ -665,26 +865,35 @@ drive (MaxCapacity in the registry), then the total.
 Usage: {prog} [OPTION]... PATTERN...
 Permanently delete Recycle Bin items matching PATTERN (glob).
 
+      --older-than=DAYS only match items deleted more than DAYS days ago
+      --newer-than=DAYS only match items deleted within the last DAYS days
+      --larger-than=SIZE  only match items over SIZE (500M, 1.5G, 64k)
+      --smaller-than=SIZE only match items under SIZE
   -n, --dry-run  list matches only
   -f, --force    allow mass patterns (e.g. '*')
   -v, --verbose  print each path
       --help     display this help and exit
 "
                     );
-                    return 0;
+                    return Some(0);
                 }
                 "--version" => {
                     println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
-                    return 0;
+                    return Some(0);
                 }
                 a if a.starts_with("--trash-dir=") => {}
                 a if a.starts_with('-') => {
                     eprintln!("{prog}: unrecognized option '{a}'");
-                    return 2;
+                    return Some(2);
                 }
                 a => patterns.push(a.to_string()),
             }
-        }
+            None
+        });
+        let filters = match filters {
+            Ok(f) => f,
+            Err(code) => return code,
+        };
         if patterns.is_empty() {
             eprintln!("{prog}: missing PATTERN");
             return 2;
@@ -714,6 +923,8 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                     .any(|p| util::fnmatch(p, &full) || util::fnmatch(p, &base))
             })
             .collect();
+        // Size last: only the matches need their `$I` read.
+        let matched = filters.apply(matched, |it| it.time_deleted, item_size);
         if dry_run {
             for it in &matched {
                 println!("{}", crate::util::term_path(&it.original_path()));
@@ -971,6 +1182,86 @@ mod tests {
             nuke_on_delete: false,
         };
         assert!(cap_note(5, &zero).contains("skip"));
+    }
+
+    #[test]
+    fn index_files_and_drive_roots_come_from_the_payload_path() {
+        assert_eq!(
+            index_file_for(Path::new("bin/$RAB12CD.txt")),
+            Some(PathBuf::from("bin/$IAB12CD.txt"))
+        );
+        assert_eq!(index_file_for(Path::new("bin/notes.txt")), None);
+        let id = Path::new(r"d:\$Recycle.Bin\S-1-5-21-1\$RX1.txt");
+        assert_eq!(drive_root_of(id), Some(PathBuf::from(r"D:\")));
+        assert_eq!(drive_root_of(Path::new("relative")), None);
+    }
+
+    #[test]
+    fn recycled_size_reads_the_index_and_walks_without_one() {
+        let dir = std::env::temp_dir().join(format!("rtrash-bin-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("$RFOLDER/sub")).unwrap();
+        std::fs::write(dir.join("$RFOLDER/a"), [0u8; 300]).unwrap();
+        std::fs::write(dir.join("$RFOLDER/sub/b"), [0u8; 700]).unwrap();
+        std::fs::write(dir.join("$RFILE.txt"), b"five!").unwrap();
+        let index = encode_recycle_i_v2(Path::new(r"C:\x.txt"), 4242, FILETIME_UNIX_EPOCH);
+        std::fs::write(dir.join("$IFILE.txt"), index).unwrap();
+        // The index wins: Windows records the size at deletion.
+        assert_eq!(recycled_size(&dir.join("$RFILE.txt")), 4242);
+        // No index: the files under the folder.
+        assert_eq!(recycled_size(&dir.join("$RFOLDER")), 1000);
+        // A broken index falls back to the payload too.
+        std::fs::write(dir.join("$IFOLDER"), [1u8; 3]).unwrap();
+        assert_eq!(recycled_size(&dir.join("$RFOLDER")), 1000);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bin_filters_parse_like_the_freedesktop_ones_and_apply() {
+        let args: Vec<String> = ["--older-than=1", "-n", "--larger-than", "1K", "pat"]
+            .map(String::from)
+            .to_vec();
+        let mut rest = Vec::new();
+        let f = parse_with_filters("t", &args, |a| {
+            rest.push(a.to_string());
+            None
+        })
+        .unwrap();
+        assert_eq!(rest, ["-n", "pat"]);
+        assert_eq!(
+            (f.age.older_than, f.size.larger_than),
+            (Some(1), Some(1024))
+        );
+        let now = crate::util::now_epoch();
+        let items = vec![
+            (now - 3 * 86_400, 4096u64),
+            (now - 60, 4096),
+            (now - 3 * 86_400, 10),
+        ];
+        let kept = f.apply(items, |it| it.0, |it| it.1);
+        assert_eq!(kept, [(now - 3 * 86_400, 4096)]);
+        // No size bound: sizes are never asked for.
+        let age_only = BinFilters {
+            age: crate::filters::AgeFilter {
+                older_than: None,
+                newer_than: Some(1),
+            },
+            ..BinFilters::default()
+        };
+        let kept = age_only.apply(
+            vec![now - 60, now - 9 * 86_400],
+            |t| *t,
+            |_| panic!("sized"),
+        );
+        assert_eq!(kept, [now - 60]);
+        let bad = |a: &[&str]| {
+            let a: Vec<String> = a.iter().map(|s| s.to_string()).collect();
+            parse_with_filters("t", &a, |_| None).unwrap_err()
+        };
+        assert_eq!(bad(&["--newer-than=x"]), 2);
+        assert_eq!(bad(&["--larger-than=2K", "--smaller-than=1K"]), 2);
+        let stop = parse_with_filters("t", &["--help".to_string()], |_| Some(0));
+        assert_eq!(stop.unwrap_err(), 0);
     }
 
     #[test]

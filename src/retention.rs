@@ -28,34 +28,7 @@ impl Policy {
     }
 }
 
-/// Parse a size such as `500M`, `10G`, `1.5GiB`, `64k` or `123` (bytes).
-/// Units are powers of 1024; a trailing `B` or `iB` is optional.
-pub fn parse_size(s: &str) -> Option<u64> {
-    let t = s.trim();
-    let t = t
-        .strip_suffix("iB")
-        .or_else(|| t.strip_suffix('B'))
-        .unwrap_or(t);
-    let (num, mult) = match t.char_indices().last() {
-        Some((i, c)) if c.is_ascii_alphabetic() => {
-            let m: u64 = match c.to_ascii_uppercase() {
-                'K' => 1 << 10,
-                'M' => 1 << 20,
-                'G' => 1 << 30,
-                'T' => 1 << 40,
-                _ => return None,
-            };
-            (&t[..i], m)
-        }
-        _ => (t, 1),
-    };
-    let v: f64 = num.trim().parse().ok()?;
-    if !v.is_finite() || v < 0.0 {
-        return None;
-    }
-    let bytes = v * mult as f64;
-    (bytes <= u64::MAX as f64).then_some(bytes as u64)
-}
+pub use crate::filters::parse_size;
 
 /// One trashed item considered for removal.
 #[derive(Debug, Clone, PartialEq, Eq)]

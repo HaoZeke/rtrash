@@ -120,20 +120,25 @@ pub fn orphans(dirs: &[TrashDir]) -> Vec<Entry> {
 
 /// Age filter aligned with `empty DAYS`: missing/unparsable date counts as old.
 pub fn is_older_than(entry: &Entry, days: i64) -> bool {
-    let cutoff = info::now_epoch() - days.saturating_mul(86_400);
-    match entry.date.as_deref().and_then(info::parse_local_to_epoch) {
-        Some(t) => t <= cutoff,
-        None => true,
-    }
+    let age = crate::filters::AgeFilter {
+        older_than: Some(days),
+        newer_than: None,
+    };
+    age.keeps_at(entry_epoch(entry), info::now_epoch())
 }
 
 /// Inverse window: trashed *after* the same cutoff (missing date excluded).
 pub fn is_newer_than(entry: &Entry, days: i64) -> bool {
-    let cutoff = info::now_epoch() - days.saturating_mul(86_400);
-    match entry.date.as_deref().and_then(info::parse_local_to_epoch) {
-        Some(t) => t > cutoff,
-        None => false,
-    }
+    let age = crate::filters::AgeFilter {
+        older_than: None,
+        newer_than: Some(days),
+    };
+    age.keeps_at(entry_epoch(entry), info::now_epoch())
+}
+
+/// When `entry` was trashed, from its `.trashinfo` date, if readable.
+fn entry_epoch(entry: &Entry) -> Option<i64> {
+    entry.date.as_deref().and_then(info::parse_local_to_epoch)
 }
 
 /// Apply optional older/newer day filters (AND if both set).
@@ -160,70 +165,7 @@ pub fn filter_age(
         .collect()
 }
 
-/// `--larger-than` and `--smaller-than`: bounds, both exclusive, on an
-/// item's disk usage (payload plus `.trashinfo`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SizeFilter {
-    pub larger_than: Option<u64>,
-    pub smaller_than: Option<u64>,
-}
-
-impl SizeFilter {
-    pub fn is_set(&self) -> bool {
-        self.larger_than.is_some() || self.smaller_than.is_some()
-    }
-
-    /// Whether an item of `bytes` passes both bounds.
-    pub fn keeps(&self, bytes: u64) -> bool {
-        self.larger_than.map_or(true, |n| bytes > n)
-            && self.smaller_than.map_or(true, |n| bytes < n)
-    }
-
-    /// Take `--larger-than` or `--smaller-than` at `args[*i]`, as
-    /// `--flag=SIZE` or `--flag SIZE` (then `*i` moves past the value).
-    /// `None` when `args[*i]` is neither flag.
-    pub fn take(&mut self, args: &[String], i: &mut usize) -> Option<Result<(), String>> {
-        let arg = args[*i].as_str();
-        let (name, inline) = match arg.split_once('=') {
-            Some((n, v)) => (n, Some(v)),
-            None => (arg, None),
-        };
-        let slot = match name {
-            "--larger-than" => &mut self.larger_than,
-            "--smaller-than" => &mut self.smaller_than,
-            _ => return None,
-        };
-        let value = match inline {
-            Some(v) => v,
-            None => {
-                *i += 1;
-                match args.get(*i) {
-                    Some(v) => v.as_str(),
-                    None => return Some(Err(format!("{name} requires SIZE"))),
-                }
-            }
-        };
-        Some(match crate::retention::parse_size(value) {
-            Some(n) => {
-                *slot = Some(n);
-                Ok(())
-            }
-            None => Err(format!(
-                "invalid SIZE '{value}' for {name} (e.g. 500M, 1.5G)"
-            )),
-        })
-    }
-
-    /// Bounds that no item can pass are a usage error.
-    pub fn check(&self) -> Result<(), String> {
-        match (self.larger_than, self.smaller_than) {
-            (Some(l), Some(s)) if l.saturating_add(1) >= s => Err(format!(
-                "--larger-than={l} and --smaller-than={s} leave no size between them"
-            )),
-            _ => Ok(()),
-        }
-    }
-}
+pub use crate::filters::SizeFilter;
 
 fn parse_nonneg_days(s: &str) -> Result<i64, String> {
     s.parse::<i64>()
@@ -566,46 +508,6 @@ pub fn sorted_order(
 
 #[cfg(test)]
 mod tests {
-    use super::SizeFilter;
-
-    #[test]
-    fn size_filters_parse_both_forms_and_bound_strictly() {
-        let args: Vec<String> = [
-            "--larger-than=1K",
-            "--smaller-than",
-            "2k",
-            "--size",
-            "--larger-than",
-        ]
-        .map(String::from)
-        .to_vec();
-        let mut f = SizeFilter::default();
-        let mut i = 0;
-        assert_eq!(f.take(&args, &mut i), Some(Ok(())));
-        i += 1;
-        assert_eq!(f.take(&args, &mut i), Some(Ok(())));
-        assert_eq!(i, 2);
-        i += 1;
-        assert_eq!(f.take(&args, &mut i), None);
-        i += 1;
-        assert!(f.take(&args, &mut i).unwrap().is_err());
-        assert_eq!(
-            f,
-            SizeFilter {
-                larger_than: Some(1024),
-                smaller_than: Some(2048)
-            }
-        );
-        assert!(!f.keeps(1024) && f.keeps(1025) && f.keeps(2047) && !f.keeps(2048));
-        assert!(f.check().is_ok());
-        let none = SizeFilter {
-            larger_than: Some(5),
-            smaller_than: Some(6),
-        };
-        assert!(none.check().is_err());
-        assert!(SizeFilter::default().keeps(0) && !SizeFilter::default().is_set());
-    }
-
     use super::*;
     use crate::trashdir::TrashDir;
     use std::path::PathBuf;
