@@ -208,6 +208,8 @@ struct App {
     print_on_exit: Vec<PathBuf>,
     /// Text `y` sends to the terminal clipboard on the next draw.
     clipboard: Option<String>,
+    /// Directory `b` opens a shell in, on the next turn of the loop.
+    shell_in: Option<PathBuf>,
 }
 
 /// The size a row shows and its bar measures: apparent size under
@@ -419,6 +421,7 @@ impl App {
             hide_dots: false,
             print_on_exit: Vec::new(),
             clipboard: None,
+            shell_in: None,
             prog: prog.to_string(),
             cur: root.clone(),
             root,
@@ -1106,6 +1109,31 @@ impl App {
         self.clipboard = Some(text.join("\n"));
     }
 
+    /// Ask the loop for a shell in the current directory (`b`, as in ncdu
+    /// and gdu). Read-only mode offers none, since a shell can delete.
+    fn ask_shell(&mut self) {
+        if self.read_only {
+            self.status = "read-only (--no-delete): no shell".into();
+            return;
+        }
+        self.shell_in = Some(self.cur.clone());
+    }
+
+    /// Back from the shell: say how it ended and rescan the directory,
+    /// whose contents may have changed.
+    fn after_shell(&mut self, status: io::Result<std::process::ExitStatus>) {
+        let said = match status {
+            Ok(s) if s.success() => "shell closed".to_string(),
+            Ok(s) => format!("shell closed ({s})"),
+            Err(e) => format!(
+                "cannot start {}: {e}",
+                tui_term::shell_program().to_string_lossy()
+            ),
+        };
+        self.refresh();
+        self.status = format!("{said} · {}", self.status);
+    }
+
     /// Open the info panel on the cursor row.
     fn show_info(&mut self) {
         let Some(it) = self.selected() else {
@@ -1164,6 +1192,7 @@ impl App {
                         KeyCode::Char('i') => return self.show_info(),
                         KeyCode::Char('p') => return self.print_and_quit(),
                         KeyCode::Char('y') => return self.copy_paths(),
+                        KeyCode::Char('b') => return self.ask_shell(),
                         KeyCode::Char('.') => return self.toggle_dots(),
                         _ => {}
                     }
@@ -1641,6 +1670,11 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 "S — show apparent sizes instead of disk use, or back",
                 "i — details of the cursor row (any key closes them)",
                 "p — quit and print the marked paths (or the cursor row) · y — copy them",
+                if app.read_only {
+                    "b — no shell in read-only mode"
+                } else {
+                    "b — open a shell in this directory; exit it to come back"
+                },
                 ". — hide names that start with a dot, or show them again",
                 "/ — show only rows whose name matches (a part, or a glob with * ? [); Esc clears",
                 "! — git work at risk (dirty, unpushed or unknown)",
@@ -1657,6 +1691,16 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
             let mut out = io::stdout();
             io::Write::write_all(&mut out, osc52(&text).as_bytes())?;
             io::Write::flush(&mut out)?;
+        }
+        if let Some(dir) = app.shell_in.take() {
+            let banner = format!(
+                "{}: shell in {}; exit it to return to the explorer",
+                app.prog,
+                crate::util::term_path(&dir)
+            );
+            let status = tui_term::run_shell(terminal, &dir, &banner);
+            app.after_shell(status);
+            continue;
         }
         if app.quit {
             // Let running scans wind down instead of walking on unseen.
@@ -1762,6 +1806,24 @@ mod tests {
             .iter()
             .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn b_asks_for_a_shell_in_the_current_directory_unless_read_only() {
+        let t = tree("shell");
+        let mut a = app(&t);
+        a.open(); // big
+        a.on_key(KeyCode::Char('b'), KeyModifiers::NONE);
+        assert_eq!(a.shell_in.take(), Some(t.0.join("w/big")));
+        // Back from the shell, the directory is read again.
+        fs::write(t.0.join("w/big/new"), vec![1u8; 50_000]).unwrap();
+        a.after_shell(Err(io::Error::from(io::ErrorKind::NotFound)));
+        assert!(a.status.starts_with("cannot start "), "{}", a.status);
+        assert!(names(&a).contains(&"new".to_string()), "{:?}", names(&a));
+        a.read_only = true;
+        a.on_key(KeyCode::Char('b'), KeyModifiers::NONE);
+        assert!(a.shell_in.is_none());
+        assert!(a.status.contains("no shell"), "{}", a.status);
     }
 
     #[test]

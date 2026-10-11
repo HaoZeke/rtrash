@@ -35,6 +35,97 @@ pub fn leave(terminal: &mut Term) {
     release_stderr();
 }
 
+/// The shell a browser opens: `$SHELL`, else `/bin/sh`; on Windows
+/// `%COMSPEC%`, else `cmd.exe`.
+pub fn shell_program() -> std::ffi::OsString {
+    let var = if cfg!(windows) { "COMSPEC" } else { "SHELL" };
+    shell_or_default(std::env::var_os(var))
+}
+
+/// `set`, unless it is missing or empty: then the platform's own shell.
+fn shell_or_default(set: Option<std::ffi::OsString>) -> std::ffi::OsString {
+    match set {
+        Some(s) if !s.is_empty() => s,
+        _ if cfg!(windows) => "cmd.exe".into(),
+        _ => "/bin/sh".into(),
+    }
+}
+
+/// Hand the terminal to an interactive shell in `dir`, after printing
+/// `banner`, and take the screen back once the shell exits, also when it
+/// could not start. While the shell runs, Ctrl-C reaches it and the
+/// programs it starts, but not this process.
+pub fn run_shell(
+    terminal: &mut Term,
+    dir: &std::path::Path,
+    banner: &str,
+) -> io::Result<std::process::ExitStatus> {
+    leave(terminal);
+    println!("{banner}");
+    let status = wait_for(std::process::Command::new(shell_program()), dir);
+    hold_stderr();
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()?;
+    status
+}
+
+/// Run `cmd` in `dir` to the end, with the terminal's interrupt keys
+/// going to it alone.
+#[cfg(unix)]
+fn wait_for(
+    mut cmd: std::process::Command,
+    dir: &std::path::Path,
+) -> io::Result<std::process::ExitStatus> {
+    use std::os::unix::process::CommandExt;
+    cmd.current_dir(dir);
+    // As system(3) does: this process ignores the terminal's interrupt
+    // and quit keys while it waits, and the shell gets the defaults back.
+    // SAFETY: signal(2) is async-signal-safe, so it may run between fork
+    // and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+            Ok(())
+        });
+    }
+    // SAFETY: plain signal(2) calls; the old handlers are put back below.
+    let old = unsafe {
+        (
+            libc::signal(libc::SIGINT, libc::SIG_IGN),
+            libc::signal(libc::SIGQUIT, libc::SIG_IGN),
+        )
+    };
+    let status = cmd.status();
+    // SAFETY: as above.
+    unsafe {
+        libc::signal(libc::SIGINT, old.0);
+        libc::signal(libc::SIGQUIT, old.1);
+    }
+    status
+}
+
+#[cfg(windows)]
+fn wait_for(
+    mut cmd: std::process::Command,
+    dir: &std::path::Path,
+) -> io::Result<std::process::ExitStatus> {
+    use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+    // A handler that takes Ctrl-C and Ctrl-Break keeps this process alive
+    // while the shell runs. Unlike ignoring them, a handler is not
+    // inherited, so programs the shell starts can still be stopped.
+    unsafe extern "system" fn swallow(_: u32) -> windows_sys::Win32::Foundation::BOOL {
+        1
+    }
+    // SAFETY: registers and later removes a handler that touches nothing.
+    unsafe { SetConsoleCtrlHandler(Some(swallow), 1) };
+    let status = cmd.current_dir(dir).status();
+    // SAFETY: as above.
+    unsafe { SetConsoleCtrlHandler(Some(swallow), 0) };
+    status
+}
+
 /// Messages written to stderr while a browser owns the terminal land on top
 /// of the frame and vanish at the next redraw. While the browser runs, send
 /// fd 2 to an unlinked temp file when it is a terminal, then replay the file
@@ -218,5 +309,34 @@ mod tests {
         assert_eq!(take_held(), msg);
         // Released: nothing is held any more.
         assert!(take_held().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+
+    #[test]
+    fn the_shell_comes_from_the_environment_or_the_platform() {
+        assert_eq!(shell_or_default(Some("/bin/zsh".into())), "/bin/zsh");
+        let own = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
+        assert_eq!(shell_or_default(Some("".into())), own);
+        assert_eq!(shell_or_default(None), own);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_shell_runs_in_the_directory_with_the_interrupt_key_live() {
+        use std::os::unix::process::ExitStatusExt;
+        let dir = std::env::temp_dir().canonicalize().unwrap();
+        let mut pwd = std::process::Command::new("/bin/sh");
+        pwd.args(["-c", "test \"$(pwd -P)\" = \"$1\"", "sh"])
+            .arg(&dir);
+        assert!(wait_for(pwd, &dir).unwrap().success());
+        // This process ignores SIGINT while it waits; the child must not,
+        // or Ctrl-C could not stop what runs in the shell.
+        let mut int = std::process::Command::new("/bin/sh");
+        int.args(["-c", "kill -INT $$; sleep 5"]);
+        assert_eq!(wait_for(int, &dir).unwrap().signal(), Some(libc::SIGINT));
     }
 }

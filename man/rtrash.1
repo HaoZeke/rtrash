@@ -926,6 +926,18 @@ marked, on stdout once the screen is restored, one per line.
 copies the same paths to the clipboard with the OSC 52 escape, which
 xterm, kitty, iTerm2, WezTerm and Windows Terminal accept, and tmux with
 .BR set\-clipboard " on" .
+.B b
+opens a shell in the current directory, as ncdu and gdu do:
+.B $SHELL
+or
+.I /bin/sh
+(on Windows
+.B %COMSPEC%
+or
+.IR cmd.exe ).
+The explorer leaves the screen while the shell runs, and Ctrl-C there
+stops only the programs the shell runs.
+Once the shell exits, the explorer comes back and rescans the directory.
 .B .
 hides names that start with a dot, in this view and every view opened
 after it, until pressed again; the title then says
@@ -956,9 +968,10 @@ takes the newest item with that path back out.
 With
 .BR \-i ,
 browse only:
-.B d
-and
+.BR d ,
 .B u
+and
+.B b
 show a note instead of acting, and the title reads
 .BR "(read\-only)" .
 Safe on a shared server or a tree you only want to measure.
