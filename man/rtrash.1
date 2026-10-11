@@ -1166,6 +1166,13 @@ never trashes such a path, so only a forged or corrupt
 .I .trashinfo
 names one, and an overwrite there would replace the trash or a real item
 in it.
+A record with a relative or empty
+.B Path=
+outside a volume trash names no place to restore to, so restore refuses
+it;
+.BI \-\-to= DIR
+restores such an item into
+.IR DIR .
 .TP
 .BR \-f ", " \-\-force
 Overwrite an existing file at the destination (same as

@@ -305,6 +305,8 @@ fn records_and_a_sizes_cache_that_are_no_regular_files_hang_nothing() {
 /// Plant a forged item `name` in the sandbox trash whose record restores to
 /// `to`, with `body` as its payload.
 fn forge_record(sb: &Sandbox, name: &str, to: &Path, body: &[u8]) {
+    fs::create_dir_all(sb.trash().join("files")).unwrap();
+    fs::create_dir_all(sb.trash().join("info")).unwrap();
     fs::write(sb.trash().join("files").join(name), body).unwrap();
     let record = format!(
         "[Trash Info]\nPath={}\nDeletionDate=2026-01-01T00:00:00\n",
@@ -375,6 +377,29 @@ fn restore_never_writes_to_the_trash_or_what_contains_it() {
     for n in ["onto-item", "onto-data", "into-files"] {
         assert!(sb.trash().join("files").join(n).exists(), "{n}");
     }
+}
+
+#[test]
+fn restore_refuses_a_record_with_no_absolute_location() {
+    let sb = Sandbox::new("restore-relative");
+    fs::write(sb.work().join("victim"), b"mine").unwrap();
+    forge_record(&sb, "rel", Path::new("victim"), b"forged");
+    forge_record(&sb, "blank", Path::new(""), b"forged");
+    // restore runs in work/, where a relative Path= would land.
+    for name in ["--name=rel", "--name=blank"] {
+        // --home-only: a --name match would also reach the host's trashes.
+        let out = sb.run(&["restore", "--home-only", "-f", name]);
+        assert_eq!(out.status.code(), Some(1), "{name}");
+        let err = stderr_of(&out);
+        assert!(err.contains("no absolute location"), "{name}: {err}");
+    }
+    assert_eq!(fs::read(sb.work().join("victim")).unwrap(), b"mine");
+    // --to still gets the item out, a relative DIR counting from here.
+    fs::create_dir(sb.work().join("out")).unwrap();
+    let out = sb.run(&["restore", "--home-only", "--to=out", "--name=rel"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(fs::read(sb.work().join("out/victim")).unwrap(), b"forged");
+    assert!(!sb.trash().join("info/rel.trashinfo").exists());
 }
 
 #[test]

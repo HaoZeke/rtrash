@@ -360,7 +360,11 @@ pub(crate) enum Outcome {
 impl Plan<'_> {
     pub(crate) fn apply(&self, prog: &str, e: &list::Entry) -> Outcome {
         let dest = match (self.to, e.original.file_name()) {
-            (Some(dir), Some(name)) => dir.join(name),
+            // A relative --to counts from here, as the shell would.
+            (Some(dir), Some(name)) if dir.is_absolute() => dir.join(name),
+            (Some(dir), Some(name)) => std::env::current_dir()
+                .map(|cwd| cwd.join(dir).join(name))
+                .unwrap_or_default(),
             (Some(_), None) => {
                 eprintln!(
                     "{prog}: cannot restore '{}' by name: no file name",
@@ -599,6 +603,15 @@ pub(crate) fn restore_one_to(
     dest: &Path,
     force: bool,
 ) -> Result<Restored, String> {
+    // The home trash records absolute paths only; a relative or empty
+    // Path= would restore below whatever directory restore runs in.
+    if !dest.is_absolute() {
+        return Err(format!(
+            "cannot restore '{}': its record names no absolute location ('{}'); `--to=DIR` restores it into DIR",
+            crate::util::show_name(&entry.name),
+            dest.display()
+        ));
+    }
     if let Some(err) = trash_conflict(entry, dest) {
         return Err(err);
     }

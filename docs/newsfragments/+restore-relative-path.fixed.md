@@ -1,0 +1,1 @@
+`rtrash restore` refuses an item whose record in the home trash has a relative or empty `Path=`, and says that `--to` restores it into a chosen directory. Such a path used to resolve against the directory restore ran in, so `restore -f` there could overwrite an unrelated file of the same name.
