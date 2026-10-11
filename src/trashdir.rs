@@ -1865,7 +1865,14 @@ fn joined_len(root: &Path, stack: &[DirCopy], name: &OsStr) -> usize {
 }
 
 fn stat_times(st: &libc::stat) -> (libc::timespec, libc::timespec) {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    // libc 0.2 keeps seconds and nanoseconds as separate fields on Linux and
+    // on macOS. It does not expose `st_atimespec` / `st_mtimespec`.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    ))]
     {
         (
             libc::timespec {
@@ -1877,10 +1884,6 @@ fn stat_times(st: &libc::stat) -> (libc::timespec, libc::timespec) {
                 tv_nsec: st.st_mtime_nsec as _,
             },
         )
-    }
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
-    {
-        (st.st_atimespec, st.st_mtimespec)
     }
     #[cfg(not(any(
         target_os = "linux",
