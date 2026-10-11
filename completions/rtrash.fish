@@ -95,6 +95,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dirs -d
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l files -d 'list files only'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l older-than -d 'only entries untouched for more than DAYS days' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l newer-than -d 'only entries modified within the last DAYS days' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l since -d 'only entries modified at or after DATE' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l until -d 'only entries last modified before DATE' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l home-only -d 'only the home trash in the trash summary'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l trash-dir -d 'only this trash directory in the summary' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-git -d 'do not ask git about listed paths'

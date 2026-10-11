@@ -88,6 +88,10 @@ directories appear as one `trash` row and are never printed by --print0.
       --older-than=DAYS only list entries whose newest modification is more
                           than DAYS days old (directories use their whole tree)
       --newer-than=DAYS only list entries modified within the last DAYS days
+      --since=DATE      only list entries modified at or after DATE
+                          (YYYY-MM-DD, or YYYY-MM-DDTHH:MM[:SS]; local time)
+      --until=DATE      only list entries whose newest modification is
+                          before DATE
       --home-only       consider only the home trash for the trash summary
       --trash-dir=PATH  consider only this trash directory (repeatable)
       --no-git          do not ask git about listed paths
@@ -1918,6 +1922,108 @@ fn parse_days(s: &str) -> Result<i64, String> {
     }
 }
 
+/// Keep the stricter of two age cutoffs, so the age options combine
+/// in any order.
+fn tighten(cut: &mut Option<i64>, new: i64, pick: fn(i64, i64) -> i64) {
+    *cut = Some(cut.map_or(new, |c| pick(c, new)));
+}
+
+/// `YYYY-MM-DD` (local midnight) or `YYYY-MM-DDTHH:MM[:SS]` in local
+/// time, with a space allowed for the `T`, as a unix time.
+fn parse_date(s: &str) -> Result<i64, String> {
+    let bad = || format!("invalid DATE '{s}' (want YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS])");
+    let mut b = s.as_bytes().to_vec();
+    match b.len() {
+        10 => b.extend_from_slice(b"T00:00:00"),
+        16 => b.extend_from_slice(b":00"),
+        19 => {}
+        _ => return Err(bad()),
+    }
+    if b[10] == b' ' {
+        b[10] = b'T';
+    }
+    let num = |r: std::ops::Range<usize>| -> Option<u32> {
+        let d = &b[r];
+        if d.iter().all(u8::is_ascii_digit) {
+            std::str::from_utf8(d).ok()?.parse().ok()
+        } else {
+            None
+        }
+    };
+    let (Some(year), Some(mon), Some(day), Some(hour), Some(min), Some(sec)) = (
+        num(0..4),
+        num(5..7),
+        num(8..10),
+        num(11..13),
+        num(14..16),
+        num(17..19),
+    ) else {
+        return Err(bad());
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match mon {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1..=12 => 31,
+        _ => 0,
+    };
+    if !(1..=days).contains(&day) || hour > 23 || min > 59 || sec > 59 {
+        return Err(bad());
+    }
+    local_to_epoch(&b, [year, mon, day, hour, min, sec]).ok_or_else(bad)
+}
+
+/// Unix time of a local wall-clock time, through mktime.
+#[cfg(unix)]
+fn local_to_epoch(text: &[u8], _: [u32; 6]) -> Option<i64> {
+    crate::info::parse_local_to_epoch(std::str::from_utf8(text).ok()?)
+}
+
+/// Unix time of a local wall-clock time, through the current time zone.
+#[cfg(windows)]
+fn local_to_epoch(_: &[u8], [y, mo, d, h, mi, s]: [u32; 6]) -> Option<i64> {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::Time::TzSpecificLocalTimeToSystemTime;
+    let field = |v: u32| u16::try_from(v).ok();
+    let local = SYSTEMTIME {
+        wYear: field(y)?,
+        wMonth: field(mo)?,
+        wDayOfWeek: 0,
+        wDay: field(d)?,
+        wHour: field(h)?,
+        wMinute: field(mi)?,
+        wSecond: field(s)?,
+        wMilliseconds: 0,
+    };
+    // SAFETY: SYSTEMTIME is plain data, so all zeroes is a valid value.
+    let mut utc: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers name live SYSTEMTIME values; a null zone
+    // means the current one.
+    if unsafe { TzSpecificLocalTimeToSystemTime(std::ptr::null(), &local, &mut utc) } == 0 {
+        return None;
+    }
+    let days = days_from_civil(utc.wYear.into(), utc.wMonth.into(), utc.wDay.into());
+    Some(
+        days * 86_400
+            + i64::from(utc.wHour) * 3600
+            + i64::from(utc.wMinute) * 60
+            + i64::from(utc.wSecond),
+    )
+}
+
+/// Days from 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's
+/// days_from_civil).
+#[cfg(windows)]
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 fn parse_count(s: &str, what: &str) -> Result<usize, String> {
     s.parse::<usize>()
         .map_err(|_| format!("invalid {what} '{s}'"))
@@ -2097,12 +2203,32 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--older-than", None) {
             match v.and_then(parse_days) {
-                Ok(d) => opts.older_cutoff = Some(now - d.saturating_mul(86_400)),
+                Ok(d) => tighten(
+                    &mut opts.older_cutoff,
+                    now - d.saturating_mul(86_400),
+                    i64::min,
+                ),
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--newer-than", None) {
             match v.and_then(parse_days) {
-                Ok(d) => opts.newer_cutoff = Some(now - d.saturating_mul(86_400)),
+                Ok(d) => tighten(
+                    &mut opts.newer_cutoff,
+                    now - d.saturating_mul(86_400),
+                    i64::max,
+                ),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--since", None) {
+            // At or after DATE: newer than the second before it.
+            match v.and_then(parse_date) {
+                Ok(t) => tighten(&mut opts.newer_cutoff, t - 1, i64::max),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--until", None) {
+            // Before DATE: at or before the second before it.
+            match v.and_then(parse_date) {
+                Ok(t) => tighten(&mut opts.older_cutoff, t - 1, i64::min),
                 Err(e) => bail!(e),
             }
         } else {
@@ -2808,5 +2934,35 @@ mod tests {
         );
         assert!(rows[0].warn && !rows[1].warn);
         assert!(rows[0].label.as_deref().unwrap().contains("git:unpushed"));
+    }
+
+    #[test]
+    fn dates_parse_in_local_time_and_reject_the_impossible() {
+        let day = parse_date("2024-02-29").unwrap();
+        assert_eq!(parse_date("2024-02-29T00:00:00"), Ok(day));
+        assert_eq!(
+            parse_date("2024-02-29 12:30"),
+            Ok(day + 12 * 3600 + 30 * 60)
+        );
+        for bad in [
+            "2023-02-29",
+            "2024-13-01",
+            "2024-1-01",
+            "2024-01-01T24:00",
+            "yesterday",
+            "",
+        ] {
+            assert!(parse_date(bad).is_err(), "{bad}");
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(days_from_civil(1970, 1, 1), 0);
+            assert_eq!(days_from_civil(2020, 6, 15), 18_428);
+            assert_eq!(days_from_civil(2000, 3, 1), 11_017);
+        }
+        let mut cut = None;
+        tighten(&mut cut, 10, i64::max);
+        tighten(&mut cut, 5, i64::max);
+        assert_eq!(cut, Some(10));
     }
 }

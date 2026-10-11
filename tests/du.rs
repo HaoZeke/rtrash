@@ -322,6 +322,33 @@ fn age_filters_use_newest_mtime() {
 }
 
 #[test]
+fn since_and_until_take_dates() {
+    let t = Tree::new("dates");
+    let old = t.file("old/stale.bin", 300_000);
+    let new = t.file("new/fresh.bin", 200_000);
+    // 2020-06-15 12:00 UTC, far from any boundary below in every zone.
+    let then = SystemTime::UNIX_EPOCH + Duration::from_secs(1_592_222_400);
+    set_mtime(&old, then);
+    set_mtime(&t.root.join("old"), then);
+    let j = t.json(&["--until=2021-01-01"]);
+    assert_eq!(paths_in(&j, "files"), [s(&old)], "{j}");
+    assert_eq!(paths_in(&j, "dirs"), [s(&t.root.join("old"))], "{j}");
+    let j = t.json(&["--since", "2021-01-01"]);
+    assert_eq!(paths_in(&j, "files"), [s(&new)], "{j}");
+    let j = t.json(&["--since=2020-06-01", "--until=2020-07-01T00:00"]);
+    assert_eq!(paths_in(&j, "files"), [s(&old)], "{j}");
+    // The stricter cutoff wins, whichever option comes first.
+    let j = t.json(&["--newer-than=30", "--since=2020-01-01"]);
+    assert_eq!(paths_in(&j, "files"), [s(&new)], "{j}");
+    let out = t.du(&["--since=2021-02-30"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("invalid DATE"),
+        "{out:?}"
+    );
+}
+
+#[test]
 fn sort_by_items_counts_files_and_dirs_below() {
     let t = Tree::new("items");
     for i in 0..3 {

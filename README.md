@@ -342,6 +342,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du --unique` | Adds a UNIQUE column: the bytes in extents no other file shares, roughly what deleting a row frees where reflinks, clones or snapshots share data (Btrfs on Linux, the Apple File System on macOS). The closing summary shows the shared extents once each and as referenced. It maps every file's extents, so it runs slower; the default listing skips it |
 | `rtrash du --sort=mtime` | Most recently modified first; a directory gives way to the subdirectory that contains its newest change |
 | `rtrash du --dirs --older-than=30` | Directories with nothing modified in the last 30 days |
+| `rtrash du --since=2026-09-01 --until=2026-10-01` | Entries last modified in September, in local time; `YYYY-MM-DDTHH:MM[:SS]` sets an hour too |
 | `rtrash du --artefacts ~/src` | Only regenerable build output and caches: cargo `target`, `node_modules`, `__pycache__`, virtualenvs, CMake build trees, `CACHEDIR.TAG` directories |
 | `rtrash du --exclude='*.iso' -X ~/.duignore` | Leave out what matches (gitignore syntax); excluded entries add nothing to any size |
 | `rtrash du --gitignore ~/src` | Leave out what git ignores in each repository (`.gitignore`, `.git/info/exclude`, `~/.config/git/ignore`) |

@@ -717,6 +717,22 @@ Only list entries modified within the last
 .I DAYS
 days.
 .TP
+.BI \-\-since =DATE
+Only list entries modified at or after
+.IR DATE :
+.I YYYY\-MM\-DD
+for local midnight, or
+.I YYYY\-MM\-DDTHH:MM
+with optional
+.I :SS
+in local time.
+.TP
+.BI \-\-until =DATE
+Only list entries whose newest modification is before
+.IR DATE ,
+in the same form.
+With more than one of the age options, each limit applies.
+.TP
 .B \-\-home\-only
 Consider only the home trash for the trash summary and
 .B trash
