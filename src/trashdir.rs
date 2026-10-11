@@ -1674,6 +1674,14 @@ fn copy_dir_iter(
     links: &mut LinkMap,
 ) -> io::Result<()> {
     fs::create_dir(dst)?;
+    // macOS accepts `/var/...` and then measures `/private/var/...`. The
+    // length that has to stay under PATH_MAX is the resolved one.
+    let ends = CopyEnds {
+        src,
+        dst,
+        src_len: resolve_existing(src).as_os_str().len(),
+        dst_len: resolve_existing(dst).as_os_str().len(),
+    };
     let sfd = open_dir_nofollow(src)?;
     let dfd = open_dir_nofollow(dst)?;
     let entries = read_names(sfd.as_raw_fd())?;
@@ -1682,13 +1690,13 @@ fn copy_dir_iter(
     loop {
         let top = stack.len() - 1;
         if let Some(name) = stack[top].entries.pop() {
-            copy_one_entry(src, dst, links, &mut stack, &mut lo, &name)?;
+            copy_one_entry(&ends, links, &mut stack, &mut lo, &name)?;
             continue;
         }
         if top == 0 {
             break;
         }
-        finish_child_dir(src, dst, &mut stack, &mut lo)?;
+        finish_child_dir(&ends, &mut stack, &mut lo)?;
     }
     finish_meta(src, dst, meta)?;
     set_times(dst, meta)
@@ -1717,9 +1725,16 @@ fn blank_dir(src: OwnedFd, dst: OwnedFd, entries: Vec<OsString>) -> DirCopy {
     }
 }
 
+/// The two roots of a copy, with the lengths the kernel will measure.
+struct CopyEnds<'a> {
+    src: &'a Path,
+    dst: &'a Path,
+    src_len: usize,
+    dst_len: usize,
+}
+
 fn copy_one_entry(
-    src_root: &Path,
-    dst_root: &Path,
+    ends: &CopyEnds<'_>,
     links: &mut LinkMap,
     stack: &mut Vec<DirCopy>,
     lo: &mut usize,
@@ -1736,14 +1751,13 @@ fn copy_one_entry(
             "cannot copy a socket to another file system",
         ));
     }
-    let by_path = joined_len(src_root, stack, name) < libc::PATH_MAX as usize
-        && joined_len(dst_root, stack, name) < libc::PATH_MAX as usize;
+    let by_path = path_fits(ends.src_len, stack, name) && path_fits(ends.dst_len, stack, name);
     if is_type(&st, libc::S_IFDIR) {
-        return push_child_dir(dst_root, stack, lo, (src_fd, dst_fd), name, &st, by_path);
+        return push_child_dir(ends.dst, stack, lo, (src_fd, dst_fd), name, &st, by_path);
     }
     if by_path {
-        let sp = joined(src_root, stack, name);
-        let dp = joined(dst_root, stack, name);
+        let sp = joined(ends.src, stack, name);
+        let dp = joined(ends.dst, stack, name);
         let emeta = fs::symlink_metadata(&sp)?;
         return copy_node(&sp, &dp, &emeta, links);
     }
@@ -1809,8 +1823,7 @@ fn trim_dir_copy(stack: &mut [DirCopy], lo: &mut usize) -> io::Result<()> {
 }
 
 fn finish_child_dir(
-    src_root: &Path,
-    dst_root: &Path,
+    ends: &CopyEnds<'_>,
     stack: &mut Vec<DirCopy>,
     lo: &mut usize,
 ) -> io::Result<()> {
@@ -1825,8 +1838,8 @@ fn finish_child_dir(
     }
     *lo = (*lo).min(stack.len());
     if done.by_path {
-        let sp = joined(src_root, stack, &done.name);
-        let dp = joined(dst_root, stack, &done.name);
+        let sp = joined(ends.src, stack, &done.name);
+        let dp = joined(ends.dst, stack, &done.name);
         let sm = fs::symlink_metadata(&sp)?;
         finish_meta(&sp, &dp, &sm)?;
         return set_times(&dp, &sm);
@@ -1853,8 +1866,8 @@ fn joined(root: &Path, stack: &[DirCopy], name: &OsStr) -> PathBuf {
     p
 }
 
-fn joined_len(root: &Path, stack: &[DirCopy], name: &OsStr) -> usize {
-    let mut n = root.as_os_str().len();
+fn joined_len(root_len: usize, stack: &[DirCopy], name: &OsStr) -> usize {
+    let mut n = root_len;
     for f in stack.iter().skip(1) {
         n = n.saturating_add(1).saturating_add(f.name.len());
     }
@@ -1862,6 +1875,15 @@ fn joined_len(root: &Path, stack: &[DirCopy], name: &OsStr) -> usize {
         n = n.saturating_add(1).saturating_add(name.len());
     }
     n
+}
+
+/// Bytes kept free under `PATH_MAX`. The syscall buffer includes a trailing
+/// NUL, and a resolved path can still grow after it is measured.
+const PATH_HEADROOM: usize = 256;
+
+/// True when a path call can carry `name`. `root_len` is the resolved length.
+fn path_fits(root_len: usize, stack: &[DirCopy], name: &OsStr) -> bool {
+    joined_len(root_len, stack, name).saturating_add(PATH_HEADROOM) < libc::PATH_MAX as usize
 }
 
 fn stat_times(st: &libc::stat) -> (libc::timespec, libc::timespec) {
@@ -2554,9 +2576,8 @@ proc /proc proc rw 0 0
         assert!(!mps.iter().any(|p| p == Path::new("/proc")));
     }
 
-    /// Levels for the deep copy. macOS CI hung past 25 minutes at 20,000;
-    /// 1,000 still passes its 1024-byte `PATH_MAX`. Linux keeps the depth
-    /// that overflowed the stack.
+    /// Levels for the deep copy. macOS CI hung past 25 minutes at 20,000,
+    /// so that runner stops at 1,000. Either depth is past `PATH_MAX`.
     #[cfg(unix)]
     const DEEP_COPY: usize = if cfg!(target_os = "macos") {
         1_000
@@ -2616,6 +2637,54 @@ proc /proc proc rw 0 0
             assert!(n >= 0);
             buf[..n as usize].to_vec()
         }
+    }
+
+    #[test]
+    fn path_copy_stops_short_of_path_max() {
+        let limit = libc::PATH_MAX as usize;
+        let name = OsStr::new("d");
+        assert!(!path_fits(limit - PATH_HEADROOM, &[], name));
+        assert!(path_fits(8, &[], name));
+    }
+
+    /// A short symlink prefix hides a long directory. Measuring the path as
+    /// written would keep using `mkdir` after the resolved path is past the
+    /// limit, which is the macOS "File name too long" failure.
+    #[test]
+    fn copy_through_a_symlink_prefix_past_the_resolved_limit() {
+        let base = std::env::temp_dir().join(format!("rtrash-resolv-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let hidden = base.join("h").join("L".repeat(180));
+        fs::create_dir_all(&hidden).unwrap();
+        let short = base.join("s");
+        std::os::unix::fs::symlink(&hidden, &short).unwrap();
+        let src = short.join("src");
+        fs::create_dir(&src).unwrap();
+        let literal = src.as_os_str().len();
+        let resolved = resolve_existing(&src).as_os_str().len();
+        assert!(
+            resolved >= literal + 100,
+            "resolved {resolved} literal {literal}"
+        );
+        let limit = libc::PATH_MAX as usize;
+        // Deep enough that the resolved path is past the limit, while the
+        // path as written is still under it.
+        let depth = (limit - resolved) / 2 + 2;
+        let literal_at_depth = literal + depth * 2;
+        assert!(
+            literal_at_depth < limit,
+            "literal {literal_at_depth} is already past PATH_MAX"
+        );
+        assert!(resolved + depth * 2 >= limit);
+        deep_chain(&src, depth);
+        let meta = fs::symlink_metadata(&src).unwrap();
+        let dst = short.join("dst");
+        copy_recursive(&src, &dst, &meta).unwrap();
+        assert_eq!(read_deep_leaf(&dst, depth), b"leaf");
+        remove_any_path(&src).unwrap();
+        remove_any_path(&dst).unwrap();
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
