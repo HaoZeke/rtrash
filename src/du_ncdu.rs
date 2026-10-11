@@ -1,5 +1,6 @@
 //! ncdu JSON exports: `ncdu -o FILE` read as du snapshots, and
-//! `rtrash du --ncdu=FILE` writing one.
+//! `rtrash du --ncdu=FILE` writing one. The export walk also feeds the
+//! binary writer of `--ncdu-binary` in `du_ncdu_bin`.
 //!
 //! The format is described at <https://dev.yorhel.nl/ncdu/jsonfmt>:
 //! `[1, MINOR, {metadata}, DIR]`, where a DIR is an array whose first
@@ -630,6 +631,130 @@ fn write_stat(w: &mut impl Write, st: &du_fs::Stat, parent_dev: Option<u64>) -> 
     Ok(())
 }
 
+/// An entry the export writes without entries of its own.
+pub(crate) enum Leaf<'a> {
+    /// Left out by a filter before it was stat-ed.
+    Excluded,
+    /// Could not be stat-ed.
+    Unreadable,
+    /// Anything but a directory.
+    File(&'a du_fs::Stat),
+    /// A directory written without its entries, for `why`.
+    Dir(&'a du_fs::Stat, DirLeaf),
+}
+
+/// Why a directory went out without its entries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirLeaf {
+    /// On another file system, under `-x`.
+    OtherFs,
+    /// A cache tagged with `CACHEDIR.TAG`, under `--exclude-caches`.
+    Cache,
+    /// Unreadable, or past the walk's depth or path limits.
+    Unread,
+}
+
+/// Where the export walk sends the tree, in depth-first order: the
+/// root, then for each directory its entries between `open` and
+/// `close`. The root is closed like any other directory.
+pub(crate) trait Sink {
+    fn root(&mut self, path: &[u8], st: &du_fs::Stat, read_error: bool) -> io::Result<()>;
+    fn leaf(&mut self, name: &[u8], leaf: Leaf<'_>, parent_dev: u64) -> io::Result<()>;
+    fn open(
+        &mut self,
+        name: &[u8],
+        st: &du_fs::Stat,
+        parent_dev: u64,
+        read_error: bool,
+    ) -> io::Result<()>;
+    fn close(&mut self) -> io::Result<()>;
+    fn finish(&mut self) -> io::Result<()>;
+}
+
+/// The JSON export (format 1.2), written as the walk goes.
+struct JsonSink<'w, W: Write> {
+    w: &'w mut W,
+    created: i64,
+}
+
+impl<W: Write> Sink for JsonSink<'_, W> {
+    fn root(&mut self, path: &[u8], st: &du_fs::Stat, read_error: bool) -> io::Result<()> {
+        write!(
+            self.w,
+            "[1,2,{{\"progname\":\"rtrash\",\"progver\":\"{}\",\"timestamp\":{}}},\n[",
+            env!("CARGO_PKG_VERSION"),
+            self.created
+        )?;
+        write_name(self.w, path)?;
+        write_stat(self.w, st, None)?;
+        if read_error {
+            self.w.write_all(b",\"read_error\":true")?;
+        }
+        self.w.write_all(b"}")
+    }
+
+    fn leaf(&mut self, name: &[u8], leaf: Leaf<'_>, parent_dev: u64) -> io::Result<()> {
+        let w = &mut *self.w;
+        w.write_all(b",\n")?;
+        match leaf {
+            Leaf::Excluded => {
+                write_name(w, name)?;
+                w.write_all(b",\"excluded\":\"pattern\"}")
+            }
+            Leaf::Unreadable => {
+                write_name(w, name)?;
+                w.write_all(b",\"read_error\":true}")
+            }
+            Leaf::File(st) => {
+                write_name(w, name)?;
+                write_stat(w, st, Some(parent_dev))?;
+                w.write_all(b"}")
+            }
+            Leaf::Dir(st, why) => {
+                write_name_or_dir(w, name, true)?;
+                match why {
+                    DirLeaf::OtherFs => {
+                        write!(w, ",\"dev\":{},\"excluded\":\"otherfs\"}}]", st.dev)
+                    }
+                    DirLeaf::Cache => {
+                        write_stat(w, st, Some(parent_dev))?;
+                        w.write_all(b",\"excluded\":\"pattern\"}]")
+                    }
+                    DirLeaf::Unread => {
+                        write_stat(w, st, Some(parent_dev))?;
+                        w.write_all(b",\"read_error\":true}]")
+                    }
+                }
+            }
+        }
+    }
+
+    fn open(
+        &mut self,
+        name: &[u8],
+        st: &du_fs::Stat,
+        parent_dev: u64,
+        read_error: bool,
+    ) -> io::Result<()> {
+        self.w.write_all(b",\n")?;
+        write_name_or_dir(self.w, name, true)?;
+        write_stat(self.w, st, Some(parent_dev))?;
+        if read_error {
+            self.w.write_all(b",\"read_error\":true")?;
+        }
+        self.w.write_all(b"}")
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        self.w.write_all(b"]")
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        self.w.write_all(b"]\n")?;
+        self.w.flush()
+    }
+}
+
 /// Write the tree at `root` as an ncdu export (format 1.2), streaming
 /// as it walks: `ncdu -f FILE` browses it and `rtrash du -f FILE` lists
 /// it. Directories on other file systems (with `one_file_system`) and
@@ -642,6 +767,31 @@ pub fn export(
     spec: Option<&du_filter::Spec>,
     created: i64,
     w: &mut impl Write,
+) -> io::Result<Exported> {
+    walk_export(root, one_file_system, spec, &mut JsonSink { w, created })
+}
+
+/// [`export`] in ncdu 2's binary format (`ncdu -O`), which ncdu 2.6 and
+/// later and `rtrash du -f` read.
+pub fn export_binary(
+    root: &Path,
+    one_file_system: bool,
+    spec: Option<&du_filter::Spec>,
+    w: &mut impl Write,
+) -> io::Result<Exported> {
+    walk_export(
+        root,
+        one_file_system,
+        spec,
+        &mut crate::du_ncdu_bin::Writer::new(w),
+    )
+}
+
+fn walk_export(
+    root: &Path,
+    one_file_system: bool,
+    spec: Option<&du_filter::Spec>,
+    sink: &mut impl Sink,
 ) -> io::Result<Exported> {
     let abs = crate::du::absolute(root)?;
     let st = du_fs::lstat(&abs)?;
@@ -657,20 +807,12 @@ pub fn export(
     let mut path = abs.clone();
     let root_dev = st.dev;
 
-    write!(
-        w,
-        "[1,2,{{\"progname\":\"rtrash\",\"progver\":\"{}\",\"timestamp\":{created}}},\n[",
-        env!("CARGO_PKG_VERSION")
-    )?;
-    write_name(w, path_bytes(&abs).as_slice())?;
-    write_stat(w, &st, None)?;
     let dir = du_fs::Dir::open(&abs)?;
     let (entries, failed) = dir.entries();
     if failed {
-        w.write_all(b",\"read_error\":true")?;
         out.unreadable += 1;
     }
-    w.write_all(b"}")?;
+    sink.root(path_bytes(&abs).as_slice(), &st, failed)?;
     out.entries += 1;
     let chain = filter.as_ref().and_then(|f| {
         let (git, ignore) = repo_markers(&entries);
@@ -690,7 +832,7 @@ pub fn export(
         if top.next == top.order.len() {
             stack.pop();
             path.pop();
-            w.write_all(b"]")?;
+            sink.close()?;
             continue;
         }
         let i = top.order[top.next];
@@ -701,14 +843,13 @@ pub fn export(
                 .as_ref()
                 .is_some_and(|f| f.excluded(chain, path, name.to_bytes(), is_dir))
         };
-        w.write_all(b",\n")?;
         out.entries += 1;
         let chain = top.chain.clone();
+        let parent_dev = top.dev;
         if kind != du_fs::Kind::Unknown
             && excluded(kind == du_fs::Kind::Dir, chain.as_deref(), &path)
         {
-            write_name(w, name.to_bytes())?;
-            w.write_all(b",\"excluded\":\"pattern\"}")?;
+            sink.leaf(name.to_bytes(), Leaf::Excluded, parent_dev)?;
             out.excluded += 1;
             continue;
         }
@@ -719,27 +860,26 @@ pub fn export(
         {
             Ok(st) => st,
             Err(_) => {
-                write_name(w, name.to_bytes())?;
-                w.write_all(b",\"read_error\":true}")?;
+                sink.leaf(name.to_bytes(), Leaf::Unreadable, parent_dev)?;
                 out.unreadable += 1;
                 continue;
             }
         };
         if kind == du_fs::Kind::Unknown && excluded(st.is_dir(), chain.as_deref(), &path) {
-            write_name(w, name.to_bytes())?;
-            w.write_all(b",\"excluded\":\"pattern\"}")?;
+            sink.leaf(name.to_bytes(), Leaf::Excluded, parent_dev)?;
             out.excluded += 1;
             continue;
         }
-        let parent_dev = top.dev;
-        write_name_or_dir(w, name.to_bytes(), st.is_dir())?;
         if !st.is_dir() {
-            write_stat(w, &st, Some(parent_dev))?;
-            w.write_all(b"}")?;
+            sink.leaf(name.to_bytes(), Leaf::File(&st), parent_dev)?;
             continue;
         }
         if one_file_system && st.dev != root_dev {
-            write!(w, ",\"dev\":{},\"excluded\":\"otherfs\"}}]", st.dev)?;
+            sink.leaf(
+                name.to_bytes(),
+                Leaf::Dir(&st, DirLeaf::OtherFs),
+                parent_dev,
+            )?;
             out.excluded += 1;
             continue;
         }
@@ -747,15 +887,13 @@ pub fn export(
         if depth + 1 >= crate::du::MAX_DEPTH
             || child_path.as_os_str().len() > crate::du::MAX_PATH_BYTES
         {
-            write_stat(w, &st, Some(parent_dev))?;
-            w.write_all(b",\"read_error\":true}]")?;
+            sink.leaf(name.to_bytes(), Leaf::Dir(&st, DirLeaf::Unread), parent_dev)?;
             out.too_deep += 1;
             continue;
         }
         let opened = top.dir.open_child(name);
         let Ok(dir) = opened else {
-            write_stat(w, &st, Some(parent_dev))?;
-            w.write_all(b",\"read_error\":true}]")?;
+            sink.leaf(name.to_bytes(), Leaf::Dir(&st, DirLeaf::Unread), parent_dev)?;
             out.unreadable += 1;
             continue;
         };
@@ -767,18 +905,15 @@ pub fn export(
                 && has_name(&entries, b"CACHEDIR.TAG")
                 && du_filter::has_cachedir_tag(&child_path)
             {
-                write_stat(w, &st, Some(parent_dev))?;
-                w.write_all(b",\"excluded\":\"pattern\"}]")?;
+                sink.leaf(name.to_bytes(), Leaf::Dir(&st, DirLeaf::Cache), parent_dev)?;
                 out.excluded += 1;
                 continue;
             }
         }
-        write_stat(w, &st, Some(parent_dev))?;
         if failed {
-            w.write_all(b",\"read_error\":true")?;
             out.unreadable += 1;
         }
-        w.write_all(b"}")?;
+        sink.open(name.to_bytes(), &st, parent_dev, failed)?;
         let chain = filter
             .as_ref()
             .and_then(|f| f.chain_for(chain.as_ref(), &child_path, git, ignore));
@@ -792,8 +927,7 @@ pub fn export(
             chain,
         });
     }
-    w.write_all(b"]\n")?;
-    w.flush()?;
+    sink.finish()?;
     Ok(out)
 }
 

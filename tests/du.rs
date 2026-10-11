@@ -1324,6 +1324,46 @@ fn ncdu_exports_written_by_du_read_back_with_the_scan_totals() {
 }
 
 #[test]
+fn ncdu_binary_exports_written_by_du_read_back_like_the_json_one() {
+    let t = Tree::new("ncdu-bin-out");
+    t.file("t/a/f", 40_000);
+    t.file("t/a/b/g", 9_000);
+    t.file("t/x.log", 70_000);
+    let bin = t.root.join("out.ncdu");
+    let json = t.root.join("out.json");
+    let (b, j) = (bin.to_str().unwrap(), json.to_str().unwrap());
+    let w = t.du(&["--ncdu-binary", b, "--exclude=*.log", "t"]);
+    assert!(w.status.success(), "{}", String::from_utf8_lossy(&w.stderr));
+    assert!(fs::read(&bin).unwrap().starts_with(b"\xbfncduEX1"));
+    let w = t.du(&["--ncdu", j, "--exclude=*.log", "t"]);
+    assert!(w.status.success(), "{}", String::from_utf8_lossy(&w.stderr));
+    let from_bin = t.du(&["-f", b, "--json"]);
+    let from_json = t.du(&["-f", j, "--json"]);
+    assert!(
+        from_bin.status.success(),
+        "{}",
+        String::from_utf8_lossy(&from_bin.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&from_bin.stdout).replace(b, "F"),
+        String::from_utf8_lossy(&from_json.stdout).replace(j, "F")
+    );
+
+    // To stdout, and only alone.
+    let s = t.du(&["--ncdu-binary=-", "t"]);
+    assert!(s.stdout.starts_with(b"\xbfncduEX1"));
+    let both = t.du(&["--ncdu", j, "--ncdu-binary", b, "t"]);
+    assert_eq!(both.status.code(), Some(2));
+    let err = t.du(&["--ncdu-binary", b, "--json", "t"]);
+    assert_eq!(err.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&err.stderr).contains("--ncdu-binary writes"));
+    assert_eq!(
+        t.du(&["--ncdu-binary", b, "t", "t/a"]).status.code(),
+        Some(2)
+    );
+}
+
+#[test]
 fn devices_list_mounted_file_systems_and_take_no_path() {
     let t = Tree::new("devices");
     let out = t.du(&["--devices"]);

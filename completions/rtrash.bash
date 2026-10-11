@@ -33,7 +33,7 @@ _rtrash_du_opts=(
   -n --top= -x --one-file-system --apparent --sort= -C --count --unique --shared --types --max-depth= --threads= --all-dirs
   --artefacts --exclude= -X --exclude-from= --exclude-caches --gitignore
   --dirs --files --older-than= --newer-than= --since= --until= --home-only
-  --trash-dir= --no-git --include-dirty --json --print0 --pick -i --interactive --no-delete --si -o --output= --devices --ncdu= -f --file= --stacks --help
+  --trash-dir= --no-git --include-dirty --json --print0 --pick -i --interactive --no-delete --si -o --output= --devices --ncdu= --ncdu-binary= -f --file= --stacks --help
   --version
 )
 

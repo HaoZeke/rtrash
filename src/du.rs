@@ -112,6 +112,8 @@ directories appear as one `trash` row and are never printed by --print0.
                           and free space (as df does), instead of scanning
       --ncdu=FILE       write an ncdu export of PATH to FILE (- for
                           stdout) for `ncdu -f FILE` or `du -f FILE`
+      --ncdu-binary=FILE  the same in ncdu 2's binary format (ncdu -O),
+                          for ncdu 2.6 or later
   -f, --file=FILE       list from a snapshot, or an ncdu export (ncdu -o,
                           ncdu -O, gdu -o), instead of scanning
       --stacks          print folded stacks of every directory's own size
@@ -1710,17 +1712,23 @@ fn devices_out(prog: &str, paths: &[PathBuf], json: bool, si: bool, other_mode: 
     0
 }
 
-/// `du --ncdu=FILE`: write `path` as an ncdu export.
-fn ncdu_out(prog: &str, path: &Path, out: &Path, opts: &ScanOpts, now: i64) -> i32 {
+/// `du --ncdu=FILE` (JSON) or `--ncdu-binary=FILE`: write `path` as an
+/// ncdu export.
+fn ncdu_out(prog: &str, path: &Path, out: &Path, binary: bool, opts: &ScanOpts, now: i64) -> i32 {
     let spec = opts.filter.as_deref();
+    let xdev = opts.one_file_system;
+    let write = |w: &mut dyn Write| {
+        let mut w = io::BufWriter::new(w);
+        if binary {
+            crate::du_ncdu::export_binary(path, xdev, spec, &mut w)
+        } else {
+            crate::du_ncdu::export(path, xdev, spec, now, &mut w)
+        }
+    };
     let written = if out.as_os_str() == "-" {
-        let mut w = io::BufWriter::new(io::stdout().lock());
-        crate::du_ncdu::export(path, opts.one_file_system, spec, now, &mut w)
+        write(&mut io::stdout().lock())
     } else {
-        fs::File::create(out).and_then(|f| {
-            let mut w = io::BufWriter::new(f);
-            crate::du_ncdu::export(path, opts.one_file_system, spec, now, &mut w)
-        })
+        fs::File::create(out).and_then(|mut f| write(&mut f))
     };
     let done = match written {
         Ok(d) => d,
@@ -2427,6 +2435,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut no_delete = false;
     let mut output: Option<PathBuf> = None;
     let mut ncdu: Option<PathBuf> = None;
+    let mut ncdu_binary = false;
     let mut devices = false;
     let mut from_file: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
@@ -2500,7 +2509,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--ncdu", None) {
             match v {
+                Ok(_) if ncdu.is_some() => bail!("--ncdu and --ncdu-binary write one export"),
                 Ok(v) => ncdu = Some(crate::util::arg_path(v)),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--ncdu-binary", None) {
+            match v {
+                Ok(_) if ncdu.is_some() => bail!("--ncdu and --ncdu-binary write one export"),
+                Ok(v) => {
+                    ncdu = Some(crate::util::arg_path(v));
+                    ncdu_binary = true;
+                }
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--output", Some("-o")) {
@@ -2680,6 +2699,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 2;
     }
     if let Some(out) = &ncdu {
+        let flag = if ncdu_binary {
+            "--ncdu-binary"
+        } else {
+            "--ncdu"
+        };
         if output.is_some()
             || from_file.is_some()
             || stacks
@@ -2691,14 +2715,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             || opts.shared_once
             || opts.types
         {
-            eprintln!("{prog}: --ncdu writes an ncdu export; it takes no other output mode");
+            eprintln!("{prog}: {flag} writes an ncdu export; it takes no other output mode");
             return 2;
         }
         if paths.len() > 1 {
-            eprintln!("{prog}: --ncdu exports one PATH");
+            eprintln!("{prog}: {flag} exports one PATH");
             return 2;
         }
-        return ncdu_out(prog, &paths[0], out, &opts, now);
+        return ncdu_out(prog, &paths[0], out, ncdu_binary, &opts, now);
     }
     if stacks && (output.is_some() || json || print0 || pick || interactive) {
         eprintln!("{prog}: --stacks prints folded stacks; it takes no other output mode");

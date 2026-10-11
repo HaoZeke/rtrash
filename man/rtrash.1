@@ -689,7 +689,7 @@ It costs as much as
 .B \-\-unique
 and can go with it.
 Not with
-.BR \-f ", " \-o ", " \-\-stacks ", " \-i ", " \-\-types " or " \-\-ncdu .
+.BR \-f ", " \-o ", " \-\-stacks ", " \-i ", " \-\-types ", " \-\-ncdu " or " \-\-ncdu\-binary .
 .TP
 .BI \-\-exclude= PATTERN
 Leave out entries that match
@@ -903,6 +903,19 @@ past the walk's limits of 4096 levels and 32 KiB of path, written without
 their contents.
 The export holds every file, so it grows with the tree (about 80 bytes an
 entry).
+.TP
+.BI \-\-ncdu\-binary= FILE
+Like
+.BR \-\-ncdu ,
+but in the binary format of ncdu 2.6 and later
+.RB ( "ncdu \-O" ):
+compressed with zstd to about a fifth of the JSON export, and holding each
+directory's cumulative sizes and item count, which ncdu reads instead of
+adding up the tree.
+Hard links count as ncdu counts them: once in every directory with a link
+below it, with the part shared with links elsewhere recorded too.
+The fast zstd level is the only one this build has, so the export is
+larger than ncdu's own, by about half.
 .TP
 .BR \-f ", " \-\-file =\fIFILE\fR
 List the largest directories from a snapshot instead of scanning.

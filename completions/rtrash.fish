@@ -113,6 +113,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l si -d '
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s o -l output -r -d 'write a snapshot of every directory total'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l devices -d 'list every mounted file system with its size and free space'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l ncdu -r -d 'write an ncdu export of PATH'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l ncdu-binary -r -d 'write an ncdu binary export of PATH (ncdu -O)'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s f -l file -r -d 'list from a snapshot or an ncdu export instead of scanning'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l stacks -d 'print folded stacks for flame graph tools'
 

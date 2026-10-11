@@ -1,5 +1,6 @@
 //! ncdu 2's binary exports (`ncdu -O FILE`, ncdu 2.6 and later) read as
-//! du snapshots, through the same [`Builder`] as the JSON exports.
+//! du snapshots, through the same [`Builder`] as the JSON exports, and
+//! written by [`Writer`] for `rtrash du --ncdu-binary=FILE`.
 //!
 //! The format is described at <https://dev.yorhel.nl/ncdu/binfmt>: a
 //! signature, then blocks, each a 4-byte big-endian type and length,
@@ -14,10 +15,11 @@
 //! visits more items than the blocks it loaded can hold (a loop of
 //! references) stops with an error.
 
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use crate::du::MTIME_UNKNOWN;
-use crate::du_ncdu::{Builder, Info};
+use crate::du_fs;
+use crate::du_ncdu::{Builder, DirLeaf, Info, Leaf, Sink};
 use crate::du_snap::Snapshot;
 
 /// First bytes of every binary export.
@@ -454,6 +456,419 @@ impl Cbor<'_> {
     }
 }
 
+/// Uncompressed bytes a data block collects before it is written.
+const BLOCK_TARGET: usize = 128 << 10;
+
+/// Writes the binary export the export walk sends it.
+///
+/// Items go out in post-order: each entry as the walk reaches it, and a
+/// directory when it closes, since only then are its cumulative sizes
+/// and its last entry known. Every reference is absolute. Items gather
+/// in a block of about [`BLOCK_TARGET`] bytes that goes out compressed
+/// once full, and the index block follows the last one, so the output
+/// needs no seeking and `-` (stdout) works.
+pub struct Writer<'w, W: Write> {
+    w: &'w mut W,
+    /// Bytes written so far.
+    at: u64,
+    block: Vec<u8>,
+    /// Per data block written: offset (high 40 bits) and length.
+    pointers: Vec<u64>,
+    stack: Vec<OpenDir>,
+    root: Option<u64>,
+}
+
+/// Hard links below a directory, by device and inode.
+type Links = std::collections::HashMap<(u64, u64), Link>;
+
+/// One hard-linked inode below a directory.
+#[derive(Clone, Copy)]
+struct Link {
+    /// Its links seen below the directory so far.
+    seen: u64,
+    nlink: u64,
+    asize: u64,
+    dsize: u64,
+}
+
+/// Merge the hard links of a closed directory into its parent's; the
+/// sizes of the inodes the parent had already counted.
+fn merge_links(parent: &mut Links, mut child: Links) -> (u64, u64) {
+    if child.len() > parent.len() {
+        std::mem::swap(parent, &mut child);
+    }
+    let mut dup = (0u64, 0u64);
+    for (key, l) in child {
+        match parent.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                e.get_mut().seen += l.seen;
+                dup.0 = dup.0.saturating_add(l.asize);
+                dup.1 = dup.1.saturating_add(l.dsize);
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(l);
+            }
+        }
+    }
+    dup
+}
+
+/// A directory whose item is written when it closes.
+struct OpenDir {
+    name: Vec<u8>,
+    asize: u64,
+    dsize: u64,
+    dev: u64,
+    /// Whether the item names its device (it differs from the parent's).
+    own_dev: bool,
+    mtime: i64,
+    read_error: bool,
+    /// An entry somewhere below could not be read.
+    sub_error: bool,
+    cum_asize: u64,
+    cum_dsize: u64,
+    items: u64,
+    /// The entry written last, which the next one points back to.
+    last: Option<u64>,
+    /// Hard links below, each counted once in the cumulative sizes.
+    links: Links,
+}
+
+impl OpenDir {
+    fn new(name: &[u8], st: &du_fs::Stat, own_dev: bool, read_error: bool) -> Self {
+        let (asize, dsize) = st.sizes();
+        OpenDir {
+            name: name.to_vec(),
+            asize,
+            dsize,
+            dev: st.dev,
+            own_dev,
+            mtime: st.mtime,
+            read_error,
+            sub_error: false,
+            cum_asize: asize,
+            cum_dsize: dsize,
+            items: 0,
+            last: None,
+            links: Links::new(),
+        }
+    }
+}
+
+/// Item types, as the format numbers them.
+const DIR: i64 = 0;
+const FILE: i64 = 1;
+const OTHER: i64 = 2;
+const LINK: i64 = 3;
+const ERROR: i64 = -1;
+const EXCLUDED: i64 = -2;
+const OTHER_FS: i64 = -3;
+
+/// A CBOR head: major type and argument, in the shortest form.
+fn put_head(out: &mut Vec<u8>, major: u8, n: u64) {
+    let m = major << 5;
+    if n < 24 {
+        out.push(m | n as u8);
+    } else if n <= 0xff {
+        out.extend([m | 24, n as u8]);
+    } else if n <= 0xffff {
+        out.push(m | 25);
+        out.extend((n as u16).to_be_bytes());
+    } else if n <= 0xffff_ffff {
+        out.push(m | 26);
+        out.extend((n as u32).to_be_bytes());
+    } else {
+        out.push(m | 27);
+        out.extend(n.to_be_bytes());
+    }
+}
+
+/// One item: a CBOR map built field by field.
+struct ItemOut(Vec<u8>, u64);
+
+impl ItemOut {
+    fn new(kind: i64, name: &[u8]) -> Self {
+        let mut it = ItemOut(Vec::with_capacity(32 + name.len()), 0);
+        it.int(0, kind);
+        put_head(&mut it.0, 0, 1);
+        put_head(&mut it.0, 2, name.len() as u64);
+        it.0.extend(name);
+        it.1 += 1;
+        it
+    }
+
+    fn uint(&mut self, key: u64, v: u64) {
+        put_head(&mut self.0, 0, key);
+        put_head(&mut self.0, 0, v);
+        self.1 += 1;
+    }
+
+    fn int(&mut self, key: u64, v: i64) {
+        put_head(&mut self.0, 0, key);
+        if v < 0 {
+            put_head(&mut self.0, 1, (-1 - v) as u64);
+        } else {
+            put_head(&mut self.0, 0, v as u64);
+        }
+        self.1 += 1;
+    }
+
+    fn boolean(&mut self, key: u64, v: bool) {
+        put_head(&mut self.0, 0, key);
+        self.0.push(if v { 0xf5 } else { 0xf4 });
+        self.1 += 1;
+    }
+
+    /// The map, with its length in front.
+    fn bytes(self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.0.len() + 9);
+        put_head(&mut out, 5, self.1);
+        out.extend(self.0);
+        out
+    }
+}
+
+/// Give a zstd frame from ruzstd its content size, which the format
+/// requires and ruzstd leaves out: set the 4-byte size flag in the
+/// frame header descriptor and insert the size after the window byte.
+fn with_content_size(mut frame: Vec<u8>, size: usize) -> io::Result<Vec<u8>> {
+    const MAGIC: [u8; 4] = 0xfd2f_b528u32.to_le_bytes();
+    let desc = *frame.get(4).ok_or_else(|| bad("short zstd frame"))?;
+    // Expected: no content size, not single-segment, no dictionary, so a
+    // window byte follows the descriptor.
+    if frame[..4] != MAGIC || desc & 0xe3 != 0 || frame.len() < 6 {
+        return Err(bad("unexpected zstd frame header from the encoder"));
+    }
+    frame[4] = desc | 0x80;
+    let size = u32::try_from(size).map_err(|_| bad("block too large"))?;
+    frame.splice(6..6, size.to_le_bytes());
+    Ok(frame)
+}
+
+impl<'w, W: Write> Writer<'w, W> {
+    pub fn new(w: &'w mut W) -> Self {
+        Writer {
+            w,
+            at: 0,
+            block: Vec::with_capacity(BLOCK_TARGET + 4096),
+            pointers: Vec::new(),
+            stack: Vec::new(),
+            root: None,
+        }
+    }
+
+    fn write(&mut self, b: &[u8]) -> io::Result<()> {
+        self.w.write_all(b)?;
+        self.at += b.len() as u64;
+        Ok(())
+    }
+
+    /// Add an item to the current block; its absolute reference.
+    fn put(&mut self, item: Vec<u8>) -> io::Result<u64> {
+        if !self.block.is_empty() && self.block.len() + item.len() > BLOCK_TARGET {
+            self.flush_block()?;
+        }
+        if self.block.len() + item.len() > BLOCK_MAX {
+            return Err(bad("item too large for a block"));
+        }
+        let at = ((self.pointers.len() as u64) << 24) | self.block.len() as u64;
+        self.block.extend(item);
+        Ok(at)
+    }
+
+    fn flush_block(&mut self) -> io::Result<()> {
+        if self.block.is_empty() {
+            return Ok(());
+        }
+        let frame = ruzstd::encoding::compress_to_vec(
+            &self.block[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        let frame = with_content_size(frame, self.block.len())?;
+        let len = frame.len() + 12;
+        if len > BLOCK_MAX || self.at >= 1 << 40 {
+            return Err(bad("block or file too large for the format"));
+        }
+        let number = u32::try_from(self.pointers.len()).map_err(|_| bad("too many blocks"))?;
+        let head = (len as u32).to_be_bytes();
+        self.pointers.push((self.at << 24) | len as u64);
+        self.write(&head)?;
+        self.write(&number.to_be_bytes())?;
+        self.write(&frame)?;
+        self.write(&head)?;
+        self.block.clear();
+        Ok(())
+    }
+
+    /// Write an entry of the innermost open directory, linked to the one
+    /// before it, and count it there.
+    fn entry(
+        &mut self,
+        mut item: ItemOut,
+        cum: (u64, u64),
+        items: u64,
+        error: bool,
+    ) -> io::Result<()> {
+        let parent = self
+            .stack
+            .last_mut()
+            .ok_or_else(|| bad("entry outside a directory"))?;
+        if let Some(prev) = parent.last {
+            item.uint(2, prev);
+        }
+        parent.cum_asize = parent.cum_asize.saturating_add(cum.0);
+        parent.cum_dsize = parent.cum_dsize.saturating_add(cum.1);
+        parent.items = parent.items.saturating_add(items + 1);
+        parent.sub_error |= error;
+        let at = self.put(item.bytes())?;
+        self.stack.last_mut().expect("parent").last = Some(at);
+        Ok(())
+    }
+
+    /// The item of a closed directory. Like ncdu, the shared sizes are
+    /// those of hard links below it that have links elsewhere too.
+    fn dir_item(d: &OpenDir) -> ItemOut {
+        let (mut shr_a, mut shr_d) = (0u64, 0u64);
+        for l in d.links.values().filter(|l| l.seen < l.nlink) {
+            shr_a = shr_a.saturating_add(l.asize);
+            shr_d = shr_d.saturating_add(l.dsize);
+        }
+        let mut it = ItemOut::new(DIR, &d.name);
+        it.uint(3, d.asize);
+        it.uint(4, d.dsize);
+        if d.own_dev {
+            it.uint(5, d.dev);
+        }
+        if d.read_error || d.sub_error {
+            it.boolean(6, d.read_error);
+        }
+        it.uint(7, d.cum_asize);
+        it.uint(8, d.cum_dsize);
+        if shr_a > 0 || shr_d > 0 {
+            it.uint(9, shr_a);
+            it.uint(10, shr_d);
+        }
+        it.uint(11, d.items);
+        if let Some(sub) = d.last {
+            it.uint(12, sub);
+        }
+        if d.mtime > 0 {
+            it.uint(18, d.mtime as u64);
+        }
+        it
+    }
+}
+
+impl<W: Write> Sink for Writer<'_, W> {
+    fn root(&mut self, path: &[u8], st: &du_fs::Stat, read_error: bool) -> io::Result<()> {
+        self.write(SIGNATURE)?;
+        self.stack.push(OpenDir::new(path, st, true, read_error));
+        Ok(())
+    }
+
+    fn leaf(&mut self, name: &[u8], leaf: Leaf<'_>, parent_dev: u64) -> io::Result<()> {
+        let (item, cum, error) = match leaf {
+            Leaf::Excluded => (ItemOut::new(EXCLUDED, name), (0, 0), false),
+            Leaf::Unreadable => (ItemOut::new(ERROR, name), (0, 0), true),
+            Leaf::File(st) => {
+                let link = st.nlink > 1;
+                let kind = if link {
+                    LINK
+                } else if st.is_file() {
+                    FILE
+                } else {
+                    OTHER
+                };
+                let (asize, dsize) = st.sizes();
+                let mut it = ItemOut::new(kind, name);
+                it.uint(3, asize);
+                it.uint(4, dsize);
+                if link {
+                    it.uint(13, st.ino);
+                    it.uint(14, st.nlink.min(u64::from(u32::MAX)));
+                }
+                if st.mtime > 0 {
+                    it.uint(18, st.mtime as u64);
+                }
+                // A directory counts each hard-linked inode below it once.
+                let mut first = true;
+                if link {
+                    let parent = self
+                        .stack
+                        .last_mut()
+                        .ok_or_else(|| bad("entry outside a directory"))?;
+                    let l = parent.links.entry((st.dev, st.ino)).or_insert(Link {
+                        seen: 0,
+                        nlink: st.nlink,
+                        asize,
+                        dsize,
+                    });
+                    first = l.seen == 0;
+                    l.seen += 1;
+                }
+                (it, if first { (asize, dsize) } else { (0, 0) }, false)
+            }
+            Leaf::Dir(_, DirLeaf::OtherFs) => (ItemOut::new(OTHER_FS, name), (0, 0), false),
+            Leaf::Dir(_, DirLeaf::Cache) => (ItemOut::new(EXCLUDED, name), (0, 0), false),
+            Leaf::Dir(st, DirLeaf::Unread) => {
+                let d = OpenDir::new(name, st, st.dev != parent_dev, true);
+                (Self::dir_item(&d), (d.cum_asize, d.cum_dsize), true)
+            }
+        };
+        self.entry(item, cum, 0, error)
+    }
+
+    fn open(
+        &mut self,
+        name: &[u8],
+        st: &du_fs::Stat,
+        parent_dev: u64,
+        read_error: bool,
+    ) -> io::Result<()> {
+        self.stack
+            .push(OpenDir::new(name, st, st.dev != parent_dev, read_error));
+        Ok(())
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        let mut d = self.stack.pop().ok_or_else(|| bad("close without open"))?;
+        let item = Self::dir_item(&d);
+        let Some(parent) = self.stack.last_mut() else {
+            self.root = Some(self.put(item.bytes())?);
+            return Ok(());
+        };
+        let dup = merge_links(&mut parent.links, std::mem::take(&mut d.links));
+        self.entry(
+            item,
+            (
+                d.cum_asize.saturating_sub(dup.0),
+                d.cum_dsize.saturating_sub(dup.1),
+            ),
+            d.items,
+            d.read_error || d.sub_error,
+        )
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        let root = self.root.ok_or_else(|| bad("no root written"))?;
+        self.flush_block()?;
+        let len = 8 + 8 * self.pointers.len() + 8;
+        if len >= 1 << 28 {
+            return Err(bad("too many blocks for the index"));
+        }
+        let head = ((1u32 << 28) | len as u32).to_be_bytes();
+        let mut index = Vec::with_capacity(len);
+        index.extend(head);
+        for p in &self.pointers {
+            index.extend(p.to_be_bytes());
+        }
+        index.extend(root.to_be_bytes());
+        index.extend(head);
+        self.write(&index)?;
+        self.w.flush()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,5 +1126,204 @@ mod tests {
         for cut in 0..REAL.len() {
             assert!(read(&REAL[..cut]).is_err(), "cut at {cut}");
         }
+    }
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "rtrash-ncdubin-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// The directory item at `path` below the root of a written export,
+    /// with its numeric fields by key.
+    fn dir_at(buf: &[u8], path: &[&str]) -> (Item, std::collections::BTreeMap<u64, u64>) {
+        let mut b = Blocks::open(io::Cursor::new(buf)).unwrap();
+        let mut at = b.root;
+        for name in path {
+            let mut next = b.item(at).unwrap().sub;
+            at = loop {
+                let here = next.unwrap_or_else(|| panic!("no {name}"));
+                let it = b.item(here).unwrap();
+                if it.info.name == name.as_bytes() {
+                    break here;
+                }
+                next = it.prev;
+            };
+        }
+        let item = b.item(at).unwrap();
+        let data = b.block((at >> 24) as usize).unwrap();
+        let mut c = Cbor {
+            data,
+            pos: (at & 0xff_ffff) as usize,
+        };
+        let (_, len) = c.head().unwrap();
+        let mut fields = std::collections::BTreeMap::new();
+        for _ in 0..len.unwrap() {
+            let key = c.uint().unwrap();
+            if matches!(key, 3 | 4 | 7..=11) {
+                fields.insert(key, c.uint().unwrap());
+            } else {
+                c.skip().unwrap();
+            }
+        }
+        (item, fields)
+    }
+
+    #[test]
+    fn encoder_frames_gain_the_content_size_the_format_needs() {
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let frame = ruzstd::encoding::compress_to_vec(
+            &data[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        let frame = with_content_size(frame, data.len()).unwrap();
+        let mut d = ruzstd::decoding::FrameDecoder::new();
+        d.init(&frame[..]).unwrap();
+        assert_eq!(d.content_size(), data.len() as u64);
+        let mut out = Vec::new();
+        ruzstd::decoding::StreamingDecoder::new(&frame[..])
+            .unwrap()
+            .read_to_end(&mut out)
+            .unwrap();
+        assert_eq!(out, data);
+        // A header with a size already, or not zstd at all, is refused.
+        assert!(with_content_size(frame, 1).is_err());
+        assert!(with_content_size(b"not zstd".to_vec(), 1).is_err());
+    }
+
+    #[test]
+    fn written_exports_read_back_like_the_json_export() {
+        use std::fs;
+        let root = tmp("rt");
+        // Enough entries for more than one data block.
+        for i in 0..3000 {
+            let d = root.join(format!("d{}", i % 7));
+            fs::create_dir_all(&d).unwrap();
+            fs::write(
+                d.join(format!("a-file-with-a-long-name-{i}")),
+                vec![7u8; i % 500],
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(root.join("logs/old")).unwrap();
+        fs::write(root.join("logs/x.log"), b"skipped").unwrap();
+        fs::write(root.join("logs/old/y"), b"kept").unwrap();
+        fs::create_dir_all(root.join("empty")).unwrap();
+        let spec = crate::du_filter::Spec {
+            patterns: vec!["*.log".into()],
+            ..crate::du_filter::Spec::default()
+        };
+        let mut bin = Vec::new();
+        let done = crate::du_ncdu::export_binary(&root, false, Some(&spec), &mut bin).unwrap();
+        assert_eq!(done.excluded, 1);
+        let mut json = Vec::new();
+        crate::du_ncdu::export(&root, false, Some(&spec), 5, &mut json).unwrap();
+        assert!(looks_like_binary(&bin));
+        assert!(
+            Blocks::open(io::Cursor::new(&bin[..]))
+                .unwrap()
+                .pointers
+                .len()
+                > 1
+        );
+        let a = read(&bin).unwrap();
+        let b = crate::du_ncdu::parse(&json[..]).unwrap();
+        assert_eq!(format!("{:?}", a.roots), format!("{:?}", b.roots));
+        let key = |s: &Snapshot| {
+            let mut v: Vec<String> = s.dirs.iter().map(|d| format!("{d:?}")).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(key(&a), key(&b));
+        assert_eq!(a.roots[0].files, 3001);
+
+        // The cumulative fields carry the totals, the root included.
+        let (top, f) = dir_at(&bin, &[]);
+        assert_eq!(top.kind, 0);
+        assert!(top.info.dev.is_some());
+        // A snapshot's apparent total is of files and its disk total
+        // counts directories too; ncdu's fields count directories in both.
+        let names: Vec<String> = (0..7).map(|i| format!("d{i}")).collect();
+        let mut dirs: Vec<Vec<&str>> = names.iter().map(|n| vec![n.as_str()]).collect();
+        dirs.extend([vec![], vec!["logs"], vec!["logs", "old"], vec!["empty"]]);
+        let own: u64 = dirs.iter().map(|p| dir_at(&bin, p).1[&3]).sum();
+        assert_eq!(f[&7], a.roots[0].apparent + own);
+        assert_eq!(f[&8], a.roots[0].disk);
+        // 7 + 3 directories, 3001 files and, as ncdu counts it, the
+        // excluded log below the root.
+        assert_eq!(f[&11], 3012);
+        let (_, f) = dir_at(&bin, &["logs", "old"]);
+        assert_eq!((f[&3] + 4, f[&11]), (f[&7], 1));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_links_count_once_per_directory_and_share_like_ncdu() {
+        use std::fs;
+        let root = tmp("links");
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::create_dir_all(root.join("x")).unwrap();
+        fs::write(root.join("a/f"), vec![1u8; 10_000]).unwrap();
+        fs::hard_link(root.join("a/f"), root.join("a/b/l1")).unwrap();
+        fs::hard_link(root.join("a/f"), root.join("x/l2")).unwrap();
+        let mut bin = Vec::new();
+        crate::du_ncdu::export_binary(&root, false, None, &mut bin).unwrap();
+        let own = |f: &std::collections::BTreeMap<u64, u64>| f[&3];
+        // Each directory counts the inode once, and all but the root
+        // share it with links outside them.
+        for (path, shared) in [
+            (&["a"][..], true),
+            (&["a", "b"][..], true),
+            (&["x"][..], true),
+            (&[][..], false),
+        ] {
+            let (_, f) = dir_at(&bin, path);
+            let subdirs: u64 = match path {
+                ["a"] => dir_at(&bin, &["a", "b"]).1[&3],
+                [] => {
+                    dir_at(&bin, &["a"]).1[&3]
+                        + dir_at(&bin, &["a", "b"]).1[&3]
+                        + dir_at(&bin, &["x"]).1[&3]
+                }
+                _ => 0,
+            };
+            assert_eq!(f[&7], own(&f) + subdirs + 10_000, "{path:?}");
+            assert_eq!(f.get(&9).copied(), shared.then_some(10_000), "{path:?}");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_directories_are_marked_and_their_parents_flag_it() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = tmp("err");
+        fs::create_dir_all(root.join("ok/locked/inner")).unwrap();
+        fs::set_permissions(root.join("ok/locked"), fs::Permissions::from_mode(0o000)).unwrap();
+        let mut bin = Vec::new();
+        let done = crate::du_ncdu::export_binary(&root, false, None, &mut bin).unwrap();
+        fs::set_permissions(root.join("ok/locked"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(done.unreadable, 1);
+        let (locked, f) = dir_at(&bin, &["ok", "locked"]);
+        assert!(locked.info.read_error);
+        assert_eq!(f[&7], f[&3]);
+        // The parent says an entry below failed, without failing itself.
+        let (ok, _) = dir_at(&bin, &["ok"]);
+        assert!(!ok.info.read_error);
+        let snap = read(&bin).unwrap();
+        assert!(snap.dirs.iter().all(|d| !d.path.ends_with("inner")));
+        let _ = fs::remove_dir_all(&root);
     }
 }

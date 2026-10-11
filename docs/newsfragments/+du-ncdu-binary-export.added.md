@@ -1,0 +1,1 @@
+`rtrash du --ncdu-binary=FILE PATH` writes ncdu 2's binary export (`ncdu -O`), which ncdu 2.6 and later browse with `ncdu -f FILE`. It is about a fifth of the size of the JSON export, and it stores each directory's totals, with hard links counted the way ncdu counts them.
