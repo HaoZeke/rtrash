@@ -206,10 +206,11 @@ struct App {
 
 /// The size a row shows and its bar measures: apparent size under
 /// `--apparent`, disk use otherwise.
-fn key_of(it: &Item, sort: SortKey) -> u64 {
-    match sort {
-        SortKey::Apparent => it.apparent,
-        _ => it.disk,
+fn key_of(it: &Item, apparent: bool) -> u64 {
+    if apparent {
+        it.apparent
+    } else {
+        it.disk
     }
 }
 
@@ -875,8 +876,8 @@ impl App {
         };
     }
 
-    /// The key rows show and bars measure: the sort key, or the size kind
-    /// when sorted by name.
+    /// The order key rows carry badges for (items, age): the sort key, or
+    /// the size kind when sorted by name.
     fn shown(&self) -> SortKey {
         match self.sorting.order {
             Order::Key(k) => k,
@@ -888,7 +889,33 @@ impl App {
     /// current one. The cursor and marks stay on the same rows.
     fn sort_by(&mut self, order: Order) {
         let reverse = self.sorting.order == order && !self.sorting.reverse;
-        self.sorting = Sorting { order, reverse };
+        self.resort(Sorting { order, reverse });
+        self.status = format!("sorted by {}", self.sorting.label());
+    }
+
+    /// Switch rows, bars and totals between disk use and apparent size
+    /// (`S`). A size order follows the switch and keeps its direction.
+    fn toggle_size(&mut self) {
+        self.size_key = match self.size_key {
+            SortKey::Apparent => SortKey::Disk,
+            _ => SortKey::Apparent,
+        };
+        if let Order::Key(SortKey::Disk | SortKey::Apparent) = self.sorting.order {
+            let reverse = self.sorting.reverse;
+            self.resort(Sorting {
+                order: Order::Key(self.size_key),
+                reverse,
+            });
+        }
+        self.status = match self.size_key {
+            SortKey::Apparent => "showing apparent sizes (S for disk use)".into(),
+            _ => "showing disk use (S for apparent sizes)".into(),
+        };
+    }
+
+    /// Put every view in the order of `sorting`.
+    fn resort(&mut self, sorting: Sorting) {
+        self.sorting = sorting;
         let keep = self.selected().map(|r| r.path.clone());
         let marked: Vec<PathBuf> = self
             .sel
@@ -913,7 +940,6 @@ impl App {
         }
         let at = keep.and_then(|p| pos(self, &p)).unwrap_or(0);
         self.select(at);
-        self.status = format!("sorted by {}", self.sorting.label());
     }
 
     /// Show only the rows of the current view whose name matches the
@@ -1051,6 +1077,7 @@ impl App {
                         KeyCode::Char('u') => return self.undo_last(),
                         KeyCode::Char('r') => return self.refresh(),
                         KeyCode::Char('s') => return self.sort_by(Order::Key(self.size_key)),
+                        KeyCode::Char('S') => return self.toggle_size(),
                         KeyCode::Char('n') => return self.sort_by(Order::Name),
                         KeyCode::Char('C') => return self.sort_by(Order::Key(SortKey::Items)),
                         KeyCode::Char('M') => return self.sort_by(Order::Key(SortKey::Mtime)),
@@ -1282,11 +1309,19 @@ fn bar(part: u64, whole: u64, width: usize) -> String {
 
 #[cfg(test)]
 fn row_text(it: &Item, marked: bool, whole: u64, sort: SortKey) -> String {
-    row_text_in(it, marked, whole, sort, false)
+    row_text_in(it, marked, whole, sort, sort == SortKey::Apparent, false)
 }
 
-/// [`row_text`]; `pending` shows a directory whose size is still coming.
-fn row_text_in(it: &Item, marked: bool, whole: u64, sort: SortKey, pending: bool) -> String {
+/// [`row_text`]; `apparent` shows apparent sizes instead of disk use, and
+/// `pending` shows a directory whose size is still coming.
+fn row_text_in(
+    it: &Item,
+    marked: bool,
+    whole: u64,
+    sort: SortKey,
+    apparent: bool,
+    pending: bool,
+) -> String {
     if pending && it.is_dir {
         let mark = if marked { "[x]" } else { "[ ]" };
         let name = it.path.file_name().unwrap_or_default().to_string_lossy();
@@ -1317,8 +1352,8 @@ fn row_text_in(it: &Item, marked: bool, whole: u64, sort: SortKey, pending: bool
     };
     format!(
         "{mark}{warn}{:>10} [{}] {name}{slash}{badges}",
-        format_bytes(key_of(it, sort)),
-        bar(key_of(it, sort), whole, 10)
+        format_bytes(key_of(it, apparent)),
+        bar(key_of(it, apparent), whole, 10)
     )
 }
 
@@ -1334,11 +1369,9 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     app.viewport_rows = chunks[1].height.saturating_sub(2) as usize;
     app.ensure_scroll();
     let sort = app.shown();
+    let apparent = app.size_key == SortKey::Apparent;
     let view = app.view();
-    let whole = match sort {
-        SortKey::Apparent => view.apparent,
-        _ => view.disk,
-    };
+    let whole = if apparent { view.apparent } else { view.disk };
     let stopped = if view.partial { " (partial)" } else { "" };
     let size = match app.progress() {
         Some((files, disk)) => format!(
@@ -1369,7 +1402,16 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .rows
         .iter()
         .enumerate()
-        .map(|(i, it)| ListItem::new(row_text_in(it, app.sel.is_marked(i), whole, sort, pending)))
+        .map(|(i, it)| {
+            ListItem::new(row_text_in(
+                it,
+                app.sel.is_marked(i),
+                whole,
+                sort,
+                apparent,
+                pending,
+            ))
+        })
         .collect();
     f.render_widget(
         Paragraph::new(Span::styled(
@@ -1377,9 +1419,14 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             Style::default().add_modifier(Modifier::BOLD),
         ))
         .block(Block::default().borders(Borders::ALL).title(format!(
-            "rtrash du{} · by {}{}",
+            "rtrash du{} · by {}{}{}",
             if app.read_only { " (read-only)" } else { "" },
             app.sorting.label(),
+            if apparent && app.sorting.order != Order::Key(SortKey::Apparent) {
+                " · apparent sizes"
+            } else {
+                ""
+            },
             if app.filter.is_empty() {
                 String::new()
             } else {
@@ -1467,6 +1514,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     "u — undo the last delete · r — rescan this directory"
                 },
                 "s n C M — sort by size, name, items or newest change; again reverses",
+                "S — show apparent sizes instead of disk use, or back",
                 "i — details of the cursor row (any key closes them)",
                 "/ — show only rows whose name matches (a part, or a glob with * ? [); Esc clears",
                 "! — git work at risk (dirty, unpushed or unknown)",
@@ -2099,6 +2147,49 @@ mod tests {
         assert_eq!(names(&a), ["small"]);
         a.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(names(&a), ["big", "file", "small"]);
+    }
+
+    #[test]
+    fn shift_s_shows_apparent_sizes_and_back() {
+        let t = tree("sizekey");
+        let mut a = app(&t);
+        a.on_key(KeyCode::Char('n'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('S'), KeyModifiers::SHIFT);
+        assert_eq!(a.size_key, SortKey::Apparent);
+        assert!(a.status.contains("apparent sizes"), "{}", a.status);
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("by name · apparent sizes"), "{text}");
+        let file = text.lines().find(|l| l.contains(" file")).unwrap();
+        assert!(file.contains(&format_bytes(9000)), "{file}");
+        // The name order stays through the switch.
+        assert_eq!(names(&a), ["big", "file", "small"]);
+        a.on_key(KeyCode::Char('S'), KeyModifiers::SHIFT);
+        assert_eq!(a.size_key, SortKey::Disk);
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(!text.contains("· apparent sizes"), "{text}");
+    }
+
+    // A sparse file is big by length and takes no blocks; Windows only
+    // makes one on request.
+    #[cfg(unix)]
+    #[test]
+    fn shift_s_reorders_a_size_sort() {
+        let t = tree("sizesort");
+        let f = fs::File::create(t.0.join("w/sparse")).unwrap();
+        f.set_len(10_000_000).unwrap();
+        drop(f);
+        let mut a = app(&t);
+        assert_eq!(names(&a)[0], "big");
+        a.on_key(KeyCode::Char('S'), KeyModifiers::SHIFT);
+        assert_eq!(names(&a)[0], "sparse");
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("rtrash du · by apparent size─"), "{text}");
+        // A reversed size order stays reversed.
+        a.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert_eq!(names(&a).last().unwrap(), "sparse");
+        a.on_key(KeyCode::Char('S'), KeyModifiers::SHIFT);
+        assert_eq!(a.sorting.label(), "disk use, reversed");
+        assert_eq!(names(&a).last().unwrap(), "big");
     }
 
     #[test]
