@@ -1772,6 +1772,51 @@ fn undo_keeps_a_recreated_path_without_force() {
     assert_eq!(fs::read(sb.work().join("x.txt")).unwrap(), b"payload");
 }
 
+#[test]
+fn undo_conflict_skips_or_renames_taken_paths() {
+    let sb = Sandbox::new("undo-policy");
+    sb.touch("x.txt");
+    sb.touch("y.txt");
+    assert!(sb.run(&["put", "x.txt", "y.txt"]).status.success());
+    fs::write(sb.work().join("x.txt"), b"new").unwrap();
+
+    let bad = sb.run(&["undo", "--home-only", "--conflict=bogus"]);
+    assert_eq!(bad.status.code(), Some(2));
+
+    let dry = sb.run(&["undo", "--home-only", "-n", "--conflict=rename"]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    let said = stdout_of(&dry);
+    assert!(said.contains("x.txt' as '"), "{said}");
+    assert!(said.contains("x.1.txt'"), "{said}");
+    assert!(
+        !sb.work().join("x.1.txt").exists(),
+        "dry run changes nothing"
+    );
+    let dry = sb.run(&["undo", "--home-only", "-n", "--conflict=skip"]);
+    assert!(
+        stdout_of(&dry).contains("would skip"),
+        "{}",
+        stdout_of(&dry)
+    );
+
+    // Skip brings back the free path and leaves the taken one in the trash.
+    let out = sb.run(&["undo", "--home-only", "--conflict=skip", "--json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let s = stdout_of(&out);
+    assert!(s.contains("\"failed\":0,\"skipped\":1"), "{s}");
+    assert!(sb.work().join("y.txt").is_file());
+    assert_eq!(fs::read(sb.work().join("x.txt")).unwrap(), b"new");
+
+    // Rename restores the rest of the run next to the new file.
+    let out = sb.run(&["undo", "--home-only", "--conflict=rename", "--json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let s = stdout_of(&out);
+    assert!(s.contains("\"restored_to\":\""), "{s}");
+    assert!(s.contains("x.1.txt\""), "{s}");
+    assert_eq!(fs::read(sb.work().join("x.txt")).unwrap(), b"new");
+    assert_eq!(fs::read(sb.work().join("x.1.txt")).unwrap(), b"payload");
+}
+
 /// Trash `name` (`len` bytes) dated `days` before 2020-01-28.
 fn trash_aged(sb: &Sandbox, name: &str, len: usize, days: u32) {
     fs::write(sb.work().join(name), vec![b'x'; len]).unwrap();

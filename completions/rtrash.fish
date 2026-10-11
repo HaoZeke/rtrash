@@ -128,6 +128,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -f
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -s l -l list -d 'list put runs, newest first'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -s n -l dry-run -d 'show what would be restored'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -s f -l force -d 'overwrite existing files at original locations'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -l conflict -x -a 'refuse overwrite rename skip' -d 'when an original location is taken'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -l json -d 'print the result as JSON'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -l home-only -d 'only the home trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q undo' -l trash-dir -d 'only this trash directory' -r

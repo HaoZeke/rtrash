@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::list;
-use crate::restore;
+use crate::restore::{self, Conflict, Outcome, Plan};
 use crate::trashdir;
 
 const HELP: &str = "\
@@ -22,7 +22,12 @@ other tools carry no batch id and never match.
   -l, --list      list put runs, newest first: id, date, item count, paths
   -n, --dry-run   show what would be restored and change nothing
   -f, --force     overwrite existing files at the original locations
-      --json      print {batch, restored, failed} as JSON on stdout
+                    (same as --conflict=overwrite)
+      --conflict=POLICY  when an original location is taken: refuse
+                    (default), overwrite, rename (restore next to it as
+                    NAME.1.EXT) or skip, as in restore
+      --json      print {batch, restored, failed, skipped} as JSON on
+                    stdout; each restored item carries restored_to
                     (with --list, an array of runs)
       --home-only  only the home trash (skip volume trash)
       --trash-dir=PATH  only consider this trash directory (repeatable)
@@ -80,7 +85,7 @@ fn id_millis(id: &str) -> i64 {
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut list_only = false;
     let mut dry_run = false;
-    let mut force = false;
+    let mut conflict = Conflict::Refuse;
     let mut json = false;
     let mut home_only = false;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
@@ -89,7 +94,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         match arg.as_str() {
             "-l" | "--list" => list_only = true,
             "-n" | "--dry-run" => dry_run = true,
-            "-f" | "--force" => force = true,
+            "-f" | "--force" => conflict = Conflict::Overwrite,
             "--json" => json = true,
             "--home-only" => home_only = true,
             "--help" => {
@@ -103,6 +108,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             a if a.starts_with("--trash-dir=") => {
                 trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
+            a if a.starts_with("--conflict=") => match Conflict::parse(&a["--conflict=".len()..]) {
+                Some(c) => conflict = c,
+                None => {
+                    eprintln!(
+                        "{prog}: invalid --conflict '{}' (refuse, overwrite, rename or skip)",
+                        &a["--conflict=".len()..]
+                    );
+                    return 2;
+                }
+            },
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
                 eprintln!("Try '{prog} --help' for more information.");
@@ -143,14 +158,44 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
         if json {
-            println!("{}", batch_json(wanted.as_deref().unwrap_or(""), &[], 0));
+            println!("{}", batch_json(wanted.as_deref().unwrap_or(""), &[], 0, 0));
         }
         return 1;
     };
 
     if dry_run {
+        let (mut would, mut failed, mut skipped) = (Vec::new(), 0usize, 0usize);
         for e in &batch.entries {
-            let line = format!("would restore '{}'", e.original.display());
+            let (line, dest) = match dry_run_dest(e, conflict) {
+                DryRun::Restore(d) if d == e.original => {
+                    (format!("would restore '{}'", e.original.display()), Some(d))
+                }
+                DryRun::Restore(d) => (
+                    format!(
+                        "would restore '{}' as '{}'",
+                        e.original.display(),
+                        d.display()
+                    ),
+                    Some(d),
+                ),
+                DryRun::Skip => {
+                    skipped += 1;
+                    (
+                        format!("would skip '{}': it exists", e.original.display()),
+                        None,
+                    )
+                }
+                DryRun::Refuse => {
+                    failed += 1;
+                    (
+                        format!("would fail: '{}' exists", e.original.display()),
+                        None,
+                    )
+                }
+            };
+            if let Some(d) = dest {
+                would.push((*e, d));
+            }
             let tty = if json {
                 crate::util::stderr_is_tty()
             } else {
@@ -168,40 +213,54 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
         if json {
-            println!("{}", batch_json(&batch.id, &batch.entries, 0));
+            println!("{}", batch_json(&batch.id, &would, failed, skipped));
         }
         return 0;
     }
 
-    let mut restored: Vec<&list::Entry> = Vec::new();
-    let mut failed = 0usize;
+    let plan = Plan {
+        to: None,
+        conflict,
+        quiet: json,
+    };
+    let mut restored: Vec<(&list::Entry, PathBuf)> = Vec::new();
+    let (mut failed, mut skipped) = (0usize, 0usize);
     for e in &batch.entries {
-        match restore::restore_one(e, force) {
-            Ok(done) => {
-                for w in &done.warnings {
-                    eprintln!("{prog}: warning: {w}");
-                }
-                if !json {
-                    println!("restored '{}'", crate::util::term_path(&done.dest));
-                }
-                restored.push(e);
-            }
-            Err(msg) => {
-                eprintln!("{prog}: {msg}");
-                failed += 1;
-            }
+        match plan.apply(prog, e) {
+            Outcome::Restored(dest) => restored.push((*e, dest)),
+            Outcome::Skipped => skipped += 1,
+            Outcome::Failed => failed += 1,
         }
     }
     if json {
-        println!("{}", batch_json(&batch.id, &restored, failed));
-    } else if failed > 0 {
+        println!("{}", batch_json(&batch.id, &restored, failed, skipped));
+    } else if failed > 0 || skipped > 0 {
         eprintln!(
-            "{prog}: run {}: {} restored, {failed} failed",
+            "{prog}: run {}: {} restored, {failed} failed, {skipped} skipped",
             batch.id,
             restored.len()
         );
     }
     i32::from(failed > 0)
+}
+
+/// What a dry run expects for `e` under `conflict`.
+enum DryRun {
+    Restore(PathBuf),
+    Skip,
+    Refuse,
+}
+
+fn dry_run_dest(e: &list::Entry, conflict: Conflict) -> DryRun {
+    if e.original.symlink_metadata().is_err() {
+        return DryRun::Restore(e.original.clone());
+    }
+    match conflict {
+        Conflict::Overwrite => DryRun::Restore(e.original.clone()),
+        Conflict::Rename => DryRun::Restore(restore::free_name(&e.original)),
+        Conflict::Skip => DryRun::Skip,
+        Conflict::Refuse => DryRun::Refuse,
+    }
 }
 
 fn print_runs(runs: &[Batch], json: bool) {
@@ -262,13 +321,15 @@ fn print_runs(runs: &[Batch], json: bool) {
     }
 }
 
-/// `{"batch": ID, "restored": [...], "failed": N}`.
-fn batch_json(id: &str, restored: &[&list::Entry], failed: usize) -> String {
-    let items: Vec<(&Path, &str, &Path)> = restored
-        .iter()
-        .map(|e| (e.original.as_path(), e.name.as_str(), e.dir.root.as_path()))
-        .collect();
-    let rest = crate::util::items_json("restored", &items, failed);
+/// `{"batch": ID, "restored": [...], "failed": N, "skipped": N}`, each
+/// restored item with its `restored_to`.
+fn batch_json(
+    id: &str,
+    restored: &[(&list::Entry, PathBuf)],
+    failed: usize,
+    skipped: usize,
+) -> String {
+    let rest = restore::restored_json(restored, failed, skipped);
     format!(
         "{{\"batch\":\"{}\",{}",
         list::json_escape(id),

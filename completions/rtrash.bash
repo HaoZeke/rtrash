@@ -49,7 +49,7 @@ _rtrash_rm_opts=(
 )
 
 _rtrash_undo_opts=(
-  -l --list -n --dry-run -f --force --json --home-only --trash-dir=
+  -l --list -n --dry-run -f --force --conflict= --json --home-only --trash-dir=
   --help --version
 )
 

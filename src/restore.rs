@@ -345,20 +345,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 }
 
 /// Where and how the CLI restores each chosen entry.
-struct Plan<'a> {
-    to: Option<&'a Path>,
-    conflict: Conflict,
-    quiet: bool,
+pub(crate) struct Plan<'a> {
+    pub to: Option<&'a Path>,
+    pub conflict: Conflict,
+    pub quiet: bool,
 }
 
-enum Outcome {
+pub(crate) enum Outcome {
     Restored(PathBuf),
     Skipped,
     Failed,
 }
 
 impl Plan<'_> {
-    fn apply(&self, prog: &str, e: &list::Entry) -> Outcome {
+    pub(crate) fn apply(&self, prog: &str, e: &list::Entry) -> Outcome {
         let dest = match (self.to, e.original.file_name()) {
             (Some(dir), Some(name)) => dir.join(name),
             (Some(_), None) => {
@@ -480,7 +480,11 @@ fn name_matches(e: &list::Entry, name: &str) -> bool {
 /// `{"restored": [...], "failed": N, "skipped": N}` for `restore --json`.
 /// Each item carries `restored_to`, which differs from `original` under
 /// `--to` or a rename.
-fn restored_json(restored: &[(&list::Entry, PathBuf)], failed: usize, skipped: usize) -> String {
+pub(crate) fn restored_json(
+    restored: &[(&list::Entry, PathBuf)],
+    failed: usize,
+    skipped: usize,
+) -> String {
     use crate::util::json_escape;
     let items: Vec<String> = restored
         .iter()
@@ -556,11 +560,13 @@ pub(crate) struct Restored {
 /// Restore one entry to its original path without printing anything, so the
 /// TUI can call it while it owns the terminal. Errors come back as text
 /// without the program name.
+#[cfg(feature = "tui")]
 pub(crate) fn restore_one(entry: &list::Entry, force: bool) -> Result<Restored, String> {
     restore_one_to(entry, &entry.original, force)
 }
 
-/// [`restore_one`] to `dest` instead of the original path.
+/// Restore one entry to `dest` instead of its original path, printing
+/// nothing.
 pub(crate) fn restore_one_to(
     entry: &list::Entry,
     dest: &Path,

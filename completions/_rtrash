@@ -124,6 +124,7 @@ undo_opts=(
   '(-l --list)'{-l,--list}'[list put runs, newest first]'
   '(-n --dry-run)'{-n,--dry-run}'[show what would be restored]'
   '(-f --force)'{-f,--force}'[overwrite existing files at original locations]'
+  '--conflict=[when an original location is taken]:policy:(refuse overwrite rename skip)'
   '--json[print the result as JSON]'
   '--home-only[only the home trash]'
   '*--trash-dir=[only consider this trash directory]:path:_files -/'

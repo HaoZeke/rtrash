@@ -985,12 +985,31 @@ List put runs, newest first: id, date, item count and paths.
 Show what would come back and change nothing.
 .TP
 .BR \-f ", " \-\-force
-Overwrite existing files at the original locations.
+Overwrite existing files at the original locations (same as
+.BR \-\-conflict=overwrite ).
+.TP
+.BI \-\-conflict= POLICY
+What to do when an original location is taken, as in restore:
+.B refuse
+(the default; the item stays in the trash and the run fails),
+.BR overwrite ,
+.B rename
+(restore next to it as
+.IR STEM .1. EXT ,
+counting up)
+or
+.B skip
+(the item stays in the trash; the run still succeeds).
+With
+.BR \-n ,
+each line says what the policy would do.
 .TP
 .B \-\-json
 Print
-.RI { batch ", " restored ", " failed }
-as JSON on stdout; with
+.RI { batch ", " restored ", " failed ", " skipped }
+as JSON on stdout, each restored item with its
+.BR restored_to ;
+with
 .BR \-\-list ,
 an array of runs.
 .TP
