@@ -213,6 +213,16 @@ pub fn sort_key(sort: SortKey, apparent: u64, disk: u64, items: u64, mtime: i64)
     }
 }
 
+/// Live counters of one scan, read by whoever runs it in the background
+/// (the `du -i` explorer shows them while a directory is still scanning).
+#[derive(Debug, Default)]
+pub struct ScanControl {
+    /// Files counted so far, each hard-linked file once.
+    pub files: AtomicU64,
+    /// Disk use of those files.
+    pub disk: AtomicU64,
+}
+
 /// Scan settings shared by every worker.
 #[derive(Debug, Clone)]
 pub struct ScanOpts {
@@ -235,6 +245,8 @@ pub struct ScanOpts {
     pub filter: Option<Arc<du_filter::Spec>>,
     /// `--unique`: map file extents to find the bytes no other file shares.
     pub unique: bool,
+    /// Counters to update as the walk goes (one add per directory chunk).
+    pub control: Option<Arc<ScanControl>>,
 }
 
 impl Default for ScanOpts {
@@ -252,6 +264,7 @@ impl Default for ScanOpts {
             no_files: false,
             filter: None,
             unique: false,
+            control: None,
         }
     }
 }
@@ -869,6 +882,10 @@ fn stat_entries(
                 mtime: m.mtime,
             });
         }
+    }
+    if let Some(c) = &opts.control {
+        c.files.fetch_add(out.files, Ordering::Relaxed);
+        c.disk.fetch_add(out.disk, Ordering::Relaxed);
     }
     out
 }

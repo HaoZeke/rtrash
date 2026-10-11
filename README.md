@@ -348,7 +348,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du diff base.snap` | What grew or shrank since the snapshot (scans again); `du diff OLD NEW` compares two snapshots, `--json` for scripts |
 | `rtrash du -f base.snap` | List the largest directories from a snapshot without scanning |
 | `rtrash du --stacks ~ \| inferno-flamegraph --countname=bytes > du.svg` | Folded stacks of each directory's own bytes for a flame graph (`flamegraph.pl`, inferno, speedscope); works with `-f FILE` |
-| `rtrash du -i ~/src` | Explore one directory at a time, like ncdu: `d` trashes, `u` undoes, `r` rescans; rows carry size bars, artefact and git badges |
+| `rtrash du -i ~/src` | Explore one directory at a time, like ncdu: `d` trashes, `u` undoes, `r` rescans; rows carry size bars, artefact and git badges. Directories open at once and scan in the background, so you can browse before the sizes are in |
 | `rtrash du -i --no-delete /srv` | The same explorer, read-only: `d` and `u` only show a note (config key `no_delete` makes it the default) |
 | `rtrash du --si` | Sizes in powers of 1000 (kB, MB, GB), as disk vendors and `df -H` count; JSON stays in bytes (config key `si`) |
 

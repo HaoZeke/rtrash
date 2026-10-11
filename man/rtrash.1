@@ -745,6 +745,12 @@ restores the last deletion, and
 .B r
 rescans the current directory.
 Sizes of the parent directories follow each change without a rescan.
+Each directory opens at once: its entries show while the scan runs in the
+background, files with their sizes and directories with
+.B …
+until their totals come in, and the title counts files and bytes so far.
+Moving, opening another directory and going up all work meanwhile;
+trashing waits until the view has its sizes.
 Rows show the artefact kind and git state; risky git state shows
 .BR ! .
 Trash directories stay closed.

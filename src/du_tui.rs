@@ -2,10 +2,17 @@
 //! ncdu. Each directory view comes from a one-level `du` scan, kept in a
 //! cache while you move around. Deleting moves rows to the trash, and `u`
 //! brings the last deletion back.
+//!
+//! Scans run in the background: a directory opens at once with a quick
+//! listing of its entries (files with their sizes, directories pending),
+//! and the full view replaces it when the scan finishes. You can move,
+//! open other directories and go back meanwhile.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -14,7 +21,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
-use crate::du::{self, Item, ScanOpts, SortKey};
+use crate::du::{self, Item, ScanControl, ScanOpts, SortKey};
 use crate::tui_binds::{Action, Keymap};
 use crate::tui_list;
 use crate::tui_select::Selection;
@@ -29,6 +36,17 @@ struct View {
     apparent: u64,
     /// Cursor row when the view was left, so going back lands on it.
     cursor: usize,
+    /// A quick listing shown while the scan runs: directory sizes are
+    /// still unknown and nothing can be deleted yet.
+    scanning: bool,
+}
+
+/// A scan running in the background.
+struct Job {
+    control: Arc<ScanControl>,
+    rx: mpsc::Receiver<io::Result<View>>,
+    /// A rescan (`r`) of a view whose sizes the parents already hold.
+    refresh: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -127,6 +145,9 @@ struct App {
     undo: Vec<UndoGroup>,
     /// `--no-delete`: browse only; `d` and `u` explain instead of acting.
     read_only: bool,
+    /// Scan in the background (the terminal session); tests scan inline.
+    background: bool,
+    jobs: HashMap<PathBuf, Job>,
 }
 
 /// The size a row shows and its bar measures: apparent size under
@@ -184,6 +205,57 @@ fn scan_view(dir: &Path, opts: &ScanOpts, git: bool) -> io::Result<View> {
         disk,
         apparent,
         cursor: 0,
+        scanning: false,
+    })
+}
+
+/// What one `read_dir` shows of `dir` before its scan ends: every entry,
+/// files with their own sizes, directories first by name with sizes to
+/// come. Filters are left to the scan.
+fn quick_view(dir: &Path) -> io::Result<View> {
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    for e in std::fs::read_dir(dir)?.flatten() {
+        let Ok(m) = e.metadata() else { continue };
+        let mtime = m
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs() as i64);
+        let is_dir = m.is_dir();
+        #[cfg(unix)]
+        let disk = std::os::unix::fs::MetadataExt::blocks(&m) * 512;
+        #[cfg(not(unix))]
+        let disk = m.len();
+        let it = Item {
+            path: e.path(),
+            is_dir,
+            apparent: if is_dir { 0 } else { m.len() },
+            disk: if is_dir { 0 } else { disk },
+            mtime,
+            items: u64::from(!is_dir),
+            artefact: None,
+            repos: Vec::new(),
+            git: None,
+            unique: None,
+        };
+        if is_dir {
+            dirs.push(it);
+        } else {
+            files.push(it);
+        }
+    }
+    dirs.sort_by(|a, b| a.path.cmp(&b.path));
+    sort_rows(&mut files, SortKey::Disk);
+    let disk = files.iter().map(|f| f.disk).sum();
+    let apparent = files.iter().map(|f| f.apparent).sum();
+    dirs.extend(files);
+    Ok(View {
+        rows: dirs,
+        disk,
+        apparent,
+        cursor: 0,
+        scanning: true,
     })
 }
 
@@ -227,8 +299,23 @@ fn adjust_chain(
 }
 
 impl App {
+    /// An explorer whose first view is scanned before it returns.
+    #[cfg(test)]
     fn new(prog: &str, root: PathBuf, opts: ScanOpts, git: bool) -> io::Result<Self> {
         let view = scan_view(&root, &opts, git)?;
+        Ok(Self::with_view(prog, root, opts, git, view))
+    }
+
+    /// An explorer that opens on a quick listing and scans in the background.
+    fn start(prog: &str, root: PathBuf, opts: ScanOpts, git: bool) -> io::Result<Self> {
+        let view = quick_view(&root)?;
+        let mut app = Self::with_view(prog, root.clone(), opts, git, view);
+        app.background = true;
+        app.spawn(root, false);
+        Ok(app)
+    }
+
+    fn with_view(prog: &str, root: PathBuf, opts: ScanOpts, git: bool, view: View) -> Self {
         let mut cache = HashMap::new();
         let n = view.rows.len();
         cache.insert(root.clone(), view);
@@ -237,7 +324,7 @@ impl App {
             list_state.select(Some(0));
         }
         let keys = Keymap::load();
-        Ok(App {
+        App {
             prog: prog.to_string(),
             cur: root.clone(),
             root,
@@ -254,6 +341,97 @@ impl App {
             keys,
             undo: Vec::new(),
             read_only: false,
+            background: false,
+            jobs: HashMap::new(),
+        }
+    }
+
+    /// Start a background scan of `dir`.
+    fn spawn(&mut self, dir: PathBuf, refresh: bool) {
+        let control = Arc::new(ScanControl::default());
+        let opts = ScanOpts {
+            control: Some(control.clone()),
+            ..self.opts.clone()
+        };
+        let (tx, rx) = mpsc::channel();
+        let (d, git) = (dir.clone(), self.git);
+        std::thread::spawn(move || {
+            let _ = tx.send(scan_view(&d, &opts, git));
+        });
+        self.jobs.insert(
+            dir,
+            Job {
+                control,
+                rx,
+                refresh,
+            },
+        );
+    }
+
+    /// Take in every finished scan. Returns whether any finished.
+    fn poll_jobs(&mut self) -> bool {
+        let done: Vec<(PathBuf, io::Result<View>)> = self
+            .jobs
+            .iter()
+            .filter_map(|(dir, job)| match job.rx.try_recv() {
+                Ok(r) => Some((dir.clone(), r)),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some((dir.clone(), Err(io::Error::other("scan ended early"))))
+                }
+            })
+            .collect();
+        let any = !done.is_empty();
+        for (dir, result) in done {
+            let refresh = self.jobs.remove(&dir).is_some_and(|j| j.refresh);
+            match result {
+                Ok(v) => self.take_view(dir, v, refresh),
+                Err(e) => {
+                    if let Some(v) = self.cache.get_mut(&dir) {
+                        v.scanning = false;
+                    }
+                    self.status = format!("cannot scan '{}': {e}", dir.display());
+                }
+            }
+        }
+        any
+    }
+
+    /// Put a finished scan of `dir` in place, keeping the cursor on the
+    /// same row when `dir` is on screen.
+    fn take_view(&mut self, dir: PathBuf, mut fresh: View, refresh: bool) {
+        // Trashed while it scanned: there is nothing left to show.
+        if dir != self.cur && !dir.exists() {
+            self.cache.remove(&dir);
+            return;
+        }
+        let on_screen = dir == self.cur;
+        let keep = on_screen
+            .then(|| self.selected().map(|r| r.path.clone()))
+            .flatten();
+        fresh.cursor = self.cache.get(&dir).map_or(0, |v| v.cursor);
+        if refresh {
+            self.apply_fresh(&dir, fresh);
+        } else {
+            self.cache.insert(dir.clone(), fresh);
+        }
+        if on_screen {
+            self.sel.clear();
+            let at = keep
+                .and_then(|p| self.rows().iter().position(|r| r.path == p))
+                .unwrap_or(0);
+            self.select(at);
+            self.status = format!("scanned · {} entries", self.rows().len());
+        }
+    }
+
+    /// Files and bytes counted so far by the scan of the current view.
+    fn progress(&self) -> Option<(u64, u64)> {
+        self.jobs.get(&self.cur).map(|j| {
+            (
+                j.control.files.load(Ordering::Relaxed),
+                j.control.disk.load(Ordering::Relaxed),
+            )
         })
     }
 
@@ -309,6 +487,18 @@ impl App {
         if let Some(v) = self.cache.get_mut(&self.cur) {
             v.cursor = cursor;
         }
+        if !self.cache.contains_key(&dir) && self.background {
+            match quick_view(&dir) {
+                Ok(v) => {
+                    self.cache.insert(dir.clone(), v);
+                    self.spawn(dir.clone(), false);
+                }
+                Err(e) => {
+                    self.status = format!("cannot open '{}': {e}", dir.display());
+                    return;
+                }
+            }
+        }
         if !self.cache.contains_key(&dir) {
             match scan_view(&dir, &self.opts, self.git) {
                 Ok(v) => {
@@ -360,6 +550,18 @@ impl App {
     /// Rescan the current directory and carry the size change up the chain.
     fn refresh(&mut self) {
         let cur = self.cur.clone();
+        if self.jobs.contains_key(&cur) {
+            self.status = "still scanning this directory".into();
+            return;
+        }
+        if self.background {
+            if let Some(v) = self.cache.get_mut(&cur) {
+                v.scanning = true;
+            }
+            self.spawn(cur, true);
+            self.status = "rescanning…".into();
+            return;
+        }
         let fresh = match scan_view(&cur, &self.opts, self.git) {
             Ok(v) => v,
             Err(e) => {
@@ -367,6 +569,17 @@ impl App {
                 return;
             }
         };
+        self.apply_fresh(&cur, fresh);
+        self.sel.clear();
+        let at = self.list_state.selected().unwrap_or(0);
+        self.select(at);
+        self.status = format!("rescanned · {} entries", self.rows().len());
+    }
+
+    /// Replace the view of `cur` with a rescan and carry the size change up
+    /// the chain.
+    fn apply_fresh(&mut self, cur: &Path, fresh: View) {
+        let cur = cur.to_path_buf();
         // Children views may hold stale sizes now; drop them.
         self.cache.retain(|p, _| p == &cur || !p.starts_with(&cur));
         let old = self
@@ -398,10 +611,6 @@ impl App {
                 }
             }
         }
-        self.sel.clear();
-        let at = self.list_state.selected().unwrap_or(0);
-        self.select(at);
-        self.status = format!("rescanned · {} entries", self.rows().len());
     }
 
     fn targets(&self) -> Vec<usize> {
@@ -419,6 +628,10 @@ impl App {
     fn ask_delete(&mut self) {
         if self.read_only {
             self.status = "read-only (--no-delete): nothing gets trashed".into();
+            return;
+        }
+        if self.view().scanning {
+            self.status = "still scanning; trash rows once the sizes are in".into();
             return;
         }
         let t = self.targets();
@@ -598,7 +811,18 @@ fn bar(part: u64, whole: u64, width: usize) -> String {
     format!("{}{}", "#".repeat(filled), " ".repeat(width - filled))
 }
 
+#[cfg(test)]
 fn row_text(it: &Item, marked: bool, whole: u64, sort: SortKey) -> String {
+    row_text_in(it, marked, whole, sort, false)
+}
+
+/// [`row_text`]; `pending` shows a directory whose size is still coming.
+fn row_text_in(it: &Item, marked: bool, whole: u64, sort: SortKey, pending: bool) -> String {
+    if pending && it.is_dir {
+        let mark = if marked { "[x]" } else { "[ ]" };
+        let name = it.path.file_name().unwrap_or_default().to_string_lossy();
+        return format!("{mark} {:>10} [{}] {name}/", "…", " ".repeat(10));
+    }
     let mark = if marked { "[x]" } else { "[ ]" };
     let risky = it.git.as_ref().is_some_and(|(s, _)| s.is_risky());
     let warn = if risky { "!" } else { " " };
@@ -643,18 +867,26 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         SortKey::Apparent => view.apparent,
         _ => view.disk,
     };
+    let size = match app.progress() {
+        Some((files, disk)) => format!(
+            "scanning: {} so far, {}",
+            crate::util::plural(files, "file", "files"),
+            format_bytes(disk)
+        ),
+        None => format_bytes(whole),
+    };
     let title = format!(
-        " {} · {} · {} entries · {} marked ",
+        " {} · {size} · {} entries · {} marked ",
         app.cur.display(),
-        format_bytes(whole),
         view.rows.len(),
         app.sel.len()
     );
+    let pending = view.scanning;
     let items: Vec<ListItem> = view
         .rows
         .iter()
         .enumerate()
-        .map(|(i, it)| ListItem::new(row_text(it, app.sel.is_marked(i), whole, sort)))
+        .map(|(i, it)| ListItem::new(row_text_in(it, app.sel.is_marked(i), whole, sort, pending)))
         .collect();
     f.render_widget(
         Paragraph::new(Span::styled(
@@ -730,11 +962,14 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
 fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
     loop {
+        app.poll_jobs();
         terminal.draw(|f| ui(f, app))?;
         if app.quit {
             return Ok(());
         }
-        if event::poll(Duration::from_millis(200))? {
+        // Redraw often while a scan runs so its counters move.
+        let tick = if app.jobs.is_empty() { 200 } else { 100 };
+        if event::poll(Duration::from_millis(tick))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     app.on_key(key.code, key.modifiers);
@@ -757,7 +992,7 @@ pub fn run(prog: &str, root: &Path, opts: ScanOpts, git: bool, read_only: bool) 
         eprintln!("{prog}: -i needs a directory: '{}'", root.display());
         return 2;
     }
-    let mut app = match App::new(prog, root, opts, git) {
+    let mut app = match App::start(prog, root, opts, git) {
         Ok(a) => App { read_only, ..a },
         Err(e) => {
             eprintln!("{prog}: cannot scan: {e}");
@@ -932,6 +1167,73 @@ mod tests {
         );
         assert!(text.contains("big/"), "{text}");
         assert!(text.contains("d trash  u undo  r rescan"), "{text}");
+    }
+
+    /// Take in finished background scans until none is left.
+    fn settle(a: &mut App) {
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        while !a.jobs.is_empty() {
+            assert!(std::time::Instant::now() < until, "scan never finished");
+            a.poll_jobs();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn quick_view_lists_directories_pending_and_files_sized() {
+        let t = tree("quick");
+        let v = quick_view(&t.0.join("w")).unwrap();
+        assert!(v.scanning);
+        let names: Vec<_> = v
+            .rows
+            .iter()
+            .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["big", "small", "file"]);
+        assert_eq!(v.rows[0].disk, 0);
+        assert_eq!(v.rows[2].apparent, 9000);
+        assert_eq!(v.apparent, 9000);
+    }
+
+    #[test]
+    fn background_scan_opens_at_once_and_fills_in() {
+        let t = tree("bg");
+        let mut a = App::start("rtrash", t.0.join("w"), ScanOpts::default(), false).unwrap();
+        a.trash_pin = Some(t.0.join("Trash"));
+        // The quick listing is up before the scan ends.
+        assert_eq!(a.rows().len(), 3);
+        // Browsing works meanwhile: open big, which scans on its own.
+        a.select(0);
+        a.open();
+        assert_eq!(a.cur, t.0.join("w/big"));
+        settle(&mut a);
+        assert!(!a.view().scanning);
+        assert_eq!(names(&a), ["inner", "side"]);
+        a.back();
+        assert!(!a.view().scanning);
+        assert_eq!(names(&a), ["big", "file", "small"]);
+        assert_eq!(a.selected().unwrap().path, t.0.join("w/big"));
+        assert!(a.rows()[0].disk >= 200_000, "{:?}", a.rows()[0]);
+        // A rescan runs in the background too and keeps the totals.
+        let before = a.view().disk;
+        a.refresh();
+        settle(&mut a);
+        assert_eq!(a.view().disk, before);
+    }
+
+    #[test]
+    fn scanning_view_shows_pending_rows_and_refuses_deletes() {
+        let t = tree("pending");
+        let mut a = app(&t);
+        let quick = quick_view(&t.0.join("w")).unwrap();
+        a.cache.insert(t.0.join("w"), quick);
+        a.select(0);
+        a.ask_delete();
+        assert_eq!(a.mode, Mode::Browse);
+        assert!(a.status.contains("still scanning"), "{}", a.status);
+        assert!(t.0.join("w/big").exists());
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("… [          ] big/"), "{text}");
     }
 
     #[test]
