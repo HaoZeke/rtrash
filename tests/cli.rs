@@ -302,6 +302,81 @@ fn records_and_a_sizes_cache_that_are_no_regular_files_hang_nothing() {
     assert!(t.join("files/keep").exists() && t.join("files/d/f").exists());
 }
 
+/// Plant a forged item `name` in the sandbox trash whose record restores to
+/// `to`, with `body` as its payload.
+fn forge_record(sb: &Sandbox, name: &str, to: &Path, body: &[u8]) {
+    fs::write(sb.trash().join("files").join(name), body).unwrap();
+    let record = format!(
+        "[Trash Info]\nPath={}\nDeletionDate=2026-01-01T00:00:00\n",
+        to.display()
+    );
+    let info = sb.trash().join("info").join(format!("{name}.trashinfo"));
+    fs::write(info, record).unwrap();
+}
+
+#[test]
+fn restore_never_writes_to_the_trash_or_what_contains_it() {
+    let sb = Sandbox::new("restore-into-trash");
+    fs::write(sb.work().join("keep"), b"real").unwrap();
+    assert!(sb.run(&["put", "keep"]).status.success());
+    let data = sb.root.join("xdg");
+    let real = sb.trash().join("files/keep");
+    let deep = sb.trash().join("files/new");
+    forge_record(&sb, "onto-item", &real, b"forged");
+    forge_record(&sb, "onto-data", &data, b"forged");
+    forge_record(&sb, "into-files", &deep, b"forged");
+    // A rename beside the data directory harms nothing, so only an
+    // overwrite of it is refused; inside the trash, both are.
+    for (to, why, conflicts) in [
+        (
+            &real,
+            "inside the trash directory",
+            &["overwrite", "rename"][..],
+        ),
+        (&data, "contains the trash directory", &["overwrite"]),
+        (
+            &deep,
+            "inside the trash directory",
+            &["overwrite", "rename"],
+        ),
+    ] {
+        let to = to.to_str().unwrap();
+        for conflict in conflicts {
+            let conflict = format!("--conflict={conflict}");
+            let out = sb.run(&["restore", &conflict, to]);
+            assert_eq!(out.status.code(), Some(1), "{to} {conflict}");
+            let err = stderr_of(&out);
+            assert!(err.contains(why), "{to} {conflict}: {err}");
+        }
+    }
+    // --to into the trash is refused as well.
+    let files = sb.trash().join("files");
+    let to = format!("--to={}", files.display());
+    let out = sb.run(&["restore", "--home-only", &to, "--name=onto-item"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    // A record in another trash may not reach into the home trash either.
+    let other = sb.root.join("other");
+    fs::create_dir_all(other.join("files")).unwrap();
+    fs::create_dir_all(other.join("info")).unwrap();
+    fs::write(other.join("files/far"), b"forged").unwrap();
+    let record = format!(
+        "[Trash Info]\nPath={}\nDeletionDate=2026-01-01T00:00:00\n",
+        real.display()
+    );
+    fs::write(other.join("info/far.trashinfo"), record).unwrap();
+    let pin = format!("--trash-dir={}", other.display());
+    let out = sb.run(&["restore", &pin, "-f", real.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("inside the trash directory"));
+    assert!(other.join("files/far").exists());
+    assert_eq!(fs::read(&real).unwrap(), b"real");
+    assert!(sb.trash().join("info/keep.trashinfo").exists());
+    assert!(!deep.exists());
+    for n in ["onto-item", "onto-data", "into-files"] {
+        assert!(sb.trash().join("files").join(n).exists(), "{n}");
+    }
+}
+
 #[test]
 fn put_json_reports_trashed_and_failed() {
     let sb = Sandbox::new("put-json");

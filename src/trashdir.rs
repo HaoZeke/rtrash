@@ -126,6 +126,29 @@ fn lexical_join_under(top: &Path, rel: &Path) -> PathBuf {
     out
 }
 
+/// How a path meets a trash directory: put refuses to trash such a path,
+/// and restore refuses to write to one.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Overlap {
+    /// The path is the trash directory or contains it.
+    Contains,
+    /// The path is inside the trash directory.
+    Inside,
+}
+
+/// Whether `abs` (absolute, its parent resolved) is, contains or sits inside
+/// the trash at `root`, compared with the trash's symlinks resolved.
+pub(crate) fn trash_overlap(abs: &Path, root: &Path) -> Option<Overlap> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if root.starts_with(abs) {
+        Some(Overlap::Contains)
+    } else if abs.starts_with(&root) {
+        Some(Overlap::Inside)
+    } else {
+        None
+    }
+}
+
 pub fn uid() -> u32 {
     unsafe { libc::getuid() }
 }

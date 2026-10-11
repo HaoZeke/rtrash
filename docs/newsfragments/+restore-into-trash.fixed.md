@@ -1,0 +1,1 @@
+`rtrash restore` refuses a destination that is, contains or sits inside the item's trash or the home trash, whatever the flags. A forged or corrupt `.trashinfo` naming such a place used to let `restore -f` replace a real trashed item with another payload, or delete the whole data directory around the trash.

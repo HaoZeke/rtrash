@@ -1158,6 +1158,14 @@ Pass
 .B \-\-cwd\-only
 to limit bare restore to originals under the current directory.
 A single match restores directly; multiple matches require a selection.
+.PP
+Whatever the flags, restore refuses a destination that is, contains or
+sits inside the item's trash or the home trash.
+.B put
+never trashes such a path, so only a forged or corrupt
+.I .trashinfo
+names one, and an overwrite there would replace the trash or a real item
+in it.
 .TP
 .BR \-f ", " \-\-force
 Overwrite an existing file at the destination (same as

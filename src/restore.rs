@@ -565,6 +565,33 @@ pub(crate) fn restore_one(entry: &list::Entry, force: bool) -> Result<Restored, 
     restore_one_to(entry, &entry.original, force)
 }
 
+/// Why `dest` must not receive a restored item: it is, contains or sits
+/// inside the entry's trash or the home trash. put refuses such paths, so
+/// only a forged or corrupt record names one, and restoring there with
+/// `-f` would replace the whole trash, or a real item in it.
+fn trash_conflict(entry: &list::Entry, dest: &Path) -> Option<String> {
+    let abs = match (dest.parent(), dest.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            trashdir::resolve_existing(parent).join(name)
+        }
+        _ => dest.to_path_buf(),
+    };
+    let home = trashdir::home_trash();
+    for root in [entry.dir.root.as_path(), home.as_path()] {
+        let why = match trashdir::trash_overlap(&abs, root) {
+            Some(trashdir::Overlap::Contains) => "it contains the trash directory",
+            Some(trashdir::Overlap::Inside) => "it is inside the trash directory",
+            None => continue,
+        };
+        return Some(format!(
+            "refusing to restore to '{}': {why} '{}'",
+            dest.display(),
+            root.display()
+        ));
+    }
+    None
+}
+
 /// Restore one entry to `dest` instead of its original path, printing
 /// nothing.
 pub(crate) fn restore_one_to(
@@ -572,6 +599,9 @@ pub(crate) fn restore_one_to(
     dest: &Path,
     force: bool,
 ) -> Result<Restored, String> {
+    if let Some(err) = trash_conflict(entry, dest) {
+        return Err(err);
+    }
     let mut warnings = Vec::new();
     let src = crate::util::join_name(&entry.dir.files(), &entry.name);
 

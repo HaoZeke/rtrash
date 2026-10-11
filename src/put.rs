@@ -3,7 +3,7 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
-use crate::trashdir;
+use crate::trashdir::{self, trash_overlap, Overlap};
 use crate::util::confirm;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -451,28 +451,6 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             eprintln!("{prog}: cannot trash '{name}': {e}");
             Err(1)
         }
-    }
-}
-
-/// How a path to trash meets the trash directory it would go to.
-#[derive(Debug, PartialEq, Eq)]
-enum Overlap {
-    /// The path is the trash directory or contains it.
-    Contains,
-    /// The path is inside the trash directory.
-    Inside,
-}
-
-/// Whether `abs` (absolute, its parent resolved) is, contains or sits inside
-/// the trash at `root`, compared with the trash's symlinks resolved.
-fn trash_overlap(abs: &Path, root: &Path) -> Option<Overlap> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    if root.starts_with(abs) {
-        Some(Overlap::Contains)
-    } else if abs.starts_with(&root) {
-        Some(Overlap::Inside)
-    } else {
-        None
     }
 }
 
