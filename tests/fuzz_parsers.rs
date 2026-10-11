@@ -307,3 +307,61 @@ fn byte_names_round_trip_through_strings() {
         }
     }
 }
+
+/// Property: a record's file name never maps to an item whose payload is
+/// `files/` itself or the trash root, and a relative `Path=` in a volume
+/// trash, once decoded, never resolves outside the volume.
+#[cfg(unix)]
+#[test]
+fn record_names_and_paths_stay_inside_their_trash() {
+    use rtrash::trashdir::TrashDir;
+    use std::path::Component;
+    let mut rng = Rng(0x0dd5_7a1e_2026_1011);
+    let bits = ["", ".", "..", "...", "a", "/", ".trashinfo", "%2E", " "];
+    for _ in 0..rounds() {
+        let mut name: String = (0..rng.below(4))
+            .map(|_| bits[rng.below(bits.len())])
+            .collect();
+        name.push_str(".trashinfo");
+        if let Some(item) = rtrash::util::trash_item_name(&name) {
+            assert!(!matches!(item, "" | "." | ".."), "{name:?} -> {item:?}");
+            assert!(!item.contains('/'), "{name:?} -> {item:?}");
+        }
+    }
+    let volume = TrashDir {
+        root: "/mnt/v/.Trash-1000".into(),
+        topdir: Some("/mnt/v".into()),
+    };
+    let parts: [&[u8]; 10] = [
+        b"..", b".", b"", b"a", b"%2E%2E", b"%2F", b"%2F..", b"%00", b"%zz", b"b c",
+    ];
+    for _ in 0..rounds() {
+        let mut raw = Vec::new();
+        if rng.below(3) == 0 {
+            raw.push(b'/');
+        }
+        for i in 0..rng.below(5) {
+            if i > 0 {
+                raw.push(b'/');
+            }
+            raw.extend_from_slice(parts[rng.below(parts.len())]);
+        }
+        let body = [
+            b"[Trash Info]\nPath=".as_slice(),
+            &raw,
+            b"\nDeletionDate=2026-01-01T00:00:00\n",
+        ]
+        .concat();
+        let recorded = rtrash::info::parse_bytes(&body).path;
+        let Ok(p) = volume.resolve_original_checked(&recorded) else {
+            continue;
+        };
+        if !recorded.is_absolute() {
+            assert!(p.starts_with("/mnt/v"), "{recorded:?} -> {p:?}");
+            assert!(
+                !p.components().any(|c| c == Component::ParentDir),
+                "{recorded:?} -> {p:?}"
+            );
+        }
+    }
+}
