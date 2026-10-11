@@ -321,6 +321,27 @@ Only items trashed within the last
 .I DAYS
 days.
 .TP
+.BI \-\-larger\-than =SIZE
+Only items taking more than
+.I SIZE
+on disk, payload plus
+.IR .trashinfo ,
+the size
+.B list \-\-size
+shows.
+.I SIZE
+reads as in
+.BR "empty \-\-max\-size" :
+500M, 1.5G, 64k.
+Payloads with no
+.I .trashinfo
+have a size, so this filter keeps them in.
+.TP
+.BI \-\-smaller\-than =SIZE
+Only items taking less than
+.I SIZE
+on disk.
+.TP
 .B \-\-size
 Add a column with each item's disk usage: the payload plus its
 .IR .trashinfo ,
@@ -394,6 +415,27 @@ days ago.
 Only count items trashed within the last
 .I DAYS
 days.
+.TP
+.BI \-\-larger\-than =SIZE
+Only count items taking more than
+.I SIZE
+on disk, payload plus
+.IR .trashinfo ,
+the size
+.B list \-\-size
+shows.
+.I SIZE
+reads as in
+.BR "empty \-\-max\-size" :
+500M, 1.5G, 64k.
+Payloads with no
+.I .trashinfo
+have a size, so this filter keeps them in.
+.TP
+.BI \-\-smaller\-than =SIZE
+Only count items taking less than
+.I SIZE
+on disk.
 .TP
 .B \-\-json
 Emit a JSON object
@@ -1427,6 +1469,27 @@ days ago.
 Only match items trashed within the last
 .I DAYS
 days.
+.TP
+.BI \-\-larger\-than =SIZE
+Only match items taking more than
+.I SIZE
+on disk, payload plus
+.IR .trashinfo ,
+the size
+.B list \-\-size
+shows.
+.I SIZE
+reads as in
+.BR "empty \-\-max\-size" :
+500M, 1.5G, 64k.
+Payloads with no
+.I .trashinfo
+have a size, so this filter keeps them in.
+.TP
+.BI \-\-smaller\-than =SIZE
+Only match items taking less than
+.I SIZE
+on disk.
 .TP
 .BR \-n ", " \-\-dry\-run
 List matches and reclaimable size; do not delete.

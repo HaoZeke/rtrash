@@ -21,11 +21,12 @@ _rtrash_empty_opts=(
 
 _rtrash_list_opts=(
   --home-only --trash-dir= --older-than= --newer-than= --json
-  --size --sort= --reverse --all-users --help --version
+  --larger-than= --smaller-than= --size --sort= --reverse --all-users --help --version
 )
 
 _rtrash_status_opts=(
-  --home-only --trash-dir= --older-than= --newer-than= --json --help --version
+  --home-only --trash-dir= --older-than= --newer-than= --json
+  --larger-than= --smaller-than= --help --version
 )
 
 _rtrash_du_opts=(
@@ -44,7 +45,7 @@ _rtrash_restore_opts=(
 
 _rtrash_rm_opts=(
   --trash-dir= --home-only -n --dry-run -f --force -v --verbose
-  --older-than= --newer-than= --json
+  --older-than= --newer-than= --larger-than= --smaller-than= --json
   --help --version
 )
 

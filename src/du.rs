@@ -577,7 +577,7 @@ pub fn trash_on_scanned_devices(dirs: &[TrashDir], report: &Report) -> TrashSumm
         })
         .cloned()
         .collect();
-    let (_, items, bytes) = status::summarize_dirs(&same, None, None);
+    let (_, items, bytes) = status::summarize_dirs(&same, None, None, Default::default());
     TrashSummary {
         roots: same.into_iter().map(|d| d.root).collect(),
         items,

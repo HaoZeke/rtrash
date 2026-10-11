@@ -321,12 +321,13 @@ In JSON they carry `"orphan": true`; an age filter leaves them out.
 | `--reverse` | Reverse the order |
 | `--older-than=DAYS` | Only items trashed more than DAYS days ago (same cutoff as `empty DAYS`) |
 | `--newer-than=DAYS` | Only items trashed within the last DAYS days |
+| `--larger-than=SIZE` / `--smaller-than=SIZE` | Only items taking more (or less) than SIZE on disk, as `--size` shows it; SIZE as in `empty --max-size` (`500M`, `1.5G`). Orphans have a size, so they stay in |
 | `--home-only` | Home trash only |
 | `--all-users` | Every account's trash this user can read (root reads all), with an owner column and a JSON `owner` field; read-only. Root restores or removes another account's items by pinning that trash with `--trash-dir` |
 
 ### `rtrash status`
 
-Per-root item count and reclaimable size (uses `directorysizes` when valid). Same discovery pins as list. Also accepts `--json`, `--older-than=DAYS`, `--newer-than=DAYS`.
+Per-root item count and reclaimable size (uses `directorysizes` when valid). Same discovery pins as list. Also accepts `--json`, `--older-than=DAYS`, `--newer-than=DAYS`, `--larger-than=SIZE`, `--smaller-than=SIZE`.
 Orphans count as items, noted as `(N without .trashinfo)` per root and as `orphans` in JSON.
 
 ### `rtrash du [PATH]...`
@@ -477,7 +478,7 @@ Permanently deletes trash entries whose original path, basename, or trash name m
 Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
 An orphan matches by its name in `files/` or its path there.
 Does **not** restore.
-Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-f`/`--force` (mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--json` (summary + `matches` array).
+Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-f`/`--force` (mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).
 
 ## FreeDesktop durability notes
 

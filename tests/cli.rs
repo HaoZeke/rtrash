@@ -1005,6 +1005,60 @@ fn list_size_and_sort() {
 }
 
 #[test]
+fn list_status_and_rm_filter_by_size() {
+    let sb = Sandbox::new("size-filter");
+    fs::write(sb.work().join("big"), vec![1u8; 64 * 1024]).unwrap();
+    fs::write(sb.work().join("small"), b"x").unwrap();
+    assert!(sb.run(&["put", "big", "small"]).status.success());
+    // A payload with no .trashinfo has a size too, so a size filter keeps it.
+    fs::write(
+        sb.trash().join("files").join("stray"),
+        vec![2u8; 200 * 1024],
+    )
+    .unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let names = |args: &[&str]| -> Vec<String> {
+        let out = sb.run(args);
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+        let mut v: Vec<String> = stdout_of(&out)
+            .lines()
+            .map(|l| l.rsplit(['/', '\\']).next().unwrap_or("").to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        names(&["list", &pin, "--larger-than=32K"]),
+        ["big", "stray"]
+    );
+    assert_eq!(names(&["list", &pin, "--smaller-than", "32K"]), ["small"]);
+    assert_eq!(
+        names(&["list", &pin, "--larger-than=32K", "--smaller-than=100K"]),
+        ["big"]
+    );
+    // The size column stays opt-in; the filter alone does not add it.
+    let out = stdout_of(&sb.run(&["list", &pin, "--larger-than=100K"]));
+    assert!(!out.contains("KiB"), "{out}");
+    let json = stdout_of(&sb.run(&["status", &pin, "--json", "--larger-than=32K"]));
+    assert!(json.contains("\"total_items\": 2"), "{json}");
+    assert!(json.contains("\"orphans\":1"), "{json}");
+    let dry = sb.run(&["rm", &pin, "-n", "--smaller-than=32K", "--force", "*"]);
+    assert_eq!(stdout_of(&dry).lines().count(), 1, "{}", stdout_of(&dry));
+    assert!(stdout_of(&dry).trim_end().ends_with("small"));
+    let gone = sb.run(&["rm", &pin, "--larger-than=100K", "--force", "*"]);
+    assert!(gone.status.success(), "{}", stderr_of(&gone));
+    assert_eq!(names(&["list", &pin]), ["big", "small"]);
+    for bad in [
+        &["list", "--larger-than=lots"][..],
+        &["list", "--smaller-than"],
+        &["status", "--larger-than=1M", "--smaller-than=1M"],
+        &["rm", "--larger-than=-5", "x"],
+    ] {
+        assert_eq!(sb.run(bad).status.code(), Some(2), "{bad:?}");
+    }
+}
+
+#[test]
 fn restore_cwd_only_skips_items_outside_cwd() {
     let sb = Sandbox::new("restore-cwd");
     let in_work = sb.touch("local.txt");

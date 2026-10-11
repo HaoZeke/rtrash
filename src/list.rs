@@ -18,6 +18,10 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
       --older-than=DAYS only items trashed more than DAYS days ago
                      (same cutoff model as `empty DAYS`)
       --newer-than=DAYS only items trashed within the last DAYS days
+      --larger-than=SIZE  only items taking more than SIZE on disk
+      --smaller-than=SIZE only items taking less than SIZE on disk
+                     (SIZE as in `empty --max-size`: 500M, 1.5G, 64k;
+                     sizes as --size shows them; orphans included)
       --size            add each item's disk usage (payload plus its
                      .trashinfo, as status counts it)
       --sort=KEY        order by date (default), size, name (file name)
@@ -156,6 +160,71 @@ pub fn filter_age(
         .collect()
 }
 
+/// `--larger-than` and `--smaller-than`: bounds, both exclusive, on an
+/// item's disk usage (payload plus `.trashinfo`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SizeFilter {
+    pub larger_than: Option<u64>,
+    pub smaller_than: Option<u64>,
+}
+
+impl SizeFilter {
+    pub fn is_set(&self) -> bool {
+        self.larger_than.is_some() || self.smaller_than.is_some()
+    }
+
+    /// Whether an item of `bytes` passes both bounds.
+    pub fn keeps(&self, bytes: u64) -> bool {
+        self.larger_than.map_or(true, |n| bytes > n)
+            && self.smaller_than.map_or(true, |n| bytes < n)
+    }
+
+    /// Take `--larger-than` or `--smaller-than` at `args[*i]`, as
+    /// `--flag=SIZE` or `--flag SIZE` (then `*i` moves past the value).
+    /// `None` when `args[*i]` is neither flag.
+    pub fn take(&mut self, args: &[String], i: &mut usize) -> Option<Result<(), String>> {
+        let arg = args[*i].as_str();
+        let (name, inline) = match arg.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (arg, None),
+        };
+        let slot = match name {
+            "--larger-than" => &mut self.larger_than,
+            "--smaller-than" => &mut self.smaller_than,
+            _ => return None,
+        };
+        let value = match inline {
+            Some(v) => v,
+            None => {
+                *i += 1;
+                match args.get(*i) {
+                    Some(v) => v.as_str(),
+                    None => return Some(Err(format!("{name} requires SIZE"))),
+                }
+            }
+        };
+        Some(match crate::retention::parse_size(value) {
+            Some(n) => {
+                *slot = Some(n);
+                Ok(())
+            }
+            None => Err(format!(
+                "invalid SIZE '{value}' for {name} (e.g. 500M, 1.5G)"
+            )),
+        })
+    }
+
+    /// Bounds that no item can pass are a usage error.
+    pub fn check(&self) -> Result<(), String> {
+        match (self.larger_than, self.smaller_than) {
+            (Some(l), Some(s)) if l.saturating_add(1) >= s => Err(format!(
+                "--larger-than={l} and --smaller-than={s} leave no size between them"
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
 fn parse_nonneg_days(s: &str) -> Result<i64, String> {
     s.parse::<i64>()
         .map_err(|_| format!("invalid DAYS '{s}'"))
@@ -244,8 +313,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
     let mut reverse = cfg.bool("list", "reverse").unwrap_or(false);
+    let mut size_filter = SizeFilter::default();
     let mut i = 0usize;
     while i < args.len() {
+        match size_filter.take(args, &mut i) {
+            Some(Ok(())) => {
+                i += 1;
+                continue;
+            }
+            Some(Err(e)) => {
+                eprintln!("{prog}: {e}");
+                return 2;
+            }
+            None => {}
+        }
         let arg = &args[i];
         match arg.as_str() {
             "--home-only" => home_only = true,
@@ -312,6 +393,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         i += 1;
     }
+    if let Err(e) = size_filter.check() {
+        eprintln!("{prog}: {e}");
+        return 2;
+    }
     if all_users && (home_only || !trash_dirs.is_empty()) {
         eprintln!("{prog}: --all-users takes no --home-only or --trash-dir");
         return 2;
@@ -328,12 +413,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut entries = filter_age(collect(&dirs), older_than, newer_than);
     // Orphans have no date, so only an unfiltered listing shows them; they
     // come last, after every recorded item.
-    let recorded = entries.len();
+    let mut recorded = entries.len();
     if older_than.is_none() && newer_than.is_none() {
         entries.extend(orphans(&dirs));
     }
     let with_size = with_size || sort == SortKey::Size;
-    let sizes = with_size.then(|| entry_sizes(&dirs, &entries));
+    let mut sizes = (with_size || size_filter.is_set()).then(|| entry_sizes(&dirs, &entries));
+    if let (true, Some(all)) = (size_filter.is_set(), sizes.as_mut()) {
+        let keep: Vec<bool> = all.iter().map(|&n| size_filter.keeps(n)).collect();
+        recorded = keep[..recorded].iter().filter(|&&k| k).count();
+        let mut k = keep.iter();
+        entries.retain(|_| *k.next().unwrap_or(&false));
+        let mut k = keep.iter();
+        all.retain(|_| *k.next().unwrap_or(&false));
+    }
+    let sizes = sizes.filter(|_| with_size);
     let mut order = sorted_order(&entries, sizes.as_deref(), sort, reverse);
     if sort == SortKey::Date {
         // Keep orphans after the recorded items whichever way dates run.
@@ -472,6 +566,46 @@ pub fn sorted_order(
 
 #[cfg(test)]
 mod tests {
+    use super::SizeFilter;
+
+    #[test]
+    fn size_filters_parse_both_forms_and_bound_strictly() {
+        let args: Vec<String> = [
+            "--larger-than=1K",
+            "--smaller-than",
+            "2k",
+            "--size",
+            "--larger-than",
+        ]
+        .map(String::from)
+        .to_vec();
+        let mut f = SizeFilter::default();
+        let mut i = 0;
+        assert_eq!(f.take(&args, &mut i), Some(Ok(())));
+        i += 1;
+        assert_eq!(f.take(&args, &mut i), Some(Ok(())));
+        assert_eq!(i, 2);
+        i += 1;
+        assert_eq!(f.take(&args, &mut i), None);
+        i += 1;
+        assert!(f.take(&args, &mut i).unwrap().is_err());
+        assert_eq!(
+            f,
+            SizeFilter {
+                larger_than: Some(1024),
+                smaller_than: Some(2048)
+            }
+        );
+        assert!(!f.keeps(1024) && f.keeps(1025) && f.keeps(2047) && !f.keeps(2048));
+        assert!(f.check().is_ok());
+        let none = SizeFilter {
+            larger_than: Some(5),
+            smaller_than: Some(6),
+        };
+        assert!(none.check().is_err());
+        assert!(SizeFilter::default().keeps(0) && !SizeFilter::default().is_set());
+    }
+
     use super::*;
     use crate::trashdir::TrashDir;
     use std::path::PathBuf;

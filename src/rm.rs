@@ -22,6 +22,9 @@ matching *trash* entries — not a synonym for put.
       --home-only  only the home trash (skip volume trash)
       --older-than=DAYS only match items trashed more than DAYS days ago
       --newer-than=DAYS only match items trashed within the last DAYS days
+      --larger-than=SIZE  only match items taking more than SIZE on disk
+      --smaller-than=SIZE only match items taking less than SIZE on disk
+                     (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
   -n, --dry-run    list matches and reclaimable size; do not delete
   -f, --force      allow mass patterns that match everything (e.g. '*')
   -v, --verbose    print each permanently removed original path
@@ -58,9 +61,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut newer_than: Option<i64> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut patterns: Vec<String> = Vec::new();
+    let mut size = list::SizeFilter::default();
 
     let mut i = 0usize;
     while i < args.len() {
+        match size.take(args, &mut i) {
+            Some(Ok(())) => {
+                i += 1;
+                continue;
+            }
+            Some(Err(e)) => {
+                eprintln!("{prog}: {e}");
+                return 2;
+            }
+            None => {}
+        }
         let arg = &args[i];
         match arg.as_str() {
             "-v" | "--verbose" => verbose = true,
@@ -123,6 +138,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         i += 1;
     }
 
+    if let Err(e) = size.check() {
+        eprintln!("{prog}: {e}");
+        return 2;
+    }
     if patterns.is_empty() {
         eprintln!("{prog}: missing operand");
         eprintln!("Try '{prog} --help' for more information.");
@@ -182,6 +201,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
         let sz =
             crate::fastdelete::disk_usage(&payload) + crate::fastdelete::disk_usage(&info_path);
+        if !size.keeps(sz) {
+            continue;
+        }
         if dry_run {
             bytes = bytes.saturating_add(sz);
             if !json {

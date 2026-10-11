@@ -68,6 +68,8 @@ for sub in list status
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l trash-dir -d 'only this trash directory' -r
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l older-than -d 'only items older than DAYS days' -r
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l newer-than -d 'only items within last DAYS days' -r
+    complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l larger-than -d 'only items over SIZE on disk' -r
+    complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l smaller-than -d 'only items under SIZE on disk' -r
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l json -d 'JSON output'
 end
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l size -d 'add each item size'
@@ -161,6 +163,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l trash-d
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l home-only -d 'only the home trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l older-than -d 'only match items older than DAYS days' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l newer-than -d 'only match items within last DAYS days' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l larger-than -d 'only match items over SIZE on disk' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l smaller-than -d 'only match items under SIZE on disk' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s n -l dry-run -d 'list matches and reclaimable size; do not delete'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s f -l force -d 'allow mass patterns that match everything'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s v -l verbose -d 'print each permanently removed original path'
@@ -219,6 +223,8 @@ complete -c trash-list -l home-only
 complete -c trash-list -l trash-dir -r
 complete -c trash-list -l older-than -r
 complete -c trash-list -l newer-than -r
+complete -c trash-list -l larger-than -r
+complete -c trash-list -l smaller-than -r
 complete -c trash-list -l json
 complete -c trash-list -l size
 complete -c trash-list -l sort -x -a 'date size name path'
@@ -249,6 +255,8 @@ complete -c trash-rm -l trash-dir -r
 complete -c trash-rm -l home-only
 complete -c trash-rm -l older-than -r
 complete -c trash-rm -l newer-than -r
+complete -c trash-rm -l larger-than -r
+complete -c trash-rm -l smaller-than -r
 complete -c trash-rm -l json
 complete -c trash-rm -s n -l dry-run
 complete -c trash-rm -s f -l force

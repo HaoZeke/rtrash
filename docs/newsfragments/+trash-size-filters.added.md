@@ -1,0 +1,1 @@
+`rtrash list`, `status` and `rm` take `--larger-than=N` and `--smaller-than=N`, with N a size such as `500M` or `1.5G`. They keep only items that take more or less than N on disk, as `list --size` measures them, so `rtrash rm --larger-than=1G --force '*'` drops only the big items.
