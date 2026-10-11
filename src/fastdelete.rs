@@ -252,70 +252,190 @@ fn owned_dir_short_of_rwx(st: &libc::stat) -> bool {
         && (st.st_mode as libc::mode_t & 0o700) != 0o700
 }
 
+/// Owned directory fds one walk keeps open. Deeper frames close their
+/// shallowest ancestors and reopen them through `..` on the way back up.
+const FD_BUDGET: usize = 16;
+
+/// One directory on the walk's explicit stack.
+struct Frame {
+    /// Open fd, or `None` for the root (borrowed) and for a frame closed
+    /// to stay within [`FD_BUDGET`].
+    fd: Option<OwnedFd>,
+    /// Name inside the parent frame (empty for the root).
+    name: OsString,
+    /// Device and inode, recorded when the fd is closed, so a reopen
+    /// through `..` can prove it found the same directory.
+    id: (u64, u64),
+    /// Entries still to remove, last first.
+    entries: Vec<DirEnt>,
+    depth: u32,
+    opened_up: bool,
+    first: Option<io::Error>,
+}
+
+/// `root` joined with the names of `stack[1..=upto]`. Built only for
+/// error messages, so path memory stays linear in depth.
+fn frame_path(root: &Path, stack: &[Frame], upto: usize) -> std::path::PathBuf {
+    let mut p = root.to_path_buf();
+    for f in &stack[1..=upto] {
+        p.push(&f.name);
+    }
+    p
+}
+
+/// Remove everything inside `dirfd` without recursion: the walk keeps
+/// its own stack, holds at most [`FD_BUDGET`] fds of its own, and
+/// handles trees of any depth.
 fn remove_dirfd_contents(dirfd: RawFd, path: &Path, depth: u32) -> io::Result<()> {
-    let entries = read_dirfd_entries(dirfd).map_err(|e| at(path, e))?;
     // Nested levels stay sequential: parallelising every directory oversubscribes
     // rayon when the top-level full-empty wipe is already highly parallel.
     // (Top-level `wipe_children_parallel` is the parallel boundary.)
-    let _ = (depth, PAR_SIBLING_THRESHOLD, PAR_MAX_DEPTH);
-    // Keep going past a failure so everything removable goes; report the
-    // first failure once the directory is done.
-    let mut first: Option<io::Error> = None;
-    let mut opened_up = false;
-    for e in &entries {
-        let mut r = remove_entry(dirfd, path, e, depth);
-        // Unlinking needs write and search on this directory: when the
-        // user owns it, grant them once and retry.
-        if !opened_up && r.as_ref().is_err_and(|e| os_code(e) == Some(libc::EACCES)) {
-            opened_up = true;
-            if own_dirfd_opened_up(dirfd) {
-                r = remove_entry(dirfd, path, e, depth);
+    let _ = (PAR_SIBLING_THRESHOLD, PAR_MAX_DEPTH);
+    let mut entries = read_dirfd_entries(dirfd).map_err(|e| at(path, e))?;
+    entries.reverse();
+    remove_listed(dirfd, path, depth, entries)
+}
+
+/// [`remove_dirfd_contents`] for a directory already listed, with
+/// `entries` in reverse order.
+fn remove_listed(dirfd: RawFd, path: &Path, depth: u32, entries: Vec<DirEnt>) -> io::Result<()> {
+    let mut stack = vec![Frame {
+        fd: None,
+        name: OsString::new(),
+        id: (0, 0),
+        entries,
+        depth,
+        opened_up: false,
+        first: None,
+    }];
+    // Frames 1..lo have closed fds; frames lo.. are open.
+    let mut lo = 1;
+    let fd_at = |stack: &[Frame], i: usize| -> RawFd {
+        if i == 0 {
+            dirfd
+        } else {
+            stack[i].fd.as_ref().map_or(-1, |f| f.as_raw_fd())
+        }
+    };
+    loop {
+        let top = stack.len() - 1;
+        let fd = fd_at(&stack, top);
+        if let Some(ent) = stack[top].entries.pop() {
+            let d = stack[top].depth;
+            let opened = stack[top].opened_up;
+            let (r, opened_now) = {
+                let child = || frame_path(path, &stack, top).join(&ent.name);
+                let mut r = remove_or_open(fd, &ent, d, &child);
+                // Unlinking needs write and search on this directory: when
+                // the user owns it, grant them once and retry.
+                let retry = !opened && r.as_ref().is_err_and(|e| os_code(e) == Some(libc::EACCES));
+                if retry && own_dirfd_opened_up(fd) {
+                    r = remove_or_open(fd, &ent, d, &child);
+                }
+                (r, retry)
+            };
+            if opened_now {
+                stack[top].opened_up = true;
+            }
+            match r {
+                Ok(None) => {}
+                Ok(Some((cfd, entries))) => {
+                    stack.push(Frame {
+                        fd: Some(cfd),
+                        name: ent.name,
+                        id: (0, 0),
+                        entries,
+                        depth: d.saturating_add(1),
+                        opened_up: false,
+                        first: None,
+                    });
+                    if stack.len() - lo > FD_BUDGET {
+                        let f = &mut stack[lo];
+                        if let Some(old) = f.fd.take() {
+                            f.id = fd_id(old.as_raw_fd()).map_err(|e| at(path, e))?;
+                        }
+                        lo += 1;
+                    }
+                }
+                Err(e) => {
+                    stack[top].first.get_or_insert(e);
+                }
+            }
+            continue;
+        }
+        // This directory is empty now (or kept something): leave it.
+        if top == 0 {
+            return stack.pop().and_then(|f| f.first).map_or(Ok(()), Err);
+        }
+        let done = stack.pop().expect("non-root frame");
+        let p = top - 1;
+        if p >= 1 && stack[p].fd.is_none() {
+            let cfd = done.fd.as_ref().map_or(-1, |f| f.as_raw_fd());
+            let back =
+                reopen_parent(cfd, stack[p].id).map_err(|e| at(&frame_path(path, &stack, p), e))?;
+            stack[p].fd = Some(back);
+            lo = p;
+        }
+        lo = lo.min(stack.len());
+        drop(done.fd);
+        if let Some(e) = done.first {
+            stack[p].first.get_or_insert(e);
+            continue;
+        }
+        let pfd = fd_at(&stack, p);
+        let name_c = CString::new(done.name.as_bytes())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let mut r = rmdir_at(pfd, &name_c);
+        if !stack[p].opened_up
+            && r.as_ref()
+                .is_err_and(|e| e.raw_os_error() == Some(libc::EACCES))
+        {
+            stack[p].opened_up = true;
+            if own_dirfd_opened_up(pfd) {
+                r = rmdir_at(pfd, &name_c);
             }
         }
-        if let Err(err) = r {
-            first.get_or_insert(err);
+        if let Err(e) = r {
+            let e = at(&frame_path(path, &stack, p).join(&done.name), e);
+            stack[p].first.get_or_insert(e);
         }
     }
-    first.map_or(Ok(()), Err)
 }
 
-fn remove_entry(dirfd: RawFd, path: &Path, ent: &DirEnt, depth: u32) -> io::Result<()> {
-    let name_c = CString::new(ent.name.as_bytes())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let child = || path.join(&ent.name);
-    #[cfg(test)]
-    if tests::fails(&ent.name) {
-        return Err(at(&child(), io::Error::from_raw_os_error(libc::EPERM)));
-    }
-
-    // Fast path: known non-directories — single unlinkat, no openat probe.
-    match ent.dtype {
-        DT_REG | DT_LNK | DT_FIFO | DT_SOCK | DT_CHR | DT_BLK => {
-            return unlinkat_file(dirfd, &name_c).map_err(|e| at(&child(), e));
-        }
-        DT_DIR => return remove_dir_child(dirfd, path, &ent.name, &name_c, depth),
-        DT_UNKNOWN => {}
-        _ => {}
-    }
-
-    // DT_UNKNOWN or exotic: is it a directory? lstat says without opening.
+/// Device and inode of an open fd.
+fn fd_id(fd: RawFd) -> io::Result<(u64, u64)> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::fstatat(dirfd, name_c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
-    if rc != 0 {
-        let err = io::Error::last_os_error();
-        return match err.raw_os_error() {
-            Some(libc::ENOENT) => Ok(()),
-            _ => Err(at(&child(), err)),
-        };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(io::Error::last_os_error());
     }
-    if (st.st_mode as libc::mode_t & libc::S_IFMT) == libc::S_IFDIR {
-        return remove_dir_child(dirfd, path, &ent.name, &name_c, depth);
-    }
-    unlinkat_file(dirfd, &name_c).map_err(|e| at(&child(), e))
+    Ok((st.st_dev as u64, st.st_ino as u64))
 }
 
-fn unlinkat_file(dirfd: RawFd, name_c: &CString) -> io::Result<()> {
-    let rc = unsafe { libc::unlinkat(dirfd, name_c.as_ptr(), 0) };
+/// Open the parent of `child_fd` through `..` and check it is the
+/// directory recorded as `id`, so a tree moved during the walk is never
+/// mistaken for its old parent.
+fn reopen_parent(child_fd: RawFd, id: (u64, u64)) -> io::Result<OwnedFd> {
+    let fd = unsafe {
+        libc::openat(
+            child_fd,
+            c"..".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    if fd_id(fd.as_raw_fd())? != id {
+        return Err(io::Error::other(
+            "the directory moved while it was being removed",
+        ));
+    }
+    Ok(fd)
+}
+
+fn rmdir_at(dirfd: RawFd, name_c: &CStr) -> io::Result<()> {
+    let rc = unsafe { libc::unlinkat(dirfd, name_c.as_ptr(), libc::AT_REMOVEDIR) };
     if rc != 0 {
         let e = io::Error::last_os_error();
         if e.kind() != io::ErrorKind::NotFound {
@@ -325,25 +445,76 @@ fn unlinkat_file(dirfd: RawFd, name_c: &CString) -> io::Result<()> {
     Ok(())
 }
 
-fn remove_dir_child(
+/// Remove `ent` from `dirfd` when it is not a directory. A directory is
+/// opened and listed instead, for the caller to empty and then remove.
+fn remove_or_open(
     dirfd: RawFd,
-    path: &Path,
-    name: &OsStr,
-    name_c: &CString,
+    ent: &DirEnt,
     depth: u32,
-) -> io::Result<()> {
-    let child = path.join(name);
+    child: &dyn Fn() -> std::path::PathBuf,
+) -> io::Result<Option<(OwnedFd, Vec<DirEnt>)>> {
+    let name_c = CString::new(ent.name.as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    #[cfg(test)]
+    if tests::fails(&ent.name) {
+        return Err(at(&child(), io::Error::from_raw_os_error(libc::EPERM)));
+    }
+    if !is_dir_entry(dirfd, ent, &name_c).map_err(|e| at(&child(), e))? {
+        return unlinkat_file(dirfd, &name_c)
+            .map(|_| None)
+            .map_err(|e| at(&child(), e));
+    }
+    let Some(fd) = open_child_dir(dirfd, &ent.name, &name_c, depth, child)? else {
+        return Ok(None);
+    };
+    let mut entries = read_dirfd_entries(fd.as_raw_fd()).map_err(|e| at(&child(), e))?;
+    entries.reverse();
+    Ok(Some((fd, entries)))
+}
+
+/// Whether `ent` is a directory, from `d_type` or, when that is unknown,
+/// from an lstat. A name already gone counts as a non-directory, whose
+/// unlink then succeeds.
+fn is_dir_entry(dirfd: RawFd, ent: &DirEnt, name_c: &CStr) -> io::Result<bool> {
+    match ent.dtype {
+        DT_REG | DT_LNK | DT_FIFO | DT_SOCK | DT_CHR | DT_BLK => return Ok(false),
+        DT_DIR => return Ok(true),
+        DT_UNKNOWN => {}
+        _ => {}
+    }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::fstatat(dirfd, name_c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+    if rc != 0 {
+        let err = io::Error::last_os_error();
+        return match err.raw_os_error() {
+            Some(libc::ENOENT) => Ok(false),
+            _ => Err(err),
+        };
+    }
+    Ok((st.st_mode as libc::mode_t & libc::S_IFMT) == libc::S_IFDIR)
+}
+
+/// Open the directory `name` under `dirfd`. `None` means nothing is
+/// left to do: it was a btrfs subvolume and is gone, it vanished, or it
+/// turned into a non-directory and was unlinked.
+fn open_child_dir(
+    dirfd: RawFd,
+    name: &OsStr,
+    name_c: &CStr,
+    depth: u32,
+    child: &dyn Fn() -> std::path::PathBuf,
+) -> io::Result<Option<OwnedFd>> {
     // Subvolume destroy only at the first level of a tree (cheap for the common
     // non-subvolume case: one failed/skipped ioctl path per top-level payload,
     // not per nested directory).
-    if depth == 0 && try_btrfs_subvol_at(dirfd, name).map_err(|e| at(&child, e))? {
-        return Ok(());
+    if depth == 0 && try_btrfs_subvol_at(dirfd, name).map_err(|e| at(&child(), e))? {
+        return Ok(None);
     }
     let open = || unsafe {
         libc::openat(
             dirfd,
             name_c.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
     let mut child_fd = open();
@@ -357,23 +528,38 @@ fn remove_dir_child(
     if child_fd < 0 {
         let e = io::Error::last_os_error();
         if e.kind() == io::ErrorKind::NotFound {
-            return Ok(());
+            return Ok(None);
         }
         // Race: became a non-dir.
         if e.raw_os_error() == Some(libc::ENOTDIR) || e.raw_os_error() == Some(libc::ELOOP) {
-            return unlinkat_file(dirfd, name_c).map_err(|e| at(&child, e));
+            return unlinkat_file(dirfd, &CString::from(name_c))
+                .map(|_| None)
+                .map_err(|e| at(&child(), e));
         }
-        return Err(at(&child, e));
+        return Err(at(&child(), e));
     }
-    let child_fd = unsafe { OwnedFd::from_raw_fd(child_fd) };
-    let inner = remove_dirfd_contents(child_fd.as_raw_fd(), &child, depth.saturating_add(1));
-    drop(child_fd);
-    inner?;
-    let rc = unsafe { libc::unlinkat(dirfd, name_c.as_ptr(), libc::AT_REMOVEDIR) };
+    Ok(Some(unsafe { OwnedFd::from_raw_fd(child_fd) }))
+}
+
+/// Remove one top-level entry of `dirfd` (a file, or a whole tree).
+fn remove_entry(dirfd: RawFd, path: &Path, ent: &DirEnt, depth: u32) -> io::Result<()> {
+    let child = || path.join(&ent.name);
+    let Some((fd, entries)) = remove_or_open(dirfd, ent, depth, &child)? else {
+        return Ok(());
+    };
+    let name_c = CString::new(ent.name.as_bytes())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    remove_listed(fd.as_raw_fd(), &child(), depth.saturating_add(1), entries)?;
+    drop(fd);
+    rmdir_at(dirfd, &name_c).map_err(|e| at(&child(), e))
+}
+
+fn unlinkat_file(dirfd: RawFd, name_c: &CStr) -> io::Result<()> {
+    let rc = unsafe { libc::unlinkat(dirfd, name_c.as_ptr(), 0) };
     if rc != 0 {
         let e = io::Error::last_os_error();
         if e.kind() != io::ErrorKind::NotFound {
-            return Err(at(&child, e));
+            return Err(e);
         }
     }
     Ok(())
@@ -704,6 +890,88 @@ mod tests {
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// A chain of `levels` directories named `d` under `root`, with a
+    /// file at every level in `files` and the level `locked` left at
+    /// mode 0500 once the chain is built. Built with `mkdirat`, since its paths pass `PATH_MAX`.
+    fn deep_chain(root: &Path, levels: usize, files: &[usize], locked: usize) {
+        let c = CString::new(root.as_os_str().as_bytes()).unwrap();
+        // SAFETY: plain descriptor calls on NUL-terminated names; each
+        // descriptor is closed once the next one is open.
+        unsafe {
+            let mut fd = libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+            assert!(fd >= 0);
+            let mut lock = -1;
+            for i in 0..levels {
+                assert_eq!(libc::mkdirat(fd, c"d".as_ptr(), 0o755), 0);
+                let next = libc::openat(fd, c"d".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+                assert!(next >= 0);
+                libc::close(fd);
+                fd = next;
+                if files.contains(&i) {
+                    let f = libc::openat(fd, c"f".as_ptr(), libc::O_WRONLY | libc::O_CREAT, 0o644);
+                    assert!(f >= 0);
+                    libc::close(f);
+                }
+                if i == locked {
+                    lock = libc::dup(fd);
+                }
+            }
+            libc::close(fd);
+            if lock >= 0 {
+                assert_eq!(libc::fchmod(lock, 0o500), 0);
+                libc::close(lock);
+            }
+        }
+    }
+
+    #[test]
+    fn deep_trees_go_without_recursion_or_an_fd_per_level() {
+        // 20000 levels: paths pass PATH_MAX, and a frame per level would
+        // overflow a 2 MiB rayon stack and need 20000 fds.
+        let root = tmp_root("deep");
+        let one = root.join("one");
+        fs::create_dir(&one).unwrap();
+        deep_chain(&one, 20_000, &[0, 99, 15_000, 19_999], 15_000);
+        remove_path(&one).unwrap();
+        assert!(!one.exists());
+        // The parallel wipe runs the same walk on rayon worker threads.
+        let files = root.join("files");
+        fs::create_dir(&files).unwrap();
+        for n in ["a", "b"] {
+            fs::create_dir(files.join(n)).unwrap();
+            deep_chain(&files.join(n), 20_000, &[19_999], usize::MAX);
+        }
+        let w = wipe_children_parallel(&files).unwrap();
+        assert!(w.failed.is_empty(), "{:?}", w.failed);
+        assert_eq!(w.removed, 2);
+        assert!(fs::read_dir(&files).unwrap().next().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_reopened_parent_must_be_the_same_directory() {
+        let root = tmp_root("reopen");
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::create_dir(root.join("c")).unwrap();
+        let open = |p: &Path| {
+            let c = CString::new(p.as_os_str().as_bytes()).unwrap();
+            let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+            assert!(fd >= 0);
+            unsafe { OwnedFd::from_raw_fd(fd) }
+        };
+        let a = fd_id(open(&root.join("a")).as_raw_fd()).unwrap();
+        let b = open(&root.join("a/b"));
+        assert_eq!(
+            fd_id(reopen_parent(b.as_raw_fd(), a).unwrap().as_raw_fd()).unwrap(),
+            a
+        );
+        // Moved under another parent: `..` now leads elsewhere.
+        fs::rename(root.join("a/b"), root.join("c/b")).unwrap();
+        let err = reopen_parent(b.as_raw_fd(), a).unwrap_err();
+        assert!(err.to_string().contains("moved"), "{err}");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

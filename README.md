@@ -509,6 +509,7 @@ These numbers are **not continuously re-verified in CI** and will vary by filesy
 
 Full empty was further optimized for large trashcans: no pre-scan when not verbose, `d_type`-fast `unlinkat` for regular files, and **serial** wipes of the `files/` then `info/` roots with **parallel children** inside each.
 Emptying uses an in-process bulk tree delete (readdir/`unlinkat` walk inspired by empty-source `rsync --delete`, not a shell-out to rsync).
+The walk keeps its own stack and at most 16 open directories, so trees of any depth go.
 On btrfs, if a trash payload is a real subvolume root, empty uses `BTRFS_IOC_SNAP_DESTROY` instead of walking the tree.
 Interactive `put` mainly wins on process startup versus trash-cli.
 
