@@ -202,6 +202,8 @@ struct App {
     info: Vec<String>,
     /// Name filter on the current view (`/`); empty shows every row.
     filter: String,
+    /// Whether `.` hides names that start with a dot, in every view.
+    hide_dots: bool,
     /// Paths `p` prints on stdout once the explorer has closed.
     print_on_exit: Vec<PathBuf>,
     /// Text `y` sends to the terminal clipboard on the next draw.
@@ -370,7 +372,7 @@ fn adjust_chain(
             break;
         };
         if let Some(v) = cache.get_mut(&parent) {
-            if let Some(row) = v.rows.iter_mut().find(|r| r.path == d) {
+            if let Some(row) = v.rows.iter_mut().chain(&mut v.stash).find(|r| r.path == d) {
                 apply(&mut row.disk, disk);
                 apply(&mut row.apparent, apparent);
             }
@@ -414,6 +416,7 @@ impl App {
             size_key,
             info: Vec::new(),
             filter: String::new(),
+            hide_dots: false,
             print_on_exit: Vec::new(),
             clipboard: None,
             prog: prog.to_string(),
@@ -526,7 +529,7 @@ impl App {
         } else {
             self.cache.insert(dir.clone(), fresh);
         }
-        if on_screen && !self.filter.is_empty() {
+        if on_screen && self.narrowed() {
             self.refilter();
         }
         if on_screen {
@@ -647,6 +650,10 @@ impl App {
             }
         }
         self.cur = dir;
+        // A view left while `.` hid its dot names may need them back.
+        if self.hide_dots || !self.view().stash.is_empty() {
+            self.refilter();
+        }
         self.sel.clear();
         let at = cursor_on
             .and_then(|p| self.rows().iter().position(|r| r.path == p))
@@ -710,7 +717,7 @@ impl App {
             }
         };
         self.apply_fresh(&cur, fresh);
-        if !self.filter.is_empty() {
+        if self.narrowed() {
             self.refilter();
         }
         self.sel.clear();
@@ -747,7 +754,12 @@ impl App {
                 // Restore the view's own totals; the chain then fixes the rest.
                 adjust_chain(&mut self.cache, &self.root, parent, d, a, grow);
                 if let Some(pv) = self.cache.get_mut(parent) {
-                    if let Some(row) = pv.rows.iter_mut().find(|r| r.path == cur) {
+                    if let Some(row) = pv
+                        .rows
+                        .iter_mut()
+                        .chain(&mut pv.stash)
+                        .find(|r| r.path == cur)
+                    {
                         row.disk = fresh.disk;
                         row.apparent = fresh.apparent;
                     }
@@ -871,7 +883,7 @@ impl App {
             }
             adjust_chain(&mut self.cache, &self.root, &parent, d, a, true);
         }
-        if !self.filter.is_empty() {
+        if self.narrowed() {
             self.refilter();
         }
         let at = self.list_state.selected().unwrap_or(0);
@@ -948,9 +960,27 @@ impl App {
         self.select(at);
     }
 
+    /// Whether the filter or `.` keeps some rows of a view out of sight.
+    fn narrowed(&self) -> bool {
+        self.hide_dots || !self.filter.is_empty()
+    }
+
+    /// Hide names that start with a dot, or show them again.
+    fn toggle_dots(&mut self) {
+        self.hide_dots = !self.hide_dots;
+        self.refilter();
+        let hidden = self.view().stash.len();
+        self.status = if self.hide_dots {
+            format!("hiding names that start with a dot ({hidden} here) · . shows them")
+        } else {
+            "showing names that start with a dot".into()
+        };
+    }
+
     /// Show only the rows of the current view whose name matches the
-    /// filter; the rest wait in the view's stash. The cursor and marks
-    /// stay on their rows when those stay visible.
+    /// filter, leaving out dot names while `.` hides them; the rest wait
+    /// in the view's stash. The cursor and marks stay on their rows when
+    /// those stay visible.
     fn refilter(&mut self) {
         let keep = self.selected().map(|r| r.path.clone());
         let marked: Vec<PathBuf> = self
@@ -960,14 +990,16 @@ impl App {
             .filter_map(|i| self.rows().get(i).map(|r| r.path.clone()))
             .collect();
         let pat = self.filter.to_lowercase();
+        let hide = self.hide_dots;
         let sorting = self.sorting;
         let Some(v) = self.cache.get_mut(&self.cur) else {
             return;
         };
         let mut all = std::mem::take(&mut v.rows);
         all.append(&mut v.stash);
-        let (shown, hidden): (Vec<Item>, Vec<Item>) =
-            all.into_iter().partition(|it| name_matches(it, &pat));
+        let (shown, hidden): (Vec<Item>, Vec<Item>) = all
+            .into_iter()
+            .partition(|it| name_matches(it, &pat) && !(hide && is_dot_name(it)));
         v.rows = shown;
         v.stash = hidden;
         sort_rows(&mut v.rows, sorting);
@@ -1132,6 +1164,7 @@ impl App {
                         KeyCode::Char('i') => return self.show_info(),
                         KeyCode::Char('p') => return self.print_and_quit(),
                         KeyCode::Char('y') => return self.copy_paths(),
+                        KeyCode::Char('.') => return self.toggle_dots(),
                         _ => {}
                     }
                 }
@@ -1178,6 +1211,13 @@ impl App {
             }
         }
     }
+}
+
+/// Whether the file name of `it` starts with a dot.
+fn is_dot_name(it: &Item) -> bool {
+    it.path
+        .file_name()
+        .is_some_and(|n| n.as_encoded_bytes().first() == Some(&b'.'))
 }
 
 /// Whether the file name of `it` matches `pat` (lowercase): a glob when
@@ -1462,7 +1502,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     };
     // Sizes, counts and markers always fit; a long path gives way from
     // the left, as in ncdu.
-    let entries = if app.filter.is_empty() {
+    let entries = if !app.narrowed() {
         format!("{} entries", view.rows.len())
     } else {
         format!(
@@ -1498,7 +1538,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             Style::default().add_modifier(Modifier::BOLD),
         ))
         .block(Block::default().borders(Borders::ALL).title(format!(
-            "rtrash du{} · by {}{}{}",
+            "rtrash du{} · by {}{}{}{}",
             if app.read_only { " (read-only)" } else { "" },
             app.sorting.label(),
             if apparent && app.sorting.order != Order::Key(SortKey::Apparent) {
@@ -1510,6 +1550,11 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 String::new()
             } else {
                 format!(" · matching {:?}", app.filter)
+            },
+            if app.hide_dots {
+                " · dot names hidden"
+            } else {
+                ""
             }
         ))),
         chunks[0],
@@ -1596,6 +1641,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 "S — show apparent sizes instead of disk use, or back",
                 "i — details of the cursor row (any key closes them)",
                 "p — quit and print the marked paths (or the cursor row) · y — copy them",
+                ". — hide names that start with a dot, or show them again",
                 "/ — show only rows whose name matches (a part, or a glob with * ? [); Esc clears",
                 "! — git work at risk (dirty, unpushed or unknown)",
             ],
@@ -2171,6 +2217,62 @@ mod tests {
         assert_eq!(names(&a), ["big", "file", "small"]);
         a.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
         assert!(a.quit);
+    }
+
+    #[test]
+    fn dot_hides_dot_names_in_every_view_until_pressed_again() {
+        let t = tree("dots");
+        fs::write(t.0.join("w/.env"), b"x").unwrap();
+        fs::create_dir_all(t.0.join("w/big/.cache")).unwrap();
+        fs::write(t.0.join("w/big/.cache/c"), vec![3u8; 40_000]).unwrap();
+        let mut a = app(&t);
+        a.keys = Keymap::builtin();
+        // Sizes on disk differ by platform, so compare names in order.
+        let sorted = |a: &App| {
+            let mut n = names(a);
+            n.sort();
+            n
+        };
+        assert_eq!(sorted(&a), [".env", "big", "file", "small"]);
+        a.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
+        assert_eq!(sorted(&a), ["big", "file", "small"]);
+        assert!(a.status.contains("(1 here)"), "{}", a.status);
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("dot names hidden"), "{text}");
+        assert!(text.contains("3 of 4 entries"), "{text}");
+        // The setting follows into other views, and the filter works
+        // on what is left.
+        let big = names(&a).iter().position(|n| n == "big").unwrap();
+        a.select(big);
+        a.open();
+        assert_eq!(sorted(&a), ["inner", "side"]);
+        a.on_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        typ(&mut a, "c");
+        assert!(a.rows().is_empty());
+        a.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
+        assert_eq!(sorted(&a), [".cache", "inner", "side"]);
+        a.back();
+        assert_eq!(sorted(&a), [".env", "big", "file", "small"]);
+        // q quits at once; the dot setting is not a filter to clear.
+        a.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn hidden_rows_follow_size_changes_below_them() {
+        let t = tree("dotchain");
+        fs::create_dir_all(t.0.join("w/.cache")).unwrap();
+        fs::write(t.0.join("w/.cache/c"), vec![3u8; 40_000]).unwrap();
+        let mut a = app(&t);
+        a.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
+        let dot = a.cur.join(".cache");
+        let before = a.view().stash.iter().find(|r| r.path == dot).unwrap().disk;
+        let root = a.root.clone();
+        adjust_chain(&mut a.cache, &root, &dot, 1000, 1000, false);
+        let after = a.view().stash.iter().find(|r| r.path == dot).unwrap().disk;
+        assert_eq!(after, before - 1000);
     }
 
     #[test]

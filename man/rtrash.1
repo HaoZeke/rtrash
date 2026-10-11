@@ -839,6 +839,10 @@ marked, on stdout once the screen is restored, one per line.
 copies the same paths to the clipboard with the OSC 52 escape, which
 xterm, kitty, iTerm2, WezTerm and Windows Terminal accept, and tmux with
 .BR set\-clipboard " on" .
+.B .
+hides names that start with a dot, in this view and every view opened
+after it, until pressed again; the title then says
+.IR "dot names hidden" .
 .B /
 filters the current directory by name as you type: a part of the name,
 or a glob when the text holds
