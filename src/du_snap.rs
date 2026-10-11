@@ -287,6 +287,7 @@ pub fn to_report(snap: Snapshot, sort: SortKey, top: usize) -> Report {
         unreadable: 0,
         shared: None,
         partial: false,
+        types: Vec::new(),
     }
 }
 
@@ -532,6 +533,7 @@ mod tests {
             unreadable: 0,
             shared: None,
             partial: false,
+            types: Vec::new(),
         };
         let opts = snapshot_opts(ScanOpts {
             max_depth: Some(3),

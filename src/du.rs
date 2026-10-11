@@ -1,7 +1,7 @@
 //! `rtrash du`: find what to delete. Walks one or more paths in parallel and
 //! reports the largest directories and files, with on-disk and apparent sizes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
 use std::fs;
 use std::io::{self, Write};
@@ -56,6 +56,10 @@ directories appear as one `trash` row and are never printed by --print0.
                           directory gives way to the subdirectory that has
                           its newest change)
   -C, --count           add an ITEMS column (each hard-linked file once)
+      --types           list file types instead of directories and files:
+                          disk use, apparent size and file count per
+                          extension (case ignored; names with no extension
+                          make one row), first --top of them
       --unique          add a UNIQUE column: the bytes in extents no other
                           file shares, roughly what deleting a row frees on
                           btrfs, XFS or APFS (reflinks, clones, snapshots);
@@ -259,6 +263,8 @@ pub struct ScanOpts {
     pub unique: bool,
     /// Counters to update as the walk goes (one add per directory chunk).
     pub control: Option<Arc<ScanControl>>,
+    /// `--types`: total the files of each file type.
+    pub types: bool,
 }
 
 impl Default for ScanOpts {
@@ -277,6 +283,7 @@ impl Default for ScanOpts {
             filter: None,
             unique: false,
             control: None,
+            types: false,
         }
     }
 }
@@ -444,6 +451,65 @@ pub struct Report {
     /// The scan was stopped early: sizes are lower bounds and some
     /// directories are missing.
     pub partial: bool,
+    /// `--types` scans: every file type, in the order of the sort key.
+    pub types: Vec<TypeRow>,
+}
+
+/// The files of one type in a `--types` scan: names ending in `.EXT`
+/// (`ext` lowercase), or with no extension (`ext` empty).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypeRow {
+    pub ext: String,
+    pub disk: u64,
+    pub apparent: u64,
+    pub files: u64,
+}
+
+/// Disk use, apparent size and file count per type key.
+type TypeMap = HashMap<Vec<u8>, (u64, u64, u64)>;
+
+/// Extensions longer than this read as none, so hashes and version tails
+/// after a dot do not each make a type.
+const TYPE_MAX: usize = 12;
+
+/// The type key of a file name: the lowercase text after its last dot, or
+/// empty when there is none. A leading dot (`.bashrc`) starts no
+/// extension.
+pub fn type_key(name: &[u8]) -> Vec<u8> {
+    match name.iter().rposition(|&b| b == b'.') {
+        Some(i) if i > 0 && i + 1 < name.len() && name.len() - i - 1 <= TYPE_MAX => {
+            name[i + 1..].to_ascii_lowercase()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn add_type(map: &mut TypeMap, name: &[u8], apparent: u64, disk: u64) {
+    let e = map.entry(type_key(name)).or_default();
+    e.0 = e.0.saturating_add(disk);
+    e.1 = e.1.saturating_add(apparent);
+    e.2 += 1;
+}
+
+/// The rows of `map`, by `sort` (disk use unless apparent or items, which
+/// counts files), then by type.
+fn type_rows(map: TypeMap, sort: SortKey) -> Vec<TypeRow> {
+    let mut rows: Vec<TypeRow> = map
+        .into_iter()
+        .map(|(k, (disk, apparent, files))| TypeRow {
+            ext: String::from_utf8_lossy(&k).into_owned(),
+            disk,
+            apparent,
+            files,
+        })
+        .collect();
+    let key = |r: &TypeRow| match sort {
+        SortKey::Apparent => r.apparent,
+        SortKey::Items => r.files,
+        _ => r.disk,
+    };
+    rows.sort_by(|a, b| key(b).cmp(&key(a)).then_with(|| a.ext.cmp(&b.ext)));
+    rows
 }
 
 /// What the shared extents of a `--unique` scan add up to.
@@ -635,6 +701,8 @@ struct Ctx<'a> {
     shared: std::sync::Mutex<crate::du_extent::SharedSet>,
     /// A directory was skipped because the scan was asked to stop.
     cut: std::sync::atomic::AtomicBool,
+    /// File type totals (`--types`), merged once per directory chunk.
+    types: Mutex<TypeMap>,
 }
 
 impl Ctx<'_> {
@@ -848,6 +916,7 @@ fn stat_entries(
         }
         out
     };
+    let mut types = TypeMap::new();
     for i in range {
         let (name, kind) = entries.get(i);
         if filter.is_some()
@@ -892,6 +961,9 @@ fn stat_entries(
         };
         out.unique = out.unique.saturating_add(u);
         out.mtime = out.mtime.max(m.mtime);
+        if opts.types {
+            add_type(&mut types, name.to_bytes(), a, d);
+        }
         if list_files
             && m.is_file()
             && ctx.top_files.wants(ctx.key(a, d, 1, m.mtime))
@@ -910,7 +982,22 @@ fn stat_entries(
         c.files.fetch_add(out.files, Ordering::Relaxed);
         c.disk.fetch_add(out.disk, Ordering::Relaxed);
     }
+    if !types.is_empty() {
+        merge_types(
+            &mut ctx.types.lock().unwrap_or_else(|e| e.into_inner()),
+            types,
+        );
+    }
     out
+}
+
+fn merge_types(into: &mut TypeMap, from: TypeMap) {
+    for (k, (d, a, n)) in from {
+        let e = into.entry(k).or_default();
+        e.0 = e.0.saturating_add(d);
+        e.1 = e.1.saturating_add(a);
+        e.2 += n;
+    }
 }
 
 /// Walk one open directory. `listing` is false below `.git`, artefacts
@@ -1235,6 +1322,7 @@ pub fn scan_with(
     let mut unreadable = 0u64;
     let mut shared = crate::du_extent::SharedSet::default();
     let mut partial = false;
+    let mut types = TypeMap::new();
     for p in paths {
         let abs = absolute(p)?;
         let meta = du_fs::lstat(&abs)?;
@@ -1262,6 +1350,7 @@ pub fn scan_with(
             top_files: SharedTop::new(file_cap, opts.sort),
             shared: Default::default(),
             cut: Default::default(),
+            types: Default::default(),
         };
         let (apparent, disk, unique, artefact) = if meta.is_dir() {
             enter(
@@ -1278,6 +1367,11 @@ pub fn scan_with(
         } else {
             ctx.files.fetch_add(1, Ordering::Relaxed);
             let (a, d) = meta.sizes();
+            if opts.types {
+                let name = abs.file_name().unwrap_or_default();
+                let mut m = ctx.types.lock().unwrap_or_else(|e| e.into_inner());
+                add_type(&mut m, name.as_encoded_bytes(), a, d);
+            }
             let u = if opts.unique {
                 root_file_unique(&ctx, &abs, &meta, d)
             } else {
@@ -1317,6 +1411,10 @@ pub fn scan_with(
         if let Ok(s) = ctx.shared.into_inner() {
             shared.merge(s);
         }
+        merge_types(
+            &mut types,
+            ctx.types.into_inner().unwrap_or_else(|e| e.into_inner()),
+        );
     }
     Ok(Report {
         roots,
@@ -1328,6 +1426,7 @@ pub fn scan_with(
             referenced: shared.referenced,
         }),
         partial,
+        types: type_rows(types, opts.sort),
     })
 }
 
@@ -1611,14 +1710,72 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
         .unwrap_or_default();
     // Only a stopped scan says so; complete reports keep their old shape.
     let partial = if r.partial { ",\"partial\":true" } else { "" };
+    // Only a --types scan has the key.
+    let types = if r.types.is_empty() {
+        String::new()
+    } else {
+        let rows: Vec<String> = r
+            .types
+            .iter()
+            .map(|t| {
+                format!(
+                    "{{\"type\":\"{}\",\"disk\":{},\"apparent\":{},\"files\":{}}}",
+                    json_escape(&t.ext),
+                    t.disk,
+                    t.apparent,
+                    t.files
+                )
+            })
+            .collect();
+        format!(",\"types\":[{}]", rows.join(","))
+    };
     format!(
-        "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{}{shared}{partial},\"trash\":{}}}",
+        "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{}{shared}{partial}{types},\"trash\":{}}}",
         roots.join(","),
         dirs.join(","),
         files.join(","),
         r.unreadable,
         trash_json(trash)
     )
+}
+
+/// The `--types` table: the first `top` rows, then one line for the rest.
+fn print_types(title: &str, rows: &[TypeRow], top: usize) {
+    if rows.is_empty() {
+        return;
+    }
+    println!("{title}");
+    println!("{:>10}  {:>10}  {:>9}  TYPE", "DISK", "APPARENT", "FILES");
+    let line = |disk: u64, apparent: u64, files: u64, name: &str| {
+        println!(
+            "{:>10}  {:>10}  {:>9}  {name}",
+            format_bytes(disk),
+            format_bytes(apparent),
+            files
+        );
+    };
+    for t in rows.iter().take(top) {
+        let name = if t.ext.is_empty() {
+            "(no extension)".to_string()
+        } else {
+            format!(".{}", crate::util::term_text(&t.ext))
+        };
+        line(t.disk, t.apparent, t.files, &name);
+    }
+    let rest = &rows[top.min(rows.len())..];
+    if !rest.is_empty() {
+        let sum = |f: fn(&TypeRow) -> u64| rest.iter().map(f).fold(0u64, u64::saturating_add);
+        line(
+            sum(|t| t.disk),
+            sum(|t| t.apparent),
+            sum(|t| t.files),
+            &format!(
+                "({} more {})",
+                rest.len(),
+                if rest.len() == 1 { "type" } else { "types" }
+            ),
+        );
+    }
 }
 
 fn print_table(title: &str, items: &[Item], now: i64, count: bool) {
@@ -1962,6 +2119,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--print0" => print0 = true,
                 "--stacks" => stacks = true,
                 "--unique" => opts.unique = true,
+                "--types" => opts.types = true,
                 "--no-git" => use_git = false,
                 "--home-only" => home_only = true,
                 a if a.starts_with("--trash-dir=") => {
@@ -2046,6 +2204,18 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!(
             "{prog}: --unique adds a column to a live listing; it takes no -f, -o, --stacks or -i"
         );
+        return 2;
+    }
+    if opts.types
+        && (from_file.is_some() || output.is_some() || stacks || print0 || pick || interactive)
+    {
+        eprintln!(
+            "{prog}: --types lists file types from a live scan; it takes no -f, -o, --stacks, --print0, --pick or -i"
+        );
+        return 2;
+    }
+    if opts.types && opts.sort == SortKey::Mtime {
+        eprintln!("{prog}: --types ranks by disk use, --apparent size or --sort=items");
         return 2;
     }
     if stacks && !matches!(opts.sort, SortKey::Disk | SortKey::Apparent) {
@@ -2250,8 +2420,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     } else {
         let count = count || opts.sort == SortKey::Items;
-        print_table(&opts.sort.title("directories"), &report.dirs, now, count);
-        print_table(&opts.sort.title("files"), &report.files, now, count);
+        if opts.types {
+            print_types(&opts.sort.title("file types"), &report.types, opts.top);
+        } else {
+            print_table(&opts.sort.title("directories"), &report.dirs, now, count);
+            print_table(&opts.sort.title("files"), &report.files, now, count);
+        }
         for t in &report.roots {
             let kind = t.artefact.map(|k| format!(" ({k})")).unwrap_or_default();
             let links = if t.links > 0 {
@@ -2301,6 +2475,30 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn type_keys_take_the_last_extension_in_lowercase() {
+        assert_eq!(type_key(b"a.tar.GZ"), b"gz");
+        assert_eq!(type_key(b".bashrc"), b"");
+        assert_eq!(type_key(b"Makefile"), b"");
+        assert_eq!(type_key(b"trailing."), b"");
+        assert_eq!(type_key(b"x.0123456789abcdef"), b"");
+        assert_eq!(type_key(b"x.0123456789ab"), b"0123456789ab");
+    }
+
+    #[test]
+    fn type_rows_rank_by_the_sort_key() {
+        let mut m = TypeMap::new();
+        add_type(&mut m, b"a.rs", 10, 4096);
+        add_type(&mut m, b"b.rs", 10, 4096);
+        add_type(&mut m, b"c.iso", 9000, 8192);
+        let exts = |rows: Vec<TypeRow>| rows.into_iter().map(|r| r.ext).collect::<Vec<_>>();
+        assert_eq!(exts(type_rows(m.clone(), SortKey::Disk)), ["iso", "rs"]);
+        assert_eq!(exts(type_rows(m.clone(), SortKey::Items)), ["rs", "iso"]);
+        let rows = type_rows(m, SortKey::Apparent);
+        assert_eq!(rows[1].files, 2);
+        assert_eq!(rows[1].disk, 8192);
+    }
 
     fn item(path: &str, disk: u64, apparent: u64) -> Item {
         Item {
@@ -2598,6 +2796,7 @@ mod tests {
             unreadable: 0,
             shared: None,
             partial: false,
+            types: Vec::new(),
         };
         let rows = pick_rows(&report);
         let paths: Vec<_> = rows.iter().map(|r| r.path.clone()).collect();

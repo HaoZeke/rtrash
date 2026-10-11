@@ -71,6 +71,7 @@ du_opts=(
   '--sort=[rank rows by this key]:key:(disk apparent items mtime)'
   '(-C --count)'{-C,--count}'[add an ITEMS column]'
   '--unique[add a UNIQUE column of bytes no other file shares]'
+  '--types[list disk use per file type instead of directories and files]'
   '--max-depth=[list only entries at most N levels deep]:N:'
   '--threads=[walk with N threads]:N:'
   '--all-dirs[list every directory level]'

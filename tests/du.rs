@@ -1326,3 +1326,44 @@ fn ctrl_c_keeps_a_partial_listing() {
     assert_eq!(out.status.code(), Some(130));
     assert!(out.stdout.is_empty());
 }
+
+#[test]
+fn types_total_each_extension_and_the_rest() {
+    let t = Tree::new("types");
+    t.file("a/one.RS", 30_000);
+    t.file("b/two.rs", 20_000);
+    t.file("big.iso", 100_000);
+    t.file("Makefile", 10);
+    t.file(".bashrc", 10);
+    t.file("log.1", 5);
+    let json = t.json(&["--types", "--apparent"]);
+    let types = &json[json.find("\"types\":[").expect("types key")..];
+    // By apparent size: iso, rs (both cases), then the rest.
+    let order: Vec<&str> = types
+        .split("\"type\":\"")
+        .skip(1)
+        .map(|s| &s[..s.find('"').unwrap()])
+        .collect();
+    assert_eq!(&order[..2], ["iso", "rs"], "{types}");
+    assert!(types.contains("{\"type\":\"rs\",\"disk\":"), "{types}");
+    assert!(types.contains("\"apparent\":50000,\"files\":2}"), "{types}");
+    // Makefile and .bashrc have no extension; log.1 has "1".
+    assert!(types.contains("\"apparent\":20,\"files\":2}"), "{types}");
+    assert!(order.contains(&"1"), "{types}");
+
+    let out = t.du(&["--types", "-n", "2"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Largest file types (by disk use)"), "{text}");
+    assert!(text.contains("TYPE"), "{text}");
+    assert!(text.contains("(2 more types)"), "{text}");
+    assert!(!text.contains("Largest directories"), "{text}");
+    assert!(text.contains("Total "), "{text}");
+
+    let out = t.du(&["--types", "--sort=mtime"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = t.du(&["--types", "--print0"]);
+    assert_eq!(out.status.code(), Some(2));
+    // A plain scan keeps its JSON shape.
+    assert!(!t.json(&[]).contains("\"types\""));
+}

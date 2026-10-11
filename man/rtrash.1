@@ -557,6 +557,37 @@ takes every key but
 Add an ITEMS column. The JSON rows always carry
 .BR items .
 .TP
+.B \-\-types
+List file types instead of directories and files: disk use, apparent
+size and file count for each extension, the text after the last dot,
+with case ignored.
+Names with no extension, including names that start with their only dot,
+make one row, and an extension over 12 characters counts as none.
+The first
+.B \-\-top
+types are listed and one line sums the rest; the totals stay.
+Ranks by disk use,
+.B \-\-apparent
+or
+.B \-\-sort=items
+(file count).
+JSON adds a
+.B types
+array of every type, each with
+.BR type ,
+.BR disk ,
+.B apparent
+and
+.BR files .
+Takes no
+.BR \-f ,
+.BR \-o ,
+.BR \-\-stacks ,
+.BR \-\-print0 ,
+.B \-\-pick
+or
+.BR \-i .
+.TP
 .B \-\-unique
 Add a UNIQUE column: the bytes of each row in extents no other file
 shares, roughly what deleting it would free.
