@@ -569,6 +569,20 @@ pub(crate) fn restore_one(entry: &list::Entry, force: bool) -> Result<Restored, 
     restore_one_to(entry, &entry.original, force)
 }
 
+/// After a failed restore, move the payload from `staged` back to `src`,
+/// its name in the trash, where its record still points; `err` says what
+/// failed, and gains where the payload is if it cannot go back.
+fn unstage(err: String, staged: &Path, src: &Path) -> String {
+    match trashdir::relocate(staged, src) {
+        Ok(()) => format!("{err}; the item stays in the trash"),
+        Err(e) => format!(
+            "{err}; the item is now at '{}', since it could not go back to '{}': {e}",
+            staged.display(),
+            src.display()
+        ),
+    }
+}
+
 /// Why `dest` must not receive a restored item: it is, contains or sits
 /// inside the entry's trash or the home trash. put refuses such paths, so
 /// only a forged or corrupt record names one, and restoring there with
@@ -661,17 +675,15 @@ pub(crate) fn restore_one_to(
         // Payload is durable under `staged`; only now remove the blocker.
         if let Err(e) = trashdir::remove_any_path(dest) {
             let err = format!("cannot remove existing '{}': {e}", dest.display());
-            // Best-effort: put payload back into the trash name.
-            let _ = trashdir::relocate(&staged, &src);
-            return Err(err);
+            return Err(unstage(err, &staged, &src));
         }
     }
 
+    // A rename in one directory; it still fails on a name the kernel
+    // refuses, such as one with a NUL byte from a `%00` in Path=.
     if let Err(e) = fs::rename(&staged, dest) {
-        // Same-FS rename of staged→dest; EXDEV should not happen (same parent).
         let err = format!("cannot place restored file at '{}': {e}", dest.display());
-        // Leave staged for recovery; try not to drop payload.
-        return Err(err);
+        return Err(unstage(err, &staged, &src));
     }
 
     let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);

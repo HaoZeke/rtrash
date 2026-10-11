@@ -1,0 +1,1 @@
+When `rtrash restore` cannot put an item in place, the item goes back into the trash under its old name and the error says so. It used to stay outside the trash, beside the destination, under a hidden `.rtrash-restore-` name, while its record pointed at nothing; a `Path=` with `%00` was enough to cause this.

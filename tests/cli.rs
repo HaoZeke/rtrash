@@ -403,6 +403,27 @@ fn restore_refuses_a_record_with_no_absolute_location() {
 }
 
 #[test]
+fn a_restore_that_cannot_place_the_item_leaves_it_in_the_trash() {
+    let sb = Sandbox::new("restore-unplaceable");
+    // `%00` decodes to a zero byte, which no file name can hold.
+    let record = format!(
+        "[Trash Info]\nPath={}/a%00b\nDeletionDate=2026-01-01T00:00:00\n",
+        sb.work().display()
+    );
+    fs::create_dir_all(sb.trash().join("files")).unwrap();
+    fs::create_dir_all(sb.trash().join("info")).unwrap();
+    fs::write(sb.trash().join("files/nul"), b"payload").unwrap();
+    fs::write(sb.trash().join("info/nul.trashinfo"), record).unwrap();
+    let out = sb.run(&["restore", "--home-only", "--name=nul"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr_of(&out);
+    assert!(err.contains("the item stays in the trash"), "{err}");
+    assert_eq!(fs::read(sb.trash().join("files/nul")).unwrap(), b"payload");
+    let left: Vec<_> = fs::read_dir(sb.work()).unwrap().flatten().collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
 fn put_json_reports_trashed_and_failed() {
     let sb = Sandbox::new("put-json");
     sb.touch("a.txt");
