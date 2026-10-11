@@ -976,8 +976,51 @@ fn totals_match_du_with_deep_links_and_unreadable_dirs() {
     assert_eq!(field(&j, "links"), 1, "{j}");
     if blocked {
         assert_eq!(field(&j, "unreadable"), 1, "{j}");
-        assert!(err.contains("could not be read"), "{err}");
+        let named = format!("cannot read '{}': Permission denied", locked.display());
+        assert!(err.contains(&named), "{err}");
+        assert!(
+            j.contains(&format!(
+                "\"unreadable_paths\":[{{\"path\":\"{}\",\"error\":\"Permission denied",
+                escaped(&s(&locked))
+            )),
+            "{j}"
+        );
     }
+}
+
+// Unix only: see the comment at the top of the file.
+#[cfg(unix)]
+#[test]
+fn unreadable_paths_are_named_up_to_ten_then_counted() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tree::new("unread");
+    let locked: Vec<PathBuf> = (0..12)
+        .map(|i| {
+            t.file(&format!("l{i:02}/x"), 10);
+            t.root.join(format!("l{i:02}"))
+        })
+        .collect();
+    for l in &locked {
+        fs::set_permissions(l, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let blocked = fs::read_dir(&locked[0]).is_err();
+    let out = t.du(&["--no-git", "-n", "0", "."]);
+    let json = t.json(&["--no-git", "-n", "0", "."]);
+    for l in &locked {
+        fs::set_permissions(l, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    if !blocked {
+        return;
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    // Sorted by path: the first ten by name, then a count.
+    for (i, l) in locked.iter().enumerate() {
+        let line = format!("cannot read '{}'", l.display());
+        assert_eq!(err.contains(&line), i < 10, "{err}");
+    }
+    assert!(err.contains("and 2 more could not be read"), "{err}");
+    assert_eq!(field(&json, "unreadable"), 12, "{json}");
+    assert_eq!(json.matches("\"error\":").count(), 12, "{json}");
 }
 
 #[test]

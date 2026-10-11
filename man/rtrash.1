@@ -760,6 +760,9 @@ A scan stopped by Ctrl-C adds \fIpartial\fR: true.
 The walk enters at most 4096 levels and paths of up to 32 KiB; a
 directory past either counts with its own blocks but not its contents,
 stderr says how many there were, and the object adds \fItoo_deep\fR.
+Entries the walk could not read are counted in \fIunreadable\fR and
+named in \fIunreadable_paths\fR (up to 100, each with \fIpath\fR and \fIerror\fR);
+stderr names the first 10 and counts the rest.
 .TP
 .B \-\-print0
 Print the listed paths separated by null bytes, for

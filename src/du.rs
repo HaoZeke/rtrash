@@ -451,6 +451,8 @@ pub struct Report {
     pub files: Vec<Item>,
     /// Entries that could not be read (permission denied, vanished).
     pub unreadable: u64,
+    /// The first of them by path, up to 100, each with the reason.
+    pub unread: Vec<(PathBuf, String)>,
     /// Directories nested too deep to enter: counted, contents unread.
     pub too_deep: u64,
     /// `--unique` scans: bytes of the shared extents the scanned files
@@ -694,6 +696,8 @@ struct Ctx<'a> {
     /// Multiply-linked files already counted.
     seen: LinkSet,
     unreadable: AtomicU64,
+    /// The first [`UNREAD_KEPT`] unreadable entries, with the reason.
+    unread: Mutex<Vec<(PathBuf, String)>>,
     /// Directories past [`MAX_DEPTH`] or [`MAX_PATH_BYTES`], not entered.
     too_deep: AtomicU64,
     /// Files counted, each hard-linked file once.
@@ -715,7 +719,22 @@ struct Ctx<'a> {
     types: Mutex<TypeMap>,
 }
 
+/// Unreadable entries a scan remembers by name; the count covers the rest.
+const UNREAD_KEPT: usize = 100;
+/// Of those, how many stderr names before it sums up the rest.
+const UNREAD_SHOWN: usize = 10;
+
 impl Ctx<'_> {
+    /// Count an entry that could not be read, and remember its path and
+    /// the reason while fewer than [`UNREAD_KEPT`] are kept.
+    fn unread(&self, path: impl FnOnce() -> PathBuf, why: impl std::fmt::Display) {
+        self.unreadable.fetch_add(1, Ordering::Relaxed);
+        let mut kept = self.unread.lock().unwrap_or_else(|e| e.into_inner());
+        if kept.len() < UNREAD_KEPT {
+            kept.push((path(), why.to_string()));
+        }
+    }
+
     /// Bytes of a counted file that no other file shares; `disk` without
     /// `--unique` or an extent map. Shared extents go to `self.shared`.
     fn unique_of(&self, dir: &du_fs::Dir, name: &CStr, st: &du_fs::Stat, disk: u64) -> u64 {
@@ -895,25 +914,32 @@ fn enter(
         Some((dir, name)) => dir.stat_at(name),
         None => du_fs::lstat(path),
     };
-    let unreadable = || {
-        ctx.unreadable.fetch_add(1, Ordering::Relaxed);
+    let unreadable = |e: io::Error| {
+        ctx.unread(|| path.to_path_buf(), e);
         None
     };
-    let Ok(dir) = opened else {
-        let Some(st) = known.or_else(|| stat_again().ok()) else {
-            return unreadable();
-        };
-        if !st.is_dir() || (ctx.opts.one_file_system && st.dev != ctx.root_dev) {
-            return unreadable();
+    let dir = match opened {
+        Ok(dir) => dir,
+        Err(e) => {
+            let st = match known {
+                Some(st) => st,
+                None => match stat_again() {
+                    Ok(st) => st,
+                    Err(e) => return unreadable(e),
+                },
+            };
+            if !st.is_dir() || (ctx.opts.one_file_system && st.dev != ctx.root_dev) {
+                return unreadable(e);
+            }
+            ctx.unread(|| path.to_path_buf(), e);
+            return Some(shut(st));
         }
-        ctx.unreadable.fetch_add(1, Ordering::Relaxed);
-        return Some(shut(st));
     };
     let st = match known {
         Some(st) => st,
         None => match dir.stat() {
             Ok(st) => st,
-            Err(_) => return unreadable(),
+            Err(e) => return unreadable(e),
         },
     };
     if ctx.opts.one_file_system && st.dev != ctx.root_dev {
@@ -985,9 +1011,15 @@ fn stat_entries(
             out.subdirs.push((i, None));
             continue;
         }
-        let Some(m) = entries.stat(i).or_else(|| dir.stat_at(name).ok()) else {
-            ctx.unreadable.fetch_add(1, Ordering::Relaxed);
-            continue;
+        let m = match entries.stat(i) {
+            Some(m) => m,
+            None => match dir.stat_at(name) {
+                Ok(m) => m,
+                Err(e) => {
+                    ctx.unread(|| path.join(du_fs::os(name)), e);
+                    continue;
+                }
+            },
         };
         if filter.is_some() && kind == du_fs::Kind::Unknown && excluded(name, m.is_dir()) {
             continue;
@@ -1113,7 +1145,7 @@ fn walk_dir(
     }
     ctx.dirs.fetch_add(1, Ordering::Relaxed);
     if failed {
-        ctx.unreadable.fetch_add(1, Ordering::Relaxed);
+        ctx.unread(|| path.to_path_buf(), "the listing stopped early");
     }
     let bare = !has_dot_git && bare_parts == BARE_ALL && is_bare_repo(path);
     if has_dot_git || bare {
@@ -1407,6 +1439,7 @@ fn scan_pooled(
     };
     let mut files = TopN::new(file_cap, opts.sort);
     let mut unreadable = 0u64;
+    let mut unread = Vec::new();
     let mut too_deep = 0u64;
     let mut shared = crate::du_extent::SharedSet::default();
     let mut partial = false;
@@ -1425,6 +1458,7 @@ fn scan_pooled(
             root_dev: meta.dev,
             seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
+            unread: Mutex::new(Vec::new()),
             too_deep: AtomicU64::new(0),
             files: AtomicU64::new(0),
             links: AtomicU64::new(0),
@@ -1483,6 +1517,7 @@ fn scan_pooled(
             (a, d, u, None)
         };
         unreadable += ctx.unreadable.load(Ordering::Relaxed);
+        unread.extend(ctx.unread.into_inner().unwrap_or_else(|e| e.into_inner()));
         too_deep += ctx.too_deep.load(Ordering::Relaxed);
         partial |= ctx.cut.load(Ordering::Relaxed);
         roots.push(RootTotals {
@@ -1511,6 +1546,12 @@ fn scan_pooled(
         dirs: dirs.into_vec(),
         files: files.into_vec(),
         unreadable,
+        unread: {
+            // Threads finish in any order: sort, so runs agree.
+            unread.sort();
+            unread.truncate(UNREAD_KEPT);
+            unread
+        },
         too_deep,
         shared: opts.unique.then(|| SharedTotals {
             distinct: shared.distinct(),
@@ -1822,13 +1863,29 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
             .collect();
         format!(",\"types\":[{}]", rows.join(","))
     };
+    let unread = if r.unread.is_empty() {
+        String::new()
+    } else {
+        let rows: Vec<String> = r
+            .unread
+            .iter()
+            .map(|(p, why)| {
+                format!(
+                    "{{\"path\":\"{}\",\"error\":\"{}\"}}",
+                    json_escape(&p.to_string_lossy()),
+                    json_escape(why)
+                )
+            })
+            .collect();
+        format!(",\"unreadable_paths\":[{}]", rows.join(","))
+    };
     let too_deep = if r.too_deep > 0 {
         format!(",\"too_deep\":{}", r.too_deep)
     } else {
         String::new()
     };
     format!(
-        "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{}{too_deep}{shared}{partial}{types},\"trash\":{}}}",
+        "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{}{unread}{too_deep}{shared}{partial}{types},\"trash\":{}}}",
         roots.join(","),
         dirs.join(","),
         files.join(","),
@@ -2670,10 +2727,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         print_trash(&trash);
     }
     if report.unreadable > 0 {
-        eprintln!(
-            "{prog}: {} could not be read",
-            plural(report.unreadable, "entry", "entries")
-        );
+        for (p, why) in report.unread.iter().take(UNREAD_SHOWN) {
+            eprintln!("{prog}: cannot read '{}': {why}", crate::util::err_path(p));
+        }
+        let named = report.unread.len().min(UNREAD_SHOWN) as u64;
+        let more = report.unreadable - named;
+        if more > 0 && named > 0 {
+            eprintln!(
+                "{prog}: and {more} more could not be read (--json lists up to {UNREAD_KEPT})"
+            );
+        } else if named == 0 {
+            eprintln!(
+                "{prog}: {} could not be read",
+                plural(report.unreadable, "entry", "entries")
+            );
+        }
     }
     if report.too_deep > 0 {
         eprintln!(
@@ -3011,6 +3079,7 @@ mod tests {
             dirs: vec![risky, trash],
             files: vec![item("/w/f.bin", 1, 1)],
             unreadable: 0,
+            unread: Vec::new(),
             too_deep: 0,
             shared: None,
             partial: false,
