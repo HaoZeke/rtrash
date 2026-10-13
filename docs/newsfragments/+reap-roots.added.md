@@ -1,0 +1,1 @@
+`rtrash reap --roots=DIR`, `RTRASH_REAP_ROOTS` and a profile's `roots` key point `{roots}` globs such as the `cargo-target` profile's at directories outside home, and `--depth` or the `depth` key sets how far `**` reaches.

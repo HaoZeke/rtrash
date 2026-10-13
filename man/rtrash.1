@@ -1615,7 +1615,15 @@ replaces the built-in of that name or adds a new one, with the keys
 .B busy
 (commands that keep an entry while they hold anything in its parent),
 .B guard
-(true to keep entries holding credential-like names) and
+(true to keep entries holding credential-like names),
+.B roots
+(directories for its
+.B {roots}
+globs),
+.B depth
+(how far
+.B **
+reaches) and
 .B tool
 (the tool's own cleanup command, where
 .B {age}
@@ -1653,6 +1661,34 @@ Also reap profile
 With a profile and no
 .IR DIR ,
 reap leaves the temp directories alone.
+.TP
+.BI \-\-roots= DIR\fR[\fP:\fIDIR\fR]...
+Directories that a glob starting with
+.B {roots}
+searches, such as
+.I /workspace
+for the
+.B cargo\-target
+profile's
+.BR {roots}/**/target .
+It is repeatable and takes a path list like
+.BR PATH ,
+and adds to
+.B RTRASH_REAP_ROOTS
+and the profile's
+.B roots
+key.
+Without roots, a
+.B {roots}
+glob matches nothing.
+.TP
+.BI \-\-depth= N
+How many directories
+.B **
+spans, below home or a root; 4 by default, at most 16.
+It beats the profile's
+.B depth
+key.
 .TP
 .B \-\-list\-profiles
 List the profiles: name, age, action and what it covers, or
@@ -2057,6 +2093,14 @@ inodes.
 It overrides
 .B policy.min_free
 in the config file.
+.TP
+.B RTRASH_REAP_ROOTS
+A path list like
+.B PATH
+of directories that the
+.B {roots}
+globs of reap profiles search, after
+.BR \-\-roots .
 .TP
 .B RTRASH_IN_USE
 .BR warn ", " refuse " or " ignore :

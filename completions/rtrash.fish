@@ -281,6 +281,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q who' -l json -
 # reap
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -s p -l profile -x -a 'ai claude cursor codex aider ollama compilers cargo-target cargo-registry sccache ccache go zig bazel gradle pkg pip uv npm pnpm yarn bun conda thumbnails' -d 'also reap a profile'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l list-profiles -d 'list the profiles'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l roots -r -d 'directories {roots} globs search'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l depth -x -d 'how deep ** reaches'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l tool -d 'hand a profile to its tool cleanup'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l trash -d 'move to the trash, even for a permanent profile'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l older-than -x -d 'only entries older than AGE (2h, 10d)'

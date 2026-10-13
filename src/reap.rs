@@ -28,6 +28,10 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
                           with its own age and action (repeatable); groups:
                           ai, compilers, pkg
       --list-profiles   list the profiles (with -v, their paths)
+      --roots=DIR[:DIR]  directories a profile's {roots} globs search, such
+                          as /workspace for cargo-target (repeatable; also
+                          RTRASH_REAP_ROOTS and the profile's roots key)
+      --depth=N         how deep ** reaches below home or a root (default 4)
       --tool            hand a profile to its tool's own cleanup (such as
                           go clean -cache) when the tool is on PATH
       --older-than=AGE  only entries whose newest time is older than AGE:
@@ -467,7 +471,7 @@ fn on_path(cmd: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|d| exec(&d.join(cmd))))
 }
 
-fn list_profiles(prog: &str, json: bool, verbose: bool) -> i32 {
+fn list_profiles(prog: &str, json: bool, verbose: bool, roots_cli: &[PathBuf]) -> i32 {
     let mut warns = Vec::new();
     let all = reap_profiles::all(crate::config::get(), &mut warns);
     for w in &warns {
@@ -511,10 +515,13 @@ fn list_profiles(prog: &str, json: bool, verbose: bool) -> i32 {
             for inc in &p.include {
                 println!("    + {inc}");
             }
-            for path in &p.paths {
-                if let Some(e) = reap_profiles::expand(path) {
-                    println!("    {e}");
-                }
+            let proots = reap_profiles::roots(roots_cli, p);
+            for e in p
+                .paths
+                .iter()
+                .flat_map(|path| reap_profiles::expand_all(path, &proots))
+            {
+                println!("    {e}");
             }
             if !p.tool.is_empty() {
                 println!("    --tool: {}", p.tool.join(" "));
@@ -522,6 +529,18 @@ fn list_profiles(prog: &str, json: bool, verbose: bool) -> i32 {
         }
     }
     0
+}
+
+/// Add the directories of one `--roots` value, a path list like PATH.
+fn add_roots(out: &mut Vec<PathBuf>, v: &str) -> Result<(), String> {
+    for p in std::env::split_paths(v) {
+        let c =
+            fs::canonicalize(&p).map_err(|e| format!("cannot use root '{}': {e}", p.display()))?;
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    Ok(())
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
@@ -547,11 +566,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut no_more = false;
     let mut want_profile = false;
+    let mut want_roots = false;
+    let mut roots_cli: Vec<PathBuf> = Vec::new();
+    let mut depth: Option<usize> = None;
     for arg in args {
         if want_profile {
             profiles.push(arg.clone());
             want_profile = false;
             continue;
+        }
+        if want_roots {
+            want_roots = false;
+            match add_roots(&mut roots_cli, arg) {
+                Ok(()) => continue,
+                Err(e) => return usage_err(prog, &e),
+            }
         }
         if no_more || !arg.starts_with('-') || arg == "-" {
             dirs.push(crate::util::arg_path(arg));
@@ -568,6 +597,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--list-profiles" => list = true,
             "--tool" => use_tool = true,
             "-p" | "--profile" => want_profile = true,
+            "--roots" => want_roots = true,
+            a if a.starts_with("--roots=") => {
+                if let Err(e) = add_roots(&mut roots_cli, &a["--roots=".len()..]) {
+                    return usage_err(prog, &e);
+                }
+            }
+            a if a.starts_with("--depth=") => match a["--depth=".len()..].parse::<usize>() {
+                Ok(d) if d <= 16 => depth = Some(d),
+                _ => return usage_err(prog, "--depth takes a number from 0 to 16"),
+            },
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -599,8 +638,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if want_profile {
         return usage_err(prog, "option '--profile' requires an argument");
     }
+    if want_roots {
+        return usage_err(prog, "option '--roots' requires an argument");
+    }
     if list {
-        return list_profiles(prog, json, verbose);
+        return list_profiles(prog, json, verbose, &roots_cli);
     }
     let now = crate::util::now_epoch();
     let mut status = 0;
@@ -675,11 +717,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         for p in chosen {
             let age = older.unwrap_or(p.age);
             let mut entries: Vec<(PathBuf, u64)> = Vec::new();
-            for pat in &p.paths {
-                let Some(full) = reap_profiles::expand(pat) else {
-                    continue;
-                };
-                for e in reap_profiles::glob(&full) {
+            let proots = reap_profiles::roots(&roots_cli, &p);
+            let max = depth.or(p.depth).unwrap_or(reap_profiles::STAR_DEPTH);
+            for full in p
+                .paths
+                .iter()
+                .flat_map(|pat| reap_profiles::expand_all(pat, &proots))
+            {
+                for e in reap_profiles::glob(&full, max) {
                     let dev = e
                         .parent()
                         .and_then(|d| fs::symlink_metadata(d).ok())

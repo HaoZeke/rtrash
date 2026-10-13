@@ -52,6 +52,10 @@ pub struct Profile {
     /// The tool's own cleanup, run by `--tool` when it is on PATH.
     /// `{age}` becomes the age in days or hours, such as `7d` or `2h`.
     pub tool: Vec<String>,
+    /// Extra directories a `{roots}` glob searches.
+    pub roots: Vec<String>,
+    /// How deep `**` reaches; four when unset.
+    pub depth: Option<usize>,
     pub from_config: bool,
 }
 
@@ -165,8 +169,8 @@ const BUILTIN: &[B] = &[
         busy: &["cargo", "rustc"],
         ..b(
             "cargo-target",
-            "idle cargo target dirs up to four levels below home, and $CARGO_TARGET_DIR",
-            &["~/**/target", "${CARGO_TARGET_DIR}"],
+            "idle cargo target dirs up to four levels below home and each root, and $CARGO_TARGET_DIR",
+            &["~/**/target", "{roots}/**/target", "${CARGO_TARGET_DIR}"],
             14,
             Permanent,
         )
@@ -259,6 +263,8 @@ fn from_builtin(x: &B) -> Profile {
         busy: x.busy.iter().map(|s| s.to_string()).collect(),
         guard: x.guard,
         tool: x.tool.iter().map(|s| s.to_string()).collect(),
+        roots: Vec::new(),
+        depth: None,
         from_config: false,
     }
 }
@@ -297,6 +303,8 @@ pub fn all(cfg: &crate::config::Config, warn: &mut Vec<String>) -> Vec<Profile> 
             busy: cfg.list(&sec, "busy").to_vec(),
             guard: cfg.bool(&sec, "guard").unwrap_or(false),
             tool: cfg.list(&sec, "tool").to_vec(),
+            roots: cfg.list(&sec, "roots").to_vec(),
+            depth: cfg.int(&sec, "depth").and_then(|d| usize::try_from(d).ok()),
             from_config: true,
         };
         match out.iter_mut().find(|q| q.name == name) {
@@ -346,6 +354,51 @@ fn cache_root() -> Option<String> {
         Ok(v) if v.starts_with('/') => Some(v),
         _ => crate::util::home_dir().map(|h| format!("{}/.cache", h.display())),
     }
+}
+
+/// Every expansion of `pat`: one per root for a `{roots}` glob (none
+/// without roots), else at most one.
+pub fn expand_all(pat: &str, roots: &[PathBuf]) -> Vec<String> {
+    let (os, body) = match pat.split_once(':') {
+        Some((os @ ("linux" | "macos" | "unix" | "windows"), rest)) => (Some(os), rest),
+        _ => (None, pat),
+    };
+    let Some(rest) = body.strip_prefix("{roots}") else {
+        return expand(pat).into_iter().collect();
+    };
+    roots
+        .iter()
+        .filter_map(|r| {
+            let joined = format!("{}{rest}", r.display());
+            match os {
+                Some(os) => expand(&format!("{os}:{joined}")),
+                None => expand(&joined),
+            }
+        })
+        .collect()
+}
+
+/// The `{roots}` directories: `--roots`, then `RTRASH_REAP_ROOTS` (a
+/// path list like PATH), then the profile's `roots` key, each once.
+pub fn roots(cli: &[PathBuf], profile: &Profile) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = cli.to_vec();
+    if let Some(v) = std::env::var_os("RTRASH_REAP_ROOTS") {
+        out.extend(std::env::split_paths(&v).filter(|p| p.is_absolute()));
+    }
+    out.extend(
+        profile
+            .roots
+            .iter()
+            .filter_map(|r| expand(r))
+            .map(PathBuf::from),
+    );
+    let mut seen = Vec::new();
+    out.retain(|p| {
+        let keep = !seen.contains(p);
+        seen.push(p.clone());
+        keep
+    });
+    out
 }
 
 /// Expand `~`, `C`, `$VAR` and `${VAR:-default}`; None when the pattern
@@ -409,17 +462,17 @@ fn expand_vars(s: &str) -> Option<String> {
     Some(out)
 }
 
-/// How deep `**` reaches.
-const STAR_DEPTH: usize = 4;
+/// How deep `**` reaches by default.
+pub const STAR_DEPTH: usize = 4;
 
 /// The existing paths an expanded pattern matches.
 /// A `*` never matches a leading dot, `**` spans up to four directories
 /// and never enters hidden directories, symlinks or `node_modules`, and
 /// a match is never searched for more matches.
-pub fn glob(pattern: &str) -> Vec<PathBuf> {
+pub fn glob(pattern: &str, depth: usize) -> Vec<PathBuf> {
     let comps: Vec<&str> = pattern.split('/').filter(|c| !c.is_empty()).collect();
     let mut out = Vec::new();
-    walk(Path::new("/"), &comps, &mut out);
+    walk(Path::new("/"), &comps, depth, &mut out);
     out.sort();
     out.dedup();
     out
@@ -429,7 +482,7 @@ fn has_magic(c: &str) -> bool {
     c.contains(['*', '?', '['])
 }
 
-fn walk(base: &Path, comps: &[&str], out: &mut Vec<PathBuf>) {
+fn walk(base: &Path, comps: &[&str], max: usize, out: &mut Vec<PathBuf>) {
     let Some((first, rest)) = comps.split_first() else {
         if std::fs::symlink_metadata(base).is_ok() {
             out.push(base.to_path_buf());
@@ -437,13 +490,13 @@ fn walk(base: &Path, comps: &[&str], out: &mut Vec<PathBuf>) {
         return;
     };
     if *first == "**" {
-        star(base, rest, out, 0);
+        star(base, rest, max, out, 0);
         return;
     }
     if !has_magic(first) {
         let next = base.join(first);
         if rest.is_empty() || next.is_dir() {
-            walk(&next, rest, out);
+            walk(&next, rest, max, out);
         }
         return;
     }
@@ -461,16 +514,16 @@ fn walk(base: &Path, comps: &[&str], out: &mut Vec<PathBuf>) {
             if rest.is_empty() {
                 out.push(p);
             } else if e.file_type().is_ok_and(|t| t.is_dir()) {
-                walk(&p, rest, out);
+                walk(&p, rest, max, out);
             }
         }
     }
 }
 
-fn star(base: &Path, rest: &[&str], out: &mut Vec<PathBuf>, depth: usize) {
+fn star(base: &Path, rest: &[&str], max: usize, out: &mut Vec<PathBuf>, depth: usize) {
     let before = out.len();
-    walk(base, rest, out);
-    if depth >= STAR_DEPTH {
+    walk(base, rest, max, out);
+    if depth >= max {
         return;
     }
     let found: Vec<PathBuf> = out[before..].to_vec();
@@ -489,7 +542,7 @@ fn star(base: &Path, rest: &[&str], out: &mut Vec<PathBuf>, depth: usize) {
             continue;
         }
         if e.file_type().is_ok_and(|t| t.is_dir()) {
-            star(&p, rest, out, depth + 1);
+            star(&p, rest, max, out, depth + 1);
         }
     }
 }
@@ -547,6 +600,17 @@ mod tests {
     }
 
     #[test]
+    fn roots_globs_expand_once_per_root_and_vanish_without_roots() {
+        let roots = [PathBuf::from("/w"), PathBuf::from("/srv/code")];
+        assert_eq!(
+            expand_all("{roots}/**/target", &roots),
+            ["/w/**/target", "/srv/code/**/target"]
+        );
+        assert!(expand_all("{roots}/**/target", &[]).is_empty());
+        assert_eq!(expand_all("/a/*", &roots), ["/a/*"]);
+    }
+
+    #[test]
     fn groups_open_up_once_and_unknown_names_fail() {
         let all: Vec<Profile> = BUILTIN.iter().map(from_builtin).collect();
         let got = select(&all, &["ai".into(), "claude".into()]).unwrap();
@@ -591,13 +655,14 @@ mod tests {
             std::fs::create_dir_all(t.join(d)).unwrap();
         }
         std::fs::write(t.join("a/.lock"), b"").unwrap();
-        let got = glob(&format!("{}/**/target", t.display()));
+        let got = glob(&format!("{}/**/target", t.display()), STAR_DEPTH);
         let rel: Vec<String> = got
             .iter()
             .map(|p| p.strip_prefix(&t).unwrap().display().to_string())
             .collect();
         assert_eq!(rel, ["a/b/c/target", "a/target"]);
-        let got = glob(&format!("{}/a/*", t.display()));
+        let got = glob(&format!("{}/a/*", t.display()), STAR_DEPTH);
+        assert_eq!(glob(&format!("{}/**/target", t.display()), 6).len(), 3);
         assert!(got.iter().all(|p| !p.ends_with(".lock")));
         let _ = std::fs::remove_dir_all(&t);
     }

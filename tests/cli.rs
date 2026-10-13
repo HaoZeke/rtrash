@@ -3351,3 +3351,55 @@ fn reap_profiles_come_from_config_and_replace_builtins() {
     let out = reap_cmd(&sb, &["reap", "-p", "nope"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_roots_find_cargo_targets_outside_home_to_the_set_depth() {
+    let sb = Sandbox::new("reap-roots");
+    let home = sb.root.join("home");
+    let ws = sb.root.join("ws");
+    fs::create_dir_all(home.join("tmp")).unwrap();
+    write_at(&ws, "p1/target/.rustc_info.json", "{}");
+    write_at(&ws, "a/b/c/d/e/p2/target/.rustc_info.json", "{}");
+    age_tree(&ws);
+    let run = |extra: &[&str], env_roots: Option<&Path>| {
+        let mut c = Command::new(bin());
+        c.args([
+            "reap",
+            "-p",
+            "cargo-target",
+            "--age-by=m",
+            "--older-than=1h",
+            "--dry-run",
+            "--json",
+        ])
+        .args(extra)
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join("xdg"))
+        .env("TMPDIR", home.join("tmp"))
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("RTRASH_REAP_ROOTS");
+        if let Some(r) = env_roots {
+            c.env("RTRASH_REAP_ROOTS", r);
+        }
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        stdout_of(&out)
+    };
+    let roots = format!("--roots={}", ws.display());
+    let text = run(&[], None);
+    assert!(!text.contains("p1/target"), "{text}");
+    let text = run(&[&roots], None);
+    assert!(
+        text.contains("p1/target") && !text.contains("p2/target"),
+        "{text}"
+    );
+    let text = run(&[&roots, "--depth=8"], None);
+    assert!(
+        text.contains("p1/target") && text.contains("p2/target"),
+        "{text}"
+    );
+    let text = run(&[], Some(&ws));
+    assert!(text.contains("p1/target"), "{text}");
+}
