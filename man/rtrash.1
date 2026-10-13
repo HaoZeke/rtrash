@@ -1398,8 +1398,10 @@ macOS asks libproc for open files, working and root directories and the
 executable, but not memory maps.
 Without root, other users' processes cannot be read, and a note on
 stderr counts them.
-Windows has no
-.BR who .
+Windows asks the Restart Manager which processes have a file open,
+checking at most 4096 files below each
+.IR PATH ;
+it does not see working directories, and links are not followed.
 .TP
 .B \-\-json
 Print a JSON object:
@@ -1482,7 +1484,10 @@ or it is or holds
 a part of it cannot be read.
 .PP
 Processes are read once, before anything moves.
-On macOS memory maps are not read; on Windows reap is not available.
+On macOS memory maps are not read.
+On Windows open files come from the Restart Manager when each entry is
+checked, owners and mount points are not checked, and symbolic links and
+junctions are kept.
 Without root, other users' processes cannot be read, but their files are
 kept for being theirs.
 .PP
@@ -1502,12 +1507,20 @@ is dropped),
 .I C
 at the start is the cache root
 (\fI$XDG_CACHE_HOME\fR or \fI\(ti/.cache\fR; \fI\(ti/Library/Caches\fR on
-macOS), and a
+macOS, \fI%LOCALAPPDATA%\fR on Windows), and a
 .BR linux: ,
-.B macos:
-or
+.BR macos: ,
 .B unix:
+or
+.B windows:
 prefix limits the glob to that system.
+On Windows a glob may start with a drive such as
+.IR C:\e ,
+and the built-in profiles also cover
+.IR %TEMP% ,
+.I %LOCALAPPDATA%
+caches and Cursor's caches under
+.IR %APPDATA% .
 A
 .B *
 never matches a leading dot, and

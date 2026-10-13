@@ -2,6 +2,8 @@
 //!
 //! Linux reads `/proc/PID/{fd,cwd,root,exe,maps}`; macOS asks libproc for
 //! each process's open vnodes, working and root directories and executable.
+//! Windows asks the Restart Manager which processes have the files open,
+//! one query per path asked about, since it names no file per process.
 //! Without root, other users' processes cannot be read; the snapshot counts
 //! them so a caller can say the answer is partial.
 
@@ -28,6 +30,32 @@ impl Hold {
     pub fn is(&self, name: &str) -> bool {
         self.command == name || self.names.iter().any(|n| n == name)
     }
+}
+
+/// `pid 12 (vim, fd 3), pid 40 (bash, cwd)`, with at most three processes.
+pub fn describe(holds: &[Hold]) -> String {
+    let mut pids: Vec<u32> = holds.iter().map(|h| h.pid).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    let mut parts: Vec<String> = pids
+        .iter()
+        .take(3)
+        .map(|&pid| {
+            let mine: Vec<&Hold> = holds.iter().filter(|h| h.pid == pid).collect();
+            let mut hows: Vec<&str> = mine.iter().map(|h| h.how.as_str()).collect();
+            hows.sort_unstable();
+            hows.dedup();
+            format!(
+                "pid {pid} ({}, {})",
+                crate::util::err_text(&mine[0].command),
+                hows.join(", ")
+            )
+        })
+        .collect();
+    if pids.len() > 3 {
+        parts.push(format!("{} more", pids.len() - 3));
+    }
+    parts.join(", ")
 }
 
 /// The file name of a path given as bytes or text.
@@ -74,10 +102,12 @@ impl Snapshot {
         s
     }
 
+    #[cfg(unix)]
     fn wanted(&self, path: &Path) -> bool {
         self.roots.is_empty() || self.roots.iter().any(|r| path.starts_with(r))
     }
 
+    #[cfg(unix)]
     fn add(&mut self, hold: Hold) {
         if !self.wanted(&hold.path) {
             return;
@@ -91,27 +121,40 @@ impl Snapshot {
     /// Holds on `path` or anything below it.
     /// Paths compare by component, so everything below `path` sorts
     /// right after it and before any sibling.
-    pub fn under(&self, path: &Path) -> Vec<&Hold> {
+    #[cfg(unix)]
+    pub fn under(&self, path: &Path) -> Vec<Hold> {
         let key = resolve(path);
         self.held
             .range(key.clone()..)
             .take_while(|(p, _)| p.starts_with(&key))
-            .flat_map(|(_, v)| v.iter())
+            .flat_map(|(_, v)| v.iter().cloned())
             .collect()
+    }
+
+    /// Holds on `path` or anything below it, asked of the Restart
+    /// Manager now.
+    #[cfg(windows)]
+    pub fn under(&self, path: &Path) -> Vec<Hold> {
+        let _ = (&self.held, &self.roots, self.maps);
+        win::query(&resolve(path))
     }
 
     /// True when a live process holds `path` or anything below it.
     pub fn holds(&self, path: &Path) -> bool {
-        let key = resolve(path);
-        self.held
-            .range(key.clone()..)
-            .next()
-            .is_some_and(|(p, _)| p.starts_with(&key))
+        !self.under(path).is_empty()
     }
+}
+
+/// The path made absolute; Windows keeps it as given, since the Restart
+/// Manager takes ordinary paths.
+#[cfg(windows)]
+pub fn resolve(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// The path with its parent's symlinks resolved, as the kernel reports it,
 /// but the last component kept (a symlink is not its target).
+#[cfg(unix)]
 pub fn resolve(path: &Path) -> PathBuf {
     let abs = if path.is_absolute() {
         path.to_path_buf()
@@ -127,6 +170,7 @@ pub fn resolve(path: &Path) -> PathBuf {
 }
 
 /// Is `pid` a live process (EPERM still means it exists)?
+#[cfg(unix)]
 pub fn alive(pid: u32) -> bool {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
         return false;
@@ -451,16 +495,212 @@ fn scan(s: &mut Snapshot) {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+const SUPPORTED: bool = true;
+
+/// Windows asks per path in `Snapshot::under` instead.
+#[cfg(windows)]
+fn scan(_s: &mut Snapshot) {}
+
+/// Is `pid` a live process? A process this user may not open is taken
+/// to be alive.
+#[cfg(windows)]
+pub fn alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    const STILL_ACTIVE: u32 = 259;
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: the handle is checked and closed; the out pointer is valid.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code) != 0;
+        CloseHandle(h);
+        ok && code == STILL_ACTIVE
+    }
+}
+
+#[cfg(windows)]
+mod win {
+    use super::{base_name, Hold};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::path::{Path, PathBuf};
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_MORE_DATA, ERROR_SUCCESS};
+    use windows_sys::Win32::System::RestartManager::{
+        RmEndSession, RmGetList, RmRegisterResources, RmStartSession, CCH_RM_SESSION_KEY,
+        RM_PROCESS_INFO,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    /// At most this many files of a directory go to one query.
+    const MAX_FILES: usize = 4096;
+
+    /// The regular files at or below `path`, never through a link.
+    fn files(path: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let Ok(m) = std::fs::symlink_metadata(path) else {
+            return out;
+        };
+        if m.is_file() {
+            out.push(path.to_path_buf());
+            return out;
+        }
+        if !m.is_dir() {
+            return out;
+        }
+        let mut stack = vec![path.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                let Ok(t) = e.file_type() else { continue };
+                if t.is_dir() {
+                    stack.push(e.path());
+                } else if t.is_file() {
+                    out.push(e.path());
+                    if out.len() >= MAX_FILES {
+                        return out;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn wide_str(w: &[u16]) -> String {
+        let end = w.iter().position(|&c| c == 0).unwrap_or(w.len());
+        std::ffi::OsString::from_wide(&w[..end])
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// The full path of a process's executable, when this user may ask.
+    fn exe_of(pid: u32) -> Option<PathBuf> {
+        // SAFETY: the handle is checked and closed; the buffer outlives the call.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return None;
+            }
+            let mut buf = [0u16; 1024];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(h, 0, buf.as_mut_ptr(), &mut len) != 0;
+            CloseHandle(h);
+            ok.then(|| PathBuf::from(std::ffi::OsString::from_wide(&buf[..len as usize])))
+        }
+    }
+
+    /// The processes that have `path`, or a file below it, open.
+    pub fn query(path: &Path) -> Vec<Hold> {
+        let files = files(path);
+        if files.is_empty() {
+            return Vec::new();
+        }
+        let wide: Vec<Vec<u16>> = files
+            .iter()
+            .map(|f| {
+                f.as_os_str()
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect()
+            })
+            .collect();
+        let ptrs: Vec<*const u16> = wide.iter().map(|w| w.as_ptr()).collect();
+        let me = std::process::id();
+        let mut infos: Vec<RM_PROCESS_INFO> = Vec::new();
+        // SAFETY: every pointer handed over points into a live buffer of
+        // the stated length, and the session always ends.
+        unsafe {
+            let mut session = 0u32;
+            let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
+            if RmStartSession(&mut session, 0, key.as_mut_ptr()) != ERROR_SUCCESS {
+                return Vec::new();
+            }
+            let n = u32::try_from(ptrs.len()).unwrap_or(u32::MAX);
+            if RmRegisterResources(
+                session,
+                n,
+                ptrs.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+            ) == ERROR_SUCCESS
+            {
+                for _ in 0..4 {
+                    let mut needed = 0u32;
+                    let mut count = infos.len() as u32;
+                    let mut reasons = 0u32;
+                    let r = RmGetList(
+                        session,
+                        &mut needed,
+                        &mut count,
+                        infos.as_mut_ptr(),
+                        &mut reasons,
+                    );
+                    if r == ERROR_SUCCESS {
+                        infos.truncate(count as usize);
+                        break;
+                    }
+                    if r != ERROR_MORE_DATA {
+                        infos.clear();
+                        break;
+                    }
+                    infos = vec![std::mem::zeroed(); needed as usize + 4];
+                }
+            }
+            RmEndSession(session);
+        }
+        let mut out: Vec<Hold> = Vec::new();
+        for info in &infos {
+            let pid = info.Process.dwProcessId;
+            if pid == me || out.iter().any(|h| h.pid == pid) {
+                continue;
+            }
+            let app = wide_str(&info.strAppName);
+            let exe = exe_of(pid);
+            let exe_name = exe.as_deref().and_then(base_name);
+            let mut names = vec![app.clone()];
+            if let Some(n) = &exe_name {
+                names.push(n.clone());
+                if let Some(stem) = Path::new(n).file_stem() {
+                    names.push(stem.to_string_lossy().into_owned());
+                }
+            }
+            out.push(Hold {
+                pid,
+                uid: None,
+                command: exe_name.unwrap_or(app),
+                how: "open".to_string(),
+                path: path.to_path_buf(),
+                names,
+            });
+        }
+        out
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 const SUPPORTED: bool = false;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn scan(_s: &mut Snapshot) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn an_open_file_and_its_parents_are_held_but_a_sibling_is_not() {
         if !SUPPORTED {

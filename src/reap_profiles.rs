@@ -37,7 +37,7 @@ impl Action {
 pub struct Profile {
     pub name: String,
     pub about: String,
-    /// Globs, each optionally prefixed `linux:`, `macos:` or `unix:`.
+    /// Globs, each optionally prefixed `linux:`, `macos:`, `unix:` or `windows:`.
     pub paths: Vec<String>,
     /// Seconds.
     pub age: i64,
@@ -116,7 +116,8 @@ const BUILTIN: &[B] = &[
             &[
                 "~/.claude/shell-snapshots/*",
                 "~/.claude/todos/*",
-                "${TMPDIR:-/tmp}/claude-*",
+                "unix:${TMPDIR:-/tmp}/claude-*",
+                "windows:${TEMP}/claude-*",
             ],
             7,
             Trash,
@@ -133,6 +134,11 @@ const BUILTIN: &[B] = &[
                 "linux:${XDG_CONFIG_HOME:-~/.config}/Cursor/Code Cache/*",
                 "linux:${XDG_CONFIG_HOME:-~/.config}/Cursor/GPUCache/*",
                 "linux:${XDG_CONFIG_HOME:-~/.config}/Cursor/logs/*",
+                "windows:${APPDATA}/Cursor/Cache/*",
+                "windows:${APPDATA}/Cursor/CachedData/*",
+                "windows:${APPDATA}/Cursor/Code Cache/*",
+                "windows:${APPDATA}/Cursor/GPUCache/*",
+                "windows:${APPDATA}/Cursor/logs/*",
                 "macos:~/Library/Application Support/Cursor/Cache/*",
                 "macos:~/Library/Application Support/Cursor/CachedData/*",
                 "macos:~/Library/Application Support/Cursor/Code Cache/*",
@@ -155,7 +161,7 @@ const BUILTIN: &[B] = &[
     b(
         "ollama",
         "ollama runner scratch dirs in the temp dir (never models)",
-        &["${TMPDIR:-/tmp}/ollama*"],
+        &["unix:${TMPDIR:-/tmp}/ollama*", "windows:${TEMP}/ollama*"],
         2,
         Permanent,
     ),
@@ -186,7 +192,7 @@ const BUILTIN: &[B] = &[
         30,
         Permanent,
     ),
-    b("sccache", "sccache local disk cache", &["${SCCACHE_DIR:-C/sccache}/*/*", "macos:~/Library/Caches/Mozilla.sccache/*/*"], 30, Permanent),
+    b("sccache", "sccache local disk cache", &["unix:${SCCACHE_DIR:-C/sccache}/*/*", "macos:~/Library/Caches/Mozilla.sccache/*/*", "windows:${SCCACHE_DIR:-C/Mozilla/sccache/cache}/*/*"], 30, Permanent),
     B {
         tool: &["ccache", "--evict-older-than", "{age}"],
         ..b("ccache", "ccache objects (never ccache.conf)", &["${CCACHE_DIR:-C/ccache}/[0-9a-f]/*"], 30, Permanent)
@@ -195,29 +201,29 @@ const BUILTIN: &[B] = &[
         tool: &["go", "clean", "-cache"],
         ..b("go", "Go build cache (not the module cache)", &["${GOCACHE:-C/go-build}/[0-9a-f][0-9a-f]"], 10, Permanent)
     },
-    b("zig", "Zig global cache", &["linux:${XDG_CACHE_HOME:-~/.cache}/zig/o/*", "linux:${XDG_CACHE_HOME:-~/.cache}/zig/tmp/*", "macos:~/Library/Caches/zig/o/*", "macos:~/Library/Caches/zig/tmp/*"], 30, Permanent),
+    b("zig", "Zig global cache", &["linux:${XDG_CACHE_HOME:-~/.cache}/zig/o/*", "linux:${XDG_CACHE_HOME:-~/.cache}/zig/tmp/*", "macos:~/Library/Caches/zig/o/*", "macos:~/Library/Caches/zig/tmp/*", "windows:C/zig/o/*", "windows:C/zig/tmp/*"], 30, Permanent),
     b("bazel", "Bazel output bases no server holds", &["linux:${XDG_CACHE_HOME:-~/.cache}/bazel/_bazel_*/[0-9a-f]*", "macos:/private/var/tmp/_bazel_*/[0-9a-f]*"], 30, Permanent),
     b("gradle", "Gradle build cache and daemon logs", &["${GRADLE_USER_HOME:-~/.gradle}/caches/build-cache-*/*", "${GRADLE_USER_HOME:-~/.gradle}/daemon/*/daemon-*.out.log"], 30, Permanent),
     group("pkg", "package caches: pip, uv, npm, pnpm, yarn, bun, conda", &["pip", "uv", "npm", "pnpm", "yarn", "bun", "conda"]),
     B {
         tool: &["pip", "cache", "purge"],
-        ..b("pip", "pip HTTP and wheel cache", &["${PIP_CACHE_DIR:-C/pip}/http*/*", "${PIP_CACHE_DIR:-C/pip}/wheels/*"], 30, Permanent)
+        ..b("pip", "pip HTTP and wheel cache", &["unix:${PIP_CACHE_DIR:-C/pip}/http*/*", "unix:${PIP_CACHE_DIR:-C/pip}/wheels/*", "windows:${PIP_CACHE_DIR:-C/pip/Cache}/http*/*", "windows:${PIP_CACHE_DIR:-C/pip/Cache}/wheels/*"], 30, Permanent)
     },
     B {
         tool: &["uv", "cache", "prune"],
-        ..b("uv", "uv cache buckets", &["${UV_CACHE_DIR:-~/.cache/uv}/*-v[0-9]*/*"], 30, Permanent)
+        ..b("uv", "uv cache buckets", &["unix:${UV_CACHE_DIR:-~/.cache/uv}/*-v[0-9]*/*", "windows:${UV_CACHE_DIR:-C/uv/cache}/*-v[0-9]*/*"], 30, Permanent)
     },
     B {
         tool: &["npm", "cache", "clean", "--force"],
-        ..b("npm", "npm content cache, logs and npx installs", &["~/.npm/_cacache/content-v2/*/*", "~/.npm/_logs/*", "~/.npm/_npx/*"], 30, Permanent)
+        ..b("npm", "npm content cache, logs and npx installs", &["unix:~/.npm/_cacache/content-v2/*/*", "unix:~/.npm/_logs/*", "unix:~/.npm/_npx/*", "windows:C/npm-cache/_cacache/content-v2/*/*", "windows:C/npm-cache/_logs/*", "windows:C/npm-cache/_npx/*"], 30, Permanent)
     },
     B {
         tool: &["pnpm", "store", "prune"],
-        ..b("pnpm", "pnpm metadata cache (the store is left to pnpm store prune)", &["C/pnpm/*"], 30, Permanent)
+        ..b("pnpm", "pnpm metadata cache (the store is left to pnpm store prune)", &["unix:C/pnpm/*", "windows:C/pnpm-cache/*"], 30, Permanent)
     },
     B {
         tool: &["yarn", "cache", "clean"],
-        ..b("yarn", "yarn v1 and berry caches", &["linux:${XDG_CACHE_HOME:-~/.cache}/yarn/v*/*", "macos:~/Library/Caches/Yarn/v*/*", "~/.yarn/berry/cache/*"], 30, Permanent)
+        ..b("yarn", "yarn v1 and berry caches", &["linux:${XDG_CACHE_HOME:-~/.cache}/yarn/v*/*", "macos:~/Library/Caches/Yarn/v*/*", "windows:C/Yarn/Cache/v*/*", "~/.yarn/berry/cache/*"], 30, Permanent)
     },
     B {
         tool: &["bun", "pm", "cache", "rm"],
@@ -347,6 +353,11 @@ pub fn select(all: &[Profile], names: &[String]) -> Result<Vec<Profile>, String>
 
 /// The cache root `C` stands for.
 fn cache_root() -> Option<String> {
+    if cfg!(windows) {
+        return std::env::var("LOCALAPPDATA")
+            .ok()
+            .filter(|v| is_absolute(v));
+    }
     if cfg!(target_os = "macos") {
         return crate::util::home_dir().map(|h| format!("{}/Library/Caches", h.display()));
     }
@@ -404,19 +415,21 @@ pub fn roots(cli: &[PathBuf], profile: &Profile) -> Vec<PathBuf> {
 /// Expand `~`, `C`, `$VAR` and `${VAR:-default}`; None when the pattern
 /// is for another OS or a variable without default is unset or empty.
 pub fn expand(pat: &str) -> Option<String> {
-    let pat = if let Some(r) = pat.strip_prefix("linux:") {
-        if !cfg!(target_os = "linux") {
-            return None;
+    let mut pat = pat;
+    for (prefix, here) in [
+        ("linux:", cfg!(target_os = "linux")),
+        ("macos:", cfg!(target_os = "macos")),
+        ("unix:", cfg!(unix)),
+        ("windows:", cfg!(windows)),
+    ] {
+        if let Some(r) = pat.strip_prefix(prefix) {
+            if !here {
+                return None;
+            }
+            pat = r;
+            break;
         }
-        r
-    } else if let Some(r) = pat.strip_prefix("macos:") {
-        if !cfg!(target_os = "macos") {
-            return None;
-        }
-        r
-    } else {
-        pat.strip_prefix("unix:").unwrap_or(pat)
-    };
+    }
     let s = expand_vars(pat)?;
     let s = if s == "~" || s.starts_with("~/") {
         format!("{}{}", crate::util::home_dir()?.display(), &s[1..])
@@ -425,7 +438,23 @@ pub fn expand(pat: &str) -> Option<String> {
     } else {
         s
     };
-    s.starts_with('/').then_some(s)
+    is_absolute(&s).then_some(s)
+}
+
+/// `/x`, or on Windows also `C:\x`, `C:/x` and `\\server\share`.
+fn is_absolute(s: &str) -> bool {
+    if s.starts_with('/') {
+        return true;
+    }
+    if !cfg!(windows) {
+        return false;
+    }
+    let b = s.as_bytes();
+    s.starts_with("\\\\")
+        || (b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && (b[2] == b'/' || b[2] == b'\\'))
 }
 
 fn expand_vars(s: &str) -> Option<String> {
@@ -470,9 +499,19 @@ pub const STAR_DEPTH: usize = 4;
 /// and never enters hidden directories, symlinks or `node_modules`, and
 /// a match is never searched for more matches.
 pub fn glob(pattern: &str, depth: usize) -> Vec<PathBuf> {
-    let comps: Vec<&str> = pattern.split('/').filter(|c| !c.is_empty()).collect();
+    let seps: &[char] = if cfg!(windows) { &['/', '\\'] } else { &['/'] };
+    let mut comps: Vec<&str> = pattern.split(seps).filter(|c| !c.is_empty()).collect();
+    let mut base = PathBuf::from("/");
+    // A drive letter starts from that drive's root.
+    if cfg!(windows)
+        && comps
+            .first()
+            .is_some_and(|c| c.len() == 2 && c.ends_with(':'))
+    {
+        base = PathBuf::from(format!("{}\\", comps.remove(0)));
+    }
     let mut out = Vec::new();
-    walk(Path::new("/"), &comps, depth, &mut out);
+    walk(&base, &comps, depth, &mut out);
     out.sort();
     out.dedup();
     out

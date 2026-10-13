@@ -12,7 +12,6 @@
 //! and paths that tmpfiles.d `x` and `X` lines exclude.
 
 use std::fs;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use crate::holders::{alive, Snapshot};
@@ -113,17 +112,17 @@ impl AgeBy {
     fn newest(&self, m: &fs::Metadata) -> i64 {
         let mut t = i64::MIN;
         if self.atime && !m.is_dir() {
-            t = t.max(m.atime());
+            t = t.max(plat::atime(m));
         }
         if self.ctime {
-            t = t.max(m.ctime());
+            t = t.max(plat::ctime(m));
         }
         if self.mtime {
-            t = t.max(m.mtime());
+            t = t.max(plat::mtime(m));
         }
         if t == i64::MIN {
             // A directory aged by atime alone: fall back to its mtime.
-            t = m.mtime();
+            t = plat::mtime(m);
         }
         t
     }
@@ -216,15 +215,7 @@ struct Walk {
 }
 
 fn kind_reason(ft: &fs::FileType) -> Option<&'static str> {
-    if ft.is_socket() {
-        Some("a socket")
-    } else if ft.is_fifo() {
-        Some("a named pipe")
-    } else if ft.is_block_device() || ft.is_char_device() {
-        Some("a device")
-    } else {
-        None
-    }
+    plat::kind_reason(ft)
 }
 
 /// Walk an entry for its newest time and size, stopping at the first
@@ -233,7 +224,7 @@ fn kind_reason(ft: &fs::FileType) -> Option<&'static str> {
 fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Walk {
     let mut w = Walk {
         newest: ctx.age_by.newest(top),
-        bytes: top.blocks() * 512,
+        bytes: plat::bytes(top),
         keep: None,
     };
     if !top.is_dir() || w.newest > g.cutoff {
@@ -264,7 +255,7 @@ fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Wal
                     return w;
                 }
             };
-            if m.dev() != dev {
+            if plat::dev(&m) != dev {
                 w.keep = Some(format!("holds the mount point '{}'", p.display()));
                 return w;
             }
@@ -272,8 +263,8 @@ fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Wal
                 w.keep = Some(format!("holds {k} '{}'", p.display()));
                 return w;
             }
-            if ctx.euid != 0 && m.uid() != ctx.euid {
-                w.keep = Some(format!("holds '{}' of user {}", p.display(), m.uid()));
+            if ctx.euid != 0 && plat::uid(&m) != ctx.euid {
+                w.keep = Some(format!("holds '{}' of user {}", p.display(), plat::uid(&m)));
                 return w;
             }
             if g.guard && secret_name(&e.file_name().to_string_lossy()) {
@@ -287,7 +278,7 @@ fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Wal
             if w.newest > g.cutoff {
                 return w;
             }
-            w.bytes += m.blocks() * 512;
+            w.bytes += plat::bytes(&m);
             if m.is_dir() {
                 stack.push(p);
             }
@@ -366,7 +357,7 @@ fn judge(path: &Path, parent_dev: u64, gi: usize, g: &Group, ctx: &Ctx) -> Optio
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_default();
-    o.skip = if path == Path::new("/") || ctx.home.as_ref().is_some_and(|h| h.starts_with(path)) {
+    o.skip = if path.parent().is_none() || ctx.home.as_ref().is_some_and(|h| h.starts_with(path)) {
         Some("holds your home directory".to_string())
     } else if name.starts_with(".Trash") {
         Some("a trash directory".to_string())
@@ -374,12 +365,12 @@ fn judge(path: &Path, parent_dev: u64, gi: usize, g: &Group, ctx: &Ctx) -> Optio
         Some("the XDG runtime directory".to_string())
     } else if let Some(pat) = excluded(path, &ctx.excl) {
         Some(format!("excluded by tmpfiles.d '{pat}'"))
-    } else if m.dev() != parent_dev {
+    } else if plat::dev(&m) != parent_dev {
         Some("a mount point".to_string())
     } else if let Some(k) = kind_reason(&m.file_type()) {
         Some(k.to_string())
-    } else if ctx.euid != 0 && m.uid() != ctx.euid {
-        Some(format!("owned by user {}", m.uid()))
+    } else if ctx.euid != 0 && plat::uid(&m) != ctx.euid {
+        Some(format!("owned by user {}", plat::uid(&m)))
     } else if g.guard && secret_name(&name) {
         Some("looks like settings, history or a credential".to_string())
     } else {
@@ -432,7 +423,17 @@ fn busy_holder(path: &Path, g: &Group, ctx: &Ctx) -> Option<String> {
         })
 }
 
+/// Is `c` (canonical) the home directory?
+fn is_home(c: &Path) -> bool {
+    crate::util::home_dir()
+        .and_then(|h| fs::canonicalize(h).ok())
+        .is_some_and(|h| h == c)
+}
+
 fn default_dirs() -> Vec<PathBuf> {
+    if cfg!(windows) {
+        return vec![std::env::temp_dir()];
+    }
     let mut v = Vec::new();
     if let Some(t) = std::env::var_os("TMPDIR") {
         let t = PathBuf::from(t);
@@ -443,6 +444,149 @@ fn default_dirs() -> Vec<PathBuf> {
     v.push(PathBuf::from("/tmp"));
     v.push(PathBuf::from("/var/tmp"));
     v
+}
+
+/// What differs between Unix and Windows: metadata, deleting and trashing.
+#[cfg(unix)]
+mod plat {
+    use std::fs;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    use std::path::{Path, PathBuf};
+
+    pub fn dev(m: &fs::Metadata) -> u64 {
+        m.dev()
+    }
+    pub fn uid(m: &fs::Metadata) -> u32 {
+        m.uid()
+    }
+    pub fn bytes(m: &fs::Metadata) -> u64 {
+        m.blocks() * 512
+    }
+    pub fn atime(m: &fs::Metadata) -> i64 {
+        m.atime()
+    }
+    pub fn mtime(m: &fs::Metadata) -> i64 {
+        m.mtime()
+    }
+    pub fn ctime(m: &fs::Metadata) -> i64 {
+        m.ctime()
+    }
+    pub fn euid() -> u32 {
+        // SAFETY: geteuid has no preconditions.
+        unsafe { libc::geteuid() }
+    }
+    pub fn kind_reason(ft: &fs::FileType) -> Option<&'static str> {
+        if ft.is_socket() {
+            Some("a socket")
+        } else if ft.is_fifo() {
+            Some("a named pipe")
+        } else if ft.is_block_device() || ft.is_char_device() {
+            Some("a device")
+        } else {
+            None
+        }
+    }
+    pub fn executable(p: &Path) -> bool {
+        fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+
+    /// Where trashed entries go.
+    #[derive(Default)]
+    pub struct Dest {
+        pub home_only: bool,
+        pub trash_pin: Option<PathBuf>,
+    }
+
+    pub fn remove(p: &Path) -> std::io::Result<()> {
+        crate::fastdelete::remove_path(p)
+    }
+
+    pub fn trash(prog: &str, p: &Path, dest: &Dest) -> Result<(), ()> {
+        let opts = crate::put::Opts {
+            force: true,
+            recursive: true,
+            quiet: true,
+            home_only: dest.home_only,
+            trash_pin: dest.trash_pin.clone(),
+            ..crate::put::Opts::default()
+        };
+        match crate::put::put_one(prog, p, &opts) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) | Err(_) => Err(()),
+        }
+    }
+}
+
+/// Windows: no devices to cross, no owner check, and links and junctions
+/// stay; trashing goes to the Recycle Bin.
+#[cfg(windows)]
+mod plat {
+    use std::fs;
+    use std::os::windows::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
+
+    /// FILETIME (100 ns since 1601) to Unix seconds.
+    fn secs(ft: u64) -> i64 {
+        (ft / 10_000_000) as i64 - 11_644_473_600
+    }
+    pub fn dev(_m: &fs::Metadata) -> u64 {
+        0
+    }
+    pub fn uid(_m: &fs::Metadata) -> u32 {
+        0
+    }
+    pub fn bytes(m: &fs::Metadata) -> u64 {
+        m.len()
+    }
+    pub fn atime(m: &fs::Metadata) -> i64 {
+        secs(m.last_access_time())
+    }
+    pub fn mtime(m: &fs::Metadata) -> i64 {
+        secs(m.last_write_time())
+    }
+    /// Windows keeps no change time; creation counts instead, which is
+    /// new for a file copied in.
+    pub fn ctime(m: &fs::Metadata) -> i64 {
+        secs(m.creation_time())
+    }
+    /// Owner checks are skipped: a profile's paths are this user's.
+    pub fn euid() -> u32 {
+        0
+    }
+    pub fn kind_reason(ft: &fs::FileType) -> Option<&'static str> {
+        ft.is_symlink().then_some("a link or junction")
+    }
+    pub fn executable(p: &Path) -> bool {
+        if p.is_file() {
+            return true;
+        }
+        let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        exts.split(';').filter(|e| !e.is_empty()).any(|e| {
+            let mut s = p.as_os_str().to_owned();
+            s.push(e);
+            Path::new(&s).is_file()
+        })
+    }
+
+    /// Where trashed entries go: always the Recycle Bin of their drive.
+    #[derive(Default)]
+    pub struct Dest {
+        pub home_only: bool,
+        pub trash_pin: Option<PathBuf>,
+    }
+
+    pub fn remove(p: &Path) -> std::io::Result<()> {
+        if fs::symlink_metadata(p)?.is_dir() {
+            fs::remove_dir_all(p)
+        } else {
+            fs::remove_file(p)
+        }
+    }
+
+    pub fn trash(prog: &str, p: &Path, dest: &Dest) -> Result<(), ()> {
+        let _ = (dest.home_only, &dest.trash_pin);
+        trash::delete(p).map_err(|e| eprintln!("{prog}: cannot trash '{}': {e}", p.display()))
+    }
 }
 
 fn fmt_age(s: i64) -> String {
@@ -460,15 +604,11 @@ fn fmt_age(s: i64) -> String {
 
 /// Is `cmd` an executable on PATH (or a path to one)?
 fn on_path(cmd: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    let exec = |p: &Path| {
-        fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    };
-    if cmd.contains('/') {
-        return exec(Path::new(cmd));
+    if cmd.contains(['/', '\\']) {
+        return plat::executable(Path::new(cmd));
     }
     std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|d| exec(&d.join(cmd))))
+        .is_some_and(|path| std::env::split_paths(&path).any(|d| plat::executable(&d.join(cmd))))
 }
 
 fn list_profiles(prog: &str, json: bool, verbose: bool, roots_cli: &[PathBuf]) -> i32 {
@@ -557,12 +697,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut list = false;
     let mut use_tool = false;
     let mut profiles: Vec<String> = Vec::new();
-    let mut opts = crate::put::Opts {
-        force: true,
-        recursive: true,
-        quiet: true,
-        ..crate::put::Opts::default()
-    };
+    let mut dest = plat::Dest::default();
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut no_more = false;
     let mut want_profile = false;
@@ -593,7 +728,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--permanent" => action = Some(Action::Permanent),
             "--trash" => action = Some(Action::Trash),
             "--json" => json = true,
-            "--home-only" => opts.home_only = true,
+            "--home-only" => dest.home_only = true,
             "--list-profiles" => list = true,
             "--tool" => use_tool = true,
             "-p" | "--profile" => want_profile = true,
@@ -630,7 +765,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 None => return usage_err(prog, "--age-by takes letters from a, c and m"),
             },
             a if a.starts_with("--trash-dir=") => {
-                opts.trash_pin = Some(crate::util::arg_path(&a["--trash-dir=".len()..]));
+                dest.trash_pin = Some(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
             other => return usage_err(prog, &format!("unrecognized option '{other}'")),
         }
@@ -657,7 +792,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     for d in &dirs {
         match fs::canonicalize(d) {
             Ok(c) if c.is_dir() => {
-                if c == Path::new("/") || crate::safety::is_home(&c) {
+                if c.parent().is_none() || is_home(&c) {
                     eprintln!("{prog}: refusing to reap '{}'", d.display());
                     status = 1;
                 } else if !roots.contains(&c) {
@@ -689,7 +824,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             };
             let mut names: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
             names.sort();
-            entries.extend(names.into_iter().map(|p| (p, root_meta.dev())));
+            entries.extend(names.into_iter().map(|p| (p, plat::dev(&root_meta))));
         }
         groups.push(Group {
             name: "tmp".into(),
@@ -728,7 +863,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     let dev = e
                         .parent()
                         .and_then(|d| fs::symlink_metadata(d).ok())
-                        .map_or(u64::MAX, |m| m.dev());
+                        .map_or(u64::MAX, |m| plat::dev(&m));
                     if !entries.iter().any(|(x, _)| *x == e) {
                         entries.push((e, dev));
                     }
@@ -768,8 +903,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         );
         return 1;
     }
-    // SAFETY: geteuid has no preconditions.
-    let euid = unsafe { libc::geteuid() };
+    let euid = plat::euid();
     if snap.unreadable > 0 && euid != 0 && verbose {
         eprintln!(
             "{prog}: {} could not be read; only your own entries are reaped",
@@ -826,14 +960,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         if !dry_run {
             let done = if groups[o.group].action == Action::Permanent {
-                crate::fastdelete::remove_path(&o.path).map_err(|e| {
+                plat::remove(&o.path).map_err(|e| {
                     eprintln!("{prog}: cannot remove '{}': {e}", o.path.display());
                 })
             } else {
-                match crate::put::put_one(prog, &o.path, &opts) {
-                    Ok(Some(_)) => Ok(()),
-                    Ok(None) | Err(_) => Err(()),
-                }
+                plat::trash(prog, &o.path, &dest)
             };
             if done.is_err() {
                 failed += 1;

@@ -10,7 +10,8 @@ Usage: {prog} [OPTION]... PATH...
 List the live processes that hold PATH or anything below it: an open
 descriptor, a memory map, the working or root directory, or the
 executable. Linux reads /proc as lsof and fuser do; macOS asks libproc
-(no memory maps). Without root, other users' processes are not seen.
+(no memory maps); Windows asks the Restart Manager (open files only).
+Without root, other users' processes are not seen.
 
       --json     print a JSON object ({holders, unreadable})
       --help     display this help and exit
@@ -69,11 +70,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: cannot list the processes holding a path on this platform");
         return 1;
     }
-    let mut holds: Vec<&Hold> = paths.iter().flat_map(|p| snap.under(p)).collect();
+    let mut holds: Vec<Hold> = paths.iter().flat_map(|p| snap.under(p)).collect();
     holds.sort_by(|a, b| (a.pid, &a.path, &a.how).cmp(&(b.pid, &b.path, &b.how)));
     holds.dedup();
     if json {
-        let items: Vec<String> = holds.iter().map(|h| hold_json(h)).collect();
+        let items: Vec<String> = holds.iter().map(hold_json).collect();
         println!(
             r#"{{"holders":[{}],"unreadable":{}}}"#,
             items.join(","),
@@ -90,8 +91,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             );
         }
     }
+    #[cfg(unix)]
     // SAFETY: geteuid has no preconditions.
     let root = unsafe { libc::geteuid() } == 0;
+    #[cfg(windows)]
+    let root = true;
     if snap.unreadable > 0 && !root && !json {
         eprintln!(
             "{prog}: {} could not be read; run as root to see them",

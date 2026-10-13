@@ -399,6 +399,7 @@ mod os {
         let mut json = false;
         let mut pinned = false;
         let mut no_more_opts = false;
+        let mut in_use: Option<String> = None;
         for arg in args {
             if no_more_opts || arg == "-" || !arg.starts_with('-') {
                 files.push(PathBuf::from(arg));
@@ -414,6 +415,14 @@ mod os {
                 // drive, so there is nothing to pin or narrow down.
                 "--home-only" => {}
                 a if a.starts_with("--trash-dir=") => pinned = true,
+                a if a.starts_with("--in-use=") => {
+                    let v = &a["--in-use=".len()..];
+                    if !matches!(v, "warn" | "refuse" | "ignore") {
+                        eprintln!("{prog}: invalid argument '{v}' for '--in-use' (want warn, refuse or ignore)");
+                        return 2;
+                    }
+                    in_use = Some(v.to_string());
+                }
                 "-h" | "--help" => {
                     print!(
                         "\
@@ -425,6 +434,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
       --plain    accepted for CLI parity (no TUI put browser on Windows)
       --json     print a JSON summary on stdout ({{trashed, failed}});
                    replaces -v output
+      --in-use=WHEN  when another process has a file open (as the
+                   Restart Manager reports it): warn (the default),
+                   refuse, or ignore
       --trash-dir=PATH, --home-only
                  accepted for script parity; items always go to the
                    Recycle Bin of their drive
@@ -470,6 +482,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             eprintln!("Try '{prog} --help' for more information.");
             return 2;
         }
+        let in_use = in_use.unwrap_or_else(|| in_use_default(prog));
+        let snap =
+            (in_use != "ignore").then(|| crate::holders::Snapshot::scan_under(&files, false));
         let mut status = 0;
         let mut failed = 0usize;
         let mut moved: Vec<PathBuf> = Vec::new();
@@ -489,6 +504,20 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             let abs = std::fs::canonicalize(f)
                 .map(|p| strip_verbatim(&p))
                 .unwrap_or_else(|_| f.clone());
+            if let Some(snap) = &snap {
+                let holds = snap.under(f);
+                if !holds.is_empty() {
+                    let who = crate::holders::describe(&holds);
+                    if in_use == "refuse" {
+                        eprintln!("{prog}: cannot trash '{}': in use by {who}", f.display());
+                        eprintln!("{prog}: use --in-use=warn to trash it anyway");
+                        status = status.max(1);
+                        failed += 1;
+                        continue;
+                    }
+                    eprintln!("{prog}: warning: '{}' is in use by {who}", f.display());
+                }
+            }
             match trash::delete(f) {
                 Ok(()) => {
                     if verbose && !json {
@@ -512,6 +541,23 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             println!("{}", util::put_summary_json(&items, failed));
         }
         status
+    }
+
+    /// `RTRASH_IN_USE`, else `policy.in_use`, else warn.
+    fn in_use_default(prog: &str) -> String {
+        let ok = |v: &str| matches!(v, "warn" | "refuse" | "ignore");
+        if let Ok(v) = std::env::var("RTRASH_IN_USE") {
+            if ok(&v) {
+                return v;
+            }
+            eprintln!(
+                "{prog}: warning: ignoring RTRASH_IN_USE='{v}' (want warn, refuse or ignore)"
+            );
+        }
+        match crate::config::get().str("policy", "in_use") {
+            Some(v) if ok(v) => v.to_string(),
+            _ => "warn".to_string(),
+        }
     }
 
     /// For each moved path, its name and folder in the Recycle Bin: the

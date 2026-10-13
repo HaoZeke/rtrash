@@ -477,7 +477,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
     if opts.in_use != InUse::Ignore {
         let holds = holders().under(&abs);
         if !holds.is_empty() {
-            let who = describe_holds(&holds);
+            let who = crate::holders::describe(&holds);
             if opts.in_use == InUse::Refuse {
                 eprintln!("{prog}: cannot trash '{name}': in use by {who}");
                 eprintln!("{prog}: use --in-use=warn to trash it anyway");
@@ -564,32 +564,6 @@ fn mappable(path: &Path) -> bool {
 
 /// The put operands, set before the first item so one scan covers them all.
 static SCAN_ROOTS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
-
-/// `pid 12 (vim, fd 3), pid 40 (bash, cwd)`, with at most three processes.
-fn describe_holds(holds: &[&crate::holders::Hold]) -> String {
-    let mut pids: Vec<u32> = holds.iter().map(|h| h.pid).collect();
-    pids.sort_unstable();
-    pids.dedup();
-    let mut parts: Vec<String> = pids
-        .iter()
-        .take(3)
-        .map(|&pid| {
-            let mine: Vec<&&crate::holders::Hold> = holds.iter().filter(|h| h.pid == pid).collect();
-            let mut hows: Vec<&str> = mine.iter().map(|h| h.how.as_str()).collect();
-            hows.sort_unstable();
-            hows.dedup();
-            format!(
-                "pid {pid} ({}, {})",
-                crate::util::err_text(&mine[0].command),
-                hows.join(", ")
-            )
-        })
-        .collect();
-    if pids.len() > 3 {
-        parts.push(format!("{} more", pids.len() - 3));
-    }
-    parts.join(", ")
-}
 
 /// Pick destination trash: explicit pin (created if needed), home-only, or auto-select.
 fn resolve_put_trash(

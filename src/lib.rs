@@ -34,7 +34,6 @@ pub mod fastdelete;
 pub mod filters;
 #[cfg(unix)]
 pub mod finder;
-#[cfg(unix)]
 pub mod holders;
 #[cfg(unix)]
 pub mod info;
@@ -44,9 +43,7 @@ pub mod list;
 pub mod put;
 #[cfg(all(unix, feature = "tui"))]
 pub mod put_tui;
-#[cfg(unix)]
 pub mod reap;
-#[cfg(unix)]
 pub mod reap_profiles;
 #[cfg(unix)]
 pub mod restore;
@@ -79,7 +76,6 @@ pub mod tui_select;
 pub mod tui_term;
 #[cfg(unix)]
 pub mod undo;
-#[cfg(unix)]
 pub mod who;
 
 // Windows CLI surface: system Recycle Bin (not FreeDesktop modules).
@@ -137,22 +133,6 @@ pub mod finder {
 pub mod status {
     pub fn run(prog: &str, args: &[String]) -> i32 {
         crate::win_recycle::status_run(prog, args)
-    }
-}
-
-#[cfg(windows)]
-pub mod who {
-    pub fn run(prog: &str, _args: &[String]) -> i32 {
-        eprintln!("{prog}: cannot list the processes holding a path on Windows");
-        1
-    }
-}
-
-#[cfg(windows)]
-pub mod reap {
-    pub fn run(prog: &str, _args: &[String]) -> i32 {
-        eprintln!("{prog}: reap needs to see which processes hold files, which rtrash cannot do on Windows");
-        1
     }
 }
 

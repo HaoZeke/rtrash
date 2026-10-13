@@ -81,13 +81,16 @@ regex-lite = "0.1"
 # Windows system Recycle Bin (shell APIs). Not used on Unix FreeDesktop builds.
 [target.'cfg(windows)'.dependencies]
 trash = { version = "5.2", default-features = true }
-# du lists directories with GetFileInformationByHandleEx.
+# du lists directories with GetFileInformationByHandleEx; who and reap ask
+# the Restart Manager which processes have files open.
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Storage_FileSystem",
   "Win32_System_Console",
   "Win32_System_Registry",
+  "Win32_System_RestartManager",
+  "Win32_System_Threading",
   "Win32_System_Time",
   "Win32_UI_Shell",
 ] }
