@@ -152,7 +152,7 @@ impl Config {
             let mut warn = |msg: String| cfg.warnings.push(format!("{name}:{}: {msg}", n + 1));
             if let Some(rest) = line.strip_prefix('[') {
                 match rest.strip_suffix(']') {
-                    Some(s) if is_bare_key(s.trim()) => section = s.trim().to_string(),
+                    Some(s) if is_section(s.trim()) => section = s.trim().to_string(),
                     _ => warn(format!("bad section header '{line}'")),
                 }
                 continue;
@@ -175,9 +175,7 @@ impl Config {
                     }
                 }
             }
-            let Some(&(_, _, kind, _)) =
-                KEYS.iter().find(|(s, k, _, _)| *s == section && *k == key)
-            else {
+            let Some(kind) = key_kind(&section, key) else {
                 let at = if section.is_empty() {
                     key.to_string()
                 } else {
@@ -198,6 +196,17 @@ impl Config {
             }
         }
         cfg
+    }
+
+    /// The names of the `[reap.profiles.NAME]` tables that set a key.
+    pub fn profile_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .values
+            .keys()
+            .filter_map(|(s, _)| s.strip_prefix("reap.profiles.").map(str::to_string))
+            .collect();
+        v.dedup();
+        v
     }
 
     pub fn get(&self, section: &str, key: &str) -> Option<&Value> {
@@ -264,6 +273,56 @@ fn kind_name(k: Kind) -> &'static str {
         Kind::Bool => "true or false",
         Kind::List => "an array of strings",
     }
+}
+
+/// The keys of a `[reap.profiles.NAME]` table.
+const PROFILE_KEYS: &[(&str, Kind, &str)] = &[
+    ("about", Kind::Str, "one line on what the profile reaps"),
+    ("paths", Kind::List, "globs of entries to reap"),
+    ("age", Kind::Str, "entries older than this go, such as 7d"),
+    ("action", Kind::Str, "trash or permanent"),
+    ("include", Kind::List, "other profiles this one runs"),
+    (
+        "marker",
+        Kind::Str,
+        "a file an entry must hold to be reaped",
+    ),
+    (
+        "busy",
+        Kind::List,
+        "commands that keep the entry's parent busy",
+    ),
+    (
+        "guard",
+        Kind::Bool,
+        "keep entries holding credential-like files",
+    ),
+    (
+        "tool",
+        Kind::List,
+        "the tool's own cleanup command, for --tool",
+    ),
+];
+
+/// What `key` holds in `section`, when it is a known key.
+fn key_kind(section: &str, key: &str) -> Option<Kind> {
+    if let Some(name) = section.strip_prefix("reap.profiles.") {
+        if !is_bare_key(name) {
+            return None;
+        }
+        return PROFILE_KEYS
+            .iter()
+            .find(|(k, _, _)| *k == key)
+            .map(|&(_, kind, _)| kind);
+    }
+    KEYS.iter()
+        .find(|(s, k, _, _)| *s == section && *k == key)
+        .map(|&(_, _, kind, _)| kind)
+}
+
+/// A section header: bare keys joined by dots.
+fn is_section(s: &str) -> bool {
+    s.split('.').all(is_bare_key)
 }
 
 fn is_bare_key(s: &str) -> bool {
@@ -472,6 +531,12 @@ pub fn template() -> String {
         };
         let _ = writeln!(out, "# {k} = {example}    # {what}");
     }
+    out.push_str(
+        "\n# A reap profile; the same name as a built-in replaces it.\n# [reap.profiles.NAME]\n",
+    );
+    for (k, _, what) in PROFILE_KEYS {
+        let _ = writeln!(out, "#   {k}: {what}");
+    }
     out
 }
 
@@ -614,6 +679,18 @@ paths = ["/srv/da\"ta", "\u00e9"]
         assert_eq!(parse_value("[]"), Some(Value::List(Vec::new())));
         assert_eq!(parse_value("[1]"), None);
         assert_eq!(parse_value("\"\\q\""), None);
+    }
+
+    #[test]
+    fn reap_profile_tables_take_their_keys_and_nothing_else() {
+        let c = Config::parse(
+            "[reap.profiles.mine]\npaths = [\"~/x/*\"]\nage = \"2d\"\nguard = true\nbogus = 1\n[reap.profiles.a.b]\nage = \"1d\"\n[a..b]\n",
+            None,
+        );
+        assert_eq!(c.profile_names(), ["mine"]);
+        assert_eq!(c.list("reap.profiles.mine", "paths"), ["~/x/*"]);
+        assert_eq!(c.bool("reap.profiles.mine", "guard"), Some(true));
+        assert_eq!(c.warnings.len(), 3, "{:?}", c.warnings);
     }
 
     #[test]
