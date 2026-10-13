@@ -23,8 +23,8 @@ fn run(home: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("HOME", home)
         .env("USERPROFILE", home)
-        .env("APPDATA", home.join("AppData/Roaming"))
-        .env("LOCALAPPDATA", home.join("AppData/Local"))
+        .env("APPDATA", home.join("AppData").join("Roaming"))
+        .env("LOCALAPPDATA", home.join("AppData").join("Local"))
         .env("TEMP", home.join("tmp"))
         .env("TMP", home.join("tmp"))
         .env_remove("XDG_CONFIG_HOME")
@@ -143,14 +143,14 @@ fn reap_skips_open_files_and_takes_stale_ones() {
 #[test]
 fn reap_profiles_work_with_windows_paths() {
     let root = sandbox("profiles");
-    let cfg = root.join("AppData/Roaming/rtrash");
+    let cfg = root.join("AppData").join("Roaming").join("rtrash");
     fs::create_dir_all(&cfg).unwrap();
     fs::write(
         cfg.join("config.toml"),
         "[reap.profiles.mine]\nabout = \"my scratch\"\npaths = [\"windows:C/scratch/*\", \"unix:/nowhere/*\"]\nage = \"1h\"\naction = \"permanent\"\n",
     )
     .unwrap();
-    let scratch = root.join("AppData/Local/scratch");
+    let scratch = root.join("AppData").join("Local").join("scratch");
     fs::create_dir_all(&scratch).unwrap();
     let old = scratch.join("old.txt");
     fs::write(&old, b"o").unwrap();

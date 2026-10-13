@@ -695,11 +695,15 @@ mod tests {
         }
         std::fs::write(t.join("a/.lock"), b"").unwrap();
         let got = glob(&format!("{}/**/target", t.display()), STAR_DEPTH);
-        let rel: Vec<String> = got
+        let rel: Vec<PathBuf> = got
             .iter()
-            .map(|p| p.strip_prefix(&t).unwrap().display().to_string())
+            .map(|p| p.strip_prefix(&t).unwrap().to_path_buf())
             .collect();
-        assert_eq!(rel, ["a/b/c/target", "a/target"]);
+        let want: Vec<PathBuf> = [&["a", "b", "c", "target"][..], &["a", "target"]]
+            .iter()
+            .map(|c| c.iter().collect())
+            .collect();
+        assert_eq!(rel, want);
         let got = glob(&format!("{}/a/*", t.display()), STAR_DEPTH);
         assert_eq!(glob(&format!("{}/**/target", t.display()), 6).len(), 3);
         assert!(got.iter().all(|p| !p.ends_with(".lock")));
