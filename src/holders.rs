@@ -17,6 +17,22 @@ pub struct Hold {
     /// `fd N`, `cwd`, `root`, `exe` or `mmap`.
     pub how: String,
     pub path: PathBuf,
+    /// Every name the process goes by: its short command name (which
+    /// Linux cuts to 15 bytes), and the file names of its executable
+    /// and of its first argument.
+    pub names: Vec<String>,
+}
+
+impl Hold {
+    /// Does the process go by `name`?
+    pub fn is(&self, name: &str) -> bool {
+        self.command == name || self.names.iter().any(|n| n == name)
+    }
+}
+
+/// The file name of a path given as bytes or text.
+fn base_name(p: &Path) -> Option<String> {
+    p.file_name().map(|f| f.to_string_lossy().into_owned())
 }
 
 /// Every hold of every readable process at one moment, keyed by path.
@@ -207,6 +223,23 @@ fn scan(s: &mut Snapshot) {
             let command = fs::read_to_string(base.join("comm"))
                 .map(|c| c.trim_end_matches('\n').to_string())
                 .unwrap_or_default();
+            let mut names = Vec::new();
+            if let Some(n) = fs::read_link(base.join("exe"))
+                .ok()
+                .and_then(live_path)
+                .and_then(|e| base_name(&e))
+            {
+                names.push(n);
+            }
+            if let Ok(cmdline) = fs::read(base.join("cmdline")) {
+                let argv0 = cmdline.split(|&b| b == 0).next().unwrap_or_default();
+                let argv0 = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(argv0);
+                if let Some(n) = base_name(Path::new(argv0)) {
+                    if !names.contains(&n) {
+                        names.push(n);
+                    }
+                }
+            }
             for (how, path) in found {
                 s.add(Hold {
                     pid,
@@ -214,6 +247,7 @@ fn scan(s: &mut Snapshot) {
                     command: command.clone(),
                     how,
                     path,
+                    names: names.clone(),
                 });
             }
         }
@@ -339,12 +373,14 @@ fn scan(s: &mut Snapshot) {
                 }
             }
             let pid_u = pid as u32;
+            let names: Vec<String> = exe.as_deref().and_then(base_name).into_iter().collect();
             let hold = |how: &str, path: PathBuf| Hold {
                 pid: pid_u,
                 uid,
                 command: command.clone(),
                 how: how.to_string(),
                 path,
+                names: names.clone(),
             };
             let mut holds = Vec::new();
             if let Some(e) = exe {

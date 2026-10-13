@@ -1552,7 +1552,8 @@ holding
 up to four levels below home, and
 .BR $CARGO_TARGET_DIR ;
 one also stays while a process named cargo or rustc holds anything in
-its project; 14 days),
+its project, by its command name, the file name of its executable or
+that of its first argument; 14 days),
 .B cargo\-registry
 (\fIregistry/cache\fR, \fIregistry/src\fR and \fIgit/checkouts\fR under
 \fI$CARGO_HOME\fR; 30 days),
@@ -1613,7 +1614,8 @@ replaces the built-in of that name or adds a new one, with the keys
 .B marker
 (a file an entry must hold),
 .B busy
-(commands that keep an entry while they hold anything in its parent),
+(command or executable names that keep an entry while they hold
+anything in its parent),
 .B guard
 (true to keep entries holding credential-like names),
 .B roots

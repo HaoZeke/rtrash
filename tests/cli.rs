@@ -3245,18 +3245,7 @@ fn reap_profile_cargo_target_takes_idle_targets_and_keeps_busy_ones() {
     write_at(&home, "src/notrust/target/out.bin", "1");
     age_tree(&home.join("src"));
     // A process named cargo working in the busy project.
-    let cargo = home.join("bin/cargo");
-    fs::create_dir_all(cargo.parent().unwrap()).unwrap();
-    let sleep = ["/bin/sleep", "/usr/bin/sleep"]
-        .into_iter()
-        .find(|p| Path::new(p).exists())
-        .unwrap();
-    fs::copy(sleep, &cargo).unwrap();
-    let mut child = Command::new(&cargo)
-        .arg("60")
-        .current_dir(home.join("src/busy"))
-        .spawn()
-        .unwrap();
+    let mut child = spawn_as(&home.join("bin/cargo"), &home.join("src/busy"));
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     let out = reap_cmd(
@@ -3402,4 +3391,76 @@ fn reap_roots_find_cargo_targets_outside_home_to_the_set_depth() {
     );
     let text = run(&[], Some(&ws));
     assert!(text.contains("p1/target"), "{text}");
+}
+
+/// Run a copy of sleep under the file name of `as_exe`, in `cwd`.
+/// A fork elsewhere in the test binary can briefly hold the fresh copy
+/// open for writing, so spawning retries while it is busy.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn spawn_as(as_exe: &Path, cwd: &Path) -> std::process::Child {
+    fs::create_dir_all(as_exe.parent().unwrap()).unwrap();
+    let sleep = ["/bin/sleep", "/usr/bin/sleep"]
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+        .unwrap();
+    fs::copy(sleep, as_exe).unwrap();
+    for _ in 0..100 {
+        match Command::new(as_exe).arg("60").current_dir(cwd).spawn() {
+            Ok(c) => return c,
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            Err(e) => panic!("cannot run {}: {e}", as_exe.display()),
+        }
+    }
+    panic!("{} stayed busy", as_exe.display());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_busy_names_match_beyond_the_short_command_name() {
+    let sb = Sandbox::new("reap-busy-name");
+    let home = sb.root.clone();
+    fs::create_dir_all(home.join("tmp")).unwrap();
+    write_at(
+        &home,
+        ".config/rtrash/config.toml",
+        "[reap.profiles.longname]\npaths = [\"~/proj/out\"]\nmarker = \"stamp\"\nbusy = [\"a-very-long-builder-name\"]\nage = \"1h\"\n",
+    );
+    write_at(&home, "proj/out/stamp", "s");
+    age_tree(&home.join("proj"));
+    // Linux cuts the command name to 15 bytes; the exe name is whole.
+    let mut child = spawn_as(
+        &home.join("bin/a-very-long-builder-name"),
+        &home.join("proj"),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let out = reap_cmd(
+        &sb,
+        &[
+            "reap",
+            "-p",
+            "longname",
+            "--age-by=m",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.contains("is busy with pid"), "{text}");
+    let out = reap_cmd(
+        &sb,
+        &[
+            "reap",
+            "-p",
+            "longname",
+            "--age-by=m",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert!(!stdout_of(&out).contains("is busy"), "{}", stdout_of(&out));
 }

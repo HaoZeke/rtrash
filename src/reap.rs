@@ -420,7 +420,7 @@ fn busy_holder(path: &Path, g: &Group, ctx: &Ctx) -> Option<String> {
     ctx.snap
         .under(parent)
         .into_iter()
-        .find(|h| g.busy.contains(&h.command))
+        .find(|h| g.busy.iter().any(|b| h.is(b)))
         .map(|h| {
             format!(
                 "'{}' is busy with pid {} ({}, {})",
