@@ -3110,3 +3110,244 @@ fn reap_refuses_home_and_rejects_bad_ages() {
     let out = sb.run(&["reap", "--age-by=x", "."]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// Set access and modification times a day back on `p` and everything
+/// in it, children first so a directory's own times stay old.
+fn age_tree(p: &Path) {
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    let meta = fs::symlink_metadata(p).unwrap();
+    if meta.is_dir() {
+        for e in fs::read_dir(p).unwrap() {
+            age_tree(&e.unwrap().path());
+        }
+    }
+    let f = if meta.is_dir() {
+        fs::File::open(p).unwrap()
+    } else {
+        fs::File::options().write(true).open(p).unwrap()
+    };
+    f.set_times(
+        fs::FileTimes::new()
+            .set_accessed(day_ago)
+            .set_modified(day_ago),
+    )
+    .unwrap();
+}
+
+/// `rtrash` in the sandbox, with its HOME and config, without the
+/// variables that would point profiles at the host's real caches.
+fn reap_cmd(sb: &Sandbox, args: &[&str]) -> Output {
+    Command::new(bin())
+        .args(args)
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("XDG_CACHE_HOME", sb.root.join(".cache"))
+        .env("HOME", &sb.root)
+        .env("TMPDIR", sb.root.join("tmp"))
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_HOME")
+        .env_remove("CODEX_HOME")
+        .output()
+        .unwrap()
+}
+
+fn write_at(root: &Path, rel: &str, body: &str) -> PathBuf {
+    let p = root.join(rel);
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(&p, body).unwrap();
+    p
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_profile_claude_takes_stale_scratch_and_never_settings_or_secrets() {
+    let sb = Sandbox::new("reap-claude");
+    let home = sb.root.clone();
+    fs::create_dir_all(home.join("tmp")).unwrap();
+    let old_snap = write_at(&home, ".claude/shell-snapshots/snapshot-zsh-1.sh", "x");
+    let old_todo = write_at(&home, ".claude/todos/a.json", "[]");
+    let secret = write_at(&home, ".claude/todos/b/history.jsonl", "h");
+    let settings = write_at(&home, ".claude/settings.json", "{}");
+    let creds = write_at(&home, ".claude/.credentials.json", "{}");
+    age_tree(&home.join(".claude"));
+    let fresh = write_at(&home, ".claude/shell-snapshots/snapshot-zsh-2.sh", "y");
+
+    let out = reap_cmd(
+        &sb,
+        &[
+            "reap",
+            "--profile",
+            "claude",
+            "--age-by=m",
+            "--older-than=1h",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    let reaped = text
+        .split("\"reaped\"")
+        .nth(1)
+        .unwrap()
+        .split("\"skipped\"")
+        .next()
+        .unwrap();
+    assert!(
+        reaped.contains("snapshot-zsh-1.sh") && reaped.contains("todos/a.json"),
+        "{text}"
+    );
+    for kept in [
+        "snapshot-zsh-2.sh",
+        "todos/b",
+        "settings.json",
+        "credentials",
+    ] {
+        assert!(!reaped.contains(kept), "{kept} in {text}");
+    }
+    assert!(
+        text.contains("looks like settings, history or a credential"),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#""name":"claude","action":"trash""#),
+        "{text}"
+    );
+
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = reap_cmd(
+        &sb,
+        &[
+            "reap",
+            "-p",
+            "claude",
+            "--age-by=m",
+            "--older-than=1h",
+            &pin,
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!old_snap.exists() && !old_todo.exists());
+    assert!(fresh.exists() && secret.exists() && settings.exists() && creds.exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_profile_cargo_target_takes_idle_targets_and_keeps_busy_ones() {
+    let sb = Sandbox::new("reap-cargo");
+    let home = sb.root.clone();
+    fs::create_dir_all(home.join("tmp")).unwrap();
+    write_at(&home, "src/idle/target/.rustc_info.json", "{}");
+    write_at(&home, "src/idle/target/debug/big", "0123456789");
+    write_at(&home, "src/busy/target/.rustc_info.json", "{}");
+    write_at(&home, "src/busy/target/debug/x", "1");
+    write_at(&home, "src/notrust/target/out.bin", "1");
+    age_tree(&home.join("src"));
+    // A process named cargo working in the busy project.
+    let cargo = home.join("bin/cargo");
+    fs::create_dir_all(cargo.parent().unwrap()).unwrap();
+    let sleep = ["/bin/sleep", "/usr/bin/sleep"]
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+        .unwrap();
+    fs::copy(sleep, &cargo).unwrap();
+    let mut child = Command::new(&cargo)
+        .arg("60")
+        .current_dir(home.join("src/busy"))
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let out = reap_cmd(
+        &sb,
+        &[
+            "reap",
+            "--profile=cargo-target",
+            "--age-by=m",
+            "--older-than=1h",
+            "--dry-run",
+        ],
+    );
+    let text = stdout_of(&out);
+    let _ = (&text, out.status);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        text.contains("would reap") && text.contains("src/idle/target"),
+        "{text}"
+    );
+    assert!(!text.contains("src/notrust"), "{text}");
+    assert!(text.contains("cargo-target: would reap 1 entry"), "{text}");
+
+    let out = reap_cmd(
+        &sb,
+        &[
+            "reap",
+            "--profile=cargo-target",
+            "--age-by=m",
+            "--older-than=1h",
+            "--json",
+        ],
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(
+        text.contains("is busy with pid") && text.contains("(cargo, cwd)"),
+        "{text}"
+    );
+    assert!(!home.join("src/idle/target").exists(), "{text}");
+    assert!(home.join("src/busy/target").exists());
+    assert!(home.join("src/notrust/target").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn reap_profiles_come_from_config_and_replace_builtins() {
+    let sb = Sandbox::new("reap-config");
+    let home = sb.root.clone();
+    fs::create_dir_all(home.join("tmp")).unwrap();
+    write_at(
+        &home,
+        ".config/rtrash/config.toml",
+        "[reap.profiles.mine]\nabout = \"my scratch\"\npaths = [\"~/scratch/*\"]\nage = \"1h\"\naction = \"permanent\"\n\n[reap.profiles.go]\nabout = \"go replaced\"\npaths = []\n",
+    );
+    let old = write_at(&home, "scratch/old.txt", "o");
+    age_tree(&old);
+    let out = reap_cmd(&sb, &["reap", "--list-profiles"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    for name in [
+        "ai",
+        "claude",
+        "compilers",
+        "cargo-target",
+        "pkg",
+        "pip",
+        "thumbnails",
+    ] {
+        assert!(
+            text.lines().any(|l| l.starts_with(name)),
+            "{name} missing:\n{text}"
+        );
+    }
+    assert!(
+        text.contains("my scratch (config)") && text.contains("go replaced (config)"),
+        "{text}"
+    );
+    let out = reap_cmd(&sb, &["reap", "--list-profiles", "--json"]);
+    assert!(stdout_of(&out)
+        .contains(r#""name":"mine","about":"my scratch","age":3600,"action":"permanent""#));
+
+    let out = reap_cmd(&sb, &["reap", "-p", "mine", "--age-by=m"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("mine: reaped 1 entry"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(!old.exists());
+    let out = reap_cmd(&sb, &["reap", "-p", "nope"]);
+    assert_eq!(out.status.code(), Some(2));
+}

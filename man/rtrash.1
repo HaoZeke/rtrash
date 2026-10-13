@@ -1485,6 +1485,185 @@ Processes are read once, before anything moves.
 On macOS memory maps are not read; on Windows reap is not available.
 Without root, other users' processes cannot be read, but their files are
 kept for being theirs.
+.PP
+.B Profiles.
+With
+.BI \-\-profile= NAME
+reap also takes a tool's caches and temp files.
+A profile is a list of path globs, an age and an action.
+In a glob,
+.I \(ti
+is your home,
+.B $VAR
+and
+.B ${VAR:\-default}
+read the environment (a path whose variable is unset and has no default
+is dropped),
+.I C
+at the start is the cache root
+(\fI$XDG_CACHE_HOME\fR or \fI\(ti/.cache\fR; \fI\(ti/Library/Caches\fR on
+macOS), and a
+.BR linux: ,
+.B macos:
+or
+.B unix:
+prefix limits the glob to that system.
+A
+.B *
+never matches a leading dot, and
+.B **
+spans up to four directories, never entering hidden directories,
+symlinks,
+.I node_modules
+or a match.
+Each match is one entry, judged by every rule above, with the profile's
+age unless
+.B \-\-older\-than
+is given.
+.PP
+The built-in profiles name only what each tool rebuilds, never its
+settings, credentials, history or sessions:
+.TP
+.B ai
+(group)
+.BR claude " (" \(ti/.claude/shell\-snapshots ", " \(ti/.claude/todos ,
+\fI$TMPDIR/claude\-*\fR; 7 days, trash),
+.B cursor
+(the Electron
+.IR Cache ", " CachedData ", " "Code Cache" ", " GPUCache " and " logs
+of Cursor, and
+\fI\(ti/.cursor/projects/*/terminals\fR; 7 days, trash),
+.B codex
+(\fI$CODEX_HOME/log\fR; 14 days, trash),
+.B aider
+(\fI\(ti/.aider/caches\fR; 14 days, trash),
+.B ollama
+(runner scratch in \fI$TMPDIR/ollama*\fR, never models; 2 days, permanent).
+The first four are guarded: an entry that is or holds a file named like
+settings, history, a credential, a key or a database stays.
+.TP
+.B compilers
+(group)
+.B cargo\-target
+(directories named
+.I target
+holding
+.I .rustc_info.json
+up to four levels below home, and
+.BR $CARGO_TARGET_DIR ;
+one also stays while a process named cargo or rustc holds anything in
+its project; 14 days),
+.B cargo\-registry
+(\fIregistry/cache\fR, \fIregistry/src\fR and \fIgit/checkouts\fR under
+\fI$CARGO_HOME\fR; 30 days),
+.B sccache
+(\fI$SCCACHE_DIR\fR),
+.B ccache
+(the hex buckets of \fI$CCACHE_DIR\fR, never \fIccache.conf\fR),
+.B go
+(the hex buckets of \fI$GOCACHE\fR, not the module cache; 10 days),
+.B zig
+(the global \fIo\fR and \fItmp\fR caches),
+.B bazel
+(output bases no server holds),
+.B gradle
+(build cache and daemon logs); all permanent.
+.TP
+.B pkg
+(group)
+.B pip
+(HTTP and wheel cache),
+.B uv
+(cache buckets),
+.B npm
+(\fI_cacache\fR content, \fI_logs\fR, \fI_npx\fR),
+.B pnpm
+(metadata cache; the store is left to
+.BR "pnpm store prune" ),
+.B yarn
+(v1 and berry caches),
+.B bun
+(install cache),
+.B conda
+(package tarballs only, never the extracted packages environments link
+to); 30 days, permanent.
+.TP
+.B thumbnails
+(freedesktop thumbnails; 90 days, permanent).
+.PP
+.B \-\-list\-profiles
+shows them all, and with
+.B \-v
+the paths each expands to here.
+A profile in the config file under
+.BI [reap.profiles. NAME ]
+replaces the built-in of that name or adds a new one, with the keys
+.B about
+(a string),
+.B paths
+(an array of globs),
+.B age
+(such as
+.BR \(dq7d\(dq ;
+30 days without it),
+.B action
+.RB ( \(dqtrash\(dq ", the default, or " \(dqpermanent\(dq ),
+.B include
+(other profiles to run),
+.B marker
+(a file an entry must hold),
+.B busy
+(commands that keep an entry while they hold anything in its parent),
+.B guard
+(true to keep entries holding credential-like names) and
+.B tool
+(the tool's own cleanup command, where
+.B {age}
+becomes the age as
+.I N\fBd\fR).
+For example:
+.PP
+.nf
+[reap.profiles.scratch]
+about = "my scratch builds"
+paths = ["\(ti/scratch/*", "linux:/var/tmp/$USER\-*"]
+age = "3d"
+action = "permanent"
+.fi
+.PP
+With
+.BR \-\-tool ,
+a profile with a tool on PATH runs it instead of its own pass:
+.BR "ccache \-\-evict\-older\-than" ,
+.BR "go clean \-cache" ,
+.BR "pip cache purge" ,
+.BR "uv cache prune" ,
+.BR "npm cache clean \-\-force" ,
+.BR "pnpm store prune" ,
+.BR "yarn cache clean" ,
+.B bun pm cache rm
+and
+.BR "conda clean \-\-tarballs" .
+A dry run only names the command.
+.TP
+.BR \-p ", " \-\-profile= NAME
+Also reap profile
+.I NAME
+(repeatable).
+With a profile and no
+.IR DIR ,
+reap leaves the temp directories alone.
+.TP
+.B \-\-list\-profiles
+List the profiles: name, age, action and what it covers, or
+.B group
+for a group.
+.TP
+.B \-\-tool
+Hand each chosen profile that has one to its tool's own cleanup.
+.TP
+.B \-\-trash
+Move entries to the trash even for a permanent profile.
 .TP
 .BI \-\-older\-than= AGE
 Only entries whose newest time is older than
@@ -1494,7 +1673,7 @@ a number with
 or
 .BR w ,
 or days without a unit.
-The default is 10d, the age systemd\-tmpfiles gives
+For DIR the default is 10d, the age systemd\-tmpfiles gives
 .IR /tmp .
 .TP
 .BI \-\-age\-by= LETTERS
@@ -1508,10 +1687,11 @@ Which times count, from
 .BR acm .
 .TP
 .BR \-n ", " \-\-dry\-run
-Show what would go and change nothing.
+Show what would go, and with profiles each profile's entry count and
+total size, and change nothing.
 .TP
 .B \-\-permanent
-Delete entries instead of moving them to the trash.
+Delete entries instead of moving them to the trash, for every profile.
 .TP
 .BI \-\-trash\-dir =PATH
 Put into this trash root instead of the one put would pick.
@@ -1527,15 +1707,20 @@ Print a JSON object:
 .IR dry_run ,
 .I older_than
 (seconds),
+.I profiles
+(each with
+.IR name ", " action ", " older_than ", " entries ", " bytes ", " kept ", " tool
+and
+.IR tool_status ),
 .I reaped
 (each with
-.IR path ,
+.IR path ", " profile ,
 .I age
 in seconds and
 .IR bytes ),
 .I skipped
 (each with
-.I path
+.IR path ", " profile
 and
 .IR reason )
 and

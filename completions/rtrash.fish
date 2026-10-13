@@ -279,6 +279,10 @@ complete -c trash-rm -l version
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q who' -l json -d 'print a JSON object'
 
 # reap
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -s p -l profile -x -a 'ai claude cursor codex aider ollama compilers cargo-target cargo-registry sccache ccache go zig bazel gradle pkg pip uv npm pnpm yarn bun conda thumbnails' -d 'also reap a profile'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l list-profiles -d 'list the profiles'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l tool -d 'hand a profile to its tool cleanup'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l trash -d 'move to the trash, even for a permanent profile'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l older-than -x -d 'only entries older than AGE (2h, 10d)'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l age-by -x -d 'times that count: a, c, m'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -s n -l dry-run -d 'show what would go, change nothing'

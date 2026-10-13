@@ -47,6 +47,8 @@ pub mod put_tui;
 #[cfg(unix)]
 pub mod reap;
 #[cfg(unix)]
+pub mod reap_profiles;
+#[cfg(unix)]
 pub mod restore;
 #[cfg(feature = "tui")]
 pub mod restore_tui;

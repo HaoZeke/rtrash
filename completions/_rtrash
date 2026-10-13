@@ -65,6 +65,10 @@ who_opts=(
 )
 
 reap_opts=(
+  '*'{-p,--profile=}'[also reap a profile]:profile:(ai claude cursor codex aider ollama compilers cargo-target cargo-registry sccache ccache go zig bazel gradle pkg pip uv npm pnpm yarn bun conda thumbnails)'
+  '--list-profiles[list the profiles]'
+  '--tool[hand a profile to its tool cleanup]'
+  '--trash[move to the trash, even for a permanent profile]'
   '--older-than=[only entries older than AGE]:age:'
   '--age-by=[times that count]:letters:'
   '(-n --dry-run)'{-n,--dry-run}'[show what would go, change nothing]'

@@ -16,26 +16,34 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use crate::holders::{alive, Snapshot};
+use crate::reap_profiles::{self, secret_name, Action};
 use crate::util::{json_escape, str_from_os_ref};
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [DIR]...
 Trash the entries in DIR that nobody has touched for --older-than and that
-no live process holds. Without DIR: $TMPDIR, /tmp and /var/tmp.
+no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
 
+  -p, --profile=NAME    also reap a profile's caches and temp files, each
+                          with its own age and action (repeatable); groups:
+                          ai, compilers, pkg
+      --list-profiles   list the profiles (with -v, their paths)
+      --tool            hand a profile to its tool's own cleanup (such as
+                          go clean -cache) when the tool is on PATH
       --older-than=AGE  only entries whose newest time is older than AGE:
                           a number with s, m, h, d or w (days without one);
-                          default 10d, as systemd-tmpfiles uses for /tmp
+                          default 10d for DIR, the profile's age for one
       --age-by=LETTERS  which times count, from a (access), c (change) and
                           m (modification); default acm; a directory's
                           access time never counts
-  -n, --dry-run         show what would go, change nothing
+  -n, --dry-run         show what would go and each profile's total
       --permanent       delete instead of moving to the trash
+      --trash           move to the trash, even for a permanent profile
       --trash-dir=PATH  put into this trash root instead of the usual one
       --home-only       always use the home trash
   -v, --verbose         also show each skipped entry and why
       --json            print a JSON object ({dry_run, older_than,
-                          reaped, skipped, failed})
+                          profiles, reaped, skipped, failed})
       --help            display this help and exit
       --version         output version information and exit
 
@@ -43,7 +51,8 @@ An entry stays when a live process has it or anything in it open or mapped
 or as its working directory, when it is or holds a socket, pipe, device or
 mount point, when another user owns any of it (unless run as root), when
 it is a lock or pid file naming a live process, when it holds
-$XDG_RUNTIME_DIR, or when a tmpfiles.d x or X line covers it.
+$XDG_RUNTIME_DIR, or when a tmpfiles.d x or X line covers it. A cargo
+target directory also stays while cargo or rustc works in its project.
 ";
 
 fn usage_err(prog: &str, msg: &str) -> i32 {
@@ -214,13 +223,16 @@ fn kind_reason(ft: &fs::FileType) -> Option<&'static str> {
     }
 }
 
-fn walk(entry: &Path, top: &fs::Metadata, dev: u64, age_by: AgeBy, euid: u32) -> Walk {
+/// Walk an entry for its newest time and size, stopping at the first
+/// reason to keep it; a time newer than `cutoff` is such a reason, so a
+/// busy tree is never walked in full.
+fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Walk {
     let mut w = Walk {
-        newest: age_by.newest(top),
+        newest: ctx.age_by.newest(top),
         bytes: top.blocks() * 512,
         keep: None,
     };
-    if !top.is_dir() {
+    if !top.is_dir() || w.newest > g.cutoff {
         return w;
     }
     let mut stack = vec![entry.to_path_buf()];
@@ -256,11 +268,21 @@ fn walk(entry: &Path, top: &fs::Metadata, dev: u64, age_by: AgeBy, euid: u32) ->
                 w.keep = Some(format!("holds {k} '{}'", p.display()));
                 return w;
             }
-            if euid != 0 && m.uid() != euid {
+            if ctx.euid != 0 && m.uid() != ctx.euid {
                 w.keep = Some(format!("holds '{}' of user {}", p.display(), m.uid()));
                 return w;
             }
-            w.newest = w.newest.max(age_by.newest(&m));
+            if g.guard && secret_name(&e.file_name().to_string_lossy()) {
+                w.keep = Some(format!(
+                    "holds '{}', which looks like settings, history or a credential",
+                    p.display()
+                ));
+                return w;
+            }
+            w.newest = w.newest.max(ctx.age_by.newest(&m));
+            if w.newest > g.cutoff {
+                return w;
+            }
             w.bytes += m.blocks() * 512;
             if m.is_dir() {
                 stack.push(p);
@@ -289,9 +311,121 @@ fn live_lock(path: &Path, m: &fs::Metadata) -> Option<u32> {
 /// One entry and what reap made of it.
 struct Outcome {
     path: PathBuf,
+    group: usize,
     age: i64,
     bytes: u64,
     skip: Option<String>,
+}
+
+/// The entries of one profile, or of the plain directories (`tmp`).
+struct Group {
+    name: String,
+    action: Action,
+    older: i64,
+    cutoff: i64,
+    marker: Option<String>,
+    busy: Vec<String>,
+    guard: bool,
+    /// The tool command `--tool` runs instead of the pass, when on PATH.
+    tool: Option<Vec<String>>,
+    /// Entry and the device of the directory it sits in.
+    entries: Vec<(PathBuf, u64)>,
+}
+
+/// What every judgement needs.
+struct Ctx {
+    now: i64,
+    euid: u32,
+    age_by: AgeBy,
+    snap: Snapshot,
+    excl: Vec<String>,
+    runtime: Option<PathBuf>,
+    home: Option<PathBuf>,
+}
+
+fn judge(path: &Path, parent_dev: u64, gi: usize, g: &Group, ctx: &Ctx) -> Option<Outcome> {
+    let m = fs::symlink_metadata(path).ok()?;
+    if let Some(marker) = &g.marker {
+        // Not the kind of entry this profile is about.
+        if !m.is_dir() || fs::symlink_metadata(path.join(marker)).is_err() {
+            return None;
+        }
+    }
+    let mut o = Outcome {
+        path: path.to_path_buf(),
+        group: gi,
+        age: ctx.now - ctx.age_by.newest(&m),
+        bytes: 0,
+        skip: None,
+    };
+    let name = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    o.skip = if path == Path::new("/") || ctx.home.as_ref().is_some_and(|h| h.starts_with(path)) {
+        Some("holds your home directory".to_string())
+    } else if name.starts_with(".Trash") {
+        Some("a trash directory".to_string())
+    } else if ctx.runtime.as_ref().is_some_and(|r| r.starts_with(path)) {
+        Some("the XDG runtime directory".to_string())
+    } else if let Some(pat) = excluded(path, &ctx.excl) {
+        Some(format!("excluded by tmpfiles.d '{pat}'"))
+    } else if m.dev() != parent_dev {
+        Some("a mount point".to_string())
+    } else if let Some(k) = kind_reason(&m.file_type()) {
+        Some(k.to_string())
+    } else if ctx.euid != 0 && m.uid() != ctx.euid {
+        Some(format!("owned by user {}", m.uid()))
+    } else if g.guard && secret_name(&name) {
+        Some("looks like settings, history or a credential".to_string())
+    } else {
+        None
+    };
+    if o.skip.is_some() {
+        return Some(o);
+    }
+    let w = walk(path, &m, parent_dev, ctx, g);
+    o.age = ctx.now - w.newest;
+    o.bytes = w.bytes;
+    o.skip = if let Some(k) = w.keep {
+        Some(k)
+    } else if w.newest > g.cutoff {
+        Some(format!("touched {} ago", fmt_age(ctx.now - w.newest)))
+    } else if let Some(pid) = live_lock(path, &m) {
+        Some(format!("lock file of live pid {pid}"))
+    } else if let Some(h) = ctx.snap.under(path).first() {
+        let more = ctx.snap.under(path).iter().any(|x| x.pid != h.pid);
+        let more = if more { " and others" } else { "" };
+        Some(format!(
+            "in use by pid {} ({}, {}){more}",
+            h.pid, h.command, h.how
+        ))
+    } else {
+        busy_holder(path, g, ctx)
+    };
+    Some(o)
+}
+
+/// A `busy` command (cargo, rustc) at work in the entry's parent, such
+/// as the project a target directory belongs to.
+fn busy_holder(path: &Path, g: &Group, ctx: &Ctx) -> Option<String> {
+    if g.busy.is_empty() {
+        return None;
+    }
+    let parent = path.parent()?;
+    ctx.snap
+        .under(parent)
+        .into_iter()
+        .find(|h| g.busy.contains(&h.command))
+        .map(|h| {
+            format!(
+                "'{}' is busy with pid {} ({}, {})",
+                parent.display(),
+                h.pid,
+                h.command,
+                h.how
+            )
+        })
 }
 
 fn default_dirs() -> Vec<PathBuf> {
@@ -320,17 +454,90 @@ fn fmt_age(s: i64) -> String {
     }
 }
 
+/// Is `cmd` an executable on PATH (or a path to one)?
+fn on_path(cmd: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let exec = |p: &Path| {
+        fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    if cmd.contains('/') {
+        return exec(Path::new(cmd));
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|d| exec(&d.join(cmd))))
+}
+
+fn list_profiles(prog: &str, json: bool, verbose: bool) -> i32 {
+    let mut warns = Vec::new();
+    let all = reap_profiles::all(crate::config::get(), &mut warns);
+    for w in &warns {
+        eprintln!("{prog}: warning: {w}");
+    }
+    if json {
+        let items: Vec<String> = all
+            .iter()
+            .map(|p| {
+                let list = |v: &[String]| {
+                    v.iter()
+                        .map(|s| format!("\"{}\"", json_escape(s)))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                };
+                format!(
+                    r#"{{"name":"{}","about":"{}","age":{},"action":"{}","paths":[{}],"include":[{}],"tool":[{}],"source":"{}"}}"#,
+                    json_escape(&p.name),
+                    json_escape(&p.about),
+                    p.age,
+                    p.action.as_str(),
+                    list(&p.paths),
+                    list(&p.include),
+                    list(&p.tool),
+                    if p.from_config { "config" } else { "builtin" }
+                )
+            })
+            .collect();
+        println!("[{}]", items.join(","));
+        return 0;
+    }
+    for p in &all {
+        let what = if p.include.is_empty() {
+            format!("{:>4} {:<9}", fmt_age(p.age), p.action.as_str())
+        } else {
+            format!("{:<14}", "group")
+        };
+        let src = if p.from_config { " (config)" } else { "" };
+        println!("{:<15} {what} {}{src}", p.name, p.about);
+        if verbose {
+            for inc in &p.include {
+                println!("    + {inc}");
+            }
+            for path in &p.paths {
+                if let Some(e) = reap_profiles::expand(path) {
+                    println!("    {e}");
+                }
+            }
+            if !p.tool.is_empty() {
+                println!("    --tool: {}", p.tool.join(" "));
+            }
+        }
+    }
+    0
+}
+
 pub fn run(prog: &str, args: &[String]) -> i32 {
-    let mut older = 10 * 86_400;
+    let mut older: Option<i64> = None;
     let mut age_by = AgeBy {
         atime: true,
         ctime: true,
         mtime: true,
     };
     let mut dry_run = false;
-    let mut permanent = false;
+    let mut action: Option<Action> = None;
     let mut verbose = false;
     let mut json = false;
+    let mut list = false;
+    let mut use_tool = false;
+    let mut profiles: Vec<String> = Vec::new();
     let mut opts = crate::put::Opts {
         force: true,
         recursive: true,
@@ -339,7 +546,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     };
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut no_more = false;
+    let mut want_profile = false;
     for arg in args {
+        if want_profile {
+            profiles.push(arg.clone());
+            want_profile = false;
+            continue;
+        }
         if no_more || !arg.starts_with('-') || arg == "-" {
             dirs.push(crate::util::arg_path(arg));
             continue;
@@ -348,9 +561,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--" => no_more = true,
             "-n" | "--dry-run" => dry_run = true,
             "-v" | "--verbose" => verbose = true,
-            "--permanent" => permanent = true,
+            "--permanent" => action = Some(Action::Permanent),
+            "--trash" => action = Some(Action::Trash),
             "--json" => json = true,
             "--home-only" => opts.home_only = true,
+            "--list-profiles" => list = true,
+            "--tool" => use_tool = true,
+            "-p" | "--profile" => want_profile = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -359,8 +576,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                 return 0;
             }
+            a if a.starts_with("--profile=") => profiles.push(a["--profile=".len()..].to_string()),
             a if a.starts_with("--older-than=") => match parse_age(&a["--older-than=".len()..]) {
-                Some(s) => older = s,
+                Some(s) => older = Some(s),
                 None => {
                     return usage_err(
                         prog,
@@ -378,12 +596,22 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             other => return usage_err(prog, &format!("unrecognized option '{other}'")),
         }
     }
+    if want_profile {
+        return usage_err(prog, "option '--profile' requires an argument");
+    }
+    if list {
+        return list_profiles(prog, json, verbose);
+    }
+    let now = crate::util::now_epoch();
+    let mut status = 0;
+    let mut groups: Vec<Group> = Vec::new();
+
+    // The plain directories: given ones, or the temp dirs without profiles.
     let explicit = !dirs.is_empty();
-    if !explicit {
+    if !explicit && profiles.is_empty() {
         dirs = default_dirs();
     }
     let mut roots: Vec<PathBuf> = Vec::new();
-    let mut status = 0;
     for d in &dirs {
         match fs::canonicalize(d) {
             Ok(c) if c.is_dir() => {
@@ -405,7 +633,90 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             _ => {}
         }
     }
-    let snap = Snapshot::take_under(&roots);
+    if !roots.is_empty() {
+        let older = older.unwrap_or(10 * 86_400);
+        let mut entries = Vec::new();
+        for root in &roots {
+            let Ok(root_meta) = fs::symlink_metadata(root) else {
+                continue;
+            };
+            let Ok(rd) = fs::read_dir(root) else {
+                eprintln!("{prog}: cannot read '{}'", root.display());
+                status = 1;
+                continue;
+            };
+            let mut names: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+            names.sort();
+            entries.extend(names.into_iter().map(|p| (p, root_meta.dev())));
+        }
+        groups.push(Group {
+            name: "tmp".into(),
+            action: action.unwrap_or(Action::Trash),
+            older,
+            cutoff: now - older,
+            marker: None,
+            busy: Vec::new(),
+            guard: false,
+            tool: None,
+            entries,
+        });
+    }
+
+    if !profiles.is_empty() {
+        let mut warns = Vec::new();
+        let all = reap_profiles::all(crate::config::get(), &mut warns);
+        for w in &warns {
+            eprintln!("{prog}: warning: {w}");
+        }
+        let chosen = match reap_profiles::select(&all, &profiles) {
+            Ok(c) => c,
+            Err(e) => return usage_err(prog, &e),
+        };
+        for p in chosen {
+            let age = older.unwrap_or(p.age);
+            let mut entries: Vec<(PathBuf, u64)> = Vec::new();
+            for pat in &p.paths {
+                let Some(full) = reap_profiles::expand(pat) else {
+                    continue;
+                };
+                for e in reap_profiles::glob(&full) {
+                    let dev = e
+                        .parent()
+                        .and_then(|d| fs::symlink_metadata(d).ok())
+                        .map_or(u64::MAX, |m| m.dev());
+                    if !entries.iter().any(|(x, _)| *x == e) {
+                        entries.push((e, dev));
+                    }
+                }
+            }
+            let tool = (!p.tool.is_empty()).then(|| reap_profiles::tool_command(&p, age));
+            groups.push(Group {
+                name: p.name.clone(),
+                action: action.unwrap_or(p.action),
+                older: age,
+                cutoff: now - age,
+                marker: p.marker.clone(),
+                busy: p.busy.clone(),
+                guard: p.guard,
+                tool,
+                entries,
+            });
+        }
+    }
+
+    // One process scan covers every entry, by way of the dirs they sit in.
+    let mut scan_roots: Vec<PathBuf> = Vec::new();
+    for g in &groups {
+        for (e, _) in &g.entries {
+            if let Some(parent) = e.parent() {
+                let parent = parent.to_path_buf();
+                if !scan_roots.contains(&parent) {
+                    scan_roots.push(parent);
+                }
+            }
+        }
+    }
+    let snap = Snapshot::take_under(&scan_roots);
     if !snap.supported {
         eprintln!(
             "{prog}: cannot tell which processes hold files on this platform; nothing reaped"
@@ -420,73 +731,48 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             crate::util::plural(snap.unreadable as u64, "process", "processes")
         );
     }
-    let excl = tmpfiles_exclusions();
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR").and_then(|d| fs::canonicalize(d).ok());
-    let now = crate::util::now_epoch();
-    let cutoff = now - older;
+    let ctx = Ctx {
+        now,
+        euid,
+        age_by,
+        snap,
+        excl: tmpfiles_exclusions(),
+        runtime: std::env::var_os("XDG_RUNTIME_DIR").and_then(|d| fs::canonicalize(d).ok()),
+        home: crate::util::home_dir().and_then(|h| fs::canonicalize(h).ok()),
+    };
+
+    // A profile with a tool on PATH hands its cleanup to it under --tool.
+    let mut tool_runs: Vec<Option<(String, Option<i32>)>> = vec![None; groups.len()];
     let mut outcomes: Vec<Outcome> = Vec::new();
-    for root in &roots {
-        let Ok(root_meta) = fs::symlink_metadata(root) else {
-            continue;
-        };
-        let Ok(rd) = fs::read_dir(root) else {
-            eprintln!("{prog}: cannot read '{}'", root.display());
-            status = 1;
-            continue;
-        };
-        let mut names: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-        names.sort();
-        for path in names {
-            let Ok(m) = fs::symlink_metadata(&path) else {
-                continue;
-            };
-            let mut o = Outcome {
-                path: path.clone(),
-                age: now - age_by.newest(&m),
-                bytes: 0,
-                skip: None,
-            };
-            let name = path
-                .file_name()
-                .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            o.skip = if name.starts_with(".Trash") {
-                Some("a trash directory".to_string())
-            } else if runtime.as_ref().is_some_and(|r| r.starts_with(&path)) {
-                Some("the XDG runtime directory".to_string())
-            } else if let Some(pat) = excluded(&path, &excl) {
-                Some(format!("excluded by tmpfiles.d '{pat}'"))
-            } else if m.dev() != root_meta.dev() {
-                Some("a mount point".to_string())
-            } else if let Some(k) = kind_reason(&m.file_type()) {
-                Some(k.to_string())
-            } else if euid != 0 && m.uid() != euid {
-                Some(format!("owned by user {}", m.uid()))
-            } else {
-                None
-            };
-            if o.skip.is_none() {
-                let w = walk(&path, &m, root_meta.dev(), age_by, euid);
-                o.age = now - w.newest;
-                o.bytes = w.bytes;
-                o.skip = if let Some(k) = w.keep {
-                    Some(k)
-                } else if w.newest > cutoff {
-                    Some(format!("touched {} ago", fmt_age(now - w.newest)))
-                } else if let Some(pid) = live_lock(&path, &m) {
-                    Some(format!("lock file of live pid {pid}"))
+    for (gi, g) in groups.iter().enumerate() {
+        if use_tool {
+            if let Some(cmd) = g.tool.as_ref().filter(|c| on_path(&c[0])) {
+                let shown = cmd.join(" ");
+                let code = if dry_run {
+                    None
                 } else {
-                    let holds = snap.under(&path);
-                    holds.first().map(|h| {
-                        let more = holds.iter().filter(|x| x.pid != h.pid).count();
-                        let more = if more > 0 { " and others" } else { "" };
-                        format!("in use by pid {} ({}, {}){more}", h.pid, h.command, h.how)
-                    })
+                    match std::process::Command::new(&cmd[0]).args(&cmd[1..]).status() {
+                        Ok(s) => s.code(),
+                        Err(e) => {
+                            eprintln!("{prog}: cannot run '{shown}': {e}");
+                            Some(127)
+                        }
+                    }
                 };
+                if code.is_some_and(|c| c != 0) {
+                    status = 1;
+                }
+                tool_runs[gi] = Some((shown, code));
+                continue;
             }
-            outcomes.push(o);
+        }
+        for (path, dev) in &g.entries {
+            if let Some(o) = judge(path, *dev, gi, g, &ctx) {
+                outcomes.push(o);
+            }
         }
     }
+
     let mut failed = 0usize;
     let mut reaped: Vec<&Outcome> = Vec::new();
     for o in &outcomes {
@@ -494,15 +780,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             continue;
         }
         if !dry_run {
-            let done = if permanent {
+            let done = if groups[o.group].action == Action::Permanent {
                 crate::fastdelete::remove_path(&o.path).map_err(|e| {
                     eprintln!("{prog}: cannot remove '{}': {e}", o.path.display());
                 })
             } else {
                 match crate::put::put_one(prog, &o.path, &opts) {
                     Ok(Some(_)) => Ok(()),
-                    Ok(None) => Err(()),
-                    Err(_) => Err(()),
+                    Ok(None) | Err(_) => Err(()),
                 }
             };
             if done.is_err() {
@@ -513,43 +798,82 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         reaped.push(o);
     }
+    // Per group: entries reaped, their bytes, entries kept.
+    let totals: Vec<(usize, u64, usize)> = (0..groups.len())
+        .map(|gi| {
+            let r = reaped.iter().filter(|o| o.group == gi);
+            let kept = outcomes
+                .iter()
+                .filter(|o| o.group == gi && o.skip.is_some())
+                .count();
+            (r.clone().count(), r.map(|o| o.bytes).sum(), kept)
+        })
+        .collect();
+
     if json {
-        let item = |o: &Outcome| {
-            format!(
-                r#"{{"path":"{}","age":{},"bytes":{}}}"#,
-                json_escape(&str_from_os_ref(o.path.as_os_str())),
-                o.age,
-                o.bytes
-            )
-        };
-        let r: Vec<String> = reaped.iter().map(|o| item(o)).collect();
+        let path_json = |p: &Path| json_escape(&str_from_os_ref(p.as_os_str()));
+        let r: Vec<String> = reaped
+            .iter()
+            .map(|o| {
+                format!(
+                    r#"{{"path":"{}","profile":"{}","age":{},"bytes":{}}}"#,
+                    path_json(&o.path),
+                    json_escape(&groups[o.group].name),
+                    o.age,
+                    o.bytes
+                )
+            })
+            .collect();
         let s: Vec<String> = outcomes
             .iter()
             .filter_map(|o| {
                 o.skip.as_ref().map(|why| {
                     format!(
-                        r#"{{"path":"{}","reason":"{}"}}"#,
-                        json_escape(&str_from_os_ref(o.path.as_os_str())),
+                        r#"{{"path":"{}","profile":"{}","reason":"{}"}}"#,
+                        path_json(&o.path),
+                        json_escape(&groups[o.group].name),
                         json_escape(why)
                     )
                 })
             })
             .collect();
+        let g: Vec<String> = groups
+            .iter()
+            .enumerate()
+            .map(|(gi, g)| {
+                let (n, bytes, kept) = totals[gi];
+                let (tool, code) = match &tool_runs[gi] {
+                    Some((t, c)) => (
+                        format!("\"{}\"", json_escape(t)),
+                        c.map_or("null".to_string(), |c| c.to_string()),
+                    ),
+                    None => ("null".to_string(), "null".to_string()),
+                };
+                format!(
+                    r#"{{"name":"{}","action":"{}","older_than":{},"entries":{n},"bytes":{bytes},"kept":{kept},"tool":{tool},"tool_status":{code}}}"#,
+                    json_escape(&g.name),
+                    g.action.as_str(),
+                    g.older
+                )
+            })
+            .collect();
         println!(
-            r#"{{"dry_run":{dry_run},"older_than":{older},"reaped":[{}],"skipped":[{}],"failed":{failed}}}"#,
+            r#"{{"dry_run":{dry_run},"older_than":{},"profiles":[{}],"reaped":[{}],"skipped":[{}],"failed":{failed}}}"#,
+            older.unwrap_or(10 * 86_400),
+            g.join(","),
             r.join(","),
             s.join(",")
         );
         return status;
     }
-    let verb = if dry_run {
-        "would reap"
-    } else if permanent {
-        "deleted"
-    } else {
-        "trashed"
-    };
     for o in &reaped {
+        let verb = if dry_run {
+            "would reap"
+        } else if groups[o.group].action == Action::Permanent {
+            "deleted"
+        } else {
+            "trashed"
+        };
         println!(
             "{verb} '{}' ({} old, {})",
             crate::util::term_path(&o.path),
@@ -568,10 +892,26 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
     }
+    let verb = if dry_run { "would reap" } else { "reaped" };
+    if !profiles.is_empty() {
+        for (gi, g) in groups.iter().enumerate() {
+            let (n, bytes, kept) = totals[gi];
+            match &tool_runs[gi] {
+                Some((t, _)) if dry_run => println!("{}: would run '{t}'", g.name),
+                Some((t, _)) => println!("{}: ran '{t}'", g.name),
+                None => println!(
+                    "{}: {verb} {}, {} ({}); {kept} kept",
+                    g.name,
+                    crate::util::plural(n as u64, "entry", "entries"),
+                    crate::util::format_bytes(bytes),
+                    g.action.as_str()
+                ),
+            }
+        }
+    }
     let total: u64 = reaped.iter().map(|o| o.bytes).sum();
     eprintln!(
-        "{prog}: {} {}, {}; {} kept",
-        verb,
+        "{prog}: {verb} {}, {}; {} kept",
         crate::util::plural(reaped.len() as u64, "entry", "entries"),
         crate::util::format_bytes(total),
         outcomes.iter().filter(|o| o.skip.is_some()).count()

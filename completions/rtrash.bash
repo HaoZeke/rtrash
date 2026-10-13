@@ -64,7 +64,7 @@ _rtrash_who_opts=(
 )
 
 _rtrash_reap_opts=(
-  --older-than= --age-by= -n --dry-run --permanent --trash-dir= --home-only -v --verbose --json --help --version
+  -p --profile= --list-profiles --tool --trash --older-than= --age-by= -n --dry-run --permanent --trash-dir= --home-only -v --verbose --json --help --version
 )
 
 _rtrash_config_opts=(
