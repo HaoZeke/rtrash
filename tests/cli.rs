@@ -3004,3 +3004,109 @@ fn put_warns_about_an_open_file_and_refuses_it_on_request() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(stderr_of(&out).is_empty());
 }
+
+/// A file in `dir` whose access and modification times are a day old.
+fn stale_file(dir: &Path, name: &str) -> PathBuf {
+    let p = dir.join(name);
+    fs::write(&p, b"old").unwrap();
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    let f = fs::File::options().write(true).open(&p).unwrap();
+    f.set_times(
+        fs::FileTimes::new()
+            .set_accessed(day_ago)
+            .set_modified(day_ago),
+    )
+    .unwrap();
+    p
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_trashes_stale_entries_and_keeps_held_fresh_and_live_lock_ones() {
+    let sb = Sandbox::new("reap");
+    let tmp = sb.root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let stale = stale_file(&tmp, "stale.txt");
+    let held = stale_file(&tmp, "held.txt");
+    let fresh = tmp.join("fresh.txt");
+    fs::write(&fresh, b"new").unwrap();
+    let lock = tmp.join("app.lock");
+    fs::write(&lock, format!("{}\n", std::process::id())).unwrap();
+    let lock = {
+        let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+        let f = fs::File::options().write(true).open(&lock).unwrap();
+        f.set_times(
+            fs::FileTimes::new()
+                .set_accessed(day_ago)
+                .set_modified(day_ago),
+        )
+        .unwrap();
+        lock
+    };
+    let fifo = tmp.join("pipe");
+    let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    // SAFETY: a valid C string and mode.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let child = Holder::open(&held);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let tmp_arg = tmp.to_str().unwrap();
+
+    // Ctime is always new on a fresh file, so age by mtime only.
+    let out = sb.run(&[
+        "reap",
+        "--older-than=1h",
+        "--age-by=m",
+        "--dry-run",
+        "--json",
+        tmp_arg,
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.contains("\"dry_run\":true"), "{text}");
+    let reaped = text.split("\"skipped\"").next().unwrap();
+    assert!(reaped.contains("stale.txt"), "{text}");
+    for kept in ["held.txt", "fresh.txt", "app.lock", "pipe"] {
+        assert!(!reaped.contains(kept), "{kept} in {text}");
+    }
+    assert!(
+        text.contains(&format!("in use by pid {}", child.pid())),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("lock file of live pid {}", std::process::id())),
+        "{text}"
+    );
+    assert!(text.contains("a named pipe"), "{text}");
+    assert!(stale.exists(), "the dry run moved a file");
+
+    let out = sb.run(&["reap", "--older-than=1h", "--age-by=m", &pin, tmp_arg]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!stale.exists());
+    assert!(held.exists() && fresh.exists() && lock.exists() && fifo.exists());
+    assert_eq!(trash_names(&sb), vec!["stale.txt".to_string()]);
+
+    drop(child);
+    let out = sb.run(&[
+        "reap",
+        "--older-than=1h",
+        "--age-by=m",
+        "--permanent",
+        tmp_arg,
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!held.exists(), "a file no longer held stayed");
+    assert!(fresh.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn reap_refuses_home_and_rejects_bad_ages() {
+    let sb = Sandbox::new("reap-args");
+    let out = sb.run(&["reap", "--dry-run", sb.root.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr_of(&out).contains("refusing to reap"));
+    let out = sb.run(&["reap", "--older-than=3y", "."]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = sb.run(&["reap", "--age-by=x", "."]);
+    assert_eq!(out.status.code(), Some(2));
+}

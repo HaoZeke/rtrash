@@ -7,7 +7,7 @@ function __rtrash_seen_subcommand
     set -e cmd[1]
     for c in $cmd
         switch $c
-            case put empty list status du restore undo rm who finder config setup keys completions man
+            case put empty list status du restore undo rm who reap finder config setup keys completions man
                 echo $c
                 return 0
         end
@@ -25,6 +25,7 @@ complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'restore' -d 'restore
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'undo' -d 'restore everything one put run trashed'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'rm' -d 'permanently delete matching trash entries'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'who' -d 'list the live processes holding PATH'
+complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'reap' -d 'trash stale temp entries no live process holds'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'finder' -d 'macOS Finder Trash with Put Back'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'config' -d 'show the config file and the settings it makes'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'setup' -d 'install multi-call links, completions, man page'
@@ -276,3 +277,13 @@ complete -c trash-rm -l version
 
 # who
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q who' -l json -d 'print a JSON object'
+
+# reap
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l older-than -x -d 'only entries older than AGE (2h, 10d)'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l age-by -x -d 'times that count: a, c, m'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -s n -l dry-run -d 'show what would go, change nothing'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l permanent -d 'delete instead of trashing'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l trash-dir -r -d 'put into this trash root'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l home-only -d 'always use the home trash'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -s v -l verbose -d 'also show skipped entries'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l json -d 'print a JSON object'

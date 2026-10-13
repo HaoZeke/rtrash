@@ -45,6 +45,8 @@ pub mod put;
 #[cfg(all(unix, feature = "tui"))]
 pub mod put_tui;
 #[cfg(unix)]
+pub mod reap;
+#[cfg(unix)]
 pub mod restore;
 #[cfg(feature = "tui")]
 pub mod restore_tui;
@@ -140,6 +142,14 @@ pub mod status {
 pub mod who {
     pub fn run(prog: &str, _args: &[String]) -> i32 {
         eprintln!("{prog}: cannot list the processes holding a path on Windows");
+        1
+    }
+}
+
+#[cfg(windows)]
+pub mod reap {
+    pub fn run(prog: &str, _args: &[String]) -> i32 {
+        eprintln!("{prog}: reap needs to see which processes hold files, which rtrash cannot do on Windows");
         1
     }
 }

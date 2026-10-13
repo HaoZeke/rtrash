@@ -1419,6 +1419,139 @@ Output version information and exit.
 Exit status is 0 when some process holds a
 .IR PATH ,
 1 when none does or the platform cannot tell, and 2 on a usage error.
+.SS reap
+.B rtrash reap
+[\fIOPTION\fR]... [\fIDIR\fR]...
+.PP
+Trash the stale entries in temporary directories that no live process
+holds.
+Without
+.IR DIR ,
+reap looks in
+.B $TMPDIR
+(when set), then
+.I /tmp
+and
+.IR /var/tmp .
+It refuses
+.I /
+and your home directory.
+An entry is a name directly inside
+.IR DIR ,
+taken whole.
+Its age comes from the newest time anywhere in it.
+Like
+.BR systemd\-tmpfiles (8)
+that is the newest access, change or modification time, except that a
+directory's access time never counts, since listing it updates it.
+.PP
+An entry stays when
+.IP \(bu 2
+a live process has it or anything in it open, mapped, or as its working,
+root or executable path, as
+.B rtrash who
+reports it;
+.IP \(bu 2
+it is or holds a socket, named pipe or device;
+.IP \(bu 2
+it is or holds a mount point;
+.IP \(bu 2
+another user owns any of it, unless reap runs as root;
+.IP \(bu 2
+it is a lock or pid file (\fI*.lock\fR, \fI*.pid\fR, \fI*\-lock\fR,
+\fI*.lck\fR, at most 64 bytes) whose first word is a live process id;
+.IP \(bu 2
+an
+.B x
+or
+.B X
+line in
+.IR /etc/tmpfiles.d ,
+.I /run/tmpfiles.d
+or
+.I /usr/lib/tmpfiles.d
+names it or a path inside it (specifiers such as
+.B %b
+match anything);
+.IP \(bu 2
+its name starts with
+.IR .Trash ,
+or it is or holds
+.BR $XDG_RUNTIME_DIR ;
+.IP \(bu 2
+a part of it cannot be read.
+.PP
+Processes are read once, before anything moves.
+On macOS memory maps are not read; on Windows reap is not available.
+Without root, other users' processes cannot be read, but their files are
+kept for being theirs.
+.TP
+.BI \-\-older\-than= AGE
+Only entries whose newest time is older than
+.IR AGE :
+a number with
+.BR s ", " m ", " h ", " d
+or
+.BR w ,
+or days without a unit.
+The default is 10d, the age systemd\-tmpfiles gives
+.IR /tmp .
+.TP
+.BI \-\-age\-by= LETTERS
+Which times count, from
+.B a
+(access),
+.B c
+(change) and
+.B m
+(modification); the default is
+.BR acm .
+.TP
+.BR \-n ", " \-\-dry\-run
+Show what would go and change nothing.
+.TP
+.B \-\-permanent
+Delete entries instead of moving them to the trash.
+.TP
+.BI \-\-trash\-dir =PATH
+Put into this trash root instead of the one put would pick.
+.TP
+.B \-\-home\-only
+Always use the home trash.
+.TP
+.BR \-v ", " \-\-verbose
+Also print each entry kept and why.
+.TP
+.B \-\-json
+Print a JSON object:
+.IR dry_run ,
+.I older_than
+(seconds),
+.I reaped
+(each with
+.IR path ,
+.I age
+in seconds and
+.IR bytes ),
+.I skipped
+(each with
+.I path
+and
+.IR reason )
+and
+.I failed
+(the count of entries that could not be moved).
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.PP
+The exit status is 0 when every stale entry went, 1 when one could not
+or a
+.I DIR
+could not be read, and 2 on a usage error.
 .SS finder
 .B rtrash finder put
 [\fB\-v\fR] [\fB\-f\fR] \fIFILE\fR...

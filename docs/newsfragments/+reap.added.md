@@ -1,0 +1,1 @@
+`rtrash reap [DIR]... --older-than=AGE` trashes or deletes stale entries in `$TMPDIR`, `/tmp` and `/var/tmp`, and keeps anything a live process holds, sockets, pipes, mount points, live lock files, other users' files and tmpfiles.d exclusions; `--dry-run` and `--json` show the plan.
