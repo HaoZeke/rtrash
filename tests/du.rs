@@ -386,6 +386,33 @@ fn sort_by_items_counts_files_and_dirs_below() {
 }
 
 #[test]
+fn inodes_rank_like_items_and_count_links_once() {
+    if cfg!(windows) && std::env::var_os("WINEPREFIX").is_some() {
+        return;
+    }
+    let t = Tree::new("inodes");
+    for i in 0..4 {
+        t.file(&format!("many/f{i}"), 10);
+    }
+    let a = t.file("few/a.bin", 300_000);
+    fs::hard_link(&a, t.root.join("few/b.bin")).unwrap();
+    let j = t.json(&["--no-git", "--inodes"]);
+    assert_eq!(paths_in(&j, "dirs")[0], s(&t.root.join("many")), "{j}");
+    // Root, many and few, four small files and one linked file.
+    assert!(j.contains("\"files\":5,"), "{j}");
+    assert!(j.contains("\"dirs\":3,\"excluded\":0,\"inodes\":8,"), "{j}");
+    let k = t.json(&["--no-git", "--sort=inodes"]);
+    assert_eq!(paths_in(&k, "dirs"), paths_in(&j, "dirs"), "{k}");
+    let text = String::from_utf8(t.du(&["--no-git", "--inodes"]).stdout).unwrap();
+    assert!(
+        text.starts_with("Directories with the most items\n"),
+        "{text}"
+    );
+    assert!(text.contains("ITEMS"), "{text}");
+    assert!(text.contains(", 8 inodes"), "{text}");
+}
+
+#[test]
 fn hard_links_count_once_in_items() {
     if cfg!(windows) && std::env::var_os("WINEPREFIX").is_some() {
         return;

@@ -81,8 +81,9 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l all-u
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s n -l top -d 'list N directories and N files' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s x -l one-file-system -d 'skip directories on other file systems'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l apparent -d 'rank by apparent size instead of disk use'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l sort -d 'rank rows by this key' -x -a 'disk apparent items mtime'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l sort -d 'rank rows by this key' -x -a 'disk apparent items inodes mtime'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s C -l count -d 'add an ITEMS column'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l inodes -d 'rank by inodes and total them'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l unique -d 'add a UNIQUE column of bytes no other file shares'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l shared -d 'count each shared extent once in sizes'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l types -d 'list disk use per file type instead of directories and files'

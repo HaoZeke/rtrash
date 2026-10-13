@@ -644,6 +644,12 @@ takes every key but
 Add an ITEMS column. The JSON rows always carry
 .BR items .
 .TP
+.B \-\-inodes
+Rank by inodes, the same as
+.BR \-\-sort=items :
+files and directories, each hard-linked file once.
+The total line and the JSON roots also give the inodes each PATH uses.
+.TP
 .B \-\-types
 List file types instead of directories and files: disk use, apparent
 size and file count for each extension, the text after the last dot,

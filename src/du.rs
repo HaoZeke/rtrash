@@ -56,6 +56,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           directory gives way to the subdirectory that has
                           its newest change)
   -C, --count           add an ITEMS column (each hard-linked file once)
+      --inodes          rank by inodes, as --sort=items: files and
+                          directories, each hard-linked file once; the
+                          total gives the inodes each PATH uses
       --types           list file types instead of directories and files:
                           disk use, apparent size and file count per
                           extension (case ignored; names with no extension
@@ -203,7 +206,7 @@ impl SortKey {
         Some(match s {
             "disk" | "size" => SortKey::Disk,
             "apparent" => SortKey::Apparent,
-            "items" | "count" => SortKey::Items,
+            "items" | "count" | "inodes" => SortKey::Items,
             "mtime" | "time" | "age" => SortKey::Mtime,
             _ => return None,
         })
@@ -461,6 +464,14 @@ pub struct RootTotals {
     /// `--shared` scans: disk use counting every reference to a shared
     /// extent, where `disk` counts each once.
     pub disk_all: Option<u64>,
+}
+
+impl RootTotals {
+    /// Inodes the PATH uses: its files, each hard-linked file once, and
+    /// its directories, the PATH itself included.
+    pub fn inodes(&self) -> u64 {
+        self.files.saturating_add(self.dirs)
+    }
 }
 
 /// Result of scanning one or more paths.
@@ -2072,7 +2083,7 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
         .iter()
         .map(|t| {
             format!(
-                "{{\"path\":\"{}\",\"disk\":{}{},\"apparent\":{}{},\"files\":{},\"links\":{},\"dirs\":{},\"excluded\":{},\"artefact\":{}}}",
+                "{{\"path\":\"{}\",\"disk\":{}{},\"apparent\":{}{},\"files\":{},\"links\":{},\"dirs\":{},\"excluded\":{},\"inodes\":{},\"artefact\":{}}}",
                 json_escape(&t.path.to_string_lossy()),
                 t.disk,
                 t.disk_all
@@ -2084,6 +2095,7 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
                 t.links,
                 t.dirs,
                 t.excluded,
+                t.inodes(),
                 json_opt(t.artefact)
             )
         })
@@ -2661,6 +2673,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "-x" | "--one-file-system" => opts.one_file_system = true,
                 "--apparent" => opts.sort = SortKey::Apparent,
                 "-C" | "--count" => count = true,
+                "--inodes" => opts.sort = SortKey::Items,
                 "--all-dirs" => opts.all_dirs = true,
                 "--artefacts" => opts.artefacts_only = true,
                 "--exclude-caches" => filter.exclude_caches = true,
@@ -3044,12 +3057,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 })
                 .unwrap_or_default();
             println!(
-                "Total {}{kind}: {} on disk{once}{unique}, {} apparent, {}{links}, {}{excluded}",
+                "Total {}{kind}: {} on disk{once}{unique}, {} apparent, {}{links}, {}, {}{excluded}",
                 crate::util::term_path(&t.path),
                 format_bytes(t.disk),
                 format_bytes(t.apparent),
                 plural(t.files, "file", "files"),
-                plural(t.dirs, "directory", "directories")
+                plural(t.dirs, "directory", "directories"),
+                plural(t.inodes(), "inode", "inodes")
             );
         }
         if let Some(s) = report.shared {
