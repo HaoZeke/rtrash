@@ -8,7 +8,7 @@ _rtrash_put_opts=(
   -f --force -i -I --interactive
   -r -R --recursive -d --dir -v --verbose
   --one-file-system --preserve-root --preserve-root=all --no-preserve-root
-  --trash-dir= --home-only --plain --no-space-check --json
+  --trash-dir= --home-only --plain --no-space-check --in-use= --json
   --help --version
 )
 

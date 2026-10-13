@@ -20,6 +20,7 @@ put_opts=(
   '--home-only[always use the home trash]'
   '--plain[skip TUI; require file operands on a TTY]'
   '--no-space-check[copy across devices even when space or inodes run low]'
+  '--in-use=[when a live process holds an item]:when:(warn refuse ignore)'
   '--json[print a JSON summary of trashed items]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'

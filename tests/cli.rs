@@ -2968,3 +2968,39 @@ fn who_names_the_process_holding_a_file_or_its_directory() {
     assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
     assert!(stdout_of(&out).is_empty());
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn put_warns_about_an_open_file_and_refuses_it_on_request() {
+    let sb = Sandbox::new("put-in-use");
+    let held = sb.touch("held.log");
+    let child = Holder::open(&held);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = sb.run(&["put", &pin, "--in-use=refuse", "held.log"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("in use by pid") && err.contains(&child.pid().to_string()),
+        "{err}"
+    );
+    assert!(held.exists());
+    let out = Command::new(bin())
+        .args(["put", &pin, "held.log"])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .env("RTRASH_IN_USE", "refuse")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(held.exists());
+    let out = sb.run(&["put", &pin, "held.log"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("warning: 'held.log' is in use by pid"));
+    assert!(!held.exists());
+    sb.touch("idle.log");
+    let out = sb.run(&["put", &pin, "--in-use=refuse", "idle.log"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).is_empty());
+}

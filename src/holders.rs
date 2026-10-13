@@ -27,20 +27,45 @@ pub struct Snapshot {
     pub unreadable: usize,
     /// False where rtrash has no way to list holders.
     pub supported: bool,
+    roots: Vec<PathBuf>,
+    /// Read memory maps (Linux only; libproc gives none).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    maps: bool,
 }
 
 impl Snapshot {
     /// Scan the running processes, leaving out this one.
     pub fn take() -> Snapshot {
+        Snapshot::take_under(&[])
+    }
+
+    /// Like `take`, but keep only holds on or below one of `roots`
+    /// (all of them when `roots` is empty), which saves most of the work.
+    pub fn take_under(roots: &[PathBuf]) -> Snapshot {
+        Snapshot::scan_under(roots, true)
+    }
+
+    /// Like `take_under`; with `maps` false, memory maps are not read,
+    /// which on Linux is about half the cost of a scan.
+    pub fn scan_under(roots: &[PathBuf], maps: bool) -> Snapshot {
         let mut s = Snapshot {
             supported: SUPPORTED,
+            maps,
+            roots: roots.iter().map(|r| resolve(r)).collect(),
             ..Snapshot::default()
         };
         scan(&mut s);
         s
     }
 
+    fn wanted(&self, path: &Path) -> bool {
+        self.roots.is_empty() || self.roots.iter().any(|r| path.starts_with(r))
+    }
+
     fn add(&mut self, hold: Hold) {
+        if !self.wanted(&hold.path) {
+            return;
+        }
         let list = self.held.entry(hold.path.clone()).or_default();
         if !list.iter().any(|h| h.pid == hold.pid && h.how == hold.how) {
             list.push(hold);
@@ -71,7 +96,7 @@ impl Snapshot {
 
 /// The path with its parent's symlinks resolved, as the kernel reports it,
 /// but the last component kept (a symlink is not its target).
-fn resolve(path: &Path) -> PathBuf {
+pub fn resolve(path: &Path) -> PathBuf {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -122,24 +147,14 @@ fn scan(s: &mut Snapshot) {
             continue;
         }
         let base = entry.path();
-        let uid = fs::metadata(&base).ok().map(|m| m.uid());
-        let command = fs::read_to_string(base.join("comm"))
-            .map(|c| c.trim_end_matches('\n').to_string())
-            .unwrap_or_default();
-        let hold = |how: String, path: PathBuf| Hold {
-            pid,
-            uid,
-            command: command.clone(),
-            how,
-            path,
-        };
+        let mut found: Vec<(String, PathBuf)> = Vec::new();
         let mut denied = false;
         for link in ["cwd", "root", "exe"] {
             match fs::read_link(base.join(link)) {
                 Ok(p) => {
                     if let Some(p) = live_path(p) {
-                        if !(link == "root" && p == Path::new("/")) {
-                            s.add(hold(link.to_string(), p));
+                        if !(link == "root" && p == Path::new("/")) && s.wanted(&p) {
+                            found.push((link.to_string(), p));
                         }
                     }
                 }
@@ -152,8 +167,10 @@ fn scan(s: &mut Snapshot) {
                 for fd in fds.flatten() {
                     if let Ok(p) = fs::read_link(fd.path()) {
                         if let Some(p) = live_path(p) {
-                            let n = fd.file_name().to_string_lossy().into_owned();
-                            s.add(hold(format!("fd {n}"), p));
+                            if s.wanted(&p) {
+                                let n = fd.file_name().to_string_lossy().into_owned();
+                                found.push((format!("fd {n}"), p));
+                            }
                         }
                     }
                 }
@@ -161,7 +178,12 @@ fn scan(s: &mut Snapshot) {
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => denied = true,
             Err(_) => {}
         }
-        if let Ok(maps) = fs::read(base.join("maps")) {
+        let maps = if s.maps {
+            fs::read(base.join("maps"))
+        } else {
+            Err(std::io::ErrorKind::Unsupported.into())
+        };
+        if let Ok(maps) = maps {
             let mut seen: Vec<&[u8]> = Vec::new();
             for line in maps.split(|&b| b == b'\n') {
                 // address perms offset dev inode path; the path may hold spaces.
@@ -169,14 +191,30 @@ fn scan(s: &mut Snapshot) {
                     continue;
                 };
                 let p = &line[at..];
-                if seen.contains(&p) {
+                let os = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(p);
+                if !s.wanted(Path::new(os)) || seen.contains(&p) {
                     continue;
                 }
                 seen.push(p);
-                let os = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(p);
                 if let Some(p) = live_path(PathBuf::from(os)) {
-                    s.add(hold("mmap".to_string(), p));
+                    found.push(("mmap".to_string(), p));
                 }
+            }
+        }
+        if !found.is_empty() {
+            // Name and owner only for a process that holds something.
+            let uid = fs::metadata(&base).ok().map(|m| m.uid());
+            let command = fs::read_to_string(base.join("comm"))
+                .map(|c| c.trim_end_matches('\n').to_string())
+                .unwrap_or_default();
+            for (how, path) in found {
+                s.add(Hold {
+                    pid,
+                    uid,
+                    command: command.clone(),
+                    how,
+                    path,
+                });
             }
         }
         if denied {

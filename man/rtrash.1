@@ -198,6 +198,23 @@ system with under 5% of its bytes or inodes free, or under
 bytes.
 Without it, such a put fails before it copies anything.
 .TP
+.BI \-\-in\-use= WHEN
+What to do when a live process holds an item, as
+.B rtrash who
+reports it: an open descriptor or memory map on it or below it, or a
+working, root or executable path there.
+.B warn
+(the default) trashes it and names the processes on stderr,
+.B refuse
+leaves it and counts it as failed, and
+.B ignore
+skips the process scan.
+It overrides
+.B RTRASH_IN_USE
+and
+.BR policy.in_use .
+The interactive browsers do not scan.
+.TP
 .B \-\-json
 Print one JSON object on stdout:
 \fItrashed\fR (one entry per moved item with \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR)
@@ -1509,6 +1526,7 @@ reverse = false           # \-\-reverse
 [policy]
 max_size = "50G"          # RTRASH_MAX_SIZE
 min_free = "10G"          # RTRASH_MIN_FREE
+in_use = "warn"           # RTRASH_IN_USE: warn, refuse or ignore
 prune = "oldest"          # RTRASH_PRUNE: oldest or largest
 
 [protect]
@@ -1721,6 +1739,14 @@ inodes.
 It overrides
 .B policy.min_free
 in the config file.
+.TP
+.B RTRASH_IN_USE
+.BR warn ", " refuse " or " ignore :
+what put does with an item a live process holds.
+It overrides
+.B policy.in_use
+and yields to
+.BR \-\-in\-use .
 .TP
 .B RTRASH_PRUNE
 Set to

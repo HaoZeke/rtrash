@@ -13,6 +13,48 @@ pub(crate) enum Interactive {
     Always,
 }
 
+/// What put does with an item a live process holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum InUse {
+    Ignore,
+    Warn,
+    Refuse,
+}
+
+impl InUse {
+    fn parse(v: &str) -> Option<InUse> {
+        match v {
+            "ignore" => Some(InUse::Ignore),
+            "warn" => Some(InUse::Warn),
+            "refuse" => Some(InUse::Refuse),
+            _ => None,
+        }
+    }
+
+    /// `RTRASH_IN_USE`, else `policy.in_use`, else warn.
+    fn from_env(prog: &str) -> InUse {
+        if let Ok(v) = std::env::var("RTRASH_IN_USE") {
+            if let Some(m) = InUse::parse(&v) {
+                return m;
+            }
+            eprintln!(
+                "{prog}: warning: ignoring RTRASH_IN_USE='{v}' (want warn, refuse or ignore)"
+            );
+        }
+        let cfg = crate::config::get();
+        if let Some(v) = cfg.str("policy", "in_use") {
+            if let Some(m) = InUse::parse(v) {
+                return m;
+            }
+            eprintln!(
+                "{prog}: warning: {}",
+                cfg.bad_value("policy", "in_use", "warn, refuse or ignore")
+            );
+        }
+        InUse::Warn
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Opts {
     pub force: bool,
@@ -27,6 +69,8 @@ pub(crate) struct Opts {
     pub home_only: bool,
     /// Suppress `-v` lines (stdout carries the `--json` summary instead).
     pub quiet: bool,
+    /// Check for live processes holding the item. The browsers leave it off.
+    pub in_use: InUse,
 }
 
 /// One item moved into a trash directory by `put_one`.
@@ -61,6 +105,7 @@ impl Default for Opts {
             trash_pin: None,
             home_only: false,
             quiet: false,
+            in_use: InUse::Ignore,
         }
     }
 }
@@ -92,6 +137,9 @@ to require CLI operands even on a TTY.
       --no-space-check  copy across devices even when the copy would leave
                           the trash's file system under 5% of its bytes or
                           inodes free, or under RTRASH_MIN_FREE bytes
+      --in-use=WHEN     when a live process has an item open, mapped or as
+                          its working directory: warn (the default), refuse,
+                          or ignore (skips the process scan)
       --json            print a JSON summary on stdout ({trashed, failed});
                           implies --plain and replaces -v output
       --help            display this help and exit
@@ -113,6 +161,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut no_more_opts = false;
     let mut plain = false;
     let mut json = false;
+    let mut in_use: Option<InUse> = None;
 
     for arg in args {
         if no_more_opts || arg == "-" || !arg.starts_with('-') {
@@ -165,6 +214,18 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                 return 0;
             }
+            a if a.starts_with("--in-use=") => match InUse::parse(&a["--in-use=".len()..]) {
+                Some(m) => in_use = Some(m),
+                None => {
+                    return usage_err(
+                        prog,
+                        &format!(
+                            "invalid argument '{}' for '--in-use' (want warn, refuse or ignore)",
+                            &a["--in-use=".len()..]
+                        ),
+                    )
+                }
+            },
             a if a.starts_with("--trash-dir=") => {
                 if opts.trash_pin.is_some() {
                     return usage_err(prog, "put accepts only one --trash-dir=PATH");
@@ -201,6 +262,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
+    opts.in_use = in_use.unwrap_or_else(|| InUse::from_env(prog));
+
     if files.is_empty() {
         #[cfg(feature = "tui")]
         if !plain && !json && crate::util::stdin_is_tty() {
@@ -228,6 +291,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
+    let _ = SCAN_ROOTS.set(files.clone());
     let mut status = 0;
     let mut trashed = Vec::new();
     let mut failed = 0usize;
@@ -410,6 +474,18 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             );
         }
     }
+    if opts.in_use != InUse::Ignore {
+        let holds = holders().under(&abs);
+        if !holds.is_empty() {
+            let who = describe_holds(&holds);
+            if opts.in_use == InUse::Refuse {
+                eprintln!("{prog}: cannot trash '{name}': in use by {who}");
+                eprintln!("{prog}: use --in-use=warn to trash it anyway");
+                return Err(1);
+            }
+            eprintln!("{prog}: warning: '{name}' is in use by {who}");
+        }
+    }
     let trash = match resolve_put_trash(opts, &abs, &meta) {
         Ok(t) => t,
         Err(e) => {
@@ -456,6 +532,63 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             Err(1)
         }
     }
+}
+
+/// The live processes and what they hold, read once per run.
+/// Only holds on the operands matter, so the scan keeps just those.
+fn holders() -> &'static crate::holders::Snapshot {
+    static SNAP: std::sync::OnceLock<crate::holders::Snapshot> = std::sync::OnceLock::new();
+    SNAP.get_or_init(|| {
+        let roots = SCAN_ROOTS.get().map_or(&[][..], Vec::as_slice);
+        crate::holders::Snapshot::scan_under(roots, roots.iter().any(|r| mappable(r)))
+    })
+}
+
+/// Reading every process's maps costs as much as the rest of the scan, so
+/// put reads them only for what is commonly mapped without staying open:
+/// directories, executables and shared libraries.
+fn mappable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(m) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    let name = path
+        .file_name()
+        .map(|f| f.to_string_lossy())
+        .unwrap_or_default();
+    m.is_dir()
+        || m.permissions().mode() & 0o111 != 0
+        || name.contains(".so")
+        || name.ends_with(".dylib")
+}
+
+/// The put operands, set before the first item so one scan covers them all.
+static SCAN_ROOTS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+
+/// `pid 12 (vim, fd 3), pid 40 (bash, cwd)`, with at most three processes.
+fn describe_holds(holds: &[&crate::holders::Hold]) -> String {
+    let mut pids: Vec<u32> = holds.iter().map(|h| h.pid).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    let mut parts: Vec<String> = pids
+        .iter()
+        .take(3)
+        .map(|&pid| {
+            let mine: Vec<&&crate::holders::Hold> = holds.iter().filter(|h| h.pid == pid).collect();
+            let mut hows: Vec<&str> = mine.iter().map(|h| h.how.as_str()).collect();
+            hows.sort_unstable();
+            hows.dedup();
+            format!(
+                "pid {pid} ({}, {})",
+                crate::util::err_text(&mine[0].command),
+                hows.join(", ")
+            )
+        })
+        .collect();
+    if pids.len() > 3 {
+        parts.push(format!("{} more", pids.len() - 3));
+    }
+    parts.join(", ")
 }
 
 /// Pick destination trash: explicit pin (created if needed), home-only, or auto-select.
