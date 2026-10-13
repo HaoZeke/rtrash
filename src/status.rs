@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use crate::fastdelete;
 use crate::list;
+use crate::space;
 use crate::trashdir::{self, TrashDir};
 use crate::util::plural;
 
@@ -12,6 +13,8 @@ Usage: {prog} [OPTION]...
 Summarize discovered trash: item count and approximate reclaimable size
 (per root and total). Directory payloads use FreeDesktop directorysizes when
 valid; otherwise the same disk_usage walk as empty --dry-run.
+Then give the free bytes and free inodes of each trash's file system, with
+a warning on stderr when either is under 10%.
 
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  only this trash directory (repeatable)
@@ -226,6 +229,51 @@ pub fn print_status(
         plural(total_items, "item", "items"),
         fastdelete::format_bytes(total_bytes)
     );
+    for d in dirs {
+        let Ok(s) = space::query(&d.root) else {
+            continue;
+        };
+        println!("Free on {}: {}", d.root.display(), free_line(&s));
+        let lows = s.lows(space::WARN_FREE_PERCENT);
+        if !lows.is_empty() {
+            eprintln!(
+                "rtrash: warning: {} is low: {}; free space with `rtrash empty`",
+                d.root.display(),
+                lows.join(", ")
+            );
+        }
+    }
+}
+
+/// `40.0 GiB of 126 GiB (31%), 7500000 of 8200000 inodes (91%)`.
+pub(crate) fn free_line(s: &space::Space) -> String {
+    let mut out = format!(
+        "{} of {} ({}%)",
+        fastdelete::format_bytes(s.avail),
+        fastdelete::format_bytes(s.total),
+        s.avail_percent()
+    );
+    match (s.inodes_avail, s.inodes, s.inodes_percent()) {
+        (Some(a), Some(t), Some(p)) => out.push_str(&format!(", {a} of {t} inodes ({p}%)")),
+        _ => out.push_str(", no inode limit"),
+    }
+    out
+}
+
+/// The free space fields of one root's JSON object.
+fn free_json(root: &std::path::Path) -> String {
+    let Ok(s) = space::query(root) else {
+        return String::new();
+    };
+    let opt = |v: Option<u64>| v.map_or("null".to_string(), |n| n.to_string());
+    format!(
+        ",\"fs_bytes\":{},\"fs_free_bytes\":{},\"fs_inodes\":{},\"fs_free_inodes\":{},\"fs_low\":{}",
+        s.total,
+        s.avail,
+        opt(s.inodes),
+        opt(s.inodes_avail),
+        !s.lows(space::WARN_FREE_PERCENT).is_empty()
+    )
 }
 
 fn print_status_json(
@@ -241,11 +289,12 @@ fn print_status_json(
             out.push_str(",\n");
         }
         out.push_str(&format!(
-            "    {{\"path\":\"{}\",\"items\":{},\"bytes\":{},\"orphans\":{}}}",
+            "    {{\"path\":\"{}\",\"items\":{},\"bytes\":{},\"orphans\":{}{}}}",
             list::json_escape(&r.path),
             r.items,
             r.bytes,
-            r.orphans
+            r.orphans,
+            free_json(&dirs[i].root)
         ));
     }
     if !roots.is_empty() {
@@ -257,4 +306,30 @@ fn print_status_json(
         total_items, total_bytes
     ));
     print!("{out}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn free_line_gives_bytes_and_inodes() {
+        let s = space::Space {
+            total: 100 << 30,
+            avail: 8 << 30,
+            inodes: Some(1000),
+            inodes_avail: Some(910),
+        };
+        assert_eq!(
+            free_line(&s),
+            "8.00 GiB of 100.00 GiB (8%), 910 of 1000 inodes (91%)"
+        );
+        assert_eq!(s.lows(space::WARN_FREE_PERCENT), ["8% of bytes free"]);
+        let s = space::Space {
+            inodes: None,
+            inodes_avail: None,
+            ..s
+        };
+        assert!(free_line(&s).ends_with(", no inode limit"));
+    }
 }

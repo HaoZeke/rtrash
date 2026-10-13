@@ -2871,3 +2871,32 @@ fn put_across_devices_keeps_the_target_from_filling() {
     assert!(other.join("files/big").exists());
     let _ = fs::remove_dir_all(&other);
 }
+
+#[test]
+fn status_gives_free_bytes_and_inodes_of_each_trash() {
+    let sb = Sandbox::new("status-free");
+    fs::write(sb.work().join("f"), b"x").unwrap();
+    assert!(sb.run(&["put", "f"]).status.success());
+    let out = sb.run(&["status", "--home-only"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let s = stdout_of(&out);
+    let line = s
+        .lines()
+        .find(|l| l.starts_with("Free on "))
+        .unwrap_or_else(|| panic!("{s}"));
+    assert!(line.contains(&*sb.trash().to_string_lossy()), "{line}");
+    assert!(line.contains("%)"), "{line}");
+    assert!(
+        line.contains("inodes (") || line.ends_with("no inode limit"),
+        "{line}"
+    );
+    let json = stdout_of(&sb.run(&["status", "--home-only", "--json"]));
+    for key in [
+        "\"fs_bytes\":",
+        "\"fs_free_bytes\":",
+        "\"fs_free_inodes\":",
+        "\"fs_low\":",
+    ] {
+        assert!(json.contains(key), "{key} in {json}");
+    }
+}

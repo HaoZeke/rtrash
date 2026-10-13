@@ -432,6 +432,12 @@ An age filter leaves them out.
 Summarize discovered trash: item count and approximate reclaimable size
 (per root and total). Uses the same disk-usage walk as
 .BR "empty \-\-dry\-run" .
+A line for each trash then gives the free bytes and free inodes of its
+file system, and a warning goes to stderr when either is under 10%.
+The JSON roots carry them as
+.BR fs_bytes ", " fs_free_bytes ", " fs_inodes ", " fs_free_inodes
+(null without an inode limit) and
+.BR fs_low .
 .TP
 .B \-\-home\-only
 Only the home trash
