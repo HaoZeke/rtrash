@@ -48,6 +48,7 @@ complete -c rtrash -n $put_cond -l no-preserve-root -d 'do not treat those speci
 complete -c rtrash -n $put_cond -l trash-dir -d 'put into this trash root' -r
 complete -c rtrash -n $put_cond -l home-only -d 'always use the home trash'
 complete -c rtrash -n $put_cond -l plain -d 'skip TUI; require file operands'
+complete -c rtrash -n $put_cond -l no-space-check -d 'copy across devices even when space or inodes run low'
 complete -c rtrash -n $put_cond -l json -d 'JSON summary of trashed items'
 
 # empty
@@ -149,6 +150,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l ho
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l trash-dir -d 'only this trash directory' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l cwd-only -d 'only items trashed from under the current directory'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l plain -d 'numbered selection even on a TTY'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l no-space-check -d 'copy across devices even when space or inodes run low'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l newest-first -d 'list the most recently trashed item first'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l oldest-first -d 'list the oldest trashed item first'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l name -r -d 'match by file name or trash name'
@@ -203,6 +205,7 @@ for cmd in trash-put trash
     complete -c $cmd -l trash-dir -r
     complete -c $cmd -l home-only
     complete -c $cmd -l plain
+    complete -c $cmd -l no-space-check
     complete -c $cmd -l json
     complete -c $cmd -l help
     complete -c $cmd -l version
@@ -240,6 +243,7 @@ complete -c trash-restore -l home-only
 complete -c trash-restore -l trash-dir -r
 complete -c trash-restore -l cwd-only
 complete -c trash-restore -l plain
+complete -c trash-restore -l no-space-check
 complete -c trash-restore -l newest-first
 complete -c trash-restore -l oldest-first
 complete -c trash-restore -l name -r

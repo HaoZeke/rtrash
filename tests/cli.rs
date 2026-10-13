@@ -2807,3 +2807,67 @@ fn list_scrubs_control_characters_on_a_terminal() {
         "{shown:?}"
     );
 }
+
+/// A writable directory on another file system than `near`, if the
+/// machine has one (`/dev/shm` on most Linux systems).
+fn other_device_dir(near: &Path, tag: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let dev = fs::metadata(near).ok()?.dev();
+    for base in ["/dev/shm", "/run/user"] {
+        let base = Path::new(base);
+        let Ok(m) = fs::metadata(base) else { continue };
+        if m.dev() == dev {
+            continue;
+        }
+        let dir = base.join(format!("rtrash-space-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        if fs::create_dir_all(dir.join("files")).is_ok()
+            && fs::create_dir_all(dir.join("info")).is_ok()
+        {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+#[test]
+fn put_across_devices_keeps_the_target_from_filling() {
+    let sb = Sandbox::new("put-space");
+    let Some(other) = other_device_dir(&sb.root, "put") else {
+        return;
+    };
+    fs::write(sb.work().join("big"), vec![b'x'; 4096]).unwrap();
+    let pin = format!("--trash-dir={}", other.display());
+    let out = Command::new(bin())
+        .args(["put", &pin, "big"])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .env("RTRASH_MIN_FREE", "1000000T")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("not enough room"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(sb.work().join("big").exists());
+    assert_eq!(fs::read_dir(other.join("files")).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(other.join("info")).unwrap().count(), 0);
+
+    let out = Command::new(bin())
+        .args(["put", "--no-space-check", &pin, "big"])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .env("RTRASH_MIN_FREE", "1000000T")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("big").exists());
+    assert!(other.join("files/big").exists());
+    let _ = fs::remove_dir_all(&other);
+}

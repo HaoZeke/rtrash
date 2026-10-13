@@ -35,6 +35,9 @@ the index prompt. --newest-first and --oldest-first set the order for both.
       --to=DIR    restore into DIR, keeping each item's file name
       --cwd-only  without PATH, only items trashed from under the current directory
       --plain     force numbered line selection even on a TTY (no TUI)
+      --no-space-check  copy across devices even when the copy would leave
+                    the target under 5% of its bytes or inodes free, or
+                    under RTRASH_MIN_FREE bytes
       --newest-first  list the most recently trashed item first
       --oldest-first  list the oldest trashed item first
       --name=NAME  match items by file name or trash name instead of PATH
@@ -116,6 +119,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         match arg.as_str() {
             "-f" | "--force" => conflict = Conflict::Overwrite,
             "--latest" => latest = true,
+            "--no-space-check" => crate::space::skip_check(true),
             "--all" => all = true,
             "--json" => {
                 json = true;
@@ -591,7 +595,7 @@ fn staging_path(parent: &Path, name: &str) -> PathBuf {
 /// its name in the trash, where its record still points; `err` says what
 /// failed, and gains where the payload is if it cannot go back.
 fn unstage(err: String, staged: &Path, src: &Path) -> String {
-    match trashdir::relocate(staged, src) {
+    match trashdir::relocate_back(staged, src) {
         Ok(()) => format!("{err}; the item stays in the trash"),
         Err(e) => format!(
             "{err}; the item is now at '{}', since it could not go back to '{}': {e}",

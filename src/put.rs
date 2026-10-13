@@ -89,6 +89,9 @@ to require CLI operands even on a TTY.
                           needed); scripts/tests pin instead of XDG discovery
       --home-only       always use the home trash (skip volume trash)
       --plain           never open the put browser; require FILE operands
+      --no-space-check  copy across devices even when the copy would leave
+                          the trash's file system under 5% of its bytes or
+                          inodes free, or under RTRASH_MIN_FREE bytes
       --json            print a JSON summary on stdout ({trashed, failed});
                           implies --plain and replaces -v output
       --help            display this help and exit
@@ -119,6 +122,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         match arg.as_str() {
             "--" => no_more_opts = true,
             "--plain" => plain = true,
+            "--no-space-check" => crate::space::skip_check(true),
             "--json" => {
                 json = true;
                 opts.quiet = true;

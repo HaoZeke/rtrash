@@ -102,6 +102,12 @@ const KEYS: &[(&str, &str, Kind, &str)] = &[
     ),
     (
         "policy",
+        "min_free",
+        Kind::Str,
+        "bytes a copy across devices must leave free (RTRASH_MIN_FREE)",
+    ),
+    (
+        "policy",
         "prune",
         Kind::Str,
         "oldest or largest (RTRASH_PRUNE)",
@@ -449,6 +455,7 @@ pub fn template() -> String {
             ("du", "git", _) => "true".to_string(),
             ("list", "sort", _) => "\"date\"".to_string(),
             ("policy", "max_size", _) => "\"50G\"".to_string(),
+            ("policy", "min_free", _) => "\"10G\"".to_string(),
             ("policy", "prune", _) => "\"oldest\"".to_string(),
             ("protect", "paths", _) => "[\"/srv/data\"]".to_string(),
             (_, _, Kind::Bool) => "false".to_string(),

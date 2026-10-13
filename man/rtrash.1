@@ -191,6 +191,13 @@ Never open the put browser; require
 .I FILE
 operands even on a TTY.
 .TP
+.B \-\-no\-space\-check
+Copy across devices even when the copy would leave the trash's file
+system with under 5% of its bytes or inodes free, or under
+.B RTRASH_MIN_FREE
+bytes.
+Without it, such a put fails before it copies anything.
+.TP
 .B \-\-json
 Print one JSON object on stdout:
 \fItrashed\fR (one entry per moved item with \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR)
@@ -1215,6 +1222,12 @@ Without PATH, only items trashed from under the current directory.
 .B \-\-plain
 Force numbered line selection even on a TTY (skip the TUI browser).
 .TP
+.B \-\-no\-space\-check
+Copy across devices even when the copy would leave the target file
+system with under 5% of its bytes or inodes free, or under
+.B RTRASH_MIN_FREE
+bytes.
+.TP
 .B \-\-newest\-first
 List the most recently trashed item first (default in the interactive browser).
 .TP
@@ -1433,6 +1446,7 @@ reverse = false           # \-\-reverse
 
 [policy]
 max_size = "50G"          # RTRASH_MAX_SIZE
+min_free = "10G"          # RTRASH_MIN_FREE
 prune = "oldest"          # RTRASH_PRUNE: oldest or largest
 
 [protect]
@@ -1637,6 +1651,14 @@ directory it used back under that size, removing older items first.
 Items of the same put run never go. It overrides
 .B policy.max_size
 in the config file, and an empty value turns the prune off.
+.TP
+.B RTRASH_MIN_FREE
+A size such as 10G that a put or restore copying across devices must
+leave free on the target file system, on top of 5% of its bytes and
+inodes.
+It overrides
+.B policy.min_free
+in the config file.
 .TP
 .B RTRASH_PRUNE
 Set to

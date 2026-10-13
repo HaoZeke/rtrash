@@ -907,7 +907,10 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             // A directory inside that this user can't empty would stop the
             // removal halfway; refuse before copying, as a rename would.
-            tree_removable(abs, meta).and_then(|()| copy_recursive(abs, &dest, meta).map(|()| true))
+            // A copy that would fill the trash's file system is refused too.
+            tree_removable(abs, meta)
+                .and_then(|()| crate::space::guard_copy(abs, meta, &trash.files()))
+                .and_then(|()| copy_recursive(abs, &dest, meta).map(|()| true))
         }
         Err(e) => Err(e),
     };
@@ -1574,11 +1577,25 @@ pub fn remove_any_path(path: &Path) -> io::Result<()> {
 /// Used by restore when the trash entry lives on a different filesystem than
 /// the original path (e.g. home-trash fallback after a volume was full).
 pub fn relocate(src: &Path, dest: &Path) -> io::Result<()> {
+    relocate_with(src, dest, true)
+}
+
+/// [`relocate`] without the free space check, for putting a payload back
+/// where it was after a failed restore.
+pub fn relocate_back(src: &Path, dest: &Path) -> io::Result<()> {
+    relocate_with(src, dest, false)
+}
+
+fn relocate_with(src: &Path, dest: &Path, check_space: bool) -> io::Result<()> {
     match fs::rename(src, dest) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             let meta = fs::symlink_metadata(src)?;
             tree_removable(src, &meta)?;
+            if check_space {
+                let parent = dest.parent().filter(|p| !p.as_os_str().is_empty());
+                crate::space::guard_copy(src, &meta, parent.unwrap_or(Path::new(".")))?;
+            }
             copy_recursive(src, dest, &meta).and_then(|_| remove_any(src, &meta))
         }
         Err(e) => Err(e),

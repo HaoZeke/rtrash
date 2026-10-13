@@ -54,6 +54,7 @@ pub mod rm;
 pub mod safety;
 #[cfg(unix)]
 pub mod setup;
+pub mod space;
 #[cfg(unix)]
 pub mod status;
 #[cfg(unix)]

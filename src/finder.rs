@@ -347,7 +347,7 @@ fn move_back(src: &Path, dest: &Path, force: bool) -> Result<(), String> {
         .map_err(|e| format!("cannot stage '{}': {e}", src.display()))?;
     if dest.symlink_metadata().is_ok() {
         if let Err(e) = crate::trashdir::remove_any_path(dest) {
-            let _ = crate::trashdir::relocate(&staged, src);
+            let _ = crate::trashdir::relocate_back(&staged, src);
             return Err(format!("cannot remove existing '{}': {e}", dest.display()));
         }
     }
