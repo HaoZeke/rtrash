@@ -35,6 +35,8 @@ pub mod filters;
 #[cfg(unix)]
 pub mod finder;
 #[cfg(unix)]
+pub mod holders;
+#[cfg(unix)]
 pub mod info;
 #[cfg(unix)]
 pub mod list;
@@ -73,6 +75,8 @@ pub mod tui_select;
 pub mod tui_term;
 #[cfg(unix)]
 pub mod undo;
+#[cfg(unix)]
+pub mod who;
 
 // Windows CLI surface: system Recycle Bin (not FreeDesktop modules).
 #[cfg(windows)]
@@ -129,6 +133,14 @@ pub mod finder {
 pub mod status {
     pub fn run(prog: &str, args: &[String]) -> i32 {
         crate::win_recycle::status_run(prog, args)
+    }
+}
+
+#[cfg(windows)]
+pub mod who {
+    pub fn run(prog: &str, _args: &[String]) -> i32 {
+        eprintln!("{prog}: cannot list the processes holding a path on Windows");
+        1
     }
 }
 

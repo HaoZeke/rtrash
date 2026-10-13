@@ -1346,6 +1346,62 @@ Display help and exit.
 Output version information and exit.
 .PP
 Exit status 0 means every item came back; 1 means nothing matched or an item failed.
+.SS who
+.B rtrash who
+[\fIOPTION\fR]...
+.I PATH
+...
+.PP
+List the live processes that hold
+.I PATH
+or anything below it, one line each: the process id, its command, how it
+holds the path and the path held.
+The ways are
+.BI "fd " N
+(an open descriptor),
+.B mmap
+(a mapped file),
+.BR cwd ,
+.B root
+and
+.BR exe .
+Linux reads
+.IR /proc/PID/fd ,
+.IR cwd ,
+.IR root ,
+.I exe
+and
+.I maps
+as
+.BR lsof (8)
+and
+.BR fuser (1)
+do.
+macOS asks libproc for open files, working and root directories and the
+executable, but not memory maps.
+Without root, other users' processes cannot be read, and a note on
+stderr counts them.
+Windows has no
+.BR who .
+.TP
+.B \-\-json
+Print a JSON object:
+.I holders
+(each with
+.IR pid ", " uid ", " command ", " how ", " path )
+and
+.I unreadable
+(the count of processes that could not be read).
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.PP
+Exit status is 0 when some process holds a
+.IR PATH ,
+1 when none does or the platform cannot tell, and 2 on a usage error.
 .SS finder
 .B rtrash finder put
 [\fB\-v\fR] [\fB\-f\fR] \fIFILE\fR...

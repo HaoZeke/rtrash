@@ -2900,3 +2900,71 @@ fn status_gives_free_bytes_and_inodes_of_each_trash() {
         assert!(json.contains(key), "{key} in {json}");
     }
 }
+
+/// A child holding a file open on descriptor 3, killed on drop.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct Holder(std::process::Child);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Holder {
+    fn open(path: &Path) -> Self {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exec 3<\"$1\"; exec sleep 60")
+            .arg("sh")
+            .arg(path)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        // Wait until the shell has opened the file and become sleep.
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(5) {
+            let out = Command::new(bin())
+                .args(["who", "--json"])
+                .arg(path)
+                .output()
+                .unwrap();
+            if String::from_utf8_lossy(&out.stdout).contains(&format!("\"pid\":{}", child.id())) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Holder(child)
+    }
+
+    fn pid(&self) -> u32 {
+        self.0.id()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for Holder {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn who_names_the_process_holding_a_file_or_its_directory() {
+    let sb = Sandbox::new("who");
+    let held = sb.touch("held.log");
+    sb.touch("idle.log");
+    let child = Holder::open(&held);
+    let out = sb.run(&["who", "held.log"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let line = format!("{}", child.pid());
+    let text = stdout_of(&out);
+    assert!(
+        text.lines()
+            .any(|l| l.trim_start().starts_with(&line) && l.contains("fd 3")),
+        "{text}"
+    );
+    let out = sb.run(&["who", "--json", "."]);
+    assert!(out.status.success());
+    assert!(stdout_of(&out).contains(&format!("\"pid\":{},", child.pid())));
+    let out = sb.run(&["who", "idle.log"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
+    assert!(stdout_of(&out).is_empty());
+}

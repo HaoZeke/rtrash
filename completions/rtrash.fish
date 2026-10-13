@@ -7,7 +7,7 @@ function __rtrash_seen_subcommand
     set -e cmd[1]
     for c in $cmd
         switch $c
-            case put empty list status du restore undo rm finder config setup keys completions man
+            case put empty list status du restore undo rm who finder config setup keys completions man
                 echo $c
                 return 0
         end
@@ -24,6 +24,7 @@ complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'du' -d 'find the lar
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'restore' -d 'restore a trashed item'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'undo' -d 'restore everything one put run trashed'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'rm' -d 'permanently delete matching trash entries'
+complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'who' -d 'list the live processes holding PATH'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'finder' -d 'macOS Finder Trash with Put Back'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'config' -d 'show the config file and the settings it makes'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'setup' -d 'install multi-call links, completions, man page'
@@ -270,3 +271,6 @@ complete -c trash-rm -s v -l verbose
 complete -c trash-rm -l help
 complete -c trash-rm -l version
 # Multi-call name `rm` is intentionally not completed here (would shadow system rm).
+
+# who
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q who' -l json -d 'print a JSON object'

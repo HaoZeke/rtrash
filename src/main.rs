@@ -5,7 +5,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(feature = "tui")]
 use rtrash::tui_binds;
-use rtrash::{config, du, empty, finder, list, put, restore, rm, setup, status, undo};
+use rtrash::{config, du, empty, finder, list, put, restore, rm, setup, status, undo, who};
 
 const HELP: &str = "\
 Usage: rtrash <COMMAND> [ARGS]...
@@ -21,6 +21,7 @@ Commands:
   restore [OPTION]... [PATH]  restore a trashed item
   undo [OPTION]... [BATCH]    restore everything the last (or BATCH) put run trashed
   rm PATTERN...               permanently delete matching trash entries
+  who [OPTION]... PATH...     list the live processes holding PATH
   finder put|list|restore     macOS Finder Trash with Put Back
   config [--path|--default]   show the config file and the settings it makes
   setup [OPTION]...           install multi-call links, completions, man page
@@ -68,6 +69,7 @@ fn main() {
             Some("restore") => restore::run(&format!("{argv0} restore"), &rest[1..]),
             Some("rm") => rm::run(&format!("{argv0} rm"), &rest[1..]),
             Some("undo") => undo::run(&format!("{argv0} undo"), &rest[1..]),
+            Some("who") => who::run(&format!("{argv0} who"), &rest[1..]),
             Some("finder") => finder::run(&format!("{argv0} finder"), &rest[1..]),
             Some("config") => config::run(&format!("{argv0} config"), &rest[1..]),
             Some("setup") => setup::run("setup", &rest[1..]),

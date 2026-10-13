@@ -3,7 +3,7 @@
 # Preferred install: rtrash setup
 # Or: rtrash completions zsh > …/zsh/site-functions/_rtrash
 
-local -a put_opts empty_opts list_opts status_opts du_opts restore_opts undo_opts finder_opts rm_opts config_opts
+local -a put_opts empty_opts list_opts status_opts du_opts restore_opts undo_opts who_opts finder_opts rm_opts config_opts
 
 put_opts=(
   '(-f --force)'{-f,--force}'[ignore nonexistent files, never prompt]'
@@ -53,6 +53,12 @@ list_opts=(
   '--sort=[row order]:key:(date size name path)'
   '--reverse[reverse the order]'
   '--all-users[list every readable user trash with an owner column]'
+  '(- *)'--help'[display help and exit]'
+  '(- *)'--version'[output version and exit]'
+)
+
+who_opts=(
+  '--json[print a JSON object]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
 )
@@ -220,6 +226,7 @@ _rtrash_dispatch() {
     'restore:restore a trashed item'
     'undo:restore everything one put run trashed'
     'rm:permanently delete matching trash entries'
+    'who:list the live processes holding PATH'
     'finder:macOS Finder Trash with Put Back'
     'config:show the config file and the settings it makes'
     'setup:install multi-call links, completions, man page'
@@ -264,6 +271,9 @@ _rtrash_dispatch() {
           ;;
         undo)
           _arguments -s -C $undo_opts
+          ;;
+        who)
+          _arguments -s -C $who_opts '*:file:_files'
           ;;
         finder)
           _arguments -s -C $finder_opts
