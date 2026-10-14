@@ -15,25 +15,85 @@ pub fn is_wsl() -> bool {
     std::fs::read_to_string(src).is_ok_and(|s| s.to_ascii_lowercase().contains("microsoft"))
 }
 
-/// Whether the user asked for the route (env first, then the config file).
-pub fn wanted() -> bool {
+/// The user's choice for the route (env first, then the config file);
+/// None when neither says.
+fn choice() -> Option<bool> {
     match std::env::var("RTRASH_WSL_RECYCLE").ok().as_deref() {
-        Some("1" | "true" | "yes") => true,
-        Some(_) => false,
-        None => crate::config::get().bool("wsl", "recycle").unwrap_or(false),
+        Some("1" | "true" | "yes") => Some(true),
+        Some(_) => Some(false),
+        None => crate::config::get().bool("wsl", "recycle"),
     }
 }
 
-/// True for a path on a Windows drive under the default automount root:
-/// `/mnt/<letter>/...`, the drive itself excluded.
-pub fn on_windows_drive(abs: &Path) -> bool {
-    let mut c = abs.components();
-    use std::path::Component::{Normal, RootDir};
+/// Whether the user asked for the route.
+pub fn wanted() -> bool {
+    choice().unwrap_or(false)
+}
+
+/// True once per run when a Windows-drive item goes to the FreeDesktop
+/// trash on WSL with no choice made: put then names the opt-in.
+pub fn hint_due(abs: &Path) -> bool {
+    static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if choice().is_some() || !on_windows_drive(abs) || !is_wsl() {
+        return false;
+    }
+    !SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The `[automount] root` from `/etc/wsl.conf` (`RTRASH_WSL_CONF` points
+/// elsewhere, for tests), else `/mnt/`, where WSL mounts Windows drives.
+pub fn automount_root() -> PathBuf {
+    let conf = std::env::var_os("RTRASH_WSL_CONF")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/etc/wsl.conf"));
+    std::fs::read_to_string(conf)
+        .ok()
+        .and_then(|t| automount_root_from(&t))
+        .unwrap_or_else(|| PathBuf::from("/mnt"))
+}
+
+/// `root` in the `[automount]` section of a wsl.conf text, when set.
+pub fn automount_root_from(text: &str) -> Option<PathBuf> {
+    let mut section = String::new();
+    for line in text.lines() {
+        let line = line.split(['#', ';']).next().unwrap_or("").trim();
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            section = name.trim().to_ascii_lowercase();
+            continue;
+        }
+        if section != "automount" {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim().eq_ignore_ascii_case("root") {
+                let v = v.trim().trim_matches('"').trim();
+                if v.starts_with('/') {
+                    return Some(PathBuf::from(v));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// True for a path on a Windows drive under `root`: `ROOT/<letter>/...`,
+/// the drive itself excluded.
+pub fn on_drive_under(root: &Path, abs: &Path) -> bool {
+    let Ok(rest) = abs.strip_prefix(root) else {
+        return false;
+    };
+    let mut c = rest.components();
+    use std::path::Component::Normal;
     matches!(
-        (c.next(), c.next(), c.next(), c.next()),
-        (Some(RootDir), Some(Normal(m)), Some(Normal(d)), Some(_))
-            if m == "mnt" && d.len() == 1 && d.to_string_lossy().chars().all(|ch| ch.is_ascii_alphabetic())
+        (c.next(), c.next()),
+        (Some(Normal(d)), Some(_))
+            if d.len() == 1 && d.to_string_lossy().chars().all(|ch| ch.is_ascii_alphabetic())
     )
+}
+
+/// True for a path on a Windows drive under the automount root.
+pub fn on_windows_drive(abs: &Path) -> bool {
+    on_drive_under(&automount_root(), abs)
 }
 
 /// Route `abs` to the Recycle Bin when the user asked and it applies.
@@ -94,11 +154,26 @@ mod tests {
 
     #[test]
     fn only_paths_inside_a_drive_letter_mount_qualify() {
-        assert!(on_windows_drive(Path::new("/mnt/c/Users/me/a.txt")));
-        assert!(on_windows_drive(Path::new("/mnt/D/x")));
-        assert!(!on_windows_drive(Path::new("/mnt/c")));
-        assert!(!on_windows_drive(Path::new("/mnt/usb/x")));
-        assert!(!on_windows_drive(Path::new("/home/me/mnt/c/x")));
-        assert!(!on_windows_drive(Path::new("/mnt/1/x")));
+        let m = Path::new("/mnt");
+        assert!(on_drive_under(m, Path::new("/mnt/c/Users/me/a.txt")));
+        assert!(on_drive_under(m, Path::new("/mnt/D/x")));
+        assert!(!on_drive_under(m, Path::new("/mnt/c")));
+        assert!(!on_drive_under(m, Path::new("/mnt/usb/x")));
+        assert!(!on_drive_under(m, Path::new("/home/me/mnt/c/x")));
+        assert!(!on_drive_under(m, Path::new("/mnt/1/x")));
+        assert!(on_drive_under(Path::new("/"), Path::new("/c/x")));
+        assert!(!on_drive_under(Path::new("/win"), Path::new("/mnt/c/x")));
+    }
+
+    #[test]
+    fn wsl_conf_sets_the_automount_root() {
+        let t = "[boot]\nsystemd=true\n[automount]\nenabled = true\nroot = /win/ # here\n";
+        assert_eq!(automount_root_from(t), Some(PathBuf::from("/win/")));
+        assert_eq!(
+            automount_root_from("[automount]\nroot=\"/\"\n"),
+            Some(PathBuf::from("/"))
+        );
+        assert_eq!(automount_root_from("[network]\nroot = /x\n"), None);
+        assert_eq!(automount_root_from("[automount]\nroot = relative\n"), None);
     }
 }

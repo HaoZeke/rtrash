@@ -3025,8 +3025,17 @@ Off by default; it applies only when the kernel release names Microsoft,
 and never with
 .BR \-\-trash\-dir .
 Items routed there do not show in rtrash list, undo or the put JSON.
+Windows drives sit under the
+.B [automount] root
+of
+.I /etc/wsl.conf
+(default
+.IR /mnt/ ).
+With neither the variable nor the config key set, put on WSL prints a
+one-line note naming this option the first time a run trashes a file
+on a Windows drive;
 .B 0
-turns it off over the config file.
+turns the route off over the config file and hides the note.
 .TP
 .B XDG_DATA_HOME
 Base for the home trash directory
