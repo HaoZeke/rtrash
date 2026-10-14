@@ -185,3 +185,16 @@ The wide directory takes the parallel stat path of `rtrash du` (above 256 entrie
 `rtrash du --dupes --json ~/.cargo/registry` over 76,074 files, warm page cache, 8 cores, six runs: 0.25 to 0.29 s (median 0.26 s).
 It finds 8,627 groups with 18,160 extra copies and 158 MiB to free.
 Trash directories are skipped, which costs one lstat per directory when a home trash exists.
+
+### Trash inode count (2026-10-14)
+
+A trash of 100,100 items on tmpfs (100,000 files and 100 directories of 110 entries), 8 cores, release build.
+`trash-stats --total --json` gives 211,200 inodes.
+
+| Case | Time |
+|---|---|
+| first count with `--measure` | 0.59 s |
+| recount after a change to `info/` | 0.16 s |
+| unchanged trash (stored answer line) | 0.001 s |
+
+A recount reads `files/` once and stats each record; it walks no tree.

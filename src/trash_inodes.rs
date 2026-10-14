@@ -8,6 +8,10 @@
 //! stats each record, and only a directory item missing from the cache
 //! is walked (with `measure`), once.
 //!
+//! The answer itself is kept on the file's first line, stamped with the
+//! modification time of `info/` as the running total is, so a trash no
+//! tool changed since is answered from that line alone.
+//!
 //! Orphans (payloads without a record) are left out, as in the total.
 
 use std::collections::HashMap;
@@ -19,31 +23,45 @@ use crate::trashdir::TrashDir;
 const FILE: &str = "rtrash-dirinodes";
 
 /// Cache lines: name to (inodes in the payload tree, record mtime in ns).
-fn load(dir: &TrashDir) -> HashMap<Vec<u8>, (u64, u128)> {
+type Trees = HashMap<Vec<u8>, (u64, u128)>;
+
+/// The cached answer `(inodes, info stamp)` from the first line, if any,
+/// and the tree counts.
+fn load_all(dir: &TrashDir) -> (Option<(u64, u128)>, Trees) {
     let Ok(body) = fs::read_to_string(dir.root.join(FILE)) else {
-        return HashMap::new();
+        return (None, HashMap::new());
     };
     let mut lines = body.lines();
-    if lines.next() != Some("v1") {
-        return HashMap::new();
+    let mut head = lines.next().unwrap_or("").split(' ');
+    if head.next() != Some("v1") {
+        return (None, HashMap::new());
     }
-    lines
+    let answer = (|| Some((head.next()?.parse().ok()?, head.next()?.parse().ok()?)))();
+    let trees = lines
         .filter_map(|l| {
             let mut f = l.splitn(3, ' ');
             let n = f.next()?.parse().ok()?;
             let t = f.next()?.parse().ok()?;
             Some((crate::util::url_decode(f.next()?), (n, t)))
         })
-        .collect()
+        .collect();
+    (answer, trees)
 }
 
-fn save(dir: &TrashDir, map: &HashMap<Vec<u8>, (u64, u128)>) {
+fn load(dir: &TrashDir) -> Trees {
+    load_all(dir).1
+}
+
+/// Write the tree counts, with the answer for the trash as of `info/`
+/// stamp when given.
+fn save(dir: &TrashDir, map: &Trees, answer: Option<(u64, u128)>) {
     let mut lines: Vec<String> = map
         .iter()
         .map(|(name, (n, t))| format!("{n} {t} {}", crate::util::url_encode(name)))
         .collect();
     lines.sort();
-    let body = format!("v1\n{}\n", lines.join("\n"));
+    let head = answer.map_or("v1".to_string(), |(n, s)| format!("v1 {n} {s}"));
+    let body = format!("{head}\n{}\n", lines.join("\n"));
     let _ = crate::trashdir::atomic_write(&dir.root.join(FILE), body.as_bytes());
 }
 
@@ -63,7 +81,8 @@ pub fn record(dir: &TrashDir, name: &str, inodes: u64) {
         crate::util::os_from_str(name).as_encoded_bytes().to_vec(),
         (inodes, t),
     );
-    save(dir, &map);
+    // The put changed the trash, so the stored answer goes.
+    save(dir, &map, None);
 }
 
 /// Inodes in the tree at `p`, itself included; links are not followed.
@@ -86,7 +105,13 @@ pub fn tree_inodes(p: &Path) -> u64 {
 /// item has no cached count and `measure` is off. With `measure`, such
 /// items are walked once and cached.
 pub fn count(dir: &TrashDir, measure: bool) -> Option<u64> {
-    let cache = load(dir);
+    let stamp = mtime_ns(&dir.info());
+    let (answer, cache) = load_all(dir);
+    if let (Some((n, s)), Some(now)) = (answer, stamp) {
+        if s == now {
+            return Some(n);
+        }
+    }
     let mut next: HashMap<Vec<u8>, (u64, u128)> = HashMap::new();
     let mut total = 0u64;
     let info = dir.info();
@@ -115,8 +140,12 @@ pub fn count(dir: &TrashDir, measure: bool) -> Option<u64> {
         next.insert(key, (n, t));
         total += 1 + n;
     }
-    if next != cache {
-        save(dir, &next);
+    // Keep the answer only when info/ did not change during the count.
+    let answer = stamp
+        .filter(|&s| mtime_ns(&dir.info()) == Some(s))
+        .map(|s| (total, s));
+    if next != cache || answer.is_some() {
+        save(dir, &next, answer);
     }
     Some(total)
 }
@@ -144,6 +173,12 @@ mod tests {
         assert_eq!(count(&dir, false), None);
         assert_eq!(count(&dir, true), Some(6));
         assert_eq!(count(&dir, false), Some(6));
+        // The answer line serves the next count while info/ is unchanged.
+        let body = fs::read_to_string(root.join(FILE)).unwrap();
+        assert!(body.starts_with("v1 6 "), "{body}");
+        fs::write(dir.files().join("g"), b"g").unwrap();
+        fs::write(dir.info().join("g.trashinfo"), b"[Trash Info]\n").unwrap();
+        assert_eq!(count(&dir, false), Some(8));
         let _ = fs::remove_dir_all(&root);
     }
 }
