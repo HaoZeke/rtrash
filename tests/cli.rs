@@ -3428,6 +3428,56 @@ fn reap_watch_reaps_on_each_pass_and_needs_when_below() {
     }
 }
 
+/// `--install-timer --watch` writes a job that stays up instead of a
+/// schedule, and still needs `--when-below`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_install_timer_with_watch_writes_a_service_that_stays_up() {
+    let sb = Sandbox::new("reap-watch-unit");
+    let out = reap_cmd(
+        &sb,
+        &[
+            "reap",
+            "--install-timer",
+            "--watch=5m",
+            "--when-below=10%",
+            "-p",
+            "ai",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    if cfg!(target_os = "macos") {
+        let p = sb
+            .root
+            .join("Library/LaunchAgents/io.github.haozeke.rtrash-reap.plist");
+        let body = fs::read_to_string(&p).unwrap();
+        assert!(
+            body.contains("KeepAlive") && body.contains("--watch=5m"),
+            "{body}"
+        );
+    } else {
+        let d = sb.root.join(".config/systemd/user");
+        let body = fs::read_to_string(d.join("rtrash-reap.service")).unwrap();
+        assert!(
+            body.contains("Type=simple") && body.contains("--watch=5m"),
+            "{body}"
+        );
+        assert!(!d.join("rtrash-reap.timer").exists());
+        assert!(stdout_of(&out).contains("enable --now rtrash-reap.service"));
+    }
+    let text = stdout_of(&reap_cmd(&sb, &["reap", "--timer-status"]));
+    assert!(text.starts_with("installed:"), "{text}");
+    let out = reap_cmd(&sb, &["reap", "--remove-timer"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stdout_of(&out).contains("removed "), "{}", stdout_of(&out));
+    assert_eq!(
+        reap_cmd(&sb, &["reap", "--install-timer", "--watch", "-n"])
+            .status
+            .code(),
+        Some(2)
+    );
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn reap_install_timer_prints_on_dry_run_and_writes_user_units() {

@@ -58,6 +58,8 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
                           1m, at least 1s); needs --when-below, so a pass
                           does nothing while space is fine; stops on
                           Ctrl-C
+                          with --watch, a service that stays running
+                          instead (Linux and macOS)
       --remove-timer    stop and remove the job --install-timer made; with
                           -n print what that would run and remove
       --timer-status    say whether that job is installed, and its state
@@ -973,9 +975,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         return crate::reap_timer::status(prog, json);
     }
+    let timer = args.iter().any(|a| a.starts_with("--install-timer"));
     if let Some(i) = args
         .iter()
         .position(|a| a == "--watch" || a.starts_with("--watch="))
+        .filter(|_| !timer)
     {
         return watch(prog, args, i);
     }
@@ -1088,6 +1092,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .any(|a| a == "--list-profiles" || a == "--help" || a == "--version")
         {
             return usage_err(prog, "--install-timer takes the options of the reap to run");
+        }
+        if rest
+            .iter()
+            .any(|a| a == "--watch" || a.starts_with("--watch="))
+            && !rest.iter().any(|a| a.starts_with("--when-below="))
+        {
+            return usage_err(prog, "--watch goes with --when-below");
         }
         return crate::reap_timer::install(prog, &rest, every, dry);
     }

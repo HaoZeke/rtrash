@@ -2090,6 +2090,17 @@ It needs
 so a pass does nothing while space is fine, and it does not go with
 .BR \-n .
 This suits a session without a timer service.
+With
+.BR \-\-install\-timer ,
+the job is a service that stays up instead of a schedule: on Linux a
+user unit \fIrtrash\-reap.service\fR (\fBType=simple\fR, restarted 30 s
+after a failure, no timer), on macOS a launchd agent with
+\fBKeepAlive\fR.
+.B \-\-timer\-status
+and
+.B \-\-remove\-timer
+handle it as they handle the timer.
+Windows takes only the scheduled form.
 .TP
 .B \-\-remove\-timer
 Stop and remove the job

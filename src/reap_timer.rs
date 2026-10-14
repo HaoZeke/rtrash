@@ -22,6 +22,26 @@ fn systemd_word(w: &str) -> String {
     format!("\"{body}\"")
 }
 
+/// Whether the job runs `reap --watch`: a service that stays up rather
+/// than one a schedule starts.
+pub fn is_watch(args: &[String]) -> bool {
+    args.iter()
+        .any(|a| a == "--watch" || a.starts_with("--watch="))
+}
+
+/// The user service that keeps `exe reap ARGS --watch` running, started
+/// at login and again 30 s after it fails.
+pub fn systemd_watch_unit(exe: &Path, args: &[String]) -> String {
+    let mut cmd = vec![systemd_word(&exe.to_string_lossy()), systemd_word("reap")];
+    cmd.extend(args.iter().map(|a| systemd_word(a)));
+    format!(
+        "[Unit]\nDescription=rtrash reap --watch: keep free space above a target\nDocumentation=man:rtrash(1)\n\n\
+         [Service]\nType=simple\nExecStart={}\nRestart=on-failure\nRestartSec=30s\nNice=19\nIOSchedulingClass=idle\n\n\
+         [Install]\nWantedBy=default.target\n",
+        cmd.join(" ")
+    )
+}
+
 /// The service and timer that run `exe reap ARGS` every `every` seconds.
 pub fn systemd_units(exe: &Path, args: &[String], every: i64) -> (String, String) {
     let mut cmd = vec![systemd_word(&exe.to_string_lossy()), systemd_word("reap")];
@@ -54,13 +74,20 @@ pub fn launchd_plist(exe: &Path, args: &[String], every: i64) -> String {
         .iter()
         .map(|w| format!("    <string>{}</string>\n", xml(w)))
         .collect();
+    // A watch stays up: started at load and again whenever it exits.
+    let schedule = if is_watch(args) {
+        "\x20 <key>RunAtLoad</key>\n  <true/>\n\x20 <key>KeepAlive</key>\n  <true/>\n".to_string()
+    } else {
+        format!(
+            "\x20 <key>StartInterval</key>\n  <integer>{every}</integer>\n\x20 <key>RunAtLoad</key>\n  <false/>\n"
+        )
+    };
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n  <string>{LABEL}</string>\n\
          \x20 <key>ProgramArguments</key>\n  <array>\n{argv}  </array>\n\
-         \x20 <key>StartInterval</key>\n  <integer>{every}</integer>\n\
-         \x20 <key>RunAtLoad</key>\n  <false/>\n\
+         {schedule}\
          \x20 <key>LowPriorityIO</key>\n  <true/>\n\
          \x20 <key>Nice</key>\n  <integer>19</integer>\n\
          \x20 <key>ProcessType</key>\n  <string>Background</string>\n</dict>\n</plist>\n"
@@ -213,6 +240,18 @@ fn plan(
             _ => home.join(".config"),
         };
         let dir = base.join("systemd/user");
+        if is_watch(args) {
+            let on = format!(
+                "systemctl --user daemon-reload && systemctl --user enable --now {NAME}.service"
+            );
+            return Ok((
+                vec![(
+                    dir.join(format!("{NAME}.service")),
+                    systemd_watch_unit(exe, args),
+                )],
+                on,
+            ));
+        }
         let (service, timer) = systemd_units(exe, args, every);
         let on =
             format!("systemctl --user daemon-reload && systemctl --user enable --now {NAME}.timer");
@@ -255,9 +294,14 @@ fn removal() -> Result<Removal, String> {
         ));
     }
     let timer = format!("{NAME}.timer");
+    let service = format!("{NAME}.service");
+    // Either job may be the one installed: the timer, or the watch service.
     Ok((
         files,
-        vec![words(&["systemctl", "--user", "disable", "--now", &timer])],
+        vec![
+            words(&["systemctl", "--user", "disable", "--now", &timer]),
+            words(&["systemctl", "--user", "disable", "--now", &service]),
+        ],
         vec![words(&["systemctl", "--user", "daemon-reload"])],
     ))
 }
@@ -293,7 +337,9 @@ pub fn remove(prog: &str, dry_run: bool) -> i32 {
             .status()
             .is_ok_and(|s| s.success())
     };
-    let stopped = before.iter().all(run);
+    // Every stop command runs: on Linux only one of them has a job to stop.
+    let ran: Vec<bool> = before.iter().map(run).collect();
+    let stopped = ran.iter().all(|&b| b);
     if cfg!(windows) && !dry_run {
         if !stopped {
             eprintln!("{prog}: schtasks could not delete the task {NAME} (is it installed?)");
@@ -402,6 +448,15 @@ fn find() -> Result<Found, String> {
         .collect();
     let installed = !files.is_empty();
     let macos = cfg!(target_os = "macos");
+    // A watch service has no timer file; ask about the service instead.
+    let unit = if files
+        .iter()
+        .any(|p| p.extension().is_some_and(|e| e == "timer"))
+    {
+        format!("{NAME}.timer")
+    } else {
+        format!("{NAME}.service")
+    };
     let fields = if !installed {
         Vec::new()
     } else if macos {
@@ -419,7 +474,7 @@ fn find() -> Result<Found, String> {
                 "systemctl",
                 "--user",
                 "show",
-                &format!("{NAME}.timer"),
+                &unit,
                 "-p",
                 "ActiveState",
                 "-p",
@@ -563,6 +618,10 @@ pub fn install(prog: &str, args: &[String], every: i64, dry_run: bool) -> i32 {
             return 1;
         }
     };
+    if cfg!(windows) && is_watch(args) {
+        eprintln!("{prog}: --install-timer --watch makes a service on Linux and macOS only; on Windows use --install-timer without --watch");
+        return 2;
+    }
     if cfg!(windows) {
         return install_task(prog, &exe, args, every, dry_run);
     }
@@ -696,6 +755,35 @@ mod tests {
         );
         assert_eq!(split_field("no separator"), None);
         assert_eq!(split_field("=x"), None);
+    }
+
+    #[test]
+    fn a_watch_job_is_a_service_that_stays_up() {
+        let args: Vec<String> = ["--watch=5m", "--when-below=10%"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(is_watch(&args) && !is_watch(&args[1..]));
+        let unit = systemd_watch_unit(Path::new("/bin/rtrash"), &args);
+        assert!(
+            unit.contains("Type=simple") && unit.contains("Restart=on-failure"),
+            "{unit}"
+        );
+        assert!(
+            unit.contains(r#"ExecStart="/bin/rtrash" "reap" "--watch=5m""#),
+            "{unit}"
+        );
+        assert!(unit.contains("WantedBy=default.target"), "{unit}");
+        let plist = launchd_plist(Path::new("/bin/rtrash"), &args, 3600);
+        assert!(
+            plist.contains("<key>KeepAlive</key>") && !plist.contains("StartInterval"),
+            "{plist}"
+        );
+        let plain = launchd_plist(Path::new("/bin/rtrash"), &args[1..], 3600);
+        assert!(
+            plain.contains("<integer>3600</integer>") && !plain.contains("KeepAlive"),
+            "{plain}"
+        );
     }
 
     #[test]
