@@ -1874,7 +1874,24 @@ A cheap job pairs it with
 .BR \-\-when\-below ,
 for example
 .BR "rtrash reap \-\-install\-timer=15m \-p compilers \-p pkg \-\-when\-below=10%" .
-Remove the files to remove the job.
+.B \-\-remove\-timer
+removes the job again.
+.TP
+.B \-\-remove\-timer
+Stop and remove the job
+.B \-\-install\-timer
+made: on Linux,
+.B systemctl \-\-user disable \-\-now rtrash\-reap.timer
+then the unit files and a daemon reload; on macOS,
+.B launchctl bootout
+then the plist; on Windows,
+.BR "schtasks /Delete /F /TN rtrash\-reap" .
+The service manager's commands are best effort, so a job that was
+never turned on still loses its files.
+With
+.B \-n
+it prints the commands and files instead.
+It takes no other option.
 .TP
 .BI \-\-when\-below= SPEC
 Reap only when a file system holding the entries has less free than

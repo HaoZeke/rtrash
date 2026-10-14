@@ -69,6 +69,7 @@ reap_opts=(
   '--list-profiles[list the profiles]'
   '--shared[show what a delete frees, counting shared extents once]'
   '--install-timer=-[write a user timer that runs this reap]:every:'
+  '--remove-timer[stop and remove the reap timer]'
   '--when-below=[reap only when free space is under this]:spec:'
   '--until=[free space to reap back to]:spec:'
   '--purge-trash[empty the oldest trash items first when space is short]'

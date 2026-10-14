@@ -170,3 +170,21 @@ fn reap_purge_trash_dry_run_lists_the_drive_recycle_bin_oldest_first() {
     assert!(old.exists() && base.join(&names[0]).symlink_metadata().is_err());
     let _ = fs::remove_dir_all(&base);
 }
+
+#[test]
+fn reap_remove_timer_dry_run_prints_the_schtasks_delete() {
+    let out = Command::new(bin())
+        .args(["reap", "--remove-timer", "-n"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.starts_with("schtasks /Delete /F /TN rtrash-reap"),
+        "{text}"
+    );
+}

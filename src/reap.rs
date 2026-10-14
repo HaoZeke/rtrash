@@ -54,6 +54,8 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
                           Scheduler task (Windows) that runs this reap,
                           with the other options, every EVERY (default
                           1h); with -n print them instead
+      --remove-timer    stop and remove the job --install-timer made; with
+                          -n print what that would run and remove
       --when-below=SPEC run only when a reaped file system has less free
                           than SPEC (a size such as 20G, a percent such
                           as 10%, and ,inodes=PCT), then reap oldest first
@@ -940,6 +942,16 @@ fn add_roots(out: &mut Vec<PathBuf>, v: &str) -> Result<(), String> {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--remove-timer") {
+        let dry = args.iter().any(|a| a == "-n" || a == "--dry-run");
+        if let Some(a) = args
+            .iter()
+            .find(|a| !matches!(a.as_str(), "--remove-timer" | "-n" | "--dry-run"))
+        {
+            return usage_err(prog, &format!("--remove-timer takes only -n, not '{a}'"));
+        }
+        return crate::reap_timer::remove(prog, dry);
+    }
     if let Some(i) = args
         .iter()
         .position(|a| a == "--install-timer" || a.starts_with("--install-timer="))

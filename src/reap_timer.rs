@@ -2,7 +2,8 @@
 //! schedule, as a systemd user service and timer on Linux, a launchd
 //! agent on macOS and a Task Scheduler task on Windows. Nothing needs root
 //! or an administrator, and `--dry-run` prints the files (or the schtasks
-//! command) instead of writing them.
+//! command) instead of writing them. `--remove-timer` stops the job and
+//! removes it again.
 
 use std::path::{Path, PathBuf};
 
@@ -134,6 +135,98 @@ fn plan(
         ));
     }
     Err("timers are installed only on Linux (systemd), macOS (launchd) and Windows (Task Scheduler)".into())
+}
+
+/// The job's files, the commands that stop it before they go, and the
+/// commands to run after.
+type Removal = (Vec<PathBuf>, Vec<Vec<String>>, Vec<Vec<String>>);
+
+fn removal() -> Result<Removal, String> {
+    let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    if cfg!(windows) {
+        return Ok((
+            Vec::new(),
+            vec![words(&["schtasks", "/Delete", "/F", "/TN", NAME])],
+            Vec::new(),
+        ));
+    }
+    let (files, _) = plan(Path::new("rtrash"), &[], 3600)?;
+    let files: Vec<PathBuf> = files.into_iter().map(|(p, _)| p).collect();
+    if cfg!(target_os = "macos") {
+        #[cfg(unix)]
+        let uid = unsafe { libc::getuid() };
+        #[cfg(not(unix))]
+        let uid = 0;
+        let target = format!("gui/{uid}/{LABEL}");
+        return Ok((
+            files,
+            vec![words(&["launchctl", "bootout", &target])],
+            Vec::new(),
+        ));
+    }
+    let timer = format!("{NAME}.timer");
+    Ok((
+        files,
+        vec![words(&["systemctl", "--user", "disable", "--now", &timer])],
+        vec![words(&["systemctl", "--user", "daemon-reload"])],
+    ))
+}
+
+/// Stop and remove the job `install` made, or with `dry_run` print what
+/// that would run and remove. The service manager's commands are best
+/// effort: a job that was never turned on still loses its files.
+pub fn remove(prog: &str, dry_run: bool) -> i32 {
+    let (files, before, after) = match removal() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{prog}: {e}");
+            return 2;
+        }
+    };
+    let present: Vec<&PathBuf> = files
+        .iter()
+        .filter(|f| f.symlink_metadata().is_ok())
+        .collect();
+    if !cfg!(windows) && present.is_empty() {
+        println!("no reap timer installed");
+        return 0;
+    }
+    let run = |cmd: &Vec<String>| -> bool {
+        if dry_run {
+            println!("{}", cmd.join(" "));
+            return true;
+        }
+        std::process::Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let stopped = before.iter().all(run);
+    if cfg!(windows) && !dry_run {
+        if !stopped {
+            eprintln!("{prog}: schtasks could not delete the task {NAME} (is it installed?)");
+            return 1;
+        }
+        println!("deleted the scheduled task {NAME}");
+        return 0;
+    }
+    let mut status = 0;
+    for f in &present {
+        if dry_run {
+            println!("would remove {}", f.display());
+        } else if let Err(e) = std::fs::remove_file(f) {
+            eprintln!("{prog}: cannot remove '{}': {e}", f.display());
+            status = 1;
+        } else {
+            println!("removed {}", f.display());
+        }
+    }
+    for cmd in &after {
+        run(cmd);
+    }
+    status
 }
 
 /// Create the Windows task, or with `dry_run` print the command.

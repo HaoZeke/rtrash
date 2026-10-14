@@ -284,6 +284,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -s p -l 
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l list-profiles -d 'list the profiles'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l shared -d 'show what a delete frees, counting shared extents once'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l install-timer -d 'write a user timer that runs this reap'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l remove-timer -d 'stop and remove the reap timer'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l when-below -x -d 'reap only when free space is under this'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l until -x -d 'free space to reap back to'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l purge-trash -d 'empty the oldest trash items first when space is short'
