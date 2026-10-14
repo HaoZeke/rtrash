@@ -1771,7 +1771,12 @@ fn trash_cli_command_lines_work_under_the_trash_names() {
     let out = run_as("trash-list", &["--trash-dirs", "--trash-dir", &t], "");
     assert_eq!(stdout_of(&out).trim(), t);
     let out = run_as("trash-list", &["--volumes"], "");
-    assert!(stdout_of(&out).lines().any(|l| l == "/"));
+    // Linux lists the mounts with the root; macOS, home-only, lists none.
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let vols = stdout_of(&out);
+    assert!(vols.lines().all(|l| l.starts_with('/')), "{vols}");
+    #[cfg(target_os = "linux")]
+    assert!(vols.lines().any(|l| l == "/"), "{vols}");
     let out = run_as("trash-list", &["--print-completion", "bash"], "");
     assert!(stdout_of(&out).contains("trash-restore"));
     let out = run_as("trash-list", &["--print-completion=tcsh"], "");
