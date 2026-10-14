@@ -35,7 +35,8 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
                           go clean -cache) when the tool is on PATH
       --older-than=AGE  only entries whose newest time is older than AGE:
                           a number with s, m, h, d or w (days without one);
-                          default 10d for DIR, the profile's age for one
+                          for DIR the age its tmpfiles.d line gives, else
+                          10d; for a profile, the profile's age
       --age-by=LETTERS  which times count, from a (access), c (change) and
                           m (modification); default acm; a directory's
                           access time never counts
@@ -158,6 +159,111 @@ pub fn tmpfiles_exclusions() -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// The tmpfiles.d age of each path a `d`, `D`, `e`, `q`, `Q` or `v` line
+/// cleans, in seconds. Files in /etc override same-named ones in /run,
+/// which override /usr/lib, and the first line for a path wins, as
+/// systemd-tmpfiles reads them.
+pub fn tmpfiles_ages() -> Vec<(PathBuf, i64)> {
+    let mut files: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();
+    for dir in ["/etc/tmpfiles.d", "/run/tmpfiles.d", "/usr/lib/tmpfiles.d"] {
+        let Ok(rd) = fs::read_dir(dir) else {
+            continue;
+        };
+        let mut here: Vec<_> = rd.flatten().map(|e| e.path()).collect();
+        here.sort();
+        for p in here {
+            let Some(name) = p.file_name().map(|n| n.to_os_string()) else {
+                continue;
+            };
+            if p.extension().and_then(|x| x.to_str()) == Some("conf")
+                && !files.iter().any(|(n, _)| *n == name)
+            {
+                files.push((name, p));
+            }
+        }
+    }
+    files.sort();
+    let mut out: Vec<(PathBuf, i64)> = Vec::new();
+    for (_, p) in files {
+        if fs::metadata(&p).map_or(true, |m| !m.is_file() || m.len() > 1 << 20) {
+            continue;
+        }
+        if let Ok(body) = fs::read_to_string(&p) {
+            for (path, age) in parse_tmpfiles_ages(&body) {
+                if !out.iter().any(|(x, _)| *x == path) {
+                    out.push((path, age));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The `(path, age)` pairs of a tmpfiles.d body's cleaning lines. Paths
+/// with specifiers, and ages that are `-`, zero or unreadable, are left
+/// out.
+fn parse_tmpfiles_ages(body: &str) -> Vec<(PathBuf, i64)> {
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 6 || f[0].starts_with('#') {
+            continue;
+        }
+        let kind = f[0].trim_end_matches(['!', '-', '=', '~', '^', '+', '?']);
+        if !matches!(kind, "d" | "D" | "e" | "q" | "Q" | "v") || f[1].contains('%') {
+            continue;
+        }
+        // A leading ~ limits cleaning to the directory's own entries,
+        // which is all reap looks at; a : keeps atime out (reap ignores).
+        let age = f[5].trim_start_matches(['~', ':']);
+        if let Some(secs) = parse_span(age).filter(|&s| s > 0) {
+            out.push((PathBuf::from(f[1]), secs));
+        }
+    }
+    out
+}
+
+/// A systemd time span such as `10d`, `1w 2d`, `12h30min` or a bare
+/// number of seconds.
+fn parse_span(s: &str) -> Option<i64> {
+    let mut total = 0i64;
+    let mut rest = s.trim();
+    if rest.is_empty() || rest == "-" {
+        return None;
+    }
+    while !rest.is_empty() {
+        let n_end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let n: i64 = rest[..n_end].parse().ok()?;
+        rest = rest[n_end..].trim_start();
+        let u_end = rest
+            .find(|c: char| c.is_ascii_digit() || c == ' ')
+            .unwrap_or(rest.len());
+        let mul = match &rest[..u_end] {
+            "" | "s" | "sec" | "second" | "seconds" => 1,
+            "m" | "min" | "minute" | "minutes" => 60,
+            "h" | "hr" | "hour" | "hours" => 3600,
+            "d" | "day" | "days" => 86_400,
+            "w" | "week" | "weeks" => 7 * 86_400,
+            "M" | "month" | "months" => 2_629_800,
+            "y" | "year" | "years" => 31_557_600,
+            "ms" | "us" | "usec" | "msec" => 0,
+            _ => return None,
+        };
+        total = total.checked_add(n.checked_mul(mul)?)?;
+        rest = rest[u_end..].trim_start();
+    }
+    Some(total)
+}
+
+/// The tmpfiles.d age for `root`, matched after resolving links.
+fn tmpfiles_age_for(root: &Path, ages: &[(PathBuf, i64)]) -> Option<i64> {
+    ages.iter()
+        .find(|(p, _)| p == root || fs::canonicalize(p).is_ok_and(|c| c == root))
+        .map(|(_, a)| *a)
 }
 
 fn parse_tmpfiles(body: &str) -> Vec<String> {
@@ -860,8 +966,24 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             _ => {}
         }
     }
-    if !roots.is_empty() {
-        let older = older.unwrap_or(10 * 86_400);
+    // Without --older-than each directory takes its tmpfiles.d age, else
+    // 10 days; one group per age.
+    let ages = if older.is_none() && !roots.is_empty() {
+        tmpfiles_ages()
+    } else {
+        Vec::new()
+    };
+    let mut by_age: Vec<(i64, Vec<PathBuf>)> = Vec::new();
+    for root in &roots {
+        let age = older
+            .or_else(|| tmpfiles_age_for(root, &ages))
+            .unwrap_or(10 * 86_400);
+        match by_age.iter_mut().find(|(a, _)| *a == age) {
+            Some((_, v)) => v.push(root.clone()),
+            None => by_age.push((age, vec![root.clone()])),
+        }
+    }
+    for (older, roots) in by_age {
         let mut entries = Vec::new();
         for root in &roots {
             let Ok(root_meta) = fs::symlink_metadata(root) else {
@@ -1216,6 +1338,28 @@ mod tests {
         assert_eq!(parse_age("1w"), Some(604_800));
         assert_eq!(parse_age("3y"), None);
         assert_eq!(parse_age(""), None);
+    }
+
+    #[test]
+    fn tmpfiles_ages_read_cleaning_lines_and_systemd_spans() {
+        let body = "# c\nq /tmp 1777 root root 10d\nD /var/tmp 1777 root root 1w2d\nd /run/user/%U 0700 - - 1h\ne /srv/scratch - - - ~12h30min\nd /keep 0755 - - -\nd /zero 0755 - - 0\nx /tmp/x\nL /tmp/link - - - 3d\n";
+        let got = parse_tmpfiles_ages(body);
+        assert_eq!(
+            got,
+            vec![
+                (PathBuf::from("/tmp"), 10 * 86_400),
+                (PathBuf::from("/var/tmp"), 9 * 86_400),
+                (PathBuf::from("/srv/scratch"), 12 * 3600 + 30 * 60),
+            ]
+        );
+        assert_eq!(parse_span("90"), Some(90));
+        assert_eq!(parse_span("1M"), Some(2_629_800));
+        assert_eq!(parse_span("5q"), None);
+        assert_eq!(
+            tmpfiles_age_for(Path::new("/var/tmp"), &got),
+            Some(9 * 86_400)
+        );
+        assert_eq!(tmpfiles_age_for(Path::new("/nope"), &got), None);
     }
 
     #[test]

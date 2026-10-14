@@ -1736,8 +1736,18 @@ a number with
 or
 .BR w ,
 or days without a unit.
-For DIR the default is 10d, the age systemd\-tmpfiles gives
-.IR /tmp .
+For DIR the default is the age column of the
+.BR tmpfiles.d (5)
+line
+.RB ( d ", " D ", " e ", " q ", " Q
+or
+.BR v )
+for that directory, read from
+.IR /etc ", " /run " and " /usr/lib/tmpfiles.d
+as systemd\-tmpfiles reads them, so
+.I /var/tmp
+usually waits 30 days; without such a line it is 10d.
+Directories with different ages are judged separately.
 .TP
 .BI \-\-age\-by= LETTERS
 Which times count, from
