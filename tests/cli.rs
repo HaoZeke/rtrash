@@ -2830,6 +2830,125 @@ fn other_device_dir(near: &Path, tag: &str) -> Option<PathBuf> {
     None
 }
 
+/// An xattr of `p`, or `None` when it has none or the call fails.
+#[cfg(target_os = "linux")]
+fn xattr(p: &Path, name: &str) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+    let name = std::ffi::CString::new(name).unwrap();
+    let mut buf = vec![0u8; 4096];
+    let n = unsafe {
+        libc::lgetxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    (n >= 0).then(|| {
+        buf.truncate(n as usize);
+        buf
+    })
+}
+
+/// A POSIX access ACL (the `system.posix_acl_access` format) granting
+/// group 4242 `perm`, with the owner, group and mask at `perm` too.
+#[cfg(target_os = "linux")]
+fn acl_bytes(perm: u16) -> Vec<u8> {
+    let mut b = 2u32.to_le_bytes().to_vec();
+    for (tag, id) in [
+        (1u16, u32::MAX),
+        (2, 4242),
+        (4, u32::MAX),
+        (0x10, u32::MAX),
+        (0x20, u32::MAX),
+    ] {
+        b.extend_from_slice(&tag.to_le_bytes());
+        b.extend_from_slice(&(if tag == 0x20 { 0 } else { perm }).to_le_bytes());
+        b.extend_from_slice(&id.to_le_bytes());
+    }
+    b
+}
+
+/// A put to a trash on another file system copies the payload; the copy,
+/// and the copy back on restore, keep the POSIX ACLs of a file and of a
+/// directory (access and default ACLs).
+#[cfg(target_os = "linux")]
+#[test]
+fn copies_across_devices_keep_posix_acls() {
+    use std::os::unix::ffi::OsStrExt;
+    let sb = Sandbox::new("acl");
+    let Some(other) = other_device_dir(&sb.root, "acl") else {
+        return;
+    };
+    let set = |p: &Path, name: &str, v: &[u8]| -> bool {
+        let path = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        let name = std::ffi::CString::new(name).unwrap();
+        unsafe { libc::setxattr(path.as_ptr(), name.as_ptr(), v.as_ptr().cast(), v.len(), 0) == 0 }
+    };
+    let file = sb.work().join("f.txt");
+    let dir = sb.work().join("d");
+    fs::write(&file, "x").unwrap();
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    let (rw, rwx) = (acl_bytes(6), acl_bytes(7));
+    if !set(&file, "system.posix_acl_access", &rw) {
+        eprintln!("no POSIX ACLs on this file system; skipping");
+        let _ = fs::remove_dir_all(&other);
+        return;
+    }
+    for p in [dir.clone(), dir.join("sub")] {
+        assert!(set(&p, "system.posix_acl_access", &rwx));
+        assert!(set(&p, "system.posix_acl_default", &rwx));
+    }
+    let check = |f: &Path, d: &Path, when: &str| {
+        assert_eq!(
+            xattr(f, "system.posix_acl_access"),
+            Some(rw.clone()),
+            "{when}: file"
+        );
+        for p in [d.to_path_buf(), d.join("sub")] {
+            for n in ["system.posix_acl_access", "system.posix_acl_default"] {
+                assert_eq!(
+                    xattr(&p, n),
+                    Some(rwx.clone()),
+                    "{when}: {} {n}",
+                    p.display()
+                );
+            }
+        }
+    };
+    let pin = format!("--trash-dir={}", other.display());
+    let run = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .current_dir(sb.work())
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["put", "-r", "--no-space-check", &pin, "f.txt", "d"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    check(
+        &other.join("files/f.txt"),
+        &other.join("files/d"),
+        "trashed",
+    );
+    for p in [&file, &dir] {
+        let out = run(&[
+            "restore",
+            "--plain",
+            "--no-space-check",
+            &pin,
+            p.to_str().unwrap(),
+        ]);
+        assert!(out.status.success(), "{}", stderr_of(&out));
+    }
+    check(&file, &dir, "restored");
+    let _ = fs::remove_dir_all(&other);
+}
+
 #[test]
 fn put_across_devices_keeps_the_target_from_filling() {
     let sb = Sandbox::new("put-space");
