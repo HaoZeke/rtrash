@@ -136,6 +136,19 @@ impl Dir {
     }
 
     /// Open the subdirectory `name` of this directory.
+    /// `du -L` is refused on Windows; this keeps the walker portable.
+    pub fn open_follow(path: &Path) -> io::Result<Dir> {
+        Self::open(path)
+    }
+
+    pub fn open_child_follow(&self, name: &CStr) -> io::Result<Dir> {
+        self.open_child(name)
+    }
+
+    pub fn stat_follow(&self, name: &CStr) -> io::Result<Stat> {
+        self.stat_at(name)
+    }
+
     pub fn open_child(&self, name: &CStr) -> io::Result<Dir> {
         Dir::open(&self.path.join(os(name)))
     }
@@ -210,6 +223,11 @@ const _: () = {
 };
 
 /// Stat `path` without following a final reparse point.
+/// `du -L` is refused on Windows; see [`Dir::open_follow`].
+pub fn stat_follow(path: &Path) -> io::Result<Stat> {
+    lstat(path)
+}
+
 pub fn lstat(path: &Path) -> io::Result<Stat> {
     handle_stat(&open_handle(path, FILE_READ_ATTRIBUTES)?)
 }

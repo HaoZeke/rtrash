@@ -117,6 +117,7 @@ status_opts=(
 du_opts=(
   '(-n --top)'{-n,--top=}'[list N directories and N files]:N:'
   '(-x --one-file-system)'{-x,--one-file-system}'[skip directories on other file systems]'
+  '(-L --follow-symlinks)'{-L,--follow-symlinks}'[follow symlinks; loops and repeats count once]'
   '--apparent[rank by apparent size instead of disk use]'
   '--sort=[rank rows by this key]:key:(disk apparent items inodes mtime)'
   '(-C --count)'{-C,--count}'[add an ITEMS column]'

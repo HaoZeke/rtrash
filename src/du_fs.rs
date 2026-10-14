@@ -28,7 +28,6 @@ pub use windows::*;
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
-#[cfg_attr(not(windows), allow(dead_code))]
 const S_IFLNK: u32 = 0o120000;
 
 /// The fields of `stat` that du uses.
@@ -50,6 +49,10 @@ impl Stat {
 
     pub fn is_file(&self) -> bool {
         self.mode & S_IFMT == S_IFREG
+    }
+
+    pub fn is_symlink(&self) -> bool {
+        self.mode & S_IFMT == S_IFLNK
     }
 
     /// Apparent size and allocated bytes (`st_blocks * 512`).

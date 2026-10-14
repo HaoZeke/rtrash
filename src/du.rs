@@ -27,7 +27,7 @@ Usage: {prog} [OPTION]... [PATH]...
 Find what to delete: walk each PATH (default .) in parallel and list the
 largest directories and files, by on-disk size unless --apparent is given.
 
-Symlinks are never followed, and a file with more than one hard link
+Symlinks are not followed unless -L is given, and a file with more than one hard link
 counts once, in the sizes and in the file count (as with du --inodes);
 the total names the extra links. When one subdirectory accounts for 90% or more of a
 directory's size, only the subdirectory is listed (--all-dirs lists both).
@@ -49,6 +49,9 @@ directories appear as one `trash` row and are never printed by --print0.
 
   -n, --top=N           list N directories and N files (default 20)
   -x, --one-file-system skip directories on other file systems
+  -L, --follow-symlinks follow symlinks: each counts as what it points to,
+                          a directory met again (a loop, or a second link)
+                          is walked once and a file counts once
       --apparent        rank by apparent size (file length) instead of disk use
       --sort=KEY        rank by KEY: disk (default), apparent, items (files
                           and directories below each directory; lists no
@@ -267,6 +270,8 @@ impl ScanControl {
 pub struct ScanOpts {
     pub top: usize,
     pub one_file_system: bool,
+    /// `-L`: follow symlinks; each directory and file counts once.
+    pub follow: bool,
     pub sort: SortKey,
     pub max_depth: Option<usize>,
     pub all_dirs: bool,
@@ -297,6 +302,7 @@ impl Default for ScanOpts {
         ScanOpts {
             top: 20,
             one_file_system: false,
+            follow: false,
             sort: SortKey::Disk,
             max_depth: None,
             all_dirs: false,
@@ -729,6 +735,9 @@ struct Ctx<'a> {
     root_dev: u64,
     /// Multiply-linked files already counted.
     seen: LinkSet,
+    /// `-L`: directories entered so far, so a symlink loop or a second
+    /// link to a directory walks it once.
+    dirs_seen: LinkSet,
     unreadable: AtomicU64,
     /// The first [`UNREAD_KEPT`] unreadable entries, with the reason.
     unread: Mutex<Vec<(PathBuf, String)>>,
@@ -985,12 +994,17 @@ fn enter(
         ctx.too_deep.fetch_add(1, Ordering::Relaxed);
         return Some(shut(st));
     }
+    let follow = ctx.opts.follow;
     let opened = match parent {
+        Some((dir, name)) if follow => dir.open_child_follow(name),
         Some((dir, name)) => dir.open_child(name),
+        None if follow => du_fs::Dir::open_follow(path),
         None => du_fs::Dir::open(path),
     };
     let stat_again = || match parent {
+        Some((dir, name)) if follow => dir.stat_follow(name),
         Some((dir, name)) => dir.stat_at(name),
+        None if follow => du_fs::stat_follow(path),
         None => du_fs::lstat(path),
     };
     let unreadable = |e: io::Error| {
@@ -1022,6 +1036,11 @@ fn enter(
         },
     };
     if ctx.opts.one_file_system && st.dev != ctx.root_dev {
+        return None;
+    }
+    // -L: a directory met again, through a loop or a second link, is
+    // walked once.
+    if follow && st.ino != 0 && !ctx.dirs_seen.insert(st.dev, st.ino) {
         return None;
     }
     walk_dir(ctx, dir, path, &st, depth, listing, chain)
@@ -1122,7 +1141,7 @@ fn stat_entries(
             out.subdirs.push((i, None));
             continue;
         }
-        let m = match entries.stat(i) {
+        let mut m = match entries.stat(i) {
             Some(m) => m,
             None => match dir.stat_at(name) {
                 Ok(m) => m,
@@ -1132,6 +1151,13 @@ fn stat_entries(
                 }
             },
         };
+        // -L: a symlink counts as what it points to; a dangling one counts
+        // as itself. A file reached through links counts once.
+        if opts.follow && m.is_symlink() {
+            if let Ok(t) = dir.stat_follow(name) {
+                m = t;
+            }
+        }
         if filter.is_some() && kind == du_fs::Kind::Unknown && excluded(name, m.is_dir()) {
             continue;
         }
@@ -1142,7 +1168,12 @@ fn stat_entries(
             out.subdirs.push((i, Some(m)));
             continue;
         }
-        if !ctx.first_link(&m) {
+        let first = if opts.follow {
+            m.ino == 0 || ctx.seen.insert(m.dev, m.ino)
+        } else {
+            ctx.first_link(&m)
+        };
+        if !first {
             ctx.links.fetch_add(1, Ordering::Relaxed);
             continue;
         }
@@ -1625,7 +1656,11 @@ fn scan_pooled(
     let mut types = TypeMap::new();
     for p in paths {
         let abs = absolute(p)?;
-        let meta = du_fs::lstat(&abs)?;
+        let meta = if opts.follow {
+            du_fs::stat_follow(&abs)?
+        } else {
+            du_fs::lstat(&abs)?
+        };
         if let Some(p) = prefetch {
             if let Some(repo) = du_git::enclosing_repo(&abs) {
                 p.repo(&repo);
@@ -1636,6 +1671,7 @@ fn scan_pooled(
             prefetch,
             root_dev: meta.dev,
             seen: LinkSet::new(),
+            dirs_seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
             unread: Mutex::new(Vec::new()),
             depth_limit,
@@ -2675,6 +2711,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             match arg {
                 "--" => no_more_opts = true,
                 "-x" | "--one-file-system" => opts.one_file_system = true,
+                "-L" | "--follow-symlinks" => opts.follow = true,
                 "--apparent" => opts.sort = SortKey::Apparent,
                 "-C" | "--count" => count = true,
                 "--inodes" => opts.sort = SortKey::Items,
@@ -2745,6 +2782,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if interactive && !interactive_available() {
         eprintln!("{prog}: --interactive needs a terminal and the tui feature");
         return 2;
+    }
+    if opts.follow {
+        if cfg!(windows) {
+            eprintln!("{prog}: --follow-symlinks is not supported on Windows");
+            return 2;
+        }
+        // A followed link lists the target's size under the link's name;
+        // trashing that name would remove only the link.
+        if print0 || pick || interactive || ncdu.is_some() {
+            eprintln!(
+                "{prog}: --follow-symlinks only reports; it does not combine with \
+                 --print0, --pick, --interactive or --ncdu"
+            );
+            return 2;
+        }
     }
     if devices {
         return devices_out(

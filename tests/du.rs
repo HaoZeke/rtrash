@@ -243,6 +243,33 @@ fn hard_links_count_once_and_symlinks_are_not_followed() {
     assert_eq!(apparent, 100_000 + link_len, "{j}");
 }
 
+#[cfg(unix)]
+#[test]
+fn follow_symlinks_counts_targets_once_and_survives_loops() {
+    use std::os::unix::fs::symlink;
+    let t = Tree::new("follow");
+    let outside = Tree::new("follow-outside");
+    outside.file("o/big.bin", 300_000);
+    t.file("a/f.bin", 100_000);
+    symlink("..", t.root.join("a/up")).unwrap();
+    symlink("f.bin", t.root.join("a/f-link")).unwrap();
+    symlink(outside.root.join("o"), t.root.join("o-link")).unwrap();
+    symlink(outside.root.join("o"), t.root.join("o-again")).unwrap();
+    symlink("/nonexistent/rtrash-dangling", t.root.join("dangling")).unwrap();
+    let dangling = fs::symlink_metadata(t.root.join("dangling")).unwrap().len();
+    let j = t.json(&["-L", "--files"]);
+    let roots = &j[..j.find("\"dirs\"").unwrap()];
+    // f.bin once, big.bin once (two links to its directory), the
+    // dangling link as itself; the loop back to the root adds nothing.
+    assert_eq!(field(roots, "apparent"), 400_000 + dangling, "{j}");
+    assert_eq!(field(roots, "files"), 3, "{j}");
+    let plain = t.json(&["--files"]);
+    let plain_roots = &plain[..plain.find("\"dirs\"").unwrap()];
+    assert!(field(plain_roots, "apparent") < 200_000, "{plain}");
+    let out = t.du(&["-L", "--print0"]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
 #[test]
 fn dominant_child_hides_parent_unless_all_dirs() {
     let t = Tree::new("collapse");

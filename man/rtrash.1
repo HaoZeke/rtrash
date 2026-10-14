@@ -701,7 +701,9 @@ Find what to delete. Walk each
 .I PATH
 (default the current directory) in parallel and list the largest
 directories and files with their on-disk and apparent sizes and the age of
-their newest modification. Symlinks are never followed, and a file with
+their newest modification. Symlinks are not followed unless
+.B \-L
+is given, and a file with
 more than one hard link counts once, in the sizes and in the file count,
 so files plus directories match
 .BR "du \-\-inodes \-s" ;
@@ -760,6 +762,17 @@ files (default 20).
 .TP
 .BR \-x ", " \-\-one\-file\-system
 Skip directories on other file systems.
+.TP
+.BR \-L ", " \-\-follow\-symlinks
+Follow symlinks, as
+.B "du \-L"
+does: a link counts as what it points to and a dangling link as itself.
+A directory met again, through a loop or a second link, is walked once,
+and a file reached by several names counts once.
+Only for reports: it does not combine with
+.BR \-\-print0 ", " \-\-pick ", " \-\-interactive " or " \-\-ncdu ,
+since trashing a link name would remove only the link.
+Not available on Windows.
 .TP
 .B \-\-apparent
 Rank by apparent size (file length) instead of allocated disk space.

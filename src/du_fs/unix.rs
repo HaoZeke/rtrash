@@ -65,9 +65,31 @@ impl Dir {
         Self::open_at(self.fd.as_raw_fd(), name)
     }
 
+    /// Open the directory at `path`, following symlinks (`du -L`).
+    pub fn open_follow(path: &Path) -> io::Result<Dir> {
+        let c = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        Self::open_with(libc::AT_FDCWD, &c, OPEN_DIR & !libc::O_NOFOLLOW)
+    }
+
+    /// Open the subdirectory `name`, or the directory a symlink `name`
+    /// points to (`du -L`).
+    pub fn open_child_follow(&self, name: &CStr) -> io::Result<Dir> {
+        Self::open_with(self.fd.as_raw_fd(), name, OPEN_DIR & !libc::O_NOFOLLOW)
+    }
+
+    /// Stat of entry `name`, following a symlink to what it points to.
+    pub fn stat_follow(&self, name: &CStr) -> io::Result<Stat> {
+        stat_at_flags(self.fd.as_raw_fd(), name, 0)
+    }
+
     fn open_at(dirfd: RawFd, name: &CStr) -> io::Result<Dir> {
+        Self::open_with(dirfd, name, OPEN_DIR)
+    }
+
+    fn open_with(dirfd: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<Dir> {
         // SAFETY: `name` is NUL-terminated; a returned fd is owned by us.
-        let fd = retry(|| cvt(unsafe { libc::openat(dirfd, name.as_ptr(), OPEN_DIR) }))?;
+        let fd = retry(|| cvt(unsafe { libc::openat(dirfd, name.as_ptr(), flags) }))?;
         Ok(Dir {
             fd: unsafe { OwnedFd::from_raw_fd(fd) },
         })
@@ -124,19 +146,21 @@ impl Dir {
 }
 
 fn stat_at(dirfd: RawFd, name: &CStr) -> io::Result<Stat> {
+    stat_at_flags(dirfd, name, libc::AT_SYMLINK_NOFOLLOW)
+}
+
+fn stat_at_flags(dirfd: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<Stat> {
     let mut s = std::mem::MaybeUninit::<libc::stat>::uninit();
     // SAFETY: `name` is NUL-terminated and fstatat fills `s` on success.
-    retry(|| {
-        cvt(unsafe {
-            libc::fstatat(
-                dirfd,
-                name.as_ptr(),
-                s.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        })
-    })?;
+    retry(|| cvt(unsafe { libc::fstatat(dirfd, name.as_ptr(), s.as_mut_ptr(), flags) }))?;
     Ok(Stat::from_raw(unsafe { &s.assume_init() }))
+}
+
+/// Stat `path`, following symlinks (`du -L`).
+pub fn stat_follow(path: &Path) -> io::Result<Stat> {
+    let c = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    stat_at_flags(libc::AT_FDCWD, &c, 0)
 }
 
 /// Stat `path` without following a final symlink.
