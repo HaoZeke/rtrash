@@ -1821,7 +1821,11 @@ and the xet chunk cache, never a finished model or dataset file;
 and TorchInductor caches in \fI$TMPDIR/torchinductor_*\fR, never a finished
 checkpoint; 7 days, permanent),
 .B vllm
-(\fI$VLLM_CACHE_ROOT/torch_compile_cache\fR; 14 days, permanent).
+(\fI$VLLM_CACHE_ROOT/torch_compile_cache\fR; 14 days, permanent),
+.B triton
+(\fI$TRITON_CACHE_DIR\fR, default \fI~/.triton/cache\fR; 14 days, permanent),
+.B jax
+(\fI$JAX_COMPILATION_CACHE_DIR\fR, default \fI~/.cache/jax\fR; 14 days, permanent).
 The first four are guarded: an entry that is or holds a file named like
 settings, history, a credential, a key or a database stays.
 .TP

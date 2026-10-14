@@ -109,8 +109,19 @@ use Action::{Permanent, Trash};
 const BUILTIN: &[B] = &[
     group(
         "ai",
-        "AI coding tools and model caches: claude, cursor, codex, aider, ollama, huggingface, torch, vllm",
-        &["claude", "cursor", "codex", "aider", "ollama", "huggingface", "torch", "vllm"],
+        "AI coding tools and model caches: claude, cursor, codex, aider, ollama, huggingface, torch, vllm, triton, jax",
+        &[
+            "claude",
+            "cursor",
+            "codex",
+            "aider",
+            "ollama",
+            "huggingface",
+            "torch",
+            "vllm",
+            "triton",
+            "jax",
+        ],
     ),
     B {
         guard: true,
@@ -196,6 +207,20 @@ const BUILTIN: &[B] = &[
         "vllm",
         "vLLM torch.compile caches (rebuilt on the next start)",
         &["${VLLM_CACHE_ROOT:-~/.cache/vllm}/torch_compile_cache/*"],
+        14,
+        Permanent,
+    ),
+    b(
+        "triton",
+        "Triton kernel caches (recompiled on the next launch)",
+        &["${TRITON_CACHE_DIR:-~/.triton/cache}/*"],
+        14,
+        Permanent,
+    ),
+    b(
+        "jax",
+        "JAX persistent compilation caches (recompiled on the next run)",
+        &["${JAX_COMPILATION_CACHE_DIR:-~/.cache/jax}/*"],
         14,
         Permanent,
     ),
@@ -735,7 +760,9 @@ mod tests {
                 "ollama",
                 "huggingface",
                 "torch",
-                "vllm"
+                "vllm",
+                "triton",
+                "jax"
             ]
         );
         assert!(select(&all, &["nope".into()]).is_err());

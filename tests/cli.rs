@@ -4866,6 +4866,51 @@ fn reap_profiles_take_torch_partials_and_compile_caches() {
     assert!(!j.contains(&json_path(&done)), "{j}");
 }
 
+/// triton and jax take old kernel and compile cache entries and leave fresh ones.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_profiles_take_triton_and_jax_caches() {
+    let sb = Sandbox::new("reap-triton-jax");
+    let triton = sb.root.join(".triton/cache");
+    let jax = sb.root.join(".cache/jax");
+    for d in [&triton, &jax] {
+        fs::create_dir_all(d).unwrap();
+    }
+    let kernel = triton.join("Zk9q");
+    fs::create_dir_all(&kernel).unwrap();
+    age_tree(&kernel);
+    let fresh = triton.join("fresh");
+    fs::create_dir_all(&fresh).unwrap();
+    let compiled = stale_file(&jax, "jit_f-abc123-cache");
+    let out = Command::new(bin())
+        .args([
+            "reap",
+            "-n",
+            "--json",
+            "--older-than=1h",
+            "--age-by=m",
+            "-p",
+            "triton",
+            "-p",
+            "jax",
+        ])
+        .env("HOME", &sb.root)
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env_remove("TRITON_CACHE_DIR")
+        .env_remove("JAX_COMPILATION_CACHE_DIR")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let j = stdout_of(&out);
+    for p in [&kernel, &compiled] {
+        assert!(j.contains(&json_path(p)), "{} missing: {j}", p.display());
+    }
+    let reaped = j.split(r#""skipped""#).next().unwrap();
+    assert!(!reaped.contains(&json_path(&fresh)), "{j}");
+    assert!(j.contains("touched 0s ago"), "{j}");
+}
+
 fn json_path(p: &Path) -> String {
     format!("\"{}\"", p.display())
 }
