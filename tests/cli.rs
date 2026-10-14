@@ -1343,6 +1343,58 @@ fn rm_and_empty_take_ages_in_hours_and_minutes() {
     }
 }
 
+/// `list` and `status` take the same age durations as `rm`.
+#[cfg(unix)]
+#[test]
+fn list_and_status_take_ages_in_hours_and_minutes() {
+    let sb = Sandbox::new("age-hours-list");
+    sb.touch("three-hours.txt");
+    sb.touch("fresh.txt");
+    let put = sb.run(&["put", "three-hours.txt", "fresh.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    backdate_trashinfo(&sb, "three-hours.txt", &local_date_ago(3 * 3600));
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = sb.run(&["list", &pin, "--older-than=2h"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let listed = stdout_of(&out);
+    assert!(
+        listed.contains("three-hours.txt") && !listed.contains("fresh.txt"),
+        "{listed}"
+    );
+    let out = sb.run(&["list", &pin, "--newer-than", "1h30m"]);
+    let listed = stdout_of(&out);
+    assert!(
+        listed.contains("fresh.txt") && !listed.contains("three-hours.txt"),
+        "{listed}"
+    );
+    let out = sb.run(&["status", &pin, "--older-than=2h", "--json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains(r#""items":1,"#),
+        "{}",
+        stdout_of(&out)
+    );
+    let out = sb.run(&["status", &pin, "--older-than=4h", "--json"]);
+    assert!(
+        stdout_of(&out).contains(r#""items":0,"#),
+        "{}",
+        stdout_of(&out)
+    );
+    let out = sb.run(&["list", &pin, "--older-than=1"]);
+    assert!(
+        !stdout_of(&out).contains("three-hours.txt"),
+        "{}",
+        stdout_of(&out)
+    );
+    for sub in ["list", "status"] {
+        assert_eq!(
+            sb.run(&[sub, &pin, "--older-than=2x"]).status.code(),
+            Some(2),
+            "{sub}"
+        );
+    }
+}
+
 #[test]
 fn restore_plain_order_defaults_oldest_first_and_flags_flip_it() {
     let sb = Sandbox::new("restore-order");

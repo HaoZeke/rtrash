@@ -15,9 +15,9 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
                      default is the home trash plus every mounted volume
       --all-users       list every user's trash this account can read
                      (root reads all) and add an OWNER column; read-only
-      --older-than=DAYS only items trashed more than DAYS days ago
-                     (same cutoff model as `empty DAYS`)
-      --newer-than=DAYS only items trashed within the last DAYS days
+      --older-than=AGE  only items trashed more than AGE ago; AGE is DAYS
+                     or a duration such as 2h, 30m or 1d12h
+      --newer-than=AGE  only items trashed within the last AGE
       --larger-than=SIZE  only items taking more than SIZE on disk
       --smaller-than=SIZE only items taking less than SIZE on disk
                      (SIZE as in `empty --max-size`: 500M, 1.5G, 64k;
@@ -190,26 +190,6 @@ pub fn filter_age(
 
 pub use crate::filters::SizeFilter;
 
-fn parse_nonneg_days(s: &str) -> Result<i64, String> {
-    s.parse::<i64>()
-        .map_err(|_| format!("invalid DAYS '{s}'"))
-        .and_then(|d| {
-            if d < 0 {
-                Err(format!("DAYS must be >= 0 (got {d})"))
-            } else {
-                Ok(d)
-            }
-        })
-}
-
-fn parse_days_flag(arg: &str, name: &str) -> Result<i64, String> {
-    let prefix = format!("{name}=");
-    if let Some(rest) = arg.strip_prefix(&prefix) {
-        return parse_nonneg_days(rest);
-    }
-    Err(format!("expected {name}=DAYS"))
-}
-
 pub use crate::util::json_escape;
 
 pub fn entry_to_json(e: &Entry) -> String {
@@ -321,28 +301,32 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             a if a.starts_with("--trash-dir=") => {
                 trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
-            a if a.starts_with("--older-than=") => match parse_days_flag(a, "--older-than") {
-                Ok(d) => older_than = Some(d),
-                Err(e) => {
-                    eprintln!("{prog}: {e}");
-                    return 2;
+            a if a.starts_with("--older-than=") => {
+                match crate::filters::parse_age_secs(&a["--older-than=".len()..]) {
+                    Ok(d) => older_than = Some(d),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
                 }
-            },
-            a if a.starts_with("--newer-than=") => match parse_days_flag(a, "--newer-than") {
-                Ok(d) => newer_than = Some(d),
-                Err(e) => {
-                    eprintln!("{prog}: {e}");
-                    return 2;
+            }
+            a if a.starts_with("--newer-than=") => {
+                match crate::filters::parse_age_secs(&a["--newer-than=".len()..]) {
+                    Ok(d) => newer_than = Some(d),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
                 }
-            },
+            }
             "--older-than" | "--newer-than" => {
                 let name = arg.as_str();
                 i += 1;
                 let Some(val) = args.get(i) else {
-                    eprintln!("{prog}: {name} requires DAYS");
+                    eprintln!("{prog}: {name} requires an AGE");
                     return 2;
                 };
-                match parse_nonneg_days(val) {
+                match crate::filters::parse_age_secs(val) {
                     Ok(d) if name == "--older-than" => older_than = Some(d),
                     Ok(d) => newer_than = Some(d),
                     Err(e) => {
@@ -376,7 +360,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: no valid --trash-dir pins");
         return 2;
     }
-    let mut entries = filter_age(collect(&dirs), older_than, newer_than);
+    let mut entries = filter_age_secs(collect(&dirs), older_than, newer_than);
     // Orphans have no date, so only an unfiltered listing shows them; they
     // come last, after every recorded item.
     let mut recorded = entries.len();

@@ -46,8 +46,8 @@ empty_opts=(
 list_opts=(
   '--home-only[only the home trash]'
   '*--trash-dir=[list only this trash directory]:path:_files -/'
-  '--older-than=[only items trashed more than DAYS days ago]:days:'
-  '--newer-than=[only items trashed within the last DAYS days]:days:'
+  '--older-than=[only items trashed more than AGE ago (DAYS, 2h, 1d12h)]:age:'
+  '--newer-than=[only items trashed within the last AGE]:age:'
   '--larger-than=[only items taking more than SIZE on disk]:size:'
   '--smaller-than=[only items taking less than SIZE on disk]:size:'
   '--json[emit a JSON array]'
@@ -109,8 +109,8 @@ trash_stats_opts=(
 status_opts=(
   '--home-only[only the home trash]'
   '*--trash-dir=[only this trash directory]:path:_files -/'
-  '--older-than=[only count items trashed more than DAYS days ago]:days:'
-  '--newer-than=[only count items trashed within the last DAYS days]:days:'
+  '--older-than=[only count items trashed more than AGE ago (DAYS, 2h, 1d12h)]:age:'
+  '--newer-than=[only count items trashed within the last AGE]:age:'
   '--larger-than=[only count items taking more than SIZE on disk]:size:'
   '--smaller-than=[only count items taking less than SIZE on disk]:size:'
   '--json[emit a JSON object]'

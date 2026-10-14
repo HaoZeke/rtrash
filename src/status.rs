@@ -20,8 +20,9 @@ on stderr to remove them with `rtrash empty --dangling`.
 
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  only this trash directory (repeatable)
-      --older-than=DAYS only count items trashed more than DAYS days ago
-      --newer-than=DAYS only count items trashed within the last DAYS days
+      --older-than=AGE  only count items trashed more than AGE ago (DAYS,
+                     or a duration such as 2h, 30m or 1d12h)
+      --newer-than=AGE  only count items trashed within the last AGE
       --larger-than=SIZE  only count items taking more than SIZE on disk
       --smaller-than=SIZE only count items taking less than SIZE on disk
                      (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
@@ -29,18 +30,6 @@ on stderr to remove them with `rtrash empty --dangling`.
       --help            display this help and exit
       --version         output version information and exit
 ";
-
-fn parse_nonneg_days(s: &str) -> Result<i64, String> {
-    s.parse::<i64>()
-        .map_err(|_| format!("invalid DAYS '{s}'"))
-        .and_then(|d| {
-            if d < 0 {
-                Err(format!("DAYS must be >= 0 (got {d})"))
-            } else {
-                Ok(d)
-            }
-        })
-}
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
@@ -78,7 +67,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
             a if a.starts_with("--older-than=") => {
-                match parse_nonneg_days(&a["--older-than=".len()..]) {
+                match crate::filters::parse_age_secs(&a["--older-than=".len()..]) {
                     Ok(d) => older_than = Some(d),
                     Err(e) => {
                         eprintln!("{prog}: {e}");
@@ -87,7 +76,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 }
             }
             a if a.starts_with("--newer-than=") => {
-                match parse_nonneg_days(&a["--newer-than=".len()..]) {
+                match crate::filters::parse_age_secs(&a["--newer-than=".len()..]) {
                     Ok(d) => newer_than = Some(d),
                     Err(e) => {
                         eprintln!("{prog}: {e}");
@@ -99,10 +88,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 let name = arg.as_str();
                 i += 1;
                 let Some(val) = args.get(i) else {
-                    eprintln!("{prog}: {name} requires DAYS");
+                    eprintln!("{prog}: {name} requires an AGE");
                     return 2;
                 };
-                match parse_nonneg_days(val) {
+                match crate::filters::parse_age_secs(val) {
                     Ok(d) if name == "--older-than" => older_than = Some(d),
                     Ok(d) => newer_than = Some(d),
                     Err(e) => {
@@ -156,7 +145,7 @@ pub(crate) fn summarize_dirs(
     let mut total_items = 0u64;
     let mut total_bytes = 0u64;
     for dir in dirs {
-        let mut entries = list::filter_age(
+        let mut entries = list::filter_age_secs(
             list::collect(std::slice::from_ref(dir)),
             older_than,
             newer_than,

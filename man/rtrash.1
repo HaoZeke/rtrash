@@ -390,16 +390,18 @@ Takes no
 or
 .BR \-\-trash\-dir .
 .TP
-.BI \-\-older\-than =DAYS
+.BI \-\-older\-than =AGE
 Only items trashed more than
-.I DAYS
-days ago (same cutoff model as
+.I AGE
+ago (same cutoff model as
 .BR "empty DAYS" ).
+.I AGE
+is a whole number of days or a duration such as 2h, 30m or 1d12h
+(units s, m, h, d, w).
 .TP
-.BI \-\-newer\-than =DAYS
+.BI \-\-newer\-than =AGE
 Only items trashed within the last
-.I DAYS
-days.
+.IR AGE .
 .TP
 .BI \-\-larger\-than =SIZE
 Only items taking more than
@@ -501,15 +503,14 @@ Only the home trash
 .BI \-\-trash\-dir =PATH
 Only this trash directory (repeatable).
 .TP
-.BI \-\-older\-than =DAYS
+.BI \-\-older\-than =AGE
 Only count items trashed more than
-.I DAYS
-days ago.
+.I AGE
+ago, in days or as a duration such as 2h or 1d12h.
 .TP
-.BI \-\-newer\-than =DAYS
+.BI \-\-newer\-than =AGE
 Only count items trashed within the last
-.I DAYS
-days.
+.IR AGE .
 .TP
 .BI \-\-larger\-than =SIZE
 Only count items taking more than

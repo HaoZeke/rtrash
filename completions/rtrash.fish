@@ -72,8 +72,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l plai
 for sub in list status
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l home-only -d 'only the home trash'
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l trash-dir -d 'only this trash directory' -r
-    complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l older-than -d 'only items older than DAYS days' -r
-    complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l newer-than -d 'only items within last DAYS days' -r
+    complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l older-than -d 'only items older than AGE (DAYS, 2h, 1d12h)' -r
+    complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l newer-than -d 'only items within the last AGE' -r
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l larger-than -d 'only items over SIZE on disk' -r
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l smaller-than -d 'only items under SIZE on disk' -r
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l json -d 'JSON output'

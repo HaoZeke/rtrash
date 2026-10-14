@@ -104,8 +104,8 @@ export extern "rtrash list" [
     --home-only  # only the home trash ($XDG_DATA_HOME/Trash)
     --trash-dir: string  # list only this trash directory (repeatable);
     --all-users  # list every user's trash this account can read
-    --older-than: string  # only items trashed more than DAYS days ago
-    --newer-than: string  # only items trashed within the last DAYS days
+    --older-than: string  # only items trashed more than AGE ago (DAYS, 2h, 1d12h)
+    --newer-than: string  # only items trashed within the last AGE
     --larger-than: string  # only items taking more than SIZE on disk
     --smaller-than: string  # only items taking less than SIZE on disk
     --size  # add each item's disk usage (payload plus its
@@ -119,8 +119,8 @@ export extern "rtrash list" [
 export extern "rtrash status" [
     --home-only  # only the home trash ($XDG_DATA_HOME/Trash)
     --trash-dir: string  # only this trash directory (repeatable)
-    --older-than: string  # only count items trashed more than DAYS days ago
-    --newer-than: string  # only count items trashed within the last DAYS days
+    --older-than: string  # only count items trashed more than AGE ago (DAYS, 2h, 1d12h)
+    --newer-than: string  # only count items trashed within the last AGE
     --larger-than: string  # only count items taking more than SIZE on disk
     --smaller-than: string  # only count items taking less than SIZE on disk
     --json  # emit a JSON object (scripts)
@@ -367,8 +367,8 @@ export extern "trash-list" [
     --home-only  # only the home trash ($XDG_DATA_HOME/Trash)
     --trash-dir: string  # list only this trash directory (repeatable);
     --all-users  # list every user's trash this account can read
-    --older-than: string  # only items trashed more than DAYS days ago
-    --newer-than: string  # only items trashed within the last DAYS days
+    --older-than: string  # only items trashed more than AGE ago (DAYS, 2h, 1d12h)
+    --newer-than: string  # only items trashed within the last AGE
     --larger-than: string  # only items taking more than SIZE on disk
     --smaller-than: string  # only items taking less than SIZE on disk
     --size  # add each item's disk usage (payload plus its
