@@ -171,7 +171,6 @@ fn item_json(i: &Item) -> String {
     )
 }
 
-/// The JSON object for a set of summaries.
 /// The change in bytes and items from the line before, as JSON numbers
 /// (negative for a drop), or `null` for the first line.
 fn deltas(prev: Option<(u64, u64)>, now: (u64, u64)) -> (String, String) {
@@ -182,6 +181,7 @@ fn deltas(prev: Option<(u64, u64)>, now: (u64, u64)) -> (String, String) {
     }
 }
 
+/// The JSON object for a set of summaries.
 pub fn to_json(all: &[Stats], with_history: bool) -> String {
     let opt = |i: &Option<Item>| i.as_ref().map_or("null".to_string(), item_json);
     let trashes: Vec<String> = all
