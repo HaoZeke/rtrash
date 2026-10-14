@@ -61,10 +61,8 @@ fn usage_err(prog: &str, msg: &str) -> i32 {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
-    #[cfg(unix)]
-    let before = crate::trash_total::snapshot();
     let code = run_inner(prog, args);
-    crate::trash_total::log_changed("empty", &before);
+    crate::trash_total::log_touched("empty");
     code
 }
 
@@ -294,6 +292,9 @@ fn empty_one(
 ) {
     let info_dir = dir.info();
     let files_dir = dir.files();
+    if !opts.dry_run {
+        crate::trash_total::touched(dir);
+    }
 
     // Full empty (no age filter): real wipe, or dry-run that inventories the
     // same two roots (every child of files/ and info/), not only .trashinfo rows.

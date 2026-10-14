@@ -827,6 +827,7 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
             let added = DirSizes::load(trash).entry_bytes(&name);
             crate::trash_total::store(trash, bytes.saturating_add(added), items + 1);
         }
+        crate::trash_total::touched(trash);
         name
     };
     if meta.is_dir() {

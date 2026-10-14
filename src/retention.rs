@@ -191,6 +191,9 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
         }
         kept[c.root].0 -= c.bytes;
         kept[c.root].1 -= 1;
+        if !p.dry_run {
+            crate::trash_total::touched(dir);
+        }
         out.removed += 1;
         out.bytes += c.bytes;
         out.inodes += c.inodes;
