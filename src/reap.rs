@@ -89,7 +89,7 @@ An entry stays when a live process has it or anything in it open or mapped
 or as its working directory, when it is or holds a socket, pipe, device or
 mount point, when another user owns any of it (unless run as root), when
 it is a lock or pid file naming a live process, when it holds
-$XDG_RUNTIME_DIR, or when a tmpfiles.d x or X line covers it. A cargo
+$XDG_RUNTIME_DIR, or when a tmpfiles.d x, X, r or R line covers it. A cargo
 target directory also stays while cargo or rustc works in its project.
 ";
 
@@ -280,7 +280,7 @@ fn expand_specifiers(path: &str, user: bool, unknown: Option<&str>) -> Option<St
 }
 
 /// tmpfiles.d paths to leave alone: the path field of every `x` and `X`
-/// line, user and system, with specifiers filled in where reap knows them
+/// line and of every `r` and `R` removal line, user and system, with specifiers filled in where reap knows them
 /// and widened to `*` where it does not.
 pub fn tmpfiles_exclusions() -> Vec<String> {
     let mut out = Vec::new();
@@ -515,7 +515,8 @@ fn parse_tmpfiles(body: &str, user: bool) -> Vec<String> {
             continue;
         }
         let kind = kind.trim_end_matches(['!', '-', '=', '~', '^', '+', '?']);
-        if kind != "x" && kind != "X" {
+        // r and R lines leave the removal to systemd-tmpfiles at boot.
+        if !matches!(kind, "x" | "X" | "r" | "R") {
             continue;
         }
         if let Some(pat) = expand_specifiers(path, user, Some("*")) {
@@ -2207,12 +2208,14 @@ mod tests {
 
     #[test]
     fn tmpfiles_x_lines_become_patterns() {
-        let body = "# c\nx /tmp/systemd-private-%b-*\nX! /var/tmp/keep\nd /tmp 1777 root root 10d\nq /var/tmp\n";
+        let body = "# c\nx /tmp/systemd-private-%b-*\nX! /var/tmp/keep\nd /tmp 1777 root root 10d\nq /var/tmp\nr! /tmp/.X0-lock\nR /var/tmp/once-%b\n";
         assert_eq!(
             parse_tmpfiles(body, false),
             vec![
                 "/tmp/systemd-private-*-*".to_string(),
-                "/var/tmp/keep".to_string()
+                "/var/tmp/keep".to_string(),
+                "/tmp/.X0-lock".to_string(),
+                "/var/tmp/once-*".to_string()
             ]
         );
     }

@@ -1852,10 +1852,10 @@ it is a lock or pid file (\fI*.lock\fR, \fI*.pid\fR, \fI*\-lock\fR,
 \fI*.lck\fR, at most 64 bytes) whose first word is a live process id;
 .IP \[u2022] 2
 an
-.B x
-or
-.B X
-line in a system
+.BR x ", " X ,
+or removal
+.BR r " or " R
+line (systemd\-tmpfiles removes those itself, once, at boot) in a system
 .I tmpfiles.d
 directory
 .RI ( /etc ", " /run ", " /usr/local/lib " or " /usr/lib )
