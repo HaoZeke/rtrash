@@ -466,6 +466,20 @@ pub fn is_default(pinned: bool) -> bool {
     }
 }
 
+/// The folders in `dir`, by name; none when it cannot be read.
+fn dirs_in(dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        // `/Volumes/Macintosh HD` links back to `/`; skip links.
+        .filter(|p| fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()))
+        .collect();
+    out.sort();
+    out
+}
+
 /// Every Finder trash of this user that exists: `~/.Trash` first, then
 /// `.Trashes/UID` at the root of each mounted volume. `RTRASH_FINDER_VOLUMES`
 /// adds volume roots, separated by ':', for drives the mount table misses.
@@ -475,7 +489,18 @@ pub fn trashes() -> Vec<PathBuf> {
     let extra = std::env::var_os("RTRASH_FINDER_VOLUMES")
         .map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
         .unwrap_or_default();
-    for root in crate::trashdir::mount_points().into_iter().chain(extra) {
+    // The mount table reader is Linux-only; on macOS every drive Finder
+    // shows is a folder of /Volumes.
+    let volumes = if cfg!(target_os = "macos") {
+        dirs_in(Path::new("/Volumes"))
+    } else {
+        Vec::new()
+    };
+    for root in crate::trashdir::mount_points()
+        .into_iter()
+        .chain(volumes)
+        .chain(extra)
+    {
         let t = root.join(".Trashes").join(uid.to_string());
         if t.is_dir() && !out.contains(&t) {
             out.push(t);
@@ -1049,6 +1074,16 @@ fn put(prog: &str, _args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn volume_folders_skip_links() {
+        let t = std::env::temp_dir().join(format!("rtrash-vols-{}", std::process::id()));
+        fs::create_dir_all(t.join("Ext")).unwrap();
+        fs::write(t.join("file"), b"").unwrap();
+        std::os::unix::fs::symlink("/", t.join("Macintosh HD")).unwrap();
+        assert_eq!(dirs_in(&t), vec![t.join("Ext")]);
+        let _ = fs::remove_dir_all(&t);
+    }
+
     #[test]
     fn firmlinked_data_paths_shorten_to_the_root_form() {
         let t = std::env::temp_dir().join(format!("rtrash-firm-{}", std::process::id()));

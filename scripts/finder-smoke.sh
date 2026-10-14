@@ -24,7 +24,12 @@ fail() {
   echo "--- ~/.Trash"
   ls -la "$HOME/.Trash" 2>&1 | tail -n 20 || true
   echo "--- wanted (hex)"
-  printf '%s' "$f" | od -An -tx1 | tail -n 3
+  if [[ -n ${RTRASH_SMOKE_VOLUME:-} ]]; then
+    echo "--- $RTRASH_SMOKE_VOLUME/.Trashes/$(id -u)"
+    ls -la "$RTRASH_SMOKE_VOLUME/.Trashes/$(id -u)" 2>&1 | tail -n 20 || true
+  fi
+  echo "--- wanted: ${want:-$f}"
+  printf '%s' "${want:-$f}" | od -An -tx1 | tail -n 3
   exit 1
 }
 listed() { # PATH: wait until list shows PATH
@@ -98,6 +103,7 @@ echo "ok   rm"
 # An item on another volume goes to that volume's .Trashes/UID.
 if [[ -n ${RTRASH_SMOKE_VOLUME:-} ]]; then
   v="$RTRASH_SMOKE_VOLUME/rtrash smoke.txt"
+  want=$v
   echo vol > "$v"
   "$rt" put "$v" || fail "put on the volume"
   [[ -d $RTRASH_SMOKE_VOLUME/.Trashes/$(id -u) ]] || fail "no volume trash"
