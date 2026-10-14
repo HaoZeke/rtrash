@@ -129,10 +129,16 @@ fn pwsh_completes_the_windows_options() {
         String::from_utf8_lossy(&run.stderr)
     );
     let got = String::from_utf8_lossy(&run.stdout).trim().to_string();
+    // An option the help shows as `--name=VALUE` completes with its `=`.
+    let help = Command::new(bin())
+        .args(["empty", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
     let mut want: Vec<String> = help_long_opts("empty")
         .into_iter()
         .map(|o| {
-            if o == "--older-than" {
+            if help.contains(&format!("{o}=")) {
                 format!("{o}=")
             } else {
                 o

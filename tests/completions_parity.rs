@@ -544,7 +544,7 @@ fn powershell_script_is_embedded_and_completes() {
             "--dangling",
             "--latest",
             "keys",
-            "--dry-run --verbose --older-than= --help --version"
+            "--dry-run --verbose --older-than= --max-size= --prune= --until-free= --json --help --version"
         ]
     );
 }
