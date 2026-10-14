@@ -319,6 +319,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l history -d 'also show each trash history'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l since -r -d 'with --history, only lines from the last AGE'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l total -d 'only size and items, from the stored running total'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l space -d 'with --total, also give free bytes and inodes'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l measure -d 'with --total, measure a trash without a current total'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l json -d 'print a JSON object'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l help -d 'display help'

@@ -99,6 +99,7 @@ trash_stats_opts=(
   '--history[also show each trash history]'
   '--since=[with --history, only lines from the last AGE]:age:'
   '--total[only size and items, from the stored running total]'
+  '--space[with --total, also give each trash file system free bytes and inodes]'
   '--measure[with --total, measure a trash whose total is missing or stale]'
   '--json[print a JSON object]'
   '--help[display help]'

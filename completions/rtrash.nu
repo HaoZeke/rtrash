@@ -135,6 +135,7 @@ export extern "rtrash trash-stats" [
     --history  # also show each trash's history: its size and items
     --since: string  # with --history, only the lines from the last AGE
     --total  # only size and items, from the stored running total
+    --space  # with --total, also give each trash's file system free bytes and inodes
     --measure  # with --total, measure a trash whose total is missing or stale
     --json  # print a JSON object ({trashes, total}); history
     --help  # display this help and exit

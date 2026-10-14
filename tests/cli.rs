@@ -4024,6 +4024,21 @@ fn empty_dangling_carries_the_total() {
     assert!(carried.contains(r#""items":1,"stale":false"#), "{carried}");
     fs::remove_file(trash.join("rtrash-total")).unwrap();
     assert_eq!(total(true), carried);
+    // --space adds the file system, from a statfs and no walk.
+    let spaced = stdout_of(&run(&[
+        "trash-stats",
+        "--home-only",
+        "--total",
+        "--space",
+        "--json",
+    ]));
+    assert!(
+        spaced.contains(r#""fs":{"total":"#) && spaced.contains(r#""low":"#),
+        "{spaced}"
+    );
+    let text = stdout_of(&run(&["trash-stats", "--home-only", "--total", "--space"]));
+    assert!(text.contains("\tfree "), "{text}");
+    assert_eq!(run(&["trash-stats", "--space"]).status.code(), Some(2));
 }
 #[test]
 #[cfg(unix)]

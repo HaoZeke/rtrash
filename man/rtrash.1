@@ -631,6 +631,19 @@ With
 walk each trash whose total is missing or stale once and store it, so
 later runs answer at once.
 .TP
+.B \-\-space
+With
+.BR \-\-total ,
+also give each trash's file system: free bytes and inodes, their
+percentages, and whether either is under 10% (one statfs per trash, no
+walk).
+In JSON each trash gains an \fIfs\fR object (\fItotal\fR, \fIavail\fR,
+\fIavail_pct\fR, \fIinodes\fR, \fIinodes_avail\fR, \fIinodes_pct\fR, \fIlow\fR);
+inode fields are null where the file system counts none.
+A disk guard can run
+.B "rtrash trash\-stats \-\-total \-\-space \-\-json"
+to see both what the trash holds and whether emptying it is urgent.
+.TP
 .B \-\-history
 Also show each trash's history: after every put, restore, rm, empty and reap that
 changed a trash (purge when

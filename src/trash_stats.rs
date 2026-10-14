@@ -37,6 +37,9 @@ directories under files/ and info/), orphans (payloads without a
       --measure         with --total, measure each trash whose total is
                         missing or stale (one walk) and store it, so
                         later --total runs answer at once
+      --space           with --total, also give each trash's file system:
+                        free bytes and inodes and whether either is under
+                        10% (one statfs per trash, no walk)
       --json            print a JSON object ({trashes, total}); history
                         lines carry delta_bytes and delta_items
       --help            display this help and exit
@@ -336,11 +339,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut top = 5usize;
     let mut total_only = false;
     let mut measure = false;
+    let mut space = false;
     for a in args {
         match a.as_str() {
             "--home-only" => home_only = true,
             "--total" => total_only = true,
             "--measure" => measure = true,
+            "--space" => space = true,
             "--json" => json = true,
             "--history" => with_history = true,
             a if a.starts_with("--since=") => {
@@ -380,8 +385,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
     }
-    if measure && !total_only {
-        eprintln!("{prog}: --measure goes with --total");
+    if (measure || space) && !total_only {
+        eprintln!("{prog}: --measure and --space go with --total");
         return 2;
     }
     if total_only {
@@ -390,10 +395,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             return 2;
         }
         let rows = totals(prog, &pins, home_only, measure);
-        if json {
-            println!("{}", totals_json(&rows));
+        let fs: Vec<Option<crate::space::Space>> = if space {
+            rows.iter()
+                .map(|(r, _)| crate::space::query(r).ok())
+                .collect()
         } else {
-            print_totals(&rows);
+            Vec::new()
+        };
+        if json {
+            println!("{}", totals_json_space(&rows, space.then_some(&fs[..])));
+        } else {
+            print_totals(&rows, space.then_some(&fs[..]));
         }
         return 0;
     }
@@ -498,19 +510,61 @@ fn totals(_prog: &str, _pins: &[PathBuf], _home_only: bool, _measure: bool) -> V
 /// a trash without a stored total has null bytes and items, and the
 /// total is stale when any trash is stale or has none.
 pub fn totals_json(rows: &[TotalRow]) -> String {
+    totals_json_space(rows, None)
+}
+
+/// The `fs` object of one trash under `--space`: free bytes and inodes
+/// with their percentages, and `low` when either is under 10%. Null when
+/// the file system cannot be read; inode fields are null where it counts
+/// none (btrfs, Windows).
+fn fs_json(s: Option<&crate::space::Space>) -> String {
+    let Some(s) = s else {
+        return "null".into();
+    };
+    let opt = |v: Option<u64>| v.map_or("null".into(), |v| v.to_string());
+    format!(
+        r#"{{"total":{},"avail":{},"avail_pct":{},"inodes":{},"inodes_avail":{},"inodes_pct":{},"low":{}}}"#,
+        s.total,
+        s.avail,
+        s.avail_percent(),
+        opt(s.inodes),
+        opt(s.inodes_avail),
+        opt(s.inodes_percent()),
+        !s.lows(crate::space::WARN_FREE_PERCENT).is_empty()
+    )
+}
+
+/// [`totals_json`], with an `fs` object in each trash when `fs` is given
+/// (one entry per row).
+pub fn totals_json_space(rows: &[TotalRow], fs: Option<&[Option<crate::space::Space>]>) -> String {
+    let with_fs = |i: usize, obj: String| match fs {
+        Some(fs) => format!(
+            "{},\"fs\":{}}}",
+            &obj[..obj.len() - 1],
+            fs_json(fs.get(i).and_then(Option::as_ref))
+        ),
+        None => obj,
+    };
     let trashes: Vec<String> = rows
         .iter()
-        .map(|(root, t)| match t {
-            Some((b, n, fresh)) => format!(
-                r#"{{"path":{},"bytes":{b},"items":{n},"stale":{}}}"#,
-                path_json(root),
-                !fresh
-            ),
-            None => format!(
-                r#"{{"path":{},"bytes":null,"items":null,"stale":true}}"#,
-                path_json(root)
-            ),
+        .enumerate()
+        .map(|(i, (root, t))| {
+            (
+                i,
+                match t {
+                    Some((b, n, fresh)) => format!(
+                        r#"{{"path":{},"bytes":{b},"items":{n},"stale":{}}}"#,
+                        path_json(root),
+                        !fresh
+                    ),
+                    None => format!(
+                        r#"{{"path":{},"bytes":null,"items":null,"stale":true}}"#,
+                        path_json(root)
+                    ),
+                },
+            )
         })
+        .map(|(i, obj)| with_fs(i, obj))
         .collect();
     let bytes: u64 = rows.iter().filter_map(|(_, t)| t.map(|t| t.0)).sum();
     let items: u64 = rows.iter().filter_map(|(_, t)| t.map(|t| t.1)).sum();
@@ -521,17 +575,32 @@ pub fn totals_json(rows: &[TotalRow]) -> String {
     )
 }
 
-fn print_totals(rows: &[TotalRow]) {
-    for (root, t) in rows {
+fn print_totals(rows: &[TotalRow], fs: Option<&[Option<crate::space::Space>]>) {
+    for (i, (root, t)) in rows.iter().enumerate() {
+        let free = match fs.map(|f| f.get(i).and_then(Option::as_ref)) {
+            None => String::new(),
+            Some(None) => "\tfree: unknown".into(),
+            Some(Some(s)) => {
+                let lows = s.lows(crate::space::WARN_FREE_PERCENT);
+                format!(
+                    "\tfree {} ({}%{}){}",
+                    format_bytes(s.avail),
+                    s.avail_percent(),
+                    s.inodes_percent()
+                        .map_or(String::new(), |p| format!(", {p}% of inodes")),
+                    if lows.is_empty() { "" } else { " LOW" }
+                )
+            }
+        };
         match t {
             Some((b, n, fresh)) => println!(
-                "{}\t{}\t{}{}",
+                "{}\t{}\t{}{}{free}",
                 root.display(),
                 format_bytes(*b),
                 crate::util::plural(*n, "item", "items"),
                 if *fresh { "" } else { "\t(stale)" }
             ),
-            None => println!("{}\tno stored total", root.display()),
+            None => println!("{}\tno stored total{free}", root.display()),
         }
     }
 }
@@ -558,6 +627,18 @@ mod tests {
             j.ends_with(r#""total":{"bytes":15,"items":3,"stale":true}}"#),
             "{j}"
         );
+        let s = crate::space::Space {
+            total: 100,
+            avail: 5,
+            inodes: Some(1000),
+            inodes_avail: Some(500),
+        };
+        let spaced = totals_json_space(&rows[..2], Some(&[Some(s), None]));
+        assert!(
+            spaced.contains(r#""stale":false,"fs":{"total":100,"avail":5,"avail_pct":5,"inodes":1000,"inodes_avail":500,"inodes_pct":50,"low":true}}"#),
+            "{spaced}"
+        );
+        assert!(spaced.contains(r#""stale":true,"fs":null}"#), "{spaced}");
         let fresh = totals_json(&rows[..1]);
         assert!(fresh.ends_with(r#""stale":false}}"#), "{fresh}");
     }
