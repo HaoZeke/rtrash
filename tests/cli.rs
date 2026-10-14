@@ -1255,6 +1255,94 @@ fn backdate_trashinfo(sb: &Sandbox, name: &str, date: &str) {
     fs::write(&info, out.join("\n") + "\n").unwrap();
 }
 
+/// The local time `secs` seconds ago, as a `.trashinfo` date.
+#[cfg(unix)]
+fn local_date_ago(secs: u64) -> String {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - secs;
+    // GNU date takes -d @EPOCH, BSD date -r EPOCH.
+    for args in [
+        vec!["-d".to_string(), format!("@{t}")],
+        vec!["-r".into(), t.to_string()],
+    ] {
+        if let Ok(o) = Command::new("date")
+            .args(&args)
+            .arg("+%Y-%m-%dT%H:%M:%S")
+            .output()
+        {
+            if o.status.success() {
+                return String::from_utf8(o.stdout).unwrap().trim().to_string();
+            }
+        }
+    }
+    panic!("date cannot format an epoch");
+}
+
+/// `rm` and `empty` take ages in hours and minutes as well as days.
+#[cfg(unix)]
+#[test]
+fn rm_and_empty_take_ages_in_hours_and_minutes() {
+    let sb = Sandbox::new("age-hours");
+    sb.touch("three-hours.txt");
+    sb.touch("fresh.txt");
+    sb.touch("ninety-min.txt");
+    let put = sb.run(&["put", "three-hours.txt", "fresh.txt", "ninety-min.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    backdate_trashinfo(&sb, "three-hours.txt", &local_date_ago(3 * 3600));
+    backdate_trashinfo(&sb, "ninety-min.txt", &local_date_ago(90 * 60));
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = sb.run(&["empty", &pin, "--older-than=2h", "-n", "--json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let j = stdout_of(&out);
+    assert!(
+        j.contains(r#""removed":1,"#) && j.contains(r#""older_than_secs":7200"#),
+        "{j}"
+    );
+    let out = sb.run(&["empty", &pin, "--older-than=1d", "-n", "--json"]);
+    assert!(
+        stdout_of(&out).contains(r#""removed":0,"#),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(
+        stdout_of(&out).contains(r#""days":1,"#),
+        "{}",
+        stdout_of(&out)
+    );
+    // rm: older than 1h but newer than 2h30m takes only the 90-minute item.
+    let out = sb.run(&[
+        "rm",
+        &pin,
+        "-f",
+        "--older-than=1h",
+        "--newer-than=2h30m",
+        "*",
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.trash().join("files/ninety-min.txt").exists());
+    assert!(sb.trash().join("files/three-hours.txt").exists());
+    assert!(sb.trash().join("files/fresh.txt").exists());
+    let out = sb.run(&["empty", &pin, "--older-than=2h", "--plain"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.trash().join("files/three-hours.txt").exists());
+    assert!(sb.trash().join("files/fresh.txt").exists());
+    for bad in ["--older-than=2x", "--older-than=1.5h"] {
+        assert_eq!(
+            sb.run(&["rm", &pin, bad, "*"]).status.code(),
+            Some(2),
+            "{bad}"
+        );
+        assert_eq!(
+            sb.run(&["empty", &pin, bad]).status.code(),
+            Some(2),
+            "{bad}"
+        );
+    }
+}
+
 #[test]
 fn restore_plain_order_defaults_oldest_first_and_flags_flip_it() {
     let sb = Sandbox::new("restore-order");

@@ -275,10 +275,13 @@ plus every mounted volume.
 .B \-\-home\-only
 Only the home trash (skip volume trash discovery).
 .TP
-.BI \-\-older\-than =DAYS
+.BI \-\-older\-than =AGE
 Same as positional
-.I DAYS
-(list/status flag style).
+.IR DAYS ;
+.I AGE
+may also be a duration such as 2h, 30m or 1d12h (units s, m, h, d, w).
+The JSON summary then gives \fIdays\fR as a fraction and
+\fIolder_than_secs\fR exactly.
 .TP
 .BI \-\-max\-size =SIZE
 Remove items until the trash directories in scope, taken together, fit in
@@ -2518,15 +2521,17 @@ Only consider this trash directory (repeatable).
 .B \-\-home\-only
 Only the home trash (skip volume trash).
 .TP
-.BI \-\-older\-than =DAYS
+.BI \-\-older\-than =AGE
 Only match items trashed more than
-.I DAYS
-days ago.
+.I AGE
+ago: a number of days, or a duration such as 2h, 30m or 1d12h
+(units s, m, h, d, w).
 .TP
-.BI \-\-newer\-than =DAYS
+.BI \-\-newer\-than =AGE
 Only match items trashed within the last
-.I DAYS
-days.
+.I AGE
+(days or a duration, as for
+.BR \-\-older\-than ).
 .TP
 .BI \-\-larger\-than =SIZE
 Only match items taking more than

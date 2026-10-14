@@ -20,8 +20,9 @@ matching *trash* entries — not a synonym for put.
 
       --trash-dir=PATH  only consider this trash directory (repeatable)
       --home-only  only the home trash (skip volume trash)
-      --older-than=DAYS only match items trashed more than DAYS days ago
-      --newer-than=DAYS only match items trashed within the last DAYS days
+      --older-than=AGE  only match items trashed more than AGE ago: DAYS,
+                     or a duration such as 2h, 30m or 1d12h
+      --newer-than=AGE  only match items trashed within the last AGE
       --larger-than=SIZE  only match items taking more than SIZE on disk
       --smaller-than=SIZE only match items taking less than SIZE on disk
                      (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
@@ -38,18 +39,6 @@ Examples:
   {prog} foo
   {prog} /home/you/old-project
 ";
-
-fn parse_nonneg_days(s: &str) -> Result<i64, String> {
-    s.parse::<i64>()
-        .map_err(|_| format!("invalid DAYS '{s}'"))
-        .and_then(|d| {
-            if d < 0 {
-                Err(format!("DAYS must be >= 0 (got {d})"))
-            } else {
-                Ok(d)
-            }
-        })
-}
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
     let code = run_inner(prog, args);
@@ -101,7 +90,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
             a if a.starts_with("--older-than=") => {
-                match parse_nonneg_days(&a["--older-than=".len()..]) {
+                match crate::filters::parse_age_secs(&a["--older-than=".len()..]) {
                     Ok(d) => older_than = Some(d),
                     Err(e) => {
                         eprintln!("{prog}: {e}");
@@ -110,7 +99,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 }
             }
             a if a.starts_with("--newer-than=") => {
-                match parse_nonneg_days(&a["--newer-than=".len()..]) {
+                match crate::filters::parse_age_secs(&a["--newer-than=".len()..]) {
                     Ok(d) => newer_than = Some(d),
                     Err(e) => {
                         eprintln!("{prog}: {e}");
@@ -122,10 +111,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 let name = arg.as_str();
                 i += 1;
                 let Some(val) = args.get(i) else {
-                    eprintln!("{prog}: {name} requires DAYS");
+                    eprintln!("{prog}: {name} requires an AGE");
                     return 2;
                 };
-                match parse_nonneg_days(val) {
+                match crate::filters::parse_age_secs(val) {
                     Ok(d) if name == "--older-than" => older_than = Some(d),
                     Ok(d) => newer_than = Some(d),
                     Err(e) => {
@@ -177,7 +166,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // path typed through a symlinked directory matches in that form too.
     let resolved: Vec<String> = patterns.iter().filter_map(|p| resolve_pattern(p)).collect();
     patterns.extend(resolved);
-    let mut entries = list::filter_age(list::collect(&dirs), older_than, newer_than);
+    let mut entries = list::filter_age_secs(list::collect(&dirs), older_than, newer_than);
     // Payloads with no .trashinfo match by their name or their path under
     // files/; having no date, they stay out of an age-filtered rm.
     if older_than.is_none() && newer_than.is_none() {

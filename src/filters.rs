@@ -95,7 +95,52 @@ impl SizeFilter {
     }
 }
 
-/// `--older-than` and `--newer-than`, in days, on when an item was
+/// An age for `--older-than` and `--newer-than` in seconds: a bare
+/// number is days (`7`), otherwise one or more NUMBER UNIT pairs with
+/// units s, m (or min), h, d and w (`2h`, `30m`, `1d12h`).
+pub fn parse_age_secs(s: &str) -> Result<i64, String> {
+    let t = s.trim();
+    let bad = || format!("invalid age '{s}' (want DAYS or a duration such as 2h, 30m or 1d12h)");
+    if t.is_empty() {
+        return Err(bad());
+    }
+    if t.bytes().all(|b| b.is_ascii_digit()) {
+        return t
+            .parse::<i64>()
+            .ok()
+            .and_then(|d| d.checked_mul(86_400))
+            .ok_or_else(bad);
+    }
+    let mut total: i64 = 0;
+    let mut rest = t;
+    while !rest.is_empty() {
+        let n_end = rest.find(|c: char| !c.is_ascii_digit()).ok_or_else(bad)?;
+        if n_end == 0 {
+            return Err(bad());
+        }
+        let n: i64 = rest[..n_end].parse().map_err(|_| bad())?;
+        let after = &rest[n_end..];
+        let u_end = after
+            .find(|c: char| c.is_ascii_digit())
+            .unwrap_or(after.len());
+        let mul = match &after[..u_end] {
+            "s" => 1,
+            "m" | "min" => 60,
+            "h" => 3600,
+            "d" => 86_400,
+            "w" => 7 * 86_400,
+            _ => return Err(bad()),
+        };
+        total = n
+            .checked_mul(mul)
+            .and_then(|v| total.checked_add(v))
+            .ok_or_else(bad)?;
+        rest = &after[u_end..];
+    }
+    Ok(total)
+}
+
+/// `--older-than` and `--newer-than`, in seconds, on when an item was
 /// trashed. The cutoff is `empty DAYS`'s: older keeps items trashed at or
 /// before it, newer keeps items trashed after it, and both leave out an
 /// item with no readable date, whose age is unknown (trash-cli's
@@ -114,7 +159,7 @@ impl AgeFilter {
     /// Whether an item trashed at `epoch` (seconds, `None` when unknown)
     /// passes both bounds, as of `now`.
     pub fn keeps_at(&self, epoch: Option<i64>, now: i64) -> bool {
-        let cutoff = |days: i64| now - days.saturating_mul(86_400);
+        let cutoff = |secs: i64| now.saturating_sub(secs);
         let old = self
             .older_than
             .is_none_or(|d| epoch.is_some_and(|t| t <= cutoff(d)));
@@ -130,7 +175,8 @@ impl AgeFilter {
     }
 
     /// Take `--older-than` or `--newer-than` at `args[*i]`, as
-    /// `--flag=DAYS` or `--flag DAYS` (then `*i` moves past the value).
+    /// `--flag=AGE` or `--flag AGE` (then `*i` moves past the value), AGE
+    /// as [`parse_age_secs`] reads it.
     /// `None` when `args[*i]` is neither flag.
     pub fn take(&mut self, args: &[String], i: &mut usize) -> Option<Result<(), String>> {
         let arg = args[*i].as_str();
@@ -149,26 +195,31 @@ impl AgeFilter {
                 *i += 1;
                 match args.get(*i) {
                     Some(v) => v.as_str(),
-                    None => return Some(Err(format!("{name} requires DAYS"))),
+                    None => return Some(Err(format!("{name} requires an AGE"))),
                 }
             }
         };
-        Some(parse_days(value).map(|d| *slot = Some(d)))
-    }
-}
-
-/// A day count for an age filter: a whole number, zero or more.
-pub fn parse_days(s: &str) -> Result<i64, String> {
-    match s.parse::<i64>() {
-        Ok(d) if d >= 0 => Ok(d),
-        Ok(d) => Err(format!("DAYS must be >= 0 (got {d})")),
-        Err(_) => Err(format!("invalid DAYS '{s}'")),
+        Some(parse_age_secs(value).map(|d| *slot = Some(d)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ages_take_days_and_compound_durations() {
+        assert_eq!(parse_age_secs("7"), Ok(7 * 86_400));
+        assert_eq!(parse_age_secs("0"), Ok(0));
+        assert_eq!(parse_age_secs("2h"), Ok(7200));
+        assert_eq!(parse_age_secs("30m"), Ok(1800));
+        assert_eq!(parse_age_secs("90min"), Ok(5400));
+        assert_eq!(parse_age_secs("1d12h"), Ok(129_600));
+        assert_eq!(parse_age_secs("1w"), Ok(604_800));
+        for bad in ["", "h", "-1", "2x", "1.5h", "2h-", "99999999999999999999"] {
+            assert!(parse_age_secs(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn size_filters_parse_both_forms_and_bound_strictly() {
@@ -212,7 +263,7 @@ mod tests {
     fn age_bounds_follow_the_empty_cutoff() {
         let now = 100 * 86_400;
         let old = AgeFilter {
-            older_than: Some(30),
+            older_than: Some(30 * 86_400),
             newer_than: None,
         };
         assert!(old.keeps_at(Some(now - 30 * 86_400), now));
@@ -220,14 +271,14 @@ mod tests {
         assert!(!old.keeps_at(None, now));
         let new = AgeFilter {
             older_than: None,
-            newer_than: Some(1),
+            newer_than: Some(86_400),
         };
         assert!(new.keeps_at(Some(now - 100), now));
         assert!(!new.keeps_at(Some(now - 86_400), now));
         assert!(!new.keeps_at(None, now));
         let both = AgeFilter {
-            older_than: Some(1),
-            newer_than: Some(7),
+            older_than: Some(86_400),
+            newer_than: Some(7 * 86_400),
         };
         assert!(both.keeps_at(Some(now - 3 * 86_400), now));
         assert!(!both.keeps_at(Some(now - 10 * 86_400), now));
@@ -250,9 +301,16 @@ mod tests {
         assert_eq!(f.take(&args, &mut i), Some(Ok(())));
         i += 1;
         assert_eq!(f.take(&args, &mut i), Some(Ok(())));
-        assert_eq!((i, f.older_than, f.newer_than), (2, Some(3), Some(9)));
+        assert_eq!(
+            (i, f.older_than, f.newer_than),
+            (2, Some(3 * 86_400), Some(9 * 86_400))
+        );
         i += 1;
-        assert!(f.take(&args, &mut i).unwrap().unwrap_err().contains(">= 0"));
+        assert!(f
+            .take(&args, &mut i)
+            .unwrap()
+            .unwrap_err()
+            .contains("invalid age"));
         i += 1;
         assert!(f
             .take(&args, &mut i)

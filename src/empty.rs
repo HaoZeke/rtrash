@@ -16,7 +16,8 @@ use crate::util::url_decode;
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [DAYS]
-Purge trashed items. With DAYS, only items trashed more than DAYS days ago.
+Purge trashed items. With DAYS (or an age such as 2h), only items trashed
+more than that long ago.
 An item that cannot be removed stays; each one is listed at the end, with
 the reason, and the exit status is 1.
 On a TTY without DAYS, opens the interactive empty browser (multi-select
@@ -28,7 +29,8 @@ permanent delete). Use --plain to skip the TUI.
   -v, --verbose    print each removed item
   -f, --force      accepted for trash-cli compatibility (emptying never prompts)
       --plain      skip TUI; non-interactive empty (also used when stdin is not a TTY)
-      --older-than=DAYS  same as positional DAYS (list/status flag style)
+      --older-than=AGE  same as positional DAYS; AGE may also be a duration
+                     such as 2h, 30m or 1d12h
       --max-size=SIZE  remove items until the trash (all roots in scope
                      together) fits in SIZE, such as 500M or 10G; with
                      DAYS, the age cut runs first
@@ -37,7 +39,8 @@ permanent delete). Use --plain to skip the TUI.
       --dangling   remove only the .trashinfo records whose payload is gone
                      (they list as items that cannot be restored); takes
                      no DAYS or --max-size
-      --json       emit a JSON summary on stdout ({dry_run, removed, bytes, days})
+      --json       emit a JSON summary on stdout ({dry_run, removed, bytes, days,
+                     older_than_secs, max_size})
       --trash-dir=PATH  empty only this trash directory (repeatable);
                      default is the home trash plus every mounted volume
       --home-only  only the home trash (skip volume trash discovery)
@@ -46,6 +49,7 @@ permanent delete). Use --plain to skip the TUI.
 ";
 
 struct Opts {
+    /// The age cut in seconds (`--older-than`, positional DAYS).
     days: Option<i64>,
     dry_run: bool,
     verbose: bool,
@@ -220,20 +224,17 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 return usage_err(prog, &format!("{arg} needs a value ({arg}=VALUE)"));
             }
             a if a.starts_with("--older-than=") => {
-                match a["--older-than=".len()..].parse::<i64>() {
-                    Ok(d) if d >= 0 => opts.days = Some(d),
-                    Ok(d) => return usage_err(prog, &format!("DAYS must be >= 0 (got {d})")),
-                    Err(_) => {
-                        return usage_err(prog, &format!("invalid DAYS in '{a}'"));
-                    }
+                match crate::filters::parse_age_secs(&a["--older-than=".len()..]) {
+                    Ok(secs) => opts.days = Some(secs),
+                    Err(e) => return usage_err(prog, &e),
                 }
             }
             "--older-than" => {
-                return usage_err(prog, "--older-than requires DAYS (use --older-than=DAYS)");
+                return usage_err(prog, "--older-than requires an AGE (use --older-than=AGE)");
             }
-            a if !a.starts_with('-') => match a.parse::<i64>() {
-                Ok(d) if d >= 0 => opts.days = Some(d),
-                _ => return usage_err(prog, &format!("invalid DAYS argument '{a}'")),
+            a if !a.starts_with('-') => match crate::filters::parse_age_secs(a) {
+                Ok(secs) => opts.days = Some(secs),
+                Err(_) => return usage_err(prog, &format!("invalid DAYS argument '{a}'")),
             },
             a => return usage_err(prog, &format!("unrecognized option '{a}'")),
         }
@@ -266,7 +267,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         return crate::empty_tui::run(prog, refs, opts.dry_run);
     }
 
-    let cutoff = opts.days.map(|d| info::now_epoch() - d * 86_400);
+    let cutoff = opts.days.map(|secs| info::now_epoch() - secs);
     let removed = AtomicU64::new(0);
     let bytes = AtomicU64::new(0);
     let errors = AtomicU64::new(0);
@@ -311,20 +312,25 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let n = removed.load(Ordering::Relaxed);
     let b = bytes.load(Ordering::Relaxed);
     if opts.json {
+        // Whole days as before; an age in hours or minutes gives days as a
+        // fraction, and older_than_secs gives it exactly.
         let days = match opts.days {
-            Some(d) => d.to_string(),
+            Some(s) if s % 86_400 == 0 => (s / 86_400).to_string(),
+            Some(s) => format!("{}", s as f64 / 86_400.0),
             None => "null".into(),
         };
+        let older_secs = opts.days.map_or("null".into(), |s| s.to_string());
         let max_size = match opts.max_size {
             Some(m) => m.to_string(),
             None => "null".into(),
         };
         println!(
-            "{{\"dry_run\":{},\"removed\":{},\"bytes\":{},\"days\":{},\"max_size\":{}}}",
+            "{{\"dry_run\":{},\"removed\":{},\"bytes\":{},\"days\":{},\"older_than_secs\":{},\"max_size\":{}}}",
             if opts.dry_run { "true" } else { "false" },
             n,
             b,
             days,
+            older_secs,
             max_size
         );
     } else {

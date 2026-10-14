@@ -1004,7 +1004,8 @@ With DAYS, only items deleted more than DAYS days ago, as on Linux.
 
   -n, --dry-run  list what would be removed
   -v, --verbose  print each removed original path
-      --older-than=DAYS  same as DAYS
+      --older-than=AGE  same as DAYS; AGE may also be a duration such as
+                   2h, 30m or 1d12h
       --help     display this help and exit
       --version  output version information and exit
 
@@ -1018,7 +1019,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                     return 0;
                 }
                 a if a.starts_with("--trash-dir=") => {}
-                a if !a.starts_with('-') => match crate::filters::parse_days(a) {
+                a if !a.starts_with('-') => match crate::filters::parse_age_secs(a) {
                     Ok(d) => age.older_than = Some(d),
                     Err(e) => {
                         eprintln!("{prog}: {e}");
@@ -1488,8 +1489,9 @@ registry), then the total and the free space on each (a warning under
 Usage: {prog} [OPTION]... PATTERN...
 Permanently delete Recycle Bin items matching PATTERN (glob).
 
-      --older-than=DAYS only match items deleted more than DAYS days ago
-      --newer-than=DAYS only match items deleted within the last DAYS days
+      --older-than=AGE  only match items deleted more than AGE ago: DAYS,
+                   or a duration such as 2h, 30m or 1d12h
+      --newer-than=AGE  only match items deleted within the last AGE
       --larger-than=SIZE  only match items over SIZE (500M, 1.5G, 64k)
       --smaller-than=SIZE only match items under SIZE
   -n, --dry-run  list matches only
@@ -2078,7 +2080,7 @@ mod tests {
         assert_eq!(rest, ["-n", "pat"]);
         assert_eq!(
             (f.age.older_than, f.size.larger_than),
-            (Some(1), Some(1024))
+            (Some(86_400), Some(1024))
         );
         let now = crate::util::now_epoch();
         let items = vec![
@@ -2092,7 +2094,7 @@ mod tests {
         let age_only = BinFilters {
             age: crate::filters::AgeFilter {
                 older_than: None,
-                newer_than: Some(1),
+                newer_than: Some(86_400),
             },
             ..BinFilters::default()
         };

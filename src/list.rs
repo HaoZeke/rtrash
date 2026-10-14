@@ -131,7 +131,7 @@ pub fn orphans(dirs: &[TrashDir]) -> Vec<Entry> {
 /// counts as old.
 pub fn is_older_than(entry: &Entry, days: i64) -> bool {
     let age = crate::filters::AgeFilter {
-        older_than: Some(days),
+        older_than: Some(days.saturating_mul(86_400)),
         newer_than: None,
     };
     age.keeps_at(entry_epoch(entry), info::now_epoch())
@@ -141,7 +141,7 @@ pub fn is_older_than(entry: &Entry, days: i64) -> bool {
 pub fn is_newer_than(entry: &Entry, days: i64) -> bool {
     let age = crate::filters::AgeFilter {
         older_than: None,
-        newer_than: Some(days),
+        newer_than: Some(days.saturating_mul(86_400)),
     };
     age.keeps_at(entry_epoch(entry), info::now_epoch())
 }
@@ -149,6 +149,19 @@ pub fn is_newer_than(entry: &Entry, days: i64) -> bool {
 /// When `entry` was trashed, from its `.trashinfo` date, if readable.
 fn entry_epoch(entry: &Entry) -> Option<i64> {
     entry.date.as_deref().and_then(info::parse_local_to_epoch)
+}
+
+/// Apply optional older/newer filters in seconds (AND if both set).
+pub fn filter_age_secs(entries: Vec<Entry>, older: Option<i64>, newer: Option<i64>) -> Vec<Entry> {
+    let now = info::now_epoch();
+    entries
+        .into_iter()
+        .filter(|e| {
+            let t = entry_epoch(e);
+            older.is_none_or(|s| t.is_some_and(|t| t <= now - s))
+                && newer.is_none_or(|s| t.is_some_and(|t| t > now - s))
+        })
+        .collect()
 }
 
 /// Apply optional older/newer day filters (AND if both set).

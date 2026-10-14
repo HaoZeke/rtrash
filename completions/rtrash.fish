@@ -61,7 +61,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s v -l
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s f -l force -d 'accepted for trash-cli compatibility'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l trash-dir -d 'empty only this trash directory' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l home-only -d 'only the home trash'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l older-than -d 'only items older than DAYS days' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l older-than -d 'only items older than AGE (DAYS, 2h, 1d12h)' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l max-size -d 'remove items until the trash fits in SIZE' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l prune -d 'which items --max-size removes first' -x -a 'oldest largest'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l dangling -d 'remove only records whose payload is gone'
@@ -176,8 +176,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l js
 # rm (trash-rm)
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l trash-dir -d 'only this trash directory' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l home-only -d 'only the home trash'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l older-than -d 'only match items older than DAYS days' -r
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l newer-than -d 'only match items within last DAYS days' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l older-than -d 'only match items older than AGE (DAYS, 2h, 1d12h)' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l newer-than -d 'only match items within the last AGE' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l larger-than -d 'only match items over SIZE on disk' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l smaller-than -d 'only match items under SIZE on disk' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s n -l dry-run -d 'list matches and reclaimable size; do not delete'

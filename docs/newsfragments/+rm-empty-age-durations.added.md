@@ -1,0 +1,1 @@
+`rtrash rm --older-than/--newer-than` and `rtrash empty --older-than` (and positional DAYS) take durations such as `2h`, `30m` and `1d12h` as well as whole days; `empty --json` adds `older_than_secs`.

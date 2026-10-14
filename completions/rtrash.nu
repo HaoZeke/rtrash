@@ -88,7 +88,7 @@ export extern "rtrash empty" [
     --verbose(-v)  # print each removed item
     --force(-f)  # accepted for trash-cli compatibility (emptying never prompts)
     --plain  # skip TUI; non-interactive empty (also used when stdin is not a TTY)
-    --older-than: string  # same as positional DAYS (list/status flag style)
+    --older-than: string  # same as positional DAYS, or a duration such as 2h or 1d12h
     --max-size: string  # remove items until the trash (all roots in scope
     --prune: string@"nu-complete rtrash prune"  # which items --max-size removes first
     --dangling  # remove only the .trashinfo records whose payload is gone
@@ -231,8 +231,8 @@ export extern "rtrash undo" [
 export extern "rtrash rm" [
     --trash-dir: string  # only consider this trash directory (repeatable)
     --home-only  # only the home trash (skip volume trash)
-    --older-than: string  # only match items trashed more than DAYS days ago
-    --newer-than: string  # only match items trashed within the last DAYS days
+    --older-than: string  # only match items trashed more than AGE ago (DAYS, 2h, 1d12h)
+    --newer-than: string  # only match items trashed within the last AGE
     --larger-than: string  # only match items taking more than SIZE on disk
     --smaller-than: string  # only match items taking less than SIZE on disk
     --dry-run(-n)  # list matches and reclaimable size; do not delete
@@ -351,7 +351,7 @@ export extern "trash-empty" [
     --verbose(-v)  # print each removed item
     --force(-f)  # accepted for trash-cli compatibility (emptying never prompts)
     --plain  # skip TUI; non-interactive empty (also used when stdin is not a TTY)
-    --older-than: string  # same as positional DAYS (list/status flag style)
+    --older-than: string  # same as positional DAYS, or a duration such as 2h or 1d12h
     --max-size: string  # remove items until the trash (all roots in scope
     --prune: string@"nu-complete rtrash prune"  # which items --max-size removes first
     --dangling  # remove only the .trashinfo records whose payload is gone
@@ -404,8 +404,8 @@ export extern "trash-restore" [
 export extern "trash-rm" [
     --trash-dir: string  # only consider this trash directory (repeatable)
     --home-only  # only the home trash (skip volume trash)
-    --older-than: string  # only match items trashed more than DAYS days ago
-    --newer-than: string  # only match items trashed within the last DAYS days
+    --older-than: string  # only match items trashed more than AGE ago (DAYS, 2h, 1d12h)
+    --newer-than: string  # only match items trashed within the last AGE
     --larger-than: string  # only match items taking more than SIZE on disk
     --smaller-than: string  # only match items taking less than SIZE on disk
     --dry-run(-n)  # list matches and reclaimable size; do not delete
