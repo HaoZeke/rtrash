@@ -384,3 +384,44 @@ fn empty_max_size_trims_the_finder_trash() {
     assert!(out(&o).contains("\"removed\":0"), "{}", out(&o));
     assert_eq!(b.run(&["empty", "--dangling"], "").status.code(), Some(2));
 }
+
+/// Put and rm carry a current total forward instead of walking the trash:
+/// a total doctored before them stays off by the same amount.
+#[test]
+fn put_and_rm_carry_the_finder_total() {
+    let b = Box_::new("carry");
+    fs::write(b.work().join("first"), b"1").unwrap();
+    assert!(b.run(&["put", "first"], "").status.success());
+    let key = b
+        .finder()
+        .to_string_lossy()
+        .replace('%', "%25")
+        .replace('/', "%2F");
+    let total = b
+        .root
+        .join(format!("state/rtrash/finder-totals/{key}.total"));
+    let body = fs::read_to_string(&total).unwrap();
+    let f: Vec<&str> = body.split_whitespace().collect();
+    assert_eq!((f[0], f[2]), ("v1", "1"), "{body}");
+    fs::write(&total, format!("v1 1000000000 1 {}\n", f[3])).unwrap();
+    fs::write(b.work().join("second"), vec![b'x'; 9000]).unwrap();
+    assert!(b.run(&["put", "second"], "").status.success());
+    let o = b.run(&["trash-stats", "--total", "--json"], "");
+    let j = out(&o);
+    assert!(j.contains("\"items\":2,\"stale\":false"), "{j}");
+    let bytes = |j: &str| -> u64 {
+        let i = j.find("\"bytes\":").unwrap() + 8;
+        j[i..].split(',').next().unwrap().parse().unwrap()
+    };
+    assert!(bytes(&j) > 1_000_000_000, "{j}");
+    assert!(b.run(&["rm", "second", "--force"], "").status.success());
+    let j = out(&b.run(&["trash-stats", "--total", "--json"], ""));
+    assert!(j.contains("\"items\":1,\"stale\":false"), "{j}");
+    assert_eq!(bytes(&j), 1_000_000_000, "{j}");
+    // A restore carries no sizes, so the trash is measured again.
+    let to = format!("--to={}", b.work().display());
+    let o = b.run(&["restore", "--name=first", &to], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let j = out(&b.run(&["trash-stats", "--total", "--json"], ""));
+    assert!(j.contains("\"bytes\":0,\"items\":0"), "{j}");
+}

@@ -11,7 +11,11 @@
 //!
 //! A command that may change a trash takes a [`Snapshot`] of the trash
 //! times before it and calls [`log`] after it: each trash whose time moved
-//! is measured once, its total stored and a history line appended.
+//! gets a new total and a history line. Put, rm and empty report each
+//! item they add or remove with [`carry`]; when the total was current
+//! before the command, the new one is the old plus those changes, with no
+//! walk. Any other change (restore, undo, a trash without a current total)
+//! measures the trash once.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -86,6 +90,15 @@ pub fn measure(trash: &Path) -> (u64, u64) {
     (b, n)
 }
 
+fn store(trash: &Path, b: u64, n: u64) {
+    if let (Some(s), Some(p)) = (stamp(trash), file(trash, "total")) {
+        if let Some(d) = p.parent() {
+            let _ = fs::create_dir_all(d);
+        }
+        let _ = crate::trashdir::atomic_write(&p, format!("v1 {b} {n} {s}\n").as_bytes());
+    }
+}
+
 /// The history of `trash`, oldest first.
 pub fn history(trash: &Path) -> Vec<crate::trash_history::Point> {
     file(trash, "history")
@@ -93,9 +106,47 @@ pub fn history(trash: &Path) -> Vec<crate::trash_history::Point> {
         .unwrap_or_default()
 }
 
-/// The times of the Finder trashes before a command; None where the
-/// Finder Trash is not the default, so the command logs nothing.
-pub struct Snapshot(Option<Vec<(PathBuf, Option<u128>)>>);
+/// Per trash: bytes and items this command added (negative: removed),
+/// and whether every change it made was carried.
+type Carried = Vec<(PathBuf, i128, i64, bool)>;
+static CARRIED: std::sync::Mutex<Carried> = std::sync::Mutex::new(Vec::new());
+
+fn note(trash: &Path, bytes: i128, items: i64, whole: bool) {
+    let mut c = CARRIED.lock().unwrap_or_else(|e| e.into_inner());
+    match c.iter_mut().find(|x| x.0 == trash) {
+        Some(x) => {
+            x.1 += bytes;
+            x.2 += items;
+            x.3 &= whole;
+        }
+        None => c.push((trash.to_path_buf(), bytes, items, whole)),
+    }
+}
+
+/// Report one item this command put into `trash` (`added`) or removed
+/// from it, with its size on disk.
+pub fn carry(trash: &Path, bytes: u64, added: bool) {
+    let b = i128::from(bytes);
+    if added {
+        note(trash, b, 1, true);
+    } else {
+        note(trash, -b, -1, true);
+    }
+}
+
+/// Report a change to `trash` that carries no sizes, so [`log`]
+/// measures it.
+pub fn uncarried(trash: &Path) {
+    note(trash, 0, 0, false);
+}
+
+/// The times of the Finder trashes before a command, each with its total
+/// when that was current; None where the Finder Trash is not the
+/// default, so the command logs nothing.
+pub struct Snapshot(Option<Vec<SnapRow>>);
+
+/// A trash, its stamp and its total when current.
+type SnapRow = (PathBuf, Option<u128>, Option<(u64, u64)>);
 
 pub fn snapshot() -> Snapshot {
     if !crate::finder::is_default(false) {
@@ -111,7 +162,8 @@ pub fn snapshot_always() -> Snapshot {
             .into_iter()
             .map(|t| {
                 let s = stamp(&t);
-                (t, s)
+                let cur = stored(&t).filter(|x| x.2).map(|x| (x.0, x.1));
+                (t, s, cur)
             })
             .collect(),
     ))
@@ -123,13 +175,25 @@ pub fn log(event: &str, before: &Snapshot) {
     let Some(before) = &before.0 else {
         return;
     };
+    let carried = std::mem::take(&mut *CARRIED.lock().unwrap_or_else(|e| e.into_inner()));
     for t in crate::finder::trashes() {
         let now = stamp(&t);
-        let was = before.iter().find(|(p, _)| *p == t).and_then(|x| x.1);
+        let snap = before.iter().find(|x| x.0 == t);
+        let was = snap.and_then(|x| x.1);
         if now.is_none() || now == was {
             continue;
         }
-        let (b, n) = measure(&t);
+        let old = snap.and_then(|x| x.2);
+        let c = carried.iter().find(|x| x.0 == t);
+        let (b, n) = match (old, c) {
+            (Some((ob, on)), Some(&(_, db, dn, true))) => {
+                let b = (i128::from(ob) + db).max(0) as u64;
+                let n = (on as i64 + dn).max(0) as u64;
+                store(&t, b, n);
+                (b, n)
+            }
+            _ => measure(&t),
+        };
         if let Some(p) = file(&t, "history") {
             crate::trash_history::append(&p, event, b, n);
         }

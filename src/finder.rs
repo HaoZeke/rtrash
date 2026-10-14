@@ -784,12 +784,15 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
         }
         match crate::trashdir::remove_any_path(&path) {
             Ok(()) => {
+                crate::finder_total::carry(&e.trash, b, false);
                 removed += 1;
                 if verbose && !json {
                     println!("removed {}", crate::util::term_path(&path));
                 }
             }
             Err(err) => {
+                // Part of the item may be gone, so measure afterwards.
+                crate::finder_total::uncarried(&e.trash);
                 eprintln!("{prog}: cannot remove '{}': {err}", path.display());
                 failed += 1;
             }

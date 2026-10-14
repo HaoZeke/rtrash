@@ -622,8 +622,10 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         }
     }
     if crate::finder::is_default(opts.trash_pin.is_some()) {
+        let size = crate::fastdelete::disk_usage(&abs);
         return match crate::finder::put_item(&abs, &meta) {
             Ok((trash_name, trash_dir)) => {
+                crate::finder_total::carry(&trash_dir, size, true);
                 if opts.verbose && !opts.quiet {
                     let to = crate::util::term_path(&trash_dir);
                     println!("removed '{}' (trash {to})", crate::util::term_text(&name));

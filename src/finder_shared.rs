@@ -505,11 +505,15 @@ pub fn rm(
                 println!("{}", crate::util::term_path(&e.shown));
             }
         } else if let Err(err) = crate::trashdir::remove_any_path(&e.path()) {
+            crate::finder_total::uncarried(&e.trash);
             eprintln!("{prog}: cannot remove '{}': {err}", e.path().display());
             status = 1;
             continue;
-        } else if verbose && !json {
-            println!("removed '{}'", crate::util::term_path(&e.shown));
+        } else {
+            crate::finder_total::carry(&e.trash, sz, false);
+            if verbose && !json {
+                println!("removed '{}'", crate::util::term_path(&e.shown));
+            }
         }
         removed += 1;
         bytes = bytes.saturating_add(sz);
