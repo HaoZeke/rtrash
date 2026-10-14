@@ -118,6 +118,43 @@ jobs:
           $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME '.cargo' }
           ./scripts/du-smoke.ps1 -Rtrash target/release/rtrash.exe -Trees (rustc --print sysroot), (Join-Path $cargoHome 'registry/src')
 
+  windows-mount:
+    name: windows · folder-mounted volume
+    runs-on: windows-latest
+    steps:
+      - run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The runner is an administrator, so diskpart can make, attach and
+      # mount a small NTFS VHD on a folder of drive C.
+      - name: Mount a VHD on a folder
+        shell: pwsh
+        run: |
+          $vhd = Join-Path $env:RUNNER_TEMP 'rtrash-mount.vhdx'
+          $mnt = 'C:\rtrash-mnt'
+          New-Item -ItemType Directory -Force $mnt | Out-Null
+          $script = Join-Path $env:RUNNER_TEMP 'diskpart.txt'
+          @(
+            "create vdisk file=""$vhd"" maximum=256 type=expandable",
+            "select vdisk file=""$vhd""",
+            "attach vdisk",
+            "create partition primary",
+            "format fs=ntfs quick label=rtrashmnt",
+            "assign mount=""$mnt"""
+          ) | Set-Content -Encoding ascii $script
+          diskpart /s $script
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-Volume -FileSystemLabel rtrashmnt | Format-List
+          "RTRASH_MOUNTED_DIR=$mnt" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Folder-mounted volume tests
+        run: cargo test --locked --test windows_mount -- --nocapture
+
   macos:
     name: ${{ matrix.os }} · test · du smoke
     strategy:

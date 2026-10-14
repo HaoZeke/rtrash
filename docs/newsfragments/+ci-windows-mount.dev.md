@@ -1,0 +1,1 @@
+CI mounts a VHD on a folder of drive C on windows-latest and runs `tests/windows_mount.rs`, which checks that the folder is a volume of its own and that `reap --purge-trash` takes only its Recycle Bin.
