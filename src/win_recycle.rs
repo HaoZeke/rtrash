@@ -99,8 +99,21 @@ fn decode_utf16le_path(bytes: &[u8]) -> Option<PathBuf> {
     if units.is_empty() {
         return None;
     }
-    let s = String::from_utf16(&units).ok()?;
-    is_plausible_original(&s).then(|| PathBuf::from(s))
+    // NTFS names are UTF-16 units, not checked text, so a name may hold
+    // an unpaired surrogate. Windows keeps it exact; elsewhere such a
+    // path has no form and is skipped.
+    if !is_plausible_original(&String::from_utf16_lossy(&units)) {
+        return None;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        Some(PathBuf::from(std::ffi::OsString::from_wide(&units)))
+    }
+    #[cfg(not(windows))]
+    {
+        String::from_utf16(&units).ok().map(PathBuf::from)
+    }
 }
 
 /// An original path from a `$I` record looks right: absolute (`C:\\` or
@@ -2765,5 +2778,38 @@ mod tests {
         assert_eq!(path_key(r"\\?\UNC\srv\share\f", &[]), r"\\srv\share\f");
         assert_eq!(path_key("C:/x/y/", &[]), r"c:\x\y");
         assert_eq!(path_key(r"C:\", &[]), r"c:\");
+    }
+
+    /// A `$I` record whose name holds an unpaired surrogate (valid on
+    /// NTFS) as raw little-endian units.
+    fn record_with_lone_surrogate() -> Vec<u8> {
+        let units: Vec<u16> = r"C:\d\a"
+            .encode_utf16()
+            .chain([0xD800])
+            .chain(".txt".encode_utf16())
+            .collect();
+        let mut b = vec![0u8; 0x1C];
+        b[0] = 2;
+        b[0x18..0x1C].copy_from_slice(&(units.len() as u32 + 1).to_le_bytes());
+        for u in units.iter().chain([&0u16]) {
+            b.extend_from_slice(&u.to_le_bytes());
+        }
+        b
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn lone_surrogate_name_parses_exactly_on_windows() {
+        use std::os::windows::ffi::OsStrExt;
+        let m = parse_recycle_i(&record_with_lone_surrogate()).expect("parsed");
+        let units: Vec<u16> = m.original.as_os_str().encode_wide().collect();
+        assert_eq!(units[6], 0xD800);
+        assert!(m.original.to_string_lossy().ends_with(".txt"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn lone_surrogate_name_is_skipped_off_windows() {
+        assert!(parse_recycle_i(&record_with_lone_surrogate()).is_none());
     }
 }
