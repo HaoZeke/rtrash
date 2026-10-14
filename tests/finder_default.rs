@@ -560,3 +560,44 @@ fn empty_until_free_takes_finder_items() {
     );
     assert!(!b.finder().join("gone.txt").exists());
 }
+
+/// A trash budget trims the Finder Trash after a put, oldest first, and
+/// never takes what that put moved.
+#[test]
+fn a_budget_trims_the_finder_trash_after_put_but_spares_the_put() {
+    let b = Box_::new("budget");
+    let put = |name: &str, budget: Option<&str>| {
+        let p = b.work().join(name);
+        fs::write(&p, "z".repeat(20_000)).unwrap();
+        let mut c = Command::new(env!("CARGO_BIN_EXE_rtrash"));
+        c.arg("put")
+            .arg(&p)
+            .current_dir(b.work())
+            .env("HOME", &b.root)
+            .env("XDG_DATA_HOME", b.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", b.root.join(".config"))
+            .env("XDG_STATE_HOME", b.root.join("state"))
+            .env("RTRASH_MACOS_TRASH", "finder")
+            .env("RTRASH_OSASCRIPT", b.root.join("osascript"))
+            .env_remove("RTRASH_PRUNE");
+        match budget {
+            Some(v) => c.env("RTRASH_MAX_SIZE", v),
+            None => c.env_remove("RTRASH_MAX_SIZE"),
+        };
+        c.output().unwrap()
+    };
+    assert!(put("old.bin", None).status.success());
+    assert!(put("mid.bin", Some("1G")).status.success());
+    assert!(
+        b.finder().join("old.bin").exists(),
+        "a roomy budget trimmed"
+    );
+    // A 1-byte budget: everything but this put's item goes.
+    let o = put("new.bin", Some("1"));
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(err(&o).contains("removed 2 items from"), "{}", err(&o));
+    assert!(b.finder().join("new.bin").exists());
+    assert!(!b.finder().join("old.bin").exists() && !b.finder().join("mid.bin").exists());
+    let o = b.run(&["trash-stats", "--total", "--json"], "");
+    assert!(out(&o).contains(r#""items":1"#), "{}", out(&o));
+}

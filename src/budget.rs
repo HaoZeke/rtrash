@@ -116,9 +116,10 @@ pub fn pick_budget(items: &[(i64, u64)], max: u64, largest: bool) -> Vec<usize> 
     out
 }
 
-/// Indices of `rows` (original path, deletion time, bytes) a put's trim
-/// removes to bring them under `max`. Rows whose original is in `moved`
-/// (what this put trashed) count toward the total but never go.
+/// Indices of `rows` (path, deletion time, bytes) a put's trim removes to
+/// bring them under `max`. Rows whose path is in `moved` (what this put
+/// trashed: the original path on Windows, the path in the trash for the
+/// Finder Trash) count toward the total but never go.
 pub fn trim_after_put(
     rows: &[(PathBuf, i64, u64)],
     moved: &[PathBuf],

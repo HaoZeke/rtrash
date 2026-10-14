@@ -323,6 +323,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .map(|t| (t.name.clone(), t.original.clone(), t.trash_dir.clone()))
             .collect();
         crate::finder_shared::log_batch(crate::info::batch_id(), &items);
+        let moved: Vec<(PathBuf, String)> = trashed
+            .iter()
+            .map(|t| (t.trash_dir.clone(), t.name.clone()))
+            .collect();
+        crate::finder::prune_after_put(prog, &moved, opts.quiet || json);
     }
     // The Finder Trash keeps no .trashinfo, so budgets and warnings that
     // read the FreeDesktop layout skip it.

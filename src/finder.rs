@@ -770,6 +770,58 @@ fn empty_pick(
     gone
 }
 
+/// With a trash budget (`RTRASH_MAX_SIZE` or `policy.max_size`), bring
+/// each Finder trash this put used back under it, oldest (or largest)
+/// first. The put's own items, given by trash and name, count but stay.
+pub fn prune_after_put(prog: &str, moved: &[(PathBuf, String)], quiet: bool) {
+    let Some((max, policy, source)) = crate::budget::budget(prog) else {
+        return;
+    };
+    let Ok(all) = crate::finder_shared::entries() else {
+        return;
+    };
+    let mine: Vec<PathBuf> = moved.iter().map(|(t, n)| t.join(n)).collect();
+    let mut trashes: Vec<&PathBuf> = moved.iter().map(|(t, _)| t).collect();
+    trashes.sort();
+    trashes.dedup();
+    for trash in trashes {
+        let here: Vec<&crate::finder_shared::Entry> =
+            all.iter().filter(|e| &e.trash == trash).collect();
+        let rows: Vec<(PathBuf, i64, u64)> = here
+            .iter()
+            .map(|e| {
+                let p = e.path();
+                let b = crate::fastdelete::disk_usage(&p);
+                (p, e.epoch, b)
+            })
+            .collect();
+        let picked = crate::budget::trim_after_put(&rows, &mine, max, policy);
+        let mut n = 0u64;
+        for i in picked {
+            let (path, _, b) = &rows[i];
+            let inodes = 1 + crate::trash_stats::count_inodes(path);
+            match crate::trashdir::remove_any_path(path) {
+                Ok(()) => {
+                    crate::finder_total::carry(trash, (*b, inodes), false);
+                    n += 1;
+                }
+                Err(err) => {
+                    crate::finder_total::uncarried(trash);
+                    eprintln!("{prog}: cannot remove '{}': {err}", path.display());
+                }
+            }
+        }
+        if n > 0 && !quiet {
+            eprintln!(
+                "{prog}: removed {} from '{}' to keep it under {} ({source})",
+                crate::util::plural(n, "item", "items"),
+                trash.display(),
+                crate::util::format_bytes(max)
+            );
+        }
+    }
+}
+
 /// `reap --purge-trash` on the Finder trashes of device `dev`: remove
 /// the oldest items until `need` (bytes, inodes) is freed, and return
 /// what is still needed. A dry run counts the items instead.
