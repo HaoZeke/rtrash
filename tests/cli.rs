@@ -3724,7 +3724,7 @@ fn status_warns_from_the_test_file_system_and_stops_once_it_is_freed() {
 
 #[test]
 #[cfg(unix)]
-fn trash_stats_history_records_each_put_and_empty() {
+fn trash_stats_history_records_each_change_rtrash_makes() {
     let sb = Sandbox::new("stats-log");
     let a = sb.work().join("a.bin");
     fs::write(&a, vec![1u8; 30_000]).unwrap();
@@ -3732,9 +3732,19 @@ fn trash_stats_history_records_each_put_and_empty() {
     let b = sb.work().join("b.txt");
     fs::write(&b, "b").unwrap();
     assert!(sb.run(&["put", b.to_str().unwrap()]).status.success());
-    // A dry run and a put that fails change nothing, so they add no line.
+    let c = sb.work().join("c.txt");
+    fs::write(&c, "c").unwrap();
+    assert!(sb.run(&["put", c.to_str().unwrap()]).status.success());
+    // A restore and an rm each change the trash, so each adds a line.
+    let out = sb.run(&["restore", "--home-only", b.to_str().unwrap()]);
+    assert!(out.status.success() && b.exists(), "{}", stderr_of(&out));
+    let out = sb.run(&["rm", "--home-only", c.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    // A dry run, a put that fails and an rm that matches nothing change
+    // nothing, so they add no line.
     assert!(sb.run(&["empty", "--home-only", "-n"]).status.success());
     assert!(!sb.run(&["put", "missing-file"]).status.success());
+    sb.run(&["rm", "--home-only", "nothing-matches"]);
     assert!(sb.run(&["empty", "--home-only"]).status.success());
     let out = sb.run(&["trash-stats", "--home-only", "--history", "--json"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -3746,12 +3756,17 @@ fn trash_stats_history_records_each_put_and_empty() {
             &rest[..rest.find('"').unwrap()]
         })
         .collect();
-    assert_eq!(events, ["put", "put", "empty"], "{json}");
+    assert_eq!(
+        events,
+        ["put", "put", "put", "restore", "rm", "empty"],
+        "{json}"
+    );
     assert!(json.contains(r#""bytes":0,"items":0}]"#), "{json}");
-    assert!(json.contains(r#""items":2}"#), "{json}");
+    assert!(json.contains(r#""items":3}"#), "{json}");
+    assert!(json.contains(r#""event":"rm","bytes":"#), "{json}");
     // Text lists the same lines; without --history there are none.
     let text = stdout_of(&sb.run(&["trash-stats", "--home-only", "--history"]));
-    assert_eq!(text.matches("  put  ").count(), 2, "{text}");
+    assert_eq!(text.matches("  put  ").count(), 3, "{text}");
     let plain = stdout_of(&sb.run(&["trash-stats", "--home-only", "--json"]));
     assert!(!plain.contains("history"), "{plain}");
 }

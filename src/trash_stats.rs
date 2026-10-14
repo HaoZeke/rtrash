@@ -23,7 +23,8 @@ directories under files/ and info/), orphans (payloads without a
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  only this trash directory (repeatable)
       --history         also show each trash's history: its size and items
-                        after each put, empty and reap that changed it
+                        after each put, restore, rm, empty and reap
+                        that changed it
       --json            print a JSON object ({trashes, total})
       --help            display this help and exit
       --version         output version information and exit

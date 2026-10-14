@@ -111,13 +111,19 @@ pub mod put {
 #[cfg(windows)]
 pub mod restore {
     pub fn run(prog: &str, args: &[String]) -> i32 {
-        crate::win_recycle::restore_run(prog, args)
+        let bins = crate::trash_history::bin_snapshot();
+        let code = crate::win_recycle::restore_run(prog, args);
+        crate::trash_history::log_bins("restore", &bins);
+        code
     }
 }
 #[cfg(windows)]
 pub mod rm {
     pub fn run(prog: &str, args: &[String]) -> i32 {
-        crate::win_recycle::rm_run(prog, args)
+        let bins = crate::trash_history::bin_snapshot();
+        let code = crate::win_recycle::rm_run(prog, args);
+        crate::trash_history::log_bins("rm", &bins);
+        code
     }
 }
 #[cfg(windows)]

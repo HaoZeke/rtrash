@@ -52,6 +52,12 @@ fn parse_nonneg_days(s: &str) -> Result<i64, String> {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    let code = run_inner(prog, args);
+    crate::trash_total::log_touched("rm");
+    code
+}
+
+fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut verbose = false;
     let mut force = false;
     let mut dry_run = false;
@@ -229,6 +235,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             status = 1;
             continue;
         }
+        crate::trash_total::touched(&entry.dir);
         if let Err(e) = std::fs::remove_file(&info_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 eprintln!(

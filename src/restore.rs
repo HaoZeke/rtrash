@@ -95,6 +95,12 @@ impl Matcher {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    let code = run_inner(prog, args);
+    crate::trash_total::log_touched("restore");
+    code
+}
+
+fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut conflict = Conflict::Refuse;
     let mut home_only = false;
     let mut cwd_only = false;
@@ -725,6 +731,7 @@ pub(crate) fn restore_one_to(
             }
             Err(e) => warnings.push(format!("cannot remove '{}': {e}", info_path.display())),
         }
+        crate::trash_total::touched(&entry.dir);
     }
     trashdir::directorysizes_remove(&entry.dir, &entry.name);
     Ok(Restored {
