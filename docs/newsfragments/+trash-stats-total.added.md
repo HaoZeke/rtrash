@@ -1,0 +1,1 @@
+`rtrash trash-stats --total [--json]` reads each trash's size and item count from the stored running total without walking it, so a disk guard gets an answer at once on trashes with huge file counts; `--measure` stores a total where none is current.

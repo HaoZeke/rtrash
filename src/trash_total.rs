@@ -66,6 +66,14 @@ pub fn cached(dir: &TrashDir) -> Option<(u64, u64)> {
     (stamp(dir)? == s).then_some((bytes, items))
 }
 
+/// The stored bytes and item count with whether they are current: a
+/// stale total is one another tool changed the trash after. Reads one
+/// small file and never walks the trash.
+pub fn stored(dir: &TrashDir) -> Option<(u64, u64, bool)> {
+    let (bytes, items, s) = parse(&fs::read_to_string(path(dir)).ok()?)?;
+    Some((bytes, items, stamp(dir) == Some(s)))
+}
+
 /// Store `bytes` and `items` as current. Best effort: a trash root this
 /// user cannot write simply goes without a total.
 pub fn store(dir: &TrashDir, bytes: u64, items: u64) {

@@ -609,6 +609,25 @@ Only the home trash.
 .BI \-\-trash\-dir= PATH
 Only this trash directory (repeatable).
 .TP
+.B \-\-total
+Only the size and item count of each trash, read from the running total
+in
+.I rtrash\-total
+that put, restore, rm, empty and reap keep current.
+Nothing is walked, so the answer comes at once however many files the
+trash holds; a disk guard should use
+.BR "rtrash trash\-stats \-\-total \-\-json" .
+A total that another tool made out of date has
+.B stale
+set; a trash without one has null bytes and items.
+On Windows the sizes come from the shell's count of each Recycle Bin.
+.TP
+.B \-\-measure
+With
+.BR \-\-total ,
+walk each trash whose total is missing or stale once and store it, so
+later runs answer at once.
+.TP
 .B \-\-history
 Also show each trash's history: after every put, restore, rm, empty and reap that
 changed a trash (purge when

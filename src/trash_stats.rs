@@ -28,6 +28,15 @@ directories under files/ and info/), orphans (payloads without a
                         from the line before and a trend bar
       --since=AGE       with --history, only the lines from the last AGE
                         (90m, 12h, 7d, 2w; a bare number is days)
+      --total           only the size and item count of each trash, from
+                        the running total that put, restore, empty and
+                        reap keep; nothing is walked, so it answers at
+                        once however many files the trash holds. A total
+                        that another tool made out of date is marked
+                        stale; a trash without one shows no size
+      --measure         with --total, measure each trash whose total is
+                        missing or stale (one walk) and store it, so
+                        later --total runs answer at once
       --json            print a JSON object ({trashes, total}); history
                         lines carry delta_bytes and delta_items
       --help            display this help and exit
@@ -325,9 +334,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut with_history = false;
     let mut since: Option<i64> = None;
     let mut top = 5usize;
+    let mut total_only = false;
+    let mut measure = false;
     for a in args {
         match a.as_str() {
             "--home-only" => home_only = true,
+            "--total" => total_only = true,
+            "--measure" => measure = true,
             "--json" => json = true,
             "--history" => with_history = true,
             a if a.starts_with("--since=") => {
@@ -366,6 +379,23 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 return 2;
             }
         }
+    }
+    if measure && !total_only {
+        eprintln!("{prog}: --measure goes with --total");
+        return 2;
+    }
+    if total_only {
+        if with_history || since.is_some() {
+            eprintln!("{prog}: --total does not combine with --history");
+            return 2;
+        }
+        let rows = totals(prog, &pins, home_only, measure);
+        if json {
+            println!("{}", totals_json(&rows));
+        } else {
+            print_totals(&rows);
+        }
+        return 0;
     }
     if since.is_some() && !with_history {
         eprintln!("{prog}: --since goes with --history");
@@ -429,9 +459,108 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     0
 }
 
+/// One trash under `--total`: its root and, when a total is stored, the
+/// bytes, items and whether the total is current.
+pub type TotalRow = (PathBuf, Option<(u64, u64, bool)>);
+
+/// The stored totals of the trashes, without walking any of them.
+/// With `measure`, a trash whose total is missing or stale is walked
+/// once and its total stored.
+#[cfg(unix)]
+fn totals(prog: &str, pins: &[PathBuf], home_only: bool, measure: bool) -> Vec<TotalRow> {
+    trashdir::resolve_dirs_opts(pins, home_only)
+        .iter()
+        .filter(|d| d.info().is_dir() || d.files().is_dir())
+        .map(|d| {
+            let mut t = crate::trash_total::stored(d);
+            if measure && !t.is_some_and(|t| t.2) {
+                crate::trash_total::bytes(prog, d);
+                t = crate::trash_total::stored(d);
+            }
+            (d.root.clone(), t)
+        })
+        .collect()
+}
+
+/// Windows: the shell keeps each Recycle Bin's size, so ask it.
+#[cfg(windows)]
+fn totals(_prog: &str, _pins: &[PathBuf], _home_only: bool, _measure: bool) -> Vec<TotalRow> {
+    crate::trash_history::bin_roots()
+        .into_iter()
+        .filter_map(|r| {
+            let (n, b) = crate::win_recycle::query_bin(&r)?;
+            Some((r, Some((b, n, true))))
+        })
+        .collect()
+}
+
+/// `{trashes:[{path,bytes,items,stale}], total:{bytes,items,stale}}`;
+/// a trash without a stored total has null bytes and items, and the
+/// total is stale when any trash is stale or has none.
+pub fn totals_json(rows: &[TotalRow]) -> String {
+    let trashes: Vec<String> = rows
+        .iter()
+        .map(|(root, t)| match t {
+            Some((b, n, fresh)) => format!(
+                r#"{{"path":{},"bytes":{b},"items":{n},"stale":{}}}"#,
+                path_json(root),
+                !fresh
+            ),
+            None => format!(
+                r#"{{"path":{},"bytes":null,"items":null,"stale":true}}"#,
+                path_json(root)
+            ),
+        })
+        .collect();
+    let bytes: u64 = rows.iter().filter_map(|(_, t)| t.map(|t| t.0)).sum();
+    let items: u64 = rows.iter().filter_map(|(_, t)| t.map(|t| t.1)).sum();
+    let stale = rows.iter().any(|(_, t)| !t.is_some_and(|t| t.2));
+    format!(
+        r#"{{"trashes":[{}],"total":{{"bytes":{bytes},"items":{items},"stale":{stale}}}}}"#,
+        trashes.join(",")
+    )
+}
+
+fn print_totals(rows: &[TotalRow]) {
+    for (root, t) in rows {
+        match t {
+            Some((b, n, fresh)) => println!(
+                "{}\t{}\t{}{}",
+                root.display(),
+                format_bytes(*b),
+                crate::util::plural(*n, "item", "items"),
+                if *fresh { "" } else { "\t(stale)" }
+            ),
+            None => println!("{}\tno stored total", root.display()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn totals_json_marks_stale_and_missing_totals() {
+        let rows: Vec<TotalRow> = vec![
+            (PathBuf::from("/a"), Some((10, 2, true))),
+            (PathBuf::from("/b"), Some((5, 1, false))),
+            (PathBuf::from("/c"), None),
+        ];
+        let j = totals_json(&rows);
+        assert!(j.contains(r#""bytes":10,"items":2,"stale":false"#), "{j}");
+        assert!(j.contains(r#""bytes":5,"items":1,"stale":true"#), "{j}");
+        assert!(
+            j.contains(r#""bytes":null,"items":null,"stale":true"#),
+            "{j}"
+        );
+        assert!(
+            j.ends_with(r#""total":{"bytes":15,"items":3,"stale":true}}"#),
+            "{j}"
+        );
+        let fresh = totals_json(&rows[..1]);
+        assert!(fresh.ends_with(r#""stale":false}}"#), "{fresh}");
+    }
 
     #[test]
     fn change_shows_the_growth_or_drop_from_the_line_before() {

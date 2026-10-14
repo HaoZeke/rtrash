@@ -97,6 +97,8 @@ trash_stats_opts=(
   '*--trash-dir=[only this trash directory]:dir:_files -/'
   '--history[also show each trash history]'
   '--since=[with --history, only lines from the last AGE]:age:'
+  '--total[only size and items, from the stored running total]'
+  '--measure[with --total, measure a trash whose total is missing or stale]'
   '--json[print a JSON object]'
   '--help[display help]'
   '--version[display version]'

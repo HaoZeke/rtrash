@@ -3846,6 +3846,46 @@ fn put_keeps_a_running_trash_total_that_matches_a_full_count() {
     assert_eq!(stored(), (stats_bytes(), 4));
 }
 
+/// `rm` keeps a current total current, and `trash-stats --total` reads
+/// it without a walk; `--measure` stores one where none is current.
+#[cfg(unix)]
+#[test]
+fn rm_carries_the_total_and_trash_stats_total_reads_it() {
+    let sb = Sandbox::new("total-rm");
+    let run = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .env_remove("RTRASH_WARN_SIZE")
+            .env_remove("RTRASH_MAX_SIZE")
+            .output()
+            .unwrap()
+    };
+    let total = || stdout_of(&run(&["trash-stats", "--home-only", "--total", "--json"]));
+    let a = write_at(&sb.root, "work/a.bin", &"a".repeat(50_000));
+    let tree = write_at(&sb.root, "work/tree/x/y.txt", &"y".repeat(9_000));
+    for p in [a, tree.parent().unwrap().parent().unwrap().to_path_buf()] {
+        let out = run(&["put", "-r", p.to_str().unwrap()]);
+        assert!(out.status.success(), "{}", stderr_of(&out));
+    }
+    let out = run(&["rm", "--home-only", "a.bin"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let carried = total();
+    assert!(carried.contains(r#""items":1,"stale":false"#), "{carried}");
+    // A fresh measure agrees with the carried total.
+    fs::remove_file(sb.root.join("xdg/Trash/rtrash-total")).unwrap();
+    assert!(total().contains(r#""bytes":null"#), "{}", total());
+    let out = run(&[
+        "trash-stats",
+        "--home-only",
+        "--total",
+        "--measure",
+        "--json",
+    ]);
+    assert_eq!(stdout_of(&out), carried);
+}
 #[test]
 #[cfg(unix)]
 fn empty_restore_and_prune_keep_the_running_trash_total_current() {
