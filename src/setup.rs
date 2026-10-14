@@ -5,17 +5,13 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
-const BASH_COMPLETION: &str = include_str!("../completions/rtrash.bash");
-const ZSH_COMPLETION: &str = include_str!("../completions/_rtrash");
-const FISH_COMPLETION: &str = include_str!("../completions/rtrash.fish");
-const NU_COMPLETION: &str = include_str!("../completions/rtrash.nu");
-const POWERSHELL_COMPLETION: &str = include_str!("../completions/rtrash.ps1");
-const ELVISH_COMPLETION: &str = include_str!("../completions/rtrash.elv");
-const MAN_PAGE: &str = include_str!("../man/rtrash.1");
+use crate::shell_assets::{
+    BASH_COMPLETION, ELVISH_COMPLETION, FISH_COMPLETION, MAN_PAGE, NU_COMPLETION, ZSH_COMPLETION,
+};
 const MC_MENU: &str = include_str!("../contrib/mc/menu.rtrash");
 
 const MULTICALL: &[&str] = &[
@@ -512,61 +508,11 @@ fn fish_completions_dir(prefix: &Path) -> PathBuf {
 }
 
 fn run_completions(args: &[String]) -> i32 {
-    match args.first().map(String::as_str) {
-        Some("-h" | "--help") | None => {
-            eprint!("{HELP}");
-            i32::from(args.is_empty())
-        }
-        Some("bash") => {
-            print!("{BASH_COMPLETION}");
-            0
-        }
-        Some("zsh") => {
-            print!("{ZSH_COMPLETION}");
-            0
-        }
-        Some("fish") => {
-            print!("{FISH_COMPLETION}");
-            0
-        }
-        Some("nu") => {
-            print!("{NU_COMPLETION}");
-            0
-        }
-        Some("powershell" | "pwsh") => {
-            print!("{POWERSHELL_COMPLETION}");
-            0
-        }
-        Some("elvish") => {
-            print!("{ELVISH_COMPLETION}");
-            0
-        }
-        Some(other) => {
-            eprintln!("rtrash completions: unknown shell '{other}' (want bash, zsh, fish, nu, powershell or elvish)");
-            2
-        }
-    }
+    crate::shell_assets::run_completions(args, HELP)
 }
 
 fn run_man(args: &[String]) -> i32 {
-    match args.first().map(String::as_str) {
-        Some("-h" | "--help") => {
-            print!("{HELP}");
-            0
-        }
-        Some(other) => {
-            eprintln!("rtrash man: unexpected argument '{other}'");
-            2
-        }
-        None => {
-            let mut out = io::stdout().lock();
-            if let Err(e) = out.write_all(MAN_PAGE.as_bytes()) {
-                eprintln!("rtrash man: {e}");
-                return 1;
-            }
-            0
-        }
-    }
+    crate::shell_assets::run_man(args, HELP)
 }
 
 /// Dispatch `setup` / `completions` / `man` subcommands.

@@ -58,6 +58,7 @@ pub mod rm;
 pub mod safety;
 #[cfg(unix)]
 pub mod setup;
+pub mod shell_assets;
 pub mod space;
 #[cfg(unix)]
 pub mod status;
@@ -128,8 +129,21 @@ pub mod rm {
 }
 #[cfg(windows)]
 pub mod setup {
+    const HELP: &str = "\
+Usage: rtrash completions {bash|zsh|fish|nu|powershell|elvish}
+       rtrash man
+
+completions: print the embedded completion script for that shell
+  (powershell, also pwsh, is the one for Windows).
+man: print the embedded man(1) page.
+";
+
     pub fn run(prog: &str, args: &[String]) -> i32 {
-        crate::win_recycle::setup_run(prog, args)
+        match prog {
+            "completions" => crate::shell_assets::run_completions(args, HELP),
+            "man" => crate::shell_assets::run_man(args, HELP),
+            _ => crate::win_recycle::setup_run(prog, args),
+        }
     }
 }
 #[cfg(windows)]

@@ -1,0 +1,1 @@
+On Windows, `rtrash completions SHELL` and `rtrash man` now print the embedded scripts and man page; before, they fell through to the setup note, so the PowerShell completer could not be loaded there.
