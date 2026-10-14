@@ -154,3 +154,40 @@ fn reap_shared_frees_little_for_a_reflink_copy() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(dir.with_extension("home"));
 }
+
+#[test]
+fn dupes_credit_a_reflink_copy_with_nothing_freed() {
+    let Some(dir) = cloned_pair("dupes") else {
+        eprintln!("RTRASH_REFLINK_DIR unset; skipping");
+        return;
+    };
+    let ok = Command::new("cp")
+        .arg("--reflink=never")
+        .arg(dir.join("a.bin"))
+        .arg(dir.join("copy.bin"))
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    // a.bin is the oldest, so it stays.
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    fs::File::options()
+        .write(true)
+        .open(dir.join("a.bin"))
+        .unwrap()
+        .set_modified(day_ago)
+        .unwrap();
+    let mib2 = 2u64 << 20;
+    let json = run(&dir, &["du", "--dupes", "--json", "."]);
+    assert!(json.contains("\"keep\":\"./a.bin\""), "{json}");
+    assert!(
+        json.contains("clone.bin") && json.contains("copy.bin"),
+        "{json}"
+    );
+    assert_eq!(num(&json, "\"total\"", "extras"), 2, "{json}");
+    // Only the plain copy owns its blocks; trashing the clone frees little.
+    let reclaim = num(&json, "\"total\"", "reclaim");
+    assert!(reclaim >= mib2 * 3 / 4 && reclaim < mib2 * 5 / 4, "{json}");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(dir.with_extension("home"));
+}

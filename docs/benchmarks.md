@@ -179,3 +179,9 @@ The file creation slowed as the directory grew on this host, so the run stopped 
 `rtrash du` reports 882.3 MiB on disk, the same as `du -sB1`; dua leaves out the directory's own blocks (878.84 MiB).
 The older dua 2.32.0 took 78.8 s on the same directory.
 The wide directory takes the parallel stat path of `rtrash du` (above 256 entries, in chunks of 64).
+
+### Duplicate finder (2026-10-14)
+
+`rtrash du --dupes --json ~/.cargo/registry` over 76,074 files, warm page cache, 8 cores, six runs: 0.25 to 0.29 s (median 0.26 s).
+It finds 8,627 groups with 18,160 extra copies and 158 MiB to free.
+Trash directories are skipped, which costs one lstat per directory when a home trash exists.
