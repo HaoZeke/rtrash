@@ -58,3 +58,19 @@ Reproduce:
 cargo build --release
 benches/compare_du.sh target/release/rtrash /path/to/tree ~/.cargo/registry/src
 #+end_src
+
+** One wide directory (2026-10-14)
+
+A single directory with 224,985 files of 100 bytes each and no
+subdirectories, warm page cache, same host, =hyperfine -N --warmup 1
+--runs 5=. The file creation slowed as the directory grew on this host,
+so the run stopped short of the planned million entries.
+
+| rtrash du | dua 2.45.1 aggregate | gdu 5.38.0 -n -p | GNU du -s |
+|-----------+----------------------+------------------+-----------|
+| 70.4 ms   | 1.233 s              | 542.7 ms         | 236.6 ms  |
+
+=rtrash du= reports 882.3 MiB on disk, the same as =du -sB1=; dua leaves
+out the directory's own blocks (878.84 MiB). The older dua 2.32.0 took
+78.8 s on the same directory. The wide directory takes the parallel stat
+path of =rtrash du= (above 256 entries, in chunks of 64).

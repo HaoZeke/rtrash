@@ -163,3 +163,16 @@ Cold or warm, with 24 threads or the default, the totals still match coreutils `
 All four agree on the synthetic tree's disk use (1.31 GiB). More dua threads (`-t 8`, `-t 24`) and `gdu -m 8` did not change their times. Memory: rtrash 5 MiB, dua 4 MiB, gdu 26 to 41 MiB, du 2 MiB. A cold cache was not measured (no root on the build host to drop caches).
 
 Reproduce: `cargo build --release && benches/compare_du.sh target/release/rtrash /path/to/tree ~/.cargo/registry/src`
+
+### One wide directory (2026-10-14)
+
+A single directory with 224,985 files of 100 bytes each and no subdirectories, warm page cache, same host, `hyperfine -N --warmup 1 --runs 5`.
+The file creation slowed as the directory grew on this host, so the run stopped short of the planned million entries.
+
+| rtrash du | dua 2.45.1 aggregate | gdu 5.38.0 -n -p | GNU du -s |
+|---:|---:|---:|---:|
+| 70.4 ms ± 5.3 | 1.233 s ± 0.019 | 542.7 ms ± 16.2 | 236.6 ms ± 5.8 |
+
+`rtrash du` reports 882.3 MiB on disk, the same as `du -sB1`; dua leaves out the directory's own blocks (878.84 MiB).
+The older dua 2.32.0 took 78.8 s on the same directory.
+The wide directory takes the parallel stat path of `rtrash du` (above 256 entries, in chunks of 64).
