@@ -158,3 +158,37 @@ fn status_and_devices_list_the_mounted_volume() {
     assert!(json.contains(&format!("\"mount\":\"{escaped}")), "{json:?}");
     assert!(json.contains("\"device\":\"rtrashmnt\""), "{json:?}");
 }
+
+/// `put -v` names the Recycle Bin of the mounted volume, and the plain
+/// status gives that volume a line of its own with the item in it.
+#[test]
+fn put_names_the_mounted_bin_and_status_counts_it() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let label = m.to_string_lossy().trim_end_matches('\\').to_lowercase();
+    let f = m.join(format!("rtrash-where-{}.txt", std::process::id()));
+    fs::write(&f, "x").unwrap();
+    let out = Command::new(bin())
+        .args(["put", "-v"])
+        .arg(&f)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains(&format!("(recycle bin of {label}")),
+        "{said:?}"
+    );
+    let status = Command::new(bin()).arg("status").output().unwrap();
+    let text = String::from_utf8_lossy(&status.stdout).to_lowercase();
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with(&format!("{label}\\\t")) || l.starts_with(&format!("{label}\t"))),
+        "{text:?}"
+    );
+}

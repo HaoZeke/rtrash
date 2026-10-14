@@ -1314,8 +1314,9 @@ Without PATH, print a numbered list and read an index from stdin.
                     "\
 Usage: {prog} [OPTION]...
 Summarize the Windows Recycle Bin: items, size, and the cap of each
-drive (MaxCapacity in the registry), then the total and the free
-space on each drive (a warning under 10% free).
+drive and each volume mounted on a folder (MaxCapacity in the
+registry), then the total and the free space on each (a warning under
+10% free).
 
       --older-than=DAYS only count items deleted more than DAYS days ago
       --newer-than=DAYS only count items deleted within the last DAYS days
@@ -1346,10 +1347,11 @@ space on each drive (a warning under 10% free).
         if filters.is_set() {
             return filtered_status(prog, &filters);
         }
-        // One line per drive with a bin or a cap, like the per-trash lines
-        // of the FreeDesktop status, then the total.
+        // One line per volume with a bin or a cap, like the per-trash lines
+        // of the FreeDesktop status, then the total. A volume mounted on a
+        // folder keeps a Recycle Bin of its own, so it gets a line too.
         let (mut items, mut bytes) = (0u64, 0u64);
-        for root in bin_drives() {
+        for root in crate::trash_history::bin_roots() {
             let Some((n, b)) = query_bin(&root) else {
                 continue;
             };
