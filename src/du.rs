@@ -121,7 +121,7 @@ directories appear as one `trash` row and are never printed by --print0.
       --trash-dupes     trash every copy but the kept one in each group
       --clone-dupes     replace every copy but the kept one with a reflink
                           clone of it, keeping its mode, owner and times
-                          (btrfs, XFS, APFS; Linux and macOS)
+                          (btrfs, XFS, APFS, ReFS)
       --link-dupes      replace every copy but the kept one with a hard
                           link to it (same device only)
       --min-size=SIZE   with --dupes, skip files smaller than SIZE

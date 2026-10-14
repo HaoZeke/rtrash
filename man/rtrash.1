@@ -1119,10 +1119,12 @@ Like \fB\-\-dupes\fR, then trash every extra copy.
 .TP
 .B \-\-clone\-dupes
 Like \fB\-\-link\-dupes\fR, but each extra becomes a reflink clone of the
-kept file (\fBFICLONE\fR on Linux, \fBclonefile\fR(2) on macOS): a file of its
+kept file (\fBFICLONE\fR on Linux, \fBclonefile\fR(2) on macOS,
+\fBFSCTL_DUPLICATE_EXTENTS_TO_FILE\fR on Windows): a file of its
 own that shares the kept file's extents until either is written, and keeps
 the extra's mode, times and (as root) owner.
-It needs a file system that shares extents, such as btrfs, XFS or APFS;
+It needs a file system that shares extents, such as btrfs, XFS, APFS or ReFS
+(including a Windows Dev Drive);
 elsewhere every name is left alone with a note, and the exit status is 1.
 .TP
 .B \-\-link\-dupes

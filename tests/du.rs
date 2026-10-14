@@ -1901,6 +1901,34 @@ fn link_dupes_turns_copies_into_hard_links_of_the_kept_file() {
     }
 }
 
+/// On NTFS the Windows clone fails, says why and leaves the copy; on ReFS
+/// (a Dev Drive) it shares the clusters and the copy still reads the same.
+#[cfg(windows)]
+#[test]
+fn clone_dupes_on_windows_clone_on_refs_and_say_why_elsewhere() {
+    let t = Tree::new("dupes-clone-win");
+    let old = t.file("keep/a.bin", 50_000);
+    let copy = t.file("x/a-copy.bin", 50_000);
+    let f = fs::File::options().write(true).open(&old).unwrap();
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    f.set_modified(day_ago).unwrap();
+    drop(f);
+    let before = fs::read(&copy).unwrap();
+    let out = t.du(&["--dupes", "--clone-dupes", "--min-size=1k"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    match out.status.code() {
+        Some(0) => assert_eq!(fs::read(&copy).unwrap(), before),
+        Some(1) => assert!(
+            err.contains("not cloned") && err.contains("no reflink support"),
+            "{err}"
+        ),
+        c => panic!("exit {c:?}: {err}"),
+    }
+    assert!(copy.exists());
+    let names: Vec<_> = fs::read_dir(t.root.join("x")).unwrap().flatten().collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+}
+
 /// Without reflink support the clone fails, says why and leaves the copy.
 /// The box and CI home directories sit on ext4 or tmpfs, which cannot share
 /// extents; tests/reflink_fs.rs covers the case where it works.

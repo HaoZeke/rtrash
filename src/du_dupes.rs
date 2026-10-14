@@ -458,7 +458,141 @@ fn clone_file(from: &Path, to: &Path) -> std::io::Result<()> {
     Err(clone_error(std::io::Error::last_os_error()))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+/// ReFS block cloning: copy the integrity setting and sparseness, size the
+/// new file, then map the source clusters into it with
+/// `FSCTL_DUPLICATE_EXTENTS_TO_FILE`, one gigabyte per call.
+#[cfg(windows)]
+fn clone_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Ioctl::{
+        DUPLICATE_EXTENTS_DATA, FSCTL_DUPLICATE_EXTENTS_TO_FILE, FSCTL_GET_INTEGRITY_INFORMATION,
+        FSCTL_GET_INTEGRITY_INFORMATION_BUFFER, FSCTL_SET_INTEGRITY_INFORMATION,
+        FSCTL_SET_INTEGRITY_INFORMATION_BUFFER, FSCTL_SET_SPARSE,
+    };
+    const SPARSE: u32 = 0x200;
+    const CHUNK: u64 = 1 << 30;
+    let src = fs::File::open(from)?;
+    let meta = src.metadata()?;
+    let dst = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    let run = || -> std::io::Result<()> {
+        // SAFETY: a plain C struct; all zero is a valid value.
+        let mut info: FSCTL_GET_INTEGRITY_INFORMATION_BUFFER = unsafe { std::mem::zeroed() };
+        fsctl(
+            &src,
+            FSCTL_GET_INTEGRITY_INFORMATION,
+            &[],
+            as_bytes_mut(&mut info),
+        )?;
+        if meta.file_attributes() & SPARSE != 0 {
+            fsctl(&dst, FSCTL_SET_SPARSE, &[], &mut [])?;
+        }
+        let set = FSCTL_SET_INTEGRITY_INFORMATION_BUFFER {
+            ChecksumAlgorithm: info.ChecksumAlgorithm,
+            Reserved: 0,
+            Flags: info.Flags,
+        };
+        fsctl(
+            &dst,
+            FSCTL_SET_INTEGRITY_INFORMATION,
+            as_bytes(&set),
+            &mut [],
+        )?;
+        dst.set_len(meta.len())?;
+        // The last range may run past the end up to a whole cluster.
+        let cluster = u64::from(info.ClusterSizeInBytes.max(1));
+        let total = meta.len().div_ceil(cluster) * cluster;
+        let mut off = 0;
+        while off < total {
+            let n = CHUNK.min(total - off);
+            let d = DUPLICATE_EXTENTS_DATA {
+                FileHandle: src.as_raw_handle(),
+                SourceFileOffset: off as i64,
+                TargetFileOffset: off as i64,
+                ByteCount: n as i64,
+            };
+            fsctl(&dst, FSCTL_DUPLICATE_EXTENTS_TO_FILE, as_bytes(&d), &mut [])?;
+            off += n;
+        }
+        Ok(())
+    };
+    if let Err(e) = run() {
+        drop(dst);
+        let _ = fs::remove_file(to);
+        return Err(clone_error(e));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn as_bytes<T>(v: &T) -> &[u8] {
+    // SAFETY: reads the bytes of a plain C struct for the ioctl.
+    unsafe { std::slice::from_raw_parts((v as *const T).cast(), std::mem::size_of::<T>()) }
+}
+
+#[cfg(windows)]
+fn as_bytes_mut<T>(v: &mut T) -> &mut [u8] {
+    // SAFETY: the ioctl fills a plain C struct whose every bit pattern is valid.
+    unsafe { std::slice::from_raw_parts_mut((v as *mut T).cast(), std::mem::size_of::<T>()) }
+}
+
+#[cfg(windows)]
+fn fsctl(f: &fs::File, code: u32, input: &[u8], out: &mut [u8]) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    let mut got = 0u32;
+    let ptr = |b: &[u8]| {
+        if b.is_empty() {
+            std::ptr::null()
+        } else {
+            b.as_ptr().cast()
+        }
+    };
+    let out_ptr = if out.is_empty() {
+        std::ptr::null_mut()
+    } else {
+        out.as_mut_ptr().cast()
+    };
+    // SAFETY: the handle is open and both buffers outlive the call.
+    let ok = unsafe {
+        windows_sys::Win32::System::IO::DeviceIoControl(
+            f.as_raw_handle(),
+            code,
+            ptr(input),
+            input.len() as u32,
+            out_ptr,
+            out.len() as u32,
+            &mut got,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn clone_error(e: std::io::Error) -> std::io::Error {
+    // Invalid function, not same device, not supported: NTFS, FAT, a
+    // network share, or two volumes.
+    match e.raw_os_error() {
+        Some(1 | 17 | 50) => {
+            std::io::Error::other("the file system cannot share extents (no reflink support)")
+        }
+        _ => e,
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+)))]
 fn clone_file(_from: &Path, _to: &Path) -> std::io::Result<()> {
     Err(std::io::Error::other(
         "reflink clones are not supported on this platform",
@@ -492,9 +626,19 @@ fn keep_metadata(from: &Path, to: &Path) -> std::io::Result<()> {
     )
 }
 
+/// The read-only bit and times of `from` on the clone `to`.
 #[cfg(not(unix))]
-fn keep_metadata(_from: &Path, _to: &Path) -> std::io::Result<()> {
-    Ok(())
+fn keep_metadata(from: &Path, to: &Path) -> std::io::Result<()> {
+    let m = fs::symlink_metadata(from)?;
+    {
+        let f = fs::File::options().write(true).open(to)?;
+        f.set_times(
+            fs::FileTimes::new()
+                .set_accessed(m.accessed()?)
+                .set_modified(m.modified()?),
+        )?;
+    }
+    fs::set_permissions(to, m.permissions())
 }
 
 pub fn print_text(groups: &[Group], top: usize) {
