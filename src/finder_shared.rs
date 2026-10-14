@@ -73,6 +73,19 @@ pub fn nfc_path(p: &Path) -> PathBuf {
     }
 }
 
+/// The entry of `dir` named `name`, or failing that the one whose
+/// composed (NFC) form matches; None when neither is there.
+pub fn resolve_name(dir: &Path, name: &str) -> Option<String> {
+    if dir.join(name).symlink_metadata().is_ok() {
+        return Some(name.to_string());
+    }
+    let want = nfc(name);
+    fs::read_dir(dir).ok()?.flatten().find_map(|d| {
+        let n = d.file_name().into_string().ok()?;
+        (nfc(&n) == want).then_some(n)
+    })
+}
+
 /// Whether `a` and `b` name the same path once both are in NFC.
 pub fn same_path(a: &Path, b: &Path) -> bool {
     a == b || nfc_path(a) == nfc_path(b)
@@ -243,9 +256,12 @@ pub fn log_batch(batch: &str, items: &[(String, PathBuf, PathBuf)]) {
 /// Put runs whose items still sit in the trash, newest first.
 fn runs() -> Vec<(String, Vec<Logged>)> {
     let mut by: Vec<(String, Vec<Logged>)> = Vec::new();
-    for l in read_log() {
-        if l.trash.join(&l.name).symlink_metadata().is_err() {
-            continue;
+    for mut l in read_log() {
+        // Finder may store the name in another Unicode form than the one
+        // put logged; find it by its composed form.
+        match resolve_name(&l.trash, &l.name) {
+            Some(n) => l.name = n,
+            None => continue,
         }
         match by.iter_mut().find(|(b, _)| *b == l.batch) {
             Some((_, v)) => v.push(l),

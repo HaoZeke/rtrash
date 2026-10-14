@@ -46,6 +46,8 @@ Until Finder writes its Put Back record, list and restore take the
 location from rtrash's own put log.
 Names and patterns match in Unicode NFC, so a name Finder keeps
 decomposed matches the composed spelling typed at the prompt.
+The same holds for restore's \-\-name, \-\-glob and \-\-regex on any trash,
+and undo finds a put whose name Finder stored in another form.
 Age filters count from the time an item went into the trash (its change
 time there) and size filters from its disk usage, for list, status and
 rm; restore takes

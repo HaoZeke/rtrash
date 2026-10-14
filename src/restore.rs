@@ -111,6 +111,10 @@ impl Matcher {
     /// The same test for an item known by its original path and its name
     /// in the trash (a Finder Trash item).
     pub(crate) fn matches_parts(&self, original: &Path, name: &str) -> bool {
+        // Patterns were made composed (NFC) when parsed; compare the same
+        // form of the path and name.
+        let original = &crate::finder_shared::nfc_path(original);
+        let name = &crate::finder_shared::nfc(name);
         match self {
             Matcher::Name(n) => name_matches_parts(original, name, n),
             Matcher::Glob(p) => glob_matches_parts(original, name, p),
@@ -119,13 +123,7 @@ impl Matcher {
     }
 
     fn matches(&self, e: &list::Entry) -> bool {
-        match self {
-            Matcher::Name(n) => name_matches(e, n),
-            Matcher::Glob(p) => glob_matches(e, p),
-            Matcher::Regex(re) => {
-                re.is_match(&crate::util::str_from_os_ref(e.original.as_os_str()))
-            }
-        }
+        self.matches_parts(&e.original, &e.name)
     }
 }
 
@@ -205,7 +203,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                     eprintln!("{prog}: --name needs a non-empty NAME");
                     return 2;
                 }
-                if !set_matcher(Matcher::Name(n.to_string())) {
+                if !set_matcher(Matcher::Name(crate::finder_shared::nfc(n))) {
                     return 2;
                 }
             }
@@ -215,13 +213,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                     eprintln!("{prog}: --glob needs a non-empty PATTERN");
                     return 2;
                 }
-                if !set_matcher(Matcher::Glob(g.to_string())) {
+                if !set_matcher(Matcher::Glob(crate::finder_shared::nfc(g))) {
                     return 2;
                 }
             }
             a if a.starts_with("--regex=") => {
                 let r = &a["--regex=".len()..];
-                match regex_lite::Regex::new(r) {
+                match regex_lite::Regex::new(&crate::finder_shared::nfc(r)) {
                     Ok(re) => {
                         if !set_matcher(Matcher::Regex(re)) {
                             return 2;
@@ -568,10 +566,6 @@ pub fn parse_selection(line: &str, len: usize) -> Result<Vec<usize>, String> {
 
 /// Shell-pattern match: against the original path when the pattern names a
 /// directory part, else against the file name or the trash name.
-fn glob_matches(e: &list::Entry, pat: &str) -> bool {
-    glob_matches_parts(&e.original, &e.name, pat)
-}
-
 fn glob_matches_parts(original: &Path, name: &str, pat: &str) -> bool {
     if pat.contains('/') {
         return crate::util::fnmatch(pat, &crate::util::str_from_os_ref(original.as_os_str()));
@@ -584,10 +578,6 @@ fn glob_matches_parts(original: &Path, name: &str, pat: &str) -> bool {
 
 /// Whether `e` goes by `name`: its original file name or its name under
 /// `files/` in the trash.
-fn name_matches(e: &list::Entry, name: &str) -> bool {
-    name_matches_parts(&e.original, &e.name, name)
-}
-
 fn name_matches_parts(original: &Path, trash_name: &str, name: &str) -> bool {
     trash_name == name
         || original
@@ -937,10 +927,10 @@ mod tests {
     fn name_matches_file_name_or_trash_name() {
         let mut e = entry("/home/u/report.pdf", 1);
         e.name = "report.2.pdf".into();
-        assert!(name_matches(&e, "report.pdf"));
-        assert!(name_matches(&e, "report.2.pdf"));
-        assert!(!name_matches(&e, "report"));
-        assert!(!name_matches(&e, "u/report.pdf"));
+        assert!(Matcher::Name(crate::finder_shared::nfc("report.pdf")).matches(&e));
+        assert!(Matcher::Name(crate::finder_shared::nfc("report.2.pdf")).matches(&e));
+        assert!(!Matcher::Name(crate::finder_shared::nfc("report")).matches(&e));
+        assert!(!Matcher::Name(crate::finder_shared::nfc("u/report.pdf")).matches(&e));
     }
 
     #[test]
@@ -971,10 +961,26 @@ mod tests {
     #[test]
     fn glob_matches_path_with_a_slash_else_the_name() {
         let e = entry("/home/u/src/main.rs", 1);
-        assert!(glob_matches(&e, "*.rs"));
-        assert!(glob_matches(&e, "/home/*/src/*"));
-        assert!(!glob_matches(&e, "src/*"));
-        assert!(!glob_matches(&e, "*.txt"));
+        assert!(Matcher::Glob(crate::finder_shared::nfc("*.rs")).matches(&e));
+        assert!(Matcher::Glob(crate::finder_shared::nfc("/home/*/src/*")).matches(&e));
+        assert!(!Matcher::Glob(crate::finder_shared::nfc("src/*")).matches(&e));
+        assert!(!Matcher::Glob(crate::finder_shared::nfc("*.txt")).matches(&e));
+    }
+
+    #[test]
+    fn matchers_ignore_unicode_normalization() {
+        let nfd = entry("/home/u/ne\u{301}e.txt", 1);
+        let nfc = entry("/home/u/n\u{e9}e.txt", 1);
+        for pat in ["n\u{e9}*", "ne\u{301}*"] {
+            let g = Matcher::Glob(crate::finder_shared::nfc(pat));
+            assert!(g.matches(&nfd) && g.matches(&nfc), "{pat}");
+            let re =
+                regex_lite::Regex::new(&crate::finder_shared::nfc(&format!("/{pat}"))).unwrap();
+            let r = Matcher::Regex(re);
+            assert!(r.matches(&nfd) && r.matches(&nfc), "{pat}");
+        }
+        let n = Matcher::Name(crate::finder_shared::nfc("ne\u{301}e.txt"));
+        assert!(n.matches(&nfc));
     }
 
     #[test]

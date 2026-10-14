@@ -698,3 +698,17 @@ fn list_and_restore_use_the_put_log_before_finder_writes_ds_store() {
     assert!(o.status.success(), "{}", err(&o));
     assert_eq!(fs::read(&f).unwrap(), b"payload");
 }
+
+#[test]
+fn undo_finds_a_name_finder_stored_decomposed() {
+    let b = Box_::new("nfcundo");
+    let nfc = "n\u{e9}e.txt";
+    let f = b.work().join(nfc);
+    fs::write(&f, b"x").unwrap();
+    assert!(b.run(&["put", nfc], "").status.success());
+    // Finder keeps the name decomposed; the log has it composed.
+    fs::rename(b.finder().join(nfc), b.finder().join("ne\u{301}e.txt")).unwrap();
+    let o = b.run(&["undo"], "");
+    assert!(o.status.success(), "{}{}", out(&o), err(&o));
+    assert_eq!(fs::read(&f).unwrap(), b"x");
+}

@@ -71,7 +71,7 @@ listing, and the restore conflict policies (=--conflict=rename|skip=).
 | Symbolic links                         | move in as themselves, without Put Back         | follows |
 | Volume trash =/Volumes/X/.Trashes/UID= | plain commands, as Finder; put there for items on the drive | yes |
 | Permanent delete (=rm PATTERN=)        | Finder trashes, by Put Back path or name        | no      |
-| Composed vs decomposed names (NFC/NFD) | match alike in list, restore and rm             | n/a     |
+| Composed vs decomposed names (NFC/NFD) | match alike in list, restore, rm and undo; restore --name/--glob/--regex on every trash | n/a |
 
 Age filters count from the move into the trash and size filters from
 disk usage; restore takes =--name=, =--glob=, =--regex=, =--latest= and
