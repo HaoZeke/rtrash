@@ -187,6 +187,18 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut removed = 0u64;
     let mut bytes = 0u64;
     let mut matched_paths: Vec<String> = Vec::new();
+    // Sizes come from each trash's directorysizes cache where it is
+    // valid, so a dry run over big trashed trees does not walk them all.
+    let sizes: Vec<trashdir::DirSizes> = dirs.iter().map(trashdir::DirSizes::load).collect();
+    let size_of = |e: &list::Entry| -> u64 {
+        match dirs.iter().position(|d| d.root == e.dir.root) {
+            Some(i) => sizes[i].entry_bytes(&e.name),
+            None => {
+                crate::fastdelete::disk_usage(&crate::util::join_name(&e.dir.files(), &e.name))
+                    + crate::fastdelete::disk_usage(&crate::util::join_info(&e.dir.info(), &e.name))
+            }
+        }
+    };
 
     for entry in &entries {
         let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
@@ -205,8 +217,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
         let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
         let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
-        let sz =
-            crate::fastdelete::disk_usage(&payload) + crate::fastdelete::disk_usage(&info_path);
+        let sz = size_of(entry);
         if !size.keeps(sz) {
             continue;
         }
@@ -235,9 +246,21 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             status = 1;
             continue;
         }
+        // A total current before this item stays current after it: the
+        // item's size and its one count come off. An orphan has no
+        // .trashinfo and no count, so its total is measured again.
+        let carry = info_path
+            .exists()
+            .then(|| crate::trash_total::cached(&entry.dir))
+            .flatten()
+            .map(|(b, n)| (b.saturating_sub(sz), n.saturating_sub(1)));
         crate::trash_total::touched(&entry.dir);
         crate::trash_total::forget(&entry.dir);
-        if let Err(e) = std::fs::remove_file(&info_path) {
+        let info_gone = std::fs::remove_file(&info_path);
+        if let (Ok(()), Some((b, n))) = (&info_gone, carry) {
+            crate::trash_total::store(&entry.dir, b, n);
+        }
+        if let Err(e) = info_gone {
             if e.kind() != std::io::ErrorKind::NotFound {
                 eprintln!(
                     "{prog}: cannot remove '{}': {e}",
@@ -256,6 +279,9 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         removed += 1;
     }
 
+    for s in sizes {
+        s.write_back();
+    }
     if json {
         let mut out = String::from("{\n");
         out.push_str(&format!(
