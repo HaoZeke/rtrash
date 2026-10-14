@@ -2911,6 +2911,8 @@ Unset, it is 20% of the disk.
 The size comes from a running total kept in
 .I rtrash\-total
 in the trash root, so the check costs a file read.
+For the Finder Trash it adds what the put moved to the stored Finder
+total, and stays quiet until a total has been stored.
 It overrides
 .B policy.warn_size
 in the config file; an empty value turns it off, and

@@ -613,3 +613,35 @@ fn a_budget_trims_the_finder_trash_after_put_and_low_space_warns() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(err(&o).contains("is low ("), "{}", err(&o));
 }
+
+/// Past RTRASH_WARN_SIZE, a Finder put warns from the stored total plus
+/// what it moved; without a stored total it stays quiet rather than walk.
+#[test]
+fn a_finder_put_warns_past_the_warn_size() {
+    let b = Box_::new("warn-size");
+    let put = |name: &str, warn: &str| {
+        let p = b.work().join(name);
+        fs::write(&p, "z".repeat(20_000)).unwrap();
+        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            .arg("put")
+            .arg(&p)
+            .current_dir(b.work())
+            .env("HOME", &b.root)
+            .env("XDG_DATA_HOME", b.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", b.root.join(".config"))
+            .env("XDG_STATE_HOME", b.root.join("state"))
+            .env("RTRASH_MACOS_TRASH", "finder")
+            .env("RTRASH_OSASCRIPT", b.root.join("osascript"))
+            .env("RTRASH_WARN_SIZE", warn)
+            .env_remove("RTRASH_MAX_SIZE")
+            .output()
+            .unwrap()
+    };
+    let o = put("first.bin", "1K");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!err(&o).contains("past RTRASH_WARN_SIZE"), "{}", err(&o));
+    let o = put("second.bin", "1K");
+    assert!(err(&o).contains("past RTRASH_WARN_SIZE"), "{}", err(&o));
+    let o = put("third.bin", "1G");
+    assert!(!err(&o).contains("past"), "{}", err(&o));
+}

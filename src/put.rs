@@ -330,11 +330,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         crate::finder::prune_after_put(prog, &moved, opts.quiet || json);
         // A put into a Finder trash frees nothing on that disk either.
         if !(opts.quiet || json) {
+            warn_big_finder_trash(prog, &trashed);
             warn_low_space(prog, &trashed);
         }
     }
-    // The Finder Trash keeps no .trashinfo, so the size warning, which
-    // reads the FreeDesktop running total, skips it.
+    // The Finder Trash keeps no .trashinfo; its own branch above warns
+    // from the Finder total.
     if !trashed.is_empty() && !crate::finder::is_default(opts.trash_pin.is_some()) {
         prune_after_put(prog, &trashed, opts.quiet || json);
         if !(opts.quiet || json) {
@@ -486,6 +487,37 @@ fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
 /// Warn when a trash this run used sits on a file system under
 /// [`crate::space::WARN_FREE_PERCENT`] free, in bytes or inodes: a put
 /// there freed nothing, since the payload only moved.
+/// The size warning for the Finder trashes a put used: the stored total
+/// from before the put plus what this put moved. A trash without a stored
+/// total is skipped rather than walked, so a put stays cheap.
+fn warn_big_finder_trash(prog: &str, trashed: &[Trashed]) {
+    let Some((limit, src)) = warn_size(prog) else {
+        return;
+    };
+    let mut roots: Vec<PathBuf> = trashed.iter().map(|t| t.trash_dir.clone()).collect();
+    roots.sort();
+    roots.dedup();
+    for root in roots {
+        let Some((before, _)) = crate::finder_total::stored_total(&root) else {
+            continue;
+        };
+        let added: u64 = trashed
+            .iter()
+            .filter(|t| t.trash_dir == root)
+            .map(|t| crate::fastdelete::disk_usage(&root.join(&t.name)))
+            .sum();
+        let bytes = before.bytes.saturating_add(added);
+        let disk = crate::space::query(&root).map_or(0, |s| s.total);
+        if limit.exceeded(bytes, disk) {
+            eprintln!(
+                "{prog}: warning: trash '{}' holds about {}, past {src}; free it with `rtrash empty --until-free=10%` or `rtrash empty`",
+                root.display(),
+                crate::fastdelete::format_bytes(bytes)
+            );
+        }
+    }
+}
+
 fn warn_low_space(prog: &str, trashed: &[Trashed]) {
     let mut roots: Vec<PathBuf> = trashed.iter().map(|t| t.trash_dir.clone()).collect();
     roots.sort();
