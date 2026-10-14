@@ -837,6 +837,13 @@ pub fn wipe_children_parallel(dir: &Path) -> io::Result<Wipe> {
     wipe_children_except(dir, |_| false)
 }
 
+/// Test seam, in debug builds only: a wipe refuses to remove the child
+/// named `RTRASH_TEST_FAIL_DELETE`, so a test can make a full empty fail
+/// partway as an undeletable payload would.
+fn test_fails(name: &OsStr) -> bool {
+    cfg!(debug_assertions) && std::env::var_os("RTRASH_TEST_FAIL_DELETE").is_some_and(|n| n == name)
+}
+
 /// [`wipe_children_parallel`], leaving the children `keep` names.
 pub fn wipe_children_except(dir: &Path, keep: impl Fn(&OsStr) -> bool + Sync) -> io::Result<Wipe> {
     let dir_c = cstring_path(dir)?;
@@ -862,7 +869,15 @@ pub fn wipe_children_except(dir: &Path, keep: impl Fn(&OsStr) -> bool + Sync) ->
     // Always parallelise top-level wipe (full empty of files/ or info/).
     let results: Vec<io::Result<()>> = entries
         .par_iter()
-        .map(|e| remove_entry(fd.as_raw_fd(), dir, e, 0))
+        .map(|e| {
+            if test_fails(&e.name) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "refused by RTRASH_TEST_FAIL_DELETE",
+                ));
+            }
+            remove_entry(fd.as_raw_fd(), dir, e, 0)
+        })
         .collect();
     let mut out = Wipe::default();
     for (e, r) in entries.into_iter().zip(results) {

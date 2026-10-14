@@ -4456,4 +4456,23 @@ fn history_counts_stay_right_when_every_change_shares_a_clock_tick() {
     assert_eq!(last_items(), 1, "empty by age");
     let json = stdout_of(&run(&["trash-stats", "--home-only", "--json"]));
     assert!(json.contains(r#""items":1,"#), "{json}");
+    // A full empty that fails partway: the seam keeps e, the rest goes,
+    // and the history counts the one item left.
+    let e = file("e");
+    assert!(run(&["put", e.to_str().unwrap()]).status.success());
+    assert_eq!(last_items(), 2, "put e");
+    let out = Command::new(bin())
+        .args(["empty", "--home-only"])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .env("RTRASH_TEST_STAMP_TICK", "1000000000000000")
+        .env("RTRASH_TEST_FAIL_DELETE", "e")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "the seam did not refuse e");
+    assert!(sb.trash().join("info/e.trashinfo").exists());
+    assert!(!sb.trash().join("info/a.trashinfo").exists());
+    assert_eq!(last_items(), 1, "failed full empty");
 }
