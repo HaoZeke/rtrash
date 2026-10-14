@@ -29,7 +29,9 @@ put_opts=(
 empty_opts=(
   '(-n --dry-run)'{-n,--dry-run}'[report what would be removed; show reclaimable size]'
   '(-v --verbose)'{-v,--verbose}'[print each removed item]'
-  '(-f --force)'{-f,--force}'[accepted for trash-cli compatibility]'
+  '(-f --force)'{-f,--force}'[do not ask]'
+  '(-i --interactive)'{-i,--interactive}'[ask before emptying]'
+  '--all-users[empty every writable user trash]'
   '*--trash-dir=[empty only this trash directory]:path:_files -/'
   '--home-only[only the home trash]'
   '--older-than=[only items trashed more than AGE ago (DAYS, 2h, 1d12h)]:age:'
@@ -55,6 +57,8 @@ list_opts=(
   '--sort=[row order]:key:(date size name path)'
   '--reverse[reverse the order]'
   '--all-users[list every readable user trash with an owner column]'
+  '--volumes[print the mount points searched and exit]'
+  '--trash-dirs[print the trash directories read and exit]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
 )

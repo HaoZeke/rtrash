@@ -11,6 +11,7 @@ pub mod platform;
 pub mod util;
 pub mod win_recycle;
 
+pub mod compat;
 pub mod config;
 pub mod ds_store;
 pub mod du;

@@ -15,6 +15,9 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
                      default is the home trash plus every mounted volume
       --all-users       list every user's trash this account can read
                      (root reads all) and add an OWNER column; read-only
+                     (as trash-list, no OWNER column, as trash-cli)
+      --volumes         print the mount points searched for trash and exit
+      --trash-dirs      print the trash directories read and exit
       --older-than=AGE  only items trashed more than AGE ago; AGE is DAYS
                      or a duration such as 2h, 30m or 1d12h
       --newer-than=AGE  only items trashed within the last AGE
@@ -202,6 +205,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut home_only = false;
     let mut all_users = false;
     let mut json = false;
+    let mut volumes = false;
+    let mut show_dirs = false;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
     // Defaults from the config file; options override them.
@@ -237,6 +242,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--home-only" => home_only = true,
             "--all-users" => all_users = true,
             "--json" => json = true,
+            "--volumes" => volumes = true,
+            "--trash-dirs" => show_dirs = true,
             "--size" => with_size = true,
             "--reverse" => reverse = true,
             a if a.starts_with("--sort=") => match SortKey::parse(&a["--sort=".len()..]) {
@@ -319,6 +326,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: no valid --trash-dir pins");
         return 2;
     }
+    // trash-cli's --volumes and --trash-dirs print the places looked at.
+    if volumes || show_dirs {
+        if volumes {
+            for m in trashdir::mount_points() {
+                println!("{}", m.display());
+            }
+        }
+        if show_dirs {
+            for d in &dirs {
+                println!("{}", d.root.display());
+            }
+        }
+        return 0;
+    }
     let mut entries = filter_age_secs(collect(&dirs), older_than, newer_than);
     // Orphans have no date, so only an unfiltered listing shows them; they
     // come last, after every recorded item.
@@ -346,7 +367,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let rows: Vec<&Entry> = order.iter().map(|&i| &entries[i]).collect();
     let row_sizes: Option<Vec<u64>> = sizes.map(|s| order.iter().map(|&i| s[i]).collect());
     // Owner of each row's trash root, looked up once per root.
-    let owners: Option<Vec<String>> = all_users.then(|| {
+    // The trash-list name keeps trash-cli's plain rows, without OWNER.
+    let owners: Option<Vec<String>> = (all_users && (json || prog != "trash-list")).then(|| {
         let mut by_root: std::collections::HashMap<&std::path::Path, String> =
             std::collections::HashMap::new();
         rows.iter()

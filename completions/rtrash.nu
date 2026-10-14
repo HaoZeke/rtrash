@@ -86,7 +86,9 @@ export extern "rtrash put" [
 export extern "rtrash empty" [
     --dry-run(-n)  # report what would be removed without removing anything;
     --verbose(-v)  # print each removed item
-    --force(-f)  # accepted for trash-cli compatibility (emptying never prompts)
+    --interactive(-i)  # list the trash directories and ask before emptying
+    --force(-f)  # do not ask (cancels an earlier -i)
+    --all-users  # every user's trash this account can write (root: all)
     --plain  # skip TUI; non-interactive empty (also used when stdin is not a TTY)
     --older-than: string  # same as positional DAYS, or a duration such as 2h or 1d12h
     --max-size: string  # remove items until the trash (all roots in scope
@@ -104,6 +106,8 @@ export extern "rtrash list" [
     --home-only  # only the home trash ($XDG_DATA_HOME/Trash)
     --trash-dir: string  # list only this trash directory (repeatable);
     --all-users  # list every user's trash this account can read
+    --volumes  # print the mount points searched for trash and exit
+    --trash-dirs  # print the trash directories read and exit
     --older-than: string  # only items trashed more than AGE ago (DAYS, 2h, 1d12h)
     --newer-than: string  # only items trashed within the last AGE
     --larger-than: string  # only items taking more than SIZE on disk
@@ -349,7 +353,9 @@ export extern "trash-put" [
 export extern "trash-empty" [
     --dry-run(-n)  # report what would be removed without removing anything;
     --verbose(-v)  # print each removed item
-    --force(-f)  # accepted for trash-cli compatibility (emptying never prompts)
+    --interactive(-i)  # list the trash directories and ask before emptying
+    --force(-f)  # do not ask (cancels an earlier -i)
+    --all-users  # every user's trash this account can write (root: all)
     --plain  # skip TUI; non-interactive empty (also used when stdin is not a TTY)
     --older-than: string  # same as positional DAYS, or a duration such as 2h or 1d12h
     --max-size: string  # remove items until the trash (all roots in scope
@@ -367,6 +373,8 @@ export extern "trash-list" [
     --home-only  # only the home trash ($XDG_DATA_HOME/Trash)
     --trash-dir: string  # list only this trash directory (repeatable);
     --all-users  # list every user's trash this account can read
+    --volumes  # print the mount points searched for trash and exit
+    --trash-dirs  # print the trash directories read and exit
     --older-than: string  # only items trashed more than AGE ago (DAYS, 2h, 1d12h)
     --newer-than: string  # only items trashed within the last AGE
     --larger-than: string  # only items taking more than SIZE on disk

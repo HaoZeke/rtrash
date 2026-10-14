@@ -1,0 +1,1 @@
+trash-cli command lines now work under the trash-* names: `--trash-dir DIR` as two words, `--print-completion bash|zsh`, `trash-list --volumes` and `--trash-dirs`, and `trash-empty -i` and `--all-users`. `trash-put` exits 74 when a file cannot be trashed, and `trash-list --all-users` prints trash-cli's rows without the owner column.

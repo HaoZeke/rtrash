@@ -54,14 +54,28 @@ fn main() {
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| "rtrash".to_string());
-    let rest = &args[1..];
+    let mut rest = &args[1..];
+    // The trash-cli names take trash-cli's command line as well.
+    let joined;
+    if argv0.starts_with("trash-") {
+        if let Some(code) = rtrash::compat::print_completion(&argv0, rest) {
+            std::process::exit(code);
+        }
+        joined = rtrash::compat::join_values(rest);
+        rest = &joined;
+    }
 
     let code = match argv0.as_str() {
         "trash-empty" => empty::run(&argv0, rest),
         "trash-list" => list::run(&argv0, rest),
         "trash-restore" => restore::run(&argv0, rest),
         "trash-rm" => rm::run(&argv0, rest),
-        "rm" | "trash-put" | "trash" => put::run(&argv0, rest),
+        // trash-cli exits 74 (EX_IOERR) when a file could not be trashed.
+        "trash-put" => match put::run(&argv0, rest) {
+            1 => 74,
+            c => c,
+        },
+        "rm" | "trash" => put::run(&argv0, rest),
         // Subcommands name themselves in usage lines and messages
         // (`rtrash du --help`), so a hint points at the right help.
         _ => match rest.first().map(String::as_str) {

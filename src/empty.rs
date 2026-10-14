@@ -27,7 +27,9 @@ permanent delete). Use --plain to skip the TUI.
                      also prints approximate reclaimable disk space (fast
                      in-process walk, like du of the victims)
   -v, --verbose    print each removed item
-  -f, --force      accepted for trash-cli compatibility (emptying never prompts)
+  -i, --interactive  list the trash directories and ask before emptying
+                     them (as trash-cli); skips the TUI
+  -f, --force      do not ask (cancels an earlier -i)
       --plain      skip TUI; non-interactive empty (also used when stdin is not a TTY)
       --older-than=AGE  same as positional DAYS; AGE may also be a duration
                      such as 2h, 30m or 1d12h
@@ -44,6 +46,7 @@ permanent delete). Use --plain to skip the TUI.
       --trash-dir=PATH  empty only this trash directory (repeatable);
                      default is the home trash plus every mounted volume
       --home-only  only the home trash (skip volume trash discovery)
+      --all-users  every user's trash this account can write (root: all)
       --help       display this help and exit
       --version    output version information and exit
 ";
@@ -60,6 +63,9 @@ struct Opts {
     max_size: Option<u64>,
     prune: crate::retention::Policy,
     dangling: bool,
+    /// `-i`: ask once before emptying, as trash-cli does.
+    interactive: bool,
+    all_users: bool,
 }
 
 /// The `.trashinfo` names in `dir` whose payload in `files/` is gone,
@@ -162,6 +168,20 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
     status
 }
 
+/// trash-cli's `-i` prompt: name the trash directories, read a y or n.
+fn confirm(dirs: &[TrashDir]) -> bool {
+    eprintln!("Would empty the following trash directories:");
+    for d in dirs {
+        eprintln!("    - {}", d.root.display());
+    }
+    eprint!("Proceed? (y/N) ");
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim(), "y" | "Y" | "yes" | "Yes")
+}
+
 fn usage_err(prog: &str, msg: &str) -> i32 {
     eprintln!("{prog}: {msg}");
     eprintln!("Try '{prog} --help' for more information.");
@@ -186,12 +206,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         max_size: None,
         prune: crate::retention::Policy::Oldest,
         dangling: false,
+        interactive: false,
+        all_users: false,
     };
     for arg in args {
         match arg.as_str() {
             "-n" | "--dry-run" => opts.dry_run = true,
             "-v" | "--verbose" => opts.verbose = true,
-            "-f" | "--force" => {}
+            "-f" | "--force" => opts.interactive = false,
+            "-i" | "--interactive" => opts.interactive = true,
+            "--all-users" => opts.all_users = true,
             "--plain" => opts.plain = true,
             "--json" => opts.json = true,
             "--dangling" => opts.dangling = true,
@@ -240,7 +264,14 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     }
 
-    let dirs: Vec<TrashDir> = trashdir::resolve_dirs_opts(&opts.trash_dirs, opts.home_only);
+    if opts.all_users && (opts.home_only || !opts.trash_dirs.is_empty()) {
+        return usage_err(prog, "--all-users takes no --home-only or --trash-dir");
+    }
+    let dirs: Vec<TrashDir> = if opts.all_users {
+        trashdir::all_users()
+    } else {
+        trashdir::resolve_dirs_opts(&opts.trash_dirs, opts.home_only)
+    };
     if dirs.is_empty() && !opts.trash_dirs.is_empty() {
         eprintln!(
             "{prog}: no valid --trash-dir pins (need non-symlink files/ and info/ directories)"
@@ -253,6 +284,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             return usage_err(prog, "--dangling takes no DAYS or --max-size");
         }
         return empty_dangling(prog, &dirs, &opts);
+    }
+
+    if opts.interactive && !opts.dry_run {
+        if !confirm(&dirs) {
+            return 0;
+        }
+        opts.plain = true;
     }
 
     // TTY empty browser when no age filter (full interactive review).

@@ -13,7 +13,7 @@ _rtrash_put_opts=(
 )
 
 _rtrash_empty_opts=(
-  -n --dry-run -v --verbose -f --force
+  -n --dry-run -v --verbose -f --force -i --interactive --all-users
   --trash-dir= --home-only --plain --older-than= --json
   --max-size= --prune= --dangling
   --help --version
@@ -21,7 +21,7 @@ _rtrash_empty_opts=(
 
 _rtrash_list_opts=(
   --home-only --trash-dir= --older-than= --newer-than= --json
-  --larger-than= --smaller-than= --size --sort= --reverse --all-users --help --version
+  --larger-than= --smaller-than= --size --sort= --reverse --all-users --volumes --trash-dirs --help --version
 )
 
 _rtrash_trash_stats_opts=(

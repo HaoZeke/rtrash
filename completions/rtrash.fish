@@ -58,7 +58,9 @@ complete -c rtrash -n $put_cond -l json -d 'JSON summary of trashed items'
 # empty
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s n -l dry-run -d 'report what would be removed; show reclaimable size'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s v -l verbose -d 'print each removed item'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s f -l force -d 'accepted for trash-cli compatibility'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s f -l force -d 'do not ask'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s i -l interactive -d 'ask before emptying'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l all-users -d 'empty every writable user trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l trash-dir -d 'empty only this trash directory' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l home-only -d 'only the home trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l older-than -d 'only items older than AGE (DAYS, 2h, 1d12h)' -r
@@ -82,6 +84,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l size 
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l sort -x -a 'date size name path' -d 'row order'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l reverse -d 'reverse the order'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l all-users -d 'list every readable user trash with an owner column'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l volumes -d 'print the mount points searched and exit'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l trash-dirs -d 'print the trash directories read and exit'
 
 # du
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s n -l top -d 'list N directories and N files' -r
@@ -227,6 +231,8 @@ end
 complete -c trash-empty -s n -l dry-run
 complete -c trash-empty -s v -l verbose
 complete -c trash-empty -s f -l force
+complete -c trash-empty -s i -l interactive
+complete -c trash-empty -l all-users
 complete -c trash-empty -l trash-dir -r
 complete -c trash-empty -l home-only
 complete -c trash-empty -l older-than -r
@@ -249,6 +255,8 @@ complete -c trash-list -l size
 complete -c trash-list -l sort -x -a 'date size name path'
 complete -c trash-list -l reverse
 complete -c trash-list -l all-users
+complete -c trash-list -l volumes
+complete -c trash-list -l trash-dirs
 complete -c trash-list -l help
 complete -c trash-list -l version
 

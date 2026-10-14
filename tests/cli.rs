@@ -1730,6 +1730,66 @@ fn multicall_names_dispatch() {
 }
 
 #[test]
+fn trash_cli_command_lines_work_under_the_trash_names() {
+    let sb = Sandbox::new("trash-cli-lines");
+    let bindir = sb.root.join("bin");
+    fs::create_dir_all(&bindir).unwrap();
+    for name in ["trash-put", "trash-empty", "trash-list", "trash-rm"] {
+        std::os::unix::fs::symlink(bin(), bindir.join(name)).unwrap();
+    }
+    let run_as = |name: &str, args: &[&str], stdin: &str| {
+        use std::io::Write;
+        let mut child = Command::new(bindir.join(name))
+            .args(args)
+            .current_dir(sb.work())
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("HOME", &sb.root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let t = sb.trash().display().to_string();
+    sb.touch("a");
+    let out = run_as("trash-put", &["--trash-dir", &t, "a"], "");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), vec!["a"]);
+    // trash-cli exits 74 when a file cannot be trashed.
+    let out = run_as("trash-put", &["missing"], "");
+    assert_eq!(out.status.code(), Some(74));
+
+    let out = run_as("trash-list", &["--trash-dir", &t], "");
+    assert!(stdout_of(&out).contains("/a"), "{}", stdout_of(&out));
+    let out = run_as("trash-list", &["--trash-dirs", "--trash-dir", &t], "");
+    assert_eq!(stdout_of(&out).trim(), t);
+    let out = run_as("trash-list", &["--volumes"], "");
+    assert!(stdout_of(&out).lines().any(|l| l == "/"));
+    let out = run_as("trash-list", &["--print-completion", "bash"], "");
+    assert!(stdout_of(&out).contains("trash-restore"));
+    let out = run_as("trash-list", &["--print-completion=tcsh"], "");
+    assert_eq!(out.status.code(), Some(2));
+
+    // -i asks first; anything but y keeps the trash.
+    let out = run_as("trash-empty", &["-i", "--trash-dir", &t], "n\n");
+    assert!(stderr_of(&out).contains("Proceed? (y/N)"));
+    assert_eq!(trash_names(&sb), vec!["a"]);
+    let out = run_as("trash-empty", &["-i", "--trash-dir", &t], "y\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty());
+
+    let out = run_as("trash-rm", &["--trash-dir", &t, "nothing"], "");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+}
+
+#[test]
 fn trash_rm_removes_match_keeps_other() {
     let sb = Sandbox::new("trash-rm-select");
     sb.touch("keep.dat");
