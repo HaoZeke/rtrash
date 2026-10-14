@@ -2301,7 +2301,8 @@ it from
 The PowerShell script (also
 .BR pwsh )
 registers a native argument completer for rtrash and the multi-call
-names; add
+names; on Windows it offers the options of the Windows put, list, empty,
+restore, status and rm instead. Add
 .B "rtrash completions powershell | Out-String | Invoke-Expression"
 to
 .IR $PROFILE .

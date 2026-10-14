@@ -24,6 +24,19 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
         'completions' = @()
         'man' = @()
     }
+    # The Windows build has its own put, list, empty, restore, status and rm,
+    # with fewer options (the Recycle Bin, not a FreeDesktop trash).
+    $winOpts = @{
+        'put' = @('-f', '--force', '-v', '--verbose', '--plain', '--json', '--in-use=', '--trash-dir=', '--home-only', '--help', '--version')
+        'list' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--help', '--version')
+        'empty' = @('-n', '--dry-run', '-v', '--verbose', '--older-than=', '--help', '--version')
+        'restore' = @('-f', '--force', '--plain', '--newest-first', '--oldest-first', '--no-space-check', '--help', '--version')
+        'status' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--help', '--version')
+        'rm' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '-n', '--dry-run', '-f', '--force', '-v', '--verbose', '--help')
+    }
+    if ($IsWindows -or $env:OS -eq 'Windows_NT') {
+        foreach ($k in @($winOpts.Keys)) { $opts[$k] = $winOpts[$k] }
+    }
     $multi = @{'trash' = 'put'; 'trash-put' = 'put'; 'trash-empty' = 'empty'; 'trash-list' = 'list'; 'trash-restore' = 'restore'; 'trash-rm' = 'rm'}
     $values = @{'completions' = @('bash', 'zsh', 'fish', 'nu', 'powershell', 'elvish'); 'finder' = @('put', 'list', 'restore')}
     $words = @($commandAst.CommandElements | ForEach-Object { $_.ToString() })

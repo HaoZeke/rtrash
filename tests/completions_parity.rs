@@ -516,8 +516,10 @@ fn powershell_script_is_embedded_and_completes() {
     );
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("completions/rtrash.ps1");
     let prog = format!(
-        ". '{}'; foreach ($l in @('rtrash empty --da', 'trash-restore --la', 'rtrash k')) {{ \
-         (TabExpansion2 -inputScript $l -cursorColumn $l.Length).CompletionMatches.CompletionText -join ' ' }}",
+        ". '{0}'; foreach ($l in @('rtrash empty --da', 'trash-restore --la', 'rtrash k')) {{ \
+         (TabExpansion2 -inputScript $l -cursorColumn $l.Length).CompletionMatches.CompletionText -join ' ' }}; \
+         $env:OS = 'Windows_NT'; . '{0}'; \
+         (TabExpansion2 -inputScript 'rtrash empty --' -cursorColumn 15).CompletionMatches.CompletionText -join ' '",
         script.display()
     );
     let Ok(run) = Command::new("pwsh")
@@ -536,7 +538,15 @@ fn powershell_script_is_embedded_and_completes() {
         .lines()
         .map(str::to_string)
         .collect();
-    assert_eq!(got, ["--dangling", "--latest", "keys"]);
+    assert_eq!(
+        got,
+        [
+            "--dangling",
+            "--latest",
+            "keys",
+            "--dry-run --verbose --older-than= --help --version"
+        ]
+    );
 }
 
 /// The words of the `&SUB=[...]` line of the elvish script.
@@ -629,4 +639,80 @@ fn elvish_script_is_embedded_and_completes() {
         .map(str::to_string)
         .collect();
     assert_eq!(got, ["--dangling", "--latest", "keys"]);
+}
+
+/// Long options in each Windows help text of src/win_recycle.rs, keyed by
+/// the subcommand its second line names.
+fn windows_help_opts() -> Vec<(&'static str, Vec<String>)> {
+    let src = read("src/win_recycle.rs");
+    let keys = [
+        ("Move FILE(s)", "put"),
+        ("List items", "list"),
+        ("Permanently empty", "empty"),
+        ("Restore an item", "restore"),
+        ("Summarize the Windows", "status"),
+        ("Permanently delete Recycle", "rm"),
+    ];
+    let mut out = Vec::new();
+    for block in src.split("Usage: {prog}").skip(1) {
+        let text = block.split('"').next().unwrap_or("");
+        let mut lines = text.lines().skip(1);
+        let Some(sub) = lines
+            .next()
+            .and_then(|l| keys.iter().find(|(k, _)| l.starts_with(k)))
+            .map(|(_, s)| *s)
+        else {
+            continue;
+        };
+        let mut opts = Vec::new();
+        for line in lines {
+            let indent = line.len() - line.trim_start().len();
+            if !(2..=6).contains(&indent) || !line.trim_start().starts_with('-') {
+                continue;
+            }
+            let spec = line.trim_start().split("  ").next().unwrap_or("");
+            for tok in spec.split([',', ' ']).filter(|t| t.starts_with("--")) {
+                let name: String = tok[2..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
+                opts.push(format!("--{name}"));
+            }
+        }
+        out.push((sub, opts));
+    }
+    out
+}
+
+/// On Windows the PowerShell script swaps in tables that match the
+/// Windows help of put, list, empty, restore, status and rm.
+#[test]
+fn powershell_windows_tables_match_the_windows_help() {
+    let ps = read("completions/rtrash.ps1");
+    let win = ps
+        .split_once("$winOpts = @{")
+        .expect("winOpts table")
+        .1
+        .split_once("\n    }")
+        .unwrap()
+        .0
+        .to_string();
+    let blocks = windows_help_opts();
+    assert_eq!(blocks.len(), 6, "{blocks:?}");
+    let mut wrong = Vec::new();
+    for (sub, opts) in &blocks {
+        let words = powershell_words(&win, sub);
+        for flag in opts {
+            if !words.contains(flag) {
+                wrong.push(format!("powershell windows {sub}: missing {flag}"));
+            }
+        }
+        // Nothing the Windows help leaves out, such as --max-size.
+        for w in words.iter().filter(|w| w.starts_with("--")) {
+            if !opts.contains(w) {
+                wrong.push(format!("powershell windows {sub}: extra {w}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
