@@ -4,7 +4,8 @@
 //! Finder shows every file in a trash, so nothing goes inside one. Each
 //! trash gets `KEY.total` and `KEY.history` under
 //! `$XDG_STATE_HOME/rtrash/finder-totals`, KEY being the trash path with
-//! `%` and `/` percent-encoded. A total (`v2 BYTES ITEMS INODES STAMP`; `v1` files lack INODES) carries
+//! `%` and `/` percent-encoded, or for a trash on another volume
+//! `uuid-UUID-PATH` with PATH below the volume's mount point. A total (`v2 BYTES ITEMS INODES STAMP`; `v1` files lack INODES) carries
 //! a fingerprint of the names in the trash (`.DS_Store` left out), which
 //! changes whenever Finder or rtrash adds, removes or renames an item, so a total that another tool
 //! made out of date reads as stale.
@@ -33,11 +34,91 @@ fn state_dir() -> Option<PathBuf> {
     Some(state.join("rtrash").join("finder-totals"))
 }
 
+fn enc(p: &Path) -> String {
+    p.to_string_lossy().replace('%', "%25").replace('/', "%2F")
+}
+
+/// The file name stem for `trash`'s total and history: the encoded path
+/// for the home trash, and for a trash on another volume the volume's
+/// UUID plus the path below its mount point, so a drive mounted again
+/// at another place keeps its total. Without a UUID, the path.
+fn key_with(trash: &Path, vol: Option<(&str, &Path)>) -> String {
+    match vol.and_then(|(u, m)| Some((u, trash.strip_prefix(m).ok()?))) {
+        Some((uuid, rel)) => format!("uuid-{uuid}-{}", enc(rel)),
+        None => enc(trash),
+    }
+}
+
 fn key(trash: &Path) -> String {
-    trash
-        .to_string_lossy()
-        .replace('%', "%25")
-        .replace('/', "%2F")
+    if crate::finder::home_trash().as_deref() == Some(trash) {
+        return enc(trash);
+    }
+    let mount = mount_point(trash);
+    let uuid = mount.as_deref().and_then(volume_uuid);
+    key_with(trash, uuid.as_deref().zip(mount.as_deref()))
+}
+
+/// The top of the file system `p` is on: the last ancestor on the same
+/// device.
+fn mount_point(p: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let dev = fs::metadata(p).ok()?.dev();
+    let mut top = p.to_path_buf();
+    while let Some(up) = top.parent() {
+        if fs::metadata(up).ok()?.dev() != dev {
+            break;
+        }
+        top = up.to_path_buf();
+    }
+    Some(top)
+}
+
+/// macOS: the volume UUID of the file system mounted at `mount`.
+#[cfg(target_os = "macos")]
+fn volume_uuid(mount: &Path) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(mount.as_os_str().as_bytes()).ok()?;
+    let mut req = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_UUID,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    // A u32 length, then the 16-byte UUID.
+    let mut buf = [0u8; 4 + 16];
+    // SAFETY: `c` is a valid C string, `req` a valid attrlist and `buf`
+    // a writable buffer of the size given.
+    let r = unsafe {
+        libc::getattrlist(
+            c.as_ptr(),
+            (&mut req as *mut libc::attrlist).cast(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            0,
+        )
+    };
+    let id = &buf[4..];
+    (r == 0 && id.iter().any(|&b| b != 0)).then(|| id.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Linux: the file system UUID udev lists for the device `mount` is on.
+#[cfg(target_os = "linux")]
+fn volume_uuid(mount: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let dev = fs::metadata(mount).ok()?.dev();
+    fs::read_dir("/dev/disk/by-uuid")
+        .ok()?
+        .flatten()
+        .find(|e| fs::metadata(e.path()).is_ok_and(|m| m.rdev() == dev))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn volume_uuid(_mount: &Path) -> Option<String> {
+    None
 }
 
 fn file(trash: &Path, ext: &str) -> Option<PathBuf> {
@@ -292,12 +373,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keys_encode_slashes_and_percents() {
-        assert_eq!(key(Path::new("/Users/a/.Trash")), "%2FUsers%2Fa%2F.Trash");
+    fn keys_encode_paths_and_volume_uuids() {
         assert_eq!(
-            key(Path::new("/V/50%/.Trashes/501")),
+            key_with(Path::new("/Users/a/.Trash"), None),
+            "%2FUsers%2Fa%2F.Trash"
+        );
+        assert_eq!(
+            key_with(Path::new("/V/50%/.Trashes/501"), None),
             "%2FV%2F50%25%2F.Trashes%2F501"
         );
+        // The same drive at two mount points gives one key.
+        let u = "0a1b";
+        assert_eq!(
+            key_with(
+                Path::new("/Volumes/USB/.Trashes/501"),
+                Some((u, Path::new("/Volumes/USB")))
+            ),
+            "uuid-0a1b-.Trashes%2F501"
+        );
+        assert_eq!(
+            key_with(
+                Path::new("/Volumes/USB 1/.Trashes/501"),
+                Some((u, Path::new("/Volumes/USB 1")))
+            ),
+            "uuid-0a1b-.Trashes%2F501"
+        );
+        // A trash outside the mount point keeps its path.
+        assert_eq!(
+            key_with(Path::new("/x/.Trashes/501"), Some((u, Path::new("/y")))),
+            "%2Fx%2F.Trashes%2F501"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mount_point_climbs_to_the_file_system_top() {
+        let m = mount_point(Path::new("/proc/self")).unwrap();
+        assert_eq!(m, Path::new("/proc"));
     }
 
     #[test]

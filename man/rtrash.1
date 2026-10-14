@@ -2908,7 +2908,10 @@ per trash, KEY being the trash path with
 .B %
 and
 .B /
-percent\-encoded, for
+percent\-encoded; for a trash on another volume, KEY is
+.BI uuid\- UUID\- PATH
+with the volume's UUID and the trash's path below the mount point, so a
+drive mounted again elsewhere keeps its total; for
 .B "trash\-stats \-\-total"
 and
 .BR \-\-history .
