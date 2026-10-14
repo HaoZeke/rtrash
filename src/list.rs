@@ -127,64 +127,23 @@ pub fn orphans(dirs: &[TrashDir]) -> Vec<Entry> {
     out
 }
 
-/// Age filter aligned with `empty DAYS`: a missing or unreadable date never
-/// counts as old.
-pub fn is_older_than(entry: &Entry, days: i64) -> bool {
-    let age = crate::filters::AgeFilter {
-        older_than: Some(days.saturating_mul(86_400)),
-        newer_than: None,
-    };
-    age.keeps_at(entry_epoch(entry), info::now_epoch())
-}
-
-/// Inverse window: trashed *after* the same cutoff (missing date excluded).
-pub fn is_newer_than(entry: &Entry, days: i64) -> bool {
-    let age = crate::filters::AgeFilter {
-        older_than: None,
-        newer_than: Some(days.saturating_mul(86_400)),
-    };
-    age.keeps_at(entry_epoch(entry), info::now_epoch())
-}
-
 /// When `entry` was trashed, from its `.trashinfo` date, if readable.
 fn entry_epoch(entry: &Entry) -> Option<i64> {
     entry.date.as_deref().and_then(info::parse_local_to_epoch)
 }
 
-/// Apply optional older/newer filters in seconds (AND if both set).
+/// Keep entries trashed at least `older` seconds ago and less than `newer`
+/// seconds ago (both when both are set). A missing or unreadable date
+/// never passes an age filter.
 pub fn filter_age_secs(entries: Vec<Entry>, older: Option<i64>, newer: Option<i64>) -> Vec<Entry> {
+    let age = crate::filters::AgeFilter {
+        older_than: older,
+        newer_than: newer,
+    };
     let now = info::now_epoch();
     entries
         .into_iter()
-        .filter(|e| {
-            let t = entry_epoch(e);
-            older.is_none_or(|s| t.is_some_and(|t| t <= now - s))
-                && newer.is_none_or(|s| t.is_some_and(|t| t > now - s))
-        })
-        .collect()
-}
-
-/// Apply optional older/newer day filters (AND if both set).
-pub fn filter_age(
-    entries: Vec<Entry>,
-    older_than: Option<i64>,
-    newer_than: Option<i64>,
-) -> Vec<Entry> {
-    entries
-        .into_iter()
-        .filter(|e| {
-            if let Some(d) = older_than {
-                if !is_older_than(e, d) {
-                    return false;
-                }
-            }
-            if let Some(d) = newer_than {
-                if !is_newer_than(e, d) {
-                    return false;
-                }
-            }
-            true
-        })
+        .filter(|e| age.keeps_at(entry_epoch(e), now))
         .collect()
 }
 
@@ -542,17 +501,17 @@ mod tests {
 
     #[test]
     fn age_filters_leave_out_a_missing_date() {
-        let e = entry_with(None, 0);
-        assert!(!is_older_than(&e, 0));
-        assert!(!is_newer_than(&e, 365));
+        let e = || entry_with(None, 0);
+        assert!(filter_age_secs(vec![e()], Some(0), None).is_empty());
+        assert!(filter_age_secs(vec![e()], None, Some(365 * 86_400)).is_empty());
     }
 
     #[test]
     fn age_newer_recent() {
         let now = info::now_epoch();
-        let e = entry_with(Some(&info::now_local_string()), now);
-        assert!(is_newer_than(&e, 1));
-        assert!(!is_older_than(&e, 1));
+        let e = || entry_with(Some(&info::now_local_string()), now);
+        assert_eq!(filter_age_secs(vec![e()], None, Some(3600)).len(), 1);
+        assert!(filter_age_secs(vec![e()], Some(3600), None).is_empty());
     }
 
     #[test]
@@ -560,7 +519,7 @@ mod tests {
         let now = info::now_epoch();
         let recent = entry_with(Some(&info::now_local_string()), now);
         let old = entry_with(Some("2001-01-01T00:00:00"), 978_307_200);
-        let out = filter_age(vec![recent, old], Some(30), None);
+        let out = filter_age_secs(vec![recent, old], Some(30 * 86_400), None);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].epoch, 978_307_200);
     }
