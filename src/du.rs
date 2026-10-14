@@ -51,7 +51,8 @@ directories appear as one `trash` row and are never printed by --print0.
   -x, --one-file-system skip directories on other file systems
   -L, --follow-symlinks follow symlinks: each counts as what it points to,
                           a directory met again (a loop, or a second link)
-                          is walked once and a file counts once
+                          is walked once and a file counts once; the
+                          total names the repeats as repeated names
       --apparent        rank by apparent size (file length) instead of disk use
       --sort=KEY        rank by KEY: disk (default), apparent, items (files
                           and directories below each directory; lists no
@@ -3089,7 +3090,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         for t in &report.roots {
             let kind = t.artefact.map(|k| format!(" ({k})")).unwrap_or_default();
-            let links = if t.links > 0 {
+            // Under -L a repeat may come through a symlink as well as a
+            // hard link, so the total names both as repeated names.
+            let links = if t.links > 0 && opts.follow {
+                format!(" (+{})", plural(t.links, "repeated name", "repeated names"))
+            } else if t.links > 0 {
                 format!(" (+{})", plural(t.links, "hard link", "hard links"))
             } else {
                 String::new()

@@ -266,6 +266,8 @@ fn follow_symlinks_counts_targets_once_and_survives_loops() {
     let plain = t.json(&["--files"]);
     let plain_roots = &plain[..plain.find("\"dirs\"").unwrap()];
     assert!(field(plain_roots, "apparent") < 200_000, "{plain}");
+    let text = String::from_utf8(t.du(&["-L"]).stdout).unwrap();
+    assert!(text.contains("3 files (+1 repeated name), "), "{text}");
     let out = t.du(&["-L", "--print0"]);
     assert_eq!(out.status.code(), Some(2));
 }

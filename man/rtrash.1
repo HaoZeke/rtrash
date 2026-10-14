@@ -774,7 +774,9 @@ Follow symlinks, as
 .B "du \-L"
 does: a link counts as what it points to and a dangling link as itself.
 A directory met again, through a loop or a second link, is walked once,
-and a file reached by several names counts once.
+and a file reached by several names counts once; the total names the
+repeats as repeated names, since they come through symlinks as well as
+hard links.
 Only for reports: it does not combine with
 .BR \-\-print0 ", " \-\-pick ", " \-\-interactive " or " \-\-ncdu ,
 since trashing a link name would remove only the link.
