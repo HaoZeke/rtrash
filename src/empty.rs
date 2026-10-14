@@ -293,7 +293,13 @@ fn empty_one(
         if opts.dry_run {
             full_empty_dry_run(dir, opts, removed, bytes);
         } else {
+            let before = errors.load(Ordering::Relaxed);
             full_empty_wipe(prog, dir, opts, removed, errors, failures);
+            // An empty that took everything leaves a known total; one that
+            // failed somewhere leaves it stale for the next reader.
+            if errors.load(Ordering::Relaxed) == before {
+                crate::trash_total::store(dir, 0, 0);
+            }
         }
         return;
     }
@@ -351,6 +357,12 @@ fn empty_one(
     }
 
     let sizes = trashdir::DirSizes::load(dir);
+    // A total current before this pass loses what the pass takes.
+    let total = (!opts.dry_run)
+        .then(|| crate::trash_total::cached(dir))
+        .flatten();
+    let gone = AtomicU64::new(0);
+    let gone_items = AtomicU64::new(0);
     victims.par_iter().for_each(|(target, info_path, display)| {
         if opts.dry_run {
             // Prefer FreeDesktop directorysizes for directory payloads; fall back
@@ -379,8 +391,18 @@ fn empty_one(
             removed.fetch_add(1, Ordering::Relaxed);
             return;
         }
+        let sz = match (&total, info_path) {
+            (Some(_), Some(_)) => target
+                .file_name()
+                .map_or(0, |n| sizes.entry_bytes(&crate::util::str_from_os_ref(n))),
+            _ => 0,
+        };
         match trashdir::remove_any_path(target) {
             Ok(()) => {
+                if info_path.is_some() {
+                    gone.fetch_add(sz, Ordering::Relaxed);
+                    gone_items.fetch_add(1, Ordering::Relaxed);
+                }
                 if let Some(ip) = info_path {
                     match fs::remove_file(ip) {
                         Ok(()) => {}
@@ -402,6 +424,13 @@ fn empty_one(
         sizes.write_back_locked();
     } else {
         prune_directorysizes(dir, &kept_names);
+        if let Some((b, n)) = total {
+            crate::trash_total::store(
+                dir,
+                b.saturating_sub(gone.into_inner()),
+                n.saturating_sub(gone_items.into_inner()),
+            );
+        }
     }
 }
 

@@ -5,8 +5,9 @@
 //! The total lives in `rtrash-total` in the trash root, stamped with the
 //! modification time of `info/`. Any tool that adds or removes an item
 //! changes that time, so a stale total is never trusted; the next reader
-//! measures the trash once and stores a fresh one. A put by rtrash adds
-//! its item to a total that was current before it, under the trash lock.
+//! measures the trash once and stores a fresh one. Put, restore, empty
+//! and the prune behind `empty --max-size` and `reap` carry a total that
+//! was current before them, under the trash lock.
 
 use std::fs;
 use std::path::PathBuf;

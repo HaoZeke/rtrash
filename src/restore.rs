@@ -680,6 +680,10 @@ pub(crate) fn restore_one_to(
         return Err(format!("cannot create '{}': {e}", parent.display()));
     }
 
+    // What leaving the trash takes off a running total that is current.
+    let size = crate::trash_total::cached(&entry.dir)
+        .map(|_| trashdir::DirSizes::load(&entry.dir).entry_bytes(&entry.name));
+
     // Stage into the destination directory first, then swap over any blocker.
     // On failure the live dest (if any) is left intact.
     let staged = staging_path(parent, &entry.name);
@@ -705,8 +709,22 @@ pub(crate) fn restore_one_to(
     }
 
     let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
-    if let Err(e) = fs::remove_file(&info_path) {
-        warnings.push(format!("cannot remove '{}': {e}", info_path.display()));
+    {
+        // Under the lock, so a put cannot add to the total in between.
+        let _lock = trashdir::TrashLock::acquire(&entry.dir.root).ok();
+        let total = size.and(crate::trash_total::cached(&entry.dir));
+        match fs::remove_file(&info_path) {
+            Ok(()) => {
+                if let (Some((b, n)), Some(sz), true) = (total, size, _lock.is_some()) {
+                    crate::trash_total::store(
+                        &entry.dir,
+                        b.saturating_sub(sz),
+                        n.saturating_sub(1),
+                    );
+                }
+            }
+            Err(e) => warnings.push(format!("cannot remove '{}': {e}", info_path.display())),
+        }
     }
     trashdir::directorysizes_remove(&entry.dir, &entry.name);
     Ok(Restored {

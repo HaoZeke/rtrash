@@ -158,6 +158,12 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
     }
     let total: u64 = items.iter().map(|c| c.bytes).sum();
     out.left = total;
+    // Per root (bytes, items) still in the trash, for its running total.
+    let mut kept = vec![(0u64, 0u64); dirs.len()];
+    for c in &items {
+        kept[c.root].0 += c.bytes;
+        kept[c.root].1 += 1;
+    }
     for i in plan_freeing(&items, p.max, p.policy, p.free_inodes) {
         let c = &items[i];
         let dir = &dirs[c.root];
@@ -183,6 +189,8 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
                 println!("removed {}", crate::util::term_path(&shown));
             }
         }
+        kept[c.root].0 -= c.bytes;
+        kept[c.root].1 -= 1;
         out.removed += 1;
         out.bytes += c.bytes;
         out.inodes += c.inodes;
@@ -193,6 +201,15 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
             if usable[ri] {
                 // Drops the cache lines of removed directories.
                 trashdir::DirSizes::load(dir).write_back_locked();
+            }
+        }
+    }
+    // A real prune leaves exactly what it counted; so does a dry run that
+    // set nothing aside as already gone.
+    if !p.dry_run || p.gone_before.is_none() {
+        for (ri, dir) in dirs.iter().enumerate() {
+            if usable[ri] {
+                crate::trash_total::store(dir, kept[ri].0, kept[ri].1);
             }
         }
     }

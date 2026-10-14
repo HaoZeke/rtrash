@@ -3542,6 +3542,94 @@ fn put_keeps_a_running_trash_total_that_matches_a_full_count() {
     assert_eq!(stored(), (stats_bytes(), 4));
 }
 
+#[test]
+#[cfg(unix)]
+fn empty_restore_and_prune_keep_the_running_trash_total_current() {
+    let sb = Sandbox::new("trash-total-keep");
+    let run = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .env_remove("RTRASH_WARN_SIZE")
+            .env_remove("RTRASH_MAX_SIZE")
+            .output()
+            .unwrap()
+    };
+    let trash = sb.root.join("xdg/Trash");
+    let stats_bytes = || {
+        let text = stdout_of(&run(&["trash-stats", "--home-only", "--json", "--top=0"]));
+        let at = text.find(r#""total":{"bytes":"#).unwrap() + r#""total":{"bytes":"#.len();
+        text[at..text[at..].find(',').unwrap() + at]
+            .parse::<u64>()
+            .unwrap()
+    };
+    // The stored (bytes, items), which must still be current.
+    let stored = || {
+        let body = fs::read_to_string(trash.join("rtrash-total")).unwrap();
+        let f: Vec<&str> = body.split_whitespace().collect();
+        let stamp = fs::metadata(trash.join("info"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        assert_eq!(f[3].parse::<u128>().unwrap(), stamp, "stale total: {body}");
+        (f[1].parse::<u64>().unwrap(), f[2].parse::<u64>().unwrap())
+    };
+    let ok = |out: std::process::Output| assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut paths = Vec::new();
+    for (name, body) in [
+        ("a.bin", "a".repeat(40_000)),
+        ("b.bin", "b".repeat(9_000)),
+        ("c.txt", "c".into()),
+    ] {
+        let p = write_at(&sb.root, &format!("work/{name}"), &body);
+        ok(run(&["put", p.to_str().unwrap()]));
+        paths.push(p);
+    }
+    let tree = write_at(&sb.root, "work/tree/x/y.txt", "y");
+    ok(run(&[
+        "put",
+        "-r",
+        tree.parent().unwrap().parent().unwrap().to_str().unwrap(),
+    ]));
+    assert_eq!(stored(), (stats_bytes(), 4));
+    // A restore takes its item off.
+    ok(run(&["restore", "--home-only", paths[2].to_str().unwrap()]));
+    assert!(paths[2].exists());
+    assert_eq!(stored(), (stats_bytes(), 3));
+    // A size budget takes the oldest items off and stores what is left.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    ok(run(&["empty", "--home-only", "--max-size=20K"]));
+    let (b, n) = stored();
+    assert!(n < 3 && b <= 20 * 1024, "{b} {n}");
+    assert_eq!((b, n), (stats_bytes(), n));
+    // An age pass takes the old items off a current total.
+    let infos: Vec<PathBuf> = fs::read_dir(trash.join("info"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    let old = &infos[0];
+    let body = fs::read_to_string(old).unwrap();
+    let at = body.find("DeletionDate=").unwrap();
+    fs::write(
+        old,
+        format!("{}DeletionDate=2001-01-01T00:00:00\n", &body[..at]),
+    )
+    .unwrap();
+    // The edit made the total stale; a prune that takes nothing renews it.
+    ok(run(&["empty", "--home-only", "--max-size=1T"]));
+    let n = stored().1;
+    ok(run(&["empty", "--home-only", "30"]));
+    assert_eq!(stored(), (stats_bytes(), n - 1));
+    // A full empty leaves nothing.
+    ok(run(&["empty", "--home-only"]));
+    assert_eq!(stored(), (0, 0));
+}
+
 /// A file in `dir` whose access and modification times are a day old.
 fn stale_file(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);
