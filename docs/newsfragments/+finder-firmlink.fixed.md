@@ -1,0 +1,1 @@
+On macOS, Finder Trash locations drop the `/System/Volumes/Data` firmlink prefix when the short path names the same folder, and restore matches a path spelled through a linked folder such as `/var` for `/private/var`.

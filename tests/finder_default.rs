@@ -727,3 +727,17 @@ fn an_unscoped_finder_empty_needs_all_for_older_puts() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(!b.finder().join("g1").exists() && !b.finder().join("g2").exists());
 }
+
+#[test]
+fn restore_takes_a_path_through_a_linked_folder() {
+    // As /var and /private/var on macOS: the put records one spelling,
+    // the user types the other.
+    let b = Box_::new("linked");
+    let link = b.root.join("link");
+    std::os::unix::fs::symlink(b.work(), &link).unwrap();
+    fs::write(b.work().join("l.txt"), b"l").unwrap();
+    assert!(b.run(&["put", "l.txt"], "").status.success());
+    let o = b.run(&["restore", &link.join("l.txt").to_string_lossy()], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(fs::read(b.work().join("l.txt")).unwrap(), b"l");
+}

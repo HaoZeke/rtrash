@@ -100,7 +100,7 @@ pub fn items(trash: &Path) -> std::io::Result<Vec<Item>> {
             let base = p.name.clone().unwrap_or_else(|| name.clone());
             Some(join_put_back(&root, folder, &base))
         });
-        let original = original.or_else(|| {
+        let original = original.map(|p| firmlink_short(&p)).or_else(|| {
             logged
                 .iter()
                 .rev()
@@ -111,6 +111,39 @@ pub fn items(trash: &Path) -> std::io::Result<Vec<Item>> {
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+/// `p` without the `/System/Volumes/Data` prefix when the shorter path
+/// names the same place: macOS firmlinks show the data volume's
+/// `/Users`, `/Applications` and the like at the root, and Finder's
+/// Put Back folders count from the data volume.
+pub fn firmlink_short(p: &Path) -> PathBuf {
+    firmlink_in(p, Path::new("/System/Volumes/Data"), Path::new("/"))
+}
+
+/// [`firmlink_short`] with the data volume at `data` and the root at
+/// `root`, so a test can stand them up in a scratch folder.
+fn firmlink_in(p: &Path, data: &Path, root: &Path) -> PathBuf {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(rest) = p.strip_prefix(data) else {
+        return p.to_path_buf();
+    };
+    // The item itself is in the trash, so check its first folder.
+    let Some(first) = rest.components().next() else {
+        return p.to_path_buf();
+    };
+    let same = match (
+        fs::metadata(root.join(first)),
+        fs::metadata(data.join(first)),
+    ) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    };
+    if same {
+        root.join(rest)
+    } else {
+        p.to_path_buf()
+    }
 }
 
 /// `root/folder/name`, refusing to climb out of `root` through `..`.
@@ -1016,6 +1049,28 @@ fn put(prog: &str, _args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn firmlinked_data_paths_shorten_to_the_root_form() {
+        let t = std::env::temp_dir().join(format!("rtrash-firm-{}", std::process::id()));
+        let root = t.join("r");
+        let data = root.join("System/Volumes/Data");
+        fs::create_dir_all(data.join("Users/u")).unwrap();
+        fs::create_dir_all(data.join("private")).unwrap();
+        // A link stands in for the firmlink: /Users is the data volume's.
+        std::os::unix::fs::symlink(data.join("Users"), root.join("Users")).unwrap();
+        let long = data.join("Users/u/a b.txt");
+        assert_eq!(
+            firmlink_in(&long, &data, &root),
+            root.join("Users/u/a b.txt")
+        );
+        // No such folder at the root: the long form stays.
+        let lone = data.join("private/x");
+        assert_eq!(firmlink_in(&lone, &data, &root), lone);
+        let other = PathBuf::from("/Volumes/X/a");
+        assert_eq!(firmlink_in(&other, &data, &root), other);
+        let _ = fs::remove_dir_all(&t);
+    }
+
     use super::*;
 
     #[test]

@@ -88,7 +88,16 @@ pub fn resolve_name(dir: &Path, name: &str) -> Option<String> {
 
 /// Whether `a` and `b` name the same path once both are in NFC.
 pub fn same_path(a: &Path, b: &Path) -> bool {
-    a == b || nfc_path(a) == nfc_path(b)
+    if a == b || nfc_path(a) == nfc_path(b) {
+        return true;
+    }
+    // One spelling may run through a symbolic link (/var against
+    // /private/var on macOS) or a firmlink; compare the real folders.
+    let real = |p: &Path| {
+        let dir = std::fs::canonicalize(p.parent()?).ok()?;
+        Some(nfc_path(&dir.join(p.file_name()?)))
+    };
+    matches!((real(a), real(b)), (Some(x), Some(y)) if x == y)
 }
 
 fn from_items(trash: &Path) -> std::io::Result<Vec<Entry>> {
