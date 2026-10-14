@@ -3782,6 +3782,13 @@ fn trash_stats_history_records_each_change_rtrash_makes() {
             .any(|l| l.contains("  empty") && l.contains(" (-")),
         "{text}"
     );
+    // The trend bar has a bar per line; the empty at the end is the lowest.
+    let trend = text
+        .lines()
+        .find_map(|l| l.strip_prefix("  trend: "))
+        .unwrap();
+    assert_eq!(trend.chars().count(), 6, "{text}");
+    assert!(trend.ends_with('▁') && trend.contains('█'), "{text}");
     let plain = stdout_of(&sb.run(&["trash-stats", "--home-only", "--json"]));
     assert!(!plain.contains("history"), "{plain}");
     // --since keeps only recent lines: an old one written by hand drops.

@@ -25,7 +25,7 @@ directories under files/ and info/), orphans (payloads without a
       --history         also show each trash's history: its size and items
                         after each put, restore, rm, empty, reap
                         and purge that changed it, with the change
-                        from the line before
+                        from the line before and a trend bar
       --since=AGE       with --history, only the lines from the last AGE
                         (90m, 12h, 7d, 2w; a bare number is days)
       --json            print a JSON object ({trashes, total})
@@ -226,6 +226,25 @@ fn change(prev: Option<u64>, now: u64) -> String {
     }
 }
 
+/// A bar per size, from `▁` for the smallest to `█` for the largest, so a
+/// trash's growth reads at a glance. The last 60 sizes at most.
+fn sparkline(sizes: &[u64]) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let sizes = &sizes[sizes.len().saturating_sub(60)..];
+    let lo = sizes.iter().copied().min().unwrap_or(0);
+    let hi = sizes.iter().copied().max().unwrap_or(0);
+    sizes
+        .iter()
+        .map(|&v| {
+            if hi == lo {
+                return BARS[0];
+            }
+            let i = (u128::from(v - lo) * 7 + u128::from(hi - lo) / 2) / u128::from(hi - lo);
+            BARS[i as usize]
+        })
+        .collect()
+}
+
 fn print_text(all: &[Stats], with_history: bool) {
     let line = |label: &str, i: &Item| {
         println!(
@@ -269,6 +288,10 @@ fn print_text(all: &[Stats], with_history: bool) {
                     change(prev, *b)
                 );
                 prev = Some(*b);
+            }
+            if s.history.len() > 1 {
+                let sizes: Vec<u64> = s.history.iter().map(|h| h.2).collect();
+                println!("  trend: {}", sparkline(&sizes));
             }
         }
     }
@@ -402,5 +425,13 @@ mod tests {
         assert_eq!(change(Some(5), 5), "");
         assert_eq!(change(Some(5), 8), format!(" (+{})", format_bytes(3)));
         assert_eq!(change(Some(8), 0), format!(" (-{})", format_bytes(8)));
+    }
+
+    #[test]
+    fn sparkline_scales_sizes_between_the_smallest_and_largest() {
+        assert_eq!(sparkline(&[0, 7, 14, 0]), "▁▅█▁");
+        assert_eq!(sparkline(&[5, 5]), "▁▁");
+        assert_eq!(sparkline(&[u64::MAX, 0]), "█▁");
+        assert_eq!(sparkline(&vec![1; 100]).chars().count(), 60);
     }
 }

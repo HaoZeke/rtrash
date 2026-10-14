@@ -584,7 +584,10 @@ size and item count to
 .I rtrash\-history
 in its root, keeping the newer half once the file passes 64 KiB.
 In text, each line after the first also shows how much the size grew
-or dropped since the line before.
+or dropped since the line before, and a
+.I trend
+line draws the sizes as bars from the smallest to the largest (the last
+60 lines at most).
 With
 .BR \-\-json ,
 each trash gains
