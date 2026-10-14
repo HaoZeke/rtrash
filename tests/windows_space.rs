@@ -201,6 +201,16 @@ fn reap_timer_status_says_when_no_task_is_installed() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(text.contains("no reap timer installed"), "{text}");
+    let out = Command::new(bin())
+        .args(["reap", "--timer-status", "--json"])
+        .output()
+        .unwrap();
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{json}");
+    assert!(
+        json.starts_with(r#"{"installed":false,"manager":"schtasks","files":[],"state":{}}"#),
+        "{json}"
+    );
 }
 
 #[test]

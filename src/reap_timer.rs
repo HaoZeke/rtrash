@@ -250,15 +250,29 @@ fn query(cmd: &[&str], keys: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Say whether the job `install` made is there, and what the service
-/// manager reports about it (state, last and next run). Exits 0 when it
-/// is installed and 1 when it is not.
-pub fn status(prog: &str) -> i32 {
+/// Split a service manager line at its first `=` or `:` into a key and a
+/// value, both trimmed.
+pub fn split_field(line: &str) -> Option<(String, String)> {
+    let at = line.find(['=', ':'])?;
+    let key = line[..at].trim();
+    (!key.is_empty()).then(|| (key.to_string(), line[at + 1..].trim().to_string()))
+}
+
+/// What `status` found: the manager's name, the job's files (none for a
+/// scheduled task) and the fields the manager reports.
+struct Found {
+    manager: &'static str,
+    installed: bool,
+    files: Vec<PathBuf>,
+    fields: Vec<String>,
+}
+
+fn find() -> Result<Found, String> {
     if cfg!(windows) {
         // schtasks' format flag, built so the spell checker does not read
         // it as a typo.
         let format = ["/F", "O"].concat();
-        let lines = query(
+        let fields = query(
             &["schtasks", "/Query", "/TN", NAME, "/V", &format, "LIST"],
             &[
                 "Status:",
@@ -268,37 +282,24 @@ pub fn status(prog: &str) -> i32 {
                 "Task To Run:",
             ],
         );
-        if lines.is_empty() {
-            println!("no reap timer installed");
-            return 1;
-        }
-        println!("installed: scheduled task {NAME}");
-        for l in lines {
-            println!("  {l}");
-        }
-        return 0;
+        return Ok(Found {
+            manager: "schtasks",
+            installed: !fields.is_empty(),
+            files: Vec::new(),
+            fields,
+        });
     }
-    let (files, _) = match plan(Path::new("rtrash"), &[], 3600) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("{prog}: {e}");
-            return 2;
-        }
-    };
-    let present: Vec<PathBuf> = files
+    let (files, _) = plan(Path::new("rtrash"), &[], 3600)?;
+    let files: Vec<PathBuf> = files
         .into_iter()
         .map(|(p, _)| p)
         .filter(|p| p.exists())
         .collect();
-    if present.is_empty() {
-        println!("no reap timer installed");
-        return 1;
-    }
-    println!("installed:");
-    for p in &present {
-        println!("  {}", p.display());
-    }
-    let lines = if cfg!(target_os = "macos") {
+    let installed = !files.is_empty();
+    let macos = cfg!(target_os = "macos");
+    let fields = if !installed {
+        Vec::new()
+    } else if macos {
         #[cfg(unix)]
         let uid = unsafe { libc::getuid() };
         #[cfg(not(unix))]
@@ -328,13 +329,68 @@ pub fn status(prog: &str) -> i32 {
             ],
         )
     };
-    if lines.is_empty() {
-        println!("the service manager reports nothing; it may not be turned on");
+    Ok(Found {
+        manager: if macos { "launchd" } else { "systemd" },
+        installed,
+        files,
+        fields,
+    })
+}
+
+/// Say whether the job `install` made is there, and what the service
+/// manager reports about it (state, last and next run); with `json`, as
+/// an object `{installed, manager, files, state}`. Exits 0 when it is
+/// installed and 1 when it is not.
+pub fn status(prog: &str, json: bool) -> i32 {
+    let f = match find() {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{prog}: {e}");
+            return 2;
+        }
+    };
+    let code = if f.installed { 0 } else { 1 };
+    if json {
+        use crate::util::json_escape;
+        let files: Vec<String> = f
+            .files
+            .iter()
+            .map(|p| format!("\"{}\"", json_escape(&p.to_string_lossy())))
+            .collect();
+        let state: Vec<String> = f
+            .fields
+            .iter()
+            .filter_map(|l| split_field(l))
+            .map(|(k, v)| format!("\"{}\":\"{}\"", json_escape(&k), json_escape(&v)))
+            .collect();
+        println!(
+            "{{\"installed\":{},\"manager\":\"{}\",\"files\":[{}],\"state\":{{{}}}}}",
+            f.installed,
+            f.manager,
+            files.join(","),
+            state.join(",")
+        );
+        return code;
     }
-    for l in lines {
+    if !f.installed {
+        println!("no reap timer installed");
+        return code;
+    }
+    if f.files.is_empty() {
+        println!("installed: scheduled task {NAME}");
+    } else {
+        println!("installed:");
+        for p in &f.files {
+            println!("  {}", p.display());
+        }
+        if f.fields.is_empty() {
+            println!("the service manager reports nothing; it may not be turned on");
+        }
+    }
+    for l in &f.fields {
         println!("  {l}");
     }
-    0
+    code
 }
 
 /// Create the Windows task, or with `dry_run` print the command.
@@ -445,6 +501,26 @@ mod tests {
         let w = schtasks_args(Path::new("rtrash"), &[], 2 * 86_400 + 1);
         let at = |k: &str| w[w.iter().position(|x| x == k).unwrap() + 1].clone();
         assert_eq!((at("/SC"), at("/MO")), ("DAILY".into(), "3".into()));
+    }
+
+    #[test]
+    fn split_field_takes_the_first_separator() {
+        let kv = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
+        assert_eq!(
+            split_field("ActiveState=active"),
+            kv("ActiveState", "active")
+        );
+        assert_eq!(
+            split_field("LastTriggerUSec=Tue 2026-10-13 21:00:00 CDT"),
+            kv("LastTriggerUSec", "Tue 2026-10-13 21:00:00 CDT")
+        );
+        assert_eq!(split_field("state = running"), kv("state", "running"));
+        assert_eq!(
+            split_field("Next Run Time:   10/13/2026 10:00:00 PM"),
+            kv("Next Run Time", "10/13/2026 10:00:00 PM")
+        );
+        assert_eq!(split_field("no separator"), None);
+        assert_eq!(split_field("=x"), None);
     }
 
     #[test]

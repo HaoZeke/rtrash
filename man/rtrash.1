@@ -1924,6 +1924,17 @@ on macOS its state, runs and last exit code from
 .BR "launchctl print" ;
 on Windows its status, last and next run time and last result from
 .BR "schtasks /Query" .
+With
+.BR \-\-json ,
+it prints an object:
+.I installed
+(true or false),
+.I manager
+.RB ( systemd ", " launchd " or " schtasks ),
+.I files
+(the job's files) and
+.IR state ,
+the reported fields by name.
 It exits 0 when the job is installed and 1 when it is not, and takes no
 other option.
 .TP

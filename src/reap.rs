@@ -57,7 +57,8 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
       --remove-timer    stop and remove the job --install-timer made; with
                           -n print what that would run and remove
       --timer-status    say whether that job is installed, and its state
-                          and last and next run; exits 1 when it is not
+                          and last and next run (with --json, an object);
+                          exits 1 when it is not
       --when-below=SPEC run only when a reaped file system has less free
                           than SPEC (a size such as 20G, a percent such
                           as 10%, and ,inodes=PCT), then reap oldest first
@@ -945,10 +946,17 @@ fn add_roots(out: &mut Vec<PathBuf>, v: &str) -> Result<(), String> {
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--timer-status") {
-        if args.len() > 1 {
-            return usage_err(prog, "--timer-status takes no other option");
+        let json = args.iter().any(|a| a == "--json");
+        if let Some(a) = args
+            .iter()
+            .find(|a| !matches!(a.as_str(), "--timer-status" | "--json"))
+        {
+            return usage_err(
+                prog,
+                &format!("--timer-status takes only --json, not '{a}'"),
+            );
         }
-        return crate::reap_timer::status(prog);
+        return crate::reap_timer::status(prog, json);
     }
     #[cfg(windows)]
     let bins = crate::trash_history::bin_snapshot();
