@@ -7,7 +7,7 @@
 #![cfg(target_os = "linux")]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn bin() -> &'static str {
@@ -39,12 +39,14 @@ fn cloned_pair(tag: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
-fn run(dir: &PathBuf, args: &[&str]) -> String {
+fn run(dir: &Path, args: &[&str]) -> String {
     let out: Output = Command::new(bin())
         .args(args)
         .current_dir(dir)
-        .env("HOME", dir)
-        .env("XDG_DATA_HOME", dir.join("xdg"))
+        // A home beside the files, not the directory reaped: reap refuses
+        // to reap a home directory.
+        .env("HOME", home(dir))
+        .env("XDG_DATA_HOME", home(dir).join("xdg"))
         .output()
         .unwrap();
     assert!(
@@ -53,6 +55,13 @@ fn run(dir: &PathBuf, args: &[&str]) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout).unwrap()
+}
+
+/// An empty home for the run, next to `dir`.
+fn home(dir: &Path) -> PathBuf {
+    let h = dir.with_extension("home");
+    fs::create_dir_all(&h).unwrap();
+    h
 }
 
 /// The number after the first `"key":` that follows `after` in `json`.
@@ -98,6 +107,7 @@ fn du_unique_and_shared_see_a_reflink_copy_as_one() {
     );
     assert!(all >= 2 * mib2 && once < all * 3 / 4, "{json}");
     let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(dir.with_extension("home"));
 }
 
 #[test]
@@ -142,4 +152,5 @@ fn reap_shared_frees_little_for_a_reflink_copy() {
     assert!(unique < mib2 * 5 / 4, "{json}");
     assert!(dir.join("clone.bin").exists(), "a dry run removed a file");
     let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(dir.with_extension("home"));
 }
