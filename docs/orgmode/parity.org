@@ -32,7 +32,13 @@ intact. gio 2.84 (Debian 13) restores both intact. The interop smoke
 test probes =x é=, =x 100%= and =x 100% é=, counts gio restores of
 non-ASCII names as known failures where the =x é= probe fails, and still
 checks every putter against a gio restore of an ASCII name. No upstream
-GLib or gvfs issue turned up yet.
+GLib or gvfs issue turned up in a search. The likely cause: the original
+=gio trash --restore= code
+([[https://lists.gnome.org/archives/commits-list/2020-December/msg02952.html][725984f]])
+reads =trash::orig-path= with =g_file_info_get_attribute_as_string()=,
+which escapes non-ASCII bytes for display. The GLib documentation for that
+function now uses =trash::orig-path= as its example of an attribute to read
+as a byte string instead, which fits a fix between 2.80 and 2.84.
 
 * trash-cli command lines
 
