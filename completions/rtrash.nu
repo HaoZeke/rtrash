@@ -264,6 +264,7 @@ export extern "rtrash reap" [
     --verbose(-v)  # also show each skipped entry and why
     --shared  # also show what a delete would free: the bytes in
     --install-timer?: string  # write a user systemd service and timer, a launchd agent or a Task Scheduler task
+    --watch?: string  # reap again every EVERY (default 1m) under --when-below
     --remove-timer  # stop and remove the job --install-timer made; with
     --timer-status  # say whether that job is installed, and its state
     --when-below: string  # run only when a reaped file system has less free

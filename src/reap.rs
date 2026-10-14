@@ -54,6 +54,10 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
                           Scheduler task (Windows) that runs this reap,
                           with the other options, every EVERY (default
                           1h); with -n print them instead
+      --watch[=EVERY]   stay running and reap again every EVERY (default
+                          1m, at least 1s); needs --when-below, so a pass
+                          does nothing while space is fine; stops on
+                          Ctrl-C
       --remove-timer    stop and remove the job --install-timer made; with
                           -n print what that would run and remove
       --timer-status    say whether that job is installed, and its state
@@ -969,6 +973,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         return crate::reap_timer::status(prog, json);
     }
+    if let Some(i) = args
+        .iter()
+        .position(|a| a == "--watch" || a.starts_with("--watch="))
+    {
+        return watch(prog, args, i);
+    }
     #[cfg(windows)]
     let bins = crate::trash_history::bin_snapshot();
     let code = run_inner(prog, args);
@@ -982,6 +992,61 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     #[cfg(windows)]
     crate::trash_history::log_bins(event, &bins);
     code
+}
+
+/// `--watch`: one reap pass every interval, for good. A debug build stops
+/// after `RTRASH_TEST_WATCH_ROUNDS` passes so tests can run it.
+fn watch(prog: &str, args: &[String], i: usize) -> i32 {
+    let every = match args[i].split_once('=') {
+        None => 60,
+        Some((_, v)) => match parse_age(v) {
+            Some(s) if s >= 1 => s,
+            _ => {
+                return usage_err(
+                    prog,
+                    &format!("invalid interval '{v}' (at least 1s, such as 5m)"),
+                )
+            }
+        },
+    };
+    let rest: Vec<String> = args
+        .iter()
+        .enumerate()
+        .filter(|&(j, _)| j != i)
+        .map(|(_, a)| a.clone())
+        .collect();
+    if !rest.iter().any(|a| a.starts_with("--when-below=")) {
+        return usage_err(prog, "--watch goes with --when-below");
+    }
+    if let Some(a) = rest.iter().find(|a| {
+        a.starts_with("--install-timer")
+            || matches!(
+                a.as_str(),
+                "--remove-timer" | "--list-profiles" | "--help" | "--version" | "-n" | "--dry-run"
+            )
+    }) {
+        return usage_err(prog, &format!("--watch does not go with '{a}'"));
+    }
+    let rounds: Option<u64> = if cfg!(debug_assertions) {
+        std::env::var("RTRASH_TEST_WATCH_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    } else {
+        None
+    };
+    let mut done = 0u64;
+    let mut code = 0;
+    loop {
+        code = code.max(run(prog, &rest));
+        if code == 2 {
+            return code;
+        }
+        done += 1;
+        if rounds.is_some_and(|r| done >= r) {
+            return code;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(every as u64));
+    }
 }
 
 fn run_inner(prog: &str, args: &[String]) -> i32 {

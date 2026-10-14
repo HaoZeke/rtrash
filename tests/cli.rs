@@ -3391,6 +3391,43 @@ fn reap_when_below_exits_while_space_is_fine_and_reaps_when_short() {
     }
 }
 
+#[cfg(all(any(target_os = "linux", target_os = "macos"), debug_assertions))]
+#[test]
+fn reap_watch_reaps_on_each_pass_and_needs_when_below() {
+    let sb = Sandbox::new("reap-watch");
+    let tmp = sb.root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let old = stale_file(&tmp, "old.txt");
+    let tmp_arg = tmp.to_str().unwrap();
+    let args = [
+        "reap",
+        "--watch=1s",
+        "--age-by=m",
+        "--older-than=1h",
+        "--when-below=100%",
+        "--until=100%",
+        "--permanent",
+        tmp_arg,
+    ];
+    let out = Command::new(bin())
+        .args(args)
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .env("RTRASH_TEST_WATCH_ROUNDS", "2")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!old.exists());
+    for bad in [
+        &["reap", "--watch", tmp_arg][..],
+        &["reap", "--watch=0s", "--when-below=10%", tmp_arg],
+        &["reap", "--watch", "--when-below=10%", "-n", tmp_arg],
+    ] {
+        assert_eq!(sb.run(bad).status.code(), Some(2), "{bad:?}");
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn reap_install_timer_prints_on_dry_run_and_writes_user_units() {

@@ -2038,6 +2038,15 @@ for example
 .B \-\-remove\-timer
 removes the job again.
 .TP
+.BR \-\-watch [=\fIEVERY\fR]
+Stay running and reap again every \fIEVERY\fR (default 1m, at least 1s),
+with the other options, until Ctrl-C.
+It needs
+.BR \-\-when\-below ,
+so a pass does nothing while space is fine, and it does not go with
+.BR \-n .
+This suits a session without a timer service.
+.TP
 .B \-\-remove\-timer
 Stop and remove the job
 .B \-\-install\-timer

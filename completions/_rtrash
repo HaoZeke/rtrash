@@ -70,6 +70,7 @@ reap_opts=(
   '--list-profiles[list the profiles]'
   '--shared[show what a delete frees, counting shared extents once]'
   '--install-timer=-[write a user timer that runs this reap]:every:'
+  '--watch=-[reap again every interval under --when-below]:interval:'
   '--remove-timer[stop and remove the reap timer]'
   '--timer-status[show whether the reap timer is installed]'
   '--when-below=[reap only when free space is under this]:spec:'
