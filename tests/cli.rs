@@ -3284,6 +3284,14 @@ fn reap_purge_trash_empties_the_oldest_trash_items_when_short() {
         stderr_of(&out)
     );
     assert!(!info.exists());
+    // The history says purge, so the drop is not mistaken for a plain reap.
+    let hist = fs::read_to_string(sb.root.join("xdg/Trash/rtrash-history")).unwrap();
+    let events: Vec<&str> = hist.lines().filter_map(|l| l.split(' ').nth(1)).collect();
+    assert_eq!(events.last(), Some(&"purge"), "{hist}");
+    assert!(
+        !events.contains(&"reap"),
+        "the dry run wrote a line: {hist}"
+    );
     assert_eq!(
         reap_cmd(&sb, &["reap", "--purge-trash"]).status.code(),
         Some(2)

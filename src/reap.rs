@@ -944,6 +944,16 @@ fn add_roots(out: &mut Vec<PathBuf>, v: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Set when `--purge-trash` emptied trash items, so the history line
+/// says `purge` instead of `reap`.
+static PURGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn purged(dry_run: bool, n: u64) {
+    if !dry_run && n > 0 {
+        PURGED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub fn run(prog: &str, args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--timer-status") {
         let json = args.iter().any(|a| a == "--json");
@@ -961,10 +971,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     #[cfg(windows)]
     let bins = crate::trash_history::bin_snapshot();
     let code = run_inner(prog, args);
+    let event = if PURGED.load(std::sync::atomic::Ordering::Relaxed) {
+        "purge"
+    } else {
+        "reap"
+    };
     #[cfg(unix)]
-    crate::trash_total::log_touched("reap");
+    crate::trash_total::log_touched(event);
     #[cfg(windows)]
-    crate::trash_history::log_bins("reap", &bins);
+    crate::trash_history::log_bins(event, &bins);
     code
 }
 
@@ -1646,6 +1661,7 @@ fn purge_oldest(
                 ..opts(max)
             },
         );
+        purged(dry_run, done.removed);
         if done.removed > 0 {
             eprintln!(
                 "{prog}: {} {} ({}) from trash '{}'",
@@ -1690,6 +1706,7 @@ fn purge_oldest(
     };
     let (n, bytes, files) =
         crate::win_recycle::purge_oldest_on(prog, &drive, need, dry_run, verbose);
+    purged(dry_run, n);
     if n > 0 {
         eprintln!(
             "{prog}: {} {} ({}) from the Recycle Bin of {}",
