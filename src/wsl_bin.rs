@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::win_recycle::{filetime_to_unix_epoch, parse_recycle_i, restore_payload};
+use crate::win_recycle::{restore_payload, scan_bin_dir};
 
 /// One Recycle Bin item as WSL sees it.
 #[derive(Debug, Clone)]
@@ -86,34 +86,17 @@ pub fn scan(root: &Path, sid: &str) -> Vec<BinEntry> {
             continue;
         }
         let bin = d.path().join("$Recycle.Bin").join(sid);
-        let Ok(rd) = std::fs::read_dir(&bin) else {
-            continue;
-        };
-        for e in rd.flatten() {
-            let fname = e.file_name();
-            let Some(rest) = fname.to_str().and_then(|s| s.strip_prefix("$I")) else {
-                continue;
-            };
-            let payload = bin.join(format!("$R{rest}"));
-            if std::fs::symlink_metadata(&payload).is_err() {
-                continue;
-            }
-            let Some(meta) = std::fs::read(e.path())
-                .ok()
-                .and_then(|b| parse_recycle_i(&b))
-            else {
-                continue;
-            };
-            let original = meta.original.to_string_lossy().into_owned();
+        for r in scan_bin_dir(&bin) {
+            let original = r.original.to_string_lossy().into_owned();
             let Some(local) = win_to_wsl(root, &original) else {
                 continue;
             };
             out.push(BinEntry {
-                payload,
+                payload: r.payload,
                 original,
                 local,
-                deleted: filetime_to_unix_epoch(meta.delete_filetime),
-                size: meta.size,
+                deleted: r.deleted,
+                size: r.size,
             });
         }
     }
