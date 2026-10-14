@@ -156,7 +156,7 @@ pub fn low_warning(what: &str, path: &Path) -> Option<String> {
 /// The text of a low-space warning about `what`.
 pub fn low_message(what: &str, lows: &[String]) -> String {
     format!(
-        "the file system of {what} is low ({}); trashing frees nothing there until the trash is emptied (`rtrash empty`, or `rtrash reap --when-below=10% --purge-trash`)",
+        "the file system of {what} is low ({}); trashing frees nothing there until the trash is emptied (`rtrash empty --until-free=10%` takes only the oldest items it needs; `rtrash empty` takes all)",
         lows.join(", ")
     )
 }

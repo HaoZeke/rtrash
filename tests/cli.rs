@@ -4669,7 +4669,11 @@ fn status_warns_from_the_test_file_system_and_stops_once_it_is_freed() {
     // Another 550 KB leaves under 10% free.
     fs::write(xdg.join("filler"), vec![1u8; 550_000]).unwrap();
     let out = status(false);
-    assert!(stderr_of(&out).contains("is low"), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("is low") && stderr_of(&out).contains("empty --until-free=10%"),
+        "{}",
+        stderr_of(&out)
+    );
     assert!(stdout_of(&status(true)).contains("\"fs_low\":true"));
     // Emptying the trash frees enough.
     fs::remove_file(xdg.join("filler")).unwrap();
@@ -5967,7 +5971,9 @@ fn put_warns_when_the_trash_file_system_is_low() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let err = stderr_of(&out);
     assert!(
-        err.contains("is low (") && err.contains("trashing frees nothing"),
+        err.contains("is low (")
+            && err.contains("trashing frees nothing")
+            && err.contains("empty --until-free=10%"),
         "{err}"
     );
     let quiet = write_at(&sb.root, "work/ok.bin", "x");

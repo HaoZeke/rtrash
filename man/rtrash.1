@@ -2910,7 +2910,11 @@ or
 silence it.
 A put also warns when a trash it used sits on a file system with less
 than 10% of its bytes or inodes free, since moving a file into that
-trash frees nothing there.
+trash frees nothing there; it and
+.B status
+point at
+.BR "empty \-\-until\-free=10%" ,
+which takes only the oldest items needed.
 On Windows it names the Recycle Bin of the volume and counts bytes only.
 .TP
 .B RTRASH_MIN_FREE

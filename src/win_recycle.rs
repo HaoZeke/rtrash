@@ -1454,7 +1454,7 @@ registry), then the total and the free space on each (a warning under
             let lows = s.lows(crate::space::WARN_FREE_PERCENT);
             if !lows.is_empty() {
                 eprintln!(
-                    "rtrash: warning: {} is low: {}; free space with `rtrash empty`",
+                    "rtrash: warning: {} is low: {}; free space with `rtrash empty --until-free=10%` (only the oldest items it needs) or `rtrash empty`",
                     root.display(),
                     lows.join(", ")
                 );
