@@ -63,6 +63,7 @@ list_opts=(
   '--regex=[only items whose original path matches RE]:regex:'
   '--name=[only items with this file name]:name:'
   '--cwd-only[only items from the current directory or below]'
+  '--format=[print each item through a template]:template:'
   '--all-users[list every readable user trash with an owner column]'
   '--volumes[print the mount points searched and exit]'
   '--trash-dirs[print the trash directories read and exit]'

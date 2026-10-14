@@ -40,7 +40,12 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
       --reverse         reverse the order
       --json            emit a JSON array (scripts; one object per item;
                      \"size\" in bytes with --size; \"missing\" is true
-                     when the payload is gone)
+                     when the payload is gone); field names are stable,
+                     and new fields only get added
+      --format=TEMPLATE print each item through TEMPLATE, unescaped:
+                     {date} {epoch} {path} {name} {trash} {batch}
+                     {size} (bytes) {owner}; {{ and }} for braces,
+                     \\t \\n \\0 for tab, newline, NUL; no newline added
       --help            display this help and exit
       --version         output version information and exit
 ";
@@ -234,6 +239,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut size_filter = SizeFilter::default();
     let mut matcher: Option<crate::restore::Matcher> = None;
     let mut cwd_only = false;
+    let mut format: Option<Vec<FmtPart>> = None;
     let mut i = 0usize;
     while i < args.len() {
         match size_filter.take(args, &mut i) {
@@ -252,6 +258,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--home-only" => home_only = true,
             "--all-users" => all_users = true,
             "--json" => json = true,
+            a if a.starts_with("--format=") => match parse_format(&a["--format=".len()..]) {
+                Ok(f) => format = Some(f),
+                Err(e) => {
+                    eprintln!("{prog}: {e}");
+                    return 2;
+                }
+            },
             "--volumes" => volumes = true,
             "--trash-dirs" => show_dirs = true,
             "--size" => with_size = true,
@@ -376,6 +389,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     } else {
         None
     };
+    if json && format.is_some() {
+        eprintln!("{prog}: give --json or --format, not both");
+        return 2;
+    }
     // --glob/--regex/--name and --cwd-only, on the original path and the
     // name in the trash.
     let keep = |original: &std::path::Path, name: &str| -> bool {
@@ -401,7 +418,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             },
             size: size_filter,
         };
-        return crate::finder::default_list(prog, json, refused, filter, &keep);
+        return crate::finder::default_list(prog, json, format.as_deref(), refused, filter, &keep);
     }
     if all_users && (home_only || !trash_dirs.is_empty()) {
         eprintln!("{prog}: --all-users takes no --home-only or --trash-dir");
@@ -442,7 +459,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 .filter(|e| keep(&e.original, &e.name)),
         );
     }
-    let with_size = with_size || sort == SortKey::Size;
+    let with_size = with_size
+        || sort == SortKey::Size
+        || format
+            .as_ref()
+            .is_some_and(|f| f.iter().any(|p| matches!(p, FmtPart::Field(Field::Size))));
     let mut sizes = (with_size || size_filter.is_set()).then(|| entry_sizes(&dirs, &entries));
     if let (true, Some(all)) = (size_filter.is_set(), sizes.as_mut()) {
         let keep: Vec<bool> = all.iter().map(|&n| size_filter.keeps(n)).collect();
@@ -475,7 +496,26 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             })
             .collect()
     });
-    if json {
+    if let Some(parts) = &format {
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        for (k, e) in rows.iter().enumerate() {
+            let row = FmtRow {
+                date: e.date.as_deref().unwrap_or(""),
+                epoch: e.epoch,
+                path: &e.original,
+                name: &e.name,
+                trash: &e.dir.root,
+                batch: e.batch.as_deref().unwrap_or(""),
+                size: row_sizes.as_ref().map(|s| s[k]),
+                owner: owners.as_ref().map(|o| o[k].as_str()),
+            };
+            if out.write_all(&render_format(parts, &row)).is_err() {
+                return 0;
+            }
+        }
+        let _ = out.flush();
+    } else if json {
         let items: Vec<String> = rows
             .iter()
             .enumerate()
@@ -521,6 +561,127 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let _ = out.flush();
     }
     0
+}
+
+/// One field `list --format` can print.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    Date,
+    Epoch,
+    Path,
+    Name,
+    Trash,
+    Batch,
+    Size,
+    Owner,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FmtPart {
+    Lit(Vec<u8>),
+    Field(Field),
+}
+
+/// Parse a `--format` template; an unknown or unclosed field is an error.
+pub fn parse_format(t: &str) -> Result<Vec<FmtPart>, String> {
+    let mut parts = Vec::new();
+    let mut lit: Vec<u8> = Vec::new();
+    let mut it = t.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '{' if it.peek() == Some(&'{') => {
+                it.next();
+                lit.push(b'{');
+            }
+            '}' if it.peek() == Some(&'}') => {
+                it.next();
+                lit.push(b'}');
+            }
+            '{' => {
+                let key: String = it.by_ref().take_while(|&c| c != '}').collect();
+                let f = match key.as_str() {
+                    "date" => Field::Date,
+                    "epoch" => Field::Epoch,
+                    "path" => Field::Path,
+                    "name" => Field::Name,
+                    "trash" => Field::Trash,
+                    "batch" => Field::Batch,
+                    "size" => Field::Size,
+                    "owner" => Field::Owner,
+                    _ => return Err(format!("--format: unknown field '{{{key}}}'")),
+                };
+                if !lit.is_empty() {
+                    parts.push(FmtPart::Lit(std::mem::take(&mut lit)));
+                }
+                parts.push(FmtPart::Field(f));
+            }
+            '}' => return Err("--format: a lone '}' (write '}}')".into()),
+            '\\' => match it.next() {
+                Some('t') => lit.push(b'\t'),
+                Some('n') => lit.push(b'\n'),
+                Some('0') => lit.push(0),
+                Some('\\') => lit.push(b'\\'),
+                Some(o) => {
+                    lit.push(b'\\');
+                    let mut b = [0; 4];
+                    lit.extend_from_slice(o.encode_utf8(&mut b).as_bytes());
+                }
+                None => lit.push(b'\\'),
+            },
+            c => {
+                let mut b = [0; 4];
+                lit.extend_from_slice(c.encode_utf8(&mut b).as_bytes());
+            }
+        }
+    }
+    if !lit.is_empty() {
+        parts.push(FmtPart::Lit(lit));
+    }
+    Ok(parts)
+}
+
+/// The values one `--format` row can show.
+pub struct FmtRow<'a> {
+    pub date: &'a str,
+    pub epoch: i64,
+    pub path: &'a std::path::Path,
+    pub name: &'a str,
+    pub trash: &'a std::path::Path,
+    pub batch: &'a str,
+    pub size: Option<u64>,
+    pub owner: Option<&'a str>,
+}
+
+/// One item through a parsed template; paths go out as raw bytes.
+pub fn render_format(parts: &[FmtPart], r: &FmtRow) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = Vec::new();
+    for p in parts {
+        match p {
+            FmtPart::Lit(b) => out.extend_from_slice(b),
+            FmtPart::Field(f) => match f {
+                Field::Date => out.extend_from_slice(r.date.as_bytes()),
+                Field::Epoch => out.extend_from_slice(r.epoch.to_string().as_bytes()),
+                Field::Path => out.extend_from_slice(r.path.as_os_str().as_bytes()),
+                Field::Name => out.extend_from_slice(r.name.as_bytes()),
+                Field::Trash => out.extend_from_slice(r.trash.as_os_str().as_bytes()),
+                Field::Batch => out.extend_from_slice(r.batch.as_bytes()),
+                Field::Size => {
+                    if let Some(n) = r.size {
+                        out.extend_from_slice(n.to_string().as_bytes());
+                    }
+                }
+                Field::Owner => {
+                    let o = r
+                        .owner
+                        .map(str::to_string)
+                        .unwrap_or_else(|| trashdir::owner_name(r.trash));
+                    out.extend_from_slice(o.as_bytes());
+                }
+            },
+        }
+    }
+    out
 }
 
 /// What `list --sort` orders by.

@@ -619,6 +619,30 @@ holds a glob character (* ? [), works as
 .BR \-\-glob .
 On Windows, list takes these matchers too.
 .TP
+.BI \-\-format =TEMPLATE
+Print each item through
+.IR TEMPLATE ,
+with no escaping and no newline added:
+.B {date} {epoch} {path} {name} {trash} {batch} {size} {owner}
+expand, with
+.B {size}
+in bytes;
+.B {{
+and
+.B }}
+print braces, and
+.BR \et ,
+.B \en
+and
+.B \e0
+print a tab, a newline and a NUL.
+An unknown field is an error.
+It reads the Finder Trash too (no batch there), but not the Windows
+Recycle Bin yet.
+The
+.B \-\-json
+field names are stable: new releases only add fields.
+.TP
 .B \-\-size
 Add a column with each item's disk usage: the payload plus its
 .IR .trashinfo ,

@@ -6088,6 +6088,32 @@ fn bare_patterns_filter_list_and_glob_restore() {
 }
 
 #[test]
+fn list_format_prints_fields_through_a_template() {
+    let sb = Sandbox::new("listfmt");
+    fs::write(sb.work().join("a b.txt"), b"xyz").unwrap();
+    assert!(sb.run(&["put", "a b.txt"]).status.success());
+    let out = sb.run(&[
+        "list",
+        "--home-only",
+        "--format={name}\\t{size}\\t{path}\\0",
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let o = stdout_of(&out);
+    let row = o.strip_suffix('\0').expect("NUL ends the row");
+    let cols: Vec<&str> = row.split('\t').collect();
+    assert_eq!(cols[0], "a b.txt");
+    assert!(cols[1].parse::<u64>().unwrap() >= 3);
+    assert!(cols[2].ends_with("/a b.txt"));
+    let out = sb.run(&["list", "--home-only", "--format={{{epoch}}}"]);
+    assert!(stdout_of(&out).starts_with('{') && stdout_of(&out).ends_with('}'));
+    for bad in ["--format={nope}", "--format=}"] {
+        assert_eq!(sb.run(&["list", bad]).status.code(), Some(2), "{bad}");
+    }
+    let out = sb.run(&["list", "--json", "--format={path}"]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
 fn put_dry_run_checks_and_moves_nothing() {
     let sb = Sandbox::new("putdry");
     fs::write(sb.work().join("a"), b"x").unwrap();

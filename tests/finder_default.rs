@@ -771,3 +771,16 @@ fn list_glob_filters_the_finder_trash() {
         out(&o)
     );
 }
+
+#[test]
+fn list_format_reads_the_finder_trash() {
+    let b = Box_::new("listfmt");
+    fs::write(b.work().join("x.log"), b"abc").unwrap();
+    assert!(b.run(&["put", "x.log"], "").status.success());
+    let o = b.run(&["list", "--format={name}|{size}\\n"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let line = out(&o).lines().next().unwrap_or_default().to_string();
+    let (name, size) = line.split_once('|').expect("one row");
+    assert_eq!(name, "x.log");
+    assert!(size.parse::<u64>().unwrap() >= 3, "{line}");
+}

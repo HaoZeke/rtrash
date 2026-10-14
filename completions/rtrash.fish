@@ -90,6 +90,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l glob 
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l regex -r -d 'only items whose original path matches RE'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l name -r -d 'only items with this file name'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l cwd-only -d 'only items from the current directory or below'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l format -r -d 'print each item through a template'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l all-users -d 'list every readable user trash with an owner column'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l volumes -d 'print the mount points searched and exit'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l trash-dirs -d 'print the trash directories read and exit'
@@ -265,6 +266,7 @@ complete -c trash-list -l glob -r
 complete -c trash-list -l regex -r
 complete -c trash-list -l name -r
 complete -c trash-list -l cwd-only
+complete -c trash-list -l format -r
 complete -c trash-list -l larger-than -r
 complete -c trash-list -l smaller-than -r
 complete -c trash-list -l json

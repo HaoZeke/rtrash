@@ -599,6 +599,7 @@ fn read_all(prog: &str) -> Result<Vec<crate::finder_shared::Entry>, i32> {
 pub fn default_list(
     prog: &str,
     json: bool,
+    format: Option<&[crate::list::FmtPart]>,
     refused: Option<&str>,
     filter: crate::finder_shared::Filter,
     keep: &dyn Fn(&Path, &str) -> bool,
@@ -630,6 +631,31 @@ pub fn default_list(
             })
             .collect();
         println!("[{}]", out.join(","));
+        return 0;
+    }
+    if let Some(parts) = format {
+        use std::io::Write;
+        let wants_size = parts.contains(&crate::list::FmtPart::Field(crate::list::Field::Size));
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        for e in &rows {
+            let row = crate::list::FmtRow {
+                date: &e.date,
+                epoch: e.epoch,
+                path: &e.shown,
+                name: &e.name,
+                trash: &e.trash,
+                batch: "",
+                size: wants_size.then(|| crate::fastdelete::disk_usage(&e.path())),
+                owner: None,
+            };
+            if out
+                .write_all(&crate::list::render_format(parts, &row))
+                .is_err()
+            {
+                return 0;
+            }
+        }
+        let _ = out.flush();
         return 0;
     }
     for e in &rows {

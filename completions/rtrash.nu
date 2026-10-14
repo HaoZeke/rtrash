@@ -122,6 +122,7 @@ export extern "rtrash list" [
     --regex: string  # only items whose original path matches RE
     --name: string  # only items with this file name
     --cwd-only  # only items from the current directory or below
+    --format: string  # print each item through a template ({date} {path} {name} {size} ...)
     --json  # emit a JSON array (scripts; one object per item;
     --help  # display this help and exit
     --version  # output version information and exit
@@ -400,6 +401,7 @@ export extern "trash-list" [
     --regex: string  # only items whose original path matches RE
     --name: string  # only items with this file name
     --cwd-only  # only items from the current directory or below
+    --format: string  # print each item through a template ({date} {path} {name} {size} ...)
     --json  # emit a JSON array (scripts; one object per item;
     --help  # display this help and exit
     --version  # output version information and exit
