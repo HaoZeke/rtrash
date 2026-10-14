@@ -3470,6 +3470,14 @@ fn reap_install_timer_with_watch_writes_a_service_that_stays_up() {
     let out = reap_cmd(&sb, &["reap", "--remove-timer"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(stdout_of(&out).contains("removed "), "{}", stdout_of(&out));
+    // The service manager calls went to the stand-in, never the session.
+    let calls = fs::read_to_string(sb.root.join("service-calls.log")).unwrap();
+    let stop = if cfg!(target_os = "macos") {
+        "launchctl bootout gui/"
+    } else {
+        "systemctl --user disable --now rtrash-reap.service"
+    };
+    assert!(calls.contains(stop), "{calls}");
     assert_eq!(
         reap_cmd(&sb, &["reap", "--install-timer", "--watch", "-n"])
             .status
@@ -4566,9 +4574,30 @@ fn reap_timer_status_reports_what_the_service_manager_says() {
     );
 }
 
+/// A stand-in for systemctl and launchctl that logs each call to
+/// `service-calls.log` in the sandbox, so no test reaches the real user
+/// session.
+#[cfg(unix)]
+fn fake_service_tool(sb: &Sandbox) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let p = sb.root.join("fake-service-tool");
+    if !p.exists() {
+        let log = sb.root.join("service-calls.log");
+        fs::write(
+            &p,
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\n", log.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    p
+}
+
 fn reap_cmd(sb: &Sandbox, args: &[&str]) -> Output {
-    Command::new(bin())
-        .args(args)
+    let mut c = Command::new(bin());
+    #[cfg(unix)]
+    c.env("RTRASH_TEST_SERVICE_TOOL", fake_service_tool(sb));
+    c.args(args)
         .current_dir(sb.work())
         .env("XDG_DATA_HOME", sb.root.join("xdg"))
         .env("XDG_CONFIG_HOME", sb.root.join(".config"))

@@ -12,6 +12,21 @@ pub const NAME: &str = "rtrash-reap";
 /// The launchd label.
 pub const LABEL: &str = "io.github.haozeke.rtrash-reap";
 
+/// The command for a service manager tool (`systemctl`, `launchctl`,
+/// `schtasks`). Test seam, in debug builds only:
+/// `RTRASH_TEST_SERVICE_TOOL=PATH` runs PATH with the tool's name as its
+/// first argument instead, so tests never reach the real user session.
+fn tool(name: &str) -> std::process::Command {
+    if cfg!(debug_assertions) {
+        if let Some(fake) = std::env::var_os("RTRASH_TEST_SERVICE_TOOL") {
+            let mut c = std::process::Command::new(fake);
+            c.arg(name);
+            return c;
+        }
+    }
+    std::process::Command::new(name)
+}
+
 /// Quote one word for a systemd `ExecStart=` line.
 fn systemd_word(w: &str) -> String {
     let body = w
@@ -330,7 +345,7 @@ pub fn remove(prog: &str, dry_run: bool) -> i32 {
             println!("{}", cmd.join(" "));
             return true;
         }
-        std::process::Command::new(&cmd[0])
+        tool(&cmd[0])
             .args(&cmd[1..])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -368,7 +383,7 @@ pub fn remove(prog: &str, dry_run: bool) -> i32 {
 /// Run `cmd` and keep the lines of its output that start with one of
 /// `keys`, trimmed; nothing when it cannot run or fails.
 fn query(cmd: &[&str], keys: &[&str]) -> Vec<String> {
-    let Ok(out) = std::process::Command::new(cmd[0])
+    let Ok(out) = tool(cmd[0])
         .args(&cmd[1..])
         .stderr(std::process::Stdio::null())
         .output()
@@ -590,7 +605,7 @@ fn install_task(prog: &str, exe: &Path, args: &[String], every: i64, dry_run: bo
         println!("schtasks {}", shown.join(" "));
         return 0;
     }
-    match std::process::Command::new("schtasks").args(&words).status() {
+    match tool("schtasks").args(&words).status() {
         Ok(s) if s.success() => {
             println!(
                 "created the scheduled task {NAME}; remove it with: schtasks /Delete /TN {NAME}"

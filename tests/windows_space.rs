@@ -230,10 +230,29 @@ fn reap_remove_timer_dry_run_prints_the_schtasks_delete() {
     );
 }
 
+/// A stand-in for schtasks that logs each call and prints nothing, so the
+/// test never asks the runner's Task Scheduler.
+#[cfg(debug_assertions)]
+fn fake_schtasks(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("rtrash-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("calls.log");
+    let cmd = dir.join("fake-schtasks.cmd");
+    std::fs::write(
+        &cmd,
+        format!("@echo %* >> \"{}\"\r\n@exit /b 0\r\n", log.display()),
+    )
+    .unwrap();
+    (cmd, log)
+}
+
+#[cfg(debug_assertions)]
 #[test]
 fn reap_timer_status_says_when_no_task_is_installed() {
+    let (fake, log) = fake_schtasks("status");
     let out = Command::new(bin())
         .args(["reap", "--timer-status"])
+        .env("RTRASH_TEST_SERVICE_TOOL", &fake)
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
@@ -241,6 +260,7 @@ fn reap_timer_status_says_when_no_task_is_installed() {
     assert!(text.contains("no reap timer installed"), "{text}");
     let out = Command::new(bin())
         .args(["reap", "--timer-status", "--json"])
+        .env("RTRASH_TEST_SERVICE_TOOL", &fake)
         .output()
         .unwrap();
     let json = String::from_utf8_lossy(&out.stdout);
@@ -249,6 +269,10 @@ fn reap_timer_status_says_when_no_task_is_installed() {
         json.starts_with(r#"{"installed":false,"manager":"schtasks","files":[],"state":{}}"#),
         "{json}"
     );
+    // Both queries went to the stand-in.
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(calls.matches("schtasks /Query").count(), 2, "{calls}");
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
 }
 
 #[test]
