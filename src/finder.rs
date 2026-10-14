@@ -601,6 +601,7 @@ pub fn default_list(
     json: bool,
     refused: Option<&str>,
     filter: crate::finder_shared::Filter,
+    keep: &dyn Fn(&Path, &str) -> bool,
 ) -> i32 {
     if let Some(what) = refused {
         return finder_only(prog, what);
@@ -609,6 +610,10 @@ pub fn default_list(
         Ok(r) => filter.apply(r),
         Err(c) => return c,
     };
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|e| keep(&e.shown, &e.name))
+        .collect();
     if json {
         let out: Vec<String> = rows
             .iter()

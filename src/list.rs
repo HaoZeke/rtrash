@@ -25,6 +25,12 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
       --smaller-than=SIZE only items taking less than SIZE on disk
                      (SIZE as in `empty --max-size`: 500M, 1.5G, 64k;
                      sizes as --size shows them; orphans included)
+      --glob=PATTERN    only items whose original path (PATTERN with a /)
+                     or file name matches a shell glob
+      --regex=RE        only items whose original path matches RE
+      --name=NAME       only items whose file name is NAME
+      --cwd-only        only items that came from the current directory
+                     or below it
       --size            add each item's disk usage (payload plus its
                      .trashinfo, as status counts it)
       --sort=KEY        order by date (default), size, name (file name)
@@ -224,6 +230,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     let mut reverse = cfg.bool("list", "reverse").unwrap_or(false);
     let mut size_filter = SizeFilter::default();
+    let mut matcher: Option<crate::restore::Matcher> = None;
+    let mut cwd_only = false;
     let mut i = 0usize;
     while i < args.len() {
         match size_filter.take(args, &mut i) {
@@ -246,6 +254,33 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--trash-dirs" => show_dirs = true,
             "--size" => with_size = true,
             "--reverse" => reverse = true,
+            "--cwd-only" => cwd_only = true,
+            a if a.starts_with("--glob=")
+                || a.starts_with("--regex=")
+                || a.starts_with("--name=") =>
+            {
+                if matcher.is_some() {
+                    eprintln!("{prog}: give only one of --glob, --regex and --name");
+                    return 2;
+                }
+                let (key, val) = a.split_once('=').unwrap_or((a, ""));
+                if val.is_empty() {
+                    eprintln!("{prog}: {key} needs a non-empty value");
+                    return 2;
+                }
+                let val = crate::finder_shared::nfc(val);
+                matcher = Some(match key {
+                    "--glob" => crate::restore::Matcher::Glob(val),
+                    "--name" => crate::restore::Matcher::Name(val),
+                    _ => match regex_lite::Regex::new(&val) {
+                        Ok(re) => crate::restore::Matcher::Regex(re),
+                        Err(e) => {
+                            eprintln!("{prog}: invalid --regex '{val}': {e}");
+                            return 2;
+                        }
+                    },
+                });
+            }
             a if a.starts_with("--sort=") => match SortKey::parse(&a["--sort=".len()..]) {
                 Some(k) => sort = k,
                 None => {
@@ -313,6 +348,28 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: {e}");
         return 2;
     }
+    let cwd = if cwd_only {
+        match std::env::current_dir() {
+            Ok(d) => Some(d),
+            Err(e) => {
+                eprintln!("{prog}: cannot read the current directory: {e}");
+                return 2;
+            }
+        }
+    } else {
+        None
+    };
+    // --glob/--regex/--name and --cwd-only, on the original path and the
+    // name in the trash.
+    let keep = |original: &std::path::Path, name: &str| -> bool {
+        matcher
+            .as_ref()
+            .is_none_or(|m| m.matches_parts(original, name))
+            && cwd.as_ref().is_none_or(|d| {
+                original.starts_with(d)
+                    || std::fs::canonicalize(d).is_ok_and(|r| original.starts_with(r))
+            })
+    };
     // macOS lists the Finder Trash unless a pin or the setting says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty() || all_users) {
         let refused = if volumes || show_dirs {
@@ -327,7 +384,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             },
             size: size_filter,
         };
-        return crate::finder::default_list(prog, json, refused, filter);
+        return crate::finder::default_list(prog, json, refused, filter, &keep);
     }
     if all_users && (home_only || !trash_dirs.is_empty()) {
         eprintln!("{prog}: --all-users takes no --home-only or --trash-dir");
@@ -357,11 +414,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 0;
     }
     let mut entries = filter_age_secs(collect(&dirs), older_than, newer_than);
+    entries.retain(|e| keep(&e.original, &e.name));
     // Orphans have no date, so only an unfiltered listing shows them; they
     // come last, after every recorded item.
     let mut recorded = entries.len();
     if older_than.is_none() && newer_than.is_none() {
-        entries.extend(orphans(&dirs));
+        entries.extend(
+            orphans(&dirs)
+                .into_iter()
+                .filter(|e| keep(&e.original, &e.name)),
+        );
     }
     let with_size = with_size || sort == SortKey::Size;
     let mut sizes = (with_size || size_filter.is_set()).then(|| entry_sizes(&dirs, &entries));

@@ -589,6 +589,23 @@ Only items taking less than
 .I SIZE
 on disk.
 .TP
+.BI \-\-glob =PATTERN
+Only items whose original path (a
+.I PATTERN
+with a /) or file name matches a shell glob.
+.TP
+.BI \-\-regex =RE
+Only items whose original path matches
+.IR RE .
+.TP
+.BI \-\-name =NAME
+Only items whose file name is
+.IR NAME .
+.TP
+.B \-\-cwd\-only
+Only items that came from the current directory or below it.
+Names and patterns compare in Unicode NFC, as restore does.
+.TP
 .B \-\-size
 Add a column with each item's disk usage: the payload plus its
 .IR .trashinfo ,

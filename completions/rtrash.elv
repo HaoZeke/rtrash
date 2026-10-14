@@ -10,7 +10,7 @@ var subs = [put empty list status trash-stats du restore undo rm who reap finder
 var opts = [
   &put=[-f --force -i -I --interactive -r -R --recursive -d --dir -v --verbose --one-file-system --preserve-root --no-preserve-root --trash-dir= --home-only --plain --no-space-check --in-use= --json --help --version]
   &empty=[-n --dry-run -v --verbose -f --force -i --interactive --all-users --plain --all --older-than= --max-size= --prune= --until-free= --dangling --json --trash-dir= --home-only --help --version]
-  &list=[--home-only --trash-dir= --all-users --volumes --trash-dirs --older-than= --newer-than= --larger-than= --smaller-than= --size --sort= --reverse --json --help --version]
+  &list=[--home-only --trash-dir= --all-users --volumes --trash-dirs --older-than= --newer-than= --larger-than= --smaller-than= --size --sort= --reverse --glob= --regex= --name= --cwd-only --json --help --version]
   &status=[--home-only --trash-dir= --older-than= --newer-than= --larger-than= --smaller-than= --json --help --version]
   &trash-stats=[--top= --home-only --trash-dir= --history --since= --total --measure --space --exit-low --json --help --version]
   &du=[-n --top= -x --one-file-system -L --follow-symlinks --apparent --sort= -C --count --inodes --types --unique --shared --max-depth= --threads= --all-dirs --artefacts --exclude= -X --exclude-from= --exclude-caches --gitignore --dirs --files --older-than= --newer-than= --since= --until= --home-only --trash-dir= --no-git --include-dirty --json --print0 --dupes --trash-dupes --link-dupes --clone-dupes --min-size= -o --output= --devices --ncdu= --ncdu-binary= -f --file= --stacks --pick -i --interactive --no-delete --si --help --version]

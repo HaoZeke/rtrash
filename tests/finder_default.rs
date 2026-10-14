@@ -755,3 +755,19 @@ fn rm_batch_takes_the_latest_finder_put() {
     assert!(!b.finder().join("d1").exists() && !b.finder().join("d2").exists());
     assert!(b.finder().join("k").exists());
 }
+
+#[test]
+fn list_glob_filters_the_finder_trash() {
+    let b = Box_::new("listglob");
+    for n in ["x.log", "y.txt"] {
+        fs::write(b.work().join(n), b"x").unwrap();
+        assert!(b.run(&["put", n], "").status.success());
+    }
+    let o = b.run(&["list", "--glob=*.log"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(
+        out(&o).contains("x.log") && !out(&o).contains("y.txt"),
+        "{}",
+        out(&o)
+    );
+}

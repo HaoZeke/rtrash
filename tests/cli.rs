@@ -6034,3 +6034,31 @@ fn rm_batch_removes_one_put_run() {
     assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     assert!(sb.trash().join("files/a").exists());
 }
+
+#[test]
+fn list_filters_by_glob_regex_name_and_cwd() {
+    let sb = Sandbox::new("listmatch");
+    fs::create_dir_all(sb.work().join("sub")).unwrap();
+    for n in ["a.log", "b.txt", "sub/c.log"] {
+        fs::write(sb.work().join(n), b"x").unwrap();
+        assert!(sb.run(&["put", n]).status.success());
+    }
+    let lines = |args: &[&str]| -> Vec<String> {
+        let mut a = vec!["list", "--home-only"];
+        a.extend_from_slice(args);
+        let out = sb.run(&a);
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        stdout_of(&out).lines().map(str::to_string).collect()
+    };
+    let got = lines(&["--glob=*.log"]);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(got.iter().all(|l| l.ends_with(".log")));
+    let got = lines(&["--regex=/sub/"]);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].ends_with("sub/c.log"));
+    assert_eq!(lines(&["--name=b.txt"]).len(), 1);
+    assert_eq!(lines(&["--cwd-only"]).len(), 3);
+    // Two matchers at once are refused.
+    let out = sb.run(&["list", "--home-only", "--glob=*", "--name=x"]);
+    assert_eq!(out.status.code(), Some(2));
+}
