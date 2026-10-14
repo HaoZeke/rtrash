@@ -4,7 +4,7 @@
 
 Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put', 'trash-empty', 'trash-list', 'trash-restore', 'trash-rm') -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
-    $subs = @('put', 'empty', 'list', 'status', 'trash-stats', 'du', 'restore', 'undo', 'rm', 'who', 'reap', 'finder', 'config', 'setup', 'keys', 'completions', 'man')
+    $subs = @('put', 'empty', 'list', 'status', 'trash-stats', 'du', 'restore', 'undo', 'rm', 'who', 'reap', 'finder', 'wsl', 'config', 'setup', 'keys', 'completions', 'man')
     $opts = @{
         'put' = @('-f', '--force', '-i', '-I', '--interactive', '-r', '-R', '--recursive', '-d', '--dir', '-v', '--verbose', '--one-file-system', '--preserve-root', '--no-preserve-root', '--trash-dir=', '--home-only', '--plain', '--no-space-check', '--dry-run', '--in-use=', '--json', '--help', '--version')
         'empty' = @('-n', '--dry-run', '-v', '--verbose', '-f', '--force', '-i', '--interactive', '--all-users', '--plain', '--all', '--older-than=', '--max-size=', '--prune=', '--until-free=', '--dangling', '--json', '--trash-dir=', '--home-only', '--help', '--version')
@@ -17,6 +17,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
         'rm' = @('--trash-dir=', '--home-only', '--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--batch=', '-n', '--dry-run', '-f', '--force', '-v', '--verbose', '--json', '--help', '--version')
         'who' = @('--json', '--help', '--version')
         'reap' = @('-p', '--profile=', '--list-profiles', '--roots=', '--depth=', '--tool', '--older-than=', '--age-by=', '-n', '--dry-run', '--permanent', '--trash', '--trash-dir=', '--home-only', '-v', '--verbose', '--shared', '--install-timer', '--watch', '--watch=', '--remove-timer', '--timer-status', '--when-below=', '--purge-trash', '--until=', '--json', '--help', '--version')
+        'wsl' = @('-f', '--force', '--help')
         'finder' = @('--trash-dir=', '--all', '-f', '--force', '--conflict=', '-v', '--verbose', '--json', '--help')
         'config' = @('--path', '--default', '--help', '--version')
         'setup' = @('--prefix=', '--bin-dir=', '--with-rm', '--powershell-profile', '-n', '--dry-run', '-f', '--force', '-v', '--verbose', '--help')
@@ -38,7 +39,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
         foreach ($k in @($winOpts.Keys)) { $opts[$k] = $winOpts[$k] }
     }
     $multi = @{'trash' = 'put'; 'trash-put' = 'put'; 'trash-empty' = 'empty'; 'trash-list' = 'list'; 'trash-restore' = 'restore'; 'trash-rm' = 'rm'}
-    $values = @{'completions' = @('bash', 'zsh', 'fish', 'nu', 'powershell', 'elvish'); 'finder' = @('put', 'list', 'restore')}
+    $values = @{'completions' = @('bash', 'zsh', 'fish', 'nu', 'powershell', 'elvish'); 'finder' = @('put', 'list', 'restore'); 'wsl' = @('list', 'restore')}
     $words = @($commandAst.CommandElements | ForEach-Object { $_.ToString() })
     $cmd = [System.IO.Path]::GetFileNameWithoutExtension($words[0])
     $sub = $multi[$cmd]

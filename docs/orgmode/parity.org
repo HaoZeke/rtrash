@@ -89,6 +89,7 @@ it has no fallback; trash-cli fails each item with a bare error.
 | =list --format=TEMPLATE= | fields {date} {path} {name} {size} ..., raw bytes, \0 rows; Finder and Windows too | no |
 | =empty -v= | one =removed ORIGINAL= line per item, every backend | no |
 | WSL: =/mnt/c= files to the Recycle Bin | opt-in, =RTRASH_WSL_RECYCLE=1= | no |
+| WSL: list and restore Recycle Bin items | =rtrash wsl list=, =rtrash wsl restore PATH=, from the =$I= records | no |
 | =restore --batch=ID= (or =last=) | one put run as a unit (same as =undo=) | no |
 | FreeDesktop home trash                 | =RTRASH_MACOS_TRASH=freedesktop=, =macos.trash= or a =--trash-dir= pin | no |
 | =undo=, =status=, =trash-stats=, restore browser | Finder Trash; undo from a put-run log | n/a |
