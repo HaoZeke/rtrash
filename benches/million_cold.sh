@@ -15,21 +15,22 @@ for d in range(n//1000):
 P
 }
 echo "== tmpfs, 1M files"
+TS=/dev/shm/.Trash-$(id -u); mkdir -p -m 700 $TS/files $TS/info
 S=/dev/shm/b75-$$; mkdir -p $S; mk $S/tree 1000000
 t $B du -n 5 $S/tree
 t $B du --inodes $S/tree
 t $B du --dupes --min-size=1 $S/tree
-t $B put -r --trash-dir=/dev/shm/.Trash-1000 $S/tree
-t $B trash-stats --trash-dir=/dev/shm/.Trash-1000 --total --measure
-t $B trash-stats --trash-dir=/dev/shm/.Trash-1000 --top=0
-t $B empty --trash-dir=/dev/shm/.Trash-1000 -f
+t $B put -r --trash-dir=$TS $S/tree
+t $B trash-stats --trash-dir=$TS --total --measure
+t $B trash-stats --trash-dir=$TS --top=0
+t $B empty --trash-dir=$TS -f
 echo "== disk, 200k files, cold (drop_caches) vs warm"
 D=${1:-$PWD/b75}; mkdir -p $D; mk $D/tree 200000
 for c in "du -n 5" "du --inodes" "du --dupes --min-size=1"; do
   sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'; t $B $c $D/tree
   t $B $c $D/tree
 done
-T=$D/.Trash-b75; mkdir -p $T
+T=$D/.Trash-b75; mkdir -p -m 700 $T/files $T/info
 t $B put -r --trash-dir=$T $D/tree
 sudo -n sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'; t $B trash-stats --trash-dir=$T --total --measure
 t $B trash-stats --trash-dir=$T --total

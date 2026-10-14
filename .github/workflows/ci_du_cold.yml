@@ -66,3 +66,16 @@ jobs:
             RUNS=5 benches/compare_du.sh "$PWD/target/release/rtrash" \
               "$RUNNER_TEMP/synthetic" "$HOME/.cargo/registry/src"
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # A million files on tmpfs, then cold and warm runs of du, dupes, put,
+      # trash-stats and empty on the runner's disk (docs/benchmarks.md has
+      # the same tables from a dev box).
+      - name: Million files and cold trash runs
+        run: |
+          {
+            echo "## A million files on tmpfs, and cold trash runs"
+            echo
+            echo '```'
+            RTRASH_BIN="$PWD/target/release/rtrash" benches/million_cold.sh "$RUNNER_TEMP/mc"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
