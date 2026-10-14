@@ -255,7 +255,7 @@ jobs:
       - name: Cross-restore every pairing
         run: |
           cargo build --locked --release
-          scripts/interop-smoke.sh target/release/rtrash
+          RTRASH_INTEROP_GIO_EMPTY=1 scripts/interop-smoke.sh target/release/rtrash
 
   completions:
     name: completion syntax (bash · zsh · fish)

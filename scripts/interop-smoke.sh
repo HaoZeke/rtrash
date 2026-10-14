@@ -6,7 +6,8 @@
 # Each tool on PATH among trash-cli (trash-put, trash-restore), gtrash and
 # gio trashes a file, and every tool restores it: rtrash, trash-cli, gtrash
 # and gio, in every pairing. trash-cli and gtrash then remove one rtrash
-# item and empty the rest. File names carry a space, a '%' and Unicode.
+# item and empty the rest; gio does too when RTRASH_INTEROP_GIO_EMPTY=1,
+# since `gio trash --empty` also empties every volume trash it finds. File names carry a space, a '%' and Unicode.
 # Tools that are missing get skipped with a note; rtrash must be there.
 # gio needs a session bus and gvfsd, so the script starts both in
 # dbus-run-session when gio is on PATH and no gvfsd runs yet.
@@ -89,7 +90,7 @@ for p in "${putters[@]}"; do
   done
 done
 
-# trash-cli and gtrash remove and empty what rtrash trashed: rm takes one
+# trash-cli, gtrash and gio remove and empty what rtrash trashed: rm takes one
 # item and leaves the rest whole, and empty leaves nothing that rtrash
 # still lists or counts. Empty stays pinned to the scratch trash, so no
 # real volume trash gets emptied.
@@ -98,17 +99,29 @@ tool_rm() { # TOOL ABSPATH
     # trash-rm reads every trash; the name is unique to this run.
     trash-cli) trash-rm "$(basename "$2")" ;;
     gtrash) gtrash rm -f "$2" ;;
+    # gio deletes one trash URI; `gio trash --list` pairs each with its path.
+    gio) gio remove "$(gio trash --list | awk -F'\t' -v p="$2" '$2 == p { print $1; exit }')" ;;
   esac
 }
 tool_empty() { # TOOL
   case $1 in
     trash-cli) trash-empty -f --trash-dir "$trash" ;;
     gtrash) gtrash prune -f --day 0 --trash-dir "$trash" ;;
+    # gio empties every trash it knows, volume trashes included, and takes
+    # no pin; the caller allows it only on a throwaway machine.
+    gio) gio trash --empty ;;
   esac
 }
 count() { "$rtrash" list --home-only | grep -c . || true; }
 for t in "${restorers[@]}"; do
-  [[ $t == trash-cli || $t == gtrash ]] || continue
+  case $t in
+    trash-cli | gtrash) ;;
+    gio) [[ -n ${RTRASH_INTEROP_GIO_EMPTY:-} ]] || {
+      echo "note: gio empty skipped (set RTRASH_INTEROP_GIO_EMPTY=1 on a throwaway machine)"
+      continue
+    } ;;
+    *) continue ;;
+  esac
   mkdir -p "$scratch/w/$t dir"
   echo d > "$scratch/w/$t dir/inner"
   echo k > "$scratch/w/$t keep 100%.txt"

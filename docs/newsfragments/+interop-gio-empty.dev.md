@@ -1,0 +1,1 @@
+CI: the interop job also has gio delete one rtrash item (`gio remove trash:///NAME`) and empty the rest (`gio trash --empty`); the empty step needs `RTRASH_INTEROP_GIO_EMPTY=1`, since gio also empties every volume trash it finds.
