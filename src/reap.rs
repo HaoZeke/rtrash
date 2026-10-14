@@ -59,6 +59,9 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
                           by profile, measuring again before each entry,
                           until it is back above it; exits at
                           once while space is fine, for a timer job
+      --purge-trash     under --when-below, first empty the oldest items
+                          of your trash on a short file system, since a
+                          put there frees nothing
       --until=SPEC      the target to reap back to under --when-below
                           (default: the --when-below SPEC)
       --json            print a JSON object ({dry_run, older_than,
@@ -967,6 +970,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut verbose = false;
     let mut json = false;
     let mut shared = false;
+    let mut purge_trash = false;
     let mut when_below: Option<Floor> = None;
     let mut until: Option<Floor> = None;
     let mut list = false;
@@ -1004,6 +1008,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--trash" => action = Some(Action::Trash),
             "--json" => json = true,
             "--shared" => shared = true,
+            "--purge-trash" => purge_trash = true,
             a if a.starts_with("--when-below=") || a.starts_with("--until=") => {
                 let (name, v) = a.split_once('=').unwrap_or((a, ""));
                 let Some(f) = Floor::parse(v) else {
@@ -1071,6 +1076,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     if until.is_some() && when_below.is_none() {
         return usage_err(prog, "--until goes with --when-below");
+    }
+    if purge_trash && when_below.is_none() {
+        return usage_err(prog, "--purge-trash goes with --when-below");
+    }
+    if purge_trash && cfg!(windows) {
+        return usage_err(prog, "--purge-trash is not available on Windows");
     }
     let now = crate::util::now_epoch();
     let mut status = 0;
@@ -1198,6 +1209,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut needs: Vec<(u64, (u64, u64))> = Vec::new();
     if let Some(wb) = when_below {
         let target = until.unwrap_or(wb);
+        let need_of = |space: &crate::space::Space| {
+            if wb.below(space) {
+                target.need(space)
+            } else {
+                (0, 0)
+            }
+        };
+        // The plain directories count even when empty, for --purge-trash.
+        for r in &roots {
+            if let (Ok(m), Ok(space)) = (fs::symlink_metadata(r), crate::space::query(r)) {
+                if !needs.iter().any(|(d, _)| *d == plat::dev(&m)) {
+                    needs.push((plat::dev(&m), need_of(&space)));
+                }
+            }
+        }
         for g in &mut groups {
             g.entries.retain(|(e, dev)| {
                 if let Some((_, n)) = needs.iter().find(|(d, _)| d == dev) {
@@ -1206,15 +1232,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 let Some(space) = e.parent().and_then(|p| crate::space::query(p).ok()) else {
                     return false;
                 };
-                let n = if wb.below(&space) {
-                    target.need(&space)
-                } else {
-                    (0, 0)
-                };
+                let n = need_of(&space);
                 // Below the trigger yet above --until still frees nothing.
                 needs.push((*dev, n));
                 n != (0, 0)
             });
+        }
+        if purge_trash {
+            for (dev, need) in needs.iter_mut().filter(|(_, n)| *n != (0, 0)) {
+                *need = purge_oldest(prog, *dev, *need, target, dry_run, verbose);
+            }
+            for g in &mut groups {
+                g.entries
+                    .retain(|(_, dev)| needs.iter().any(|(d, n)| d == dev && *n != (0, 0)));
+            }
         }
         if groups.iter().all(|g| g.entries.is_empty()) {
             if json {
@@ -1509,6 +1540,80 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         );
     }
     status
+}
+
+/// Empty the oldest items of this user's trashes on device `dev` until
+/// `need` (bytes, inodes) is freed, and return what is still needed:
+/// measured again after a real purge, estimated on a dry run.
+#[cfg(unix)]
+fn purge_oldest(
+    prog: &str,
+    dev: u64,
+    need: (u64, u64),
+    target: Floor,
+    dry_run: bool,
+    verbose: bool,
+) -> (u64, u64) {
+    use crate::retention::{prune, Policy, Prune};
+    use std::os::unix::fs::MetadataExt;
+    let dirs: Vec<crate::trashdir::TrashDir> = crate::trashdir::all()
+        .into_iter()
+        .filter(|d| fs::metadata(&d.root).is_ok_and(|m| m.dev() == dev))
+        .collect();
+    let mut left = need;
+    for dir in &dirs {
+        if left.0 == 0 && left.1 == 0 {
+            break;
+        }
+        let one = std::slice::from_ref(dir);
+        let opts = |max| Prune {
+            max,
+            policy: Policy::Oldest,
+            dry_run: true,
+            verbose: false,
+            protect_batch: None,
+            gone_before: None,
+        };
+        let total = prune(prog, one, &opts(u64::MAX)).left;
+        // Inodes: without a count per item, take every item when short.
+        let max = if left.1 > 0 {
+            0
+        } else {
+            total.saturating_sub(left.0)
+        };
+        let done = prune(
+            prog,
+            one,
+            &Prune {
+                dry_run,
+                verbose,
+                ..opts(max)
+            },
+        );
+        if done.removed > 0 {
+            eprintln!(
+                "{prog}: {} {} ({}) from trash '{}'",
+                if dry_run { "would empty" } else { "emptied" },
+                crate::util::plural(done.removed, "item", "items"),
+                crate::util::format_bytes(done.bytes),
+                dir.root.display()
+            );
+        }
+        left = if dry_run {
+            (
+                left.0.saturating_sub(done.bytes),
+                if done.removed > 0 { 0 } else { left.1 },
+            )
+        } else {
+            crate::space::query(&dir.root).map_or(left, |s| target.need(&s))
+        };
+    }
+    left
+}
+
+#[cfg(not(unix))]
+fn purge_oldest(_: &str, _: u64, need: (u64, u64), _: Floor, _: bool, _: bool) -> (u64, u64) {
+    need
 }
 
 /// Bytes on disk only the tree at `path` uses: what deleting it frees

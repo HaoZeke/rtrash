@@ -1,0 +1,1 @@
+`rtrash reap --when-below=SPEC --purge-trash` first empties the oldest items of your trash on a file system that is short of space, since a put there frees nothing, and reaps only if that is not enough.

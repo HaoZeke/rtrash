@@ -3199,6 +3199,52 @@ fn reap_install_timer_prints_on_dry_run_and_writes_user_units() {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_purge_trash_empties_the_oldest_trash_items_when_short() {
+    let sb = Sandbox::new("reap-purge");
+    let tmp = sb.root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let gone = write_at(&sb.root, "work/gone.txt", "g");
+    let out = reap_cmd(&sb, &["put", gone.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let info = sb.root.join("xdg/Trash/info/gone.txt.trashinfo");
+    assert!(info.exists(), "put did not use the sandbox trash");
+    let tmp_arg = tmp.to_str().unwrap();
+    let args = [
+        "reap",
+        "--when-below=100%",
+        "--until=100%",
+        "--purge-trash",
+        "--older-than=1h",
+        "--age-by=m",
+    ];
+    let mut dry: Vec<&str> = args.to_vec();
+    dry.extend(["-n", tmp_arg]);
+    let out = reap_cmd(&sb, &dry);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("would empty 1 item"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(info.exists(), "the dry run emptied the trash");
+    let mut real: Vec<&str> = args.to_vec();
+    real.push(tmp_arg);
+    let out = reap_cmd(&sb, &real);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("emptied 1 item"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(!info.exists());
+    assert_eq!(
+        reap_cmd(&sb, &["reap", "--purge-trash"]).status.code(),
+        Some(2)
+    );
+}
+
 /// A file in `dir` whose access and modification times are a day old.
 fn stale_file(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);

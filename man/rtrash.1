@@ -1827,6 +1827,18 @@ permanent, or
 suit it best.
 A dry run cannot measure, so it adds up the entries' sizes instead.
 .TP
+.B \-\-purge\-trash
+Under
+.BR \-\-when\-below ,
+first empty the oldest items of your trashes on each file system that is
+short, as
+.B empty \-\-max\-size
+would, until it is back above the target, and only then reap.
+A put onto the same disk frees nothing, so this is what turns old trash
+into free space.
+A dry run says how many items it would empty.
+Not on Windows.
+.TP
 .BI \-\-until= SPEC
 The target to reap back to under
 .BR \-\-when\-below ,

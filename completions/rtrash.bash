@@ -64,7 +64,7 @@ _rtrash_who_opts=(
 )
 
 _rtrash_reap_opts=(
-  -p --profile= --list-profiles --roots= --depth= --tool --trash --older-than= --age-by= -n --dry-run --permanent --trash-dir= --home-only -v --verbose --shared --install-timer --install-timer= --when-below= --until= --json --help --version
+  -p --profile= --list-profiles --roots= --depth= --tool --trash --older-than= --age-by= -n --dry-run --permanent --trash-dir= --home-only -v --verbose --shared --install-timer --install-timer= --when-below= --until= --purge-trash --json --help --version
 )
 
 _rtrash_config_opts=(
