@@ -96,6 +96,26 @@ if [[ -n ${RTRASH_SMOKE_VOLUME:-} ]]; then
   echo "ok   external volume"
 fi
 
+# A short volume: ask for 2 MiB more free than it has, so reap
+# --purge-trash and empty --until-free must purge the 4 MiB item there.
+if [[ -n ${RTRASH_SMOKE_VOLUME:-} ]]; then
+  big="$RTRASH_SMOKE_VOLUME/rtrash purge.bin"
+  scratch="$RTRASH_SMOKE_VOLUME/rtrash scratch"
+  mkdir -p "$scratch"
+  dd if=/dev/zero of="$big" bs=1048576 count=4 2>/dev/null
+  "$rt" put "$big" || fail "put the purge item"
+  avail=$(( $(df -k "$RTRASH_SMOKE_VOLUME" | awk 'NR==2 {print $4}') * 1024 ))
+  want=$(( avail + 2 * 1048576 ))
+  out=$("$rt" reap -n --when-below="$want" --purge-trash --older-than=1h "$scratch" 2>&1) ||
+    fail "reap --purge-trash dry run: $out"
+  grep -q "would empty 1 item" <<<"$out" || fail "reap --purge-trash saw no Finder item: $out"
+  listed "$big" || fail "the dry run purged the item"
+  out=$("$rt" empty --until-free="$want" 2>&1)
+  grep -q "emptied 1 item" <<<"$out" || fail "empty --until-free: $out"
+  "$rt" list | grep -qF -- "$big" && fail "empty --until-free left the item"
+  echo "ok   reap --purge-trash and empty --until-free on the volume"
+fi
+
 # The FreeDesktop trash stays reachable.
 h="$work/fdo.txt"
 echo fdo > "$h"
