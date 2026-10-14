@@ -59,6 +59,21 @@ echo undo > "$i"
 "$rt" trash-stats --json | grep -qF '.Trash' || fail "trash-stats on the Finder Trash"
 "$rt" trash-stats --history --json | grep -qF '"event":"put"' || fail "trash-stats --history on the Finder Trash"
 "$rt" trash-stats --total --json | grep -qF '.Trash' || fail "trash-stats --total on the Finder Trash"
+# The carried home total against a full walk; a bytes difference is
+# logged (Finder may still be writing), an items one fails.
+sleep 2
+carried=$("$rt" trash-stats --total --json)
+walked=$("$rt" trash-stats --json --top=0)
+python3 - "$carried" "$walked" "$HOME/.Trash" <<'PY' || fail "carried Finder total"
+import json, sys
+c, w, home = json.loads(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3]
+pick = lambda rows: next(r for r in rows if r["path"] == home)
+ct = pick(c["trashes"])
+wt = pick(w["trashes"] if isinstance(w, dict) else w)
+print(f"carried: {ct['bytes']} bytes, {ct['items']} items, stale={ct['stale']}; walked: {wt.get('bytes')} bytes, {wt.get('items')} items")
+if not ct["stale"] and ct["items"] != wt.get("items"):
+    sys.exit(1)
+PY
 "$rt" undo || fail "undo"
 [[ $(cat "$i") == undo ]] || fail "undo content"
 echo "ok   undo, status and trash-stats (with --total and --history)"
