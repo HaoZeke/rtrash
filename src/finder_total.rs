@@ -5,8 +5,8 @@
 //! trash gets `KEY.total` and `KEY.history` under
 //! `$XDG_STATE_HOME/rtrash/finder-totals`, KEY being the trash path with
 //! `%` and `/` percent-encoded. A total (`v2 BYTES ITEMS INODES STAMP`; `v1` files lack INODES) carries
-//! the modification time and entry count of the trash directory, which
-//! change whenever Finder or rtrash adds or removes an item, so a total that another tool
+//! a fingerprint of the names in the trash (`.DS_Store` left out), which
+//! changes whenever Finder or rtrash adds, removes or renames an item, so a total that another tool
 //! made out of date reads as stale.
 //!
 //! A command that may change a trash takes a [`Snapshot`] of the trash
@@ -44,15 +44,36 @@ fn file(trash: &Path, ext: &str) -> Option<PathBuf> {
     Some(state_dir()?.join(format!("{}.{ext}", key(trash))))
 }
 
-/// The modification time of the trash directory in nanoseconds, mixed
-/// with its entry count: a coarse file system clock can give two changes
-/// in a row the same time, but not the same count as well unless one put
-/// and one removal fall in the same tick.
+/// Finder's own record file, which it rewrites at will.
+const DS_STORE: &str = ".DS_Store";
+
+/// A fingerprint of the names in the trash, `.DS_Store` left out: any
+/// item added, removed or renamed changes it, while Finder rewriting
+/// `.DS_Store` (which moves the directory's time) does not. One readdir,
+/// no stat.
 fn stamp(trash: &Path) -> Option<u128> {
-    let m = fs::metadata(trash).ok()?.modified().ok()?;
-    let ns = m.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
-    let count = fs::read_dir(trash).ok()?.count() as u128;
-    Some(ns.wrapping_mul(1_000_003).wrapping_add(count))
+    let mut names: Vec<std::ffi::OsString> = fs::read_dir(trash)
+        .ok()?
+        .flatten()
+        .map(|e| e.file_name())
+        .filter(|n| n != DS_STORE)
+        .collect();
+    names.sort();
+    // FNV-1a, 128 bits.
+    let mut h: u128 = 0x6c62272e07bb014262b821756295c58d;
+    for n in &names {
+        for b in n.as_encoded_bytes().iter().chain([&0u8]) {
+            h ^= u128::from(*b);
+            h = h.wrapping_mul(0x0000000001000000000000000000013B);
+        }
+    }
+    Some(h ^ names.len() as u128)
+}
+
+/// Inodes in the trash as the totals count them: `.DS_Store` left out.
+fn trash_inodes(trash: &Path) -> u64 {
+    let ds = u64::from(trash.join(DS_STORE).symlink_metadata().is_ok());
+    crate::trash_stats::count_inodes(trash).saturating_sub(ds)
 }
 
 /// A stored total: bytes, items, and inodes (files and directories in
@@ -105,7 +126,7 @@ pub fn measure(trash: &Path) -> Total {
     let t = Total {
         bytes,
         items,
-        inodes: Some(crate::trash_stats::count_inodes(trash)),
+        inodes: Some(trash_inodes(trash)),
     };
     // A change during the walk leaves the total stale.
     if before.is_some() && stamp(trash) == before {

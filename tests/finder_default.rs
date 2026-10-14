@@ -223,6 +223,15 @@ fn undo_status_and_trash_stats_cover_the_finder_trash() {
         "{}",
         out(&o)
     );
+    // Finder rewriting its .DS_Store leaves the total current.
+    fs::write(b.finder().join(".DS_Store"), b"Bud1").unwrap();
+    let o = b.run(&["trash-stats", "--total", "--json"], "");
+    assert!(
+        out(&o).contains("\"items\":3,\"stale\":false"),
+        "{}",
+        out(&o)
+    );
+    fs::remove_file(b.finder().join(".DS_Store")).unwrap();
     // A change rtrash did not make leaves the total stale until --measure.
     std::thread::sleep(std::time::Duration::from_millis(20));
     fs::write(b.finder().join("by-finder"), b"f").unwrap();

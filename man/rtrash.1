@@ -61,8 +61,13 @@ since a file inside the trash would show in Finder; put, rm, empty,
 restore and undo add or subtract the sizes and inodes of the items they
 move in or out of a current total, so
 .B \-\-total
-shows inodes without a walk, and a change made outside rtrash marks the total stale until
-.BR \-\-measure .
+shows inodes without a walk.
+An item added, removed or renamed outside rtrash marks the total stale
+until
+.BR \-\-measure ;
+Finder rewriting its
+.I .DS_Store
+does not, and that file counts toward neither items nor inodes.
 .B "empty \-\-max\-size"
 and
 .B \-\-prune
