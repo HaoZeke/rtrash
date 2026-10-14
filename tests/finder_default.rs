@@ -562,11 +562,13 @@ fn empty_until_free_takes_finder_items() {
 }
 
 /// A trash budget trims the Finder Trash after a put, oldest first, and
-/// never takes what that put moved.
+/// never takes what that put moved; a put on a short disk warns.
 #[test]
-fn a_budget_trims_the_finder_trash_after_put_but_spares_the_put() {
+fn a_budget_trims_the_finder_trash_after_put_and_low_space_warns() {
     let b = Box_::new("budget");
+    let fs_total = std::cell::Cell::new(1u64 << 40);
     let put = |name: &str, budget: Option<&str>| {
+        let fs_total = fs_total.get();
         let p = b.work().join(name);
         fs::write(&p, "z".repeat(20_000)).unwrap();
         let mut c = Command::new(env!("CARGO_BIN_EXE_rtrash"));
@@ -579,6 +581,10 @@ fn a_budget_trims_the_finder_trash_after_put_but_spares_the_put() {
             .env("XDG_STATE_HOME", b.root.join("state"))
             .env("RTRASH_MACOS_TRASH", "finder")
             .env("RTRASH_OSASCRIPT", b.root.join("osascript"))
+            .env(
+                "RTRASH_TEST_FS",
+                format!("{}:{}", fs_total, b.root.display()),
+            )
             .env_remove("RTRASH_PRUNE");
         match budget {
             Some(v) => c.env("RTRASH_MAX_SIZE", v),
@@ -600,4 +606,10 @@ fn a_budget_trims_the_finder_trash_after_put_but_spares_the_put() {
     assert!(!b.finder().join("old.bin").exists() && !b.finder().join("mid.bin").exists());
     let o = b.run(&["trash-stats", "--total", "--json"], "");
     assert!(out(&o).contains(r#""items":1"#), "{}", out(&o));
+    assert!(!err(&o).contains("is low"));
+    // On a nearly full disk the put warns that it freed nothing.
+    fs_total.set(45_000);
+    let o = put("last.bin", None);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(err(&o).contains("is low ("), "{}", err(&o));
 }

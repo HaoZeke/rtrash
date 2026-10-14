@@ -328,9 +328,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .map(|t| (t.trash_dir.clone(), t.name.clone()))
             .collect();
         crate::finder::prune_after_put(prog, &moved, opts.quiet || json);
+        // A put into a Finder trash frees nothing on that disk either.
+        if !(opts.quiet || json) {
+            warn_low_space(prog, &trashed);
+        }
     }
-    // The Finder Trash keeps no .trashinfo, so budgets and warnings that
-    // read the FreeDesktop layout skip it.
+    // The Finder Trash keeps no .trashinfo, so the size warning, which
+    // reads the FreeDesktop running total, skips it.
     if !trashed.is_empty() && !crate::finder::is_default(opts.trash_pin.is_some()) {
         prune_after_put(prog, &trashed, opts.quiet || json);
         if !(opts.quiet || json) {
