@@ -28,7 +28,8 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
                      or path (original path); size implies --size
       --reverse         reverse the order
       --json            emit a JSON array (scripts; one object per item;
-                     \"size\" in bytes with --size)
+                     \"size\" in bytes with --size; \"missing\" is true
+                     when the payload is gone)
       --help            display this help and exit
       --version         output version information and exit
 ";
@@ -41,6 +42,14 @@ pub struct Entry {
     pub dir: TrashDir,
     /// Put batch id from the `.trashinfo`, when rtrash wrote one.
     pub batch: Option<String>,
+}
+
+impl Entry {
+    /// True when the record's payload under `files/` is gone, so the item
+    /// cannot be restored (`rtrash empty --dangling` removes such records).
+    pub fn missing(&self) -> bool {
+        fs::symlink_metadata(crate::util::join_name(&self.dir.files(), &self.name)).is_err()
+    }
 }
 
 pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
@@ -203,12 +212,13 @@ pub fn entry_to_json_sized(e: &Entry, size: Option<u64>) -> String {
         None => "null".to_string(),
     };
     format!(
-        "{{\"deletion_date\":\"{}\",\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\",\"batch\":{}{}}}",
+        "{{\"deletion_date\":\"{}\",\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\",\"batch\":{},\"missing\":{}{}}}",
         json_escape(date),
         json_escape(&e.original.to_string_lossy()),
         json_escape(&crate::util::show_name(&e.name)),
         json_escape(&e.dir.root.to_string_lossy()),
         batch,
+        e.missing(),
         size,
     )
 }

@@ -440,9 +440,13 @@ Reverse the order.
 .B \-\-json
 Emit a JSON array of objects
 (\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR,
-\fIbatch\fR, and \fIsize\fR in bytes with
+\fIbatch\fR, \fImissing\fR, and \fIsize\fR in bytes with
 .BR \-\-size ).
 The batch holds the put run id for items rtrash trashed, else null.
+.I missing
+is true for a record whose payload is gone: the item cannot be restored, and
+.B rtrash empty \-\-dangling
+removes the record.
 .TP
 .B \-\-help
 Display help and exit.
@@ -473,6 +477,11 @@ The JSON roots carry them as
 .BR fs_bytes ", " fs_free_bytes ", " fs_inodes ", " fs_free_inodes
 (null without an inode limit) and
 .BR fs_low .
+Records whose payload is gone count as items; the line for their trash
+notes how many, a hint on stderr names
+.BR "rtrash empty \-\-dangling" ,
+and the JSON roots carry the count as
+.BR dangling .
 .TP
 .B \-\-home\-only
 Only the home trash

@@ -15,6 +15,8 @@ Summarize discovered trash: item count and approximate reclaimable size
 valid; otherwise the same disk_usage walk as empty --dry-run.
 Then give the free bytes and free inodes of each trash's file system, with
 a warning on stderr when either is under 10%.
+Records whose payload is gone count as items and are noted, with a hint
+on stderr to remove them with `rtrash empty --dangling`.
 
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  only this trash directory (repeatable)
@@ -140,6 +142,8 @@ pub(crate) struct RootSummary {
     pub bytes: u64,
     /// Of `items`, payloads with no `.trashinfo`.
     pub orphans: u64,
+    /// Of `items`, records whose payload is gone.
+    pub dangling: u64,
 }
 
 pub(crate) fn summarize_dirs(
@@ -173,6 +177,7 @@ pub(crate) fn summarize_dirs(
             entries.retain(|_| kept.next().is_some_and(|&n| size.keeps(n)));
             each.retain(|&n| size.keeps(n));
         }
+        let dangling = entries.iter().filter(|e| e.missing()).count() as u64;
         let mut bytes: u64 = each.iter().sum();
         // Orphans (payloads with no .trashinfo) count as items, but only on
         // an unfiltered status: they have no date for an age filter.
@@ -194,6 +199,7 @@ pub(crate) fn summarize_dirs(
             items: n,
             bytes,
             orphans,
+            dangling,
         });
     }
     (roots, total_items, total_bytes)
@@ -212,10 +218,17 @@ pub fn print_status(
     }
     let (roots, total_items, total_bytes) = summarize_dirs(dirs, older_than, newer_than, size);
     for r in &roots {
-        let orphans = if r.orphans > 0 {
-            format!(" ({} without .trashinfo)", r.orphans)
-        } else {
+        let mut notes = Vec::new();
+        if r.orphans > 0 {
+            notes.push(format!("{} without .trashinfo", r.orphans));
+        }
+        if r.dangling > 0 {
+            notes.push(format!("{} without a payload", r.dangling));
+        }
+        let orphans = if notes.is_empty() {
             String::new()
+        } else {
+            format!(" ({})", notes.join(", "))
         };
         println!(
             "{}\t{}{orphans}\t{}",
@@ -229,6 +242,14 @@ pub fn print_status(
         plural(total_items, "item", "items"),
         fastdelete::format_bytes(total_bytes)
     );
+    let dangling: u64 = roots.iter().map(|r| r.dangling).sum();
+    if dangling > 0 {
+        eprintln!(
+            "rtrash: {} cannot be restored, as the payload is gone; remove {} with `rtrash empty --dangling`",
+            plural(dangling, "record", "records"),
+            if dangling == 1 { "it" } else { "them" }
+        );
+    }
     for d in dirs {
         let Ok(s) = space::query(&d.root) else {
             continue;
@@ -278,11 +299,12 @@ fn print_status_json(
             out.push_str(",\n");
         }
         out.push_str(&format!(
-            "    {{\"path\":\"{}\",\"items\":{},\"bytes\":{},\"orphans\":{}{}}}",
+            "    {{\"path\":\"{}\",\"items\":{},\"bytes\":{},\"orphans\":{},\"dangling\":{}{}}}",
             list::json_escape(&r.path),
             r.items,
             r.bytes,
             r.orphans,
+            r.dangling,
             free_json(&dirs[i].root)
         ));
     }

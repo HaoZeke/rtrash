@@ -4480,6 +4480,54 @@ fn history_counts_stay_right_when_every_change_shares_a_clock_tick() {
 /// `empty --dangling` removes only the records whose payload is gone:
 /// real items, orphan payloads and names that are not UTF-8 all stay.
 #[test]
+fn list_and_status_flag_records_without_a_payload() {
+    let sb = Sandbox::new("missing");
+    let keep = sb.work().join("keep.txt");
+    fs::write(&keep, "k").unwrap();
+    assert!(sb.run(&["put", keep.to_str().unwrap()]).status.success());
+    fs::write(
+        sb.trash().join("info/ghost.trashinfo"),
+        "[Trash Info]\nPath=/tmp/ghost\nDeletionDate=2020-01-01T00:00:00\n",
+    )
+    .unwrap();
+    let out = sb.run(&["list", "--home-only", "--json"]);
+    let list = stdout_of(&out);
+    let line = |name: &str| list.lines().find(|l| l.contains(name)).unwrap().to_string();
+    assert!(line("ghost").contains(r#""missing":true"#), "{list}");
+    assert!(line("keep.txt").contains(r#""missing":false"#), "{list}");
+    let out = sb.run(&["status", "--home-only"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("2 items (1 without a payload)"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(
+        stderr_of(&out).contains("1 record cannot be restored")
+            && stderr_of(&out).contains("rtrash empty --dangling"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = sb.run(&["status", "--home-only", "--json"]);
+    assert!(
+        stdout_of(&out).contains(r#""dangling":1"#),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(sb
+        .run(&["empty", "--home-only", "--dangling"])
+        .status
+        .success());
+    let out = sb.run(&["status", "--home-only"]);
+    assert!(
+        !stderr_of(&out).contains("--dangling"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(!stdout_of(&out).contains("payload"), "{}", stdout_of(&out));
+}
+
+#[test]
 fn empty_dangling_removes_only_records_without_a_payload() {
     use std::os::unix::ffi::OsStrExt;
     let sb = Sandbox::new("dangling");
