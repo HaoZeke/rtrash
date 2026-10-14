@@ -1981,8 +1981,10 @@ permanent, or
 .BR \-\-permanent ,
 suit it best.
 A dry run cannot measure, so it adds up the entries' sizes instead.
-On Windows each drive letter (or network share) counts as its own file
-system.
+On Windows each volume counts as its own file system, told apart by its
+serial number, so a volume mounted on a folder counts apart from the
+drive that holds the folder; a volume without a serial falls back to its
+drive letter (or network share).
 .TP
 .B \-\-purge\-trash
 Under

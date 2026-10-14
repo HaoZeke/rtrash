@@ -159,6 +159,48 @@ pub fn drive_key(path: &Path) -> u64 {
     }
 }
 
+/// Windows: a key for the volume that holds `path`, by its serial number,
+/// so a volume mounted on a folder (`C:\\mnt\\data`) counts apart from the
+/// drive that holds the folder. Falls back to [`drive_key`] when the
+/// volume cannot be asked.
+#[cfg(windows)]
+pub fn volume_key(path: &Path) -> u64 {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let w: Vec<u16> = abs.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut root = [0u16; 1024];
+    // SAFETY: `w` is NUL-terminated and `root` is as long as the length passed.
+    if unsafe { GetVolumePathNameW(w.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
+        return drive_key(path);
+    }
+    let mut serial = 0u32;
+    // SAFETY: `root` is NUL-terminated; the other outputs are null or a u32.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            root.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            &mut serial,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ok == 0 || serial == 0 {
+        return drive_key(path);
+    }
+    serial_key(serial)
+}
+
+/// The key [`volume_key`] gives a volume serial number: the high bit
+/// below the share flag set, so it never equals a drive letter's key or a
+/// share's.
+pub fn serial_key(serial: u32) -> u64 {
+    u64::from(serial) | 1 << 62
+}
+
 fn key_of(s: &str) -> u64 {
     let s = s.replace('/', "\\");
     let s = s
@@ -1592,6 +1634,18 @@ mod tests {
         assert_eq!(share, drive_key(Path::new(r"\\?\UNC\srv\share\d")));
         assert_ne!(share, drive_key(Path::new(r"\\srv\other")));
         assert_ne!(share, c);
+        let v = serial_key(u32::from(b'C'));
+        assert!(v != c && v != share && v & 1 << 63 == 0, "{v:x}");
+        assert_ne!(serial_key(1), serial_key(2));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn volume_key_reads_the_serial_of_the_temp_volume() {
+        let t = std::env::temp_dir();
+        let k = volume_key(&t);
+        assert_ne!(k & 1 << 62, 0, "no serial for {}: {k:x}", t.display());
+        assert_eq!(volume_key(&t.join("rtrash-no-such-dir")), k);
     }
 
     #[test]

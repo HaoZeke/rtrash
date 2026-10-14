@@ -771,10 +771,11 @@ mod plat {
     pub fn dev(_m: &fs::Metadata) -> u64 {
         0
     }
-    /// Which drive `--when-below` measures for `path`: its letter or
-    /// network share, since Windows metadata carries no device number.
+    /// Which volume `--when-below` measures for `path`: its serial
+    /// number (else its letter or network share), since Windows metadata
+    /// carries no device number.
     pub fn fs_key(path: &Path, _m: &fs::Metadata) -> u64 {
-        crate::win_recycle::drive_key(path)
+        crate::win_recycle::volume_key(path)
     }
     pub fn uid(_m: &fs::Metadata) -> u32 {
         0
