@@ -2980,6 +2980,24 @@ It overrides
 .B macos.trash
 in the config file.
 .TP
+.B RTRASH_WSL_RECYCLE
+.B 1
+(or
+.B wsl.recycle = true
+in the config file): on WSL, put sends a file under
+.I /mnt/<drive>/
+to the Windows Recycle Bin through
+.B wslpath
+and
+.BR powershell.exe ,
+so Explorer can restore it.
+Off by default; it applies only when the kernel release names Microsoft,
+and never with
+.BR \-\-trash\-dir .
+Items routed there do not show in rtrash list, undo or the put JSON.
+.B 0
+turns it off over the config file.
+.TP
 .B XDG_DATA_HOME
 Base for the home trash directory
 (\fI$XDG_DATA_HOME/Trash\fR). Defaults under

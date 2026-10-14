@@ -674,6 +674,25 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         println!("would trash '{}'", crate::util::term_path(&abs));
         return Ok(None);
     }
+    // WSL, opted in: a file on a Windows drive goes to the Recycle Bin,
+    // where Explorer restores it; rtrash list and undo do not see it.
+    if opts.trash_pin.is_none() && crate::wsl::applies(&abs) {
+        return match crate::wsl::recycle(&abs, meta.is_dir()) {
+            Ok(()) => {
+                if opts.verbose && !opts.quiet {
+                    println!(
+                        "removed '{}' (Windows Recycle Bin)",
+                        crate::util::term_text(&name)
+                    );
+                }
+                Ok(None)
+            }
+            Err(e) => {
+                eprintln!("{prog}: cannot trash '{name}' to the Windows Recycle Bin: {e}");
+                Err(1)
+            }
+        };
+    }
     if crate::finder::is_default(opts.trash_pin.is_some()) {
         let size = crate::finder_total::measure_item(&abs);
         return match crate::finder::put_item(&abs, &meta) {

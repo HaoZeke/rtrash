@@ -11,6 +11,8 @@
 pub mod platform;
 pub mod util;
 pub mod win_recycle;
+#[cfg(unix)]
+pub mod wsl;
 
 pub mod budget;
 pub mod compat;

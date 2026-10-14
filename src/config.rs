@@ -41,6 +41,12 @@ const KEYS: &[(&str, &str, Kind, &str)] = &[
         Kind::Str,
         "finder (macOS default) or freedesktop: the trash plain put, list, restore and empty use",
     ),
+    (
+        "wsl",
+        "recycle",
+        Kind::Bool,
+        "on WSL, put files under /mnt/<drive>/ into the Windows Recycle Bin",
+    ),
     ("du", "top", Kind::Int, "rows per list (--top)"),
     (
         "du",

@@ -78,6 +78,7 @@ listing, and the restore conflict policies (=--conflict=rename|skip=).
 | bare =list PATTERN=, =restore '*.log'= | substring or glob, like =gtrash find= | no |
 | =list --format=TEMPLATE= | fields {date} {path} {name} {size} ..., raw bytes, \0 rows | no |
 | =empty -v= | one =removed ORIGINAL= line per item, every backend | no |
+| WSL: =/mnt/c= files to the Recycle Bin | opt-in, =RTRASH_WSL_RECYCLE=1= | no |
 | FreeDesktop home trash                 | =RTRASH_MACOS_TRASH=freedesktop=, =macos.trash= or a =--trash-dir= pin | no |
 | =undo=, =status=, =trash-stats=, restore browser | Finder Trash; undo from a put-run log | n/a |
 | Symbolic links                         | move in as themselves, without Put Back         | follows |
