@@ -57,6 +57,31 @@ put() { # TOOL PATH
   esac
 }
 
+# The trash URI gio gives the item that came from ABSPATH. `gio trash
+# --list` pairs each URI with its path, but the GLib on Ubuntu 24.04
+# prints a non-ASCII path in another form than the one passed in, so
+# fall back to the scratch trash's own records and build the URI from
+# the record's name.
+gio_uri() { # ABSPATH
+  local uri
+  uri=$(gio trash --list | awk -F'\t' -v p="$1" '$2 == p { print $1; exit }')
+  if [[ -z $uri ]]; then
+    uri=$(python3 - "$trash/info" "$1" <<'PY'
+import os, sys, urllib.parse
+info, want = sys.argv[1], sys.argv[2]
+for f in sorted(os.listdir(info)):
+    if not f.endswith(".trashinfo"):
+        continue
+    for line in open(os.path.join(info, f), encoding="utf-8", errors="replace"):
+        if line.startswith("Path=") and urllib.parse.unquote(line[5:].strip()) == want:
+            print("trash:///" + urllib.parse.quote(f[: -len(".trashinfo")]))
+            sys.exit(0)
+PY
+    )
+  fi
+  [[ -n $uri ]] && echo "$uri"
+}
+
 restore() { # TOOL ABSPATH
   case $1 in
     rtrash) "$rtrash" restore --home-only "$2" ;;
@@ -65,8 +90,7 @@ restore() { # TOOL ABSPATH
     gio)
       # gio restores by trash URI; `gio trash --list` pairs each with its path.
       local uri
-      uri=$(gio trash --list | awk -F'\t' -v p="$2" '$2 == p { print $1; exit }')
-      gio trash --restore "$uri"
+      uri=$(gio_uri "$2") && gio trash --restore "$uri"
       ;;
   esac
 }
@@ -100,7 +124,7 @@ tool_rm() { # TOOL ABSPATH
     trash-cli) trash-rm "$(basename "$2")" ;;
     gtrash) gtrash rm -f "$2" ;;
     # gio deletes one trash URI; `gio trash --list` pairs each with its path.
-    gio) gio remove "$(gio trash --list | awk -F'\t' -v p="$2" '$2 == p { print $1; exit }')" ;;
+    gio) gio remove "$(gio_uri "$2")" ;;
   esac
 }
 tool_empty() { # TOOL
