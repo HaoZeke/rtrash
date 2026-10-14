@@ -515,6 +515,11 @@ cap from
 .B MaxCapacity
 in the registry with the share in use, then the total.
 A drive set to skip the Recycle Bin says so.
+A
+.B Free on
+line per drive then gives its free bytes from
+.BR GetDiskFreeSpaceExW ,
+with a warning under 10% free; Windows counts no inodes.
 With an age or size filter it counts the passing items per drive
 instead, without the caps.
 .PP
@@ -1254,6 +1259,9 @@ Copy across devices even when the copy would leave the target file
 system with under 5% of its bytes or inodes free, or under
 .B RTRASH_MIN_FREE
 bytes.
+On Windows an item moves back within its drive, but one whose original
+path is on another drive than its Recycle Bin is copied, so the same
+byte rules apply to that drive before anything is restored.
 .TP
 .B \-\-newest\-first
 List the most recently trashed item first (default in the interactive browser).

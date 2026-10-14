@@ -245,19 +245,8 @@ pub fn print_status(
     }
 }
 
-/// `40.0 GiB of 126 GiB (31%), 7500000 of 8200000 inodes (91%)`.
 pub(crate) fn free_line(s: &space::Space) -> String {
-    let mut out = format!(
-        "{} of {} ({}%)",
-        fastdelete::format_bytes(s.avail),
-        fastdelete::format_bytes(s.total),
-        s.avail_percent()
-    );
-    match (s.inodes_avail, s.inodes, s.inodes_percent()) {
-        (Some(a), Some(t), Some(p)) => out.push_str(&format!(", {a} of {t} inodes ({p}%)")),
-        _ => out.push_str(", no inode limit"),
-    }
-    out
+    space::free_line(s)
 }
 
 /// The free space fields of one root's JSON object.

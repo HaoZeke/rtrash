@@ -1,0 +1,52 @@
+//! The Windows space check: `status` shows each drive's free space from
+//! GetDiskFreeSpaceExW, and `restore` takes `--no-space-check`.
+#![cfg(windows)]
+
+use std::process::Command;
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_rtrash")
+}
+
+#[test]
+fn status_shows_free_space_on_each_drive() {
+    let out = Command::new(bin()).arg("status").output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let drive = std::env::temp_dir()
+        .to_str()
+        .unwrap()
+        .chars()
+        .next()
+        .unwrap()
+        .to_ascii_uppercase();
+    let line = text
+        .lines()
+        .find(|l| l.starts_with(&format!("Free on {drive}:\\")))
+        .unwrap_or_else(|| panic!("no free line for {drive}: {text}"));
+    assert!(
+        line.contains('%') && line.ends_with("no inode limit"),
+        "{line}"
+    );
+}
+
+#[test]
+fn restore_takes_no_space_check_and_status_rejects_a_bad_floor_quietly() {
+    let out = Command::new(bin())
+        .args(["restore", "--no-space-check", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("--no-space-check"));
+    // The floor only matters to a copy; status still reports.
+    let out = Command::new(bin())
+        .arg("status")
+        .env("RTRASH_MIN_FREE", "lots")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+}

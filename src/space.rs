@@ -182,6 +182,46 @@ pub fn check_fits(
     }
 }
 
+/// `40.0 GiB of 126 GiB (31%), 7500000 of 8200000 inodes (91%)`.
+pub fn free_line(s: &Space) -> String {
+    let mut out = format!(
+        "{} of {} ({}%)",
+        fmt_bytes(s.avail),
+        fmt_bytes(s.total),
+        s.avail_percent()
+    );
+    match (s.inodes_avail, s.inodes, s.inodes_percent()) {
+        (Some(a), Some(t), Some(p)) => out.push_str(&format!(", {a} of {t} inodes ({p}%)")),
+        _ => out.push_str(", no inode limit"),
+    }
+    out
+}
+
+/// Refuse to copy `need_bytes` onto the volume holding `dest_dir` when
+/// that would leave it short, unless `--no-space-check` was given. A
+/// volume that can't be measured lets the copy go ahead. Windows has no
+/// inode count, so only bytes are checked.
+pub fn guard_bytes(need_bytes: u64, dest_dir: &Path) -> io::Result<()> {
+    if SKIP_CHECK.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let floor = floor().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let Ok(space) = query(dest_dir) else {
+        return Ok(());
+    };
+    check_fits(&space, need_bytes, 0, floor).map_err(|why| short_error(dest_dir, why))
+}
+
+fn short_error(dest_dir: &Path, why: String) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::StorageFull,
+        format!(
+            "not enough room to copy onto {}: {why} (--no-space-check copies anyway)",
+            dest_dir.display()
+        ),
+    )
+}
+
 fn fmt_bytes(n: u64) -> String {
     crate::util::format_bytes(n)
 }
@@ -224,15 +264,7 @@ fn guard_copy_with(
         return Ok(());
     };
     let (bytes, inodes) = tree_need(src, meta)?;
-    check_fits(&space, bytes, inodes, floor).map_err(|why| {
-        io::Error::new(
-            io::ErrorKind::StorageFull,
-            format!(
-                "not enough room to copy onto {}: {why} (--no-space-check copies anyway)",
-                dest_dir.display()
-            ),
-        )
-    })
+    check_fits(&space, bytes, inodes, floor).map_err(|why| short_error(dest_dir, why))
 }
 
 #[cfg(test)]
@@ -284,6 +316,20 @@ mod tests {
         let s = disk(100 * G, 9 * G, Some((1000, 50)));
         assert_eq!(s.lows(10), ["9% of bytes free", "5% of inodes free"]);
         assert!(disk(100 * G, 50 * G, Some((1000, 500))).lows(10).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_volumes_report_bytes_and_refuse_an_overfill() {
+        let tmp = std::env::temp_dir();
+        let s = query(&tmp).unwrap();
+        assert!(s.total > 0 && s.avail <= s.total, "{s:?}");
+        assert_eq!(s.inodes, None);
+        assert!(free_line(&s).ends_with("no inode limit"));
+        let e = guard_bytes(s.avail, &tmp).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::StorageFull);
+        assert!(e.to_string().contains("must leave"), "{e}");
+        guard_bytes(0, &tmp).ok();
     }
 
     #[cfg(unix)]

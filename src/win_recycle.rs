@@ -137,6 +137,23 @@ pub fn drive_root_of(path: &Path) -> Option<PathBuf> {
         .then(|| PathBuf::from(format!("{}:\\", char::from(b[0].to_ascii_uppercase()))))
 }
 
+/// Bytes each destination drive must take for a restore: items whose bin
+/// (`id`) sits on another drive than their original path are copied, so
+/// their size counts against that drive. Items on the same drive move.
+pub fn cross_drive_needs(items: &[(PathBuf, PathBuf, u64)]) -> Vec<(PathBuf, u64)> {
+    let mut out: std::collections::BTreeMap<PathBuf, u64> = std::collections::BTreeMap::new();
+    for (bin, dest, size) in items {
+        let (Some(from), Some(to)) = (drive_root_of(bin), drive_root_of(dest)) else {
+            continue;
+        };
+        if from != to {
+            let e = out.entry(to).or_default();
+            *e = e.saturating_add(*size);
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// The age and size filters the Recycle Bin `list`, `status` and `rm`
 /// take, with the FreeDesktop commands' flags and meanings.
 #[derive(Debug, Default)]
@@ -762,6 +779,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 "--plain" | "--cwd-only" | "--home-only" => plain = true,
                 "--newest-first" => newest_first = true,
                 "--oldest-first" => newest_first = false,
+                "--no-space-check" => crate::space::skip_check(true),
                 "--help" => {
                     print!(
                         "\
@@ -775,6 +793,8 @@ Without PATH, print a numbered list and read an index from stdin.
       --plain   numbered selection instead of the browser
       --newest-first  list the most recently deleted item first
       --oldest-first  list the oldest deleted item first (default)
+      --no-space-check  restore onto another drive even when it would
+                leave less than 5% (or RTRASH_MIN_FREE) free
       --help    display this help and exit
       --version output version information and exit
 "
@@ -920,6 +940,16 @@ Without PATH, print a numbered list and read an index from stdin.
                 let _ = super::remove_forcing(&dest);
             }
         }
+        let pairs: Vec<(PathBuf, PathBuf, u64)> = items
+            .iter()
+            .map(|it| (PathBuf::from(&it.id), it.original_path(), item_size(it)))
+            .collect();
+        for (dest, need) in super::cross_drive_needs(&pairs) {
+            if let Err(e) = crate::space::guard_bytes(need, &dest) {
+                eprintln!("{prog}: cannot restore: {e}");
+                return 1;
+            }
+        }
         match os_limited::restore_all(items) {
             Ok(()) => 0,
             Err(e) => {
@@ -936,7 +966,8 @@ Without PATH, print a numbered list and read an index from stdin.
                     "\
 Usage: {prog} [OPTION]...
 Summarize the Windows Recycle Bin: items, size, and the cap of each
-drive (MaxCapacity in the registry), then the total.
+drive (MaxCapacity in the registry), then the total and the free
+space on each drive (a warning under 10% free).
 
       --older-than=DAYS only count items deleted more than DAYS days ago
       --newer-than=DAYS only count items deleted within the last DAYS days
@@ -998,7 +1029,31 @@ drive (MaxCapacity in the registry), then the total.
             crate::util::plural(items, "item", "items"),
             crate::util::format_bytes(bytes)
         );
+        print_free(&bin_drives());
         0
+    }
+
+    /// A `Free on` line per drive, and a warning for a drive under
+    /// [`crate::space::WARN_FREE_PERCENT`] free.
+    fn print_free(drives: &[PathBuf]) {
+        for root in drives {
+            let Ok(s) = crate::space::query(root) else {
+                continue;
+            };
+            println!(
+                "Free on {}: {}",
+                root.display(),
+                crate::space::free_line(&s)
+            );
+            let lows = s.lows(crate::space::WARN_FREE_PERCENT);
+            if !lows.is_empty() {
+                eprintln!(
+                    "rtrash: warning: {} is low: {}; free space with `rtrash empty`",
+                    root.display(),
+                    lows.join(", ")
+                );
+            }
+        }
     }
 
     /// `status` with a filter: the shell's per-drive totals cannot be
@@ -1035,6 +1090,7 @@ drive (MaxCapacity in the registry), then the total.
             crate::util::plural(items, "item", "items"),
             crate::util::format_bytes(bytes)
         );
+        print_free(&bin_drives());
         0
     }
 
@@ -1433,6 +1489,18 @@ mod tests {
         assert!(!nested.exists());
         assert_eq!(std::fs::read(outside.join("precious")).unwrap(), b"keep");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restores_count_only_items_that_change_drive() {
+        let p = PathBuf::from;
+        let items = [
+            (p("D:\\$Recycle.Bin\\S-1\\$R1"), p("C:\\a\\x"), 10),
+            (p("D:\\$Recycle.Bin\\S-1\\$R2"), p("D:\\b"), 99),
+            (p("E:\\$Recycle.Bin\\S-1\\$R3"), p("c:/y"), 5),
+            (p("relative"), p("C:\\z"), 7),
+        ];
+        assert_eq!(cross_drive_needs(&items), [(p("C:\\"), 15)]);
     }
 
     #[test]
