@@ -2987,7 +2987,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let r = dir.join(std::ffi::OsStr::from_bytes(b"$RABCDEF.\xe9"));
         let i = dir.join(std::ffi::OsStr::from_bytes(b"$IABCDEF.\xe9"));
-        std::fs::write(&r, b"x").unwrap();
+        // APFS and some other file systems refuse names that are not
+        // UTF-8 (EILSEQ); there is nothing to check then.
+        if let Err(e) = std::fs::write(&r, b"x") {
+            if e.raw_os_error() == Some(libc::EILSEQ)
+                || e.kind() == std::io::ErrorKind::InvalidInput
+            {
+                eprintln!("skipped: the file system refused the name: {e}");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            panic!("cannot write {r:?}: {e}");
+        }
         std::fs::write(
             &i,
             encode_recycle_i_v2(Path::new(r"C:\odd"), 1, FILETIME_UNIX_EPOCH),
