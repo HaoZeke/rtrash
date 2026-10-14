@@ -337,6 +337,39 @@ fn carried_total(old: Total, c: &Change) -> Total {
     }
 }
 
+/// Past this age, the files of a trash no longer present go.
+const FORGET_AFTER: std::time::Duration = std::time::Duration::from_secs(90 * 86_400);
+
+/// Drop the total and history files of trashes not among `live` whose
+/// files nobody wrote for [`FORGET_AFTER`], such as a drive not plugged
+/// in for months. Best effort.
+fn prune_stale(live: &[String]) {
+    let Some(dir) = state_dir() else { return };
+    let Ok(rd) = fs::read_dir(&dir) else { return };
+    let now = std::time::SystemTime::now();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(stem) = name
+            .strip_suffix(".total")
+            .or_else(|| name.strip_suffix(".history"))
+        else {
+            continue;
+        };
+        if live.iter().any(|k| k == stem) {
+            continue;
+        }
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > FORGET_AFTER);
+        if old {
+            let _ = fs::remove_file(e.path());
+        }
+    }
+}
+
 /// After a command: give each trash whose time moved since `before` a
 /// new total (carried when it can be, else measured) and a history line
 /// under `event`.
@@ -345,6 +378,7 @@ pub fn log(event: &str, before: &Snapshot) {
         return;
     };
     let carried = std::mem::take(&mut *CARRIED.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut logged = false;
     for t in crate::finder::trashes() {
         let now = stamp(&t);
         let snap = before.iter().find(|x| x.0 == t);
@@ -365,6 +399,11 @@ pub fn log(event: &str, before: &Snapshot) {
         if let Some(p) = file(&t, "history") {
             crate::trash_history::append(&p, event, total.bytes, total.items);
         }
+        logged = true;
+    }
+    if logged {
+        let live: Vec<String> = crate::finder::trashes().iter().map(|t| key(t)).collect();
+        prune_stale(&live);
     }
 }
 

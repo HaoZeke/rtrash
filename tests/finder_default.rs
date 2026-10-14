@@ -448,3 +448,39 @@ fn put_and_rm_carry_the_finder_total() {
     assert!(j.contains("\"items\":1,\"stale\":false"), "{j}");
     assert!(bytes(&j) < 1_000_000, "{j}");
 }
+
+/// The files of a trash gone for over 90 days go at the next logged
+/// change; recent ones and live trashes stay.
+#[test]
+fn stale_finder_totals_of_gone_volumes_are_pruned() {
+    let b = Box_::new("prune");
+    let dir = b.root.join("state/rtrash/finder-totals");
+    fs::create_dir_all(&dir).unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(100 * 86_400);
+    for (n, t) in [
+        ("uuid-gone-.Trashes%2F501.total", old),
+        ("uuid-gone-.Trashes%2F501.history", old),
+        ("uuid-recent-x.total", std::time::SystemTime::now()),
+        ("notes.txt", old),
+    ] {
+        let p = dir.join(n);
+        fs::write(&p, b"v1 1 1 1\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+    fs::write(b.work().join("f"), b"1").unwrap();
+    assert!(b.run(&["put", "f"], "").status.success());
+    assert!(!dir.join("uuid-gone-.Trashes%2F501.total").exists());
+    assert!(!dir.join("uuid-gone-.Trashes%2F501.history").exists());
+    assert!(dir.join("uuid-recent-x.total").exists());
+    assert!(dir.join("notes.txt").exists());
+    let home = fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with(".Trash.total"));
+    assert!(home, "the live home total stays");
+}
