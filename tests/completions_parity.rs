@@ -361,8 +361,26 @@ fn nu_block(script: &str, name: &str) -> String {
     panic!("nu extern {name} not found");
 }
 
-/// Every long option of `--help` is a flag of the matching nushell extern,
-/// or a comment line when it takes an optional value (nushell flags cannot).
+/// Long options that `rtrash SUB --help` shows with an optional value,
+/// such as `--interactive[=WHEN]`.
+fn help_optional_value_opts(sub: &str) -> Vec<String> {
+    let out = Command::new(bin()).args([sub, "--help"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.split("--")
+        .skip(1)
+        .filter_map(|rest| {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            rest[name.len()..].starts_with("[=").then_some(name)
+        })
+        .collect()
+}
+
+/// Every long option of `--help` is a flag of the matching nushell extern.
+/// One that takes an optional value is declared `--opt?: string`, so both
+/// `--opt` and `--opt=VALUE` pass through.
 #[test]
 fn nu_externs_cover_every_help_option() {
     let nu = read("completions/rtrash.nu");
@@ -381,7 +399,6 @@ fn nu_externs_cover_every_help_option() {
             let flag = format!("--{opt}");
             let found = block.lines().any(|l| {
                 let l = l.trim_start();
-                let l = l.strip_prefix("# ").unwrap_or(l);
                 let word: String = l
                     .chars()
                     .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
@@ -390,6 +407,12 @@ fn nu_externs_cover_every_help_option() {
             });
             if !found {
                 missing.push(format!("nu {name} {flag}"));
+            }
+        }
+        for opt in help_optional_value_opts(sub) {
+            let decl = format!("--{opt}?: string");
+            if !block.lines().any(|l| l.trim_start().starts_with(&decl)) {
+                missing.push(format!("nu {name} {decl}"));
             }
         }
     }

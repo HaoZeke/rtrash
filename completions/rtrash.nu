@@ -41,6 +41,14 @@ def "nu-complete rtrash in-use" [] {
     ["warn" "refuse" "ignore"]
 }
 
+def "nu-complete rtrash when" [] {
+    ["never" "once" "always"]
+}
+
+def "nu-complete rtrash preserve-root" [] {
+    ["all"]
+}
+
 def "nu-complete rtrash conflict" [] {
     ["refuse" "overwrite" "rename" "skip"]
 }
@@ -56,13 +64,13 @@ export extern "rtrash put" [
     --force(-f)  # ignore nonexistent files and arguments, never prompt
     -i  # prompt before every removal
     -I  # prompt once before removing more than three files,
-    # --interactive[=WHEN] is left out: nushell flags cannot take an optional value, and an unknown flag passes through
+    --interactive?: string@"nu-complete rtrash when"  # prompt according to WHEN: never, once (-I), or always (-i)
     --recursive(-r)  # remove directories and their contents
     -R  # remove directories and their contents
     --dir(-d)  # remove empty directories
     --verbose(-v)  # explain what is being done
     --one-file-system  # accepted for rm compatibility (no-op: entries are
-    # --preserve-root[=all] is left out: nushell flags cannot take an optional value, and an unknown flag passes through
+    --preserve-root?: string@"nu-complete rtrash preserve-root"  # do not remove '/', your home directory or a mount point (default)
     --no-preserve-root  # do not treat those specially
     --trash-dir: string  # put into this trash root (creates files/ and info/ if
     --home-only  # always use the home trash (skip volume trash)
@@ -249,7 +257,7 @@ export extern "rtrash reap" [
     --home-only  # always use the home trash
     --verbose(-v)  # also show each skipped entry and why
     --shared  # also show what a delete would free: the bytes in
-    # --install-timer[=EVERY] is left out: nushell flags cannot take an optional value, and an unknown flag passes through
+    --install-timer?: string  # write a user systemd service and timer, a launchd agent or a Task Scheduler task
     --remove-timer  # stop and remove the job --install-timer made; with
     --timer-status  # say whether that job is installed, and its state
     --when-below: string  # run only when a reaped file system has less free
@@ -308,13 +316,13 @@ export extern "trash-put" [
     --force(-f)  # ignore nonexistent files and arguments, never prompt
     -i  # prompt before every removal
     -I  # prompt once before removing more than three files,
-    # --interactive[=WHEN] is left out: nushell flags cannot take an optional value, and an unknown flag passes through
+    --interactive?: string@"nu-complete rtrash when"  # prompt according to WHEN: never, once (-I), or always (-i)
     --recursive(-r)  # remove directories and their contents
     -R  # remove directories and their contents
     --dir(-d)  # remove empty directories
     --verbose(-v)  # explain what is being done
     --one-file-system  # accepted for rm compatibility (no-op: entries are
-    # --preserve-root[=all] is left out: nushell flags cannot take an optional value, and an unknown flag passes through
+    --preserve-root?: string@"nu-complete rtrash preserve-root"  # do not remove '/', your home directory or a mount point (default)
     --no-preserve-root  # do not treat those specially
     --trash-dir: string  # put into this trash root (creates files/ and info/ if
     --home-only  # always use the home trash (skip volume trash)

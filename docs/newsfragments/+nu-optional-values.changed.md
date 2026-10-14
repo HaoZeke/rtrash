@@ -1,0 +1,1 @@
+The nushell completions now declare `--interactive`, `--preserve-root` and `--install-timer` as flags with an optional value, so nushell completes them and passes both the bare and the `=VALUE` form through.
