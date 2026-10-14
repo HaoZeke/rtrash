@@ -101,6 +101,45 @@ echo "ok   undo, status and trash-stats (with --total and --history)"
 "$rt" list | grep -qF -- "$i" && fail "rm left the item listed"
 echo "ok   rm"
 
+# A name with a newline through the real Finder. Finder may refuse it
+# or store it its own way, so this step reports what happened on
+# "finder-newline:" lines and fails only when the file is lost: gone
+# from disk without a Finder Trash entry to restore.
+n="$work/line one
+line two.txt"
+want=$n
+echo newline > "$n"
+if out=$("$rt" put "$n" 2>&1); then
+  echo "finder-newline: put exited 0"
+  [[ ! -e $n ]] || echo "finder-newline: the file is still in place"
+  if "$rt" list --format='{path}\0' |
+    python3 -c 'import sys; w = sys.argv[1].encode(); sys.exit(0 if any(r.strip(b"\n") == w for r in sys.stdin.buffer.read().split(b"\0")) else 1)' "$n"; then
+    echo "finder-newline: list shows the Put Back path unchanged"
+  else
+    echo "finder-newline: list does not show the path unchanged"
+    "$rt" finder list 2>&1 | grep -F "line one" | sed 's/^/finder-newline:   /' || true
+  fi
+  if rout=$("$rt" restore "$n" 2>&1); then
+    echo "finder-newline: restore exited 0"
+  else
+    echo "finder-newline: restore failed: $rout"
+  fi
+  if [[ -e $n ]]; then
+    [[ $(cat "$n") == newline ]] || fail "newline name restored with other content"
+    echo "finder-newline: restored in place"
+  else
+    found=$(find "$HOME/.Trash" -maxdepth 1 -name 'line one*' -print -quit 2>/dev/null || true)
+    [[ -n $found ]] || fail "newline name lost: not on disk and not in ~/.Trash"
+    echo "finder-newline: still in ~/.Trash as '$found'"
+    mv "$found" "$n" || fail "cannot move the newline item back by hand"
+  fi
+else
+  echo "finder-newline: put refused: $out"
+  [[ -e $n ]] || fail "newline name lost after a refused put"
+fi
+unset want
+echo "ok   newline name through Finder (see finder-newline lines)"
+
 # An item on another volume goes to that volume's .Trashes/UID.
 if [[ -n ${RTRASH_SMOKE_VOLUME:-} ]]; then
   v="$RTRASH_SMOKE_VOLUME/rtrash smoke.txt"
