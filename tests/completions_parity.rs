@@ -285,7 +285,7 @@ fn bash_complete(words: &[&str]) -> Vec<String> {
 fn bash_completion_offers_the_right_words() {
     assert_eq!(
         bash_complete(&["rtrash", "completions", ""]),
-        ["bash", "zsh", "fish", "nu"]
+        ["bash", "zsh", "fish", "nu", "powershell"]
     );
     let keys = bash_complete(&["rtrash", "keys", "--"]);
     assert!(keys.contains(&"--sample".to_string()), "{keys:?}");
@@ -324,7 +324,7 @@ fn fish_completion_offers_the_right_words() {
         eprintln!("fish not installed; skipping");
         return;
     };
-    assert_eq!(shells, ["bash", "fish", "nu", "zsh"]);
+    assert_eq!(shells, ["bash", "fish", "nu", "powershell", "zsh"]);
     let keys = run("rtrash keys --").unwrap();
     assert!(keys.contains(&"--sample".to_string()), "{keys:?}");
     let subs = run("rtrash k").unwrap();
@@ -335,7 +335,7 @@ fn fish_completion_offers_the_right_words() {
 fn zsh_completion_knows_keys_and_every_shell() {
     let zsh = read("completions/_rtrash");
     assert!(zsh.contains("'keys:"), "keys subcommand missing");
-    assert!(zsh.contains("'1:shell:(bash zsh fish nu)'"));
+    assert!(zsh.contains("'1:shell:(bash zsh fish nu powershell)'"));
     assert!(zsh.contains("--sample["));
 }
 
@@ -425,4 +425,90 @@ fn nu_script_is_embedded_and_parses() {
         String::from_utf8_lossy(&run.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "1");
+}
+
+/// The quoted words of the `'SUB' = @(...)` line of the PowerShell script.
+fn powershell_words(script: &str, sub: &str) -> Vec<String> {
+    let start = format!("'{sub}' = @(");
+    let line = script
+        .lines()
+        .map(str::trim_start)
+        .find(|l| l.starts_with(&start))
+        .unwrap_or_else(|| panic!("powershell table for {sub} not found"));
+    line[start.len()..]
+        .trim_end_matches(')')
+        .split(", ")
+        .map(|w| w.trim_matches('\'').trim_end_matches('=').to_string())
+        .collect()
+}
+
+/// Every long option of `--help` is in the PowerShell script's table for
+/// that subcommand; the multi-call names share the tables.
+#[test]
+fn powershell_tables_cover_every_help_option() {
+    let ps = read("completions/rtrash.ps1");
+    let mut missing = Vec::new();
+    for sub in SUBCOMMANDS {
+        let words = powershell_words(&ps, sub);
+        for opt in help_long_opts(sub) {
+            let flag = format!("--{opt}");
+            if !words.contains(&flag) {
+                missing.push(format!("powershell {sub} {flag}"));
+            }
+        }
+    }
+    for (name, sub) in [
+        ("trash-put", "put"),
+        ("trash-empty", "empty"),
+        ("trash-list", "list"),
+        ("trash-restore", "restore"),
+        ("trash-rm", "rm"),
+    ] {
+        if !ps.contains(&format!("'{name}' = '{sub}'")) {
+            missing.push(format!("powershell multi-call {name}"));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "missing in rtrash.ps1:\n{}",
+        missing.join("\n")
+    );
+}
+
+/// `rtrash completions powershell` prints the script, and PowerShell
+/// completes from it when pwsh is installed.
+#[test]
+fn powershell_script_is_embedded_and_completes() {
+    let out = Command::new(bin())
+        .args(["completions", "powershell"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        read("completions/rtrash.ps1")
+    );
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("completions/rtrash.ps1");
+    let prog = format!(
+        ". '{}'; foreach ($l in @('rtrash empty --da', 'trash-restore --la', 'rtrash k')) {{ \
+         (TabExpansion2 -inputScript $l -cursorColumn $l.Length).CompletionMatches.CompletionText -join ' ' }}",
+        script.display()
+    );
+    let Ok(run) = Command::new("pwsh")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &prog])
+        .output()
+    else {
+        eprintln!("pwsh not installed; skipping");
+        return;
+    };
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let got: Vec<String> = String::from_utf8_lossy(&run.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(got, ["--dangling", "--latest", "keys"]);
 }

@@ -26,7 +26,7 @@ def "nu-complete rtrash commands" [] {
 }
 
 def "nu-complete rtrash shells" [] {
-    ["bash" "zsh" "fish" "nu"]
+    ["bash" "zsh" "fish" "nu" "powershell"]
 }
 
 def "nu-complete rtrash finder" [] {
