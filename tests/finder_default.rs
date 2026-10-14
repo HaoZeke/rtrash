@@ -683,3 +683,18 @@ fn finder_matching_ignores_unicode_normalization() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(!b.finder().join(nfd).exists());
 }
+
+#[test]
+fn list_and_restore_use_the_put_log_before_finder_writes_ds_store() {
+    let b = Box_::new("nods");
+    let f = b.work().join("a b %\u{e9}.txt");
+    fs::write(&f, b"payload").unwrap();
+    assert!(b.run(&["put", "a b %\u{e9}.txt"], "").status.success());
+    // No .DS_Store yet, as on a fresh account.
+    assert!(!b.finder().join(".DS_Store").exists());
+    let o = b.run(&["list"], "");
+    assert!(out(&o).contains(&*f.to_string_lossy()), "{}", out(&o));
+    let o = b.run(&["restore", &f.to_string_lossy()], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(fs::read(&f).unwrap(), b"payload");
+}

@@ -42,6 +42,8 @@ Finder kept none), restore moves items back to it, and empty removes
 the items and leaves
 .I .DS_Store
 to Finder.
+Until Finder writes its Put Back record, list and restore take the
+location from rtrash's own put log.
 Names and patterns match in Unicode NFC, so a name Finder keeps
 decomposed matches the composed spelling typed at the prompt.
 Age filters count from the time an item went into the trash (its change

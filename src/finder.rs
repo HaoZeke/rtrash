@@ -85,6 +85,9 @@ pub fn items(trash: &Path) -> std::io::Result<Vec<Item>> {
         .unwrap_or_default();
     let pb = ds_store::put_back(&records);
     let root = volume_root(trash);
+    // Finder writes .DS_Store lazily, and on a fresh account not at all
+    // for a while; the put log knows where rtrash's own puts came from.
+    let logged = crate::finder_shared::read_log();
     let mut out = Vec::new();
     for ent in fs::read_dir(trash)? {
         let ent = ent?;
@@ -96,6 +99,13 @@ pub fn items(trash: &Path) -> std::io::Result<Vec<Item>> {
             let folder = p.folder.as_deref()?;
             let base = p.name.clone().unwrap_or_else(|| name.clone());
             Some(join_put_back(&root, folder, &base))
+        });
+        let original = original.or_else(|| {
+            logged
+                .iter()
+                .rev()
+                .find(|l| l.trash == trash && l.name == name)
+                .map(|l| l.original.clone())
         });
         out.push(Item { name, original });
     }
@@ -971,25 +981,29 @@ fn put(prog: &str, args: &[String]) -> i32 {
             }
         }
     }
-    if !paths.is_empty() {
-        let status = finder_delete(&paths);
-        match status {
-            Ok(s) if s.success() => {
+    // One item at a time, so each lands in the put log with its name in
+    // the trash; list and restore find it there before Finder writes
+    // its Put Back record.
+    let mut logged: Vec<(String, PathBuf, PathBuf)> = Vec::new();
+    for p in &paths {
+        let moved = fs::symlink_metadata(p)
+            .map_err(|e| format!("cannot remove '{}': {e}", p.display()))
+            .and_then(|m| put_item(p, &m));
+        match moved {
+            Ok((name, trash)) => {
                 if verbose {
-                    for p in &paths {
-                        println!("trashed '{}'", crate::util::term_path(p));
-                    }
+                    println!("trashed '{}'", crate::util::term_path(p));
                 }
-            }
-            Ok(s) => {
-                eprintln!("{prog}: Finder refused the move (osascript {s})");
-                failed = true;
+                logged.push((name, p.clone(), trash));
             }
             Err(e) => {
-                eprintln!("{prog}: cannot run osascript: {e}");
+                eprintln!("{prog}: {e}");
                 failed = true;
             }
         }
+    }
+    if !logged.is_empty() {
+        crate::finder_shared::log_batch(crate::info::batch_id(), &logged);
     }
     i32::from(failed)
 }

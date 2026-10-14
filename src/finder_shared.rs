@@ -194,7 +194,7 @@ fn parse_line(line: &str) -> Option<Logged> {
     })
 }
 
-fn read_log() -> Vec<Logged> {
+pub(crate) fn read_log() -> Vec<Logged> {
     log_path()
         .and_then(|p| fs::read_to_string(p).ok())
         .map(|s| s.lines().filter_map(parse_line).collect())
