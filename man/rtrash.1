@@ -2049,6 +2049,18 @@ files, as systemd\-tmpfiles reads them (a file masks one of the same name
 in a later directory, and specifiers are filled in as above), so
 .I /var/tmp
 usually waits 30 days; without such a line it is 10d.
+A glob line such as
+.I d /srv/cache\-* \- \- \- 1d
+gives its age to each directory it matches with as many path components.
+The age column's modifiers count too: a
+.B ~
+prefix reaps the entries inside each subdirectory of DIR and spares the
+entries directly in it, and a
+.IB LETTERS :
+prefix (\fBa\fR, \fBc\fR, \fBm\fR for files, \fBA\fR, \fBC\fR,
+\fBM\fR for directories) picks the times that count, unless
+.B \-\-age\-by
+is given; birth time (\fBb\fR, \fBB\fR) is not read.
 Directories with different ages are judged separately.
 .TP
 .BI \-\-age\-by= LETTERS

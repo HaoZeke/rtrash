@@ -4849,6 +4849,42 @@ fn reap_reads_user_tmpfiles_with_specifiers() {
     assert!(!reaped.contains(&json_path(&kept)), "{reaped}");
 }
 
+/// A ~ age reaps inside each subdirectory and spares the entries directly
+/// inside; a `m:` prefix ages by modification time alone, so a file whose
+/// change time is new still goes.
+#[cfg(target_os = "linux")]
+#[test]
+fn reap_honours_tmpfiles_age_modifiers() {
+    let sb = Sandbox::new("reap-tmpfiles-mods");
+    let deep = sb.root.join(".cache/deep");
+    let mt = sb.root.join(".cache/mt");
+    fs::create_dir_all(deep.join("sub")).unwrap();
+    fs::create_dir_all(&mt).unwrap();
+    let top = stale_file(&deep, "top.bin");
+    let inner = stale_file(&deep.join("sub"), "old.bin");
+    let by_m = stale_file(&mt, "f.bin");
+    let conf = sb.root.join(".config/user-tmpfiles.d");
+    fs::create_dir_all(&conf).unwrap();
+    fs::write(
+        conf.join("mods.conf"),
+        "e %C/deep - - - ~m:12h\ne %C/mt - - - m:12h\n",
+    )
+    .unwrap();
+    let (d, m) = (deep.to_string_lossy(), mt.to_string_lossy());
+    let out = reap_cmd(&sb, &["reap", "-n", "--json", &d, &m]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let j = stdout_of(&out);
+    let reaped = j.split(r#""skipped""#).next().unwrap();
+    assert!(reaped.contains(&json_path(&inner)), "{j}");
+    assert!(reaped.contains(&json_path(&by_m)), "{j}");
+    assert!(!reaped.contains(&json_path(&top)), "{j}");
+    // --age-by overrides the line's letters: ctime is new, so f.bin stays.
+    let out = reap_cmd(&sb, &["reap", "-n", "--json", "--age-by=c", &m]);
+    let j = stdout_of(&out);
+    let reaped = j.split(r#""skipped""#).next().unwrap();
+    assert!(!reaped.contains(&json_path(&by_m)), "{j}");
+}
+
 /// node-gyp takes old header downloads and leaves a fresh one.
 #[cfg(target_os = "linux")]
 #[test]

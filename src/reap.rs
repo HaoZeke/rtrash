@@ -363,8 +363,8 @@ fn enough(sizes: &[(u64, u64)], need: (u64, u64)) -> usize {
 /// cleans, in seconds, from the user's files and then the system's (see
 /// [`tmpfiles_confs`]); the first line for a path wins, as
 /// systemd-tmpfiles reads them.
-pub fn tmpfiles_ages() -> Vec<(PathBuf, i64)> {
-    let mut out: Vec<(PathBuf, i64)> = Vec::new();
+pub fn tmpfiles_ages() -> Vec<(PathBuf, TmpAge)> {
+    let mut out: Vec<(PathBuf, TmpAge)> = Vec::new();
     for (p, user) in tmpfiles_confs() {
         if let Ok(body) = fs::read_to_string(&p) {
             for (path, age) in parse_tmpfiles_ages(&body, user) {
@@ -381,7 +381,7 @@ pub fn tmpfiles_ages() -> Vec<(PathBuf, i64)> {
 /// specifiers filled in for a user file (`user`) or a system one. Paths
 /// with a specifier reap cannot know, and ages that are `-`, zero or
 /// unreadable, are left out.
-fn parse_tmpfiles_ages(body: &str, user: bool) -> Vec<(PathBuf, i64)> {
+fn parse_tmpfiles_ages(body: &str, user: bool) -> Vec<(PathBuf, TmpAge)> {
     let mut out = Vec::new();
     for line in body.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
@@ -395,14 +395,57 @@ fn parse_tmpfiles_ages(body: &str, user: bool) -> Vec<(PathBuf, i64)> {
         let Some(path) = expand_specifiers(f[1], user, None) else {
             continue;
         };
-        // A leading ~ limits cleaning to the directory's own entries,
-        // which is all reap looks at; a : keeps atime out (reap ignores).
-        let age = f[5].trim_start_matches(['~', ':']);
-        if let Some(secs) = parse_span(age).filter(|&s| s > 0) {
-            out.push((PathBuf::from(path), secs));
+        if let Some(age) = parse_tmp_age(f[5]) {
+            out.push((PathBuf::from(path), age));
         }
     }
     out
+}
+
+/// One tmpfiles.d age field: the span, which times count, and whether a
+/// leading `~` moves cleaning one level down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TmpAge {
+    pub secs: i64,
+    /// From a `LETTERS:` prefix; `None` counts every time.
+    by: Option<AgeBy>,
+    /// `~`: only entries inside the directory's subdirectories go, never
+    /// the entries directly inside it.
+    pub below: bool,
+}
+
+/// Read an age field such as `10d`, `~1w`, `cmA:2h` or `~mM:1d`. The
+/// letters are tmpfiles.d's: a, c and m for files, A, C and M for
+/// directories, b and B for birth time; reap counts a time when either
+/// case names it and has no birth time, so a prefix of only b and B counts
+/// every time. `None` for `-`, zero or an unreadable span.
+fn parse_tmp_age(field: &str) -> Option<TmpAge> {
+    let mut rest = field;
+    let mut below = false;
+    if let Some(r) = rest.strip_prefix('~') {
+        below = true;
+        rest = r;
+    }
+    let mut by = None;
+    if let Some((letters, span)) = rest.split_once(':') {
+        if !letters.chars().all(|c| "aAbBcCmM".contains(c)) {
+            return None;
+        }
+        let has = |l: char| letters.contains(l) || letters.contains(l.to_ascii_uppercase());
+        let a = AgeBy {
+            atime: has('a'),
+            ctime: has('c'),
+            mtime: has('m'),
+        };
+        by = (a.atime || a.ctime || a.mtime).then_some(a);
+        rest = span;
+    }
+    if let Some(r) = rest.strip_prefix('~') {
+        below = true;
+        rest = r;
+    }
+    let secs = parse_span(rest).filter(|&s| s > 0)?;
+    Some(TmpAge { secs, by, below })
 }
 
 /// A systemd time span such as `10d`, `1w 2d`, `12h30min` or a bare
@@ -439,10 +482,25 @@ fn parse_span(s: &str) -> Option<i64> {
     Some(total)
 }
 
-/// The tmpfiles.d age for `root`, matched after resolving links.
-fn tmpfiles_age_for(root: &Path, ages: &[(PathBuf, i64)]) -> Option<i64> {
+/// The tmpfiles.d age for `root`: a line for that path (also after
+/// resolving links), else the first glob line that matches it with as
+/// many components, as systemd-tmpfiles applies a glob to each match.
+fn tmpfiles_age_for(root: &Path, ages: &[(PathBuf, TmpAge)]) -> Option<TmpAge> {
+    let exact = ages
+        .iter()
+        .find(|(p, _)| p == root || fs::canonicalize(p).is_ok_and(|c| c == root));
+    if let Some((_, a)) = exact {
+        return Some(*a);
+    }
+    let text = str_from_os_ref(root.as_os_str());
+    let depth = root.components().count();
     ages.iter()
-        .find(|(p, _)| p == root || fs::canonicalize(p).is_ok_and(|c| c == root))
+        .find(|(p, _)| {
+            let pat = p.to_string_lossy();
+            pat.contains(['*', '?', '['])
+                && p.components().count() == depth
+                && crate::util::fnmatch(&pat, &text)
+        })
         .map(|(_, a)| *a)
 }
 
@@ -503,7 +561,7 @@ fn kind_reason(ft: &fs::FileType) -> Option<&'static str> {
 /// busy tree is never walked in full.
 fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Walk {
     let mut w = Walk {
-        newest: ctx.age_by.newest(top),
+        newest: g.age_by.unwrap_or(ctx.age_by).newest(top),
         bytes: plat::bytes(top),
         inodes: 1,
         keep: None,
@@ -555,7 +613,7 @@ fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Wal
                 ));
                 return w;
             }
-            w.newest = w.newest.max(ctx.age_by.newest(&m));
+            w.newest = w.newest.max(g.age_by.unwrap_or(ctx.age_by).newest(&m));
             if w.newest > g.cutoff {
                 return w;
             }
@@ -604,6 +662,9 @@ struct Group {
     name: String,
     action: Action,
     older: i64,
+    /// Which times count here, when a tmpfiles.d line says; else
+    /// `Ctx::age_by`.
+    age_by: Option<AgeBy>,
     cutoff: i64,
     marker: Option<String>,
     busy: Vec<String>,
@@ -636,7 +697,7 @@ fn judge(path: &Path, parent_dev: u64, gi: usize, g: &Group, ctx: &Ctx) -> Optio
     let mut o = Outcome {
         path: path.to_path_buf(),
         group: gi,
-        age: ctx.now - ctx.age_by.newest(&m),
+        age: ctx.now - g.age_by.unwrap_or(ctx.age_by).newest(&m),
         bytes: 0,
         inodes: 1,
         dev: parent_dev,
@@ -1222,6 +1283,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         return crate::reap_timer::install(prog, &rest, every, dry);
     }
     let mut older: Option<i64> = None;
+    let mut age_by_set = false;
     let mut age_by = AgeBy {
         atime: true,
         ctime: true,
@@ -1318,7 +1380,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 }
             },
             a if a.starts_with("--age-by=") => match AgeBy::parse(&a["--age-by=".len()..]) {
-                Some(x) => age_by = x,
+                Some(x) => {
+                    age_by = x;
+                    age_by_set = true;
+                }
                 None => return usage_err(prog, "--age-by takes letters from a, c and m"),
             },
             a if a.starts_with("--trash-dir=") => {
@@ -1380,17 +1445,40 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     } else {
         Vec::new()
     };
-    let mut by_age: Vec<(i64, Vec<PathBuf>)> = Vec::new();
+    // A line's time letters count unless --age-by was given, and a ~ age
+    // reaps inside each subdirectory instead of the directory itself.
+    type Key = (i64, Option<AgeBy>);
+    let mut by_age: Vec<(Key, Vec<PathBuf>)> = Vec::new();
     for root in &roots {
-        let age = older
-            .or_else(|| tmpfiles_age_for(root, &ages))
-            .unwrap_or(10 * 86_400);
-        match by_age.iter_mut().find(|(a, _)| *a == age) {
-            Some((_, v)) => v.push(root.clone()),
-            None => by_age.push((age, vec![root.clone()])),
+        let rule = if older.is_none() {
+            tmpfiles_age_for(root, &ages)
+        } else {
+            None
+        };
+        let age = older.or(rule.map(|r| r.secs)).unwrap_or(10 * 86_400);
+        let by = rule.and_then(|r| r.by).filter(|_| !age_by_set);
+        let targets: Vec<PathBuf> = if rule.is_some_and(|r| r.below) {
+            let mut subs: Vec<PathBuf> = fs::read_dir(root)
+                .map(|rd| {
+                    rd.flatten()
+                        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                        .map(|e| e.path())
+                        .collect()
+                })
+                .unwrap_or_default();
+            subs.sort();
+            subs
+        } else {
+            vec![root.clone()]
+        };
+        for t in targets {
+            match by_age.iter_mut().find(|(k, _)| *k == (age, by)) {
+                Some((_, v)) => v.push(t),
+                None => by_age.push(((age, by), vec![t])),
+            }
         }
     }
-    for (older, roots) in by_age {
+    for ((older, by), roots) in by_age {
         let mut entries = Vec::new();
         for root in &roots {
             let Ok(root_meta) = fs::symlink_metadata(root) else {
@@ -1413,6 +1501,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             name: "tmp".into(),
             action: action.unwrap_or(Action::Trash),
             older,
+            age_by: by,
             cutoff: now - older,
             marker: None,
             busy: Vec::new(),
@@ -1457,6 +1546,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 name: p.name.clone(),
                 action: action.unwrap_or(p.action),
                 older: age,
+                age_by: None,
                 cutoff: now - age,
                 marker: p.marker.clone(),
                 busy: p.busy.clone(),
@@ -2027,24 +2117,53 @@ mod tests {
 
     #[test]
     fn tmpfiles_ages_read_cleaning_lines_and_systemd_spans() {
-        let body = "# c\nq /tmp 1777 root root 10d\nD /var/tmp 1777 root root 1w2d\nd /run/user/%b 0700 - - 1h\nd %V/sys 0700 - - 2h\ne /srv/scratch - - - ~12h30min\nd /keep 0755 - - -\nd /zero 0755 - - 0\nx /tmp/x\nL /tmp/link - - - 3d\n";
+        let body = "# c\nq /tmp 1777 root root 10d\nD /var/tmp 1777 root root 1w2d\nd /run/user/%b 0700 - - 1h\nd %V/sys 0700 - - 2h\ne /srv/scratch - - - ~12h30min\nd /keep 0755 - - -\nd /zero 0755 - - 0\nx /tmp/x\nL /tmp/link - - - 3d\ne /srv/cache-* - - - cmA:1d\ne /srv/odd - - - xyz:1d\n";
         let got = parse_tmpfiles_ages(body, false);
+        let age = |secs, by, below| TmpAge { secs, by, below };
+        let cm = Some(AgeBy {
+            atime: true,
+            ctime: true,
+            mtime: true,
+        });
         assert_eq!(
             got,
             vec![
-                (PathBuf::from("/tmp"), 10 * 86_400),
-                (PathBuf::from("/var/tmp"), 9 * 86_400),
-                (PathBuf::from("/var/tmp/sys"), 2 * 3600),
-                (PathBuf::from("/srv/scratch"), 12 * 3600 + 30 * 60),
+                (PathBuf::from("/tmp"), age(10 * 86_400, None, false)),
+                (PathBuf::from("/var/tmp"), age(9 * 86_400, None, false)),
+                (PathBuf::from("/var/tmp/sys"), age(2 * 3600, None, false)),
+                (
+                    PathBuf::from("/srv/scratch"),
+                    age(12 * 3600 + 30 * 60, None, true)
+                ),
+                (PathBuf::from("/srv/cache-*"), age(86_400, cm, false)),
             ]
         );
+        assert_eq!(
+            parse_tmp_age("~mM:1h"),
+            Some(age(
+                3600,
+                Some(AgeBy {
+                    atime: false,
+                    ctime: false,
+                    mtime: true
+                }),
+                true
+            ))
+        );
+        assert_eq!(parse_tmp_age("bB:1h"), Some(age(3600, None, false)));
         assert_eq!(parse_span("90"), Some(90));
         assert_eq!(parse_span("1M"), Some(2_629_800));
         assert_eq!(parse_span("5q"), None);
         assert_eq!(
-            tmpfiles_age_for(Path::new("/var/tmp"), &got),
+            tmpfiles_age_for(Path::new("/var/tmp"), &got).map(|a| a.secs),
             Some(9 * 86_400)
         );
+        // A glob line covers a match with as many components, not deeper.
+        assert_eq!(
+            tmpfiles_age_for(Path::new("/srv/cache-pip"), &got).map(|a| a.secs),
+            Some(86_400)
+        );
+        assert_eq!(tmpfiles_age_for(Path::new("/srv/cache-pip/x"), &got), None);
         assert_eq!(tmpfiles_age_for(Path::new("/nope"), &got), None);
     }
 
