@@ -95,6 +95,7 @@ trash_stats_opts=(
   '--home-only[only the home trash]'
   '*--trash-dir=[only this trash directory]:dir:_files -/'
   '--history[also show each trash history]'
+  '--since=[with --history, only lines from the last AGE]:age:'
   '--json[print a JSON object]'
   '--help[display help]'
   '--version[display version]'

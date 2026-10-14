@@ -25,7 +25,7 @@ _rtrash_list_opts=(
 )
 
 _rtrash_trash_stats_opts=(
-  --top= --home-only --trash-dir= --history --json --help --version
+  --top= --home-only --trash-dir= --history --since= --json --help --version
 )
 
 _rtrash_status_opts=(

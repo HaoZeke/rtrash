@@ -25,6 +25,8 @@ directories under files/ and info/), orphans (payloads without a
       --history         also show each trash's history: its size and items
                         after each put, restore, rm, empty and reap
                         that changed it
+      --since=AGE       with --history, only the lines from the last AGE
+                        (90m, 12h, 7d, 2w; a bare number is days)
       --json            print a JSON object ({trashes, total})
       --help            display this help and exit
       --version         output version information and exit
@@ -270,12 +272,25 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut home_only = false;
     let mut json = false;
     let mut with_history = false;
+    let mut since: Option<i64> = None;
     let mut top = 5usize;
     for a in args {
         match a.as_str() {
             "--home-only" => home_only = true,
             "--json" => json = true,
             "--history" => with_history = true,
+            a if a.starts_with("--since=") => {
+                match crate::reap::parse_age(&a["--since=".len()..]) {
+                    Some(s) => since = Some(s),
+                    None => {
+                        eprintln!(
+                            "{prog}: invalid --since '{}' (an age such as 12h or 7d)",
+                            &a["--since=".len()..]
+                        );
+                        return 2;
+                    }
+                }
+            }
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -301,8 +316,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
     }
+    if since.is_some() && !with_history {
+        eprintln!("{prog}: --since goes with --history");
+        eprintln!("Try '{prog} --help' for more information.");
+        return 2;
+    }
     #[cfg(unix)]
-    let all: Vec<Stats> = trashdir::resolve_dirs_opts(&pins, home_only)
+    let mut all: Vec<Stats> = trashdir::resolve_dirs_opts(&pins, home_only)
         .iter()
         .filter(|d| d.info().is_dir() || d.files().is_dir())
         .map(|d| {
@@ -318,7 +338,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         .collect();
     // The Recycle Bin has one place per drive; there is nothing to narrow.
     #[cfg(windows)]
-    let all: Vec<Stats> = {
+    let mut all: Vec<Stats> = {
         let _ = (home_only, &pins);
         let mut all = gather_bins(top);
         if with_history {
@@ -344,6 +364,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         all
     };
+    if let Some(age) = since {
+        let cut = crate::util::now_epoch() - age;
+        for s in &mut all {
+            s.history.retain(|(t, ..)| *t >= cut);
+        }
+    }
     if json {
         println!("{}", to_json(&all, with_history));
     } else {

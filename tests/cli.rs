@@ -3769,6 +3769,26 @@ fn trash_stats_history_records_each_change_rtrash_makes() {
     assert_eq!(text.matches("  put  ").count(), 3, "{text}");
     let plain = stdout_of(&sb.run(&["trash-stats", "--home-only", "--json"]));
     assert!(!plain.contains("history"), "{plain}");
+    // --since keeps only recent lines: an old one written by hand drops.
+    let hist = sb.trash().join("rtrash-history");
+    let body = fs::read_to_string(&hist).unwrap();
+    fs::write(&hist, format!("1000000000 put 1 1\n{body}")).unwrap();
+    let all = stdout_of(&sb.run(&["trash-stats", "--home-only", "--history", "--json"]));
+    assert!(all.contains(r#""epoch":1000000000,"#), "{all}");
+    let recent = stdout_of(&sb.run(&[
+        "trash-stats",
+        "--home-only",
+        "--history",
+        "--since=1d",
+        "--json",
+    ]));
+    assert!(!recent.contains(r#""epoch":1000000000,"#), "{recent}");
+    assert_eq!(recent.matches(r#""event":"#).count(), 6, "{recent}");
+    for bad in [&["--since=1d"][..], &["--history", "--since=soon"]] {
+        let mut args = vec!["trash-stats", "--home-only"];
+        args.extend_from_slice(bad);
+        assert_eq!(sb.run(&args).status.code(), Some(2), "{bad:?}");
+    }
 }
 
 /// A file in `dir` whose access and modification times are a day old.
