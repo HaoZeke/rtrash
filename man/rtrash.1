@@ -3144,6 +3144,9 @@ Either per-user directory must be a real directory owned by the user;
 one that is a symlink or belongs to someone else gets a warning, put
 falls back to the next choice and in the end the home trash, and list,
 empty and rm skip it.
+One put cannot create or write (a fresh partition whose root only root
+may write, say) gets the same warning with the system error, so a slow
+copy into the home trash never happens silently.
 .SH EXIT STATUS
 .TP
 .B 0

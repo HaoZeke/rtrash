@@ -324,17 +324,26 @@ fn warn_shared_trash_once(shared: &Path, why: &str, fallback: &Path) {
 /// (mode 0700) when missing, then use it only when it is that user's own
 /// real directory. Refusing returns an error and warns once.
 fn ensure_user_trash(td: &TrashDir, uid: u32, fallback: &Path) -> io::Result<()> {
+    // A fresh partition owned by root, or a trash made read-only, would
+    // otherwise send items to the fallback (a copy across file systems
+    // for the home trash) without a word.
+    let say = |e: &io::Error| {
+        warn_shared_trash_once(&td.root, &format!("cannot be used ({e})"), fallback);
+    };
     match fs::DirBuilder::new().mode(0o700).create(&td.root) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
+        Err(e) => {
+            say(&e);
+            return Err(e);
+        }
     }
     let meta = fs::symlink_metadata(&td.root)?;
     if let Some(why) = user_trash_problem(&meta, uid) {
         warn_shared_trash_once(&td.root, why, fallback);
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
     }
-    td.ensure()
+    td.ensure().inspect_err(say)
 }
 
 /// The trash `uid` uses on the volume mounted at `top`: `$top/.Trash/$uid`
@@ -2438,6 +2447,23 @@ fn set_times_path(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_volume_top_the_user_cannot_write_falls_back() {
+        // Root ignores the mode, so the check means nothing there.
+        if uid() == 0 {
+            return;
+        }
+        let top = std::env::temp_dir().join(format!("rtrash-rotop-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&top);
+        fs::create_dir_all(&top).unwrap();
+        fs::set_permissions(&top, fs::Permissions::from_mode(0o500)).unwrap();
+        // A fresh partition whose root the user cannot write: no trash
+        // there, a warning, and the caller falls back to the home trash.
+        assert!(select_on_volume(&top, uid()).is_none());
+        fs::set_permissions(&top, fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_dir_all(&top);
+    }
 
     #[test]
     fn volume_trash_must_be_the_users_own_real_directory() {
