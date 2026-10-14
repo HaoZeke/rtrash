@@ -36,7 +36,8 @@ directories under files/ and info/), orphans (payloads without a
                         stale; a trash without one shows no size
       --measure         with --total, measure each trash whose total is
                         missing or stale (one walk) and store it, so
-                        later --total runs answer at once
+                        later --total runs answer at once; also count
+                        the inodes of directory items not yet counted
       --space           with --total, also give each trash's file system:
                         free bytes and inodes and whether either is under
                         10% (one statfs per trash, no walk)
@@ -402,10 +403,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         } else {
             Vec::new()
         };
+        let inodes = inode_counts(&pins, home_only, measure, &rows);
         if json {
-            println!("{}", totals_json_space(&rows, space.then_some(&fs[..])));
+            println!(
+                "{}",
+                totals_json_full(&rows, space.then_some(&fs[..]), Some(&inodes))
+            );
         } else {
-            print_totals(&rows, space.then_some(&fs[..]));
+            print_totals(&rows, space.then_some(&fs[..]), &inodes);
         }
         return 0;
     }
@@ -537,13 +542,64 @@ fn fs_json(s: Option<&crate::space::Space>) -> String {
 /// [`totals_json`], with an `fs` object in each trash when `fs` is given
 /// (one entry per row).
 pub fn totals_json_space(rows: &[TotalRow], fs: Option<&[Option<crate::space::Space>]>) -> String {
-    let with_fs = |i: usize, obj: String| match fs {
-        Some(fs) => format!(
-            "{},\"fs\":{}}}",
-            &obj[..obj.len() - 1],
-            fs_json(fs.get(i).and_then(Option::as_ref))
-        ),
-        None => obj,
+    totals_json_full(rows, fs, None)
+}
+
+/// The inodes each trash holds (see [`crate::trash_inodes`]), in row
+/// order: `None` where a directory item has no cached count and
+/// `measure` is off, and always on Windows.
+#[cfg(unix)]
+fn inode_counts(
+    pins: &[PathBuf],
+    home_only: bool,
+    measure: bool,
+    rows: &[TotalRow],
+) -> Vec<Option<u64>> {
+    let dirs = trashdir::resolve_dirs_opts(pins, home_only);
+    rows.iter()
+        .map(|(root, _)| {
+            dirs.iter()
+                .find(|d| &d.root == root)
+                .and_then(|d| crate::trash_inodes::count(d, measure))
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn inode_counts(
+    _pins: &[PathBuf],
+    _home_only: bool,
+    _measure: bool,
+    rows: &[TotalRow],
+) -> Vec<Option<u64>> {
+    vec![None; rows.len()]
+}
+
+/// [`totals_json_space`], with `inodes` in each trash and in the total
+/// when `inodes` is given; the total's is null when any trash's is.
+pub fn totals_json_full(
+    rows: &[TotalRow],
+    fs: Option<&[Option<crate::space::Space>]>,
+    inodes: Option<&[Option<u64>]>,
+) -> String {
+    let opt = |v: Option<u64>| v.map_or("null".into(), |v| v.to_string());
+    let with_fs = |i: usize, obj: String| {
+        let mut obj = obj;
+        if let Some(ino) = inodes {
+            obj = format!(
+                "{},\"inodes\":{}}}",
+                &obj[..obj.len() - 1],
+                opt(ino.get(i).copied().flatten())
+            );
+        }
+        match fs {
+            Some(fs) => format!(
+                "{},\"fs\":{}}}",
+                &obj[..obj.len() - 1],
+                fs_json(fs.get(i).and_then(Option::as_ref))
+            ),
+            None => obj,
+        }
     };
     let trashes: Vec<String> = rows
         .iter()
@@ -569,14 +625,26 @@ pub fn totals_json_space(rows: &[TotalRow], fs: Option<&[Option<crate::space::Sp
     let bytes: u64 = rows.iter().filter_map(|(_, t)| t.map(|t| t.0)).sum();
     let items: u64 = rows.iter().filter_map(|(_, t)| t.map(|t| t.1)).sum();
     let stale = rows.iter().any(|(_, t)| !t.is_some_and(|t| t.2));
+    let total_inodes = inodes.map(|ino| {
+        let all: Option<u64> = ino.iter().copied().sum();
+        format!(",\"inodes\":{}", opt(all))
+    });
     format!(
-        r#"{{"trashes":[{}],"total":{{"bytes":{bytes},"items":{items},"stale":{stale}}}}}"#,
-        trashes.join(",")
+        r#"{{"trashes":[{}],"total":{{"bytes":{bytes},"items":{items},"stale":{stale}{}}}}}"#,
+        trashes.join(","),
+        total_inodes.unwrap_or_default()
     )
 }
 
-fn print_totals(rows: &[TotalRow], fs: Option<&[Option<crate::space::Space>]>) {
+fn print_totals(
+    rows: &[TotalRow],
+    fs: Option<&[Option<crate::space::Space>]>,
+    inodes: &[Option<u64>],
+) {
     for (i, (root, t)) in rows.iter().enumerate() {
+        let ino = inodes.get(i).copied().flatten().map_or(String::new(), |n| {
+            format!(", {}", crate::util::plural(n, "inode", "inodes"))
+        });
         let free = match fs.map(|f| f.get(i).and_then(Option::as_ref)) {
             None => String::new(),
             Some(None) => "\tfree: unknown".into(),
@@ -594,7 +662,7 @@ fn print_totals(rows: &[TotalRow], fs: Option<&[Option<crate::space::Space>]>) {
         };
         match t {
             Some((b, n, fresh)) => println!(
-                "{}\t{}\t{}{}{free}",
+                "{}\t{}\t{}{ino}{}{free}",
                 root.display(),
                 format_bytes(*b),
                 crate::util::plural(*n, "item", "items"),
@@ -639,6 +707,17 @@ mod tests {
             "{spaced}"
         );
         assert!(spaced.contains(r#""stale":true,"fs":null}"#), "{spaced}");
+        let counted = totals_json_full(&rows[..2], None, Some(&[Some(4), None]));
+        assert!(
+            counted.contains(r#""stale":false,"inodes":4}"#),
+            "{counted}"
+        );
+        assert!(
+            counted.ends_with(r#""stale":true,"inodes":null}}"#),
+            "{counted}"
+        );
+        let both = totals_json_full(&rows[..1], None, Some(&[Some(4)]));
+        assert!(both.ends_with(r#""stale":false,"inodes":4}}"#), "{both}");
         let fresh = totals_json(&rows[..1]);
         assert!(fresh.ends_with(r#""stale":false}}"#), "{fresh}");
     }

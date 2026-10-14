@@ -624,6 +624,13 @@ A total that another tool made out of date has
 .B stale
 set; a trash without one has null bytes and items.
 On Windows the sizes come from the shell's count of each Recycle Bin.
+Each trash and the total also give \fIinodes\fR: one per record and file
+payload, and the tree count of each directory payload, which a put keeps
+in \fIrtrash\-dirinodes\fR in the trash root.
+A directory item another tool trashed has no count until
+.B \-\-measure
+walks it once; until then \fIinodes\fR is null.
+Windows gives null.
 .TP
 .B \-\-measure
 With

@@ -3911,6 +3911,8 @@ fn rm_carries_the_total_and_trash_stats_total_reads_it() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let carried = total();
     assert!(carried.contains(r#""items":1,"stale":false"#), "{carried}");
+    // The tree's record, tree, x and y: counted at put, read without a walk.
+    assert!(carried.contains(r#""inodes":4}"#), "{carried}");
     // An orphan is not in the total, so removing one keeps it as it is.
     fs::write(
         sb.root.join("xdg/Trash/files/orphan.bin"),
@@ -4036,7 +4038,13 @@ fn empty_dangling_carries_the_total() {
         spaced.contains(r#""fs":{"total":"#) && spaced.contains(r#""low":"#),
         "{spaced}"
     );
+    // One file item left: its record and its payload.
+    assert!(
+        spaced.contains(r#""stale":false,"inodes":2,"fs""#),
+        "{spaced}"
+    );
     let text = stdout_of(&run(&["trash-stats", "--home-only", "--total", "--space"]));
+    assert!(text.contains("1 item, 2 inodes"), "{text}");
     assert!(text.contains("\tfree "), "{text}");
     assert_eq!(run(&["trash-stats", "--space"]).status.code(), Some(2));
 }

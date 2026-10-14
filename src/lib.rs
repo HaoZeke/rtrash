@@ -64,6 +64,8 @@ pub mod space;
 #[cfg(unix)]
 pub mod status;
 pub mod trash_history;
+#[cfg(unix)]
+pub mod trash_inodes;
 pub mod trash_stats;
 #[cfg(unix)]
 pub mod trash_total;

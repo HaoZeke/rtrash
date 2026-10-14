@@ -846,8 +846,10 @@ pub fn record_dir_size(trash: &TrashDir, name: &str) {
     let Ok(mtime) = info_mtime_secs(&join_info(&trash.info(), name)) else {
         return;
     };
+    let inodes = crate::trash_inodes::tree_inodes(&dest);
     if let Ok(_lock) = TrashLock::acquire(&trash.root) {
         let _ = directorysizes_upsert(trash, name, size, mtime);
+        crate::trash_inodes::record(trash, name, inodes);
     }
 }
 
