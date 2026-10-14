@@ -526,6 +526,9 @@ fn powershell_script_is_embedded_and_completes() {
         .args(["-NoProfile", "-NonInteractive", "-Command", &prog])
         .output()
     else {
+        // CI installs pwsh on every runner, so a missing one there is a
+        // broken job, not a reason to pass quietly.
+        assert!(std::env::var_os("CI").is_none(), "pwsh missing on CI");
         eprintln!("pwsh not installed; skipping");
         return;
     };
@@ -544,7 +547,7 @@ fn powershell_script_is_embedded_and_completes() {
             "--dangling",
             "--latest",
             "keys",
-            "--dry-run --verbose --older-than= --max-size= --prune= --until-free= --json --help --version"
+            "--dry-run --verbose --older-than= --max-size= --prune= --until-free= --all --json --help --version"
         ]
     );
 }
