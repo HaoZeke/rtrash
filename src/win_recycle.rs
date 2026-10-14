@@ -221,6 +221,16 @@ pub fn bin_root_of(id: &Path) -> Option<PathBuf> {
         .or_else(|| drive_root_of(id))
 }
 
+/// The `put --verbose` line for `name`: it names the Recycle Bin the item
+/// went to, by its volume root, so an item on a volume mounted on a folder
+/// shows the bin of that volume, not the bin of the drive above it.
+pub fn removed_line(name: &str, bin: Option<&Path>) -> String {
+    match bin {
+        Some(root) => format!("removed '{name}' (Recycle Bin of {})", root.display()),
+        None => format!("removed '{name}'"),
+    }
+}
+
 /// Windows: the folders that volumes are mounted on (not drive roots),
 /// each with a trailing backslash, for the history of their Recycle Bins.
 #[cfg(windows)]
@@ -705,7 +715,7 @@ Usage: {prog} [OPTION]... [FILE]...
 Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
 
   -f, --force    ignore nonexistent files
-  -v, --verbose  print each path
+  -v, --verbose  print each path and the Recycle Bin it went to
       --plain    accepted for CLI parity (no TUI put browser on Windows)
       --json     print a JSON summary on stdout ({{trashed, failed}});
                    replaces -v output
@@ -793,10 +803,14 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     eprintln!("{prog}: warning: '{}' is in use by {who}", f.display());
                 }
             }
+            let bin = verbose.then(|| bin_root_of(&abs)).flatten();
             match trash::delete(f) {
                 Ok(()) => {
                     if verbose && !json {
-                        println!("removed '{}'", crate::util::term_path(f));
+                        println!(
+                            "{}",
+                            removed_line(&crate::util::term_path(f), bin.as_deref())
+                        );
                     }
                     moved.push(abs);
                 }
@@ -1754,6 +1768,15 @@ pub fn purge_oldest_on(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn removed_line_names_the_bin_of_the_volume() {
+        assert_eq!(
+            removed_line(r"C:\mnt\data\a.txt", Some(Path::new(r"C:\mnt\data\"))),
+            r"removed 'C:\mnt\data\a.txt' (Recycle Bin of C:\mnt\data\)"
+        );
+        assert_eq!(removed_line("a.txt", None), "removed 'a.txt'");
+    }
 
     #[test]
     fn drive_key_tells_drives_and_shares_apart() {
