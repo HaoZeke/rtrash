@@ -56,6 +56,13 @@ pub fn store(dir: &TrashDir, bytes: u64, items: u64) {
     }
 }
 
+/// Drop the stored total of `dir` after a change that does not carry
+/// it, so the next reader measures again. The stamp alone cannot catch
+/// a change in the same tick of a coarse clock as the store.
+pub fn forget(dir: &TrashDir) {
+    let _ = fs::remove_file(path(dir));
+}
+
 /// The trash's size in bytes (payloads and `.trashinfo` files, as
 /// `status` counts them): the stored total when current, else measured
 /// and stored.

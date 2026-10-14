@@ -3748,6 +3748,11 @@ fn trash_stats_history_records_each_change_rtrash_makes() {
     assert!(out.status.success() && b.exists(), "{}", stderr_of(&out));
     let out = sb.run(&["rm", "--home-only", c.to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr_of(&out));
+    // The rm line counts the one item left, even in the same clock tick
+    // as the restore before it.
+    let hist = fs::read_to_string(sb.trash().join("rtrash-history")).unwrap();
+    let last = hist.lines().last().unwrap();
+    assert!(last.contains(" rm ") && last.ends_with(" 1"), "{hist}");
     // A dry run, a put that fails and an rm that matches nothing change
     // nothing, so they add no line.
     assert!(sb.run(&["empty", "--home-only", "-n"]).status.success());

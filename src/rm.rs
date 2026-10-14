@@ -236,6 +236,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             continue;
         }
         crate::trash_total::touched(&entry.dir);
+        crate::trash_total::forget(&entry.dir);
         if let Err(e) = std::fs::remove_file(&info_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 eprintln!(
