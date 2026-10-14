@@ -2714,6 +2714,38 @@ Restore:
 .TP
 .B \-\-help
 Display help and exit.
+.SS wsl
+.B rtrash wsl list
+.br
+.B rtrash wsl restore
+[\fB\-f\fR|\fB\-\-force\fR] \fIPATH\fR...
+.PP
+The Windows Recycle Bin, from inside WSL (the Windows Subsystem for Linux).
+.B list
+prints each item of the user's Recycle Bins on the drives under the
+automount root (see
+.BR RTRASH_WSL_RECYCLE ),
+oldest first, by its original path as WSL sees it
+.RI ( /mnt/c/... ).
+It reads the
+.I $I
+records in
+.I X:\e$Recycle.Bin\eSID
+directly, so names keep their extension and nothing changes on the
+Windows side; only the user's SID takes one
+.B powershell.exe
+call
+.RB ( RTRASH_WSL_SID
+sets it instead).
+.B restore
+moves the newest item from each
+.I PATH
+back and removes its record, refusing to overwrite an existing file
+unless
+.BR \-f / \-\-force .
+.B \-\-help
+prints the usage.
+Outside WSL both fail.
 .SS config
 .B rtrash config
 [\fB\-\-path\fR | \fB\-\-default\fR]
@@ -3009,6 +3041,12 @@ macOS defaults to finder, and other systems to freedesktop.
 It overrides
 .B macos.trash
 in the config file.
+.TP
+.B RTRASH_WSL_SID
+The Windows user id that
+.B rtrash wsl
+reads the Recycle Bins of, instead of asking
+.BR powershell.exe .
 .TP
 .B RTRASH_WSL_RECYCLE
 .B 1

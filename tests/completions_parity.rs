@@ -21,6 +21,7 @@ const SUBCOMMANDS: &[&str] = &[
     "who",
     "reap",
     "finder",
+    "wsl",
     "config",
 ];
 

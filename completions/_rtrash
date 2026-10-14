@@ -3,7 +3,7 @@
 # Preferred install: rtrash setup
 # Or: rtrash completions zsh > …/zsh/site-functions/_rtrash
 
-local -a put_opts empty_opts list_opts status_opts trash_stats_opts du_opts restore_opts undo_opts who_opts reap_opts finder_opts rm_opts config_opts
+local -a put_opts empty_opts list_opts status_opts trash_stats_opts du_opts restore_opts undo_opts who_opts reap_opts finder_opts wsl_opts rm_opts config_opts
 
 put_opts=(
   '(-f --force)'{-f,--force}'[ignore nonexistent files, never prompt]'
@@ -182,6 +182,13 @@ du_opts=(
   '*:path:_files -/'
 )
 
+wsl_opts=(
+  '1:action:(list restore)'
+  '(-f --force)'{-f,--force}'[restore over an existing file]'
+  '(- *)'--help'[display help and exit]'
+  '*:file:_files'
+)
+
 finder_opts=(
   '1:action:(put list restore)'
   '*--trash-dir=[use this Finder trash]:path:_files -/'
@@ -296,6 +303,7 @@ _rtrash_dispatch() {
     'who:list the live processes holding PATH'
     'reap:trash stale temp entries no live process holds'
     'finder:macOS Finder Trash with Put Back'
+    'wsl:the Windows Recycle Bin from inside WSL'
     'config:show the config file and the settings it makes'
     'setup:install multi-call links, completions, man page'
     'keys:show or sample the TUI keybind config'
@@ -351,6 +359,9 @@ _rtrash_dispatch() {
           ;;
         finder)
           _arguments -s -C $finder_opts
+          ;;
+        wsl)
+          _arguments -s -C $wsl_opts
           ;;
         config)
           _arguments -s -C $config_opts
