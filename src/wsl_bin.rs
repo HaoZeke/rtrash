@@ -181,7 +181,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 eprintln!("{prog}: unknown option '{s}'");
                 return 2;
             }
-            _ => paths.push(PathBuf::from(a)),
+            _ => paths.push(crate::util::arg_path(a)),
         }
     }
     if paths.is_empty() {
