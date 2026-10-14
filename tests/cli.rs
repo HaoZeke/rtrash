@@ -4548,6 +4548,54 @@ fn reap_profiles_take_partial_downloads_and_tarballs_only() {
     assert!(!j.contains("numpy-2.0-py312_0\""), "{j}");
 }
 
+/// torch takes a stale partial checkpoint and an old inductor cache and
+/// leaves the finished checkpoint; vllm takes an old compile cache.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_profiles_take_torch_partials_and_compile_caches() {
+    let sb = Sandbox::new("reap-torch");
+    let ck = sb.root.join(".cache/torch/hub/checkpoints");
+    let vllm = sb.root.join(".cache/vllm/torch_compile_cache");
+    let tmp = sb.root.join("tmp");
+    for d in [&ck, &vllm, &tmp] {
+        fs::create_dir_all(d).unwrap();
+    }
+    let partial = stale_file(&ck, "resnet50.pth.1a2b.partial");
+    let done = stale_file(&ck, "resnet50.pth");
+    fs::create_dir_all(tmp.join("torchinductor_me")).unwrap();
+    let inductor = tmp.join("torchinductor_me");
+    let compiled = vllm.join("abc123");
+    fs::create_dir_all(&compiled).unwrap();
+    age_tree(&inductor);
+    age_tree(&compiled);
+    let out = Command::new(bin())
+        .args([
+            "reap",
+            "-n",
+            "--json",
+            "--older-than=1h",
+            "--age-by=m",
+            "-p",
+            "torch",
+            "-p",
+            "vllm",
+        ])
+        .env("HOME", &sb.root)
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("TMPDIR", &tmp)
+        .env_remove("TORCH_HOME")
+        .env_remove("VLLM_CACHE_ROOT")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let j = stdout_of(&out);
+    for p in [&partial, &inductor, &compiled] {
+        assert!(j.contains(&json_path(p)), "{} missing: {j}", p.display());
+    }
+    assert!(!j.contains(&json_path(&done)), "{j}");
+}
+
 fn json_path(p: &Path) -> String {
     format!("\"{}\"", p.display())
 }

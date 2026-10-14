@@ -109,8 +109,8 @@ use Action::{Permanent, Trash};
 const BUILTIN: &[B] = &[
     group(
         "ai",
-        "AI coding tools: claude, cursor, codex, aider, ollama, huggingface",
-        &["claude", "cursor", "codex", "aider", "ollama", "huggingface"],
+        "AI coding tools and model caches: claude, cursor, codex, aider, ollama, huggingface, torch, vllm",
+        &["claude", "cursor", "codex", "aider", "ollama", "huggingface", "torch", "vllm"],
     ),
     B {
         guard: true,
@@ -179,6 +179,24 @@ const BUILTIN: &[B] = &[
             "windows:${HF_HOME:-~/.cache/huggingface}/xet/*/chunk-cache/*",
         ],
         2,
+        Permanent,
+    ),
+    b(
+        "torch",
+        "PyTorch partial hub downloads and TorchInductor compile caches in the temp dir (never finished checkpoints)",
+        &[
+            "${TORCH_HOME:-~/.cache/torch}/hub/checkpoints/*.partial",
+            "unix:${TMPDIR:-/tmp}/torchinductor_*",
+            "windows:${TEMP}/torchinductor_*",
+        ],
+        7,
+        Permanent,
+    ),
+    b(
+        "vllm",
+        "vLLM torch.compile caches (rebuilt on the next start)",
+        &["${VLLM_CACHE_ROOT:-~/.cache/vllm}/torch_compile_cache/*"],
+        14,
         Permanent,
     ),
     group(
@@ -715,7 +733,9 @@ mod tests {
                 "codex",
                 "aider",
                 "ollama",
-                "huggingface"
+                "huggingface",
+                "torch",
+                "vllm"
             ]
         );
         assert!(select(&all, &["nope".into()]).is_err());
