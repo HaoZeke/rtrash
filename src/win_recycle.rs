@@ -804,7 +804,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     eprintln!("{prog}: warning: '{}' is in use by {who}", f.display());
                 }
             }
-            let root = bin_root_of(&abs);
+            let root = test_bin_root().or_else(|| bin_root_of(&abs));
             let bin = verbose.then(|| root.clone()).flatten();
             match trash::delete(f) {
                 Ok(()) => {
@@ -845,6 +845,16 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             }
         }
         status
+    }
+
+    /// Test seam, in debug builds only: `RTRASH_TEST_BIN_ROOT=DIR` names
+    /// DIR as the volume root of every put, so a test can pair it with
+    /// `RTRASH_TEST_FS` and fake a short volume.
+    fn test_bin_root() -> Option<PathBuf> {
+        if !cfg!(debug_assertions) {
+            return None;
+        }
+        std::env::var_os("RTRASH_TEST_BIN_ROOT").map(PathBuf::from)
     }
 
     /// `RTRASH_IN_USE`, else `policy.in_use`, else warn.

@@ -1,7 +1,8 @@
 //! Windows: `status` shows each drive's free space from GetDiskFreeSpaceExW,
 //! `restore` takes `--no-space-check`, `trash-stats` reads the Recycle
-//! Bins, `reap --install-timer` makes a Task Scheduler task, and
-//! `reap --purge-trash` lists a drive's Recycle Bin oldest first.
+//! Bins, `reap --install-timer` makes a Task Scheduler task,
+//! `reap --purge-trash` lists a drive's Recycle Bin oldest first, and `put`
+//! warns when the volume of the Recycle Bin it used is low.
 #![cfg(windows)]
 
 use std::process::Command;
@@ -312,4 +313,44 @@ fn trash_stats_history_lists_a_drive_whose_bin_is_empty() {
         text.contains(r#""epoch":1700000000,"event":"empty""#),
         "{text}"
     );
+}
+
+/// A put whose Recycle Bin volume is short says that it freed nothing.
+/// The volume is faked: a directory named as the bin root, sized by
+/// `RTRASH_TEST_FS` and nearly full of ballast.
+#[cfg(debug_assertions)]
+#[test]
+fn put_warns_when_the_recycle_bin_volume_is_low() {
+    let base = std::env::temp_dir().join(format!("rtrash-winlow-{}", std::process::id()));
+    let vol = base.join("vol");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+    let put = |name: &str, fake: bool| {
+        let f = base.join(name);
+        std::fs::write(&f, b"x").unwrap();
+        let mut c = Command::new(bin());
+        c.args(["put", f.to_str().unwrap()])
+            .env("RTRASH_TEST_BIN_ROOT", &vol)
+            .env("RTRASH_IN_USE", "ignore");
+        if fake {
+            c.env("RTRASH_TEST_FS", format!("100000:{}", vol.display()));
+        }
+        let out = c.output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let err = put("low.txt", true);
+    assert!(
+        err.contains("Recycle Bin of")
+            && err.contains("is low (")
+            && err.contains("trashing frees nothing"),
+        "{err}"
+    );
+    let err = put("fine.txt", false);
+    assert!(!err.contains("is low"), "{err}");
+    let _ = std::fs::remove_dir_all(&base);
 }
