@@ -4915,3 +4915,24 @@ fn empty_dangling_removes_only_records_without_a_payload() {
         Some(2)
     );
 }
+
+/// `put -v` names the trash directory each item went to.
+#[cfg(unix)]
+#[test]
+fn put_verbose_names_the_trash_directory() {
+    let sb = Sandbox::new("put-v-trash");
+    fs::create_dir_all(sb.work().join("d")).unwrap();
+    fs::write(sb.work().join("f.txt"), "x").unwrap();
+    let out = sb.run(&["put", "-v", "-r", "--home-only", "f.txt", "d"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    let to = sb.trash().display().to_string();
+    assert!(
+        text.contains(&format!("removed 'f.txt' (trash {to})")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("removed directory 'd' (trash {to})")),
+        "{text}"
+    );
+}

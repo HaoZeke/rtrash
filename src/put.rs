@@ -124,7 +124,8 @@ to require CLI operands even on a TTY.
                           always (-i); without WHEN, prompt always
   -r, -R, --recursive   remove directories and their contents
   -d, --dir             remove empty directories
-  -v, --verbose         explain what is being done
+  -v, --verbose         explain what is being done, naming the trash
+                          directory each item went to
       --one-file-system accepted for rm compatibility (no-op: entries are
                           moved whole, never traversed)
       --preserve-root[=all]  do not remove '/', your home directory or a
@@ -623,10 +624,16 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
     match trashdir::trash_move(&abs, &meta, &trash) {
         Ok(trash_name) => {
             if opts.verbose && !opts.quiet {
+                // Name the trash the item went to: a file on another
+                // file system goes to that file system's trash.
+                let to = crate::util::term_path(&trash.root);
                 if meta.is_dir() {
-                    println!("removed directory '{}'", crate::util::term_text(&name));
+                    println!(
+                        "removed directory '{}' (trash {to})",
+                        crate::util::term_text(&name)
+                    );
                 } else {
-                    println!("removed '{}'", crate::util::term_text(&name));
+                    println!("removed '{}' (trash {to})", crate::util::term_text(&name));
                 }
             }
             Ok(Some(Trashed {
