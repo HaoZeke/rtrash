@@ -530,3 +530,24 @@ fn empty_max_size_dry_run_trims_the_recycle_bins() {
     );
     let _ = fs::remove_dir_all(&base);
 }
+
+/// A put under a trash budget the Recycle Bins already fit in trims
+/// nothing and says nothing. (A tight budget would purge the shared bin
+/// that parallel tests use, so the trim itself is unit tested.)
+#[test]
+fn put_under_a_roomy_budget_trims_nothing() {
+    use std::fs;
+    let name = format!("rtrash-budget-{}.txt", std::process::id());
+    let p = std::env::temp_dir().join(&name);
+    fs::write(&p, "budget").unwrap();
+    let out = Command::new(bin())
+        .arg("put")
+        .arg(&p)
+        .env("RTRASH_MAX_SIZE", "999999G")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(!err.contains("to keep them under"), "{err}");
+    let _ = Command::new(bin()).args(["rm", &name]).output();
+}

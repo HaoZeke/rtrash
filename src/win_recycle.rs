@@ -890,6 +890,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 .collect();
             println!("{}", util::put_summary_json(&items, failed));
         }
+        if !moved.is_empty() {
+            prune_after_put(prog, &moved, json);
+        }
         // The Recycle Bin keeps items on their own volume, so a full volume
         // stays full.
         for r in &roots {
@@ -1195,6 +1198,40 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 eprintln!("{prog}: cannot empty Recycle Bin: {}", err_msg(e));
                 1
             }
+        }
+    }
+
+    /// With a trash budget (`RTRASH_MAX_SIZE` or `policy.max_size`), trim
+    /// the Recycle Bins together back under it, never touching the items
+    /// this put moved (matched by original path); they still count.
+    fn prune_after_put(prog: &str, moved: &[PathBuf], quiet: bool) {
+        let Some((max, policy, source)) = crate::budget::budget(prog) else {
+            return;
+        };
+        let Ok(all) = os_limited::list() else {
+            return;
+        };
+        let (mine, rest): (Vec<TrashItem>, Vec<TrashItem>) = all
+            .into_iter()
+            .partition(|it| moved.contains(&original_of(it)));
+        let size = |it: &TrashItem| recycled_size(Path::new(&it.id));
+        let kept: u64 = mine.iter().map(size).sum();
+        let sized: Vec<(i64, u64)> = rest.iter().map(|it| (it.time_deleted, size(it))).collect();
+        let largest = policy == crate::budget::Policy::Largest;
+        let picked = pick_budget(&sized, max.saturating_sub(kept), largest);
+        if picked.is_empty() {
+            return;
+        }
+        let n = picked.len() as u64;
+        let chosen: Vec<TrashItem> = picked.iter().map(|&i| rest[i].clone()).collect();
+        match os_limited::purge_all(chosen) {
+            Ok(()) if !quiet => eprintln!(
+                "{prog}: removed {} from the Recycle Bins to keep them under {} ({source})",
+                crate::util::plural(n, "item", "items"),
+                crate::util::format_bytes(max)
+            ),
+            Ok(()) => {}
+            Err(e) => eprintln!("{prog}: cannot trim the Recycle Bin: {}", err_msg(e)),
         }
     }
 

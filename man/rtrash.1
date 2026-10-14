@@ -2898,6 +2898,8 @@ directory it used back under that size, removing older items first.
 Items of the same put run never go. It overrides
 .B policy.max_size
 in the config file, and an empty value turns the prune off.
+On Windows a put trims the Recycle Bins of every drive together back
+under the size, sparing the items it moved (matched by original path).
 .TP
 .B RTRASH_WARN_SIZE
 A size such as 20G, or a percent of the disk such as 10%: after a put,

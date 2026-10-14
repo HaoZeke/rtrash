@@ -12,6 +12,7 @@ pub mod platform;
 pub mod util;
 pub mod win_recycle;
 
+pub mod budget;
 pub mod compat;
 pub mod config;
 pub mod ds_store;
