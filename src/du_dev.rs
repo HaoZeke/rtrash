@@ -172,7 +172,8 @@ pub fn devices() -> io::Result<Vec<Device>> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetVolumeInformationW};
     let mut out = Vec::new();
-    for root in crate::win_recycle::bin_drives() {
+    // The drives, then the folders volumes are mounted on.
+    for root in crate::trash_history::bin_roots() {
         let w: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
         let (mut avail, mut size, mut free) = (0u64, 0u64, 0u64);
         // SAFETY: `w` is NUL-terminated; the outputs are plain integers.

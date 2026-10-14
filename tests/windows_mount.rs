@@ -133,3 +133,28 @@ fn put_on_a_mounted_volume_writes_its_own_history() {
     assert!(body.lines().any(|l| l.contains(" put ")), "{body:?}");
     let _ = fs::remove_dir_all(&local);
 }
+
+/// status and du --devices list the mounted folder as a volume of its
+/// own, with its own free space.
+#[test]
+fn status_and_devices_list_the_mounted_volume() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let label = m.to_string_lossy().trim_end_matches('\\').to_lowercase();
+    let status = Command::new(bin()).arg("status").output().unwrap();
+    let text = String::from_utf8_lossy(&status.stdout).to_lowercase();
+    assert!(
+        text.lines()
+            .any(|l| l.starts_with(&format!("free on {label}"))),
+        "{text:?}"
+    );
+    let devs = Command::new(bin())
+        .args(["du", "--devices", "--json"])
+        .output()
+        .unwrap();
+    let json = String::from_utf8_lossy(&devs.stdout).to_lowercase();
+    let escaped = label.replace('\\', "\\\\");
+    assert!(json.contains(&format!("\"mount\":\"{escaped}")), "{json:?}");
+    assert!(json.contains("\"device\":\"rtrashmnt\""), "{json:?}");
+}

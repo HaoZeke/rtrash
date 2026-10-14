@@ -1353,7 +1353,7 @@ space on each drive (a warning under 10% free).
             crate::util::plural(items, "item", "items"),
             crate::util::format_bytes(bytes)
         );
-        print_free(&bin_drives());
+        print_free(&crate::trash_history::bin_roots());
         0
     }
 
@@ -1414,7 +1414,7 @@ space on each drive (a warning under 10% free).
             crate::util::plural(items, "item", "items"),
             crate::util::format_bytes(bytes)
         );
-        print_free(&bin_drives());
+        print_free(&crate::trash_history::bin_roots());
         0
     }
 

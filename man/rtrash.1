@@ -517,7 +517,7 @@ in the registry with the share in use, then the total.
 A drive set to skip the Recycle Bin says so.
 A
 .B Free on
-line per drive then gives its free bytes from
+line per drive (and per volume mounted on a folder) then gives its free bytes from
 .BR GetDiskFreeSpaceExW ,
 with a warning under 10% free; Windows counts no inodes.
 With an age or size filter it counts the passing items per drive
@@ -1061,7 +1061,8 @@ As with
 .BR df ,
 pseudo file systems, file systems with no blocks and second mounts of one
 device (bind mounts) are left out.
-On Windows the fixed and removable drives are listed, with their labels.
+On Windows the fixed and removable drives are listed, with their labels,
+then each volume mounted on a folder.
 With
 .BR \-\-json ,
 one object with a \fIdevices\fR array of \fImount\fR, \fIdevice\fR, \fItype\fR,
