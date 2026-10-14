@@ -2250,7 +2250,7 @@ Output version information and exit.
 .B rtrash setup
 [\fIOPTION\fR]...
 .PP
-Install multi-call symlinks, bash, zsh, fish and nushell completions, and this man page under a
+Install multi-call symlinks, bash, zsh, fish, nushell and elvish completions, and this man page under a
 user prefix (default
 .IR ~/.local ,
 or
@@ -2305,9 +2305,13 @@ names; add
 .B "rtrash completions powershell | Out-String | Invoke-Expression"
 to
 .IR $PROFILE .
-The elvish script is a module: save it as
-.I ~/.config/elvish/lib/rtrash.elv
-and add
+The elvish script is a module;
+.B rtrash setup
+installs it as
+.IR PREFIX/share/elvish/lib/rtrash.elv
+(or save it as
+.IR ~/.config/elvish/lib/rtrash.elv );
+then add
 .B use rtrash
 to
 .IR rc.elv .

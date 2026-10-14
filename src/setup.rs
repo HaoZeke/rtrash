@@ -33,7 +33,7 @@ Usage: rtrash setup [OPTION]...
        rtrash man
 
 After `cargo install`, run `rtrash setup` once to install multi-call
-symlinks, bash/zsh/fish/nu completions, the man page, and an optional Midnight
+symlinks, bash/zsh/fish/nu/elvish completions, the man page, and an optional Midnight
 Commander menu sample under a user prefix (default: ~/.local). Assets are
 embedded (no source tree required).
 
@@ -250,6 +250,9 @@ fn run_setup(args: &[String]) -> i32 {
     // $XDG_DATA_HOME/nushell/vendor/autoload and each
     // XDG_DATA_DIRS/nushell/vendor/autoload, so PREFIX/share fits both.
     let nu_dir = share.join("nushell/vendor/autoload");
+    // Elvish finds `use rtrash` modules under $XDG_DATA_HOME/elvish/lib and
+    // each XDG_DATA_DIRS/elvish/lib, so PREFIX/share fits both.
+    let elvish_dir = share.join("elvish/lib");
     let man_dir = share.join("man/man1");
 
     let target = match resolve_self_exe() {
@@ -359,6 +362,15 @@ fn run_setup(args: &[String]) -> i32 {
         opts.verbose,
     ));
 
+    ok &= absorb(ensure_dir(&elvish_dir, opts.dry_run, opts.verbose));
+    ok &= absorb(write_file(
+        &elvish_dir.join("rtrash.elv"),
+        ELVISH_COMPLETION,
+        opts.force,
+        opts.dry_run,
+        opts.verbose,
+    ));
+
     ok &= absorb(ensure_dir(&fish_dir, opts.dry_run, opts.verbose));
     ok &= absorb(write_file(
         &fish_dir.join("rtrash.fish"),
@@ -440,6 +452,7 @@ fn run_setup(args: &[String]) -> i32 {
         fish_dir.display()
     );
     println!("  nu completion    → {}/rtrash.nu", nu_dir.display());
+    println!("  elvish module    → {}/rtrash.elv", elvish_dir.display());
     println!("  man page         → {}/rtrash.1", man_dir.display());
     println!("  mc menu sample   → {}/mc.menu.sample", mc_dir.display());
     println!();
@@ -463,6 +476,9 @@ fn run_setup(args: &[String]) -> i32 {
     println!("  • nu: nushell sources its vendor autoload dirs at startup; see");
     println!("    $nu.vendor-autoload-dirs (PREFIX/share must be in XDG_DATA_DIRS");
     println!("    when --prefix is neither ~/.local nor /usr/local or /usr).");
+    println!("  • elvish: add `use rtrash` to ~/.config/elvish/rc.elv (the module");
+    println!("    sits on elvish's search path when PREFIX/share is XDG_DATA_HOME");
+    println!("    or in XDG_DATA_DIRS).");
     println!("  • man: if `man rtrash` misses the page, set:");
     println!(
         "      export MANPATH=\"{}:${{MANPATH:-}}\"",
@@ -624,6 +640,8 @@ mod tests {
         assert!(prefix.join("share/man/man1/rtrash.1").is_file());
         let nu = prefix.join("share/nushell/vendor/autoload/rtrash.nu");
         assert_eq!(fs::read_to_string(nu).unwrap(), NU_COMPLETION);
+        let elvish = prefix.join("share/elvish/lib/rtrash.elv");
+        assert_eq!(fs::read_to_string(elvish).unwrap(), ELVISH_COMPLETION);
         assert!(prefix.join("share/rtrash/mc.menu.sample").is_file());
         assert!(
             fs::read_to_string(prefix.join("share/rtrash/mc.menu.sample"))

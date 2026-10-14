@@ -1,6 +1,7 @@
 # elvish completion for rtrash and its multi-call names
-# Install: rtrash completions elvish > ~/.config/elvish/lib/rtrash.elv
-# and add `use rtrash` to ~/.config/elvish/rc.elv.
+# Preferred install: rtrash setup (into PREFIX/share/elvish/lib)
+# Or: rtrash completions elvish > ~/.config/elvish/lib/rtrash.elv
+# Then add `use rtrash` to ~/.config/elvish/rc.elv.
 
 use path
 use str
