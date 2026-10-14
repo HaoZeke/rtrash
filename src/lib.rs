@@ -39,6 +39,8 @@ pub mod filters;
 pub mod finder;
 #[cfg(unix)]
 pub mod finder_shared;
+#[cfg(unix)]
+pub mod finder_total;
 pub mod holders;
 #[cfg(unix)]
 pub mod info;

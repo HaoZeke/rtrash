@@ -122,9 +122,11 @@ fn join_put_back(root: &Path, folder: &str, name: &str) -> PathBuf {
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
-        Some("put") => put(&format!("{prog} put"), &args[1..]),
+        Some("put") => logged("put", || put(&format!("{prog} put"), &args[1..])),
         Some("list") => list(&format!("{prog} list"), &args[1..]),
-        Some("restore") => restore(&format!("{prog} restore"), &args[1..]),
+        Some("restore") => logged("restore", || {
+            restore(&format!("{prog} restore"), &args[1..])
+        }),
         Some("--help") | Some("-h") => {
             print!("{}", HELP.replace("{prog}", prog));
             0
@@ -139,6 +141,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             2
         }
     }
+}
+
+/// Run `f`, then log the trashes it changed under `event`; the explicit
+/// `finder` actions log whatever the default trash is.
+fn logged(event: &str, f: impl FnOnce() -> i32) -> i32 {
+    let snap = crate::finder_total::snapshot_always();
+    let rc = f();
+    crate::finder_total::log(event, &snap);
+    rc
 }
 
 fn trash_or_default(prog: &str, pinned: Option<PathBuf>) -> Result<PathBuf, i32> {

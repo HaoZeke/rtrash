@@ -390,19 +390,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     // otherwise.
     #[cfg(unix)]
     if crate::finder::is_default(!pins.is_empty()) {
-        if total_only || with_history || since.is_some() {
-            eprintln!(
-                "{prog}: --total and --history read the FreeDesktop running totals; pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop"
-            );
-            return 2;
-        }
-        let all = crate::finder_shared::stats(top);
-        if json {
-            println!("{}", to_json(&all, false));
-        } else {
-            print_text(&all, false);
-        }
-        return 0;
+        return finder_run(
+            prog,
+            top,
+            total_only,
+            measure,
+            space,
+            with_history,
+            since,
+            json,
+        );
     }
     if (measure || space) && !total_only {
         eprintln!("{prog}: --measure and --space go with --total");
@@ -484,6 +481,92 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let cut = crate::util::now_epoch() - age;
         for s in &mut all {
             s.history.retain(|(t, ..)| *t >= cut);
+        }
+    }
+    if json {
+        println!("{}", to_json(&all, with_history));
+    } else {
+        print_text(&all, with_history);
+    }
+    0
+}
+
+/// `trash-stats` on the Finder trashes, with `--total` and `--history`
+/// read from [`crate::finder_total`].
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn finder_run(
+    prog: &str,
+    top: usize,
+    total_only: bool,
+    measure: bool,
+    space: bool,
+    with_history: bool,
+    since: Option<i64>,
+    json: bool,
+) -> i32 {
+    use crate::finder_total as ft;
+    if (measure || space) && !total_only {
+        eprintln!("{prog}: --measure and --space go with --total");
+        return 2;
+    }
+    if total_only && (with_history || since.is_some()) {
+        eprintln!("{prog}: --total does not combine with --history");
+        return 2;
+    }
+    if since.is_some() && !with_history {
+        eprintln!("{prog}: --since goes with --history");
+        eprintln!("Try '{prog} --help' for more information.");
+        return 2;
+    }
+    let trashes: Vec<PathBuf> = crate::finder::trashes()
+        .into_iter()
+        .filter(|t| t.is_dir())
+        .collect();
+    if total_only {
+        let rows: Vec<TotalRow> = trashes
+            .iter()
+            .map(|t| {
+                let mut r = ft::stored(t);
+                if measure && !r.is_some_and(|r| r.2) {
+                    ft::measure(t);
+                    r = ft::stored(t);
+                }
+                (t.clone(), r)
+            })
+            .collect();
+        let fs: Vec<Option<crate::space::Space>> = if space {
+            trashes
+                .iter()
+                .map(|t| crate::space::query(t).ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Inodes need a walk, so only --measure counts them.
+        let inodes: Vec<Option<u64>> = trashes
+            .iter()
+            .map(|t| measure.then(|| count_inodes(t)))
+            .collect();
+        if json {
+            println!(
+                "{}",
+                totals_json_full(&rows, space.then_some(&fs[..]), Some(&inodes))
+            );
+        } else {
+            print_totals(&rows, space.then_some(&fs[..]), &inodes);
+        }
+        return 0;
+    }
+    let mut all = crate::finder_shared::stats(top);
+    if with_history {
+        let cut = since.map(|a| crate::util::now_epoch() - a);
+        for s in &mut all {
+            s.history = ft::history(&s.root)
+                .into_iter()
+                .filter(|p| cut.is_none_or(|c| p.epoch >= c))
+                .map(|p| (p.epoch, p.event, p.bytes, p.items))
+                .collect();
         }
     }
     if json {

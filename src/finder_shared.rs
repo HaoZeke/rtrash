@@ -432,6 +432,16 @@ pub fn status(prog: &str, json: bool, filter: Filter) -> i32 {
     0
 }
 
+/// The bytes on disk and item count of one Finder trash.
+pub fn size_of(trash: &Path) -> (u64, u64) {
+    let items = from_items(trash).unwrap_or_default();
+    let bytes = items
+        .iter()
+        .map(|e| crate::fastdelete::disk_usage(&e.path()))
+        .sum();
+    (bytes, items.len() as u64)
+}
+
 /// The trash-stats summaries of the Finder trashes.
 pub fn stats(top: usize) -> Vec<crate::trash_stats::Stats> {
     finder::trashes()

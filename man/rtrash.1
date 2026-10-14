@@ -52,6 +52,15 @@ rm; restore takes
 and
 .B \-\-to
 as on the FreeDesktop trash.
+.B "trash\-stats \-\-total"
+and
+.B \-\-history
+read a total and a history per Finder trash kept under
+.IR $XDG_STATE_HOME/rtrash/finder\-totals ,
+since a file inside the trash would show in Finder; put, restore, rm,
+empty and undo measure each trash whose modification time they moved,
+and a change made outside rtrash marks the total stale until
+.BR \-\-measure .
 Options that need FreeDesktop records, such as
 .BR \-\-max\-size ,
 get refused there.
@@ -2874,6 +2883,20 @@ Set to
 to make that prune remove the largest items first (default
 .BR oldest ).
 .SH FILES
+.TP
+.I $XDG_STATE_HOME/rtrash/finder\-totals
+On the Finder Trash, a
+.I KEY.total
+and
+.I KEY.history
+per trash, KEY being the trash path with
+.B %
+and
+.B /
+percent\-encoded, for
+.B "trash\-stats \-\-total"
+and
+.BR \-\-history .
 .TP
 .I $XDG_DATA_HOME/Trash
 Home trash:

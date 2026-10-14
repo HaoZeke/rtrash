@@ -41,8 +41,10 @@ Examples:
 ";
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    let snap = crate::finder_total::snapshot();
     let code = run_inner(prog, args);
     crate::trash_total::log_touched("rm");
+    crate::finder_total::log("rm", &snap);
     code
 }
 

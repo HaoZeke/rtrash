@@ -207,10 +207,34 @@ fn undo_status_and_trash_stats_cover_the_finder_trash() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(out(&o).contains(".Trash"), "{}", out(&o));
     assert!(out(&o).contains("\"items\":3"), "{}", out(&o));
-    assert_eq!(
-        b.run(&["trash-stats", "--total"], "").status.code(),
-        Some(2)
+    // Each put stored a total and a history line, read without a walk.
+    let o = b.run(&["trash-stats", "--total", "--json"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(
+        out(&o).contains("\"items\":3,\"stale\":false"),
+        "{}",
+        out(&o)
     );
+    let o = b.run(&["trash-stats", "--history", "--json"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(
+        out(&o).matches("\"event\":\"put\"").count(),
+        2,
+        "{}",
+        out(&o)
+    );
+    // A change rtrash did not make leaves the total stale until --measure.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(b.finder().join("by-finder"), b"f").unwrap();
+    let o = b.run(&["trash-stats", "--total", "--json"], "");
+    assert!(out(&o).contains("\"stale\":true"), "{}", out(&o));
+    let o = b.run(&["trash-stats", "--total", "--measure", "--json"], "");
+    assert!(
+        out(&o).contains("\"items\":4,\"stale\":false"),
+        "{}",
+        out(&o)
+    );
+    fs::remove_file(b.finder().join("by-finder")).unwrap();
 
     // Two runs: undo --list shows both, undo brings back the newest.
     let o = b.run(&["undo", "--list"], "");
@@ -224,6 +248,14 @@ fn undo_status_and_trash_stats_cover_the_finder_trash() {
     assert!(out(&o).contains("restored_to"), "{}", out(&o));
     assert!(b.work().join("one").exists() && b.work().join("two").exists());
     assert_eq!(b.run(&["undo"], "").status.code(), Some(1));
+    let o = b.run(&["trash-stats", "--history", "--json"], "");
+    assert!(out(&o).contains("\"event\":\"undo\""), "{}", out(&o));
+    let o = b.run(&["trash-stats", "--total", "--json"], "");
+    assert!(
+        out(&o).contains("\"items\":0,\"stale\":false"),
+        "{}",
+        out(&o)
+    );
 }
 
 #[test]

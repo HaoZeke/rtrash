@@ -130,8 +130,10 @@ impl Matcher {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    let snap = crate::finder_total::snapshot();
     let code = run_inner(prog, args);
     crate::trash_total::log_touched("restore");
+    crate::finder_total::log("restore", &snap);
     code
 }
 

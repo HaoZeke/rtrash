@@ -157,8 +157,10 @@ fn usage_err(prog: &str, msg: &str) -> i32 {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    let snap = crate::finder_total::snapshot();
     let code = run_inner(prog, args);
     crate::trash_total::log_touched("put");
+    crate::finder_total::log("put", &snap);
     code
 }
 

@@ -1,0 +1,1 @@
+macOS: `trash-stats --total` and `--history` now work on the Finder Trash, from a total and history per trash kept under `$XDG_STATE_HOME/rtrash/finder-totals` and updated by put, restore, rm, empty and undo.

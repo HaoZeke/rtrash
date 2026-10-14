@@ -75,7 +75,11 @@ listing, and the restore conflict policies (=--conflict=rename|skip=).
 Age filters count from the move into the trash and size filters from
 disk usage; restore takes =--name=, =--glob=, =--regex=, =--latest= and
 =--to=.
-=--max-size=, =--dangling=, =trash-stats --total= and =--history= need
-FreeDesktop records, so on the Finder Trash they are refused with a hint.
+=trash-stats --total= and =--history= read a total and history per Finder
+trash kept under =$XDG_STATE_HOME/rtrash/finder-totals=, which put,
+restore, rm, empty and undo update; a change made outside rtrash marks
+the total stale until =--measure=.
+=--max-size= and =--dangling= need FreeDesktop records, so on the Finder
+Trash they are refused with a hint.
 CI runs plain put, list, restore and empty on a real macOS runner against
 Finder.
