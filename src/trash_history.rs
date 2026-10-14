@@ -1,6 +1,7 @@
 //! The history behind `trash-stats --history`: a line `EPOCH EVENT BYTES
-//! ITEMS` per command that changed a trash, in a small text file:
-//! `rtrash-history` in each trash root.
+//! ITEMS` per command that changed a trash, in a small text file. On Unix
+//! the file is `rtrash-history` in each trash root; on Windows it is one
+//! file per drive's Recycle Bin under `%LOCALAPPDATA%\\rtrash\\history`.
 
 use std::fs;
 use std::path::Path;
@@ -55,6 +56,56 @@ pub fn append(path: &Path, event: &str, bytes: u64, items: u64) {
     let line = format!("{} {event} {bytes} {items}\n", crate::util::now_epoch());
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Windows: the history file of the Recycle Bin of drive `root` (`C:\\`).
+#[cfg(windows)]
+pub fn bin_path(root: &Path) -> Option<std::path::PathBuf> {
+    let letter = root.to_str()?.chars().next()?.to_ascii_uppercase();
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        std::path::PathBuf::from(base)
+            .join("rtrash")
+            .join("history")
+            .join(format!("{letter}.txt")),
+    )
+}
+
+/// Windows: items and bytes in each drive's Recycle Bin, for
+/// [`log_bins`].
+#[cfg(windows)]
+pub type BinSnapshot = Vec<(std::path::PathBuf, Option<(u64, u64)>)>;
+
+#[cfg(windows)]
+pub fn bin_snapshot() -> BinSnapshot {
+    crate::win_recycle::bin_drives()
+        .into_iter()
+        .map(|r| {
+            let q = crate::win_recycle::query_bin(&r);
+            (r, q)
+        })
+        .collect()
+}
+
+/// Windows: after a command, append a line for each drive whose Recycle
+/// Bin changed since `before`.
+#[cfg(windows)]
+pub fn log_bins(event: &str, before: &BinSnapshot) {
+    for (root, now) in bin_snapshot() {
+        let Some((items, bytes)) = now else {
+            continue;
+        };
+        let was = before
+            .iter()
+            .find(|(r, _)| *r == root)
+            .and_then(|(_, q)| *q);
+        if was == Some((items, bytes)) {
+            continue;
+        }
+        if let Some(p) = bin_path(&root) {
+            append(&p, event, bytes, items);
+        }
     }
 }
 

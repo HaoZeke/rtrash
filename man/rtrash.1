@@ -587,7 +587,12 @@ each trash gains
 .IR history ,
 a list of
 .RI { epoch ", " event ", " bytes ", " items }.
-None on Windows.
+On Windows, put, empty and reap append a line for each drive whose
+Recycle Bin changed to
+.IR %LOCALAPPDATA%\ertrash\ehistory\e X .txt
+instead, with the counts
+.B SHQueryRecycleBinW
+reports.
 .TP
 .B \-\-json
 Print a JSON object:

@@ -87,7 +87,10 @@ pub mod who;
 #[cfg(windows)]
 pub mod empty {
     pub fn run(prog: &str, args: &[String]) -> i32 {
-        crate::win_recycle::empty_run(prog, args)
+        let bins = crate::trash_history::bin_snapshot();
+        let code = crate::win_recycle::empty_run(prog, args);
+        crate::trash_history::log_bins("empty", &bins);
+        code
     }
 }
 #[cfg(windows)]
@@ -99,7 +102,10 @@ pub mod list {
 #[cfg(windows)]
 pub mod put {
     pub fn run(prog: &str, args: &[String]) -> i32 {
-        crate::win_recycle::put_run(prog, args)
+        let bins = crate::trash_history::bin_snapshot();
+        let code = crate::win_recycle::put_run(prog, args);
+        crate::trash_history::log_bins("put", &bins);
+        code
     }
 }
 #[cfg(windows)]

@@ -950,9 +950,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         return crate::reap_timer::status(prog);
     }
+    #[cfg(windows)]
+    let bins = crate::trash_history::bin_snapshot();
     let code = run_inner(prog, args);
     #[cfg(unix)]
     crate::trash_total::log_touched("reap");
+    #[cfg(windows)]
+    crate::trash_history::log_bins("reap", &bins);
     code
 }
 

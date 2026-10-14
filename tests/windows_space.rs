@@ -202,3 +202,36 @@ fn reap_timer_status_says_when_no_task_is_installed() {
     assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(text.contains("no reap timer installed"), "{text}");
 }
+
+#[test]
+fn put_adds_a_line_to_the_recycle_bin_history() {
+    use std::fs;
+    let p = std::env::temp_dir().join(format!("rtrash-history-{}.txt", std::process::id()));
+    fs::write(&p, "history").unwrap();
+    let out = Command::new(bin()).arg("put").arg(&p).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = Command::new(bin())
+        .args(["trash-stats", "--history", "--json", "--top=0"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains(r#""event":"put""#), "{text}");
+    let drive = p
+        .to_str()
+        .unwrap()
+        .chars()
+        .next()
+        .unwrap()
+        .to_ascii_uppercase();
+    let file = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+        .join(format!("rtrash/history/{drive}.txt"));
+    assert!(
+        fs::read_to_string(&file).unwrap().contains(" put "),
+        "{}",
+        file.display()
+    );
+}

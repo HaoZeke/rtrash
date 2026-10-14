@@ -319,7 +319,19 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     #[cfg(windows)]
     let all: Vec<Stats> = {
         let _ = (home_only, &pins);
-        gather_bins(top)
+        let mut all = gather_bins(top);
+        if with_history {
+            for s in &mut all {
+                let drive = s.root.parent().unwrap_or(&s.root).to_path_buf();
+                s.history = crate::trash_history::bin_path(&drive)
+                    .map(|p| crate::trash_history::read(&p))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|p| (p.epoch, p.event, p.bytes, p.items))
+                    .collect();
+            }
+        }
+        all
     };
     if json {
         println!("{}", to_json(&all, with_history));
