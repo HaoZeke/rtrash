@@ -40,8 +40,9 @@ const RAW_BYTE_BASE: u32 = 0x10_FF00;
 /// Turn an OS string (an argument or a file name) into a `String` without
 /// losing bytes. Valid UTF-8 passes through; each stray byte becomes one
 /// private-use character that [`os_from_str`] turns back into that byte.
-/// Windows strings are UTF-16 and almost always valid, so they go through
-/// lossy conversion there.
+/// Windows strings are UTF-16 units that may hold an unpaired surrogate;
+/// they pass through WTF-8 (see [`wtf8_encode`]), so such a unit becomes
+/// stray bytes and round-trips the same way.
 pub fn str_from_os(s: std::ffi::OsString) -> String {
     match s.into_string() {
         Ok(s) => s,
@@ -72,9 +73,107 @@ fn os_bytes(s: &std::ffi::OsStr) -> std::borrow::Cow<'_, [u8]> {
     std::borrow::Cow::Borrowed(s.as_bytes())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn os_bytes(s: &std::ffi::OsStr) -> std::borrow::Cow<'_, [u8]> {
+    use std::os::windows::ffi::OsStrExt;
+    let units: Vec<u16> = s.encode_wide().collect();
+    std::borrow::Cow::Owned(wtf8_encode(&units))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn os_bytes(s: &std::ffi::OsStr) -> std::borrow::Cow<'_, [u8]> {
     std::borrow::Cow::Owned(s.to_string_lossy().into_owned().into_bytes())
+}
+
+/// UTF-16 units as WTF-8: UTF-8, except that an unpaired surrogate is
+/// written as its own three-byte sequence (`ED A0..BF xx`) instead of
+/// failing. Valid UTF-16 gives plain UTF-8.
+pub fn wtf8_encode(units: &[u16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(units.len());
+    let mut push = |cp: u32| {
+        if cp < 0x80 {
+            out.push(cp as u8);
+        } else if cp < 0x800 {
+            out.extend([0xC0 | (cp >> 6) as u8, 0x80 | (cp & 0x3F) as u8]);
+        } else if cp < 0x1_0000 {
+            out.extend([
+                0xE0 | (cp >> 12) as u8,
+                0x80 | ((cp >> 6) & 0x3F) as u8,
+                0x80 | (cp & 0x3F) as u8,
+            ]);
+        } else {
+            out.extend([
+                0xF0 | (cp >> 18) as u8,
+                0x80 | ((cp >> 12) & 0x3F) as u8,
+                0x80 | ((cp >> 6) & 0x3F) as u8,
+                0x80 | (cp & 0x3F) as u8,
+            ]);
+        }
+    };
+    let mut i = 0;
+    while i < units.len() {
+        let u = u32::from(units[i]);
+        let next = units.get(i + 1).map(|&n| u32::from(n));
+        match (u, next) {
+            (0xD800..=0xDBFF, Some(lo @ 0xDC00..=0xDFFF)) => {
+                push(0x1_0000 + ((u - 0xD800) << 10) + (lo - 0xDC00));
+                i += 2;
+            }
+            _ => {
+                push(u);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Inverse of [`wtf8_encode`]. A byte that starts no well-formed sequence
+/// becomes U+FFFD; that only happens for bytes no Windows name produced.
+pub fn wtf8_decode(b: &[u8]) -> Vec<u16> {
+    let mut out = Vec::with_capacity(b.len());
+    let cont = |i: usize| b.get(i).is_some_and(|&c| c & 0xC0 == 0x80);
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let (cp, len) = match c {
+            0x00..=0x7F => (u32::from(c), 1),
+            0xC2..=0xDF if cont(i + 1) => {
+                ((u32::from(c & 0x1F) << 6) | u32::from(b[i + 1] & 0x3F), 2)
+            }
+            0xE0..=0xEF if cont(i + 1) && cont(i + 2) => {
+                let cp = (u32::from(c & 0x0F) << 12)
+                    | (u32::from(b[i + 1] & 0x3F) << 6)
+                    | u32::from(b[i + 2] & 0x3F);
+                if cp < 0x800 {
+                    (0xFFFD, 1)
+                } else {
+                    (cp, 3)
+                }
+            }
+            0xF0..=0xF4 if cont(i + 1) && cont(i + 2) && cont(i + 3) => {
+                let cp = (u32::from(c & 0x07) << 18)
+                    | (u32::from(b[i + 1] & 0x3F) << 12)
+                    | (u32::from(b[i + 2] & 0x3F) << 6)
+                    | u32::from(b[i + 3] & 0x3F);
+                if (0x1_0000..=0x10_FFFF).contains(&cp) {
+                    (cp, 4)
+                } else {
+                    (0xFFFD, 1)
+                }
+            }
+            _ => (0xFFFD, 1),
+        };
+        if cp >= 0x1_0000 {
+            let v = cp - 0x1_0000;
+            out.push(0xD800 | (v >> 10) as u16);
+            out.push(0xDC00 | (v & 0x3FF) as u16);
+        } else {
+            out.push(cp as u16);
+        }
+        i += len;
+    }
+    out
 }
 
 fn escape_bytes(mut b: &[u8]) -> String {
@@ -106,6 +205,13 @@ pub fn os_from_str(s: &str) -> std::ffi::OsString {
     if !s.chars().any(raw) {
         return s.into();
     }
+    os_from_bytes(bytes_from_str(s))
+}
+
+/// The bytes behind a string kept by [`str_from_os`]: raw-byte characters
+/// become their bytes, everything else its UTF-8.
+fn bytes_from_str(s: &str) -> Vec<u8> {
+    let raw = |c: char| (RAW_BYTE_BASE + 0x80..=RAW_BYTE_BASE + 0xFF).contains(&u32::from(c));
     let mut out = Vec::with_capacity(s.len());
     for c in s.chars() {
         if raw(c) {
@@ -115,7 +221,7 @@ pub fn os_from_str(s: &str) -> std::ffi::OsString {
             out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
         }
     }
-    os_from_bytes(out)
+    out
 }
 
 #[cfg(unix)]
@@ -124,7 +230,13 @@ fn os_from_bytes(b: Vec<u8>) -> std::ffi::OsString {
     std::ffi::OsString::from_vec(b)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn os_from_bytes(b: Vec<u8>) -> std::ffi::OsString {
+    use std::os::windows::ffi::OsStringExt;
+    std::ffi::OsString::from_wide(&wtf8_decode(&b))
+}
+
+#[cfg(not(any(unix, windows)))]
 fn os_from_bytes(b: Vec<u8>) -> std::ffi::OsString {
     String::from_utf8_lossy(&b).into_owned().into()
 }
@@ -569,5 +681,48 @@ mod tests {
         ] {
             assert_eq!(trash_item_name(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn wtf8_round_trips_lone_surrogates_and_pairs() {
+        let cases: [&[u16]; 6] = [
+            &[0x61, 0xD800, 0x62],
+            &[0xDC00],
+            &[0xD800, 0xD800, 0xDC00],
+            &[0xD83D, 0xDDD1],
+            &[0x65, 0x301, 0x2E, 0x74],
+            &[0xDBFF],
+        ];
+        for units in cases {
+            let b = wtf8_encode(units);
+            assert_eq!(wtf8_decode(&b), units, "{b:x?}");
+            // Through the kept-string form and back, byte for byte.
+            let kept = escape_bytes(&b);
+            assert_eq!(bytes_from_str(&kept), b, "{kept:?}");
+        }
+    }
+
+    #[test]
+    fn wtf8_of_valid_utf16_is_plain_utf8() {
+        let s = "café \u{1f5d1}.txt";
+        let units: Vec<u16> = s.encode_utf16().collect();
+        assert_eq!(wtf8_encode(&units), s.as_bytes());
+        assert_eq!(escape_bytes(&wtf8_encode(&units)), s);
+    }
+
+    #[test]
+    fn wtf8_lone_surrogate_is_three_escaped_bytes_shown_as_replacement() {
+        let b = wtf8_encode(&[0x61, 0xD800]);
+        assert_eq!(b, [0x61, 0xED, 0xA0, 0x80]);
+        let kept = escape_bytes(&b);
+        assert_eq!(kept.chars().count(), 4);
+        assert!(!show_name(&kept).is_empty());
+        assert!(!show_name(&kept).contains(char::from_u32(RAW_BYTE_BASE + 0xED).unwrap()));
+    }
+
+    #[test]
+    fn wtf8_decode_replaces_bytes_no_name_made() {
+        assert_eq!(wtf8_decode(&[0xFF, 0x61]), [0xFFFD, 0x61]);
+        assert_eq!(wtf8_decode(&[0xE0, 0x80, 0x80]), [0xFFFD, 0xFFFD, 0xFFFD]);
     }
 }
