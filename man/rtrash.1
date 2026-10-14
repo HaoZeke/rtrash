@@ -1344,6 +1344,12 @@ and commas such as
 .BR 0\-2,5 ,
 or
 .BR all .
+In the list and in both browsers (restore and empty), a record whose
+payload is gone ends with
+.BR "[payload gone]" :
+it cannot be restored, and
+.B rtrash empty \-\-dangling
+removes it.
 Pass
 .B \-\-cwd\-only
 to limit bare restore to originals under the current directory.

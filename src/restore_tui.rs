@@ -28,6 +28,23 @@ pub trait TuiItem {
     /// that did not stop it. `force` replaces what sits at the original
     /// path.
     fn restore(&self, force: bool) -> Result<(PathBuf, Vec<String>), String>;
+    /// True when the payload is gone, so a restore cannot work.
+    fn missing(&self) -> bool {
+        false
+    }
+}
+
+/// What a row adds for an item whose payload is gone.
+pub const GONE_MARK: &str = "  [payload gone]";
+
+/// One picker row: mark, date, original path, and [`GONE_MARK`] when the
+/// payload is gone.
+pub fn row_text(mark: &str, date: &str, original: &Path, gone: bool) -> String {
+    format!(
+        "{mark} {date:<20}  {}{}",
+        original.display(),
+        if gone { GONE_MARK } else { "" }
+    )
 }
 
 #[cfg(unix)]
@@ -40,6 +57,9 @@ impl TuiItem for crate::list::Entry {
     }
     fn restore(&self, force: bool) -> Result<(PathBuf, Vec<String>), String> {
         crate::restore::restore_one(self, force).map(|d| (d.dest, d.warnings))
+    }
+    fn missing(&self) -> bool {
+        crate::list::Entry::missing(self)
     }
 }
 
@@ -65,6 +85,8 @@ enum Mode {
 struct App<'a, E: TuiItem> {
     prog: &'a str,
     entries: Vec<&'a E>,
+    /// Per entry, whether its payload is gone (one stat each, at start).
+    gone: Vec<bool>,
     filtered: Vec<usize>,
     list_state: ListState,
     sel: Selection,
@@ -92,9 +114,11 @@ impl<'a, E: TuiItem> App<'a, E> {
         let n = entries.len();
         let keys = Keymap::load();
         let force_hint = footer_extras(&keys);
+        let gone = entries.iter().map(|e| e.missing()).collect();
         let mut app = Self {
             prog,
             entries,
+            gone,
             filtered: (0..n).collect(),
             list_state,
             sel: Selection::new(),
@@ -458,8 +482,7 @@ fn ui<E: TuiItem>(f: &mut ratatui::Frame, app: &mut App<'_, E>) {
         .map(|&ei| {
             let e = app.entries[ei];
             let mark = if app.sel.is_marked(ei) { "[x]" } else { "[ ]" };
-            let line = format!("{mark} {:<20}  {}", date_label(e), e.original().display());
-            ListItem::new(line)
+            ListItem::new(row_text(mark, &date_label(e), e.original(), app.gone[ei]))
         })
         .collect();
 

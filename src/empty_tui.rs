@@ -98,6 +98,8 @@ enum Mode {
 struct App<'a> {
     prog: &'a str,
     entries: Vec<&'a Entry>,
+    /// Per entry, whether its payload is gone (one stat each, at start).
+    gone: Vec<bool>,
     filtered: Vec<usize>,
     list_state: ListState,
     sel: Selection,
@@ -120,9 +122,11 @@ impl<'a> App<'a> {
         let n = entries.len();
         let keys = Keymap::load();
         let dry_hint = format!("{} dry-run", keys.display_chords(Action::ToggleDryRun));
+        let gone = entries.iter().map(|e| e.missing()).collect();
         let mut app = Self {
             prog,
             entries,
+            gone,
             filtered: (0..n).collect(),
             list_state,
             sel: Selection::new(),
@@ -389,8 +393,13 @@ fn ui(f: &mut ratatui::Frame, app: &mut App<'_>) {
         .map(|&ei| {
             let e = app.entries[ei];
             let mark = if app.sel.is_marked(ei) { "[x]" } else { "[ ]" };
+            let gone = if app.gone[ei] {
+                crate::restore_tui::GONE_MARK
+            } else {
+                ""
+            };
             ListItem::new(format!(
-                "{mark} {}  {}",
+                "{mark} {}  {}{gone}",
                 e.date.as_deref().unwrap_or("?"),
                 e.original.display()
             ))

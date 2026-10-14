@@ -4702,6 +4702,13 @@ fn list_and_status_flag_records_without_a_payload() {
         "{}",
         stdout_of(&out)
     );
+    // The numbered picker marks the row it cannot restore; an empty
+    // answer restores nothing.
+    let out = sb.run_with_stdin(&["restore", "--home-only", "--plain"], "\n");
+    let rows = stdout_of(&out);
+    let row = |name: &str| rows.lines().find(|l| l.contains(name)).unwrap().to_string();
+    assert!(row("ghost").ends_with("[payload gone]"), "{rows}");
+    assert!(!row("keep.txt").contains("payload gone"), "{rows}");
     assert!(sb
         .run(&["empty", "--home-only", "--dangling"])
         .status

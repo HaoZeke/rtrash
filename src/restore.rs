@@ -292,8 +292,9 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     } else {
         for (i, e) in matches.iter().enumerate() {
             let date = e.date.as_deref().unwrap_or("????-??-??T??:??:??");
+            let gone = if e.missing() { "  [payload gone]" } else { "" };
             let row = format!(
-                "{i:4}  {}  {}",
+                "{i:4}  {}  {}{gone}",
                 date.replacen('T', " ", 1),
                 e.original.display()
             );
