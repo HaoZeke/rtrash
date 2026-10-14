@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use crate::info;
 use crate::list;
 use crate::trashdir::{self, TrashDir};
+#[cfg(feature = "tui")]
 use crate::util::stdin_is_tty;
 use crate::util::url_decode;
 
@@ -191,31 +192,6 @@ fn unscoped(opts: &Opts) -> bool {
         && !opts.dry_run
 }
 
-/// The guard on an unscoped empty: it goes ahead when every one of the
-/// `total` items came from the latest put run; otherwise it asks on a
-/// terminal and refuses elsewhere, since the trash may be shared (other
-/// agents, other sessions) and an empty cannot be undone.
-fn guard_ok(prog: &str, total: usize, foreign: usize) -> bool {
-    if foreign == 0 {
-        return true;
-    }
-    if stdin_is_tty() {
-        eprint!(
-            "Permanently delete all {total} items, {foreign} of them not from the latest put? (y/N) "
-        );
-        let mut line = String::new();
-        let _ = io::stdin().read_line(&mut line);
-        return matches!(line.trim(), "y" | "Y" | "yes" | "Yes");
-    }
-    eprintln!(
-        "{prog}: refusing to empty the whole trash: {foreign} of {total} items are not from the latest put"
-    );
-    eprintln!(
-        "{prog}: pass --all to remove everything, or scope it (DAYS, --max-size, --until-free, --trash-dir, or rm PATTERN)"
-    );
-    false
-}
-
 fn confirm(dirs: &[TrashDir]) -> bool {
     eprintln!("Would empty the following trash directories:");
     for d in dirs {
@@ -349,7 +325,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
         if !opts.interactive && unscoped(&opts) {
             let (total, foreign) = crate::finder_shared::outside_latest_put();
-            if !guard_ok(prog, total, foreign) {
+            if !crate::budget::guard_ok(prog, total, foreign) {
                 return 2;
             }
         }
@@ -422,7 +398,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .iter()
             .filter(|e| latest.is_none() || e.batch != latest)
             .count();
-        if !guard_ok(prog, entries.len(), foreign) {
+        if !crate::budget::guard_ok(prog, entries.len(), foreign) {
             return 2;
         }
     }

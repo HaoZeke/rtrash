@@ -136,9 +136,84 @@ pub fn trim_after_put(
         .collect()
 }
 
+/// The guard on an unscoped empty: it goes ahead when every one of the
+/// `total` items came from the latest put run; otherwise it asks on a
+/// terminal and refuses elsewhere, since the trash may be shared (other
+/// agents, other sessions) and an empty cannot be undone.
+pub fn guard_ok(prog: &str, total: usize, foreign: usize) -> bool {
+    if foreign == 0 {
+        return true;
+    }
+    if crate::util::stdin_is_tty() {
+        use std::io::Write;
+        eprint!(
+            "Permanently delete all {total} items, {foreign} of them not from the latest put? (y/N) "
+        );
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        return matches!(line.trim(), "y" | "Y" | "yes" | "Yes");
+    }
+    eprintln!(
+        "{prog}: refusing to empty the whole trash: {foreign} of {total} items are not from the latest put"
+    );
+    eprintln!(
+        "{prog}: pass --all to remove everything, or scope it (DAYS, --max-size, --until-free, --trash-dir, or rm PATTERN)"
+    );
+    false
+}
+
+/// How many of `items` (original path, deletion time) the last put did
+/// not move: that put moved `last`, starting at epoch `since`.
+pub fn not_from_last_put(items: &[(PathBuf, i64)], last: &[PathBuf], since: i64) -> usize {
+    items
+        .iter()
+        .filter(|(p, t)| *t < since || !last.iter().any(|l| l == p))
+        .count()
+}
+
+/// The last-put record: its start epoch on the first line, then one
+/// moved path per line.
+pub fn last_put_text(since: i64, moved: &[PathBuf]) -> String {
+    let mut s = format!("{since}\n");
+    for m in moved {
+        s.push_str(&m.to_string_lossy());
+        s.push('\n');
+    }
+    s
+}
+
+/// The start epoch and paths of a last-put record; none for a damaged one.
+pub fn parse_last_put(text: &str) -> Option<(i64, Vec<PathBuf>)> {
+    let mut lines = text.lines();
+    let since = lines.next()?.trim().parse().ok()?;
+    Some((
+        since,
+        lines.filter(|l| !l.is_empty()).map(PathBuf::from).collect(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_empty_guard_counts_items_the_last_put_did_not_move() {
+        let p = |s: &str| PathBuf::from(s);
+        let text = last_put_text(100, &[p("C:\\w\\a"), p("C:\\w\\b")]);
+        let (since, last) = parse_last_put(&text).unwrap();
+        assert_eq!(since, 100);
+        let items = [
+            (p("C:\\w\\a"), 101),
+            (p("C:\\w\\b"), 100),
+            // Same path, but put before the last run began.
+            (p("C:\\w\\a"), 50),
+            (p("C:\\w\\c"), 102),
+        ];
+        assert_eq!(not_from_last_put(&items, &last, since), 2);
+        assert_eq!(not_from_last_put(&items[..2], &last, since), 0);
+        assert_eq!(parse_last_put("garbled"), None);
+    }
 
     #[test]
     fn a_put_trim_spares_what_the_put_moved_but_counts_it() {

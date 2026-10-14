@@ -1,0 +1,1 @@
+On Windows, an `empty` with no DAYS, `--max-size` or `--until-free` asks on a terminal, and exits 2 elsewhere, when the Recycle Bin has items the latest put did not move; `--all` empties everything as before.

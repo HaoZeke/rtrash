@@ -701,6 +701,8 @@ mod os {
     }
 
     pub fn put_run(prog: &str, args: &[String]) -> i32 {
+        // A second early, so the record covers every item this run moves.
+        let started = crate::util::now_epoch() - 1;
         let mut force = false;
         let mut verbose = false;
         let mut files: Vec<PathBuf> = Vec::new();
@@ -861,6 +863,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             println!("{}", util::put_summary_json(&items, failed));
         }
         if !moved.is_empty() {
+            write_last_put(started, &moved);
             prune_after_put(prog, &moved, json);
         }
         // The Recycle Bin keeps items on their own volume, so a full volume
@@ -1001,6 +1004,7 @@ on Windows (there is no FreeDesktop layout here).
         let mut until: Option<(String, crate::reap::Floor)> = None;
         let mut max_size: Option<u64> = None;
         let mut policy = crate::budget::Policy::Oldest;
+        let mut every = false;
         let mut age = AgeFilter::default();
         let mut i = 0usize;
         while i < args.len() {
@@ -1027,6 +1031,7 @@ on Windows (there is no FreeDesktop layout here).
                 "-v" | "--verbose" => verbose = true,
                 "-f" | "--force" | "--plain" | "--home-only" => {}
                 "--json" => json = true,
+                "--all" => every = true,
                 a if a.starts_with("--max-size=") => {
                     match crate::filters::parse_size(&a["--max-size=".len()..]) {
                         Some(n) => max_size = Some(n),
@@ -1075,6 +1080,10 @@ With DAYS, only items deleted more than DAYS days ago, as on Linux.
                    runs first
       --prune=oldest|largest  which items --max-size removes first
                    (default oldest)
+      --all      let an empty with no DAYS, --max-size or --until-free
+                   remove items other puts left; without it such an
+                   empty asks on a terminal and refuses elsewhere unless
+                   every item came from the latest put
       --json     print a JSON summary ({{dry_run, removed, bytes, days,
                    older_than_secs, max_size}}; with --until-free, the
                    per-drive summary)
@@ -1119,6 +1128,22 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 return 1;
             }
         };
+        // An empty of everything may take what other sessions or agents
+        // put; it goes ahead alone only for the latest put's items.
+        if age.older_than.is_none() && max_size.is_none() && !every && !dry_run {
+            let rows: Vec<(PathBuf, i64)> = all
+                .iter()
+                .map(|it| (original_of(it), it.time_deleted))
+                .collect();
+            let (since, last) = last_put_path()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|t| crate::budget::parse_last_put(&t))
+                .unwrap_or((i64::MAX, Vec::new()));
+            let foreign = crate::budget::not_from_last_put(&rows, &last, since);
+            if !crate::budget::guard_ok(prog, rows.len(), foreign) {
+                return 2;
+            }
+        }
         // DAYS alone, or nothing, takes by age (everything without DAYS);
         // a budget then takes the oldest or largest of the rest.
         let age_pass = age.older_than.is_some() || max_size.is_none();
@@ -1173,6 +1198,21 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 1
             }
         }
+    }
+
+    /// `%LOCALAPPDATA%\\rtrash\\last-put.txt`, the record the empty guard
+    /// reads.
+    fn last_put_path() -> Option<PathBuf> {
+        let base = std::env::var_os("LOCALAPPDATA")?;
+        Some(PathBuf::from(base).join("rtrash").join("last-put.txt"))
+    }
+
+    fn write_last_put(since: i64, moved: &[PathBuf]) {
+        let Some(p) = last_put_path() else { return };
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(&p, crate::budget::last_put_text(since, moved));
     }
 
     /// With a trash budget (`RTRASH_MAX_SIZE` or `policy.max_size`), trim

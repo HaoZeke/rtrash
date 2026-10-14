@@ -474,6 +474,8 @@ Without it, such an empty goes ahead only when every item came from the
 latest put; otherwise it asks on a terminal and exits 2 elsewhere.
 The trash is often shared by several sessions or agents, and an empty
 cannot be undone.
+On Windows the latest put is the one recorded in
+.IR %LOCALAPPDATA%\\rtrash\\last\-put.txt .
 .TP
 .B \-\-help
 Display help and exit.
