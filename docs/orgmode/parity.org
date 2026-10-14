@@ -6,6 +6,8 @@ desktop file managers built on it.
 This page records what matches and what differs.
 The Linux rows come from live runs against trash-cli 0.26.9.29, gtrash and
 gio 2.84 on one shared trash.
+CI repeats the cross-restore rows on every push with
+=scripts/interop-smoke.sh=, in all sixteen pairings.
 
 * Shared trash
 

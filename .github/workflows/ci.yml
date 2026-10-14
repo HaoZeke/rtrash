@@ -1,6 +1,7 @@
 # Quality bar: fmt, clippy (-D warnings), nextest (locked), supply-chain (cargo-deny),
 # shell completion syntax, shared extent tests on btrfs and XFS loop images,
-# and tests plus a du smoke test on Windows and macOS.
+# tests plus a du smoke test on Windows and macOS, and cross-restore with
+# trash-cli, gtrash and gio.
 # Spelling runs through prek (codespell) in pre_commit.yml.
 name: CI
 
@@ -202,6 +203,30 @@ jobs:
             RTRASH_DU_BULK=$bulk scripts/du-smoke.sh target/release/rtrash \
               "$(rustc --print sysroot)" "${CARGO_HOME:-$HOME/.cargo}/registry/src" "$fixture"
           done
+
+  interop:
+    name: interop (trash-cli · gtrash · gio cross-restore)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install trash-cli, gtrash and gio
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gvfs libglib2.0-bin dbus
+          pipx install trash-cli
+          curl -fsSL https://github.com/umlx5h/gtrash/releases/download/v0.0.6/gtrash_Linux_x86_64.tar.gz \
+            | tar -xz -C "$RUNNER_TEMP" gtrash
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Cross-restore every pairing
+        run: |
+          cargo build --locked --release
+          scripts/interop-smoke.sh target/release/rtrash
 
   completions:
     name: completion syntax (bash · zsh · fish)

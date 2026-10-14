@@ -207,3 +207,25 @@ fn package_release_script_stages_fish_multicall() {
         "package-release must symlink multi-call fish completions to rtrash.fish"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn interop_smoke_script_passes_with_the_tools_present() {
+    // CI installs trash-cli, gtrash and gio; here rtrash pairs with itself
+    // and with whichever of the others is on PATH.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = std::process::Command::new(root.join("scripts/interop-smoke.sh"))
+        .arg(env!("CARGO_BIN_EXE_rtrash"))
+        .env("RTRASH_INTEROP_NO_GIO", "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("ok   rtrash -> rtrash"), "{text}");
+    let ci = read(".github/workflows/ci.yml");
+    assert!(ci.contains("scripts/interop-smoke.sh target/release/rtrash"));
+}
