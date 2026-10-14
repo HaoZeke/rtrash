@@ -14,6 +14,9 @@
 # Everything happens in a scratch XDG_DATA_HOME, so the real trash stays
 # untouched. RTRASH_INTEROP_NO_GIO=1 leaves gio out. Exits non-zero when any pairing fails.
 set -euo pipefail
+# In the C or POSIX locale GLib escapes non-ASCII bytes when it decodes a
+# trash:// URI, so gio restores 'é' as a literal '\xc3\xa9'.
+export LANG=C.UTF-8 LC_ALL=C.UTF-8 G_FILENAME_ENCODING=UTF-8
 
 rtrash=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 GVFSD=${GVFSD:-/usr/libexec/gvfsd}
@@ -28,8 +31,8 @@ mkdir -p "$XDG_DATA_HOME" "$scratch/w"
 
 if [[ -z ${RTRASH_INTEROP_NO_GIO:-} ]] && command -v gio >/dev/null && [[ -x $GVFSD && -z ${RTRASH_INTEROP_BUS:-} ]]; then
   export RTRASH_INTEROP_BUS=1
-  exec dbus-run-session -- bash -c '"$0" & sleep 2; "$1" "$2"; s=$?; kill %1 2>/dev/null; exit $s' \
-    "$GVFSD" "$0" "$rtrash"
+  exec dbus-run-session -- bash -c '"$0" 2>"$3" & sleep 2; "$1" "$2"; s=$?; kill %1 2>/dev/null; exit $s' \
+    "$GVFSD" "$0" "$rtrash" "$scratch/gvfsd.log"
 fi
 
 trash=$XDG_DATA_HOME/Trash

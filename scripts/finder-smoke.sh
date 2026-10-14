@@ -10,7 +10,8 @@
 # failing step, naming it.
 set -euo pipefail
 
-rt=$1
+# Absolute, so the steps after `cd /` still find it.
+rt=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 unset RTRASH_MACOS_TRASH
 work=$(mktemp -d "$HOME/rtrash-finder.XXXXXX")
 f="$work/a b %é.txt"

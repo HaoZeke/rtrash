@@ -25,6 +25,9 @@ Each tool reads the others' duplicate names, so the spelling only shows in
 =files/=.
 gio lists and restores rtrash items (=gio trash --list=,
 =gio trash --restore trash:///NAME=), and rtrash restores gio items.
+GLib caveat: in the C or POSIX locale gio escapes non-ASCII bytes when it
+decodes a =trash://= URI, so a restored =é= comes back as a literal
+=\xc3\xa9=; run gio under a UTF-8 locale (=LANG=C.UTF-8=).
 
 * trash-cli command lines
 

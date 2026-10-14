@@ -16,7 +16,10 @@ fn backend_matches_target_os() {
     let b = trash_backend();
     if cfg!(target_os = "macos") {
         assert_eq!(b, TrashBackend::MacosFdoExperimental);
-        assert!(trash_backend_label().contains("not Finder"));
+        // Plain commands default to the Finder Trash unless
+        // RTRASH_MACOS_TRASH picks the FreeDesktop layout; the label
+        // names that default either way.
+        assert!(trash_backend_label().contains("Finder Trash"));
     } else if cfg!(windows) {
         assert_eq!(b, TrashBackend::WindowsRecycleBin);
         assert!(trash_backend_label().contains("Recycle"));
