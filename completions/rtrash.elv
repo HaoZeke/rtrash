@@ -6,7 +6,7 @@
 use path
 use str
 
-var subs = [put empty list status trash-stats du restore undo rm who reap finder config setup keys completions man]
+var subs = [put empty list status trash-stats du restore undo rm who reap finder wsl config setup keys completions man]
 var opts = [
   &put=[-f --force -i -I --interactive -r -R --recursive -d --dir -v --verbose --one-file-system --preserve-root --no-preserve-root --trash-dir= --home-only --plain --no-space-check --dry-run --in-use= --json --help --version]
   &empty=[-n --dry-run -v --verbose -f --force -i --interactive --all-users --plain --all --older-than= --max-size= --prune= --until-free= --dangling --json --trash-dir= --home-only --help --version]
@@ -19,6 +19,7 @@ var opts = [
   &rm=[--trash-dir= --home-only --older-than= --newer-than= --larger-than= --smaller-than= --batch= -n --dry-run -f --force -v --verbose --json --help --version]
   &who=[--json --help --version]
   &reap=[-p --profile= --list-profiles --roots= --depth= --tool --older-than= --age-by= -n --dry-run --permanent --trash --trash-dir= --home-only -v --verbose --shared --install-timer --watch --watch= --remove-timer --timer-status --when-below= --purge-trash --until= --json --help --version]
+  &wsl=[-f --force --help]
   &finder=[--trash-dir= --all -f --force --conflict= -v --verbose --json --help]
   &config=[--path --default --help --version]
   &setup=[--prefix= --bin-dir= --with-rm --powershell-profile -n --dry-run -f --force -v --verbose --help]
@@ -27,7 +28,7 @@ var opts = [
   &man=[]
 ]
 var multi = [&trash=put &trash-put=put &trash-empty=empty &trash-list=list &trash-restore=restore &trash-rm=rm]
-var values = [&completions=[bash zsh fish nu powershell elvish] &finder=[put list restore]]
+var values = [&completions=[bash zsh fish nu powershell elvish] &finder=[put list restore] &wsl=[list restore]]
 
 fn complete {|@words|
   var cmd = (path:base $words[0])

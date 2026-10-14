@@ -1,0 +1,145 @@
+//! `rtrash wsl list` and `rtrash wsl restore` against a made-up drive
+//! tree: a fake kernel release says WSL, a fake wsl.conf moves the
+//! automount root into a scratch folder, and `RTRASH_WSL_SID` stands in
+//! for the call to powershell.exe.
+#![cfg(unix)]
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use rtrash::win_recycle::{encode_recycle_i_v2, FILETIME_UNIX_EPOCH};
+
+const SID: &str = "S-1-5-21-1-2-3-1001";
+
+struct Fake {
+    top: PathBuf,
+    root: PathBuf,
+}
+
+impl Fake {
+    fn new(tag: &str) -> Self {
+        let top = std::env::temp_dir().join(format!("rtrash-wslbin-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&top);
+        let root = top.join("drives");
+        fs::create_dir_all(root.join("c").join("$Recycle.Bin").join(SID)).unwrap();
+        fs::write(top.join("osrelease"), "5.15.0-microsoft-standard-WSL2\n").unwrap();
+        fs::write(
+            top.join("wsl.conf"),
+            format!("[automount]\nroot = {}/\n", root.display()),
+        )
+        .unwrap();
+        Fake { top, root }
+    }
+
+    fn bin(&self) -> PathBuf {
+        self.root.join("c").join("$Recycle.Bin").join(SID)
+    }
+
+    /// A recycled file: `$R<id>` holds `body`, `$I<id>` names `win`.
+    fn recycle(&self, id: &str, win: &str, body: &[u8], secs: u64) {
+        fs::write(self.bin().join(format!("$R{id}")), body).unwrap();
+        let ft = FILETIME_UNIX_EPOCH + secs * 10_000_000;
+        let rec = encode_recycle_i_v2(Path::new(win), body.len() as u64, ft);
+        fs::write(self.bin().join(format!("$I{id}")), rec).unwrap();
+    }
+
+    fn run(&self, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            .arg("wsl")
+            .args(args)
+            .env("RTRASH_WSL_OSRELEASE", self.top.join("osrelease"))
+            .env("RTRASH_WSL_CONF", self.top.join("wsl.conf"))
+            .env("RTRASH_WSL_SID", SID)
+            .output()
+            .unwrap()
+    }
+}
+
+impl Drop for Fake {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.top);
+    }
+}
+
+#[test]
+fn wsl_list_shows_original_paths_with_their_extension() {
+    let f = Fake::new("list");
+    f.recycle("AB12CD.txt", r"C:\Users\me\notes.txt", b"n", 1_700_000_000);
+    f.recycle("EF34GH", r"C:\Users\me\dir", b"d", 1_700_000_100);
+    // A record without its payload is skipped.
+    fs::write(
+        f.bin().join("$IZZZZZZ.txt"),
+        encode_recycle_i_v2(Path::new(r"C:\gone.txt"), 1, FILETIME_UNIX_EPOCH),
+    )
+    .unwrap();
+    let out = f.run(&["list"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "{text}");
+    let notes = f.root.join("c/Users/me/notes.txt");
+    assert!(lines[0].ends_with(&notes.display().to_string()), "{text}");
+    assert!(lines[1].ends_with(&f.root.join("c/Users/me/dir").display().to_string()));
+    assert!(!text.contains("gone.txt"));
+}
+
+#[test]
+fn wsl_restore_moves_the_payload_back_and_drops_the_record() {
+    let f = Fake::new("restore");
+    f.recycle(
+        "AB12CD.txt",
+        r"C:\Users\me\notes.txt",
+        b"hello",
+        1_700_000_000,
+    );
+    let dest = f.root.join("c/Users/me/notes.txt");
+    let out = f.run(&["restore", &dest.display().to_string()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read(&dest).unwrap(), b"hello");
+    assert!(!f.bin().join("$RAB12CD.txt").exists());
+    assert!(!f.bin().join("$IAB12CD.txt").exists());
+    // Gone now, so a second restore finds nothing.
+    let out = f.run(&["restore", &dest.display().to_string()]);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn wsl_restore_refuses_to_overwrite_without_force() {
+    let f = Fake::new("force");
+    f.recycle("AB12CD.txt", r"C:\a.txt", b"old", 1_700_000_000);
+    let dest = f.root.join("c/a.txt");
+    fs::write(&dest, b"new").unwrap();
+    let out = f.run(&["restore", &dest.display().to_string()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(fs::read(&dest).unwrap(), b"new");
+    let out = f.run(&["restore", "-f", &dest.display().to_string()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read(&dest).unwrap(), b"old");
+}
+
+#[test]
+fn wsl_commands_need_wsl_and_a_known_action() {
+    let f = Fake::new("guard");
+    assert_eq!(f.run(&["nope"]).status.code(), Some(2));
+    assert_eq!(f.run(&[]).status.code(), Some(2));
+    assert!(f.run(&["--help"]).status.success());
+    let out = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        .args(["wsl", "list"])
+        .env("RTRASH_WSL_OSRELEASE", f.top.join("missing"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+}

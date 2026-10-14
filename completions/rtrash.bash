@@ -63,6 +63,10 @@ _rtrash_finder_opts=(
   --json --help
 )
 
+_rtrash_wsl_opts=(
+  list restore -f --force --help
+)
+
 _rtrash_who_opts=(
   --json --help --version
 )
@@ -75,7 +79,7 @@ _rtrash_config_opts=(
   --path --default --help --version
 )
 
-_rtrash_subcommands=(put empty list status trash-stats du restore undo rm who reap finder config setup keys completions man)
+_rtrash_subcommands=(put empty list status trash-stats du restore undo rm who reap finder wsl config setup keys completions man)
 
 _rtrash_keys_opts=(
   -l --list --sample --path --help
@@ -142,7 +146,7 @@ _rtrash_main() {
   local i sub=
   for ((i = 1; i < ${#COMP_WORDS[@]}; i++)); do
     case "${COMP_WORDS[i]}" in
-      put | empty | list | status | trash-stats | du | restore | undo | rm | who | reap | finder | config | setup | keys | completions | man)
+      put | empty | list | status | trash-stats | du | restore | undo | rm | who | reap | finder | wsl | config | setup | keys | completions | man)
         sub="${COMP_WORDS[i]}"
         break
         ;;
@@ -175,6 +179,7 @@ _rtrash_main() {
     who) _rtrash_complete_from _rtrash_who_opts ;;
     reap) _rtrash_complete_from _rtrash_reap_opts ;;
     finder) _rtrash_complete_from _rtrash_finder_opts ;;
+    wsl) _rtrash_complete_from _rtrash_wsl_opts ;;
     config) _rtrash_complete_from _rtrash_config_opts ;;
     rm) _rtrash_complete_from _rtrash_rm_opts ;;
     setup) _rtrash_complete_from _rtrash_setup_opts ;;
