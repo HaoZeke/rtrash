@@ -343,7 +343,30 @@ fn ensure_user_trash(td: &TrashDir, uid: u32, fallback: &Path) -> io::Result<()>
         warn_shared_trash_once(&td.root, why, fallback);
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
     }
-    td.ensure().inspect_err(say)
+    td.ensure().inspect_err(say)?;
+    // files/ and info/ that exist but refuse writes (made read-only by
+    // hand, or a read-only remount) would fail each item later; fall back
+    // now, once, with the reason.
+    for d in [td.files(), td.info()] {
+        if !writable(&d) {
+            let e = io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("'{}' is not writable", d.display()),
+            );
+            say(&e);
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// True when this process may create entries in `dir`.
+fn writable(dir: &Path) -> bool {
+    let Ok(c) = CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: `c` is a valid NUL-terminated path for the call's duration.
+    unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) == 0 }
 }
 
 /// The trash `uid` uses on the volume mounted at `top`: `$top/.Trash/$uid`
@@ -2447,6 +2470,22 @@ fn set_times_path(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_read_only_files_dir_in_an_owned_volume_trash_falls_back() {
+        if uid() == 0 {
+            return;
+        }
+        let top = std::env::temp_dir().join(format!("rtrash-rofiles-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&top);
+        fs::create_dir_all(&top).unwrap();
+        let td = select_on_volume(&top, uid()).expect("a fresh trash");
+        fs::set_permissions(td.files(), fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(select_on_volume(&top, uid()).is_none());
+        fs::set_permissions(td.files(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(select_on_volume(&top, uid()).is_some());
+        let _ = fs::remove_dir_all(&top);
+    }
 
     #[test]
     fn a_volume_top_the_user_cannot_write_falls_back() {

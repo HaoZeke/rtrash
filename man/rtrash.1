@@ -3204,6 +3204,12 @@ empty and rm skip it.
 One put cannot create or write (a fresh partition whose root only root
 may write, say) gets the same warning with the system error, so a slow
 copy into the home trash never happens silently.
+The same goes for a per-user trash whose
+.I files
+or
+.I info
+folder refuses writes (made read-only, or a read-only remount): put
+warns once and falls back before the first item.
 .SH EXIT STATUS
 .TP
 .B 0
