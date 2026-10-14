@@ -1,7 +1,8 @@
 //! `rtrash reap --install-timer`: a per-user job that runs reap on a
-//! schedule, as a systemd user service and timer on Linux and a launchd
-//! agent on macOS. Nothing needs root, and `--dry-run` prints the files
-//! instead of writing them.
+//! schedule, as a systemd user service and timer on Linux, a launchd
+//! agent on macOS and a Task Scheduler task on Windows. Nothing needs root
+//! or an administrator, and `--dry-run` prints the files (or the schtasks
+//! command) instead of writing them.
 
 use std::path::{Path, PathBuf};
 
@@ -65,6 +66,42 @@ pub fn launchd_plist(exe: &Path, args: &[String], every: i64) -> String {
     )
 }
 
+/// Quote one word of the command a scheduled task runs (`schtasks /TR`).
+fn task_word(w: &str) -> String {
+    if !w.is_empty() && !w.contains([' ', '\t', '"']) {
+        return w.to_string();
+    }
+    format!("\"{}\"", w.replace('"', "\\\""))
+}
+
+/// The `schtasks` arguments that create (or replace) a task running
+/// `exe reap ARGS` every `every` seconds as this user: by the minute under
+/// a day, else by the day, rounded up.
+pub fn schtasks_args(exe: &Path, args: &[String], every: i64) -> Vec<String> {
+    let mut cmd = vec![task_word(&exe.to_string_lossy()), "reap".to_string()];
+    cmd.extend(args.iter().map(|a| task_word(a)));
+    let (unit, n) = if every < 86_400 {
+        ("MINUTE", ((every + 59) / 60).clamp(1, 1439))
+    } else {
+        ("DAILY", ((every + 86_399) / 86_400).clamp(1, 365))
+    };
+    [
+        "/Create",
+        "/F",
+        "/TN",
+        NAME,
+        "/SC",
+        unit,
+        "/MO",
+        &n.to_string(),
+        "/TR",
+        &cmd.join(" "),
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 /// Files to write and the command that turns the job on.
 fn plan(
     exe: &Path,
@@ -96,7 +133,33 @@ fn plan(
             on,
         ));
     }
-    Err("timers are installed only on Linux (systemd) and macOS (launchd)".into())
+    Err("timers are installed only on Linux (systemd), macOS (launchd) and Windows (Task Scheduler)".into())
+}
+
+/// Create the Windows task, or with `dry_run` print the command.
+fn install_task(prog: &str, exe: &Path, args: &[String], every: i64, dry_run: bool) -> i32 {
+    let words = schtasks_args(exe, args, every);
+    if dry_run {
+        let shown: Vec<String> = words.iter().map(|w| task_word(w)).collect();
+        println!("schtasks {}", shown.join(" "));
+        return 0;
+    }
+    match std::process::Command::new("schtasks").args(&words).status() {
+        Ok(s) if s.success() => {
+            println!(
+                "created the scheduled task {NAME}; remove it with: schtasks /Delete /TN {NAME}"
+            );
+            0
+        }
+        Ok(s) => {
+            eprintln!("{prog}: schtasks failed ({s})");
+            1
+        }
+        Err(e) => {
+            eprintln!("{prog}: cannot run schtasks: {e}");
+            1
+        }
+    }
 }
 
 /// Write (or with `dry_run` print) the job running `reap ARGS` every
@@ -109,6 +172,9 @@ pub fn install(prog: &str, args: &[String], every: i64, dry_run: bool) -> i32 {
             return 1;
         }
     };
+    if cfg!(windows) {
+        return install_task(prog, &exe, args, every, dry_run);
+    }
     let (files, on) = match plan(&exe, args, every) {
         Ok(p) => p,
         Err(e) => {
@@ -159,6 +225,25 @@ mod tests {
         assert!(
             timer.contains("OnUnitActiveSec=3600s") && timer.contains("WantedBy=timers.target")
         );
+    }
+
+    #[test]
+    fn schtasks_args_quote_the_command_and_pick_a_schedule() {
+        let args = vec!["-p".to_string(), "my dir".to_string()];
+        let w = schtasks_args(Path::new(r"C:\Program Files\rtrash.exe"), &args, 3600);
+        let at = |k: &str| w[w.iter().position(|x| x == k).unwrap() + 1].clone();
+        assert_eq!(at("/TN"), NAME);
+        assert_eq!((at("/SC"), at("/MO")), ("MINUTE".into(), "60".into()));
+        assert_eq!(
+            at("/TR"),
+            r#""C:\Program Files\rtrash.exe" reap -p "my dir""#
+        );
+        assert!(w.contains(&"/F".to_string()));
+        let w = schtasks_args(Path::new("rtrash"), &[], 90);
+        assert_eq!(w[w.iter().position(|x| x == "/MO").unwrap() + 1], "2");
+        let w = schtasks_args(Path::new("rtrash"), &[], 2 * 86_400 + 1);
+        let at = |k: &str| w[w.iter().position(|x| x == k).unwrap() + 1].clone();
+        assert_eq!((at("/SC"), at("/MO")), ("DAILY".into(), "3".into()));
     }
 
     #[test]

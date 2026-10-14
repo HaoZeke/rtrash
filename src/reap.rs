@@ -50,9 +50,10 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
                           extents no other file shares, and the extents
                           shared by reflinks or snapshots, counted once
       --install-timer[=EVERY]  write a user systemd service and timer
-                          (Linux) or launchd agent (macOS) that runs this
-                          reap, with the other options, every EVERY
-                          (default 1h); with -n print them instead
+                          (Linux), a launchd agent (macOS) or a Task
+                          Scheduler task (Windows) that runs this reap,
+                          with the other options, every EVERY (default
+                          1h); with -n print them instead
       --when-below=SPEC run only when a reaped file system has less free
                           than SPEC (a size such as 20G, a percent such
                           as 10%, and ,inodes=PCT), then reap oldest first

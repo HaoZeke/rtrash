@@ -1,5 +1,6 @@
-//! The Windows space check: `status` shows each drive's free space from
-//! GetDiskFreeSpaceExW, and `restore` takes `--no-space-check`.
+//! Windows: `status` shows each drive's free space from GetDiskFreeSpaceExW,
+//! `restore` takes `--no-space-check`, and `reap --install-timer` makes a
+//! Task Scheduler task.
 #![cfg(windows)]
 
 use std::process::Command;
@@ -49,4 +50,29 @@ fn restore_takes_no_space_check_and_status_rejects_a_bad_floor_quietly() {
         .output()
         .unwrap();
     assert!(out.status.success());
+}
+
+#[test]
+fn reap_install_timer_dry_run_prints_a_schtasks_command() {
+    let out = Command::new(bin())
+        .args([
+            "reap",
+            "--install-timer=30m",
+            "-n",
+            "--when-below=10%",
+            "--purge-trash",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.starts_with("schtasks /Create /F /TN rtrash-reap /SC MINUTE /MO 30 /TR ")
+            && text.contains("reap --when-below=10% --purge-trash"),
+        "{text}"
+    );
 }

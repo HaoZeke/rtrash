@@ -1849,10 +1849,17 @@ On macOS it writes
 .I \(ti/Library/LaunchAgents/io.github.haozeke.rtrash\-reap.plist
 for
 .BR "launchctl bootstrap gui/$(id \-u)" .
-Neither needs root, and the job runs at low priority.
+On Windows it runs
+.B schtasks /Create /F /TN rtrash\-reap
+to make a Task Scheduler task for this user, every
+.I EVERY
+rounded up to whole minutes (whole days from 1d on); remove it with
+.BR "schtasks /Delete /TN rtrash\-reap" .
+None of them needs root or an administrator, and on Linux and macOS
+the job runs at low priority.
 With
 .B \-n
-it prints the files instead of writing them.
+it prints the files (or the schtasks command) instead.
 A cheap job pairs it with
 .BR \-\-when\-below ,
 for example
