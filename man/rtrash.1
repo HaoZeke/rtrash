@@ -61,9 +61,12 @@ since a file inside the trash would show in Finder; put, restore, rm,
 empty and undo measure each trash whose modification time they moved,
 and a change made outside rtrash marks the total stale until
 .BR \-\-measure .
-Options that need FreeDesktop records, such as
-.BR \-\-max\-size ,
-get refused there.
+.B "empty \-\-max\-size"
+and
+.B \-\-prune
+trim the Finder trashes together, by disk usage.
+.BR "empty \-\-dangling" ,
+which needs FreeDesktop records, gets refused there.
 A
 .B \-\-trash\-dir
 pin,

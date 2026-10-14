@@ -351,3 +351,36 @@ fn restore_matchers_work_on_the_finder_trash() {
     assert!(o.status.success(), "{}", err(&o));
     assert_eq!(fs::read(dest.join("keep.txt")).unwrap(), b"keep.txt");
 }
+
+#[test]
+fn empty_max_size_trims_the_finder_trash() {
+    let b = Box_::new("maxsize");
+    for (n, len) in [("big", 400_000), ("mid", 60_000), ("small", 10)] {
+        fs::write(b.work().join(n), vec![b'x'; len]).unwrap();
+    }
+    assert!(b.run(&["put", "big", "mid", "small"], "").status.success());
+    let o = b.run(
+        &[
+            "empty",
+            "--max-size=200K",
+            "--prune=largest",
+            "-n",
+            "--json",
+        ],
+        "",
+    );
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).contains("\"removed\":1"), "{}", out(&o));
+    assert!(b.finder().join("big").exists());
+    let o = b.run(
+        &["empty", "--max-size=200K", "--prune=largest", "--json"],
+        "",
+    );
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!b.finder().join("big").exists());
+    assert!(b.finder().join("mid").exists() && b.finder().join("small").exists());
+    // A budget the trash already fits removes nothing.
+    let o = b.run(&["empty", "--max-size=1G", "--json"], "");
+    assert!(out(&o).contains("\"removed\":0"), "{}", out(&o));
+    assert_eq!(b.run(&["empty", "--dangling"], "").status.code(), Some(2));
+}

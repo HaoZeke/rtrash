@@ -269,10 +269,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // macOS empties the Finder Trash unless a pin or the setting says
     // otherwise.
     if crate::finder::is_default(!opts.trash_dirs.is_empty() || opts.all_users) {
-        if opts.max_size.is_some() || opts.dangling {
+        if opts.dangling {
             return usage_err(
                 prog,
-                "--max-size and --dangling do not apply to the Finder Trash; pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop",
+                "--dangling does not apply to the Finder Trash; pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop",
             );
         }
         if opts.interactive && !opts.dry_run {
@@ -284,7 +284,17 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
         }
         let cutoff = opts.days.map(|secs| info::now_epoch() - secs);
-        return crate::finder::default_empty(prog, cutoff, opts.dry_run, opts.verbose, opts.json);
+        return crate::finder::default_empty(
+            prog,
+            &crate::finder::EmptyOpts {
+                cutoff,
+                max_size: opts.max_size,
+                prune: opts.prune,
+                dry_run: opts.dry_run,
+                verbose: opts.verbose,
+                json: opts.json,
+            },
+        );
     }
     if opts.all_users && (opts.home_only || !opts.trash_dirs.is_empty()) {
         return usage_err(prog, "--all-users takes no --home-only or --trash-dir");

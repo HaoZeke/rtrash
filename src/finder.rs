@@ -715,23 +715,65 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
 /// `empty` on the Finder trashes: remove every item, or with `cutoff`
 /// only those trashed before it. `.DS_Store` stays; Finder drops stale
 /// records.
-pub fn default_empty(
-    prog: &str,
+/// What `empty` takes on the Finder Trash: an age cut, a size budget
+/// and which items the budget removes first.
+pub struct EmptyOpts {
+    pub cutoff: Option<i64>,
+    pub max_size: Option<u64>,
+    pub prune: crate::retention::Policy,
+    pub dry_run: bool,
+    pub verbose: bool,
+    pub json: bool,
+}
+
+/// The items `empty` removes: those older than the cutoff (all of them
+/// without one, unless a budget is set), then, under a budget, the
+/// oldest or largest of the rest until the others fit in it.
+fn empty_pick(
+    rows: Vec<(crate::finder_shared::Entry, u64)>,
     cutoff: Option<i64>,
-    dry_run: bool,
-    verbose: bool,
-    json: bool,
-) -> i32 {
+    max: Option<u64>,
+    prune: crate::retention::Policy,
+) -> Vec<(crate::finder_shared::Entry, u64)> {
+    let age_pass = cutoff.is_some() || max.is_none();
+    let (mut gone, mut rest): (Vec<_>, Vec<_>) = rows
+        .into_iter()
+        .partition(|(e, _)| age_pass && cutoff.is_none_or(|c| e.epoch < c));
+    if let Some(max) = max {
+        match prune {
+            crate::retention::Policy::Oldest => rest.sort_by_key(|(e, _)| e.epoch),
+            crate::retention::Policy::Largest => rest.sort_by_key(|(_, b)| std::cmp::Reverse(*b)),
+        }
+        let mut left: u64 = rest.iter().map(|(_, b)| b).sum();
+        for r in rest {
+            if left <= max {
+                break;
+            }
+            left -= r.1;
+            gone.push(r);
+        }
+    }
+    gone
+}
+
+pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
+    let (dry_run, verbose, json) = (o.dry_run, o.verbose, o.json);
     let rows = match read_all(prog) {
         Ok(r) => r,
         Err(c) => return c,
     };
+    let rows: Vec<_> = rows
+        .into_iter()
+        .map(|e| {
+            let b = crate::fastdelete::disk_usage(&e.path());
+            (e, b)
+        })
+        .collect();
     let mut removed = 0u64;
+    let mut bytes = 0u64;
     let mut failed = 0u64;
-    for e in rows {
-        if cutoff.is_some_and(|c| e.epoch >= c) {
-            continue;
-        }
+    for (e, b) in empty_pick(rows, o.cutoff, o.max_size, o.prune) {
+        bytes += b;
         let path = e.path();
         if dry_run {
             if !json {
@@ -754,7 +796,9 @@ pub fn default_empty(
         }
     }
     if json {
-        println!("{{\"dry_run\":{dry_run},\"removed\":{removed},\"failed\":{failed}}}");
+        println!(
+            "{{\"dry_run\":{dry_run},\"removed\":{removed},\"bytes\":{bytes},\"failed\":{failed}}}"
+        );
     } else if !verbose && !dry_run {
         eprintln!("Removed {}", crate::util::plural(removed, "item", "items"));
     }
