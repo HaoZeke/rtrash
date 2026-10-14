@@ -27,8 +27,8 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
     # The Windows build has its own put, list, empty, restore, status and rm,
     # with fewer options (the Recycle Bin, not a FreeDesktop trash).
     $winOpts = @{
-        'put' = @('-f', '--force', '-v', '--verbose', '--plain', '--json', '--in-use=', '--trash-dir=', '--home-only', '--help', '--version')
-        'list' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--help', '--version')
+        'put' = @('-f', '--force', '-v', '--verbose', '--dry-run', '--plain', '--json', '--in-use=', '--trash-dir=', '--home-only', '--help', '--version')
+        'list' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--glob=', '--regex=', '--name=', '--cwd-only', '--help', '--version')
         'empty' = @('-n', '--dry-run', '-v', '--verbose', '--older-than=', '--max-size=', '--prune=', '--until-free=', '--all', '--json', '--help', '--version')
         'restore' = @('-f', '--force', '--plain', '--newest-first', '--oldest-first', '--no-space-check', '--help', '--version')
         'status' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--help', '--version')

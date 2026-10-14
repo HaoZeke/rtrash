@@ -67,16 +67,16 @@ crossterm = { version = "0.28", optional = true }
 # TUI keybind config (`keys.toml`).
 toml = { version = "0.8", optional = true }
 serde = { version = "1", optional = true, features = ["derive"] }
+# restore and list --regex. The lite engine keeps the binary small;
+# patterns match paths, so Unicode classes do not matter.
+regex-lite = "0.1"
 
 # musl's malloc serialises threads on one lock; the parallel du walk needs a
 # faster allocator there. glibc builds keep the system allocator.
 [target.'cfg(target_env = "musl")'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
-# restore --regex. The lite engine keeps the binary small; patterns match
-# paths, so Unicode classes do not matter.
 [target.'cfg(unix)'.dependencies]
-regex-lite = "0.1"
 # Finder may keep a name decomposed (NFD) where the user types it
 # composed (NFC); matching compares the NFC forms.
 unicode-normalization = { version = "0.1", default-features = false, features = [

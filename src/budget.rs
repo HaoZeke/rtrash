@@ -201,6 +201,48 @@ pub fn parse_last_put(text: &str) -> Option<(i64, Vec<PathBuf>)> {
     ))
 }
 
+/// A `list` matcher on the Recycle Bin, where no trash name exists: by
+/// the original path (a glob with a separator, a regex) or file name.
+pub enum PathMatch {
+    Glob(String),
+    Regex(regex_lite::Regex),
+    Name(String),
+}
+
+impl PathMatch {
+    /// From `--glob=`, `--regex=` or `--name=`; None for another option.
+    pub fn parse(arg: &str) -> Option<Result<PathMatch, String>> {
+        let (key, val) = arg.split_once('=')?;
+        if !matches!(key, "--glob" | "--regex" | "--name") {
+            return None;
+        }
+        if val.is_empty() {
+            return Some(Err(format!("{key} needs a non-empty value")));
+        }
+        Some(match key {
+            "--glob" => Ok(PathMatch::Glob(val.to_string())),
+            "--name" => Ok(PathMatch::Name(val.to_string())),
+            _ => regex_lite::Regex::new(val)
+                .map(PathMatch::Regex)
+                .map_err(|e| format!("invalid --regex '{val}': {e}")),
+        })
+    }
+
+    pub fn keeps(&self, original: &Path) -> bool {
+        let full = original.to_string_lossy();
+        let base = original
+            .file_name()
+            .map(|b| b.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match self {
+            PathMatch::Glob(p) if p.contains(['/', '\\']) => crate::util::fnmatch(p, &full),
+            PathMatch::Glob(p) => crate::util::fnmatch(p, &base),
+            PathMatch::Regex(re) => re.is_match(&full),
+            PathMatch::Name(n) => base == *n,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +264,19 @@ mod tests {
         assert_eq!(not_from_last_put(&items[..2], &last, since), 0);
         assert_eq!(from_last_put(&items, &last, since), vec![0, 1]);
         assert_eq!(parse_last_put("garbled"), None);
+    }
+
+    #[test]
+    fn path_matchers_take_the_name_or_the_whole_path() {
+        let p = PathBuf::from("C:/w/sub/a.log");
+        let m = |a: &str| PathMatch::parse(a).unwrap().unwrap();
+        assert!(m("--glob=*.log").keeps(&p));
+        assert!(!m("--glob=*.txt").keeps(&p));
+        assert!(m("--glob=C:/w/*").keeps(&p));
+        assert!(m("--regex=/sub/").keeps(&p));
+        assert!(m("--name=a.log").keeps(&p) && !m("--name=a").keeps(&p));
+        assert!(PathMatch::parse("--json").is_none());
+        assert!(PathMatch::parse("--regex=(").unwrap().is_err());
     }
 
     #[test]

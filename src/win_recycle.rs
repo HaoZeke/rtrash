@@ -711,6 +711,7 @@ mod os {
         let mut pinned = false;
         let mut no_more_opts = false;
         let mut in_use: Option<String> = None;
+        let mut dry_run = false;
         for arg in args {
             if no_more_opts || arg == "-" || !arg.starts_with('-') {
                 files.push(PathBuf::from(arg));
@@ -722,6 +723,7 @@ mod os {
                 "-v" | "--verbose" => verbose = true,
                 "--plain" => plain = true,
                 "--json" => json = true,
+                "--dry-run" => dry_run = true,
                 // FreeDesktop options: the Recycle Bin has one place per
                 // drive, so there is nothing to pin or narrow down.
                 "--home-only" => {}
@@ -742,6 +744,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
 
   -f, --force    ignore nonexistent files
   -v, --verbose  print each path and the Recycle Bin it went to
+      --dry-run  run every check (missing files, holders) and print
+                   'would trash PATH' for each item that would move,
+                   moving nothing
       --plain    accepted for CLI parity (no TUI put browser on Windows)
       --json     print a JSON summary on stdout ({{trashed, failed}});
                    replaces -v output
@@ -829,6 +834,10 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     }
                     eprintln!("{prog}: warning: '{}' is in use by {who}", f.display());
                 }
+            }
+            if dry_run {
+                println!("would trash '{}'", crate::util::term_path(&abs));
+                continue;
             }
             let root = test_bin_root().or_else(|| bin_root_of(&abs));
             let bin = verbose.then(|| root.clone()).flatten();
@@ -942,7 +951,29 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
     }
 
     pub fn list_run(prog: &str, args: &[String]) -> i32 {
+        let mut matcher: Option<crate::budget::PathMatch> = None;
+        let mut cwd_only = false;
+        let mut bad: Option<String> = None;
         let filters = parse_with_filters(prog, args, |arg| match arg {
+            "--cwd-only" => {
+                cwd_only = true;
+                None
+            }
+            a if crate::budget::PathMatch::parse(a).is_some() => {
+                match crate::budget::PathMatch::parse(a) {
+                    Some(Ok(_)) if matcher.is_some() => {
+                        bad = Some("give only one of --glob, --regex and --name".into())
+                    }
+                    Some(Ok(m)) => matcher = Some(m),
+                    Some(Err(e)) => bad = Some(e),
+                    None => {}
+                }
+                if bad.is_some() {
+                    Some(2)
+                } else {
+                    None
+                }
+            }
             "--help" => {
                 print!(
                     "\
@@ -953,6 +984,11 @@ List items in the Windows Recycle Bin (system trash).
       --newer-than=DAYS only items deleted within the last DAYS days
       --larger-than=SIZE  only items over SIZE (500M, 1.5G, 64k)
       --smaller-than=SIZE only items under SIZE
+      --glob=PATTERN  only items whose original path (PATTERN with a
+                   separator) or file name matches a shell glob
+      --regex=RE  only items whose original path matches RE
+      --name=NAME  only items whose file name is NAME
+      --cwd-only only items that came from the current directory or below
       --help     display this help and exit
       --version  output version information and exit
 
@@ -973,12 +1009,31 @@ on Windows (there is no FreeDesktop layout here).
                 Some(2)
             }
         });
+        if let Some(e) = &bad {
+            eprintln!("{prog}: {e}");
+            return 2;
+        }
         let filters = match filters {
             Ok(f) => f,
             Err(code) => return code,
         };
+        let cwd = cwd_only.then(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|d| std::fs::canonicalize(&d).ok().map(|c| strip_verbatim(&c)))
+        });
         match os_limited::list() {
             Ok(items) => {
+                let items: Vec<TrashItem> = items
+                    .into_iter()
+                    .filter(|it| {
+                        let o = original_of(it);
+                        matcher.as_ref().is_none_or(|m| m.keeps(&o))
+                            && cwd
+                                .as_ref()
+                                .is_none_or(|d| d.as_ref().is_some_and(|d| o.starts_with(d)))
+                    })
+                    .collect();
                 let mut items = filters.apply(items, |it| it.time_deleted, item_size);
                 items.sort_by_key(|i| i.time_deleted);
                 for it in items {
