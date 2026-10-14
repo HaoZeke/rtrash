@@ -1759,8 +1759,18 @@ fn devices_list_the_test_file_system_with_known_numbers() {
                 .parse()
                 .unwrap()
         };
-        assert_eq!(text.matches("\"mount\":").count(), 1, "{text}");
-        assert!(text.contains("\"device\":\"rtrash-test\""), "{text}");
+        // Only the test file system, mounted at the seam's directory.
+        assert_eq!(text.matches("\"mount\":").count(), 1, "{text:?}");
+        assert!(text.contains("\"device\":\"rtrash-test\""), "{text:?}");
+        assert!(text.contains("\"type\":\"test\""), "{text:?}");
+        let mount = text
+            .split("\"mount\":\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next());
+        assert!(
+            mount.is_some_and(|m| m.trim_end_matches(['/', '\\']).ends_with("fs")),
+            "{text:?}"
+        );
         (num("size"), num("used"), num("available"), text)
     };
     let (size, used, avail, text) = devices();

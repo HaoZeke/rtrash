@@ -70,6 +70,21 @@ fn percent(part: u64, whole: u64) -> u64 {
     (u128::from(part) * 100 / u128::from(whole)) as u64
 }
 
+/// Split an `RTRASH_TEST_FS` value into TOTAL, INODES and DIR. INODES is
+/// there only when the field after TOTAL is all digits, so a Windows DIR
+/// such as `D:\\a\\fs` keeps its drive letter.
+pub fn parse_test_fs(spec: &str) -> Option<(u64, Option<u64>, &str)> {
+    let (total, rest) = spec.split_once(':')?;
+    let total = total.parse().ok()?;
+    let (inodes, dir) = match rest.split_once(':') {
+        Some((n, d)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => {
+            (Some(n.parse().ok()?), d)
+        }
+        _ => (None, rest),
+    };
+    (!dir.is_empty()).then_some((total, inodes, dir))
+}
+
 /// Test seam, in debug builds only: `RTRASH_TEST_FS=TOTAL:DIR` or
 /// `TOTAL:INODES:DIR` makes every path under DIR sit on a file system of
 /// TOTAL bytes (and INODES inodes) whose used part is what DIR holds, so
@@ -77,13 +92,7 @@ fn percent(part: u64, whole: u64) -> u64 {
 #[cfg(debug_assertions)]
 fn fake(path: &Path) -> Option<Space> {
     let spec = std::env::var("RTRASH_TEST_FS").ok()?;
-    let mut parts = spec.splitn(3, ':');
-    let total: u64 = parts.next()?.parse().ok()?;
-    let second = parts.next()?;
-    let (inodes, dir) = match parts.next() {
-        Some(d) => (Some(second.parse::<u64>().ok()?), d),
-        None => (None, second),
-    };
+    let (total, inodes, dir) = parse_test_fs(&spec)?;
     let dir = std::fs::canonicalize(dir).ok()?;
     let p = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !p.starts_with(&dir) {
@@ -132,7 +141,7 @@ pub fn test_fs() -> Option<(std::path::PathBuf, Space)> {
         return None;
     }
     let spec = std::env::var("RTRASH_TEST_FS").ok()?;
-    let dir = std::fs::canonicalize(spec.splitn(3, ':').last()?).ok()?;
+    let dir = std::fs::canonicalize(parse_test_fs(&spec)?.2).ok()?;
     let s = fake(&dir)?;
     Some((dir, s))
 }
@@ -343,6 +352,22 @@ fn guard_copy_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_test_fs_keeps_a_windows_drive_letter() {
+        assert_eq!(parse_test_fs("100:/tmp/fs"), Some((100, None, "/tmp/fs")));
+        assert_eq!(
+            parse_test_fs("100:7:/tmp/fs"),
+            Some((100, Some(7), "/tmp/fs"))
+        );
+        assert_eq!(parse_test_fs(r"100:D:\a\fs"), Some((100, None, r"D:\a\fs")));
+        assert_eq!(
+            parse_test_fs(r"100:7:D:\a\fs"),
+            Some((100, Some(7), r"D:\a\fs"))
+        );
+        assert_eq!(parse_test_fs("x:/tmp"), None);
+        assert_eq!(parse_test_fs("100:"), None);
+    }
 
     const G: u64 = 1 << 30;
 
