@@ -799,3 +799,73 @@ fn verbose_finder_empty_names_the_put_back_place() {
     );
     assert!(!line.contains(".Trash"), "{line}");
 }
+
+/// Odd but valid file names (APFS takes no invalid UTF-8) through put,
+/// every list form, restore, rm and empty on the Finder Trash. Each
+/// command must finish without a panic; restore brings back the bytes.
+#[test]
+fn odd_names_survive_the_finder_trash() {
+    let names = [
+        "new\nline",
+        "tab\there",
+        "-leading dash",
+        "%2F not a slash",
+        "e\u{301}cole",
+        "\u{202e}txt.exe",
+        "emoji \u{1f5d1}",
+        "  spaced  ",
+    ];
+    let b = Box_::new("oddnames");
+    let ok = |o: &Output, what: &str| {
+        assert!(
+            o.status.code() != Some(101) && !err(o).contains("panicked"),
+            "{what} panicked: {}",
+            err(o)
+        );
+    };
+    for n in names {
+        fs::write(b.work().join(n), n.as_bytes()).unwrap();
+        let o = b.run(&["put", "--", n], "");
+        ok(&o, "put");
+        assert!(o.status.success(), "put {n:?}: {}", err(&o));
+    }
+    for args in [
+        &["list"][..],
+        &["list", "--json"],
+        &["list", "--format={name}\\0{path}\\0{size}\\0"],
+        &["list", "--glob=*"],
+        &["empty", "-n", "-v", "--all"],
+        &["status"],
+    ] {
+        let o = b.run(args, "");
+        ok(&o, &format!("{args:?}"));
+        assert!(o.status.success(), "{args:?}: {}", err(&o));
+    }
+    // The undo log knows every original, so restore by path works before
+    // Finder writes any Put Back record.
+    let first = b.work().join(names[4]);
+    let o = b.run(&["restore", first.to_str().unwrap()], "");
+    ok(&o, "restore");
+    assert!(o.status.success(), "restore: {}", err(&o));
+    assert_eq!(fs::read(&first).unwrap(), names[4].as_bytes());
+    // A payload gone from under the trash: the commands still finish.
+    let gone = b.finder().join(names[0]);
+    if gone.exists() {
+        fs::remove_file(&gone).unwrap();
+    }
+    for args in [
+        &["list"][..],
+        &["list", "--json"],
+        &["empty", "-n", "-v", "--all"],
+    ] {
+        ok(
+            &b.run(args, ""),
+            &format!("{args:?} after a payload vanished"),
+        );
+    }
+    let o = b.run(&["rm", "*"], "");
+    ok(&o, "rm");
+    let o = b.run(&["empty", "--all", "-v"], "");
+    ok(&o, "empty");
+    assert!(o.status.success(), "{}", err(&o));
+}

@@ -312,3 +312,69 @@ fn restore_batch_last_brings_back_the_latest_put() {
     }
     let _ = fs::remove_dir_all(&lad);
 }
+
+/// Odd but valid NTFS names through put, list, restore and a vanished
+/// Recycle Bin payload; no command may panic.
+#[test]
+fn odd_names_survive_the_recycle_bin() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let id = std::process::id();
+    let names = [
+        format!("-leading {id}.txt"),
+        format!("%2F not a slash {id}"),
+        format!("e\u{301}cole {id}.md"),
+        format!("\u{202e}txt.exe {id}"),
+        format!("emoji \u{1f5d1} {id}.tar.gz"),
+        format!("two  spaces {id}"),
+    ];
+    let run = |args: &[&std::ffi::OsStr]| {
+        let o = Command::new(bin()).args(args).output().unwrap();
+        let e = String::from_utf8_lossy(&o.stderr).into_owned();
+        assert!(
+            o.status.code() != Some(101) && !e.contains("panicked"),
+            "{args:?} panicked: {e}"
+        );
+        o
+    };
+    let os = |s: &str| std::ffi::OsString::from(s);
+    let paths: Vec<PathBuf> = names.iter().map(|n| m.join(n)).collect();
+    for p in &paths {
+        fs::write(p, p.to_string_lossy().as_bytes()).unwrap();
+    }
+    let mut put = vec![os("put"), os("--")];
+    put.extend(paths.iter().map(|p| p.clone().into_os_string()));
+    let refs: Vec<&std::ffi::OsStr> = put.iter().map(|s| s.as_os_str()).collect();
+    let o = run(&refs);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let o = run(&[os("list").as_os_str(), os("--format={path}\\n").as_os_str()]);
+    let text = String::from_utf8_lossy(&o.stdout).into_owned();
+    for p in &paths {
+        assert!(
+            text.lines().any(|l| Path::new(l) == p),
+            "{p:?} not in {text}"
+        );
+    }
+    for args in [
+        vec!["list", "--size"],
+        vec!["list", "--glob=*"],
+        vec!["status"],
+    ] {
+        let a: Vec<std::ffi::OsString> = args.iter().map(|s| os(s)).collect();
+        let r: Vec<&std::ffi::OsStr> = a.iter().map(|s| s.as_os_str()).collect();
+        assert!(run(&r).status.success(), "{args:?}");
+    }
+    let o = run(&[os("restore").as_os_str(), paths[2].as_os_str()]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(
+        fs::read(&paths[2]).unwrap(),
+        paths[2].to_string_lossy().as_bytes()
+    );
+    let o = run(&[os("restore").as_os_str(), os("--batch=last").as_os_str()]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    for p in &paths {
+        assert!(p.exists(), "{p:?}");
+        let _ = fs::remove_file(p);
+    }
+}
