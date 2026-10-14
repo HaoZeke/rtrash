@@ -1,0 +1,1 @@
+macOS: `undo`, `status`, `trash-stats` and the restore browser now cover the Finder Trash. Plain put logs each run's items in `$XDG_STATE_HOME/rtrash/finder-undo.tsv`, since Finder keeps no `.trashinfo`, and undo restores a run from that log.

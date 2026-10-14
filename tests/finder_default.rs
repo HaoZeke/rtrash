@@ -48,6 +48,7 @@ impl Box_ {
             .env("XDG_CONFIG_HOME", self.root.join(".config"))
             .env("RTRASH_MACOS_TRASH", "finder")
             .env("RTRASH_OSASCRIPT", self.root.join("osascript"))
+            .env("XDG_STATE_HOME", self.root.join("state"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -176,4 +177,48 @@ fn a_symlink_moves_in_as_itself() {
         .file_type()
         .is_symlink());
     assert!(b.work().join("target").exists());
+}
+
+#[test]
+fn undo_status_and_trash_stats_cover_the_finder_trash() {
+    let b = Box_::new("undo");
+    for n in ["one", "two"] {
+        fs::write(b.work().join(n), vec![b'x'; 5000]).unwrap();
+    }
+    fs::write(b.work().join("later"), b"l").unwrap();
+    assert!(b.run(&["put", "one", "two"], "").status.success());
+    assert!(b.run(&["put", "later"], "").status.success());
+
+    let o = b.run(&["status", "--json"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).contains("\"total_items\": 3"), "{}", out(&o));
+    assert!(out(&o).contains("\"finder\":true"), "{}", out(&o));
+    let o = b.run(&["status"], "");
+    assert!(out(&o).contains("Total: 3 items"), "{}", out(&o));
+    assert_eq!(
+        b.run(&["status", "--older-than=1d"], "").status.code(),
+        Some(2)
+    );
+
+    let o = b.run(&["trash-stats", "--json", "--top=1"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).contains(".Trash"), "{}", out(&o));
+    assert!(out(&o).contains("\"items\":3"), "{}", out(&o));
+    assert_eq!(
+        b.run(&["trash-stats", "--total"], "").status.code(),
+        Some(2)
+    );
+
+    // Two runs: undo --list shows both, undo brings back the newest.
+    let o = b.run(&["undo", "--list"], "");
+    assert_eq!(out(&o).lines().count(), 2, "{}", out(&o));
+    let o = b.run(&["undo"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(b.work().join("later").exists());
+    assert!(!b.work().join("one").exists());
+    let o = b.run(&["undo", "--json"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).contains("restored_to"), "{}", out(&o));
+    assert!(b.work().join("one").exists() && b.work().join("two").exists());
+    assert_eq!(b.run(&["undo"], "").status.code(), Some(1));
 }

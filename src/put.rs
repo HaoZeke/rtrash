@@ -315,6 +315,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     if json {
         println!("{}", summary_json(&trashed, failed));
     }
+    if !trashed.is_empty() && crate::finder::is_default(opts.trash_pin.is_some()) {
+        let items: Vec<(String, PathBuf, PathBuf)> = trashed
+            .iter()
+            .map(|t| (t.name.clone(), t.original.clone(), t.trash_dir.clone()))
+            .collect();
+        crate::finder_shared::log_batch(crate::info::batch_id(), &items);
+    }
     // The Finder Trash keeps no .trashinfo, so budgets and warnings that
     // read the FreeDesktop layout skip it.
     if !trashed.is_empty() && !crate::finder::is_default(opts.trash_pin.is_some()) {

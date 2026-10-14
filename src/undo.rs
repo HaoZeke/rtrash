@@ -133,6 +133,18 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
+    // macOS undoes put runs into the Finder Trash unless a pin or the
+    // setting says otherwise.
+    if crate::finder::is_default(!trash_dirs.is_empty()) {
+        return crate::finder_shared::undo(
+            prog,
+            wanted.as_deref(),
+            list_only,
+            dry_run,
+            conflict,
+            json,
+        );
+    }
     let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);
     if dirs.is_empty() && !trash_dirs.is_empty() {
         eprintln!("{prog}: no valid --trash-dir pins (need files/ and info/ directories)");

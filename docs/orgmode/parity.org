@@ -67,11 +67,12 @@ listing, and the restore conflict policies (=--conflict=rename|skip=).
 | Put Back after a plain put             | yes; Finder records it                          | yes     |
 | Plain =list=, =restore=, =empty=       | Finder Trash, by Put Back location              | yes     |
 | FreeDesktop home trash                 | =RTRASH_MACOS_TRASH=freedesktop=, =macos.trash= or a =--trash-dir= pin | no |
+| =undo=, =status=, =trash-stats=, restore browser | Finder Trash; undo from a put-run log | n/a |
 | Symbolic links                         | move in as themselves, without Put Back         | follows |
 | Volume trash =/Volumes/X/.Trashes/UID= | =finder list= and =restore= with =--trash-dir=  | yes     |
 
-Age and size filters, =--max-size=, =undo=, =status= and =trash-stats=
-read the FreeDesktop layout, so on the Finder Trash they are refused or
-cover only the FreeDesktop side.
+Age and size filters, =--max-size=, =trash-stats --total= and
+=--history= read the FreeDesktop layout, so on the Finder Trash they are
+refused with a hint.
 CI runs plain put, list, restore and empty on a real macOS runner against
 Finder.

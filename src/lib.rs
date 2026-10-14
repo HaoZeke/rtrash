@@ -37,6 +37,8 @@ pub mod fastdelete;
 pub mod filters;
 #[cfg(unix)]
 pub mod finder;
+#[cfg(unix)]
+pub mod finder_shared;
 pub mod holders;
 #[cfg(unix)]
 pub mod info;

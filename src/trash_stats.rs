@@ -75,7 +75,7 @@ pub struct Stats {
 
 /// Files and directories at or below `path`, links not followed.
 #[cfg(unix)]
-fn count_inodes(path: &Path) -> u64 {
+pub(crate) fn count_inodes(path: &Path) -> u64 {
     let mut n = 0u64;
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -385,6 +385,24 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 return 2;
             }
         }
+    }
+    // macOS sums up the Finder Trash unless a pin or the setting says
+    // otherwise.
+    #[cfg(unix)]
+    if crate::finder::is_default(!pins.is_empty()) {
+        if total_only || with_history || since.is_some() {
+            eprintln!(
+                "{prog}: --total and --history read the FreeDesktop running totals; pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop"
+            );
+            return 2;
+        }
+        let all = crate::finder_shared::stats(top);
+        if json {
+            println!("{}", to_json(&all, false));
+        } else {
+            print_text(&all, false);
+        }
+        return 0;
     }
     if (measure || space) && !total_only {
         eprintln!("{prog}: --measure and --space go with --total");

@@ -275,7 +275,15 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             );
             return 2;
         }
-        return crate::finder::default_restore(prog, target.as_deref(), all, conflict, json);
+        return crate::finder::default_restore(
+            prog,
+            target.as_deref(),
+            all,
+            conflict,
+            json,
+            plain,
+            newest_first,
+        );
     }
     let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);
     if dirs.is_empty() && !trash_dirs.is_empty() {

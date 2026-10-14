@@ -332,7 +332,7 @@ fn restore(prog: &str, args: &[String]) -> i32 {
 
 /// Move `src` to `dest`, creating the parent. With `force`, an existing
 /// `dest` goes only after the item sits staged beside it.
-fn move_back(src: &Path, dest: &Path, force: bool) -> Result<(), String> {
+pub(crate) fn move_back(src: &Path, dest: &Path, force: bool) -> Result<(), String> {
     let parent = dest
         .parent()
         .ok_or_else(|| format!("cannot restore to '{}': no parent", dest.display()))?;
@@ -518,13 +518,17 @@ pub fn default_list(prog: &str, json: bool, refused: Option<&str>) -> i32 {
 
 /// `restore` on the Finder Trash. PATH names the item by its Put Back
 /// place or its name in the trash; without one, a numbered table offers
-/// every item with a Put Back record and stdin picks.
+/// every item with a Put Back record and stdin picks, or on a terminal
+/// the restore browser opens unless `plain`.
+#[allow(clippy::too_many_arguments)]
 pub fn default_restore(
     prog: &str,
     target: Option<&Path>,
     all: bool,
     conflict: Conflict,
     json: bool,
+    plain: bool,
+    newest_first: Option<bool>,
 ) -> i32 {
     let Some(trash) = home_trash() else {
         eprintln!("{prog}: HOME unset; pass --trash-dir");
@@ -548,6 +552,21 @@ pub fn default_restore(
             .unwrap_or_else(|_| t.to_path_buf());
         args.push(abs.to_string_lossy().into_owned());
     } else {
+        #[cfg(feature = "tui")]
+        if !plain && !json && crate::util::stdin_is_tty() {
+            let entries: Vec<crate::finder_shared::Entry> = crate::finder_shared::entries()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| e.original.is_some())
+                .collect();
+            let newest = newest_first.unwrap_or(true);
+            let mut refs: Vec<&crate::finder_shared::Entry> = entries.iter().collect();
+            if newest {
+                refs.reverse();
+            }
+            return crate::restore_tui::run(prog, refs, conflict == Conflict::Overwrite, newest);
+        }
+        let _ = (plain, newest_first);
         let rows: Vec<(Item, i64)> = match dated_items(&trash) {
             Ok(r) => r
                 .into_iter()

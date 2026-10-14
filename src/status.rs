@@ -112,6 +112,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: {e}");
         return 2;
     }
+    // macOS sums up the Finder Trash unless a pin or the setting says
+    // otherwise.
+    if crate::finder::is_default(!trash_dirs.is_empty()) {
+        if size.is_set() || older_than.is_some() || newer_than.is_some() {
+            eprintln!(
+                "{prog}: age and size filters do not apply to the Finder Trash; pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop"
+            );
+            return 2;
+        }
+        return crate::finder_shared::status(prog, json);
+    }
     let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);
     if dirs.is_empty() && !trash_dirs.is_empty() {
         eprintln!("{prog}: no valid --trash-dir pins");

@@ -52,6 +52,15 @@ done
 [[ $(cat "$g") == finder ]] || fail "finder restore content"
 echo "ok   finder put, list and restore"
 
+i="$work/undo me.txt"
+echo undo > "$i"
+"$rt" put "$i" || fail "put for undo"
+"$rt" status --json | grep -q '"finder":true' || fail "status on the Finder Trash"
+"$rt" trash-stats --json | grep -qF '.Trash' || fail "trash-stats on the Finder Trash"
+"$rt" undo || fail "undo"
+[[ $(cat "$i") == undo ]] || fail "undo content"
+echo "ok   undo, status and trash-stats"
+
 # The FreeDesktop trash stays reachable.
 h="$work/fdo.txt"
 echo fdo > "$h"
