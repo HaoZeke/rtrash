@@ -1321,6 +1321,28 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         Some(PathBuf::from(base).join("rtrash").join("last-put.txt"))
     }
 
+    /// The Recycle Bin items the latest put moved, by the last-put record.
+    fn last_put_items(prog: &str, items: &[TrashItem]) -> Result<Vec<TrashItem>, i32> {
+        let Some((since, last)) = last_put_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|t| crate::budget::parse_last_put(&t))
+        else {
+            eprintln!("{prog}: no put run recorded");
+            return Err(1);
+        };
+        let rows: Vec<(PathBuf, i64)> = items
+            .iter()
+            .map(|it| (original_of(it), it.time_deleted))
+            .collect();
+        let keep = crate::budget::from_last_put(&rows, &last, since);
+        let picked: Vec<TrashItem> = keep.into_iter().map(|i| items[i].clone()).collect();
+        if picked.is_empty() {
+            eprintln!("{prog}: nothing from the latest put is left in the Recycle Bin");
+            return Err(1);
+        }
+        Ok(picked)
+    }
+
     fn write_last_put(since: i64, moved: &[PathBuf]) {
         let Some(p) = last_put_path() else { return };
         if let Some(d) = p.parent() {
@@ -1450,9 +1472,17 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut plain = false;
         let mut newest_first = false;
         let mut target: Option<PathBuf> = None;
+        let mut last_run = false;
         for arg in args {
             match arg.as_str() {
                 "-f" | "--force" => force = true,
+                "--batch=last" => last_run = true,
+                a if a.starts_with("--batch=") => {
+                    eprintln!(
+                        "{prog}: the Recycle Bin keeps only the latest put run; use --batch=last"
+                    );
+                    return 2;
+                }
                 "--plain" | "--cwd-only" | "--home-only" => plain = true,
                 "--newest-first" => newest_first = true,
                 "--oldest-first" => newest_first = false,
@@ -1470,6 +1500,8 @@ Without PATH, print a numbered list and read an index from stdin.
       --plain   numbered selection instead of the browser
       --newest-first  list the most recently deleted item first
       --oldest-first  list the oldest deleted item first (default)
+      --batch=last  restore every item the latest put moved, by the
+                record put keeps in %LOCALAPPDATA%\\rtrash
       --no-space-check  restore onto another drive even when it would
                 leave less than 5% (or RTRASH_MIN_FREE) free
       --help    display this help and exit
@@ -1503,6 +1535,16 @@ Without PATH, print a numbered list and read an index from stdin.
                 return 1;
             }
         };
+        if last_run {
+            if target.is_some() {
+                eprintln!("{prog}: give PATH or --batch=last, not both");
+                return 2;
+            }
+            return match last_put_items(prog, &items) {
+                Ok(run) => restore_one(prog, run, force),
+                Err(c) => c,
+            };
+        }
         let mut matches: Vec<TrashItem> = match &target {
             Some(t) => {
                 let abs = std::fs::canonicalize(t).unwrap_or_else(|_| t.clone());
@@ -1855,24 +1897,10 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             }
         };
         let items = if batch.is_some() {
-            let Some((since, last)) = last_put_path()
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .and_then(|t| crate::budget::parse_last_put(&t))
-            else {
-                eprintln!("{prog}: no put run recorded");
-                return 1;
-            };
-            let rows: Vec<(PathBuf, i64)> = items
-                .iter()
-                .map(|it| (original_of(it), it.time_deleted))
-                .collect();
-            let keep = crate::budget::from_last_put(&rows, &last, since);
-            let picked: Vec<TrashItem> = keep.into_iter().map(|i| items[i].clone()).collect();
-            if picked.is_empty() {
-                eprintln!("{prog}: nothing from the latest put is left in the Recycle Bin");
-                return 1;
+            match last_put_items(prog, &items) {
+                Ok(p) => p,
+                Err(c) => return c,
             }
-            picked
         } else {
             items
         };

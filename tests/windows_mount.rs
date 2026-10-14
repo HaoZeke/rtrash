@@ -236,3 +236,43 @@ fn list_format_size_and_matchers_read_the_recycle_bin() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn restore_batch_last_brings_back_the_latest_put() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let id = std::process::id();
+    let a = m.join(format!("run-a-{id}.txt"));
+    let b = m.join(format!("run-b-{id}.txt"));
+    for p in [&a, &b] {
+        fs::write(p, b"x").unwrap();
+    }
+    let out = Command::new(bin())
+        .arg("put")
+        .arg(&a)
+        .arg(&b)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!a.exists() && !b.exists());
+    let out = Command::new(bin())
+        .args(["restore", "--batch=last"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(a.exists() && b.exists());
+    let out = Command::new(bin())
+        .args(["restore", "--batch=7"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
