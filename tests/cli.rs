@@ -3874,6 +3874,16 @@ fn rm_carries_the_total_and_trash_stats_total_reads_it() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     let carried = total();
     assert!(carried.contains(r#""items":1,"stale":false"#), "{carried}");
+    // An orphan is not in the total, so removing one keeps it as it is.
+    fs::write(
+        sb.root.join("xdg/Trash/files/orphan.bin"),
+        "o".repeat(7_000),
+    )
+    .unwrap();
+    let out = run(&["rm", "--home-only", "orphan.bin"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.root.join("xdg/Trash/files/orphan.bin").exists());
+    assert_eq!(total(), carried);
     // A fresh measure agrees with the carried total.
     fs::remove_file(sb.root.join("xdg/Trash/rtrash-total")).unwrap();
     assert!(total().contains(r#""bytes":null"#), "{}", total());

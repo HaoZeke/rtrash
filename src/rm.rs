@@ -247,15 +247,18 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             continue;
         }
         // A total current before this item stays current after it: the
-        // item's size and its one count come off. An orphan has no
-        // .trashinfo and no count, so its total is measured again.
-        let carry = info_path
-            .exists()
+        // item's size and its one count come off. The total leaves out
+        // orphans (payloads without a .trashinfo), so removing one leaves
+        // it as it is, and info/ does not change either.
+        let orphan = !info_path.exists();
+        let carry = (!orphan)
             .then(|| crate::trash_total::cached(&entry.dir))
             .flatten()
             .map(|(b, n)| (b.saturating_sub(sz), n.saturating_sub(1)));
         crate::trash_total::touched(&entry.dir);
-        crate::trash_total::forget(&entry.dir);
+        if !orphan {
+            crate::trash_total::forget(&entry.dir);
+        }
         let info_gone = std::fs::remove_file(&info_path);
         if let (Ok(()), Some((b, n))) = (&info_gone, carry) {
             crate::trash_total::store(&entry.dir, b, n);
