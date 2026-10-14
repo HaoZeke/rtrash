@@ -28,6 +28,7 @@ Commands:
   who [OPTION]... PATH...     list the live processes holding PATH
   reap [OPTION]... [DIR]...   trash stale temp entries no live process holds
   finder put|list|restore     macOS Finder Trash with Put Back
+  wsl list|restore            the Windows Recycle Bin from inside WSL
   config [--path|--default]   show the config file and the settings it makes
   setup [OPTION]...           install multi-call links, completions, man page
   keys [OPTION]...            show/sample TUI keybind config (customizable)
@@ -92,6 +93,13 @@ fn main() {
             Some("who") => who::run(&format!("{argv0} who"), &rest[1..]),
             Some("reap") => reap::run(&format!("{argv0} reap"), &rest[1..]),
             Some("finder") => finder::run(&format!("{argv0} finder"), &rest[1..]),
+            #[cfg(unix)]
+            Some("wsl") => rtrash::wsl_bin::run(&format!("{argv0} wsl"), &rest[1..]),
+            #[cfg(not(unix))]
+            Some("wsl") => {
+                eprintln!("{argv0}: wsl works only inside WSL");
+                1
+            }
             Some("config") => config::run(&format!("{argv0} config"), &rest[1..]),
             Some("setup") => setup::run("setup", &rest[1..]),
             #[cfg(feature = "tui")]
