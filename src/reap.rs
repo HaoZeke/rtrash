@@ -1696,17 +1696,24 @@ fn purge_oldest(
     dry_run: bool,
     verbose: bool,
 ) -> (u64, u64) {
-    let Some(drive) = at
-        .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
-        .and_then(|p| {
-            let s = p.to_string_lossy();
-            crate::win_recycle::drive_root_of(Path::new(s.strip_prefix(r"\\?\").unwrap_or(&s)))
-        })
-    else {
+    // The volume that holds `at`: a drive, or a volume mounted on a
+    // folder, whose Recycle Bin is its own.
+    // Without the `\\?\` prefix canonicalize adds, so the drive reads
+    // `C:\` in messages.
+    let Some(at) = at.map(|p| {
+        let c = fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let s = c.to_string_lossy();
+        s.strip_prefix(r"\\?\")
+            .map_or_else(|| c.clone(), PathBuf::from)
+    }) else {
         return need;
     };
-    let (n, bytes, files) =
-        crate::win_recycle::purge_oldest_on(prog, &drive, need, dry_run, verbose);
+    let drive =
+        crate::win_recycle::volume_root(&at).or_else(|| crate::win_recycle::drive_root_of(&at));
+    let Some(drive) = drive else {
+        return need;
+    };
+    let (n, bytes, files) = crate::win_recycle::purge_oldest_on(prog, &at, need, dry_run, verbose);
     purged(dry_run, n);
     if n > 0 {
         eprintln!(

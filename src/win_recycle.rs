@@ -166,14 +166,11 @@ pub fn drive_key(path: &Path) -> u64 {
 #[cfg(windows)]
 pub fn volume_key(path: &Path) -> u64 {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
-    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let w: Vec<u16> = abs.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut root = [0u16; 1024];
-    // SAFETY: `w` is NUL-terminated and `root` is as long as the length passed.
-    if unsafe { GetVolumePathNameW(w.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
+    let Some(root) = volume_root(path) else {
         return drive_key(path);
-    }
+    };
+    let root: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut serial = 0u32;
     // SAFETY: `root` is NUL-terminated; the other outputs are null or a u32.
     let ok = unsafe {
@@ -192,6 +189,33 @@ pub fn volume_key(path: &Path) -> u64 {
         return drive_key(path);
     }
     serial_key(serial)
+}
+
+/// Windows: the root of the volume that holds `path`: `C:\\` for a
+/// plain drive, or the folder a volume is mounted on (`C:\\mnt\\data\\`).
+#[cfg(windows)]
+pub fn volume_root(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetVolumePathNameW;
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let w: Vec<u16> = abs.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut root = [0u16; 1024];
+    // SAFETY: `w` is NUL-terminated and `root` is as long as the length passed.
+    if unsafe { GetVolumePathNameW(w.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
+        return None;
+    }
+    let n = root.iter().position(|&c| c == 0).unwrap_or(root.len());
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&root[..n])))
+}
+
+/// The indices of the Recycle Bin items in `ids` whose volume, by `key`,
+/// is `want`: the items a purge on that volume may take. An unknown
+/// volume (key 0) matches nothing.
+pub fn on_volume(ids: &[PathBuf], key: impl Fn(&Path) -> u64, want: u64) -> Vec<usize> {
+    if want == 0 {
+        return Vec::new();
+    }
+    (0..ids.len()).filter(|&i| key(&ids[i]) == want).collect()
 }
 
 /// The key [`volume_key`] gives a volume serial number: the high bit
@@ -914,16 +938,19 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
     /// (bytes, files) goes, and return (items, bytes, files) taken.
     pub fn purge_oldest_on(
         prog: &str,
-        drive: &Path,
+        at: &Path,
         need: (u64, u64),
         dry_run: bool,
         verbose: bool,
     ) -> (u64, u64, u64) {
         let items: Vec<TrashItem> = match os_limited::list() {
-            Ok(i) => i
-                .into_iter()
-                .filter(|it| drive_root_of(Path::new(&it.id)).as_deref() == Some(drive))
-                .collect(),
+            Ok(all) => {
+                let ids: Vec<PathBuf> = all.iter().map(|it| PathBuf::from(&it.id)).collect();
+                on_volume(&ids, volume_key, volume_key(at))
+                    .into_iter()
+                    .map(|i| all[i].clone())
+                    .collect()
+            }
             Err(e) => {
                 eprintln!("{prog}: cannot list Recycle Bin: {}", err_msg(e));
                 return (0, 0, 0);
@@ -1609,12 +1636,12 @@ pub fn bin_items() -> Vec<(PathBuf, Vec<BinStat>)> {
 #[cfg(windows)]
 pub fn purge_oldest_on(
     prog: &str,
-    drive: &Path,
+    at: &Path,
     need: (u64, u64),
     dry_run: bool,
     verbose: bool,
 ) -> (u64, u64, u64) {
-    os::purge_oldest_on(prog, drive, need, dry_run, verbose)
+    os::purge_oldest_on(prog, at, need, dry_run, verbose)
 }
 
 #[cfg(test)]
@@ -1646,6 +1673,31 @@ mod tests {
         let k = volume_key(&t);
         assert_ne!(k & 1 << 62, 0, "no serial for {}: {k:x}", t.display());
         assert_eq!(volume_key(&t.join("rtrash-no-such-dir")), k);
+    }
+
+    #[test]
+    fn on_volume_takes_the_items_of_a_mounted_volume_apart_from_its_drive() {
+        let ids: Vec<PathBuf> = [
+            r"C:\$Recycle.Bin\S-1\$R1.txt",
+            r"C:\mnt\data\$Recycle.Bin\S-1\$R2.txt",
+            r"D:\$Recycle.Bin\S-1\$R3.txt",
+            r"C:\mnt\data\$Recycle.Bin\S-1\$R4.txt",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        // The mounted folder is a volume of its own, as GetVolumePathNameW
+        // and its serial would tell.
+        let key = |p: &Path| {
+            if p.to_string_lossy().starts_with(r"C:\mnt\data\") {
+                serial_key(7)
+            } else {
+                drive_key(p)
+            }
+        };
+        assert_eq!(on_volume(&ids, key, serial_key(7)), vec![1, 3]);
+        assert_eq!(on_volume(&ids, key, drive_key(Path::new(r"C:\"))), vec![0]);
+        assert_eq!(on_volume(&ids, key, 0), Vec::<usize>::new());
     }
 
     #[test]
