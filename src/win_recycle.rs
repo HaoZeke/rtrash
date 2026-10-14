@@ -479,37 +479,7 @@ pub fn empty_summary_json(
     )
 }
 
-/// Indices of `items` (deletion time, bytes) to purge, in order, so the
-/// rest totals at most `max` bytes: oldest first, or largest first when
-/// `largest` is set (ties go to the older item).
-pub fn pick_budget(items: &[(i64, u64)], max: u64, largest: bool) -> Vec<usize> {
-    let mut total: u64 = items.iter().map(|i| i.1).sum();
-    let mut order: Vec<usize> = (0..items.len()).collect();
-    if largest {
-        order.sort_by(|&a, &b| {
-            items[b]
-                .1
-                .cmp(&items[a].1)
-                .then(items[a].0.cmp(&items[b].0))
-        });
-    } else {
-        order.sort_by(|&a, &b| {
-            items[a]
-                .0
-                .cmp(&items[b].0)
-                .then(items[b].1.cmp(&items[a].1))
-        });
-    }
-    let mut out = Vec::new();
-    for i in order {
-        if total <= max {
-            break;
-        }
-        total -= items[i].1;
-        out.push(i);
-    }
-    out
-}
+pub use crate::budget::pick_budget;
 
 /// What a Recycle Bin item takes, from its `$R` payload path: the size
 /// its `$I` record holds (Windows writes a folder's total there), else
@@ -1211,19 +1181,22 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let Ok(all) = os_limited::list() else {
             return;
         };
-        let (mine, rest): (Vec<TrashItem>, Vec<TrashItem>) = all
-            .into_iter()
-            .partition(|it| moved.contains(&original_of(it)));
-        let size = |it: &TrashItem| recycled_size(Path::new(&it.id));
-        let kept: u64 = mine.iter().map(size).sum();
-        let sized: Vec<(i64, u64)> = rest.iter().map(|it| (it.time_deleted, size(it))).collect();
-        let largest = policy == crate::budget::Policy::Largest;
-        let picked = pick_budget(&sized, max.saturating_sub(kept), largest);
+        let rows: Vec<(PathBuf, i64, u64)> = all
+            .iter()
+            .map(|it| {
+                (
+                    original_of(it),
+                    it.time_deleted,
+                    recycled_size(Path::new(&it.id)),
+                )
+            })
+            .collect();
+        let picked = crate::budget::trim_after_put(&rows, moved, max, policy);
         if picked.is_empty() {
             return;
         }
         let n = picked.len() as u64;
-        let chosen: Vec<TrashItem> = picked.iter().map(|&i| rest[i].clone()).collect();
+        let chosen: Vec<TrashItem> = picked.iter().map(|&i| all[i].clone()).collect();
         match os_limited::purge_all(chosen) {
             Ok(()) if !quiet => eprintln!(
                 "{prog}: removed {} from the Recycle Bins to keep them under {} ({source})",
@@ -2052,15 +2025,6 @@ mod tests {
             empty_summary_json(false, 0, 0, Some(43_200), Some(5)),
             r#"{"dry_run":false,"removed":0,"bytes":0,"days":0.5,"older_than_secs":43200,"max_size":5}"#
         );
-    }
-
-    #[test]
-    fn pick_budget_trims_to_the_size_oldest_or_largest_first() {
-        let items = [(30, 5), (10, 4), (20, 100), (40, 1)];
-        assert_eq!(pick_budget(&items, 200, false), Vec::<usize>::new());
-        assert_eq!(pick_budget(&items, 10, false), vec![1, 2]);
-        assert_eq!(pick_budget(&items, 10, true), vec![2]);
-        assert_eq!(pick_budget(&items, 0, true), vec![2, 0, 1, 3]);
     }
 
     #[test]

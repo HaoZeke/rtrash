@@ -2,6 +2,8 @@
 //! or `policy.max_size`, and which items go first. Shared by the Unix
 //! trash and the Windows Recycle Bin.
 
+use std::path::{Path, PathBuf};
+
 use crate::filters::parse_size;
 
 /// Which items go first when the trash is over budget.
@@ -80,4 +82,98 @@ pub fn budget(prog: &str) -> Option<(u64, Policy, &'static str)> {
         })
         .unwrap_or(Policy::Oldest);
     Some((max, policy, "policy.max_size in the config file"))
+}
+
+/// Indices of `items` (deletion time, bytes) to purge, in order, so the
+/// rest totals at most `max` bytes: oldest first, or largest first when
+/// `largest` is set (ties go to the older item).
+pub fn pick_budget(items: &[(i64, u64)], max: u64, largest: bool) -> Vec<usize> {
+    let mut total: u64 = items.iter().map(|i| i.1).sum();
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    if largest {
+        order.sort_by(|&a, &b| {
+            items[b]
+                .1
+                .cmp(&items[a].1)
+                .then(items[a].0.cmp(&items[b].0))
+        });
+    } else {
+        order.sort_by(|&a, &b| {
+            items[a]
+                .0
+                .cmp(&items[b].0)
+                .then(items[b].1.cmp(&items[a].1))
+        });
+    }
+    let mut out = Vec::new();
+    for i in order {
+        if total <= max {
+            break;
+        }
+        total -= items[i].1;
+        out.push(i);
+    }
+    out
+}
+
+/// Indices of `rows` (original path, deletion time, bytes) a put's trim
+/// removes to bring them under `max`. Rows whose original is in `moved`
+/// (what this put trashed) count toward the total but never go.
+pub fn trim_after_put(
+    rows: &[(PathBuf, i64, u64)],
+    moved: &[PathBuf],
+    max: u64,
+    policy: Policy,
+) -> Vec<usize> {
+    let mine = |p: &Path| moved.iter().any(|m| m == p);
+    let kept: u64 = rows.iter().filter(|r| mine(&r.0)).map(|r| r.2).sum();
+    let rest: Vec<usize> = (0..rows.len()).filter(|&i| !mine(&rows[i].0)).collect();
+    let sized: Vec<(i64, u64)> = rest.iter().map(|&i| (rows[i].1, rows[i].2)).collect();
+    pick_budget(&sized, max.saturating_sub(kept), policy == Policy::Largest)
+        .into_iter()
+        .map(|i| rest[i])
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_put_trim_spares_what_the_put_moved_but_counts_it() {
+        let p = |s: &str| PathBuf::from(s);
+        let rows = vec![
+            (p("/a/old"), 10, 50),
+            (p("/a/new"), 30, 50),
+            (p("/a/mine"), 5, 60),
+            (p("/a/mid"), 20, 10),
+        ];
+        let moved = vec![p("/a/mine")];
+        // 170 in all, budget 100: mine (60, oldest) stays, so the other
+        // three must come down to 40: old goes, then mid, then new.
+        assert_eq!(
+            trim_after_put(&rows, &moved, 100, Policy::Oldest),
+            vec![0, 3, 1]
+        );
+        // Budget 120 leaves room for 60 besides mine: old alone is enough.
+        assert_eq!(trim_after_put(&rows, &moved, 120, Policy::Oldest), vec![0]);
+        // Largest first takes one 50 (the older), never the 60 of mine.
+        assert_eq!(trim_after_put(&rows, &moved, 120, Policy::Largest), vec![0]);
+        // Mine alone over budget: everything else goes, mine stays.
+        assert_eq!(
+            trim_after_put(&rows, &moved, 10, Policy::Oldest),
+            vec![0, 3, 1]
+        );
+        assert!(trim_after_put(&rows, &moved, 1000, Policy::Oldest).is_empty());
+        assert!(trim_after_put(&rows, &[], 1000, Policy::Oldest).is_empty());
+    }
+
+    #[test]
+    fn pick_budget_trims_to_the_size_oldest_or_largest_first() {
+        let items = [(30, 5), (10, 4), (20, 100), (40, 1)];
+        assert_eq!(pick_budget(&items, 200, false), Vec::<usize>::new());
+        assert_eq!(pick_budget(&items, 10, false), vec![1, 2]);
+        assert_eq!(pick_budget(&items, 10, true), vec![2]);
+        assert_eq!(pick_budget(&items, 0, true), vec![2, 0, 1, 3]);
+    }
 }
