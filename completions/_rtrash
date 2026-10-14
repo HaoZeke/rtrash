@@ -221,6 +221,7 @@ restore_opts=(
   '--cwd-only[only items trashed from under the current directory]'
   '--plain[numbered selection even on a TTY]'
   '--no-space-check[copy across devices even when space or inodes run low]'
+  '--batch=[restore one whole put run (an undo --list id, or last)]:batch:'
   '(--oldest-first)--newest-first[list the most recently trashed item first]'
   '--overwrite[same as --force]'
   '--sort=[numbered table order]:order:(date path none)'

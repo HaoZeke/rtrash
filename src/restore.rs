@@ -53,6 +53,8 @@ the index prompt. --newest-first and --oldest-first set the order for both.
       --regex=REGEX  match items whose original path contains REGEX
       --latest    of several matches, restore the most recently trashed
       --all       of several matches, restore every one
+      --batch=ID  restore one whole put run, as `undo ID` does: an ID
+                    from `undo --list`, or last for the latest run
       --json      print {restored, failed, skipped} as JSON on stdout;
                     implies --plain, and the numbered table goes to stderr
       --home-only  only the home trash (skip volume trash)
@@ -136,7 +138,41 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     code
 }
 
+/// `restore --batch=ID|last`: the put run as a unit, which `undo` does.
+/// Only the options undo shares pass through.
+fn by_batch(prog: &str, args: &[String]) -> Option<i32> {
+    let id = args.iter().find_map(|a| a.strip_prefix("--batch="))?;
+    if id.is_empty() {
+        eprintln!("{prog}: --batch needs an ID (or last)");
+        return Some(2);
+    }
+    let mut pass: Vec<String> = Vec::new();
+    for a in args {
+        match a.as_str() {
+            a if a.starts_with("--batch=") => {}
+            "-f" | "--force" | "--overwrite" => pass.push("--force".into()),
+            "--json" | "--home-only" => pass.push(a.to_string()),
+            a if a.starts_with("--conflict=") || a.starts_with("--trash-dir=") => {
+                pass.push(a.to_string())
+            }
+            a => {
+                eprintln!(
+                    "{prog}: --batch takes only --force, --conflict, --json, --home-only and --trash-dir, not '{a}'"
+                );
+                return Some(2);
+            }
+        }
+    }
+    if id != "last" {
+        pass.push(id.to_string());
+    }
+    Some(crate::undo::run(prog, &pass))
+}
+
 fn run_inner(prog: &str, args: &[String]) -> i32 {
+    if let Some(code) = by_batch(prog, args) {
+        return code;
+    }
     let mut conflict = Conflict::Refuse;
     let mut home_only = false;
     let mut cwd_only = false;

@@ -43,7 +43,7 @@ _rtrash_du_opts=(
 
 _rtrash_restore_opts=(
   -f --force --home-only --trash-dir= --cwd-only --plain --no-space-check
-  --newest-first --oldest-first --overwrite --sort= --name= --glob= --regex= --latest --all
+  --newest-first --oldest-first --overwrite --sort= --name= --glob= --regex= --latest --all --batch=
   --to= --conflict= --json --help --version
 )
 

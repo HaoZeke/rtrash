@@ -213,6 +213,7 @@ export extern "rtrash restore" [
     --cwd-only  # without PATH, only items trashed from under the current directory
     --plain  # force numbered line selection even on a TTY (no TUI)
     --no-space-check  # copy across devices even when the copy would leave
+    --batch: string  # restore one whole put run (an undo --list id, or last)
     --newest-first  # list the most recently trashed item first
     --overwrite  # same as --force (trash-cli spelling)
     --sort: string  # numbered table order: date, path or none
@@ -414,6 +415,7 @@ export extern "trash-restore" [
     --cwd-only  # without PATH, only items trashed from under the current directory
     --plain  # force numbered line selection even on a TTY (no TUI)
     --no-space-check  # copy across devices even when the copy would leave
+    --batch: string  # restore one whole put run (an undo --list id, or last)
     --newest-first  # list the most recently trashed item first
     --overwrite  # same as --force (trash-cli spelling)
     --sort: string  # numbered table order: date, path or none

@@ -6146,6 +6146,27 @@ fn verbose_empty_names_original_paths() {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn restore_batch_brings_back_one_put_run() {
+    let sb = Sandbox::new("restbatch");
+    fs::write(sb.work().join("old.txt"), b"o").unwrap();
+    assert!(sb.run(&["put", "old.txt"]).status.success());
+    for n in ["a.txt", "b.txt"] {
+        fs::write(sb.work().join(n), b"x").unwrap();
+    }
+    assert!(sb.run(&["put", "a.txt", "b.txt"]).status.success());
+    let out = sb.run(&["restore", "--home-only", "--batch=last"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(sb.work().join("a.txt").exists() && sb.work().join("b.txt").exists());
+    assert!(!sb.work().join("old.txt").exists());
+    // Options undo does not share are refused.
+    let out = sb.run(&["restore", "--batch=last", "--to=/tmp"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = sb.run(&["restore", "--batch="]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
 #[test]
 fn put_dry_run_checks_and_moves_nothing() {
     let sb = Sandbox::new("putdry");

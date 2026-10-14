@@ -1825,6 +1825,26 @@ and
 .B \-\-latest
 When several items match, restore the most recently trashed one without asking.
 .TP
+.BI \-\-batch =ID
+Restore one whole put run, as
+.B undo
+.I ID
+does:
+.I ID
+comes from
+.BR "undo \-\-list" ,
+and
+.B last
+names the latest run.
+Only
+.BR \-\-force ,
+.BR \-\-conflict ,
+.BR \-\-json ,
+.B \-\-home\-only
+and
+.B \-\-trash\-dir
+go with it.
+.TP
 .B \-\-all
 When several items match, restore every one without asking.
 .TP

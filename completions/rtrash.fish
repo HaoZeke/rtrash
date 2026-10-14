@@ -174,6 +174,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l tr
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l cwd-only -d 'only items trashed from under the current directory'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l plain -d 'numbered selection even on a TTY'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l no-space-check -d 'copy across devices even when space or inodes run low'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l batch -r -d 'restore one whole put run'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l newest-first -d 'list the most recently trashed item first'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l overwrite -d 'same as --force'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l sort -d 'numbered table order' -x -a 'date path none'
@@ -285,6 +286,7 @@ complete -c trash-restore -l trash-dir -r
 complete -c trash-restore -l cwd-only
 complete -c trash-restore -l plain
 complete -c trash-restore -l no-space-check
+complete -c trash-restore -l batch -r
 complete -c trash-restore -l newest-first
 complete -c trash-restore -l overwrite
 complete -c trash-restore -l sort -x -a 'date path none'
