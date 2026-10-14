@@ -223,6 +223,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Mount a disk image as an external volume
+        run: |
+          hdiutil create -size 64m -fs APFS -volname rtrashext -attach "$RUNNER_TEMP/rtrashext.dmg"
+          echo "RTRASH_SMOKE_VOLUME=/Volumes/rtrashext" >> "$GITHUB_ENV"
+
       - name: Finder default against the real Finder
         run: |
           cargo build --locked --release

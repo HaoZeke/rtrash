@@ -52,8 +52,15 @@ pin,
 or
 .B macos.trash
 in the config file selects the FreeDesktop home trash instead.
+An item on an external drive goes to that drive's
+.IR .Trashes/UID ,
+as Finder does it, and the plain commands read
+.I ~/.Trash
+together with the
+.I .Trashes/UID
+of every mounted volume.
 Undo, status, trash-stats and the restore browser cover the Finder
-Trash too.
+trashes too.
 Since Finder keeps no
 .IR .trashinfo ,
 plain put logs each run's items in
@@ -2743,6 +2750,11 @@ trash-rm foo
 .RE
 .fi
 .SH ENVIRONMENT
+.TP
+.B RTRASH_FINDER_VOLUMES
+Extra volume roots, separated by colons, whose
+.I .Trashes/UID
+the Finder Trash commands read, for drives the mount table misses.
 .TP
 .B RTRASH_MACOS_TRASH
 .B finder

@@ -4,8 +4,8 @@
 //!
 //! Finder keeps no `.trashinfo`, so plain put writes each run's items to
 //! an undo log of its own: `$XDG_STATE_HOME/rtrash/finder-undo.tsv`, one
-//! `BATCH<TAB>EPOCH<TAB>NAME<TAB>ORIGINAL` line per item, with NAME and
-//! ORIGINAL percent-encoded. Undo restores the items of a run that still
+//! `BATCH<TAB>EPOCH<TAB>NAME<TAB>ORIGINAL<TAB>TRASH` line per item, the
+//! last three percent-encoded (a line without TRASH means `~/.Trash`). Undo restores the items of a run that still
 //! sit in the trash under the names the log gives.
 
 use std::fs;
@@ -48,13 +48,14 @@ impl Entry {
     }
 }
 
-/// Every item in the Finder home trash, oldest first; none when the trash
-/// is missing.
+/// Every item in every Finder trash ([`finder::trashes`]), oldest first.
 pub fn entries() -> std::io::Result<Vec<Entry>> {
-    let Some(trash) = finder::home_trash() else {
-        return Ok(Vec::new());
-    };
-    from_items(&trash)
+    let mut all = Vec::new();
+    for t in finder::trashes() {
+        all.extend(from_items(&t)?);
+    }
+    all.sort_by(|a, b| a.epoch.cmp(&b.epoch).then_with(|| a.name.cmp(&b.name)));
+    Ok(all)
 }
 
 fn from_items(trash: &Path) -> std::io::Result<Vec<Entry>> {
@@ -124,6 +125,11 @@ pub struct Logged {
     pub epoch: i64,
     pub name: String,
     pub original: PathBuf,
+    pub trash: PathBuf,
+}
+
+fn decode_path(s: &str) -> PathBuf {
+    PathBuf::from(std::ffi::OsString::from_vec(url_decode(s)))
 }
 
 fn parse_line(line: &str) -> Option<Logged> {
@@ -131,12 +137,17 @@ fn parse_line(line: &str) -> Option<Logged> {
     let batch = f.next()?.to_string();
     let epoch = f.next()?.parse().ok()?;
     let name = String::from_utf8_lossy(&url_decode(f.next()?)).into_owned();
-    let original = PathBuf::from(std::ffi::OsString::from_vec(url_decode(f.next()?)));
+    let original = decode_path(f.next()?);
+    let trash = match f.next() {
+        Some(t) => decode_path(t),
+        None => finder::home_trash()?,
+    };
     Some(Logged {
         batch,
         epoch,
         name,
         original,
+        trash,
     })
 }
 
@@ -153,27 +164,27 @@ pub fn log_batch(batch: &str, items: &[(String, PathBuf, PathBuf)]) {
     let Some(path) = log_path() else { return };
     let mut keep: Vec<Logged> = read_log()
         .into_iter()
-        .filter(|l| {
-            finder::home_trash().is_some_and(|t| t.join(&l.name).symlink_metadata().is_ok())
-        })
+        .filter(|l| l.trash.join(&l.name).symlink_metadata().is_ok())
         .collect();
     let now = crate::util::now_epoch();
-    for (name, original, _trash) in items {
+    for (name, original, trash) in items {
         keep.push(Logged {
             batch: batch.to_string(),
             epoch: now,
             name: name.clone(),
             original: original.clone(),
+            trash: trash.clone(),
         });
     }
     let mut body = String::new();
     for l in &keep {
         body.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\n",
             l.batch,
             l.epoch,
             url_encode(l.name.as_bytes()),
-            url_encode(l.original.as_os_str().as_bytes())
+            url_encode(l.original.as_os_str().as_bytes()),
+            url_encode(l.trash.as_os_str().as_bytes())
         ));
     }
     if let Some(dir) = path.parent() {
@@ -188,12 +199,9 @@ pub fn log_batch(batch: &str, items: &[(String, PathBuf, PathBuf)]) {
 
 /// Put runs whose items still sit in the trash, newest first.
 fn runs() -> Vec<(String, Vec<Logged>)> {
-    let Some(trash) = finder::home_trash() else {
-        return Vec::new();
-    };
     let mut by: Vec<(String, Vec<Logged>)> = Vec::new();
     for l in read_log() {
-        if trash.join(&l.name).symlink_metadata().is_err() {
+        if l.trash.join(&l.name).symlink_metadata().is_err() {
             continue;
         }
         match by.iter_mut().find(|(b, _)| *b == l.batch) {
@@ -271,7 +279,6 @@ pub fn undo(
         }
         return 1;
     };
-    let trash = finder::home_trash().unwrap_or_default();
     let (mut restored, mut failed, mut skipped) = (Vec::new(), 0usize, 0usize);
     for l in items {
         let exists = l.original.symlink_metadata().is_ok();
@@ -297,7 +304,7 @@ pub fn undo(
             restored.push(dest);
             continue;
         }
-        match finder::move_back(&trash.join(&l.name), &dest, force) {
+        match finder::move_back(&l.trash.join(&l.name), &dest, force) {
             Ok(()) => {
                 if !json {
                     println!("restored '{}'", crate::util::term_path(&dest));
@@ -326,72 +333,105 @@ pub fn undo(
 
 // ---- status and trash-stats ----
 
-/// `status` on the Finder Trash, in the shape of the FreeDesktop one.
+/// `status` on the Finder trashes, in the shape of the FreeDesktop one.
 pub fn status(prog: &str, json: bool) -> i32 {
-    let Some(trash) = finder::home_trash() else {
-        eprintln!("{prog}: HOME unset; pass --trash-dir");
-        return 2;
-    };
-    let all = match from_items(&trash) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("{prog}: cannot read '{}': {e}", trash.display());
-            return 1;
-        }
-    };
-    let items = all.len() as u64;
-    let bytes: u64 = all
-        .iter()
-        .map(|e| crate::fastdelete::disk_usage(&e.path()))
-        .sum();
-    let unplaced = all.iter().filter(|e| e.original.is_none()).count();
+    struct Row {
+        trash: PathBuf,
+        items: u64,
+        bytes: u64,
+        unplaced: u64,
+    }
+    let mut rows = Vec::new();
+    for trash in finder::trashes() {
+        let all = match from_items(&trash) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("{prog}: cannot read '{}': {e}", trash.display());
+                return 1;
+            }
+        };
+        rows.push(Row {
+            items: all.len() as u64,
+            bytes: all
+                .iter()
+                .map(|e| crate::fastdelete::disk_usage(&e.path()))
+                .sum(),
+            unplaced: all.iter().filter(|e| e.original.is_none()).count() as u64,
+            trash,
+        });
+    }
+    let items: u64 = rows.iter().map(|r| r.items).sum();
+    let bytes: u64 = rows.iter().map(|r| r.bytes).sum();
     if json {
+        let body: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                format!(
+                    "    {{\"path\":\"{}\",\"items\":{},\"bytes\":{},\"orphans\":0,\"dangling\":0,\"finder\":true,\"without_put_back\":{}}}",
+                    crate::util::json_escape(&r.trash.to_string_lossy()),
+                    r.items,
+                    r.bytes,
+                    r.unplaced
+                )
+            })
+            .collect();
         println!(
-            "{{\n  \"roots\": [\n    {{\"path\":\"{}\",\"items\":{items},\"bytes\":{bytes},\"orphans\":0,\"dangling\":0,\"finder\":true,\"without_put_back\":{unplaced}}}\n  ],\n  \"total_items\": {items},\n  \"total_bytes\": {bytes}\n}}",
-            crate::util::json_escape(&trash.to_string_lossy())
+            "{{\n  \"roots\": [\n{}\n  ],\n  \"total_items\": {items},\n  \"total_bytes\": {bytes}\n}}",
+            body.join(",\n")
         );
         return 0;
     }
-    let note = if unplaced > 0 {
-        format!(" ({unplaced} without Put Back)")
-    } else {
-        String::new()
-    };
-    let size = crate::fastdelete::format_bytes(bytes);
-    let n = crate::util::plural(items, "item", "items");
-    println!("{}\t{n}{note}\t{size}", trash.display());
-    println!("Total: {n} ({size})");
-    if let Ok(s) = crate::space::query(&trash) {
+    for r in &rows {
+        let note = if r.unplaced > 0 {
+            format!(" ({} without Put Back)", r.unplaced)
+        } else {
+            String::new()
+        };
         println!(
-            "Free on {}: {}",
-            trash.display(),
-            crate::space::free_line(&s)
+            "{}\t{}{note}\t{}",
+            r.trash.display(),
+            crate::util::plural(r.items, "item", "items"),
+            crate::fastdelete::format_bytes(r.bytes)
         );
+    }
+    println!(
+        "Total: {} ({})",
+        crate::util::plural(items, "item", "items"),
+        crate::fastdelete::format_bytes(bytes)
+    );
+    for r in &rows {
+        if let Ok(s) = crate::space::query(&r.trash) {
+            println!(
+                "Free on {}: {}",
+                r.trash.display(),
+                crate::space::free_line(&s)
+            );
+        }
     }
     0
 }
 
-/// The trash-stats summary of the Finder Trash.
+/// The trash-stats summaries of the Finder trashes.
 pub fn stats(top: usize) -> Vec<crate::trash_stats::Stats> {
-    let Some(trash) = finder::home_trash() else {
-        return Vec::new();
-    };
-    if !trash.is_dir() {
-        return Vec::new();
-    }
-    let items: Vec<crate::trash_stats::Item> = from_items(&trash)
-        .unwrap_or_default()
+    finder::trashes()
         .into_iter()
-        .map(|e| crate::trash_stats::Item {
-            bytes: crate::fastdelete::disk_usage(&e.path()),
-            name: e.name,
-            original: e.shown,
-            date: Some(e.date),
-            epoch: e.epoch,
+        .filter(|t| t.is_dir())
+        .map(|trash| {
+            let items: Vec<crate::trash_stats::Item> = from_items(&trash)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| crate::trash_stats::Item {
+                    bytes: crate::fastdelete::disk_usage(&e.path()),
+                    name: e.name,
+                    original: e.shown,
+                    date: Some(e.date),
+                    epoch: e.epoch,
+                })
+                .collect();
+            let inodes = crate::trash_stats::count_inodes(&trash);
+            crate::trash_stats::summarize(trash, items, inodes, 0, top)
         })
-        .collect();
-    let inodes = crate::trash_stats::count_inodes(&trash);
-    vec![crate::trash_stats::summarize(trash, items, inodes, 0, top)]
+        .collect()
 }
 
 #[cfg(test)]
@@ -405,13 +445,15 @@ mod tests {
             epoch: 1_700_000_000,
             name: "a\tb %é".into(),
             original: PathBuf::from("/x/a\tb %é"),
+            trash: PathBuf::from("/Volumes/X/.Trashes/501"),
         };
         let line = format!(
-            "{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}",
             l.batch,
             l.epoch,
             url_encode(l.name.as_bytes()),
-            url_encode(l.original.as_os_str().as_bytes())
+            url_encode(l.original.as_os_str().as_bytes()),
+            url_encode(l.trash.as_os_str().as_bytes())
         );
         assert_eq!(parse_line(&line), Some(l));
         assert_eq!(parse_line("broken"), None);

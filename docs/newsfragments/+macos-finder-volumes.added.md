@@ -1,0 +1,1 @@
+macOS: plain put sends an item on an external drive to that drive's `.Trashes/UID`, as Finder does, and list, restore, empty, undo, status and trash-stats read every mounted volume's Finder trash with `~/.Trash`. `RTRASH_FINDER_VOLUMES` adds volume roots the mount table misses.

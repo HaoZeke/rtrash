@@ -23,7 +23,7 @@ impl Box_ {
         let fake = root.join("osascript");
         fs::write(
             &fake,
-            "#!/bin/sh\nshift 2\nfor p in \"$@\"; do mv \"$p\" \"$HOME/.Trash/\" || exit 1; done\n",
+            "#!/bin/sh\nshift 2\nmkdir -p \"$HOME/.Trash\"\nfor p in \"$@\"; do mv \"$p\" \"$HOME/.Trash/\" || exit 1; done\n",
         )
         .unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
@@ -221,4 +221,46 @@ fn undo_status_and_trash_stats_cover_the_finder_trash() {
     assert!(out(&o).contains("restored_to"), "{}", out(&o));
     assert!(b.work().join("one").exists() && b.work().join("two").exists());
     assert_eq!(b.run(&["undo"], "").status.code(), Some(1));
+}
+
+#[test]
+fn volume_trashes_join_list_restore_and_status() {
+    use std::os::unix::fs::MetadataExt;
+    let b = Box_::new("vol");
+    let vol = b.root.join("vol");
+    let uid = fs::metadata(&b.root).unwrap().uid();
+    let vt = vol.join(".Trashes").join(uid.to_string());
+    fs::create_dir_all(&vt).unwrap();
+    fs::create_dir_all(vol.join("data")).unwrap();
+    fs::write(vt.join("v.bin"), b"vol").unwrap();
+    let rec = Record {
+        name: "v.bin".into(),
+        code: *b"ptbL",
+        value: Value::Ustr("data/".into()),
+    };
+    fs::write(vt.join(".DS_Store"), ds_store::write(&[rec])).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            .args(args)
+            .current_dir(b.work())
+            .env("HOME", &b.root)
+            .env("XDG_CONFIG_HOME", b.root.join(".config"))
+            .env("RTRASH_MACOS_TRASH", "finder")
+            .env("RTRASH_FINDER_VOLUMES", &vol)
+            .output()
+            .unwrap()
+    };
+    let orig = vol.join("data/v.bin");
+    let o = run(&["list"]);
+    assert!(
+        out(&o).contains(&*orig.to_string_lossy()),
+        "{}{}",
+        out(&o),
+        err(&o)
+    );
+    let o = run(&["status", "--json"]);
+    assert!(out(&o).contains(&*vt.to_string_lossy()), "{}", out(&o));
+    let o = run(&["restore", &orig.to_string_lossy()]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(fs::read(&orig).unwrap(), b"vol");
 }

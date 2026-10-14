@@ -395,13 +395,56 @@ pub fn is_default(pinned: bool) -> bool {
     }
 }
 
-/// Trash `abs` into the Finder Trash for plain put; returns the name it
+/// Every Finder trash of this user that exists: `~/.Trash` first, then
+/// `.Trashes/UID` at the root of each mounted volume. `RTRASH_FINDER_VOLUMES`
+/// adds volume roots, separated by ':', for drives the mount table misses.
+pub fn trashes() -> Vec<PathBuf> {
+    let uid = unsafe { libc::getuid() };
+    let mut out: Vec<PathBuf> = home_trash().into_iter().collect();
+    let extra = std::env::var_os("RTRASH_FINDER_VOLUMES")
+        .map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for root in crate::trashdir::mount_points().into_iter().chain(extra) {
+        let t = root.join(".Trashes").join(uid.to_string());
+        if t.is_dir() && !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// The Finder trash an item at `abs` goes to: `~/.Trash` on the home
+/// volume, else `.Trashes/UID` at the root of the item's volume (the
+/// highest ancestor on the same device).
+pub fn trash_for(abs: &Path, dev: u64) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let home = home_trash()?;
+    let home_dev = home
+        .parent()
+        .and_then(|h| fs::metadata(h).ok())
+        .map(|m| m.dev());
+    if home_dev == Some(dev) {
+        return Some(home);
+    }
+    let mut root = abs.parent()?.to_path_buf();
+    while let Some(up) = root.parent() {
+        match fs::metadata(up) {
+            Ok(m) if m.dev() == dev => root = up.to_path_buf(),
+            _ => break,
+        }
+    }
+    let uid = unsafe { libc::getuid() };
+    Some(root.join(".Trashes").join(uid.to_string()))
+}
+
+/// Trash `abs` into its Finder trash for plain put; returns the name it
 /// got there and the trash. Finder moves it and records Put Back; a
 /// symbolic link, which Finder would follow, moves in as itself without a
-/// record.
+/// record. An item on an external drive goes to that drive's trash, as
+/// Finder does it.
 pub fn put_item(abs: &Path, meta: &fs::Metadata) -> Result<(String, PathBuf), String> {
-    let trash = home_trash().ok_or("HOME unset")?;
-    fs::create_dir_all(&trash).map_err(|e| format!("cannot create '{}': {e}", trash.display()))?;
+    use std::os::unix::fs::MetadataExt;
+    let trash = trash_for(abs, meta.dev()).ok_or("HOME unset")?;
     let names = |t: &Path| -> std::collections::HashSet<std::ffi::OsString> {
         fs::read_dir(t)
             .into_iter()
@@ -411,6 +454,8 @@ pub fn put_item(abs: &Path, meta: &fs::Metadata) -> Result<(String, PathBuf), St
             .collect()
     };
     if meta.file_type().is_symlink() {
+        fs::create_dir_all(&trash)
+            .map_err(|e| format!("cannot create '{}': {e}", trash.display()))?;
         let name = abs.file_name().ok_or("no file name")?;
         let mut dest = trash.join(name);
         if dest.symlink_metadata().is_ok() {
@@ -439,31 +484,6 @@ pub fn put_item(abs: &Path, meta: &fs::Metadata) -> Result<(String, PathBuf), St
     Ok((name, trash))
 }
 
-/// When an item went into a Finder trash: its change time there, which
-/// the move set.
-fn trashed_at(trash: &Path, name: &str) -> i64 {
-    use std::os::unix::fs::MetadataExt;
-    fs::symlink_metadata(trash.join(name)).map_or(0, |m| m.ctime())
-}
-
-/// Finder items oldest first, each with its trash time.
-fn dated_items(trash: &Path) -> std::io::Result<Vec<(Item, i64)>> {
-    let mut v: Vec<(Item, i64)> = items(trash)?
-        .into_iter()
-        .map(|i| {
-            let t = trashed_at(trash, &i.name);
-            (i, t)
-        })
-        .collect();
-    v.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.name.cmp(&b.0.name)));
-    Ok(v)
-}
-
-/// Where a row shows an item: its Put Back place, else its trash path.
-fn shown(trash: &Path, i: &Item) -> PathBuf {
-    i.original.clone().unwrap_or_else(|| trash.join(&i.name))
-}
-
 fn finder_only(prog: &str, what: &str) -> i32 {
     eprintln!(
         "{prog}: {what} does not apply to the Finder Trash; pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop"
@@ -471,52 +491,52 @@ fn finder_only(prog: &str, what: &str) -> i32 {
     2
 }
 
-/// `list` on the Finder Trash: `DATE ORIGINAL` rows, oldest first, as the
-/// FreeDesktop listing prints them (`--json` too).
+fn read_all(prog: &str) -> Result<Vec<crate::finder_shared::Entry>, i32> {
+    crate::finder_shared::entries().map_err(|e| {
+        eprintln!("{prog}: cannot read the Finder Trash: {e}");
+        1
+    })
+}
+
+/// `list` on the Finder trashes: `DATE ORIGINAL` rows, oldest first, as
+/// the FreeDesktop listing prints them (`--json` too).
 pub fn default_list(prog: &str, json: bool, refused: Option<&str>) -> i32 {
     if let Some(what) = refused {
         return finder_only(prog, what);
     }
-    let Some(trash) = home_trash() else {
-        eprintln!("{prog}: HOME unset; pass --trash-dir");
-        return 2;
-    };
-    let rows = match dated_items(&trash) {
+    let rows = match read_all(prog) {
         Ok(r) => r,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => {
-            eprintln!("{prog}: cannot read '{}': {e}", trash.display());
-            return 1;
-        }
+        Err(c) => return c,
     };
     if json {
         let out: Vec<String> = rows
             .iter()
-            .map(|(i, t)| {
-                let orig = i.original.as_ref().map_or("null".to_string(), |o| {
+            .map(|e| {
+                let orig = e.original.as_ref().map_or("null".to_string(), |o| {
                     format!("\"{}\"", json_escape(&o.to_string_lossy()))
                 });
                 format!(
-                    "{{\"date\":\"{}\",\"name\":\"{}\",\"original\":{orig}}}",
-                    crate::info::local_string(*t),
-                    json_escape(&i.name)
+                    "{{\"date\":\"{}\",\"name\":\"{}\",\"trash\":\"{}\",\"original\":{orig}}}",
+                    e.date,
+                    json_escape(&e.name),
+                    json_escape(&e.trash.to_string_lossy())
                 )
             })
             .collect();
         println!("[{}]", out.join(","));
         return 0;
     }
-    for (i, t) in &rows {
+    for e in &rows {
         println!(
             "{} {}",
-            crate::info::local_string(*t).replacen('T', " ", 1),
-            crate::util::term_path(&shown(&trash, i))
+            e.date.replacen('T', " ", 1),
+            crate::util::term_path(&e.shown)
         );
     }
     0
 }
 
-/// `restore` on the Finder Trash. PATH names the item by its Put Back
+/// `restore` on the Finder trashes. PATH names the item by its Put Back
 /// place or its name in the trash; without one, a numbered table offers
 /// every item with a Put Back record and stdin picks, or on a terminal
 /// the restore browser opens unless `plain`.
@@ -530,79 +550,118 @@ pub fn default_restore(
     plain: bool,
     newest_first: Option<bool>,
 ) -> i32 {
-    let Some(trash) = home_trash() else {
-        eprintln!("{prog}: HOME unset; pass --trash-dir");
-        return 2;
+    let rows = match read_all(prog) {
+        Ok(r) => r,
+        Err(c) => return c,
     };
-    let mut args: Vec<String> = vec![format!("--trash-dir={}", trash.display())];
-    match conflict {
-        Conflict::Refuse => {}
-        Conflict::Overwrite => args.push("--conflict=overwrite".into()),
-        Conflict::Rename => args.push("--conflict=rename".into()),
-        Conflict::Skip => args.push("--conflict=skip".into()),
-    }
-    if json {
-        args.push("--json".into());
-    }
-    if all {
-        args.push("--all".into());
+    let placed: Vec<&crate::finder_shared::Entry> =
+        rows.iter().filter(|e| e.original.is_some()).collect();
+    let chosen: Vec<&crate::finder_shared::Entry> = if all {
+        placed
     } else if let Some(t) = target {
         let abs = std::env::current_dir()
             .map(|c| c.join(t))
             .unwrap_or_else(|_| t.to_path_buf());
-        args.push(abs.to_string_lossy().into_owned());
+        let hit: Vec<_> = rows
+            .iter()
+            .filter(|e| e.original.as_deref() == Some(abs.as_path()) || Path::new(&e.name) == t)
+            .collect();
+        if hit.is_empty() {
+            eprintln!(
+                "{prog}: no item named '{}' in the Finder Trash",
+                t.display()
+            );
+            return 1;
+        }
+        // The newest of several items with one Put Back place.
+        vec![*hit.last().unwrap()]
     } else {
+        if placed.is_empty() {
+            eprintln!("{prog}: no trashed files match");
+            return 1;
+        }
         #[cfg(feature = "tui")]
         if !plain && !json && crate::util::stdin_is_tty() {
-            let entries: Vec<crate::finder_shared::Entry> = crate::finder_shared::entries()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|e| e.original.is_some())
-                .collect();
             let newest = newest_first.unwrap_or(true);
-            let mut refs: Vec<&crate::finder_shared::Entry> = entries.iter().collect();
+            let mut refs = placed.clone();
             if newest {
                 refs.reverse();
             }
             return crate::restore_tui::run(prog, refs, conflict == Conflict::Overwrite, newest);
         }
         let _ = (plain, newest_first);
-        let rows: Vec<(Item, i64)> = match dated_items(&trash) {
-            Ok(r) => r
-                .into_iter()
-                .filter(|(i, _)| i.original.is_some())
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        if rows.is_empty() {
-            eprintln!("{prog}: no trashed files match");
-            return 1;
-        }
-        for (k, (i, t)) in rows.iter().enumerate() {
+        for (k, e) in placed.iter().enumerate() {
             println!(
                 "{k:4}  {}  {}",
-                crate::info::local_string(*t).replacen('T', " ", 1),
-                crate::util::term_path(&shown(&trash, i))
+                e.date.replacen('T', " ", 1),
+                crate::util::term_path(&e.shown)
             );
         }
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() || line.trim().is_empty() {
-            eprintln!("{prog}: provide an index 0..{} on stdin", rows.len() - 1);
+            eprintln!("{prog}: provide an index 0..{} on stdin", placed.len() - 1);
             return 1;
         }
-        match crate::restore::parse_selection(&line, rows.len()) {
-            Ok(idx) => args.extend(idx.into_iter().map(|k| rows[k].0.name.clone())),
+        match crate::restore::parse_selection(&line, placed.len()) {
+            Ok(idx) => idx.into_iter().map(|k| placed[k]).collect(),
             Err(e) => {
                 eprintln!("{prog}: invalid selection: {e}");
                 return 1;
             }
         }
+    };
+    let (mut done, mut failed, mut skipped) = (Vec::new(), 0usize, 0usize);
+    for e in chosen {
+        let Some(dest) = e.original.clone() else {
+            eprintln!("{prog}: '{}' has no Put Back record", e.name);
+            failed += 1;
+            continue;
+        };
+        let exists = dest.symlink_metadata().is_ok();
+        let (dest, force) = match (exists, conflict) {
+            (true, Conflict::Skip) => {
+                eprintln!("{prog}: skipping '{}': it exists", dest.display());
+                skipped += 1;
+                continue;
+            }
+            (true, Conflict::Rename) => (crate::restore::free_name(&dest), false),
+            (_, c) => (dest, c == Conflict::Overwrite),
+        };
+        match e.restore_to(&dest, force) {
+            Ok(()) => {
+                if !json {
+                    println!("restored '{}'", crate::util::term_path(&dest));
+                }
+                done.push((e, dest));
+            }
+            Err(err) => {
+                eprintln!("{prog}: {err}");
+                failed += 1;
+            }
+        }
     }
-    restore(prog, &args)
+    if json {
+        let rows: Vec<String> = done
+            .iter()
+            .map(|(e, d)| {
+                format!(
+                    "{{\"name\":\"{}\",\"restored_to\":\"{}\"}}",
+                    json_escape(&e.name),
+                    json_escape(&d.to_string_lossy())
+                )
+            })
+            .collect();
+        println!(
+            "{{\"restored\":[{}],\"failed\":{failed},\"skipped\":{skipped}}}",
+            rows.join(",")
+        );
+    }
+    i32::from(failed > 0)
 }
 
-/// `empty` on the Finder Trash: remove every item, or with `cutoff` only
-/// those trashed before it. `.DS_Store` stays; Finder drops stale records.
+/// `empty` on the Finder trashes: remove every item, or with `cutoff`
+/// only those trashed before it. `.DS_Store` stays; Finder drops stale
+/// records.
 pub fn default_empty(
     prog: &str,
     cutoff: Option<i64>,
@@ -610,25 +669,17 @@ pub fn default_empty(
     verbose: bool,
     json: bool,
 ) -> i32 {
-    let Some(trash) = home_trash() else {
-        eprintln!("{prog}: HOME unset; pass --trash-dir");
-        return 2;
-    };
-    let rows = match dated_items(&trash) {
+    let rows = match read_all(prog) {
         Ok(r) => r,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => {
-            eprintln!("{prog}: cannot read '{}': {e}", trash.display());
-            return 1;
-        }
+        Err(c) => return c,
     };
     let mut removed = 0u64;
     let mut failed = 0u64;
-    for (i, t) in rows {
-        if cutoff.is_some_and(|c| t >= c) {
+    for e in rows {
+        if cutoff.is_some_and(|c| e.epoch >= c) {
             continue;
         }
-        let path = trash.join(&i.name);
+        let path = e.path();
         if dry_run {
             if !json {
                 println!("would remove {}", crate::util::term_path(&path));
@@ -643,8 +694,8 @@ pub fn default_empty(
                     println!("removed {}", crate::util::term_path(&path));
                 }
             }
-            Err(e) => {
-                eprintln!("{prog}: cannot remove '{}': {e}", path.display());
+            Err(err) => {
+                eprintln!("{prog}: cannot remove '{}': {err}", path.display());
                 failed += 1;
             }
         }
@@ -732,6 +783,24 @@ fn put(prog: &str, _args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trash_for_picks_home_or_the_volume_root() {
+        use std::os::unix::fs::MetadataExt;
+        let home = std::env::temp_dir().join(format!("rtrash-tf-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        // HOME is process-wide; read it back instead of changing it.
+        let Some(h) = home_trash() else { return };
+        let hdev = fs::metadata(h.parent().unwrap()).map(|m| m.dev());
+        if let Ok(dev) = hdev {
+            assert_eq!(trash_for(&h.parent().unwrap().join("x"), dev), Some(h));
+        }
+        // A device no ancestor has stops at the parent directory.
+        let f = home.join("sub/f");
+        let got = trash_for(&f, u64::MAX).unwrap();
+        assert!(got.starts_with(home.join("sub/.Trashes")), "{got:?}");
+        let _ = fs::remove_dir_all(&home);
+    }
     use crate::ds_store::{Record, Value};
 
     fn ustr(name: &str, code: &[u8; 4], s: &str) -> Record {

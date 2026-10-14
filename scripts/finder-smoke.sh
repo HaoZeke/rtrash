@@ -61,6 +61,18 @@ echo undo > "$i"
 [[ $(cat "$i") == undo ]] || fail "undo content"
 echo "ok   undo, status and trash-stats"
 
+# An item on another volume goes to that volume's .Trashes/UID.
+if [[ -n ${RTRASH_SMOKE_VOLUME:-} ]]; then
+  v="$RTRASH_SMOKE_VOLUME/rtrash smoke.txt"
+  echo vol > "$v"
+  "$rt" put "$v" || fail "put on the volume"
+  [[ -d $RTRASH_SMOKE_VOLUME/.Trashes/$(id -u) ]] || fail "no volume trash"
+  listed "$v" || fail "list does not show the volume item"
+  "$rt" restore "$v" || fail "restore on the volume"
+  [[ $(cat "$v") == vol ]] || fail "volume restore content"
+  echo "ok   external volume"
+fi
+
 # The FreeDesktop trash stays reachable.
 h="$work/fdo.txt"
 echo fdo > "$h"
