@@ -10,6 +10,12 @@
 //!
 //! The shared extents met during a scan are kept by physical range, so
 //! the report can say how much space they take when each counts once.
+//!
+//! Mapping costs a syscall or more per file, so a [`Probe`] maps only
+//! files of at least [`PROBE_MIN`] bytes on disk (`RTRASH_EXTENT_MIN`
+//! overrides it) on file systems that can share extents: btrfs, XFS,
+//! bcachefs and OCFS2 on Linux, APFS on macOS. Every other file counts
+//! as unique, which smaller files on those file systems seldom are not.
 
 use std::collections::HashMap;
 
@@ -136,6 +142,99 @@ pub fn file_share(file: &std::fs::File, disk: u64) -> FileShare {
             shared: Vec::new(),
         },
     }
+}
+
+/// Files with fewer bytes on disk than this are not mapped.
+pub const PROBE_MIN: u64 = 64 * 1024;
+
+/// [`PROBE_MIN`], or `RTRASH_EXTENT_MIN` when it holds a size.
+pub fn probe_min() -> u64 {
+    static MIN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MIN.get_or_init(|| {
+        std::env::var("RTRASH_EXTENT_MIN")
+            .ok()
+            .and_then(|v| crate::filters::parse_size(&v))
+            .unwrap_or(PROBE_MIN)
+    })
+}
+
+/// Maps files only where it can pay: above [`probe_min`] and on file
+/// systems that share extents, asked once per device.
+#[derive(Debug, Default)]
+pub struct Probe {
+    shares: std::sync::Mutex<HashMap<u64, bool>>,
+}
+
+impl Probe {
+    /// The open file, when one of `disk` bytes on `dev` is worth
+    /// mapping; `open` runs only then.
+    pub fn wants(
+        &self,
+        dev: u64,
+        disk: u64,
+        open: impl FnOnce() -> Option<std::fs::File>,
+    ) -> Option<std::fs::File> {
+        if disk < probe_min() {
+            return None;
+        }
+        let known = self.shares.lock().ok().and_then(|m| m.get(&dev).copied());
+        if known == Some(false) {
+            return None;
+        }
+        let f = open()?;
+        if known.is_none() {
+            let may = fs_may_share(&f);
+            if let Ok(mut m) = self.shares.lock() {
+                m.insert(dev, may);
+            }
+            if !may {
+                return None;
+            }
+        }
+        Some(f)
+    }
+}
+
+/// Whether the file system holding `file` can share extents between
+/// files. An error says yes, leaving the answer to the extent map.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[allow(clippy::unnecessary_cast)]
+pub fn fs_may_share(file: &std::fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+    const BTRFS: i64 = 0x9123_683E;
+    const XFS: i64 = 0x5846_5342;
+    const BCACHEFS: i64 = 0xCA45_1A4E;
+    const OCFS2: i64 = 0x7461_636F;
+    let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: the fd is open and `buf` is a plain C struct.
+    if unsafe { libc::fstatfs(file.as_raw_fd(), &mut buf) } != 0 {
+        return true;
+    }
+    // f_type is signed on some targets; compare its low 32 bits.
+    matches!(
+        buf.f_type as i64 & 0xFFFF_FFFF,
+        BTRFS | XFS | BCACHEFS | OCFS2
+    )
+}
+
+/// Whether the file system holding `file` is APFS, which clones files.
+#[cfg(target_os = "macos")]
+pub fn fs_may_share(file: &std::fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
+    // SAFETY: the fd is open and `buf` is a plain C struct.
+    if unsafe { libc::fstatfs(file.as_raw_fd(), &mut buf) } != 0 {
+        return true;
+    }
+    // SAFETY: f_fstypename is a NUL-terminated name.
+    let name = unsafe { std::ffi::CStr::from_ptr(buf.f_fstypename.as_ptr()) };
+    name.to_bytes() == b"apfs"
+}
+
+/// No other platform maps extents.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+pub fn fs_may_share(_file: &std::fs::File) -> bool {
+    false
 }
 
 #[cfg(unix)]
@@ -398,6 +497,28 @@ mod tests {
             s.unique
         );
         assert!(s.shared.is_empty());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn probe_skips_small_files_and_asks_each_device_once() {
+        let p = std::env::temp_dir().join(format!("rtrash-probe-{}", std::process::id()));
+        std::fs::write(&p, b"x").unwrap();
+        let probe = Probe::default();
+        let opens = std::cell::Cell::new(0);
+        let open = || {
+            opens.set(opens.get() + 1);
+            std::fs::File::open(&p).ok()
+        };
+        assert!(probe.wants(1, probe_min() - 1, open).is_none());
+        assert_eq!(opens.get(), 0, "a small file was opened");
+        let first = probe.wants(1, probe_min(), open).is_some();
+        assert_eq!(opens.get(), 1);
+        assert_eq!(first, fs_may_share(&std::fs::File::open(&p).unwrap()));
+        let again = probe.wants(1, probe_min(), open).is_some();
+        assert_eq!(again, first);
+        // A device that shares nothing is not opened again.
+        assert_eq!(opens.get(), if first { 2 } else { 1 });
         let _ = std::fs::remove_file(&p);
     }
 

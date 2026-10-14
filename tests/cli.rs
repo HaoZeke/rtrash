@@ -3005,6 +3005,87 @@ fn put_warns_about_an_open_file_and_refuses_it_on_request() {
     assert!(stderr_of(&out).is_empty());
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_shared_reports_what_a_delete_frees() {
+    let sb = Sandbox::new("reap-shared");
+    let tmp = sb.root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let big = tmp.join("big.bin");
+    fs::write(&big, vec![7u8; 256 * 1024]).unwrap();
+    // An APFS clone shares every byte with big.bin.
+    let clone = tmp.join("clone.bin");
+    let cloned = cfg!(target_os = "macos")
+        && Command::new("cp")
+            .args(["-c", big.to_str().unwrap(), clone.to_str().unwrap()])
+            .status()
+            .is_ok_and(|s| s.success());
+    for p in [&big, &clone] {
+        if p.exists() {
+            let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+            fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new()
+                        .set_accessed(day_ago)
+                        .set_modified(day_ago),
+                )
+                .unwrap();
+        }
+    }
+    let tmp_arg = tmp.to_str().unwrap();
+    let out = sb.run(&[
+        "reap",
+        "--older-than=1h",
+        "--age-by=m",
+        "--dry-run",
+        "--shared",
+        "--json",
+        tmp_arg,
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(
+        text.contains(r#""shared":"#) && text.contains(r#""unique":"#),
+        "{text}"
+    );
+    let field = |entry: &str, key: &str| -> u64 {
+        let at = text
+            .find(entry)
+            .unwrap_or_else(|| panic!("{entry} missing: {text}"));
+        let rest = &text[at..];
+        let v = &rest[rest.find(&format!("\"{key}\":")).unwrap() + key.len() + 3..];
+        v[..v.find(|c: char| !c.is_ascii_digit()).unwrap()]
+            .parse()
+            .unwrap()
+    };
+    let (bytes, unique) = (field("big.bin", "bytes"), field("big.bin", "unique"));
+    assert!(unique <= bytes, "{text}");
+    if cloned {
+        assert!(
+            field("clone.bin", "unique") < field("clone.bin", "bytes"),
+            "{text}"
+        );
+    }
+    let out = sb.run(&[
+        "reap",
+        "--older-than=1h",
+        "--age-by=m",
+        "--dry-run",
+        "--shared",
+        tmp_arg,
+    ]);
+    assert!(stdout_of(&out).contains(", frees "), "{}", stdout_of(&out));
+    assert!(
+        stderr_of(&out).contains("in extents shared with other files"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(big.exists());
+}
+
 /// A file in `dir` whose access and modification times are a day old.
 fn stale_file(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);

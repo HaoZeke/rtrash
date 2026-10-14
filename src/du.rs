@@ -749,6 +749,9 @@ struct Ctx<'a> {
     top_files: SharedTop,
     /// Shared extents met so far (`--unique`).
     shared: std::sync::Mutex<crate::du_extent::SharedSet>,
+    /// Which files are worth an extent map.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    probe: crate::du_extent::Probe,
     /// A directory was skipped because the scan was asked to stop.
     cut: std::sync::atomic::AtomicBool,
     /// File type totals (`--types`), merged once per directory chunk.
@@ -791,7 +794,7 @@ impl Ctx<'_> {
             if !st.is_file() || disk == 0 {
                 return whole;
             }
-            let Ok(f) = dir.open_file(name) else {
+            let Some(f) = self.probe.wants(st.dev, disk, || dir.open_file(name).ok()) else {
                 return whole;
             };
             self.note_shares(st.dev, crate::du_extent::file_share(&f, disk))
@@ -1649,6 +1652,7 @@ fn scan_pooled(
             top_dirs: SharedTop::new(opts.top, opts.sort),
             top_files: SharedTop::new(file_cap, opts.sort),
             shared: Default::default(),
+            probe: Default::default(),
             cut: Default::default(),
             types: Default::default(),
         };
@@ -1763,9 +1767,9 @@ fn root_file_share(
         if !st.is_file() || disk == 0 {
             return whole;
         }
-        match fs::File::open(path) {
-            Ok(f) => ctx.note_shares(st.dev, crate::du_extent::file_share(&f, disk)),
-            Err(_) => whole,
+        match ctx.probe.wants(st.dev, disk, || fs::File::open(path).ok()) {
+            Some(f) => ctx.note_shares(st.dev, crate::du_extent::file_share(&f, disk)),
+            None => whole,
         }
     }
     #[cfg(not(unix))]

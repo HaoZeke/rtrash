@@ -727,7 +727,11 @@ JSON rows and roots gain
 .BR unique ,
 and the report gains
 .BR shared .
-Mapping extents costs time on every file, so the plain listing skips it.
+Mapping extents costs time, so the plain listing skips it, and even
+then only files of at least 64 KiB on disk
+.RB ( RTRASH_EXTENT_MIN )
+are mapped, and only on btrfs, XFS, bcachefs, OCFS2 and APFS; any
+other file counts as unique.
 Not with
 .BR \-f ", " \-o ", " \-\-stacks " or " \-i .
 .TP
@@ -1753,6 +1757,21 @@ Always use the home trash.
 .BR \-v ", " \-\-verbose
 Also print each entry kept and why.
 .TP
+.B \-\-shared
+Also give what a delete would free, measured before anything goes: each
+entry's bytes in extents no other file shares, then the extents that
+reflinks or snapshots share, counted once across all entries.
+These go only when no file outside the entries still uses them, so the
+total frees at least the first figure and at most both.
+Extents are read as for
+.BR "du \-\-unique" ;
+JSON entries gain
+.I unique
+and the object gains
+.I unique
+and
+.IR shared .
+.TP
 .B \-\-json
 Print a JSON object:
 .IR dry_run ,
@@ -2108,6 +2127,15 @@ inodes.
 It overrides
 .B policy.min_free
 in the config file.
+.TP
+.B RTRASH_EXTENT_MIN
+The smallest size on disk, such as 16K, of a file whose extents
+.BR "du \-\-unique" ,
+.B du \-\-shared
+and
+.B reap \-\-shared
+map; smaller files count as unique.
+The default is 64K.
 .TP
 .B RTRASH_REAP_ROOTS
 A path list like

@@ -1,0 +1,1 @@
+`rtrash reap --shared` gives what a delete would free next to the apparent size, counting reflinked and snapshot extents once, and extent maps are now read only for files of at least 64 KiB (`RTRASH_EXTENT_MIN`) on file systems that share extents, which keeps `du --unique` and `du --shared` fast elsewhere.

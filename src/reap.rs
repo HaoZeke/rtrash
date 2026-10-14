@@ -45,6 +45,9 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
       --trash-dir=PATH  put into this trash root instead of the usual one
       --home-only       always use the home trash
   -v, --verbose         also show each skipped entry and why
+      --shared          also show what a delete would free: the bytes in
+                          extents no other file shares, and the extents
+                          shared by reflinks or snapshots, counted once
       --json            print a JSON object ({dry_run, older_than,
                           profiles, reaped, skipped, failed})
       --help            display this help and exit
@@ -310,6 +313,8 @@ struct Outcome {
     age: i64,
     bytes: u64,
     skip: Option<String>,
+    /// Bytes only this entry uses (`--shared`).
+    unique: Option<u64>,
 }
 
 /// The entries of one profile, or of the plain directories (`tmp`).
@@ -352,6 +357,7 @@ fn judge(path: &Path, parent_dev: u64, gi: usize, g: &Group, ctx: &Ctx) -> Optio
         age: ctx.now - ctx.age_by.newest(&m),
         bytes: 0,
         skip: None,
+        unique: None,
     };
     let name = path
         .file_name()
@@ -462,6 +468,31 @@ mod plat {
     pub fn bytes(m: &fs::Metadata) -> u64 {
         m.blocks() * 512
     }
+    /// False for a further name of a file already counted.
+    pub fn first_link(m: &fs::Metadata, seen: &mut std::collections::HashSet<(u64, u64)>) -> bool {
+        m.is_dir() || m.nlink() < 2 || seen.insert((m.dev(), m.ino()))
+    }
+    /// A file's bytes no other file shares, from its extent map when the
+    /// probe finds that worth asking for.
+    pub fn file_unique(
+        p: &Path,
+        m: &fs::Metadata,
+        disk: u64,
+        probe: &crate::du_extent::Probe,
+        set: &mut crate::du_extent::SharedSet,
+    ) -> u64 {
+        if !m.is_file() {
+            return disk;
+        }
+        match probe.wants(m.dev(), disk, || fs::File::open(p).ok()) {
+            Some(f) => {
+                let s = crate::du_extent::file_share(&f, disk);
+                set.add(m.dev(), &s.shared);
+                s.unique
+            }
+            None => disk,
+        }
+    }
     pub fn atime(m: &fs::Metadata) -> i64 {
         m.atime()
     }
@@ -537,6 +568,23 @@ mod plat {
     }
     pub fn bytes(m: &fs::Metadata) -> u64 {
         m.len()
+    }
+    /// Windows hard links are rare enough to count each name.
+    pub fn first_link(
+        _m: &fs::Metadata,
+        _seen: &mut std::collections::HashSet<(u64, u64)>,
+    ) -> bool {
+        true
+    }
+    /// Windows gives no extent map here, so a file counts in full.
+    pub fn file_unique(
+        _p: &Path,
+        _m: &fs::Metadata,
+        disk: u64,
+        _probe: &crate::du_extent::Probe,
+        _set: &mut crate::du_extent::SharedSet,
+    ) -> u64 {
+        disk
     }
     pub fn atime(m: &fs::Metadata) -> i64 {
         secs(m.last_access_time())
@@ -694,6 +742,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut action: Option<Action> = None;
     let mut verbose = false;
     let mut json = false;
+    let mut shared = false;
     let mut list = false;
     let mut use_tool = false;
     let mut profiles: Vec<String> = Vec::new();
@@ -728,6 +777,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--permanent" => action = Some(Action::Permanent),
             "--trash" => action = Some(Action::Trash),
             "--json" => json = true,
+            "--shared" => shared = true,
             "--home-only" => dest.home_only = true,
             "--list-profiles" => list = true,
             "--tool" => use_tool = true,
@@ -952,6 +1002,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
+    // Measured before anything goes, while the extents still exist.
+    let mut shared_set = crate::du_extent::SharedSet::default();
+    if shared {
+        let probe = crate::du_extent::Probe::default();
+        for o in outcomes.iter_mut().filter(|o| o.skip.is_none()) {
+            o.unique = Some(unique_bytes(&o.path, &probe, &mut shared_set));
+        }
+    }
+    let shared_once = shared_set.distinct();
     let mut failed = 0usize;
     let mut reaped: Vec<&Outcome> = Vec::new();
     for o in &outcomes {
@@ -992,11 +1051,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             .iter()
             .map(|o| {
                 format!(
-                    r#"{{"path":"{}","profile":"{}","age":{},"bytes":{}}}"#,
+                    r#"{{"path":"{}","profile":"{}","age":{},"bytes":{}{}}}"#,
                     path_json(&o.path),
                     json_escape(&groups[o.group].name),
                     o.age,
-                    o.bytes
+                    o.bytes,
+                    o.unique
+                        .map_or(String::new(), |u| format!(r#","unique":{u}"#))
                 )
             })
             .collect();
@@ -1034,11 +1095,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             })
             .collect();
         println!(
-            r#"{{"dry_run":{dry_run},"older_than":{},"profiles":[{}],"reaped":[{}],"skipped":[{}],"failed":{failed}}}"#,
+            r#"{{"dry_run":{dry_run},"older_than":{},"profiles":[{}],"reaped":[{}],"skipped":[{}],"failed":{failed}{}}}"#,
             older.unwrap_or(10 * 86_400),
             g.join(","),
             r.join(","),
-            s.join(",")
+            s.join(","),
+            if shared {
+                let u: u64 = reaped.iter().filter_map(|o| o.unique).sum();
+                format!(r#","unique":{u},"shared":{shared_once}"#)
+            } else {
+                String::new()
+            }
         );
         return status;
     }
@@ -1050,8 +1117,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         } else {
             "trashed"
         };
+        let frees = o.unique.map_or(String::new(), |u| {
+            format!(", frees {}", crate::util::format_bytes(u))
+        });
         println!(
-            "{verb} '{}' ({} old, {})",
+            "{verb} '{}' ({} old, {}{frees})",
             crate::util::term_path(&o.path),
             fmt_age(o.age),
             crate::util::format_bytes(o.bytes)
@@ -1092,7 +1162,46 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         crate::util::format_bytes(total),
         outcomes.iter().filter(|o| o.skip.is_some()).count()
     );
+    if shared {
+        let u: u64 = reaped.iter().filter_map(|o| o.unique).sum();
+        eprintln!(
+            "{prog}: frees {}, and up to {} more in extents shared with other files",
+            crate::util::format_bytes(u),
+            crate::util::format_bytes(shared_once)
+        );
+    }
     status
+}
+
+/// Bytes on disk only the tree at `path` uses: what deleting it frees
+/// at least. Shared extents of its files go to `set`, counted once
+/// across every entry. Without an extent map a file counts in full.
+fn unique_bytes(
+    path: &Path,
+    probe: &crate::du_extent::Probe,
+    set: &mut crate::du_extent::SharedSet,
+) -> u64 {
+    let mut total = 0u64;
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let Ok(m) = fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if !plat::first_link(&m, &mut seen) {
+            continue;
+        }
+        let disk = plat::bytes(&m);
+        if m.is_dir() {
+            total = total.saturating_add(disk);
+            if let Ok(rd) = fs::read_dir(&p) {
+                stack.extend(rd.flatten().map(|e| e.path()));
+            }
+            continue;
+        }
+        total = total.saturating_add(plat::file_unique(&p, &m, disk, probe, set));
+    }
+    total
 }
 
 #[cfg(test)]
