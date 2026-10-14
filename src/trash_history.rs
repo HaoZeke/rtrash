@@ -59,17 +59,29 @@ pub fn append(path: &Path, event: &str, bytes: u64, items: u64) {
     }
 }
 
-/// Windows: the history file of the Recycle Bin of drive `root` (`C:\\`).
+/// Windows: the history file of the Recycle Bin of volume `root`: a
+/// drive (`C:\\`, in `C.txt`) or a folder a volume is mounted on (in
+/// `vol-SERIAL.txt`).
 #[cfg(windows)]
 pub fn bin_path(root: &Path) -> Option<std::path::PathBuf> {
-    let letter = root.to_str()?.chars().next()?.to_ascii_uppercase();
+    let s = root.to_str()?;
+    let name = crate::win_recycle::history_name(s, crate::win_recycle::volume_key(root));
     let base = std::env::var_os("LOCALAPPDATA")?;
     Some(
         std::path::PathBuf::from(base)
             .join("rtrash")
             .join("history")
-            .join(format!("{letter}.txt")),
+            .join(name),
     )
+}
+
+/// Windows: every volume with a Recycle Bin to follow: the drives, then
+/// the folders volumes are mounted on.
+#[cfg(windows)]
+pub fn bin_roots() -> Vec<std::path::PathBuf> {
+    let mut v = crate::win_recycle::bin_drives();
+    v.extend(crate::win_recycle::mounted_volumes());
+    v
 }
 
 /// Windows: items and bytes in each drive's Recycle Bin, for
@@ -79,7 +91,7 @@ pub type BinSnapshot = Vec<(std::path::PathBuf, Option<(u64, u64)>)>;
 
 #[cfg(windows)]
 pub fn bin_snapshot() -> BinSnapshot {
-    crate::win_recycle::bin_drives()
+    bin_roots()
         .into_iter()
         .map(|r| {
             let q = crate::win_recycle::query_bin(&r);

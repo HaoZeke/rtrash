@@ -208,6 +208,85 @@ pub fn volume_root(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsString::from_wide(&root[..n])))
 }
 
+/// Windows: the root of the volume whose Recycle Bin holds the item at
+/// `id`: its drive, or the folder its volume is mounted on.
+#[cfg(windows)]
+pub fn bin_root_of(id: &Path) -> Option<PathBuf> {
+    volume_root(id)
+        .map(|r| {
+            let s = r.to_string_lossy();
+            s.strip_prefix(r"\\?\")
+                .map_or_else(|| r.clone(), PathBuf::from)
+        })
+        .or_else(|| drive_root_of(id))
+}
+
+/// Windows: the folders that volumes are mounted on (not drive roots),
+/// each with a trailing backslash, for the history of their Recycle Bins.
+#[cfg(windows)]
+pub fn mounted_volumes() -> Vec<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetVolumePathNamesForVolumeNameW,
+    };
+    let mut out = Vec::new();
+    let mut name = [0u16; 64];
+    // SAFETY: `name` is as long as the length passed.
+    let h = unsafe { FindFirstVolumeW(name.as_mut_ptr(), name.len() as u32) };
+    if h == INVALID_HANDLE_VALUE {
+        return out;
+    }
+    loop {
+        let mut paths = vec![0u16; 4096];
+        let mut len = 0u32;
+        // SAFETY: `name` is NUL-terminated; `paths` is as long as passed.
+        let ok = unsafe {
+            GetVolumePathNamesForVolumeNameW(
+                name.as_ptr(),
+                paths.as_mut_ptr(),
+                paths.len() as u32,
+                &mut len,
+            )
+        };
+        if ok != 0 {
+            // A list of NUL-terminated strings, ending in an empty one.
+            for p in paths.split(|&c| c == 0).take_while(|p| !p.is_empty()) {
+                let p = PathBuf::from(std::ffi::OsString::from_wide(p));
+                if mounted_folder(&p.to_string_lossy()) {
+                    out.push(p);
+                }
+            }
+        }
+        // SAFETY: `h` came from FindFirstVolumeW; `name` as above.
+        if unsafe { FindNextVolumeW(h, name.as_mut_ptr(), name.len() as u32) } == 0 {
+            break;
+        }
+    }
+    // SAFETY: `h` came from FindFirstVolumeW and is closed once.
+    unsafe { FindVolumeClose(h) };
+    out.sort();
+    out
+}
+
+/// A volume path that is a folder rather than a drive root (`C:\\`).
+pub fn mounted_folder(path: &str) -> bool {
+    let b = path.as_bytes();
+    let root = b.len() <= 3 && b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
+    !root && !path.is_empty()
+}
+
+/// The name of the history file for the Recycle Bin of volume `root`:
+/// `C.txt` for a drive root, else `vol-SERIAL.txt` from its volume key.
+pub fn history_name(root: &str, key: u64) -> String {
+    match root.as_bytes() {
+        [l, b':', ..] if !mounted_folder(root) && l.is_ascii_alphabetic() => {
+            format!("{}.txt", char::from(l.to_ascii_uppercase()))
+        }
+        _ => format!("vol-{:08x}.txt", key & 0xffff_ffff),
+    }
+}
+
 /// The indices of the Recycle Bin items in `ids` whose volume, by `key`,
 /// is `want`: the items a purge on that volume may take. An unknown
 /// volume (key 0) matches nothing.
@@ -993,7 +1072,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut out: Vec<(PathBuf, Vec<BinStat>)> = Vec::new();
         for it in os_limited::list().unwrap_or_default() {
             let p = Path::new(&it.id);
-            let Some(drive) = drive_root_of(p) else {
+            let Some(drive) = bin_root_of(p) else {
                 continue;
             };
             let bin = drive.join("$Recycle.Bin");
@@ -1698,6 +1777,18 @@ mod tests {
         assert_eq!(on_volume(&ids, key, serial_key(7)), vec![1, 3]);
         assert_eq!(on_volume(&ids, key, drive_key(Path::new(r"C:\"))), vec![0]);
         assert_eq!(on_volume(&ids, key, 0), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn history_files_are_named_by_drive_letter_or_volume_serial() {
+        assert!(!mounted_folder(r"C:\"));
+        assert!(!mounted_folder("d:"));
+        assert!(mounted_folder(r"C:\rtrash-mnt\"));
+        assert_eq!(history_name(r"c:\", 0), "C.txt");
+        assert_eq!(
+            history_name(r"C:\rtrash-mnt\", serial_key(0x1234_abcd)),
+            "vol-1234abcd.txt"
+        );
     }
 
     #[test]

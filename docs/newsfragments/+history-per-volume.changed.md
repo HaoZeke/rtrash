@@ -1,0 +1,1 @@
+On Windows, the trash history follows each volume mounted on a folder in a file of its own, `vol-SERIAL.txt`, and `trash-stats` groups the Recycle Bin items of such a volume under its folder instead of under the drive above it.

@@ -93,3 +93,43 @@ fn purge_takes_the_mounted_volume_recycle_bin_only() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// A put on the mounted folder adds a line to that volume's own history
+/// file, named by its serial, not to the history of drive C.
+#[test]
+fn put_on_a_mounted_volume_writes_its_own_history() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let local = std::env::temp_dir().join(format!("rtrash-mount-hist-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&local);
+    let p = m.join(format!("rtrash-hist-{}.txt", std::process::id()));
+    fs::write(&p, "h").unwrap();
+    let out = Command::new(bin())
+        .arg("put")
+        .arg(&p)
+        .env("LOCALAPPDATA", &local)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let key = rtrash::win_recycle::volume_key(&m);
+    let file = local
+        .join("rtrash")
+        .join("history")
+        .join(format!("vol-{:08x}.txt", key & 0xffff_ffff));
+    let body = fs::read_to_string(&file).unwrap_or_else(|e| {
+        let have: Vec<_> = fs::read_dir(local.join("rtrash").join("history"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        panic!("{}: {e}; history files: {have:?}", file.display())
+    });
+    assert!(body.lines().any(|l| l.contains(" put ")), "{body:?}");
+    let _ = fs::remove_dir_all(&local);
+}

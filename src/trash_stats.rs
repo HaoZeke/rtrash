@@ -395,7 +395,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         if with_history {
             // A drive whose bin is empty has no items to list, but its
             // history (often ending in that empty) still counts.
-            for drive in crate::win_recycle::bin_drives() {
+            for drive in crate::trash_history::bin_roots() {
                 let bin = drive.join("$Recycle.Bin");
                 let has = crate::trash_history::bin_path(&drive).is_some_and(|p| p.exists());
                 if has && !all.iter().any(|s| s.root == bin) {

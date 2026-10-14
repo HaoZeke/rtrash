@@ -600,7 +600,9 @@ on the first line).
 On Windows, the same commands append a line for each drive whose
 Recycle Bin changed to
 .IR %LOCALAPPDATA%\ertrash\ehistory\e X .txt
-instead, with the counts
+(or
+.IR vol\- SERIAL .txt
+for a volume mounted on a folder) instead, with the counts
 .B SHQueryRecycleBinW
 reports.
 With
