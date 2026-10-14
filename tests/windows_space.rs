@@ -513,6 +513,11 @@ fn empty_max_size_dry_run_trims_the_recycle_bins() {
     assert!(roomy.contains("0 item(s)"), "{roomy}");
     let tight = dry(&["--max-size=0", "--prune=largest"]);
     assert!(tight.contains(&name), "{tight}");
+    let json = dry(&["--max-size=0", "--json"]);
+    assert!(
+        json.starts_with(r#"{"dry_run":true,"removed":"#) && json.contains(r#""max_size":0}"#),
+        "{json}"
+    );
     let _ = Command::new(bin()).args(["rm", &name]).output();
     assert_eq!(
         Command::new(bin())

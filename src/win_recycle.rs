@@ -457,6 +457,28 @@ pub fn pick_oldest(items: &[(i64, u64, u64)], need: (u64, u64)) -> Vec<usize> {
         .collect()
 }
 
+/// The `empty --json` summary, in the Unix fields: whole days as an
+/// integer, any other age as a fraction, and the exact seconds too.
+pub fn empty_summary_json(
+    dry_run: bool,
+    removed: u64,
+    bytes: u64,
+    older_secs: Option<i64>,
+    max_size: Option<u64>,
+) -> String {
+    let days = match older_secs {
+        Some(s) if s % 86_400 == 0 => (s / 86_400).to_string(),
+        Some(s) => format!("{}", s as f64 / 86_400.0),
+        None => "null".into(),
+    };
+    let opt = |v: Option<String>| v.unwrap_or_else(|| "null".into());
+    format!(
+        r#"{{"dry_run":{dry_run},"removed":{removed},"bytes":{bytes},"days":{days},"older_than_secs":{},"max_size":{}}}"#,
+        opt(older_secs.map(|s| s.to_string())),
+        opt(max_size.map(|m| m.to_string()))
+    )
+}
+
 /// Indices of `items` (deletion time, bytes) to purge, in order, so the
 /// rest totals at most `max` bytes: oldest first, or largest first when
 /// `largest` is set (ties go to the older item).
@@ -1077,7 +1099,9 @@ With DAYS, only items deleted more than DAYS days ago, as on Linux.
                    runs first
       --prune=oldest|largest  which items --max-size removes first
                    (default oldest)
-      --json     with --until-free, print a JSON summary
+      --json     print a JSON summary ({{dry_run, removed, bytes, days,
+                   older_than_secs, max_size}}; with --until-free, the
+                   per-drive summary)
       --help     display this help and exit
       --version  output version information and exit
 
@@ -1112,10 +1136,6 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             let roots: Vec<PathBuf> = bin_items().into_iter().map(|(b, _)| b).collect();
             return crate::reap::free_until(prog, &roots, &spec, floor, dry_run, verbose, json);
         }
-        if json {
-            eprintln!("{prog}: --json goes with --until-free on Windows");
-            return 2;
-        }
         let all = match os_limited::list() {
             Ok(i) => i,
             Err(e) => {
@@ -1138,17 +1158,36 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 items.push(rest[i].clone());
             }
         }
+        let n = items.len() as u64;
+        let summary = |bytes_of: &[TrashItem]| {
+            let bytes = bytes_of
+                .iter()
+                .map(|it| recycled_size(Path::new(&it.id)))
+                .sum();
+            println!(
+                "{}",
+                empty_summary_json(dry_run, n, bytes, age.older_than, max_size)
+            );
+        };
         if dry_run {
+            if json {
+                summary(&items);
+                return 0;
+            }
             for it in &items {
                 println!("would remove {}", crate::util::term_path(&original_of(it)));
             }
             println!("{} item(s)", items.len());
             return 0;
         }
-        if verbose {
+        if verbose && !json {
             for it in &items {
                 println!("{}", crate::util::term_path(&original_of(it)));
             }
+        }
+        // Sizes come from the records, so read them before the purge.
+        if json {
+            summary(&items);
         }
         match os_limited::purge_all(items) {
             Ok(()) => 0,
@@ -1963,6 +2002,18 @@ mod tests {
         assert_eq!(
             history_name(r"C:\rtrash-mnt\", serial_key(0x1234_abcd)),
             "vol-1234abcd.txt"
+        );
+    }
+
+    #[test]
+    fn empty_summary_json_matches_the_unix_fields() {
+        assert_eq!(
+            empty_summary_json(true, 2, 10, Some(2 * 86_400), None),
+            r#"{"dry_run":true,"removed":2,"bytes":10,"days":2,"older_than_secs":172800,"max_size":null}"#
+        );
+        assert_eq!(
+            empty_summary_json(false, 0, 0, Some(43_200), Some(5)),
+            r#"{"dry_run":false,"removed":0,"bytes":0,"days":0.5,"older_than_secs":43200,"max_size":5}"#
         );
     }
 

@@ -378,6 +378,8 @@ Same as positional
 may also be a duration such as 2h, 30m or 1d12h (units s, m, h, d, w).
 The JSON summary then gives \fIdays\fR as a fraction and
 \fIolder_than_secs\fR exactly.
+The Windows build prints the same JSON summary, with the sizes the
+Recycle Bin records give.
 .TP
 .BI \-\-max\-size =SIZE
 Remove items until the trash directories in scope, taken together, fit in
@@ -426,9 +428,7 @@ and
 .I left_inodes
 (what it still lacks: measured again after a real purge, estimated on a
 dry run).
-On Windows it works per drive on the Recycle Bins, and
-.B \-\-json
-goes only with it there.
+On Windows it works per drive on the Recycle Bins.
 It takes no DAYS,
 .BR \-\-max\-size ,
 .B \-\-dangling
