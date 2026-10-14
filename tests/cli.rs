@@ -3657,6 +3657,53 @@ fn empty_restore_and_prune_keep_the_running_trash_total_current() {
     assert_eq!(stored(), (0, 0));
 }
 
+/// Debug builds only: status reads the trash's file system through
+/// space::query, so RTRASH_TEST_FS can make it short and full again.
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn status_warns_from_the_test_file_system_and_stops_once_it_is_freed() {
+    let sb = Sandbox::new("status-seam");
+    let big = sb.work().join("big.bin");
+    fs::write(&big, vec![7u8; 400_000]).unwrap();
+    assert!(sb.run(&["put", big.to_str().unwrap()]).status.success());
+    let xdg = sb.root.join("xdg");
+    let status = |json: bool| {
+        let mut args = vec!["status", "--home-only"];
+        if json {
+            args.push("--json");
+        }
+        Command::new(bin())
+            .args(&args)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .env("RTRASH_TEST_FS", format!("1000000:{}", xdg.display()))
+            .output()
+            .unwrap()
+    };
+    // 400 KB of a 1 MB disk leaves 60% free: fine.
+    let out = status(false);
+    assert!(
+        out.status.success() && !stderr_of(&out).contains("is low"),
+        "{}",
+        stderr_of(&out)
+    );
+    let json = stdout_of(&status(true));
+    assert!(
+        json.contains("\"fs_bytes\":1000000") && json.contains("\"fs_low\":false"),
+        "{json}"
+    );
+    // Another 550 KB leaves under 10% free.
+    fs::write(xdg.join("filler"), vec![1u8; 550_000]).unwrap();
+    let out = status(false);
+    assert!(stderr_of(&out).contains("is low"), "{}", stderr_of(&out));
+    assert!(stdout_of(&status(true)).contains("\"fs_low\":true"));
+    // Emptying the trash frees enough.
+    fs::remove_file(xdg.join("filler")).unwrap();
+    assert!(sb.run(&["empty", "--home-only"]).status.success());
+    assert!(!stderr_of(&status(false)).contains("is low"));
+}
+
 /// A file in `dir` whose access and modification times are a day old.
 fn stale_file(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);

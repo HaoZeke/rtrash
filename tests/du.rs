@@ -1728,3 +1728,49 @@ fn a_capped_address_space_walks_fewer_levels_instead_of_overflowing() {
     assert!(err.contains("1 directory past 1024 levels"), "{err}");
     fs::remove_dir_all(&t.root).unwrap();
 }
+
+/// Debug builds only: under RTRASH_TEST_FS, `du --devices` lists the one
+/// fake file system, whose use follows what its directory holds.
+#[cfg(debug_assertions)]
+#[test]
+fn devices_list_the_test_file_system_with_known_numbers() {
+    let t = Tree::new("devices-seam");
+    let big = t.file("fs/big", 200_000);
+    t.file("fs/small", 10);
+    let fs_dir = t.root.join("fs");
+    let devices = || {
+        let out = Command::new(bin())
+            .args(["du", "--devices", "--json"])
+            .env("RTRASH_TEST_FS", format!("10000000:{}", fs_dir.display()))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        let num = |k: &str| -> u64 {
+            let at = text.find(&format!("\"{k}\":")).unwrap() + k.len() + 3;
+            text[at..]
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        assert_eq!(text.matches("\"mount\":").count(), 1, "{text}");
+        assert!(text.contains("\"device\":\"rtrash-test\""), "{text}");
+        (num("size"), num("used"), num("available"), text)
+    };
+    let (size, used, avail, text) = devices();
+    assert_eq!(size, 10_000_000, "{text}");
+    assert_eq!(used + avail, size, "{text}");
+    assert!(used >= 200_000, "{text}");
+    fs::remove_file(big).unwrap();
+    let (_, after, _, text) = devices();
+    assert!(
+        after + 150_000 < used,
+        "deleting did not free space: {text}"
+    );
+}

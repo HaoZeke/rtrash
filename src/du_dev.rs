@@ -210,6 +210,22 @@ pub fn devices() -> io::Result<Vec<Device>> {
     Ok(sorted(out))
 }
 
+/// [`devices`], or in debug builds the one fake file system
+/// `RTRASH_TEST_FS` describes, so tests see known numbers.
+pub fn listed() -> io::Result<Vec<Device>> {
+    match crate::space::test_fs() {
+        Some((mount, s)) => Ok(vec![Device {
+            source: "rtrash-test".into(),
+            fstype: "test".into(),
+            mount,
+            size: s.total,
+            used: s.total.saturating_sub(s.avail),
+            avail: s.avail,
+        }]),
+        None => devices(),
+    }
+}
+
 fn sorted(mut v: Vec<Device>) -> Vec<Device> {
     v.sort_by(|a, b| a.mount.cmp(&b.mount));
     v

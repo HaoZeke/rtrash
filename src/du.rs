@@ -1786,7 +1786,7 @@ fn devices_out(prog: &str, paths: &[PathBuf], json: bool, si: bool, other_mode: 
         return 2;
     }
     crate::util::set_si_units(si);
-    match crate::du_dev::devices() {
+    match crate::du_dev::listed() {
         Ok(devs) if json => println!("{}", crate::du_dev::json(&devs)),
         Ok(devs) => print!("{}", crate::du_dev::table(&devs)),
         Err(e) => {

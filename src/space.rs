@@ -125,6 +125,18 @@ fn fake(_path: &Path) -> Option<Space> {
     None
 }
 
+/// The directory `RTRASH_TEST_FS` names and its fake file system, in
+/// debug builds; `du --devices` lists it as the only device.
+pub fn test_fs() -> Option<(std::path::PathBuf, Space)> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let spec = std::env::var("RTRASH_TEST_FS").ok()?;
+    let dir = std::fs::canonicalize(spec.splitn(3, ':').last()?).ok()?;
+    let s = fake(&dir)?;
+    Some((dir, s))
+}
+
 /// The file system holding `path`.
 #[cfg(unix)]
 pub fn query(path: &Path) -> io::Result<Space> {
