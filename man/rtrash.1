@@ -1281,6 +1281,20 @@ confirmation,
 restores the last deletion, and
 .B r
 rescans the current directory.
+Marks (Space) stay on their rows while you browse other directories, and the
+title counts them all: one
+.B d
+trashes the marks of every directory as one batch after a single
+confirmation that names how many directories it spans, and one
+.B u
+brings the whole batch back.
+A mark inside a marked directory goes with that directory.
+.B p
+and
+.B y
+take every mark the same way, and
+.B A
+clears them all.
 Sizes of the parent directories follow each change without a rescan.
 Each directory opens at once: its entries show while the scan runs in the
 background, files with their sizes and directories with

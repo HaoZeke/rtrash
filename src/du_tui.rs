@@ -12,7 +12,7 @@
 //! opens on a view of its own above them, one row per directory, kept in
 //! the cache under the empty path, which names no directory.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -190,6 +190,9 @@ struct App {
     cache: HashMap<PathBuf, View>,
     list_state: ListState,
     sel: Selection,
+    /// Marks left behind in other views, by path: they stay marked while
+    /// the user browses elsewhere and join the next trash, print or copy.
+    away: BTreeMap<PathBuf, Item>,
     mode: Mode,
     status: String,
     quit: bool,
@@ -622,6 +625,7 @@ impl App {
             cache,
             list_state,
             sel: Selection::new(),
+            away: BTreeMap::new(),
             mode: Mode::Browse,
             status: String::new(),
             quit: false,
@@ -869,12 +873,14 @@ impl App {
                 }
             }
         }
+        self.stash_marks();
         self.cur = dir;
         // A view left while `.` hid its dot names may need them back.
         if self.hide_dots || !self.view().stash.is_empty() {
             self.refilter();
         }
         self.sel.clear();
+        self.restore_marks();
         let at = cursor_on
             .and_then(|p| self.rows().iter().position(|r| r.path == p))
             .unwrap_or(self.view().cursor);
@@ -986,16 +992,56 @@ impl App {
         }
     }
 
-    fn targets(&self) -> Vec<usize> {
+    /// Move this view's marks into `away` before the view changes.
+    fn stash_marks(&mut self) {
+        for i in self.sel.marked_sorted() {
+            if let Some(r) = self.rows().get(i) {
+                self.away.insert(r.path.clone(), r.clone());
+            }
+        }
+    }
+
+    /// Take back the marks `away` holds for rows of this view.
+    fn restore_marks(&mut self) {
+        if self.away.is_empty() {
+            return;
+        }
+        let here: Vec<usize> = (0..self.rows().len())
+            .filter(|&i| self.away.contains_key(&self.rows()[i].path))
+            .collect();
+        for i in here {
+            let p = self.rows()[i].path.clone();
+            self.away.remove(&p);
+            self.sel.mark(i);
+        }
+    }
+
+    /// Marks in every view.
+    fn marked_count(&self) -> usize {
+        self.sel.len() + self.away.len()
+    }
+
+    /// The rows a trash, print or copy acts on: the marks of every view,
+    /// else the cursor row. A mark under another marked directory goes
+    /// with it and is not counted twice.
+    fn batch(&self) -> Vec<Item> {
+        let mut out: Vec<Item> = self.away.values().cloned().collect();
         let marked = self.sel.marked_sorted();
-        let idxs = if marked.is_empty() {
+        let idxs = if marked.is_empty() && self.away.is_empty() {
             self.list_state.selected().into_iter().collect()
         } else {
             marked
         };
-        idxs.into_iter()
-            .filter(|&i| self.rows().get(i).is_some_and(|r| !is_trash(r)))
-            .collect()
+        out.extend(idxs.into_iter().filter_map(|i| self.rows().get(i).cloned()));
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out.dedup_by(|a, b| a.path == b.path);
+        let all: Vec<PathBuf> = out.iter().map(|r| r.path.clone()).collect();
+        out.retain(|r| !all.iter().any(|p| p != &r.path && r.path.starts_with(p)));
+        out
+    }
+
+    fn targets(&self) -> Vec<Item> {
+        self.batch().into_iter().filter(|r| !is_trash(r)).collect()
     }
 
     fn ask_delete(&mut self) {
@@ -1012,22 +1058,28 @@ impl App {
             self.status = "nothing to trash".into();
             return;
         }
-        let rows = self.rows();
-        let bytes: u64 = t.iter().map(|&i| rows[i].disk).sum();
+        let bytes: u64 = t.iter().map(|r| r.disk).sum();
         let risky = t
             .iter()
-            .filter(|&&i| rows[i].git.as_ref().is_some_and(|(s, _)| s.is_risky()))
+            .filter(|r| r.git.as_ref().is_some_and(|(s, _)| s.is_risky()))
             .count();
+        let dirs: std::collections::BTreeSet<Option<PathBuf>> =
+            t.iter().map(|r| up(&self.roots, &r.path)).collect();
+        let place = if dirs.len() > 1 {
+            format!(" in {} directories", dirs.len())
+        } else {
+            String::new()
+        };
         self.mode = Mode::Confirm;
         self.status = if risky > 0 {
             format!(
-                "trash {} item(s), {}, {risky} with git work at risk (!)?  y confirm · n cancel",
+                "trash {} item(s){place}, {}, {risky} with git work at risk (!)?  y confirm · n cancel",
                 t.len(),
                 format_bytes(bytes)
             )
         } else {
             format!(
-                "trash {} item(s), {}?  y confirm · n cancel",
+                "trash {} item(s){place}, {}?  y confirm · n cancel",
                 t.len(),
                 format_bytes(bytes)
             )
@@ -1039,26 +1091,37 @@ impl App {
         let t = self.targets();
         let mut group: UndoGroup = Vec::new();
         let mut failed = 0usize;
-        for &i in &t {
-            let item = self.rows()[i].clone();
+        for item in t {
             match bin::trash(&self.prog, &item.path, self.trash_pin.as_ref()) {
                 Some(done) => group.push((done, item)),
                 None => failed += 1,
             }
         }
         let gone: Vec<PathBuf> = group.iter().map(|(_, it)| it.path.clone()).collect();
-        let (disk, apparent) = group.iter().fold((0u64, 0u64), |(d, a), (_, it)| {
-            (d + it.disk, a + it.apparent)
-        });
-        let cur = self.cur.clone();
-        if let Some(v) = self.cache.get_mut(&cur) {
-            v.rows.retain(|r| !gone.contains(&r.path));
+        let disk: u64 = group.iter().map(|(_, it)| it.disk).sum();
+        // Each trashed row leaves its own view and shrinks the views above.
+        for (_, it) in &group {
+            let Some(parent) = up(&self.roots, &it.path) else {
+                continue;
+            };
+            if let Some(v) = self.cache.get_mut(&parent) {
+                v.rows.retain(|r| r.path != it.path);
+                v.stash.retain(|r| r.path != it.path);
+            }
+            adjust_chain(
+                &mut self.cache,
+                &self.roots,
+                &parent,
+                it.disk,
+                it.apparent,
+                false,
+            );
         }
         // Views below a trashed directory describe paths that are gone.
         self.cache
             .retain(|p, _| !gone.iter().any(|g| p.starts_with(g)));
-        adjust_chain(&mut self.cache, &self.roots, &cur, disk, apparent, false);
         self.sel.clear();
+        self.away.clear();
         let at = self.list_state.selected().unwrap_or(0);
         self.select(at);
         let n = group.len();
@@ -1284,15 +1347,7 @@ impl App {
 
     /// The marked rows, or the cursor row when none is marked.
     fn chosen_paths(&self) -> Vec<PathBuf> {
-        let marked = self.sel.marked_sorted();
-        let idxs = if marked.is_empty() {
-            self.list_state.selected().into_iter().collect()
-        } else {
-            marked
-        };
-        idxs.into_iter()
-            .filter_map(|i| self.rows().get(i).map(|r| r.path.clone()))
-            .collect()
+        self.batch().into_iter().map(|r| r.path).collect()
     }
 
     /// Quit and print the chosen paths (`p`).
@@ -1487,15 +1542,16 @@ impl App {
                     Some(Action::ToggleMark) => {
                         if let Some(i) = self.list_state.selected() {
                             self.sel.toggle(i);
-                            self.status = format!("{} marked", self.sel.len());
+                            self.status = format!("{} marked", self.marked_count());
                         }
                     }
                     Some(Action::MarkAll) => {
                         self.sel.mark_all(0..self.rows().len());
-                        self.status = format!("{} marked", self.sel.len());
+                        self.status = format!("{} marked", self.marked_count());
                     }
                     Some(Action::ClearMarks) => {
                         self.sel.clear();
+                        self.away.clear();
                         self.status = "marks cleared".into();
                     }
                     Some(Action::Help) => self.mode = Mode::Help,
@@ -1819,7 +1875,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             view.rows.len() + view.stash.len()
         )
     };
-    let tail = format!(" · {size} · {entries} · {} marked ", app.sel.len());
+    let tail = format!(" · {size} · {entries} · {} marked ", app.marked_count());
     let room = (chunks[0].width as usize)
         .saturating_sub(2)
         .saturating_sub(tail.chars().count() + 1);
@@ -2209,6 +2265,83 @@ mod tests {
         assert_eq!(a.selected().unwrap().path, t.0.join("w/big"));
         a.back();
         assert_eq!(a.status, "already at the top");
+    }
+
+    // Unix only for the same reason as the test below.
+    #[cfg(unix)]
+    #[test]
+    fn marks_follow_the_user_across_views_and_trash_as_one_batch() {
+        let t = tree("batch");
+        let mut a = app(&t);
+        let top_before = a.view().disk;
+        // Rows: big, file, small. Mark file and small here, side in big.
+        a.select(1);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        a.select(2);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        a.select(0);
+        a.open();
+        assert_eq!(names(&a), ["inner", "side"]);
+        assert_eq!(a.marked_count(), 2);
+        a.select(1);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(a.status, "3 marked");
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("3 marked"), "{text}");
+        // Back up, the earlier marks are still on their rows.
+        a.back();
+        assert!(a.sel.is_marked(1) && a.sel.is_marked(2) && a.sel.len() == 2);
+        // p prints every mark, sorted, the subtree kept once.
+        let mut paths = a.chosen_paths();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                t.0.join("w/big/side"),
+                t.0.join("w/file"),
+                t.0.join("w/small")
+            ]
+        );
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(
+            a.status.starts_with("trash 3 item(s) in 2 directories"),
+            "{}",
+            a.status
+        );
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(a.status.starts_with("trashed 3 item(s)"), "{}", a.status);
+        for gone in ["w/big/side", "w/file", "w/small"] {
+            assert!(!t.0.join(gone).exists(), "{gone}");
+        }
+        assert_eq!(names(&a), ["big"]);
+        assert_eq!(a.marked_count(), 0);
+        assert!(a.view().disk < top_before);
+        a.open();
+        assert_eq!(names(&a), ["inner"]);
+        a.back();
+        a.on_key(KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(a.status, "restored 3 item(s)");
+        for back in ["w/big/side", "w/file", "w/small"] {
+            assert!(t.0.join(back).exists(), "{back}");
+        }
+        assert_eq!(a.view().disk, top_before);
+    }
+
+    /// A mark under a marked directory goes with the directory.
+    #[test]
+    fn a_mark_inside_a_marked_directory_is_not_counted_twice() {
+        let t = tree("nested");
+        let mut a = app(&t);
+        a.open(); // big
+        a.select(1);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        a.back();
+        a.select(0);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(a.marked_count(), 2);
+        assert_eq!(a.chosen_paths(), [t.0.join("w/big")]);
+        a.on_key(KeyCode::Char('A'), KeyModifiers::SHIFT);
+        assert_eq!(a.marked_count(), 0);
     }
 
     // Windows deletes go to the real Recycle Bin, so this stays on Unix,
