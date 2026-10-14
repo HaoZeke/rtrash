@@ -49,6 +49,10 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
       --shared          also show what a delete would free: the bytes in
                           extents no other file shares, and the extents
                           shared by reflinks or snapshots, counted once
+      --install-timer[=EVERY]  write a user systemd service and timer
+                          (Linux) or launchd agent (macOS) that runs this
+                          reap, with the other options, every EVERY
+                          (default 1h); with -n print them instead
       --when-below=SPEC run only when a reaped file system has less free
                           than SPEC (a size such as 20G, a percent such
                           as 10%, and ,inodes=PCT), then reap oldest first
@@ -920,6 +924,37 @@ fn add_roots(out: &mut Vec<PathBuf>, v: &str) -> Result<(), String> {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    if let Some(i) = args
+        .iter()
+        .position(|a| a == "--install-timer" || a.starts_with("--install-timer="))
+    {
+        let every = match args[i].split_once('=') {
+            None => 3600,
+            Some((_, v)) => match parse_age(v) {
+                Some(s) if s >= 60 => s,
+                _ => {
+                    return usage_err(
+                        prog,
+                        &format!("invalid interval '{v}' (at least 1m, such as 1h)"),
+                    )
+                }
+            },
+        };
+        let dry = args.iter().any(|a| a == "-n" || a == "--dry-run");
+        let rest: Vec<String> = args
+            .iter()
+            .enumerate()
+            .filter(|&(j, a)| j != i && a != "-n" && a != "--dry-run")
+            .map(|(_, a)| a.clone())
+            .collect();
+        if rest
+            .iter()
+            .any(|a| a == "--list-profiles" || a == "--help" || a == "--version")
+        {
+            return usage_err(prog, "--install-timer takes the options of the reap to run");
+        }
+        return crate::reap_timer::install(prog, &rest, every, dry);
+    }
     let mut older: Option<i64> = None;
     let mut age_by = AgeBy {
         atime: true,

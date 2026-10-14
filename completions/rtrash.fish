@@ -282,6 +282,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q who' -l json -
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -s p -l profile -x -a 'ai claude cursor codex aider ollama compilers cargo-target cargo-registry sccache ccache go zig bazel gradle pkg pip uv npm pnpm yarn bun conda thumbnails' -d 'also reap a profile'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l list-profiles -d 'list the profiles'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l shared -d 'show what a delete frees, counting shared extents once'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l install-timer -d 'write a user timer that runs this reap'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l when-below -x -d 'reap only when free space is under this'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l until -x -d 'free space to reap back to'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l roots -r -d 'directories {roots} globs search'

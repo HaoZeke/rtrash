@@ -1775,6 +1775,35 @@ Always use the home trash.
 .BR \-v ", " \-\-verbose
 Also print each entry kept and why.
 .TP
+.BR \-\-install\-timer [=\fIEVERY\fR]
+Write a per\-user job that runs this reap, with every other option
+given, each
+.I EVERY
+(an age such as
+.BR 30m ;
+1h by default, at least 1m), and print the command that turns it on.
+On Linux it writes
+.I rtrash\-reap.service
+and
+.I rtrash\-reap.timer
+to
+.IR $XDG_CONFIG_HOME/systemd/user ;
+turn them on with
+.BR "systemctl \-\-user daemon\-reload && systemctl \-\-user enable \-\-now rtrash\-reap.timer" .
+On macOS it writes
+.I \(ti/Library/LaunchAgents/io.github.haozeke.rtrash\-reap.plist
+for
+.BR "launchctl bootstrap gui/$(id \-u)" .
+Neither needs root, and the job runs at low priority.
+With
+.B \-n
+it prints the files instead of writing them.
+A cheap job pairs it with
+.BR \-\-when\-below ,
+for example
+.BR "rtrash reap \-\-install\-timer=15m \-p compilers \-p pkg \-\-when\-below=10%" .
+Remove the files to remove the job.
+.TP
 .BI \-\-when\-below= SPEC
 Reap only when a file system holding the entries has less free than
 .IR SPEC :

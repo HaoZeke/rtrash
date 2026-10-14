@@ -3140,6 +3140,65 @@ fn reap_when_below_exits_while_space_is_fine_and_reaps_when_short() {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_install_timer_prints_on_dry_run_and_writes_user_units() {
+    let sb = Sandbox::new("reap-timer");
+    let files: Vec<PathBuf> = if cfg!(target_os = "macos") {
+        vec![sb
+            .root
+            .join("Library/LaunchAgents/io.github.haozeke.rtrash-reap.plist")]
+    } else {
+        let d = sb.root.join(".config/systemd/user");
+        vec![d.join("rtrash-reap.service"), d.join("rtrash-reap.timer")]
+    };
+    let args = [
+        "reap",
+        "--install-timer=30m",
+        "-n",
+        "-p",
+        "ai",
+        "--when-below=10%",
+    ];
+    let out = reap_cmd(&sb, &args);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(
+        text.contains("--when-below=10%") && text.contains("1800"),
+        "{text}"
+    );
+    assert!(
+        files.iter().all(|f| !f.exists()),
+        "the dry run wrote a file"
+    );
+
+    let out = reap_cmd(
+        &sb,
+        &args[..2]
+            .iter()
+            .chain(&args[3..])
+            .copied()
+            .collect::<Vec<_>>(),
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    for f in &files {
+        let body = fs::read_to_string(f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        assert!(
+            body.contains("reap") && !body.contains("--dry-run"),
+            "{body}"
+        );
+    }
+    assert!(
+        stdout_of(&out).contains("turn it on with"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert_eq!(
+        reap_cmd(&sb, &["reap", "--install-timer=5s"]).status.code(),
+        Some(2)
+    );
+}
+
 /// A file in `dir` whose access and modification times are a day old.
 fn stale_file(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);
