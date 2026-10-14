@@ -471,16 +471,8 @@ fn warn_low_space(prog: &str, trashed: &[Trashed]) {
     roots.sort();
     roots.dedup();
     for root in roots {
-        let Ok(s) = crate::space::query(&root) else {
-            continue;
-        };
-        let lows = s.lows(crate::space::WARN_FREE_PERCENT);
-        if !lows.is_empty() {
-            eprintln!(
-                "{prog}: warning: the file system of trash '{}' is low ({}); trashing frees nothing there until the trash is emptied (`rtrash empty`, or `rtrash reap --when-below=10% --purge-trash`)",
-                root.display(),
-                lows.join(", ")
-            );
+        if let Some(w) = crate::space::low_warning(&format!("trash '{}'", root.display()), &root) {
+            eprintln!("{prog}: warning: {w}");
         }
     }
 }

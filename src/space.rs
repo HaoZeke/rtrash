@@ -146,6 +146,21 @@ pub fn test_fs() -> Option<(std::path::PathBuf, Space)> {
     Some((dir, s))
 }
 
+/// The low-space warning for the file system of `what` (at `path`), or
+/// `None` when it has room or cannot be read.
+pub fn low_warning(what: &str, path: &Path) -> Option<String> {
+    let lows = query(path).ok()?.lows(WARN_FREE_PERCENT);
+    (!lows.is_empty()).then(|| low_message(what, &lows))
+}
+
+/// The text of a low-space warning about `what`.
+pub fn low_message(what: &str, lows: &[String]) -> String {
+    format!(
+        "the file system of {what} is low ({}); trashing frees nothing there until the trash is emptied (`rtrash empty`, or `rtrash reap --when-below=10% --purge-trash`)",
+        lows.join(", ")
+    )
+}
+
 /// The file system holding `path`.
 #[cfg(unix)]
 pub fn query(path: &Path) -> io::Result<Space> {

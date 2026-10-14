@@ -773,6 +773,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut status = 0;
         let mut failed = 0usize;
         let mut moved: Vec<PathBuf> = Vec::new();
+        let mut roots: Vec<PathBuf> = Vec::new();
         for f in &files {
             if std::fs::symlink_metadata(f).is_err() {
                 if force {
@@ -803,7 +804,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     eprintln!("{prog}: warning: '{}' is in use by {who}", f.display());
                 }
             }
-            let bin = verbose.then(|| bin_root_of(&abs)).flatten();
+            let root = bin_root_of(&abs);
+            let bin = verbose.then(|| root.clone()).flatten();
             match trash::delete(f) {
                 Ok(()) => {
                     if verbose && !json {
@@ -813,6 +815,11 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                         );
                     }
                     moved.push(abs);
+                    if let Some(r) = root {
+                        if !roots.contains(&r) {
+                            roots.push(r);
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("{prog}: cannot trash '{}': {}", f.display(), err_msg(e));
@@ -828,6 +835,14 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 .map(|(o, n, d)| (o.as_path(), n.as_str(), d.as_path()))
                 .collect();
             println!("{}", util::put_summary_json(&items, failed));
+        }
+        // The Recycle Bin keeps items on their own volume, so a full volume
+        // stays full.
+        for r in &roots {
+            let what = format!("the Recycle Bin of {}", r.display());
+            if let Some(w) = crate::space::low_warning(&what, r) {
+                eprintln!("{prog}: warning: {w}");
+            }
         }
         status
     }
