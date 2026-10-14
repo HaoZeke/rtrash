@@ -1079,6 +1079,23 @@ Consider only this trash directory (repeatable).
 .B \-\-no\-git
 Do not ask git about listed paths.
 .TP
+.B \-\-dupes
+List groups of regular files with the same contents.
+Files are grouped by size, then by a hash of their first and last 4 KiB,
+then by a full hash.
+Hard links to one inode count once; shared reflink extents free nothing.
+The oldest file in each group is kept (ties go to the shortest path).
+Trash directories are skipped.
+With \fB\-\-json\fR, each group has \fIsize\fR, \fIreclaim\fR, \fIkeep\fR,
+\fIkeep_links\fR, \fIextras\fR and \fIextra_links\fR; \fItotal\fR sums them.
+With \fB\-\-print0\fR, the extras and their links are printed.
+.TP
+.B \-\-trash\-dupes
+Like \fB\-\-dupes\fR, then trash every extra copy.
+.TP
+.BI \-\-min\-size= SIZE
+With \fB\-\-dupes\fR, skip files smaller than \fISIZE\fR (as 10M).
+.TP
 .B \-\-include\-dirty
 With
 .BR \-\-print0 ,

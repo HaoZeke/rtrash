@@ -173,6 +173,9 @@ export extern "rtrash du" [
     --json  # emit a JSON object (scripts)
     --print0  # print the listed paths, NUL-separated, for
     --output(-o): string  # write a snapshot of every directory total (to
+    --dupes  # list groups of files with the same contents
+    --trash-dupes  # trash every copy but one in each duplicate group
+    --min-size: string  # with --dupes, skip files smaller than SIZE
     --devices  # list every mounted file system with its size, use
     --ncdu: string  # write an ncdu export of PATH to FILE (- for
     --ncdu-binary: string  # the same in ncdu 2's binary format (ncdu -O),

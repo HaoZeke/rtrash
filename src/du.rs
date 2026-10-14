@@ -115,6 +115,11 @@ directories appear as one `trash` row and are never printed by --print0.
   -o, --output=FILE     write a snapshot of every directory total (to
                           --max-depth) to FILE (- for stdout) instead of
                           listing; compare snapshots with `du diff`
+      --dupes           list groups of files with the same contents (size,
+                          then edge hash, then full hash); hard links count
+                          once, reflinks free nothing; the oldest file stays
+      --trash-dupes     trash every copy but the kept one in each group
+      --min-size=SIZE   with --dupes, skip files smaller than SIZE
       --devices         list every mounted file system with its size, use
                           and free space (as df does), instead of scanning
       --ncdu=FILE       write an ncdu export of PATH to FILE (- for
@@ -1836,6 +1841,52 @@ fn devices_out(prog: &str, paths: &[PathBuf], json: bool, si: bool, other_mode: 
 
 /// `du --ncdu=FILE` (JSON) or `--ncdu-binary=FILE`: write `path` as an
 /// ncdu export.
+/// `du --dupes`: find the duplicate groups and report them, or list or
+/// trash every copy but the one each group keeps.
+fn dupes_out(
+    prog: &str,
+    paths: &[PathBuf],
+    opts: &ScanOpts,
+    min_size: u64,
+    json: bool,
+    print0: bool,
+    trash: bool,
+) -> i32 {
+    use std::io::Write;
+    let files = crate::du_dupes::walk(
+        paths,
+        crate::du_dupes::Opts {
+            min_size,
+            one_file_system: opts.one_file_system,
+        },
+    );
+    let groups = crate::du_dupes::find(files);
+    if json {
+        println!("{}", crate::du_dupes::to_json(&groups));
+        return 0;
+    }
+    let extras: Vec<&Path> = groups
+        .iter()
+        .flat_map(|g| g.extras.iter())
+        .flat_map(|f| std::iter::once(f.path.as_path()).chain(f.links.iter().map(PathBuf::as_path)))
+        .collect();
+    if print0 {
+        let mut out = std::io::stdout().lock();
+        for p in &extras {
+            let _ = out.write_all(p.as_os_str().as_encoded_bytes());
+            let _ = out.write_all(b"\0");
+        }
+        return 0;
+    }
+    crate::du_dupes::print_text(&groups, opts.top);
+    if trash && !extras.is_empty() {
+        let mut args: Vec<String> = vec!["--".into()];
+        args.extend(extras.iter().map(|p| p.to_string_lossy().into_owned()));
+        return crate::put::run(prog, &args);
+    }
+    0
+}
+
 fn ncdu_out(prog: &str, path: &Path, out: &Path, binary: bool, opts: &ScanOpts, now: i64) -> i32 {
     let spec = opts.filter.as_deref();
     let xdev = opts.one_file_system;
@@ -2560,6 +2611,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut ncdu: Option<PathBuf> = None;
     let mut ncdu_binary = false;
     let mut devices = false;
+    let mut dupes = false;
+    let mut trash_dupes = false;
+    let mut min_size: u64 = 1;
     let mut from_file: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
     let mut filter = du_filter::Spec::default();
@@ -2725,6 +2779,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--devices" => devices = true,
                 "--json" => json = true,
                 "--print0" => print0 = true,
+                "--dupes" => dupes = true,
+                "--trash-dupes" => trash_dupes = true,
+                a if a.starts_with("--min-size=") => {
+                    match crate::filters::parse_size(&a["--min-size=".len()..]) {
+                        Some(n) => min_size = n,
+                        None => {
+                            eprintln!(
+                                "{prog}: invalid --min-size '{}' (a size such as 1M)",
+                                &a["--min-size=".len()..]
+                            );
+                            return 2;
+                        }
+                    }
+                }
                 "--stacks" => stacks = true,
                 "--unique" => opts.unique = true,
                 "--shared" => opts.shared_once = true,
@@ -2819,6 +2887,28 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     if paths.is_empty() {
         paths.push(PathBuf::from("."));
+    }
+    if (trash_dupes || min_size != 1) && !dupes {
+        eprintln!("{prog}: --trash-dupes and --min-size go with --dupes");
+        return 2;
+    }
+    if dupes {
+        if ncdu.is_some()
+            || output.is_some()
+            || from_file.is_some()
+            || stacks
+            || pick
+            || interactive
+            || opts.types
+            || (trash_dupes && (json || print0))
+        {
+            eprintln!(
+                "{prog}: --dupes takes --json, --print0 or --trash-dupes, with -x, -n and --min-size"
+            );
+            return 2;
+        }
+        crate::util::set_si_units(si);
+        return dupes_out(prog, &paths, &opts, min_size, json, print0, trash_dupes);
     }
     // Text sizes everywhere in this run, the explorer included; JSON,
     // snapshots and stacks stay in bytes.
