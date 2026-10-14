@@ -1830,13 +1830,22 @@ fn dupes_find_copies_and_trash_all_but_one() {
     fs::hard_link(&copy, t.root.join("x/a-link.bin")).unwrap();
     let j = t.json(&["--dupes", "--min-size=1k"]);
     assert!(j.contains(r#""total":{"groups":1,"extras":1,"#), "{j}");
-    assert!(j.contains(r#""keep":"./keep/a.bin""#), "{j}");
+    // Paths keep the platform's separator; JSON doubles a backslash.
+    let keep = if cfg!(windows) {
+        r#""keep":".\\keep\\a.bin""#
+    } else {
+        r#""keep":"./keep/a.bin""#
+    };
+    assert!(j.contains(keep), "{j}");
     let out = t.du(&["--dupes", "--print0", "--min-size=1k"]);
     let listed = String::from_utf8(out.stdout).unwrap();
     // The extra and its hard link: both names must go to free the space.
     let names = if cfg!(unix) { 2 } else { 1 };
     assert_eq!(listed.matches('\0').count(), names, "{listed:?}");
-    assert!(!listed.contains("keep/a.bin"), "{listed:?}");
+    assert!(
+        !listed.contains(&format!("keep{}a.bin", std::path::MAIN_SEPARATOR)),
+        "{listed:?}"
+    );
     let out = t.du(&["--dupes", "--json", "--trash-dupes"]);
     assert_eq!(out.status.code(), Some(2));
     let out = t.du(&["--dupes", "--trash-dupes", "--min-size=1k", "--home-only"]);
