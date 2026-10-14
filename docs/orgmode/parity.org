@@ -72,8 +72,10 @@ listing, and the restore conflict policies (=--conflict=rename|skip=).
 | Volume trash =/Volumes/X/.Trashes/UID= | plain commands, as Finder; put there for items on the drive | yes |
 | Permanent delete (=rm PATTERN=)        | Finder trashes, by Put Back path or name        | no      |
 
-Age and size filters, =--max-size=, =trash-stats --total= and
-=--history= read the FreeDesktop layout, so on the Finder Trash they are
-refused with a hint.
+Age filters count from the move into the trash and size filters from
+disk usage; restore takes =--name=, =--glob=, =--regex=, =--latest= and
+=--to=.
+=--max-size=, =--dangling=, =trash-stats --total= and =--history= need
+FreeDesktop records, so on the Finder Trash they are refused with a hint.
 CI runs plain put, list, restore and empty on a real macOS runner against
 Finder.

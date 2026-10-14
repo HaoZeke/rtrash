@@ -84,6 +84,27 @@ fn from_items(trash: &Path) -> std::io::Result<Vec<Entry>> {
     Ok(out)
 }
 
+/// Age and size filters over Finder items: the age counts from the time an
+/// item went into the trash (its change time there), the size is its disk
+/// usage, as on the FreeDesktop trash.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Filter {
+    pub age: crate::filters::AgeFilter,
+    pub size: crate::filters::SizeFilter,
+}
+
+impl Filter {
+    pub fn apply(&self, v: Vec<Entry>) -> Vec<Entry> {
+        let now = crate::util::now_epoch();
+        v.into_iter()
+            .filter(|e| self.age.keeps_at(Some(e.epoch), now))
+            .filter(|e| {
+                !self.size.is_set() || self.size.keeps(crate::fastdelete::disk_usage(&e.path()))
+            })
+            .collect()
+    }
+}
+
 #[cfg(feature = "tui")]
 impl crate::restore_tui::TuiItem for Entry {
     fn original(&self) -> &Path {
@@ -334,7 +355,7 @@ pub fn undo(
 // ---- status and trash-stats ----
 
 /// `status` on the Finder trashes, in the shape of the FreeDesktop one.
-pub fn status(prog: &str, json: bool) -> i32 {
+pub fn status(prog: &str, json: bool, filter: Filter) -> i32 {
     struct Row {
         trash: PathBuf,
         items: u64,
@@ -344,7 +365,7 @@ pub fn status(prog: &str, json: bool) -> i32 {
     let mut rows = Vec::new();
     for trash in finder::trashes() {
         let all = match from_items(&trash) {
-            Ok(a) => a,
+            Ok(a) => filter.apply(a),
             Err(e) => {
                 eprintln!("{prog}: cannot read '{}': {e}", trash.display());
                 return 1;
@@ -436,9 +457,16 @@ pub fn stats(top: usize) -> Vec<crate::trash_stats::Stats> {
 
 /// `rm` on the Finder trashes: permanently remove the items whose Put Back
 /// place, its file name or the name in the trash matches a pattern.
-pub fn rm(prog: &str, patterns: &[String], dry_run: bool, verbose: bool, json: bool) -> i32 {
+pub fn rm(
+    prog: &str,
+    patterns: &[String],
+    dry_run: bool,
+    verbose: bool,
+    json: bool,
+    filter: Filter,
+) -> i32 {
     let rows = match entries() {
-        Ok(r) => r,
+        Ok(r) => filter.apply(r),
         Err(e) => {
             eprintln!("{prog}: cannot read the Finder Trash: {e}");
             return 1;

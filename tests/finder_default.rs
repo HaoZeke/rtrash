@@ -111,8 +111,13 @@ fn plain_commands_use_the_finder_trash() {
     );
     let o = b.run(&["list", "--json"], "");
     assert!(out(&o).contains("\"name\":\"a b.txt\""), "{}", out(&o));
+    // Ages count from the move into the trash, sizes from disk usage.
     let o = b.run(&["list", "--older-than=1d"], "");
-    assert_eq!(o.status.code(), Some(2));
+    assert!(o.status.success() && out(&o).is_empty(), "{}", out(&o));
+    let o = b.run(&["list", "--newer-than=1d"], "");
+    assert!(out(&o).contains("a b.txt"), "{}", out(&o));
+    let o = b.run(&["list", "--larger-than=1G"], "");
+    assert!(out(&o).is_empty(), "{}", out(&o));
 
     let o = b.run(&["restore", "a b.txt"], "");
     assert!(o.status.success(), "{}", err(&o));
@@ -195,10 +200,8 @@ fn undo_status_and_trash_stats_cover_the_finder_trash() {
     assert!(out(&o).contains("\"finder\":true"), "{}", out(&o));
     let o = b.run(&["status"], "");
     assert!(out(&o).contains("Total: 3 items"), "{}", out(&o));
-    assert_eq!(
-        b.run(&["status", "--older-than=1d"], "").status.code(),
-        Some(2)
-    );
+    let o = b.run(&["status", "--json", "--older-than=1d"], "");
+    assert!(out(&o).contains("\"total_items\": 0"), "{}", out(&o));
 
     let o = b.run(&["trash-stats", "--json", "--top=1"], "");
     assert!(o.status.success(), "{}", err(&o));
@@ -272,6 +275,47 @@ fn volume_trashes_join_list_restore_rm_and_status() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(!vt.join("v.bin").exists());
     assert!(vt.join(".DS_Store").exists());
-    let o = run(&["rm", "--older-than=1d", "x"]);
-    assert_eq!(o.status.code(), Some(2));
+    let o = run(&["rm", "--older-than=1d", "*", "--force"]);
+    assert!(o.status.success(), "{}", err(&o));
+}
+
+#[test]
+fn restore_matchers_work_on_the_finder_trash() {
+    let b = Box_::new("match");
+    for n in ["r1.log", "r2.log", "keep.txt"] {
+        fs::write(b.work().join(n), n).unwrap();
+        assert!(b.run(&["put", n], "").status.success());
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    // Finder writes one .DS_Store with every Put Back record.
+    let recs: Vec<Record> = ["r1.log", "r2.log", "keep.txt"]
+        .iter()
+        .map(|n| Record {
+            name: n.to_string(),
+            code: *b"ptbL",
+            value: Value::Ustr(format!(
+                "{}/",
+                b.work().to_string_lossy().trim_start_matches('/')
+            )),
+        })
+        .collect();
+    fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
+
+    // Two matches need --latest or --all.
+    let o = b.run(&["restore", "--glob=*.log"], "");
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    let o = b.run(&["restore", "--glob=*.log", "--latest"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(b.work().join("r2.log").exists() && !b.work().join("r1.log").exists());
+
+    let o = b.run(&["restore", "--regex=r1\\.log$"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(b.work().join("r1.log").exists());
+
+    let dest = b.root.join("elsewhere");
+    fs::create_dir_all(&dest).unwrap();
+    let to = format!("--to={}", dest.display());
+    let o = b.run(&["restore", "--name=keep.txt", &to], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(fs::read(dest.join("keep.txt")).unwrap(), b"keep.txt");
 }

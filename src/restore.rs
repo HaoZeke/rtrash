@@ -101,13 +101,23 @@ impl Conflict {
 }
 
 /// How the CLI picks entries besides PATH.
-enum Matcher {
+pub(crate) enum Matcher {
     Name(String),
     Glob(String),
     Regex(regex_lite::Regex),
 }
 
 impl Matcher {
+    /// The same test for an item known by its original path and its name
+    /// in the trash (a Finder Trash item).
+    pub(crate) fn matches_parts(&self, original: &Path, name: &str) -> bool {
+        match self {
+            Matcher::Name(n) => name_matches_parts(original, name, n),
+            Matcher::Glob(p) => glob_matches_parts(original, name, p),
+            Matcher::Regex(re) => re.is_match(&crate::util::str_from_os_ref(original.as_os_str())),
+        }
+    }
+
     fn matches(&self, e: &list::Entry) -> bool {
         match self {
             Matcher::Name(n) => name_matches(e, n),
@@ -269,20 +279,19 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // macOS restores from the Finder Trash unless a pin or the setting
     // says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty()) {
-        if matcher.is_some() || latest || to.is_some() {
-            eprintln!(
-                "{prog}: --name, --glob, --regex, --latest and --to do not apply to the Finder Trash; pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop"
-            );
-            return 2;
-        }
         return crate::finder::default_restore(
             prog,
-            target.as_deref(),
-            all,
-            conflict,
-            json,
-            plain,
-            newest_first,
+            &crate::finder::RestoreOpts {
+                target: target.as_deref(),
+                matcher: matcher.as_ref(),
+                all,
+                latest,
+                to: to.as_deref(),
+                conflict,
+                json,
+                plain,
+                newest_first,
+            },
         );
     }
     let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);
@@ -558,11 +567,15 @@ pub fn parse_selection(line: &str, len: usize) -> Result<Vec<usize>, String> {
 /// Shell-pattern match: against the original path when the pattern names a
 /// directory part, else against the file name or the trash name.
 fn glob_matches(e: &list::Entry, pat: &str) -> bool {
+    glob_matches_parts(&e.original, &e.name, pat)
+}
+
+fn glob_matches_parts(original: &Path, name: &str, pat: &str) -> bool {
     if pat.contains('/') {
-        return crate::util::fnmatch(pat, &crate::util::str_from_os_ref(e.original.as_os_str()));
+        return crate::util::fnmatch(pat, &crate::util::str_from_os_ref(original.as_os_str()));
     }
-    crate::util::fnmatch(pat, &e.name)
-        || e.original
+    crate::util::fnmatch(pat, name)
+        || original
             .file_name()
             .is_some_and(|f| crate::util::fnmatch(pat, &crate::util::str_from_os_ref(f)))
 }
@@ -570,8 +583,12 @@ fn glob_matches(e: &list::Entry, pat: &str) -> bool {
 /// Whether `e` goes by `name`: its original file name or its name under
 /// `files/` in the trash.
 fn name_matches(e: &list::Entry, name: &str) -> bool {
-    e.name == name
-        || e.original
+    name_matches_parts(&e.original, &e.name, name)
+}
+
+fn name_matches_parts(original: &Path, trash_name: &str, name: &str) -> bool {
+    trash_name == name
+        || original
             .file_name()
             .is_some_and(|f| f == crate::util::os_from_str(name))
 }

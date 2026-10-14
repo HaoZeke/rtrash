@@ -169,13 +169,14 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // macOS deletes from the Finder trashes unless a pin or the setting
     // says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty()) {
-        if size.is_set() || older_than.is_some() || newer_than.is_some() {
-            eprintln!(
-                "{prog}: age and size filters do not apply to the Finder Trash; pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop"
-            );
-            return 2;
-        }
-        return crate::finder_shared::rm(prog, &patterns, dry_run, verbose, json);
+        let filter = crate::finder_shared::Filter {
+            age: crate::filters::AgeFilter {
+                older_than,
+                newer_than,
+            },
+            size,
+        };
+        return crate::finder_shared::rm(prog, &patterns, dry_run, verbose, json, filter);
     }
     let mut entries = list::filter_age_secs(list::collect(&dirs), older_than, newer_than);
     // Payloads with no .trashinfo match by their name or their path under

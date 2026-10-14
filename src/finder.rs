@@ -500,12 +500,17 @@ fn read_all(prog: &str) -> Result<Vec<crate::finder_shared::Entry>, i32> {
 
 /// `list` on the Finder trashes: `DATE ORIGINAL` rows, oldest first, as
 /// the FreeDesktop listing prints them (`--json` too).
-pub fn default_list(prog: &str, json: bool, refused: Option<&str>) -> i32 {
+pub fn default_list(
+    prog: &str,
+    json: bool,
+    refused: Option<&str>,
+    filter: crate::finder_shared::Filter,
+) -> i32 {
     if let Some(what) = refused {
         return finder_only(prog, what);
     }
     let rows = match read_all(prog) {
-        Ok(r) => r,
+        Ok(r) => filter.apply(r),
         Err(c) => return c,
     };
     if json {
@@ -536,60 +541,68 @@ pub fn default_list(prog: &str, json: bool, refused: Option<&str>) -> i32 {
     0
 }
 
+/// What `restore` asks of the Finder trashes.
+pub(crate) struct RestoreOpts<'a> {
+    /// PATH: a Put Back place or a name in the trash.
+    pub(crate) target: Option<&'a Path>,
+    /// `--name`, `--glob` or `--regex`, tested on the Put Back place.
+    pub(crate) matcher: Option<&'a crate::restore::Matcher>,
+    pub(crate) all: bool,
+    pub(crate) latest: bool,
+    /// `--to=DIR`: restore there, keeping each file name.
+    pub(crate) to: Option<&'a Path>,
+    pub(crate) conflict: Conflict,
+    pub(crate) json: bool,
+    pub(crate) plain: bool,
+    pub(crate) newest_first: Option<bool>,
+}
+
 /// `restore` on the Finder trashes. PATH names the item by its Put Back
-/// place or its name in the trash; without one, a numbered table offers
-/// every item with a Put Back record and stdin picks, or on a terminal
-/// the restore browser opens unless `plain`.
-#[allow(clippy::too_many_arguments)]
-pub fn default_restore(
-    prog: &str,
-    target: Option<&Path>,
-    all: bool,
-    conflict: Conflict,
-    json: bool,
-    plain: bool,
-    newest_first: Option<bool>,
-) -> i32 {
+/// place or its name in the trash, and `--name`, `--glob` and `--regex`
+/// match as on the FreeDesktop trash; several matches need `--all` or
+/// `--latest`. Without either, a numbered table offers every item with a
+/// Put Back record and stdin picks, or on a terminal the restore browser
+/// opens unless `plain`.
+pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
     let rows = match read_all(prog) {
         Ok(r) => r,
         Err(c) => return c,
     };
-    let placed: Vec<&crate::finder_shared::Entry> =
-        rows.iter().filter(|e| e.original.is_some()).collect();
-    let chosen: Vec<&crate::finder_shared::Entry> = if all {
+    // Without --to, only an item with a Put Back record has a place to go.
+    let placed: Vec<&crate::finder_shared::Entry> = rows
+        .iter()
+        .filter(|e| e.original.is_some() || o.to.is_some())
+        .collect();
+    let mut chosen: Vec<&crate::finder_shared::Entry> = if let Some(m) = o.matcher {
         placed
-    } else if let Some(t) = target {
+            .iter()
+            .copied()
+            .filter(|e| m.matches_parts(&e.shown, &e.name))
+            .collect()
+    } else if let Some(t) = o.target {
         let abs = std::env::current_dir()
             .map(|c| c.join(t))
             .unwrap_or_else(|_| t.to_path_buf());
-        let hit: Vec<_> = rows
-            .iter()
+        rows.iter()
             .filter(|e| e.original.as_deref() == Some(abs.as_path()) || Path::new(&e.name) == t)
-            .collect();
-        if hit.is_empty() {
-            eprintln!(
-                "{prog}: no item named '{}' in the Finder Trash",
-                t.display()
-            );
-            return 1;
-        }
-        // The newest of several items with one Put Back place.
-        vec![*hit.last().unwrap()]
+            .collect()
+    } else if o.all {
+        placed.clone()
     } else {
         if placed.is_empty() {
             eprintln!("{prog}: no trashed files match");
             return 1;
         }
         #[cfg(feature = "tui")]
-        if !plain && !json && crate::util::stdin_is_tty() {
-            let newest = newest_first.unwrap_or(true);
+        if !o.plain && !o.json && o.to.is_none() && crate::util::stdin_is_tty() {
+            let newest = o.newest_first.unwrap_or(true);
             let mut refs = placed.clone();
             if newest {
                 refs.reverse();
             }
-            return crate::restore_tui::run(prog, refs, conflict == Conflict::Overwrite, newest);
+            return crate::restore_tui::run(prog, refs, o.conflict == Conflict::Overwrite, newest);
         }
-        let _ = (plain, newest_first);
+        let _ = (o.plain, o.newest_first);
         for (k, e) in placed.iter().enumerate() {
             println!(
                 "{k:4}  {}  {}",
@@ -610,9 +623,38 @@ pub fn default_restore(
             }
         }
     };
+    if chosen.is_empty() {
+        eprintln!("{prog}: no trashed files match");
+        return 1;
+    }
+    // Rows come oldest first, so the newest match is the last.
+    if o.latest {
+        chosen = vec![*chosen.last().unwrap()];
+    } else if chosen.len() > 1 && !o.all && (o.matcher.is_some() || o.target.is_some()) {
+        if o.target.is_some() {
+            // Several items with one Put Back place: the newest, as before.
+            chosen = vec![*chosen.last().unwrap()];
+        } else {
+            eprintln!(
+                "{prog}: {} items match; pass --latest or --all",
+                chosen.len()
+            );
+            return 1;
+        }
+    }
+    let conflict = o.conflict;
+    let json = o.json;
     let (mut done, mut failed, mut skipped) = (Vec::new(), 0usize, 0usize);
     for e in chosen {
-        let Some(dest) = e.original.clone() else {
+        let to_dir = o.to.map(|d| {
+            let d = if d.is_absolute() {
+                d.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(d)
+            };
+            d.join(e.shown.file_name().unwrap_or_default())
+        });
+        let Some(dest) = to_dir.or_else(|| e.original.clone()) else {
             eprintln!("{prog}: '{}' has no Put Back record", e.name);
             failed += 1;
             continue;

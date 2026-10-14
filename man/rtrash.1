@@ -42,7 +42,17 @@ Finder kept none), restore moves items back to it, and empty removes
 the items and leaves
 .I .DS_Store
 to Finder.
-Options that read the FreeDesktop layout, such as age filters or
+Age filters count from the time an item went into the trash (its change
+time there) and size filters from its disk usage, for list, status and
+rm; restore takes
+.BR \-\-name ,
+.BR \-\-glob ,
+.BR \-\-regex ,
+.B \-\-latest
+and
+.B \-\-to
+as on the FreeDesktop trash.
+Options that need FreeDesktop records, such as
 .BR \-\-max\-size ,
 get refused there.
 A

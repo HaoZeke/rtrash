@@ -315,16 +315,19 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     // macOS lists the Finder Trash unless a pin or the setting says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty() || all_users) {
-        let refused = if size_filter.is_set() {
-            Some("a size filter")
-        } else if older_than.is_some() || newer_than.is_some() {
-            Some("an age filter")
-        } else if volumes || show_dirs {
+        let refused = if volumes || show_dirs {
             Some("--volumes or --trash-dirs")
         } else {
             None
         };
-        return crate::finder::default_list(prog, json, refused);
+        let filter = crate::finder_shared::Filter {
+            age: crate::filters::AgeFilter {
+                older_than,
+                newer_than,
+            },
+            size: size_filter,
+        };
+        return crate::finder::default_list(prog, json, refused, filter);
     }
     if all_users && (home_only || !trash_dirs.is_empty()) {
         eprintln!("{prog}: --all-users takes no --home-only or --trash-dir");

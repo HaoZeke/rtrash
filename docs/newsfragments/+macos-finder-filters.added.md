@@ -1,0 +1,1 @@
+macOS: on the Finder Trash, `list`, `status` and `rm` now take the age and size filters (ages count from the move into the trash), and `restore` takes `--name`, `--glob`, `--regex`, `--latest` and `--to`.
