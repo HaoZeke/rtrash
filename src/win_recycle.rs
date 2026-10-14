@@ -54,21 +54,24 @@ pub fn parse_recycle_i(bytes: &[u8]) -> Option<RecycleIMeta> {
     let delete_filetime = u64::from_le_bytes(bytes[0x10..0x18].try_into().ok()?);
 
     let original = if version >= 2 {
-        if bytes.len() < 0x1C {
+        // Version 2: a u32 count of UTF-16 units (the trailing NUL
+        // included) at 0x18, then the path at 0x1C. The count is in
+        // characters, not bytes.
+        if bytes.len() < 0x1C + 2 {
             return None;
         }
-        let path_bytes_len = u32::from_le_bytes(bytes[0x18..0x1C].try_into().ok()?) as usize;
-        if path_bytes_len < 2 || bytes.len() < 0x1C + path_bytes_len {
-            return None;
-        }
-        let path_bytes = &bytes[0x1C..0x1C + path_bytes_len];
-        decode_utf16le_path(path_bytes)?
+        let units = u32::from_le_bytes(bytes[0x18..0x1C].try_into().ok()?) as usize;
+        let end = 0x1C_usize
+            .saturating_add(units.saturating_mul(2))
+            .min(bytes.len());
+        decode_utf16le_path(&bytes[0x1C..end])?
     } else {
-        // Version 1: fixed 520 wchar (1040 byte) buffer at 0x18.
+        // Version 1: fixed 260 wchar (520 byte) buffer at 0x18.
         if bytes.len() < 0x18 + 2 {
             return None;
         }
-        decode_utf16le_path(&bytes[0x18..])?
+        let end = (0x18 + 520).min(bytes.len());
+        decode_utf16le_path(&bytes[0x18..end])?
     };
 
     Some(RecycleIMeta {
@@ -89,15 +92,23 @@ fn decode_utf16le_path(bytes: &[u8]) -> Option<PathBuf> {
         .iter()
         .map(|c| u16::from_le_bytes(*c))
         .collect();
-    // Strip trailing NULs.
-    while units.last().copied() == Some(0) {
-        units.pop();
+    // The path ends at the first NUL; what follows is padding.
+    if let Some(n) = units.iter().position(|&u| u == 0) {
+        units.truncate(n);
     }
     if units.is_empty() {
         return None;
     }
     let s = String::from_utf16(&units).ok()?;
-    Some(PathBuf::from(s))
+    is_plausible_original(&s).then(|| PathBuf::from(s))
+}
+
+/// An original path from a `$I` record looks right: absolute (`C:\\` or
+/// `\\\\server\\share`) and free of control characters.
+fn is_plausible_original(s: &str) -> bool {
+    let b = s.as_bytes();
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
+    (drive || s.starts_with(r"\\")) && !s.chars().any(char::is_control)
 }
 
 /// Build a minimal version-2 `$I` buffer for tests (round-trip with [`parse_recycle_i`]).
@@ -107,12 +118,12 @@ pub fn encode_recycle_i_v2(original: &Path, size: u64, delete_filetime: u64) -> 
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    let path_bytes_len = (path_utf16.len() * 2) as u32;
-    let mut out = Vec::with_capacity(0x1C + path_bytes_len as usize);
+    let units = path_utf16.len() as u32;
+    let mut out = Vec::with_capacity(0x1C + path_utf16.len() * 2);
     out.extend_from_slice(&2u64.to_le_bytes());
     out.extend_from_slice(&size.to_le_bytes());
     out.extend_from_slice(&delete_filetime.to_le_bytes());
-    out.extend_from_slice(&path_bytes_len.to_le_bytes());
+    out.extend_from_slice(&units.to_le_bytes());
     for u in path_utf16 {
         out.extend_from_slice(&u.to_le_bytes());
     }
@@ -1603,6 +1614,50 @@ mod tests {
         assert_eq!(meta.delete_filetime, ft);
         assert_eq!(meta.original, PathBuf::from(r"C:\Users\me\doc.txt"));
         assert_eq!(filetime_to_unix_epoch(ft), 86_400);
+    }
+
+    /// Hand-built records in the on-disk layout, not via the encoder, so
+    /// a shared mistake in both cannot hide.
+    #[test]
+    fn recycle_i_parses_real_v1_and_v2_layouts() {
+        let path = r"C:\Users\runneradmin\AppData\Local\Temp\rtrash-purge-6716-1.txt";
+        let utf16: Vec<u8> = path.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let head = |v: u64| -> Vec<u8> {
+            [v.to_le_bytes(), 7u64.to_le_bytes(), 9u64.to_le_bytes()].concat()
+        };
+        // v2: count of UTF-16 units with the NUL, then the path and NUL.
+        let mut v2 = head(2);
+        v2.extend_from_slice(&(path.encode_utf16().count() as u32 + 1).to_le_bytes());
+        v2.extend_from_slice(&utf16);
+        v2.extend_from_slice(&[0, 0]);
+        let m = parse_recycle_i(&v2).expect("v2");
+        assert_eq!((m.version, m.size, m.delete_filetime), (2, 7, 9));
+        assert_eq!(m.original, PathBuf::from(path), "{:?}", m.original);
+        // v1: the path in a 520-byte buffer padded with NULs and junk.
+        let mut v1 = head(1);
+        let mut buf = utf16.clone();
+        buf.extend_from_slice(&[0, 0, b'x', 0, b'\r', 0]);
+        buf.resize(520, 0);
+        v1.extend_from_slice(&buf);
+        let m = parse_recycle_i(&v1).expect("v1");
+        assert_eq!(m.original, PathBuf::from(path), "{:?}", m.original);
+        // A relative path or a control character is not a path to trust.
+        let mut bad = head(2);
+        let rel: Vec<u8> = "Temp\r\rx"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        bad.extend_from_slice(&5u32.to_le_bytes());
+        bad.extend_from_slice(&rel);
+        assert!(parse_recycle_i(&bad).is_none());
+        let mut ctl = head(2);
+        let s: Vec<u8> = "C:\\a\rb"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        ctl.extend_from_slice(&6u32.to_le_bytes());
+        ctl.extend_from_slice(&s);
+        assert!(parse_recycle_i(&ctl).is_none());
     }
 
     #[test]

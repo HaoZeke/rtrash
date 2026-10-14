@@ -163,10 +163,13 @@ fn reap_purge_trash_dry_run_lists_the_drive_recycle_bin_oldest_first() {
             stdout
                 .lines()
                 .position(|l| l.starts_with("would remove ") && l.contains(n.as_str()))
-                .unwrap_or_else(|| panic!("{n} not listed: {stdout}"))
+                .unwrap_or_else(|| panic!("{n} not listed: {stdout:?}"))
         })
         .collect();
-    assert!(at[0] < at[1] && at[1] < at[2], "not oldest first: {stdout}");
+    assert!(
+        at[0] < at[1] && at[1] < at[2],
+        "not oldest first: {stdout:?}"
+    );
     assert!(old.exists() && base.join(&names[0]).symlink_metadata().is_err());
     let _ = fs::remove_dir_all(&base);
 }
