@@ -62,6 +62,15 @@ pub fn permanently_remove_entries(
             succeeded.push(true);
             continue;
         }
+        // A total current before this removal stays current after it: the
+        // item's size (from the directorysizes cache where valid) and its
+        // one count come off.
+        let carry = crate::trash_total::cached(&entry.dir).map(|(b, n)| {
+            let sz = trashdir::entry_reclaim_bytes(&entry.dir, &entry.name);
+            (b.saturating_sub(sz), n.saturating_sub(1))
+        });
+        crate::trash_total::forget(&entry.dir);
+        crate::trash_total::touched(&entry.dir);
         if let Err(e) = trashdir::remove_any_path(&payload) {
             eprintln!("{prog}: cannot remove '{}': {e}", payload.display());
             succeeded.push(false);
@@ -75,10 +84,9 @@ pub fn permanently_remove_entries(
             }
         }
         trashdir::directorysizes_remove(&entry.dir, &entry.name);
-        // The total does not follow this removal; drop it, and mark the
-        // trash for the history line.
-        crate::trash_total::forget(&entry.dir);
-        crate::trash_total::touched(&entry.dir);
+        if let Some((b, n)) = carry {
+            crate::trash_total::store(&entry.dir, b, n);
+        }
         succeeded.push(true);
     }
     RemoveBatchResult {
@@ -560,7 +568,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn removing_entries_drops_the_running_total() {
+    fn removing_entries_carries_the_running_total() {
         let root = std::env::temp_dir().join(format!("rtrash-tui-total-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("info")).unwrap();
@@ -568,8 +576,9 @@ mod tests {
         std::fs::write(root.join("files/x"), "x").unwrap();
         std::fs::write(root.join("info/x.trashinfo"), "[Trash Info]\nPath=/x\n").unwrap();
         let dir = TrashDir::from_root(&root).unwrap();
-        crate::trash_total::store(&dir, 999, 99);
+        crate::trash_total::store(&dir, 999_999, 99);
         assert!(root.join("rtrash-total").exists());
+        let sz = trashdir::entry_reclaim_bytes(&dir, "x");
         let e = Entry {
             date: None,
             epoch: 0,
@@ -581,10 +590,10 @@ mod tests {
         let r = permanently_remove_entries("rtrash", &[&e], false);
         assert_eq!(r.succeeded, vec![true]);
         assert!(!root.join("files/x").exists());
-        // In the same clock tick the old stamp could still match info/.
-        assert!(
-            !root.join("rtrash-total").exists(),
-            "the stale total stayed"
+        assert_eq!(
+            crate::trash_total::cached(&dir),
+            Some((999_999 - sz, 98)),
+            "the total did not follow the removal"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -96,6 +96,11 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
                 continue;
             }
         };
+        // A total current before keeps current: each record's size and
+        // its one count come off.
+        let mut total = (!opts.dry_run)
+            .then(|| crate::trash_total::cached(dir))
+            .flatten();
         for fname in dangling_records(dir) {
             let path = dir.info().join(&fname);
             if opts.dry_run {
@@ -105,6 +110,10 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
                 removed += 1;
                 continue;
             }
+            let sz = fs::symlink_metadata(&path).map_or(0, |m| {
+                use std::os::unix::fs::MetadataExt;
+                m.blocks().saturating_mul(512)
+            });
             match fs::remove_file(&path) {
                 Ok(()) => {
                     if opts.verbose && !opts.json {
@@ -112,6 +121,11 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
                     }
                     crate::trash_total::forget(dir);
                     crate::trash_total::touched(dir);
+                    if let Some((b, n)) = total {
+                        let next = (b.saturating_sub(sz), n.saturating_sub(1));
+                        crate::trash_total::store(dir, next.0, next.1);
+                        total = Some(next);
+                    }
                     removed += 1;
                 }
                 Err(e) => {

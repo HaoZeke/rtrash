@@ -3886,6 +3886,45 @@ fn rm_carries_the_total_and_trash_stats_total_reads_it() {
     ]);
     assert_eq!(stdout_of(&out), carried);
 }
+
+/// `empty --dangling` keeps a current total current.
+#[cfg(unix)]
+#[test]
+fn empty_dangling_carries_the_total() {
+    let sb = Sandbox::new("total-dangling");
+    let run = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .env_remove("RTRASH_WARN_SIZE")
+            .env_remove("RTRASH_MAX_SIZE")
+            .output()
+            .unwrap()
+    };
+    let total = |measure: bool| {
+        let mut a = vec!["trash-stats", "--home-only", "--total", "--json"];
+        if measure {
+            a.push("--measure");
+        }
+        stdout_of(&run(&a))
+    };
+    for n in ["a.bin", "b.bin"] {
+        let p = write_at(&sb.root, &format!("work/{n}"), &"z".repeat(20_000));
+        assert!(run(&["put", p.to_str().unwrap()]).status.success());
+    }
+    let trash = sb.root.join("xdg/Trash");
+    fs::remove_file(trash.join("files/b.bin")).unwrap();
+    fs::remove_file(trash.join("rtrash-total")).unwrap();
+    assert!(total(true).contains(r#""items":2,"stale":false"#));
+    let out = run(&["empty", "--dangling", "--home-only"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let carried = total(false);
+    assert!(carried.contains(r#""items":1,"stale":false"#), "{carried}");
+    fs::remove_file(trash.join("rtrash-total")).unwrap();
+    assert_eq!(total(true), carried);
+}
 #[test]
 #[cfg(unix)]
 fn empty_restore_and_prune_keep_the_running_trash_total_current() {
