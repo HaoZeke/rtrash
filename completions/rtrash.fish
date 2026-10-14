@@ -52,6 +52,7 @@ complete -c rtrash -n $put_cond -l trash-dir -d 'put into this trash root' -r
 complete -c rtrash -n $put_cond -l home-only -d 'always use the home trash'
 complete -c rtrash -n $put_cond -l plain -d 'skip TUI; require file operands'
 complete -c rtrash -n $put_cond -l no-space-check -d 'copy across devices even when space or inodes run low'
+complete -c rtrash -n $put_cond -l dry-run -d 'run every check and print what would move'
 complete -c rtrash -n $put_cond -l in-use -x -a 'warn refuse ignore' -d 'when a live process holds an item'
 complete -c rtrash -n $put_cond -l json -d 'JSON summary of trashed items'
 
@@ -231,6 +232,7 @@ for cmd in trash-put trash
     complete -c $cmd -l home-only
     complete -c $cmd -l plain
     complete -c $cmd -l no-space-check
+    complete -c $cmd -l dry-run
     complete -c $cmd -l in-use -x -a 'warn refuse ignore'
     complete -c $cmd -l json
     complete -c $cmd -l help

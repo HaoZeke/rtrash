@@ -281,6 +281,12 @@ if needed). Scripts and tests use this instead of XDG discovery.
 .B \-\-home\-only
 Always use the home trash (skip volume trash selection).
 .TP
+.B \-\-dry\-run
+Run every check put makes (protected paths, the home and mount\-point
+failsafes, git work, live holders) and print
+.I would trash PATH
+for each item that would move; nothing moves.
+.TP
 .B \-\-plain
 Never open the put browser; require
 .I FILE

@@ -8,7 +8,7 @@ use str
 
 var subs = [put empty list status trash-stats du restore undo rm who reap finder config setup keys completions man]
 var opts = [
-  &put=[-f --force -i -I --interactive -r -R --recursive -d --dir -v --verbose --one-file-system --preserve-root --no-preserve-root --trash-dir= --home-only --plain --no-space-check --in-use= --json --help --version]
+  &put=[-f --force -i -I --interactive -r -R --recursive -d --dir -v --verbose --one-file-system --preserve-root --no-preserve-root --trash-dir= --home-only --plain --no-space-check --dry-run --in-use= --json --help --version]
   &empty=[-n --dry-run -v --verbose -f --force -i --interactive --all-users --plain --all --older-than= --max-size= --prune= --until-free= --dangling --json --trash-dir= --home-only --help --version]
   &list=[--home-only --trash-dir= --all-users --volumes --trash-dirs --older-than= --newer-than= --larger-than= --smaller-than= --size --sort= --reverse --glob= --regex= --name= --cwd-only --json --help --version]
   &status=[--home-only --trash-dir= --older-than= --newer-than= --larger-than= --smaller-than= --json --help --version]

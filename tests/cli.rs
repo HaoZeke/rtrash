@@ -6062,3 +6062,19 @@ fn list_filters_by_glob_regex_name_and_cwd() {
     let out = sb.run(&["list", "--home-only", "--glob=*", "--name=x"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn put_dry_run_checks_and_moves_nothing() {
+    let sb = Sandbox::new("putdry");
+    fs::write(sb.work().join("a"), b"x").unwrap();
+    let out = sb.run(&["put", "--dry-run", "a", "missing"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("would trash"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(stderr_of(&out).contains("missing"));
+    assert!(sb.work().join("a").exists());
+    assert!(!sb.trash().join("files/a").exists());
+}

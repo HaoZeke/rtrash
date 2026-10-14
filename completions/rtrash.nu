@@ -76,6 +76,7 @@ export extern "rtrash put" [
     --home-only  # always use the home trash (skip volume trash)
     --plain  # never open the put browser; require FILE operands
     --no-space-check  # copy across devices even when the copy would leave
+    --dry-run  # run every check and print what would move, moving nothing
     --in-use: string@"nu-complete rtrash in-use"  # when a live process has an item open, mapped or as
     --json  # print a JSON summary on stdout ({trashed, failed});
     --help  # display this help and exit
@@ -353,6 +354,7 @@ export extern "trash-put" [
     --home-only  # always use the home trash (skip volume trash)
     --plain  # never open the put browser; require FILE operands
     --no-space-check  # copy across devices even when the copy would leave
+    --dry-run  # run every check and print what would move, moving nothing
     --in-use: string@"nu-complete rtrash in-use"  # when a live process has an item open, mapped or as
     --json  # print a JSON summary on stdout ({trashed, failed});
     --help  # display this help and exit

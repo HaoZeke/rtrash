@@ -71,6 +71,8 @@ pub(crate) struct Opts {
     pub quiet: bool,
     /// Check for live processes holding the item. The browsers leave it off.
     pub in_use: InUse,
+    /// `--dry-run`: run every check and say what would move, moving nothing.
+    pub dry_run: bool,
 }
 
 /// One item moved into a trash directory by `put_one`.
@@ -106,6 +108,7 @@ impl Default for Opts {
             home_only: false,
             quiet: false,
             in_use: InUse::Ignore,
+            dry_run: false,
         }
     }
 }
@@ -124,6 +127,10 @@ to require CLI operands even on a TTY.
                           always (-i); without WHEN, prompt always
   -r, -R, --recursive   remove directories and their contents
   -d, --dir             remove empty directories
+      --dry-run         run every check (protected paths, the home and
+                          mount-point failsafes, git work, holders) and
+                          print 'would trash PATH' for each item that would
+                          move, moving nothing
   -v, --verbose         explain what is being done, naming the trash
                           directory each item went to
       --one-file-system accepted for rm compatibility (no-op: entries are
@@ -193,6 +200,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "--recursive" => opts.recursive = true,
             "--dir" => opts.empty_dirs = true,
             "--verbose" => opts.verbose = true,
+            "--dry-run" => opts.dry_run = true,
             "--one-file-system" => {}
             // GNU's =all also refuses arguments on another device than
             // their parent; rtrash refuses mount roots under plain
@@ -661,6 +669,10 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             }
             eprintln!("{prog}: warning: '{name}' is in use by {who}");
         }
+    }
+    if opts.dry_run {
+        println!("would trash '{}'", crate::util::term_path(&abs));
+        return Ok(None);
     }
     if crate::finder::is_default(opts.trash_pin.is_some()) {
         let size = crate::finder_total::measure_item(&abs);
