@@ -3897,6 +3897,59 @@ fn rm_carries_the_total_and_trash_stats_total_reads_it() {
     assert_eq!(stdout_of(&out), carried);
 }
 
+/// A total that appears while a restore runs (stored by another process)
+/// still loses the restored item, sized where it now lives.
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn restore_carries_a_total_stored_while_it_ran() {
+    let sb = Sandbox::new("total-restore-midway");
+    let run = |args: &[&str], midway: Option<&str>| {
+        let mut c = Command::new(bin());
+        c.args(args)
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .env_remove("RTRASH_WARN_SIZE")
+            .env_remove("RTRASH_MAX_SIZE");
+        if let Some(m) = midway {
+            c.env("RTRASH_TEST_TOTAL_MIDWAY", m);
+        }
+        c.output().unwrap()
+    };
+    let total = |measure: bool| {
+        let mut a = vec!["trash-stats", "--home-only", "--total", "--json"];
+        if measure {
+            a.push("--measure");
+        }
+        stdout_of(&run(&a, None))
+    };
+    let field = |j: &str, k: &str| -> u64 {
+        let at = j.find(&format!("\"{k}\":")).unwrap() + k.len() + 3;
+        j[at..].split([',', '}']).next().unwrap().parse().unwrap()
+    };
+    let a = write_at(&sb.root, "work/a.bin", &"a".repeat(30_000));
+    let tree = write_at(&sb.root, "work/t/x/y.txt", &"y".repeat(12_000));
+    let t = tree.parent().unwrap().parent().unwrap().to_path_buf();
+    for p in [&a, &t] {
+        assert!(run(&["put", "-r", p.to_str().unwrap()], None)
+            .status
+            .success());
+    }
+    let full = total(true);
+    let midway = format!("{}:{}", field(&full, "bytes"), field(&full, "items"));
+    fs::remove_file(sb.root.join("xdg/Trash/rtrash-total")).unwrap();
+    let out = run(
+        &["restore", "--plain", "--home-only", t.to_str().unwrap()],
+        Some(&midway),
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(t.join("x/y.txt").exists());
+    let carried = total(false);
+    assert!(carried.contains(r#""items":1,"stale":false"#), "{carried}");
+    fs::remove_file(sb.root.join("xdg/Trash/rtrash-total")).unwrap();
+    assert_eq!(total(true), carried);
+}
+
 /// `empty --dangling` keeps a current total current.
 #[cfg(unix)]
 #[test]

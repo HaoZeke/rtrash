@@ -716,10 +716,36 @@ pub(crate) fn restore_one_to(
     }
 
     let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
+    // Test seam, debug builds only: store a total here as if another
+    // process had measured the trash while this restore ran.
+    if cfg!(debug_assertions) {
+        if let Some((b, n)) = std::env::var("RTRASH_TEST_TOTAL_MIDWAY")
+            .ok()
+            .and_then(|v| {
+                let (b, n) = v.split_once(':')?;
+                Some((b.parse().ok()?, n.parse().ok()?))
+            })
+        {
+            crate::trash_total::store(&entry.dir, b, n);
+        }
+    }
     {
         // Under the lock, so a put cannot add to the total in between.
         let _lock = trashdir::TrashLock::acquire(&entry.dir.root).ok();
-        let total = size.and(crate::trash_total::cached(&entry.dir));
+        let total = crate::trash_total::cached(&entry.dir);
+        // A total stored by another process while this restore ran was
+        // not sized up front; size the item where it now lives, plus its
+        // record, as the trash counted them.
+        let size = match (size, total) {
+            (None, Some(_)) => {
+                let info_sz = fs::symlink_metadata(&info_path).map_or(0, |m| {
+                    use std::os::unix::fs::MetadataExt;
+                    m.blocks().saturating_mul(512)
+                });
+                Some(crate::fastdelete::disk_usage(dest).saturating_add(info_sz))
+            }
+            (s, _) => s,
+        };
         match fs::remove_file(&info_path) {
             Ok(()) => {
                 if let (Some((b, n)), Some(sz), true) = (total, size, _lock.is_some()) {
