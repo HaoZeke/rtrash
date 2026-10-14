@@ -61,7 +61,6 @@ pub mod setup;
 pub mod space;
 #[cfg(unix)]
 pub mod status;
-#[cfg(unix)]
 pub mod trash_stats;
 #[cfg(unix)]
 pub mod trash_total;
@@ -131,13 +130,6 @@ pub mod undo {
 pub mod finder {
     pub fn run(prog: &str, _args: &[String]) -> i32 {
         eprintln!("{prog}: the Finder Trash exists on macOS only");
-        1
-    }
-}
-#[cfg(windows)]
-pub mod trash_stats {
-    pub fn run(prog: &str, _args: &[String]) -> i32 {
-        eprintln!("{prog}: trash-stats reads FreeDesktop trashes; on Windows, use status");
         1
     }
 }

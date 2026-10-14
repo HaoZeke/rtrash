@@ -553,6 +553,16 @@ Sizes come from the same walk and
 .I directorysizes
 cache as
 .BR status .
+On Windows there is one summary per drive's Recycle Bin
+.RI ( X:\e$Recycle.Bin ),
+an item's size is the one its
+.I $I
+record holds, its inodes are its files plus the record, there are
+no orphans, and
+.B \-\-home\-only
+and
+.B \-\-trash\-dir
+change nothing.
 .TP
 .BI \-\-top= N
 List the

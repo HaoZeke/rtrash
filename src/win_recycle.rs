@@ -220,6 +220,17 @@ pub fn parse_with_filters(
     Ok(f)
 }
 
+/// One Recycle Bin item, as trash-stats shows it.
+#[cfg(windows)]
+pub struct BinStat {
+    pub name: String,
+    pub original: PathBuf,
+    pub epoch: i64,
+    pub bytes: u64,
+    /// Files and directories in its `$R` payload.
+    pub files: u64,
+}
+
 /// Indices of `items` (deletion time, bytes, files), oldest first, to
 /// purge until at least `need` (bytes, files) goes; all of them when that
 /// is more than they hold.
@@ -855,6 +866,32 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         (n, bytes, files)
     }
 
+    /// Every item, grouped by the Recycle Bin (`X:\\$Recycle.Bin`) of its
+    /// drive, in drive order.
+    pub fn bin_items() -> Vec<(PathBuf, Vec<BinStat>)> {
+        let mut out: Vec<(PathBuf, Vec<BinStat>)> = Vec::new();
+        for it in os_limited::list().unwrap_or_default() {
+            let p = Path::new(&it.id);
+            let Some(drive) = drive_root_of(p) else {
+                continue;
+            };
+            let bin = drive.join("$Recycle.Bin");
+            let item = BinStat {
+                name: it.name.to_string_lossy().into_owned(),
+                original: it.original_path(),
+                epoch: it.time_deleted,
+                bytes: recycled_size(p),
+                files: tree_files(p),
+            };
+            match out.iter_mut().find(|(b, _)| *b == bin) {
+                Some((_, v)) => v.push(item),
+                None => out.push((bin, vec![item])),
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     pub fn restore_run(prog: &str, args: &[String]) -> i32 {
         let mut force = false;
         let mut plain = false;
@@ -1470,6 +1507,10 @@ pub fn rm_run(prog: &str, args: &[String]) -> i32 {
 #[cfg(windows)]
 pub fn setup_run(prog: &str, args: &[String]) -> i32 {
     os::setup_run(prog, args)
+}
+#[cfg(windows)]
+pub fn bin_items() -> Vec<(PathBuf, Vec<BinStat>)> {
+    os::bin_items()
 }
 #[cfg(windows)]
 pub fn purge_oldest_on(

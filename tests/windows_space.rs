@@ -1,6 +1,6 @@
 //! Windows: `status` shows each drive's free space from GetDiskFreeSpaceExW,
-//! `restore` takes `--no-space-check`, and `reap --install-timer` makes a
-//! Task Scheduler task.
+//! `restore` takes `--no-space-check`, `trash-stats` reads the Recycle
+//! Bins, and `reap --install-timer` makes a Task Scheduler task.
 #![cfg(windows)]
 
 use std::process::Command;
@@ -50,6 +50,24 @@ fn restore_takes_no_space_check_and_status_rejects_a_bad_floor_quietly() {
         .output()
         .unwrap();
     assert!(out.status.success());
+}
+
+#[test]
+fn trash_stats_summarizes_the_recycle_bins_as_json() {
+    let out = Command::new(bin())
+        .args(["trash-stats", "--json", "--top=2"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.starts_with(r#"{"trashes":["#) && text.contains(r#""total":{"bytes":"#),
+        "{text}"
+    );
 }
 
 #[test]

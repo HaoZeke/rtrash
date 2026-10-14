@@ -1,11 +1,15 @@
 //! `rtrash trash-stats`: one summary per trash directory: size, items,
 //! inodes, orphans, the oldest and newest entries and the largest ones,
-//! as text or JSON for scripts and dashboards.
+//! as text or JSON for scripts and dashboards. On Windows, one summary
+//! per drive's Recycle Bin.
 
+#[cfg(unix)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
 use crate::list;
+#[cfg(unix)]
 use crate::trashdir::{self, TrashDir};
 use crate::util::{format_bytes, json_escape, str_from_os_ref};
 
@@ -47,6 +51,7 @@ pub struct Stats {
 }
 
 /// Files and directories at or below `path`, links not followed.
+#[cfg(unix)]
 fn count_inodes(path: &Path) -> u64 {
     let mut n = 0u64;
     let mut stack = vec![path.to_path_buf()];
@@ -64,13 +69,42 @@ fn count_inodes(path: &Path) -> u64 {
     n
 }
 
+/// The summary of `items` in the trash at `root`, keeping the `top`
+/// largest.
+pub fn summarize(
+    root: PathBuf,
+    mut items: Vec<Item>,
+    inodes: u64,
+    orphans: u64,
+    top: usize,
+) -> Stats {
+    let bytes = items.iter().map(|i| i.bytes).sum();
+    let dated = |i: &&Item| i.date.is_some();
+    let oldest = items.iter().filter(dated).min_by_key(|i| i.epoch).cloned();
+    let newest = items.iter().filter(dated).max_by_key(|i| i.epoch).cloned();
+    let count = items.len() as u64;
+    items.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
+    items.truncate(top);
+    Stats {
+        root,
+        bytes,
+        items: count,
+        inodes,
+        orphans,
+        oldest,
+        newest,
+        top: items,
+    }
+}
+
 /// Gather the summary of `dir`, keeping the `top` largest items.
+#[cfg(unix)]
 pub fn gather(dir: &TrashDir, top: usize) -> Stats {
     let sizes = trashdir::DirSizes::load(dir);
     let entries = list::collect(std::slice::from_ref(dir));
     let orphans = list::orphans(std::slice::from_ref(dir));
     let orphan_count = orphans.len() as u64;
-    let mut items: Vec<Item> = entries
+    let items: Vec<Item> = entries
         .into_iter()
         .chain(orphans)
         .map(|e| Item {
@@ -82,23 +116,31 @@ pub fn gather(dir: &TrashDir, top: usize) -> Stats {
         })
         .collect();
     sizes.write_back();
-    let bytes = items.iter().map(|i| i.bytes).sum();
-    let dated = |i: &&Item| i.date.is_some();
-    let oldest = items.iter().filter(dated).min_by_key(|i| i.epoch).cloned();
-    let newest = items.iter().filter(dated).max_by_key(|i| i.epoch).cloned();
-    let count = items.len() as u64;
-    items.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
-    items.truncate(top);
-    Stats {
-        root: dir.root.clone(),
-        bytes,
-        items: count,
-        inodes: count_inodes(&dir.files()) + count_inodes(&dir.info()),
-        orphans: orphan_count,
-        oldest,
-        newest,
-        top: items,
-    }
+    let inodes = count_inodes(&dir.files()) + count_inodes(&dir.info());
+    summarize(dir.root.clone(), items, inodes, orphan_count, top)
+}
+
+/// The summaries of each drive's Recycle Bin: a `$R` payload and its `$I`
+/// record count as the item's inodes; the bin keeps no orphans apart.
+#[cfg(windows)]
+fn gather_bins(top: usize) -> Vec<Stats> {
+    crate::win_recycle::bin_items()
+        .into_iter()
+        .map(|(root, raw)| {
+            let inodes = raw.iter().map(|r| r.files + 1).sum();
+            let items = raw
+                .into_iter()
+                .map(|r| Item {
+                    name: r.name,
+                    original: r.original,
+                    date: Some(crate::platform::epoch_to_iso_utc(r.epoch)),
+                    epoch: r.epoch,
+                    bytes: r.bytes,
+                })
+                .collect();
+            summarize(root, items, inodes, 0, top)
+        })
+        .collect()
 }
 
 fn path_json(p: &Path) -> String {
@@ -221,12 +263,18 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
     }
-    let dirs = trashdir::resolve_dirs_opts(&pins, home_only);
-    let all: Vec<Stats> = dirs
+    #[cfg(unix)]
+    let all: Vec<Stats> = trashdir::resolve_dirs_opts(&pins, home_only)
         .iter()
         .filter(|d| d.info().is_dir() || d.files().is_dir())
         .map(|d| gather(d, top))
         .collect();
+    // The Recycle Bin has one place per drive; there is nothing to narrow.
+    #[cfg(windows)]
+    let all: Vec<Stats> = {
+        let _ = (home_only, &pins);
+        gather_bins(top)
+    };
     if json {
         println!("{}", to_json(&all));
     } else {
