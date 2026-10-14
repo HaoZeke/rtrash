@@ -434,6 +434,70 @@ pub fn stats(top: usize) -> Vec<crate::trash_stats::Stats> {
         .collect()
 }
 
+/// `rm` on the Finder trashes: permanently remove the items whose Put Back
+/// place, its file name or the name in the trash matches a pattern.
+pub fn rm(prog: &str, patterns: &[String], dry_run: bool, verbose: bool, json: bool) -> i32 {
+    let rows = match entries() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{prog}: cannot read the Finder Trash: {e}");
+            return 1;
+        }
+    };
+    let (mut removed, mut bytes, mut status) = (0u64, 0u64, 0);
+    let mut matched: Vec<String> = Vec::new();
+    for e in &rows {
+        let path_s = e.shown.to_string_lossy();
+        let base = e
+            .shown
+            .file_name()
+            .map(|b| b.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let hit = patterns.iter().any(|p| {
+            crate::util::fnmatch(p, &path_s)
+                || crate::util::fnmatch(p, &base)
+                || crate::util::fnmatch(p, &e.name)
+        });
+        if !hit {
+            continue;
+        }
+        let sz = crate::fastdelete::disk_usage(&e.path());
+        if dry_run {
+            if !json {
+                println!("{}", crate::util::term_path(&e.shown));
+            }
+        } else if let Err(err) = crate::trashdir::remove_any_path(&e.path()) {
+            eprintln!("{prog}: cannot remove '{}': {err}", e.path().display());
+            status = 1;
+            continue;
+        } else if verbose && !json {
+            println!("removed '{}'", crate::util::term_path(&e.shown));
+        }
+        removed += 1;
+        bytes = bytes.saturating_add(sz);
+        matched.push(path_s.into_owned());
+    }
+    let noun = if removed == 1 { "item" } else { "items" };
+    if json {
+        let m: Vec<String> = matched
+            .iter()
+            .map(|p| format!("\"{}\"", crate::util::json_escape(p)))
+            .collect();
+        println!(
+            "{{\"dry_run\":{dry_run},\"removed\":{removed},\"bytes\":{bytes},\"matches\":[{}]}}",
+            m.join(",")
+        );
+    } else if dry_run {
+        eprintln!(
+            "Would permanently remove {removed} {noun} ({}, approximately reclaimable)",
+            crate::fastdelete::format_bytes(bytes)
+        );
+    } else if removed > 0 || verbose {
+        eprintln!("Permanently removed {removed} {noun}");
+    }
+    status
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

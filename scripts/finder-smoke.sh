@@ -61,6 +61,11 @@ echo undo > "$i"
 [[ $(cat "$i") == undo ]] || fail "undo content"
 echo "ok   undo, status and trash-stats"
 
+"$rt" put "$i" || fail "put for rm"
+"$rt" rm "undo me.txt" || fail "rm on the Finder Trash"
+"$rt" list | grep -qF -- "$i" && fail "rm left the item listed"
+echo "ok   rm"
+
 # An item on another volume goes to that volume's .Trashes/UID.
 if [[ -n ${RTRASH_SMOKE_VOLUME:-} ]]; then
   v="$RTRASH_SMOKE_VOLUME/rtrash smoke.txt"
@@ -70,6 +75,7 @@ if [[ -n ${RTRASH_SMOKE_VOLUME:-} ]]; then
   listed "$v" || fail "list does not show the volume item"
   "$rt" restore "$v" || fail "restore on the volume"
   [[ $(cat "$v") == vol ]] || fail "volume restore content"
+  "$rt" put "$v" && "$rt" rm "rtrash smoke.txt" || fail "rm on the volume"
   echo "ok   external volume"
 fi
 

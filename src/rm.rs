@@ -166,6 +166,17 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // path typed through a symlinked directory matches in that form too.
     let resolved: Vec<String> = patterns.iter().filter_map(|p| resolve_pattern(p)).collect();
     patterns.extend(resolved);
+    // macOS deletes from the Finder trashes unless a pin or the setting
+    // says otherwise.
+    if crate::finder::is_default(!trash_dirs.is_empty()) {
+        if size.is_set() || older_than.is_some() || newer_than.is_some() {
+            eprintln!(
+                "{prog}: age and size filters do not apply to the Finder Trash; pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop"
+            );
+            return 2;
+        }
+        return crate::finder_shared::rm(prog, &patterns, dry_run, verbose, json);
+    }
     let mut entries = list::filter_age_secs(list::collect(&dirs), older_than, newer_than);
     // Payloads with no .trashinfo match by their name or their path under
     // files/; having no date, they stay out of an age-filtered rm.

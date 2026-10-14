@@ -224,7 +224,7 @@ fn undo_status_and_trash_stats_cover_the_finder_trash() {
 }
 
 #[test]
-fn volume_trashes_join_list_restore_and_status() {
+fn volume_trashes_join_list_restore_rm_and_status() {
     use std::os::unix::fs::MetadataExt;
     let b = Box_::new("vol");
     let vol = b.root.join("vol");
@@ -263,4 +263,15 @@ fn volume_trashes_join_list_restore_and_status() {
     let o = run(&["restore", &orig.to_string_lossy()]);
     assert!(o.status.success(), "{}", err(&o));
     assert_eq!(fs::read(&orig).unwrap(), b"vol");
+
+    // Back into the volume trash, then a Finder rm takes it for good.
+    fs::rename(&orig, vt.join("v.bin")).unwrap();
+    let o = run(&["rm", "-n", "v.bin"]);
+    assert!(out(&o).contains("v.bin") && vt.join("v.bin").exists());
+    let o = run(&["rm", "v.bin"]);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!vt.join("v.bin").exists());
+    assert!(vt.join(".DS_Store").exists());
+    let o = run(&["rm", "--older-than=1d", "x"]);
+    assert_eq!(o.status.code(), Some(2));
 }

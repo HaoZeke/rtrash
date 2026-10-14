@@ -70,6 +70,7 @@ listing, and the restore conflict policies (=--conflict=rename|skip=).
 | =undo=, =status=, =trash-stats=, restore browser | Finder Trash; undo from a put-run log | n/a |
 | Symbolic links                         | move in as themselves, without Put Back         | follows |
 | Volume trash =/Volumes/X/.Trashes/UID= | plain commands, as Finder; put there for items on the drive | yes |
+| Permanent delete (=rm PATTERN=)        | Finder trashes, by Put Back path or name        | no      |
 
 Age and size filters, =--max-size=, =trash-stats --total= and
 =--history= read the FreeDesktop layout, so on the Finder Trash they are
