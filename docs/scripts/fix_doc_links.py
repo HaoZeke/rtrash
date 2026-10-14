@@ -27,7 +27,7 @@ def fix_text(t: str) -> str:
     t = _LINK.sub(repl, t)
     # Pandoc often glues the next section title to a directive; ensure blank line
     # after grid / toctree blocks that lost spacing.
-    t = re.sub(r"( +bindings)\n(Source & license)", r"\1\n\n\2", t)
+    t = re.sub(r"( +parity)\n(Source & license)", r"\1\n\n\2", t)
     t = re.sub(r"(trash put\.)\n(\.\. toctree::)", r"\1\n\n\2", t)
     # Blank line after raw:: html hero so the next section is not "unexpected unindent".
     t = re.sub(r"(</div>\n)(Why rtrash)", r"\1\n\2", t)

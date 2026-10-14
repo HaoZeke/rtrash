@@ -58,6 +58,7 @@ if ".. toctree::" not in text:
    architecture
    benchmarks
    bindings
+   parity
 """
 idx.write_text(text, encoding="utf-8")
 print("index.rst ready")

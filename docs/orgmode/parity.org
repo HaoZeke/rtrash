@@ -1,0 +1,74 @@
+#+title: Parity with other trash tools
+#+options: toc:2 num:nil
+
+rtrash shares the trash with trash-cli, gtrash, GNOME's =gio trash= and the
+desktop file managers built on it.
+This page records what matches and what differs.
+The Linux rows come from live runs against trash-cli 0.26.9.29, gtrash and
+gio 2.84 on one shared trash.
+
+* Shared trash
+
+| Behaviour                                   | rtrash          | trash-cli | gtrash  | gio trash |
+|---------------------------------------------+-----------------+-----------+---------+-----------|
+| Home trash =$XDG_DATA_HOME/Trash=           | yes             | yes       | yes     | yes       |
+| Volume trash =.Trash/$uid= and =.Trash-$uid= | yes             | yes       | yes     | yes       |
+| Reads entries the others wrote              | yes             | yes       | yes     | yes       |
+| Names with spaces, =%= and Unicode          | yes             | yes       | yes     | yes       |
+| Second item with the same name              | =name_1=        | =name_1=  | =name.2= | =name.2= |
+| Restores items the others trashed           | yes             | yes       | yes     | yes       |
+
+Each tool reads the others' duplicate names, so the spelling only shows in
+=files/=.
+gio lists and restores rtrash items (=gio trash --list=,
+=gio trash --restore trash:///NAME=), and rtrash restores gio items.
+
+* trash-cli command lines
+
+Linked as =trash-put=, =trash-list=, =trash-empty=, =trash-restore= and
+=trash-rm=, rtrash takes a trash-cli command line as is.
+
+| trash-cli                          | rtrash under the trash-* name                      |
+|------------------------------------+----------------------------------------------------|
+| =--trash-dir DIR= (two words)      | same; =--trash-dir=DIR= works too                  |
+| =--print-completion bash= or =zsh= | same; tcsh has no script (exit 2)                  |
+| =trash-put= exit 74 on a failure   | same                                               |
+| =trash-list --volumes=             | same                                               |
+| =trash-list --trash-dirs=          | same                                               |
+| =trash-list --all-users=           | same rows; =rtrash list= adds an owner column      |
+| =trash-empty DAYS=, =-f=           | same; DAYS also takes an age such as =2h=          |
+| =trash-empty -i=                   | same prompt, then empties                          |
+| =trash-empty --all-users=          | same                                               |
+| =trash-restore= (current dir)      | same scope and "No files trashed" message          |
+| =trash-restore PATH=               | same: the item at PATH and items from under it     |
+| =trash-restore --sort date/path/none= | same                                            |
+| =trash-restore --overwrite=        | same                                               |
+| =trash-rm PATTERN=                 | same; no match exits 0                             |
+
+On a terminal, =trash-restore= and =trash-empty= open the rtrash browser;
+=--plain= keeps the numbered prompt.
+=rtrash restore= with no PATH offers every item, and a PATH must match
+exactly; only the =trash-restore= name narrows to the current directory.
+
+* Beyond trash-cli and gtrash
+
+These exist only in rtrash: =rm(1)= flags on put, =undo= of the last put
+run, size budgets (=empty --max-size=), =du= and =reap=, =--json= on every
+listing, and the restore conflict policies (=--conflict=rename|skip=).
+
+* macOS
+
+| Behaviour                          | rtrash                                         | Finder  |
+|------------------------------------+------------------------------------------------+---------|
+| Plain =rtrash put=                 | FreeDesktop home trash =~/.local/share/Trash=  | no      |
+| Trash into =~/.Trash= with Put Back | =rtrash finder put= asks Finder               | yes     |
+| Read Put Back records (=.DS_Store=) | =rtrash finder list=                          | yes     |
+| Put Back without Finder            | =rtrash finder restore=                        | n/a     |
+| Volume trash =/Volumes/X/.Trashes/UID= | =finder list= and =restore= with =--trash-dir= | yes |
+
+Plain put on macOS keeps the FreeDesktop layout, so trash-cli and gtrash
+see its items, while Finder does not; =rtrash finder= covers the Finder
+Trash.
+The macOS rows describe the code paths and their unit tests, which run on
+files written by rtrash and by the Python =ds_store= package.
+No real Mac has run them yet, so treat them as untested.

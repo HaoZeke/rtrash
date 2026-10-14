@@ -107,6 +107,12 @@ Safety model vs permanent delete: [[file:architecture.org][Architecture]].
       :link-type: doc
 
       Replace ``os.remove`` / ``Path.unlink`` / ``shutil.rmtree`` with trash put.
+
+   .. grid-item-card:: Parity
+      :link: parity
+      :link-type: doc
+
+      What matches trash-cli, gtrash, gio and macOS Finder, and what differs.
 #+end_export
 
 #+begin_export rst
@@ -119,6 +125,7 @@ Safety model vs permanent delete: [[file:architecture.org][Architecture]].
    architecture
    benchmarks
    bindings
+   parity
 #+end_export
 
 * Source & license
