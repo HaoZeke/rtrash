@@ -255,7 +255,9 @@ jobs:
       - name: Cross-restore every pairing
         run: |
           cargo build --locked --release
-          RTRASH_INTEROP_GIO_EMPTY=1 scripts/interop-smoke.sh target/release/rtrash
+          # gio reaches trash:// through gvfsd on a session bus, which a
+          # runner does not start; dbus-run-session gives the script one.
+          RTRASH_INTEROP_GIO_EMPTY=1 dbus-run-session -- scripts/interop-smoke.sh target/release/rtrash
 
   completions:
     name: completion syntax (bash · zsh · fish)
