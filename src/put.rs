@@ -693,6 +693,11 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             }
         };
     }
+    if opts.trash_pin.is_none() && !opts.quiet && crate::wsl::hint_due(&abs) {
+        eprintln!(
+            "{prog}: note: '{name}' is on a Windows drive; RTRASH_WSL_RECYCLE=1 sends such files to the Windows Recycle Bin (=0 hides this note)"
+        );
+    }
     if crate::finder::is_default(opts.trash_pin.is_some()) {
         let size = crate::finder_total::measure_item(&abs);
         return match crate::finder::put_item(&abs, &meta) {
