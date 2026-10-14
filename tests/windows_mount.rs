@@ -378,3 +378,52 @@ fn odd_names_survive_the_recycle_bin() {
         let _ = fs::remove_file(p);
     }
 }
+
+/// A name holding an unpaired surrogate, which NTFS stores as it is but
+/// which is not valid text: put, list and restore by path must keep the
+/// exact name (and its extension), and nothing may panic.
+#[test]
+fn unpaired_surrogate_names_survive_the_recycle_bin() {
+    use std::os::windows::ffi::OsStringExt;
+    let Some(m) = mounted() else {
+        return;
+    };
+    let lad = local_app_data("surrogate");
+    let id = std::process::id();
+    let units: Vec<u16> = "lone-"
+        .encode_utf16()
+        .chain([0xD800])
+        .chain(format!(" {id}.txt").encode_utf16())
+        .collect();
+    let f = m.join(std::ffi::OsString::from_wide(&units));
+    if let Err(e) = fs::write(&f, b"surrogate") {
+        eprintln!("skipped: the volume refused the name: {e}");
+        return;
+    }
+    let out = cmd(&lad).arg("put").arg(&f).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(out.status.success(), "{err}");
+    assert!(!f.exists());
+    let out = cmd(&lad)
+        .args(["list", "--format={name}\\n"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let out = cmd(&lad).arg("restore").arg(&f).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(out.status.success(), "{err}");
+    assert_eq!(fs::read(&f).unwrap(), b"surrogate", "{err}");
+    let out = cmd(&lad).arg("put").arg(&f).output().unwrap();
+    assert!(out.status.success());
+    let out = cmd(&lad)
+        .args(["restore", "--batch=last"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{err}");
+    assert!(f.exists(), "{err}");
+    fs::remove_file(&f).unwrap();
+    let _ = fs::remove_dir_all(&lad);
+}
