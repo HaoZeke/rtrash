@@ -2021,7 +2021,11 @@ that of its first argument; 14 days),
 .B bazel
 (output bases no server holds),
 .B gradle
-(build cache and daemon logs); all permanent.
+(build cache and daemon logs),
+.B jetbrains
+(\fIJetBrains/\fR in the cache root, every IDE cache but the newest version
+of each IDE, such as \fIIntelliJIdea2024.3\fR once \fIIntelliJIdea2025.1\fR
+exists); all permanent.
 .TP
 .B pkg
 (group)
@@ -2098,7 +2102,9 @@ reaches),
 .B keep_newest
 (true to reap only entries named
 .IR NAME\-VERSION ,
-VERSION being numbers joined by dots,
+VERSION being numbers joined by dots (or
+.I NAMEVERSION
+when NAME ends in a letter),
 sparing the highest
 .I VERSION
 of each

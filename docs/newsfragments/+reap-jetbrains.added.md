@@ -1,0 +1,1 @@
+reap: a new `jetbrains` profile (in the `compilers` group) takes the caches of older JetBrains IDE versions and keeps the newest of each IDE; `keep_newest` also splits names such as `IntelliJIdea2024.3` without a dash.

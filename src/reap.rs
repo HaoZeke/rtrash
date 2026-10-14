@@ -526,13 +526,23 @@ fn parse_tmpfiles(body: &str, user: bool) -> Vec<String> {
     out
 }
 
-/// `NAME-VERSION` split at the last `-`, with VERSION digits in
+/// `NAME-VERSION` split at the last `-`, or `NAMEVERSION` where the name
+/// ends in a letter (`IntelliJIdea2024.3`), with VERSION digits in
 /// dot-separated parts (`1148`, `131.0.6778.85`), compared part by part.
 fn name_version(p: &Path) -> Option<(String, Vec<u64>)> {
     let name = p.file_name()?.to_str()?;
-    let (n, v) = name.rsplit_once('-')?;
-    let parts: Option<Vec<u64>> = v.split('.').map(|x| x.parse().ok()).collect();
-    Some((n.to_string(), parts?))
+    let parse = |v: &str| -> Option<Vec<u64>> { v.split('.').map(|x| x.parse().ok()).collect() };
+    if let Some((n, v)) = name.rsplit_once('-') {
+        if let Some(parts) = parse(v) {
+            return Some((n.to_string(), parts));
+        }
+    }
+    let cut = name.rfind(|c: char| !(c.is_ascii_digit() || c == '.'))? + 1;
+    let (n, v) = name.split_at(cut);
+    if !n.ends_with(|c: char| c.is_ascii_alphabetic()) || v.is_empty() {
+        return None;
+    }
+    Some((n.to_string(), parse(v)?))
 }
 
 /// Drop the entries not named `NAME-VERSION` and the highest VERSION of
@@ -2258,6 +2268,10 @@ mod tests {
             "/p/linux-131.0.6778.85",
             "/p/linux-131.0.6778.204",
             "/p/linux-99.1",
+            "/j/IntelliJIdea2024.3",
+            "/j/IntelliJIdea2025.1",
+            "/j/PyCharm2024.2",
+            "/j/acme",
         ]
         .iter()
         .map(|p| (PathBuf::from(p), 0))
@@ -2270,7 +2284,8 @@ mod tests {
                 Path::new("/c/chromium-1140"),
                 Path::new("/c/firefox-990"),
                 Path::new("/p/linux-131.0.6778.85"),
-                Path::new("/p/linux-99.1")
+                Path::new("/p/linux-99.1"),
+                Path::new("/j/IntelliJIdea2024.3")
             ]
         );
     }

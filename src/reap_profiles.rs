@@ -131,6 +131,16 @@ const BUILTIN: &[B] = &[
         ],
     ),
     B {
+        keep_newest: true,
+        ..b(
+            "jetbrains",
+            "JetBrains IDE caches of older IDE versions (the newest of each IDE stays)",
+            &["C/JetBrains/*[0-9]*"],
+            30,
+            Permanent,
+        )
+    },
+    B {
         guard: true,
         ..b(
             "claude",
@@ -257,8 +267,8 @@ const BUILTIN: &[B] = &[
     ),
     group(
         "compilers",
-        "build caches: cargo targets and registry, sccache, ccache, go, zig, bazel, gradle",
-        &["cargo-target", "cargo-registry", "sccache", "ccache", "go", "zig", "bazel", "gradle"],
+        "build caches: cargo targets and registry, sccache, ccache, go, zig, bazel, gradle, jetbrains",
+        &["cargo-target", "cargo-registry", "sccache", "ccache", "go", "zig", "bazel", "gradle", "jetbrains"],
     ),
     B {
         marker: Some(".rustc_info.json"),
