@@ -3482,6 +3482,66 @@ fn reap_purge_trash_counts_the_inodes_each_item_frees() {
     assert_eq!(left, ["single.txt.trashinfo"], "the newer item went too");
 }
 
+#[cfg(unix)]
+#[test]
+fn put_keeps_a_running_trash_total_that_matches_a_full_count() {
+    let sb = Sandbox::new("trash-total");
+    let run = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .env_remove("RTRASH_WARN_SIZE")
+            .env_remove("RTRASH_MAX_SIZE")
+            .output()
+            .unwrap()
+    };
+    let total_file = sb.root.join("xdg/Trash/rtrash-total");
+    let stats_bytes = || {
+        let text = stdout_of(&run(&["trash-stats", "--home-only", "--json", "--top=0"]));
+        let at = text.find(r#""total":{"bytes":"#).unwrap() + r#""total":{"bytes":"#.len();
+        text[at..text[at..].find(',').unwrap() + at]
+            .parse::<u64>()
+            .unwrap()
+    };
+    let stored = || {
+        let body = fs::read_to_string(&total_file).unwrap();
+        let f: Vec<&str> = body.split_whitespace().collect();
+        (f[1].parse::<u64>().unwrap(), f[2].parse::<u64>().unwrap())
+    };
+    // The default warning (20% of the disk) measures the trash after the
+    // first put and stores the total.
+    let a = write_at(&sb.root, "work/a.bin", &"a".repeat(50_000));
+    let out = run(&["put", a.to_str().unwrap()]);
+    assert!(
+        out.status.success() && !stderr_of(&out).contains("warning"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(total_file.exists(), "no running total after a put");
+    assert_eq!(stored(), (stats_bytes(), 1));
+    // Later puts add to it without a pass.
+    let tree = write_at(&sb.root, "work/tree/x/y.txt", "y");
+    let out = run(&[
+        "put",
+        "-r",
+        tree.parent().unwrap().parent().unwrap().to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stored(), (stats_bytes(), 2));
+    // Another tool's change makes it stale; the next put measures again.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(
+        sb.root.join("xdg/Trash/info/ghost.trashinfo"),
+        "[Trash Info]\nPath=/ghost\nDeletionDate=2020-01-01T00:00:00\n",
+    )
+    .unwrap();
+    let c = write_at(&sb.root, "work/c.txt", "c");
+    assert!(run(&["put", c.to_str().unwrap()]).status.success());
+    assert_eq!(stored(), (stats_bytes(), 4));
+}
+
 /// A file in `dir` whose access and modification times are a day old.
 fn stale_file(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);

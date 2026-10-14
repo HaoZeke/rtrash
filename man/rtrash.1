@@ -2060,7 +2060,7 @@ reverse = false           # \-\-reverse
 [policy]
 max_size = "50G"          # RTRASH_MAX_SIZE
 min_free = "10G"          # RTRASH_MIN_FREE
-warn_size = "20%"         # RTRASH_WARN_SIZE: a size or a percent
+warn_size = "20%"         # RTRASH_WARN_SIZE: a size or a percent (default 20%)
 in_use = "warn"           # RTRASH_IN_USE: warn, refuse or ignore
 prune = "oldest"          # RTRASH_PRUNE: oldest or largest
 
@@ -2271,7 +2271,10 @@ in the config file, and an empty value turns the prune off.
 A size such as 20G, or a percent of the disk such as 10%: after a put,
 each trash it used that holds more than this gets a warning on stderr
 with its size and share of the disk.
-Measuring the trash costs a pass over it, so it is off unless set.
+Unset, it is 20% of the disk.
+The size comes from a running total kept in
+.I rtrash\-total
+in the trash root, so the check costs a file read.
 It overrides
 .B policy.warn_size
 in the config file; an empty value turns it off, and
@@ -2325,6 +2328,14 @@ Home trash:
 .BR files/ ,
 .BR info/ ,
 .BR directorysizes ,
+.B rtrash\-total
+(the running size and item count put checks against
+.B policy.warn_size
+and
+.BR policy.max_size ,
+trusted only while
+.B info/
+is unchanged since it was written),
 and optional lock file.
 Cache sizes count allocated blocks as
 .B du \-B1

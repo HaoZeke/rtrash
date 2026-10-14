@@ -1,0 +1,1 @@
+Each trash keeps a running total of its size in `rtrash-total`, so the checks after a put are cheap, and a put now warns by default when a trash takes more than 20% of its disk (`RTRASH_WARN_SIZE` or `policy.warn_size` change it; empty turns it off).

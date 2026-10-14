@@ -64,6 +64,8 @@ pub mod status;
 #[cfg(unix)]
 pub mod trash_stats;
 #[cfg(unix)]
+pub mod trash_total;
+#[cfg(unix)]
 pub mod trashdir;
 #[cfg(feature = "tui")]
 pub mod tui_binds;

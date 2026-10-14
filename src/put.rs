@@ -333,6 +333,10 @@ fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
         .collect();
     // One budget per root: each volume's trash frees space on that volume.
     for dir in &dirs {
+        // The running total answers most puts without a pass.
+        if crate::trash_total::bytes(prog, dir) <= max {
+            continue;
+        }
         let done = crate::retention::prune(
             prog,
             std::slice::from_ref(dir),
@@ -391,14 +395,23 @@ impl WarnSize {
     }
 }
 
-/// `RTRASH_WARN_SIZE`, else `policy.warn_size`, with where it came from.
+/// Share of its disk past which a put warns about a trash by default.
+pub const DEFAULT_WARN_PERCENT: u64 = 20;
+
+/// `RTRASH_WARN_SIZE`, else `policy.warn_size`, else 20% of the disk,
+/// with where it came from.
 fn warn_size(prog: &str) -> Option<(WarnSize, &'static str)> {
     let (raw, src) = match std::env::var("RTRASH_WARN_SIZE") {
         Ok(v) => (v, "RTRASH_WARN_SIZE"),
-        Err(_) => (
-            crate::config::get().str("policy", "warn_size")?.to_string(),
-            "policy.warn_size",
-        ),
+        Err(_) => match crate::config::get().str("policy", "warn_size") {
+            Some(v) => (v.to_string(), "policy.warn_size"),
+            None => {
+                return Some((
+                    WarnSize::Percent(DEFAULT_WARN_PERCENT),
+                    "the default 20% of its disk",
+                ))
+            }
+        },
     };
     if raw.trim().is_empty() {
         return None;
@@ -422,20 +435,7 @@ fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
         let Ok(dir) = trashdir::TrashDir::from_root(&root) else {
             continue;
         };
-        let bytes = crate::retention::prune(
-            prog,
-            std::slice::from_ref(&dir),
-            &crate::retention::Prune {
-                max: u64::MAX,
-                policy: crate::retention::Policy::Oldest,
-                dry_run: true,
-                verbose: false,
-                protect_batch: None,
-                gone_before: None,
-                free_inodes: 0,
-            },
-        )
-        .left;
+        let bytes = crate::trash_total::bytes(prog, &dir);
         let disk = crate::space::query(&root).map_or(0, |s| s.total);
         if limit.exceeded(bytes, disk) {
             let share = if disk > 0 {

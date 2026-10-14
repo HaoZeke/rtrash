@@ -820,7 +820,14 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
     trash.ensure()?;
     let name = {
         let _lock = TrashLock::acquire(&trash.root)?;
-        trash_move_locked(abs, meta, trash)?
+        let before = crate::trash_total::cached(trash);
+        let name = trash_move_locked(abs, meta, trash)?;
+        // Keep a total that was current before this put current after it.
+        if let Some((bytes, items)) = before {
+            let added = DirSizes::load(trash).entry_bytes(&name);
+            crate::trash_total::store(trash, bytes.saturating_add(added), items + 1);
+        }
+        name
     };
     if meta.is_dir() {
         record_dir_size(trash, &name);
