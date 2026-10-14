@@ -405,6 +405,21 @@ until it is back at
 A dry run says what it would empty.
 The exit status is 1 when a file system stays short because its trash
 held too little.
+With
+.BR \-\-json ,
+it prints
+.RI { dry_run ", " until_free ", " short ", " still_short ", " file_systems },
+where each short file system gives
+.IR path ,
+.I need_bytes
+and
+.I need_inodes
+(what it lacked), and
+.I left_bytes
+and
+.I left_inodes
+(what it still lacks: measured again after a real purge, estimated on a
+dry run).
 It takes no DAYS,
 .BR \-\-max\-size ,
 .B \-\-dangling

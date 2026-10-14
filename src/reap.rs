@@ -2124,6 +2124,77 @@ pub(crate) fn purge_oldest(
     }
 }
 
+/// `empty --until-free`: for each file system among `roots` (one path
+/// per file system counts) with less free than `floor`, purge the oldest
+/// trash items there until it is back at `floor`. Exits 1 when one stays
+/// short. JSON lists each short file system with what it needed and what
+/// is still missing (estimated on a dry run).
+// Windows calls it from its own empty once that takes --until-free.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn free_until(
+    prog: &str,
+    roots: &[PathBuf],
+    spec: &str,
+    floor: Floor,
+    dry_run: bool,
+    verbose: bool,
+    json: bool,
+) -> i32 {
+    let mut seen: Vec<u64> = Vec::new();
+    let mut rows: Vec<String> = Vec::new();
+    let mut still = 0u64;
+    for root in roots {
+        #[cfg(unix)]
+        let dev = {
+            use std::os::unix::fs::MetadataExt;
+            match fs::metadata(root) {
+                Ok(m) => m.dev(),
+                Err(_) => continue,
+            }
+        };
+        #[cfg(windows)]
+        let dev = crate::win_recycle::volume_key(root);
+        if seen.contains(&dev) {
+            continue;
+        }
+        seen.push(dev);
+        let Ok(space) = crate::space::query(root) else {
+            continue;
+        };
+        let need = floor.need(&space);
+        if need == (0, 0) {
+            continue;
+        }
+        let left = purge_oldest(prog, dev, Some(root), need, floor, dry_run, verbose);
+        if left != (0, 0) {
+            still += 1;
+            eprintln!(
+                "{prog}: the file system of '{}' is still under {spec} free; the trash there held too little",
+                root.display()
+            );
+        }
+        rows.push(format!(
+            r#"{{"path":"{}","need_bytes":{},"need_inodes":{},"left_bytes":{},"left_inodes":{}}}"#,
+            crate::util::json_escape(&root.to_string_lossy()),
+            need.0,
+            need.1,
+            left.0,
+            left.1
+        ));
+    }
+    if json {
+        println!(
+            r#"{{"dry_run":{dry_run},"until_free":"{}","short":{},"still_short":{still},"file_systems":[{}]}}"#,
+            crate::util::json_escape(spec),
+            rows.len(),
+            rows.join(",")
+        );
+    } else if rows.is_empty() && (verbose || dry_run) {
+        eprintln!("{prog}: every trash file system has {spec} free; nothing to do");
+    }
+    i32::from(still > 0)
+}
+
 /// Bytes on disk only the tree at `path` uses: what deleting it frees
 /// at least. Shared extents of its files go to `set`, counted once
 /// across every entry. Without an extent map a file counts in full.

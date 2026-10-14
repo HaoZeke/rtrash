@@ -43,7 +43,8 @@ permanent delete). Use --plain to skip the TUI.
                      remove the oldest items of every trash there (with
                      --home-only or --trash-dir, only file systems those
                      hold) until
-                     it is back at SPEC; exits 1 when one stays short
+                     it is back at SPEC; exits 1 when one stays short;
+                     --json lists each short file system
       --dangling   remove only the .trashinfo records whose payload is gone
                      (they list as items that cannot be restored); takes
                      no DAYS or --max-size
@@ -476,58 +477,15 @@ fn until_free(prog: &str, spec: &str, floor: crate::reap::Floor, opts: &Opts) ->
     if crate::finder::is_default(!opts.trash_dirs.is_empty()) {
         roots.extend(crate::finder::trashes());
     }
-    let mut seen: Vec<u64> = Vec::new();
-    let (mut short, mut still) = (0u64, 0u64);
-    for root in roots {
-        #[cfg(unix)]
-        let dev = {
-            use std::os::unix::fs::MetadataExt;
-            match std::fs::metadata(&root) {
-                Ok(m) => m.dev(),
-                Err(_) => continue,
-            }
-        };
-        #[cfg(windows)]
-        let dev = crate::win_recycle::volume_key(&root);
-        if seen.contains(&dev) {
-            continue;
-        }
-        seen.push(dev);
-        let Ok(space) = crate::space::query(&root) else {
-            continue;
-        };
-        let need = floor.need(&space);
-        if need == (0, 0) {
-            continue;
-        }
-        short += 1;
-        let left = crate::reap::purge_oldest(
-            prog,
-            dev,
-            Some(&root),
-            need,
-            floor,
-            opts.dry_run,
-            opts.verbose,
-        );
-        if left != (0, 0) {
-            still += 1;
-            eprintln!(
-                "{prog}: the file system of '{}' is still under {spec} free; the trash there held too little",
-                root.display()
-            );
-        }
-    }
-    if opts.json {
-        println!(
-            "{{\"dry_run\":{},\"until_free\":\"{}\",\"short\":{short},\"still_short\":{still}}}",
-            opts.dry_run,
-            crate::util::json_escape(spec)
-        );
-    } else if short == 0 && (opts.verbose || opts.dry_run) {
-        eprintln!("{prog}: every trash file system has {spec} free; nothing to do");
-    }
-    i32::from(still > 0)
+    crate::reap::free_until(
+        prog,
+        &roots,
+        spec,
+        floor,
+        opts.dry_run,
+        opts.verbose,
+        opts.json,
+    )
 }
 
 /// Older-than-cutoff check. An entry with a missing or unreadable

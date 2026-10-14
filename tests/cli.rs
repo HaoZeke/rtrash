@@ -4456,7 +4456,8 @@ fn empty_until_free_removes_the_oldest_until_there_is_room() {
     );
     assert_eq!(o.status.code(), Some(0), "{}", stderr_of(&o));
     assert!(
-        stdout_of(&o).contains(r#""short":1,"still_short":0"#),
+        stdout_of(&o).contains(r#""short":1,"still_short":0,"file_systems":[{"path":"#)
+            && stdout_of(&o).contains(r#""left_bytes":0,"left_inodes":0}]"#),
         "{}",
         stdout_of(&o)
     );
