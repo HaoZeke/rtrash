@@ -64,6 +64,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l home
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l older-than -d 'only items older than DAYS days' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l max-size -d 'remove items until the trash fits in SIZE' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l prune -d 'which items --max-size removes first' -x -a 'oldest largest'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l dangling -d 'remove only records whose payload is gone'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l json -d 'JSON summary'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l plain -d 'skip TUI'
 
@@ -224,6 +225,7 @@ complete -c trash-empty -l home-only
 complete -c trash-empty -l older-than -r
 complete -c trash-empty -l max-size -r
 complete -c trash-empty -l prune -x -a 'oldest largest'
+complete -c trash-empty -l dangling
 complete -c trash-empty -l json
 complete -c trash-empty -l plain
 complete -c trash-empty -l help

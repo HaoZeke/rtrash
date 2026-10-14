@@ -285,6 +285,24 @@ Which items
 .B \-\-max\-size
 removes first (default oldest).
 .TP
+.B \-\-dangling
+Remove only the
+.B .trashinfo
+records whose payload in
+.B files/
+is gone: they list as items, but cannot be restored.
+Real items and payloads without a record stay.
+It takes no
+.I DAYS
+or
+.BR \-\-max\-size ;
+with
+.BR \-n ,
+it lists the records instead, and with
+.BR \-\-json
+it prints
+.RI { dry_run ", " removed ", " dangling }.
+.TP
 .B \-\-json
 Emit a JSON summary on stdout
 (\fIdry_run\fR, \fIremoved\fR, \fIbytes\fR, \fIdays\fR, \fImax_size\fR).

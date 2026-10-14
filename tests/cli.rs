@@ -4476,3 +4476,57 @@ fn history_counts_stay_right_when_every_change_shares_a_clock_tick() {
     assert!(!sb.trash().join("info/a.trashinfo").exists());
     assert_eq!(last_items(), 1, "failed full empty");
 }
+
+/// `empty --dangling` removes only the records whose payload is gone:
+/// real items, orphan payloads and names that are not UTF-8 all stay.
+#[test]
+fn empty_dangling_removes_only_records_without_a_payload() {
+    use std::os::unix::ffi::OsStrExt;
+    let sb = Sandbox::new("dangling");
+    let keep = sb.work().join("keep.txt");
+    fs::write(&keep, "k").unwrap();
+    assert!(sb.run(&["put", keep.to_str().unwrap()]).status.success());
+    let info = sb.trash().join("info");
+    let files = sb.trash().join("files");
+    let record = |name: &[u8]| {
+        let mut p = name.to_vec();
+        p.extend_from_slice(b".trashinfo");
+        let path = info.join(std::ffi::OsStr::from_bytes(&p));
+        fs::write(
+            &path,
+            "[Trash Info]\nPath=/tmp/x\nDeletionDate=2020-01-01T00:00:00\n",
+        )
+        .unwrap();
+        path
+    };
+    let ghost = record(b"ghost");
+    // A name that is not UTF-8, with its payload: a real item. macOS
+    // file systems take only UTF-8 names.
+    let odd = cfg!(target_os = "linux").then(|| {
+        let r = record(b"odd\xff");
+        fs::write(files.join(std::ffi::OsStr::from_bytes(b"odd\xff")), "o").unwrap();
+        r
+    });
+    // An orphan payload with no record stays too.
+    fs::write(files.join("orphan"), "o").unwrap();
+    let out = sb.run(&["empty", "--home-only", "--dangling", "-n"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).lines().count(), 1, "{}", stdout_of(&out));
+    assert!(stdout_of(&out).contains("ghost.trashinfo"));
+    assert!(ghost.exists(), "the dry run removed it");
+    let out = sb.run(&["empty", "--home-only", "--dangling", "--json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains(r#""removed":1"#),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(!ghost.exists() && odd.is_none_or(|p| p.exists()));
+    assert!(info.join("keep.txt.trashinfo").exists() && files.join("orphan").exists());
+    assert_eq!(
+        sb.run(&["empty", "--home-only", "--dangling", "3"])
+            .status
+            .code(),
+        Some(2)
+    );
+}

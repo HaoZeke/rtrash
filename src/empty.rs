@@ -34,6 +34,9 @@ permanent delete). Use --plain to skip the TUI.
                      DAYS, the age cut runs first
       --prune=oldest|largest  which items --max-size removes first
                      (default oldest)
+      --dangling   remove only the .trashinfo records whose payload is gone
+                     (they list as items that cannot be restored); takes
+                     no DAYS or --max-size
       --json       emit a JSON summary on stdout ({dry_run, removed, bytes, days})
       --trash-dir=PATH  empty only this trash directory (repeatable);
                      default is the home trash plus every mounted volume
@@ -52,6 +55,93 @@ struct Opts {
     json: bool,
     max_size: Option<u64>,
     prune: crate::retention::Policy,
+    dangling: bool,
+}
+
+/// The `.trashinfo` names in `dir` whose payload in `files/` is gone,
+/// sorted.
+fn dangling_records(dir: &TrashDir) -> Vec<std::ffi::OsString> {
+    let files = dir.files();
+    let mut out: Vec<std::ffi::OsString> = fs::read_dir(dir.info())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            // Raw bytes, so a name that is not UTF-8 still finds its
+            // payload and is never taken for dangling.
+            let fname = e.file_name();
+            let stem = fname.as_bytes().strip_suffix(b".trashinfo")?;
+            if stem.is_empty() || stem.contains(&b'/') {
+                return None;
+            }
+            let payload = files.join(std::ffi::OsStr::from_bytes(stem));
+            payload.symlink_metadata().is_err().then_some(fname)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// `empty --dangling`: remove the records that name no payload, under
+/// each trash's lock, and nothing else.
+fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
+    let mut removed = 0u64;
+    let mut status = 0;
+    for dir in dirs {
+        let _lock = match trashdir::TrashLock::acquire(&dir.root) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("{prog}: cannot lock trash '{}': {e}", dir.root.display());
+                status = 1;
+                continue;
+            }
+        };
+        for fname in dangling_records(dir) {
+            let path = dir.info().join(&fname);
+            if opts.dry_run {
+                if !opts.json {
+                    println!("would remove {}", crate::util::term_path(&path));
+                }
+                removed += 1;
+                continue;
+            }
+            match fs::remove_file(&path) {
+                Ok(()) => {
+                    if opts.verbose && !opts.json {
+                        println!("removed {}", crate::util::term_path(&path));
+                    }
+                    crate::trash_total::forget(dir);
+                    crate::trash_total::touched(dir);
+                    removed += 1;
+                }
+                Err(e) => {
+                    eprintln!("{prog}: cannot remove '{}': {e}", path.display());
+                    status = 1;
+                }
+            }
+        }
+    }
+    if opts.json {
+        println!(
+            "{{\"dry_run\":{},\"removed\":{removed},\"dangling\":true}}",
+            opts.dry_run
+        );
+    } else {
+        let verb = if opts.dry_run {
+            "Would remove"
+        } else {
+            "Removed"
+        };
+        eprintln!(
+            "{verb} {}",
+            crate::util::plural(
+                removed,
+                "record without a payload",
+                "records without a payload"
+            )
+        );
+    }
+    status
 }
 
 fn usage_err(prog: &str, msg: &str) -> i32 {
@@ -77,6 +167,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         json: false,
         max_size: None,
         prune: crate::retention::Policy::Oldest,
+        dangling: false,
     };
     for arg in args {
         match arg.as_str() {
@@ -85,6 +176,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "-f" | "--force" => {}
             "--plain" => opts.plain = true,
             "--json" => opts.json = true,
+            "--dangling" => opts.dangling = true,
             "--home-only" => opts.home_only = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
@@ -139,6 +231,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "{prog}: no valid --trash-dir pins (need non-symlink files/ and info/ directories)"
         );
         return 2;
+    }
+
+    if opts.dangling {
+        if opts.days.is_some() || opts.max_size.is_some() {
+            return usage_err(prog, "--dangling takes no DAYS or --max-size");
+        }
+        return empty_dangling(prog, &dirs, &opts);
     }
 
     // TTY empty browser when no age filter (full interactive review).
