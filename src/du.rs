@@ -119,6 +119,8 @@ directories appear as one `trash` row and are never printed by --print0.
                           then edge hash, then full hash); hard links count
                           once, reflinks free nothing; the oldest file stays
       --trash-dupes     trash every copy but the kept one in each group
+      --link-dupes      replace every copy but the kept one with a hard
+                          link to it (same device only)
       --min-size=SIZE   with --dupes, skip files smaller than SIZE
       --devices         list every mounted file system with its size, use
                           and free space (as df does), instead of scanning
@@ -1843,6 +1845,14 @@ fn devices_out(prog: &str, paths: &[PathBuf], json: bool, si: bool, other_mode: 
 /// ncdu export.
 /// `du --dupes`: find the duplicate groups and report them, or list or
 /// trash every copy but the one each group keeps.
+/// What `--dupes` does with the extra copies.
+#[derive(Clone, Copy, PartialEq)]
+enum DupesAct {
+    List,
+    Trash,
+    Link,
+}
+
 fn dupes_out(
     prog: &str,
     paths: &[PathBuf],
@@ -1850,7 +1860,7 @@ fn dupes_out(
     min_size: u64,
     json: bool,
     print0: bool,
-    trash: bool,
+    act: DupesAct,
 ) -> i32 {
     use std::io::Write;
     let files = crate::du_dupes::walk(
@@ -1879,7 +1889,19 @@ fn dupes_out(
         return 0;
     }
     crate::du_dupes::print_text(&groups, opts.top);
-    if trash && !extras.is_empty() {
+    if act == DupesAct::Link {
+        let done = crate::du_dupes::link_extras(&groups);
+        for s in &done.skipped {
+            eprintln!("{prog}: not linked: {s}");
+        }
+        println!(
+            "linked {} name(s) to the kept copies, freeing {}",
+            done.names,
+            crate::util::format_bytes(done.freed)
+        );
+        return i32::from(!done.skipped.is_empty());
+    }
+    if act == DupesAct::Trash && !extras.is_empty() {
         let mut args: Vec<String> = vec!["--".into()];
         args.extend(extras.iter().map(|p| p.to_string_lossy().into_owned()));
         return crate::put::run(prog, &args);
@@ -2613,6 +2635,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut devices = false;
     let mut dupes = false;
     let mut trash_dupes = false;
+    let mut link_dupes = false;
     let mut min_size: u64 = 1;
     let mut from_file: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
@@ -2781,6 +2804,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--print0" => print0 = true,
                 "--dupes" => dupes = true,
                 "--trash-dupes" => trash_dupes = true,
+                "--link-dupes" => link_dupes = true,
                 a if a.starts_with("--min-size=") => {
                     match crate::filters::parse_size(&a["--min-size=".len()..]) {
                         Some(n) => min_size = n,
@@ -2888,8 +2912,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if paths.is_empty() {
         paths.push(PathBuf::from("."));
     }
-    if (trash_dupes || min_size != 1) && !dupes {
-        eprintln!("{prog}: --trash-dupes and --min-size go with --dupes");
+    if (trash_dupes || link_dupes || min_size != 1) && !dupes {
+        eprintln!("{prog}: --trash-dupes, --link-dupes and --min-size go with --dupes");
         return 2;
     }
     if dupes {
@@ -2900,15 +2924,23 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             || pick
             || interactive
             || opts.types
-            || (trash_dupes && (json || print0))
+            || ((trash_dupes || link_dupes) && (json || print0))
+            || (trash_dupes && link_dupes)
         {
             eprintln!(
-                "{prog}: --dupes takes --json, --print0 or --trash-dupes, with -x, -n and --min-size"
+                "{prog}: --dupes takes one of --json, --print0, --trash-dupes or --link-dupes, with -x, -n and --min-size"
             );
             return 2;
         }
         crate::util::set_si_units(si);
-        return dupes_out(prog, &paths, &opts, min_size, json, print0, trash_dupes);
+        let act = if trash_dupes {
+            DupesAct::Trash
+        } else if link_dupes {
+            DupesAct::Link
+        } else {
+            DupesAct::List
+        };
+        return dupes_out(prog, &paths, &opts, min_size, json, print0, act);
     }
     // Text sizes everywhere in this run, the explorer included; JSON,
     // snapshots and stacks stay in bytes.

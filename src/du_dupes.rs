@@ -324,6 +324,71 @@ pub fn to_json(groups: &[Group]) -> String {
 }
 
 /// The text report: the `top` groups, then the total.
+/// What `link_extras` did: names replaced, bytes freed, and one message
+/// per name left alone.
+#[derive(Debug, Default)]
+pub struct Linked {
+    pub names: usize,
+    pub freed: u64,
+    pub skipped: Vec<String>,
+}
+
+/// Replace every extra name with a hard link to the kept file, so one copy
+/// of the contents stays on disk and every path still reads it.
+///
+/// A name is only replaced when it still is the file the scan saw (same
+/// inode, size and mtime) and sits on the kept file's device. The link is
+/// made under a temporary name in the same directory and renamed over the
+/// extra, so the path is never missing.
+pub fn link_extras(groups: &[Group]) -> Linked {
+    let mut out = Linked::default();
+    for (gi, g) in groups.iter().enumerate() {
+        let mut whole = true;
+        for f in &g.extras {
+            if f.dev != g.keep.dev {
+                out.skipped.push(format!(
+                    "'{}' is on another device than '{}'",
+                    f.path.display(),
+                    g.keep.path.display()
+                ));
+                whole = false;
+                continue;
+            }
+            for (ni, name) in std::iter::once(&f.path).chain(&f.links).enumerate() {
+                if let Err(e) = link_one(&g.keep.path, name, f, (gi, ni)) {
+                    out.skipped.push(format!("'{}': {e}", name.display()));
+                    whole = false;
+                } else {
+                    out.names += 1;
+                }
+            }
+        }
+        // Partly linked groups free an unknown share; count only whole ones.
+        if whole {
+            out.freed += g.reclaim;
+        }
+    }
+    out
+}
+
+fn link_one(keep: &Path, name: &Path, seen: &File, tag: (usize, usize)) -> std::io::Result<()> {
+    let st = du_fs::lstat(name)?;
+    if st.size != seen.size || st.mtime != seen.mtime || (seen.ino != 0 && st.ino != seen.ino) {
+        return Err(std::io::Error::other("changed since the scan"));
+    }
+    let dir = name.parent().unwrap_or(Path::new("."));
+    let tmp = dir.join(format!(
+        ".rtrash-link-{}-{}-{}",
+        std::process::id(),
+        tag.0,
+        tag.1
+    ));
+    fs::hard_link(keep, &tmp)?;
+    fs::rename(&tmp, name).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })
+}
+
 pub fn print_text(groups: &[Group], top: usize) {
     let fmt = crate::util::format_bytes;
     if !groups.is_empty() {

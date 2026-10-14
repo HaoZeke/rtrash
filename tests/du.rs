@@ -1859,3 +1859,44 @@ fn dupes_find_copies_and_trash_all_but_one() {
     let after = t.json(&["--dupes", "--min-size=1k"]);
     assert!(after.contains(r#""total":{"groups":0,"#), "{after}");
 }
+
+#[test]
+fn link_dupes_turns_copies_into_hard_links_of_the_kept_file() {
+    let t = Tree::new("dupes-link");
+    let old = t.file("keep/a.bin", 50_000);
+    let copy = t.file("x/a-copy.bin", 50_000);
+    let f = fs::File::options().write(true).open(&old).unwrap();
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    f.set_modified(day_ago).unwrap();
+    let out = t.du(&["--dupes", "--json", "--link-dupes"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = t.du(&["--dupes", "--link-dupes", "--trash-dupes"]);
+    assert_eq!(out.status.code(), Some(2));
+    let out = t.du(&["--dupes", "--link-dupes", "--min-size=1k"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("linked 1 name(s)"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(fs::read(&old).unwrap(), fs::read(&copy).unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (a, b) = (fs::metadata(&old).unwrap(), fs::metadata(&copy).unwrap());
+        assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+        assert_eq!(a.nlink(), 2);
+    }
+    // No stray temporary names, and nothing left to free.
+    let names: Vec<_> = fs::read_dir(t.root.join("x")).unwrap().flatten().collect();
+    assert_eq!(names.len(), 1);
+    // Windows may give no file index, so the two names still look apart.
+    if cfg!(unix) {
+        let after = t.json(&["--dupes", "--min-size=1k"]);
+        assert!(after.contains(r#""total":{"groups":0,"#), "{after}");
+    }
+}

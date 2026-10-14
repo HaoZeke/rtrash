@@ -1093,6 +1093,15 @@ With \fB\-\-print0\fR, the extras and their links are printed.
 .B \-\-trash\-dupes
 Like \fB\-\-dupes\fR, then trash every extra copy.
 .TP
+.B \-\-link\-dupes
+Like \fB\-\-dupes\fR, then replace every extra name with a hard link to the
+kept file, so one copy stays on disk and every path still reads it.
+A name is replaced only when it is still the file the scan saw and sits on
+the kept file's device; the link is made under a temporary name and renamed
+over it.
+The extra loses its own owner, mode and times.
+Exits 1 when any name was left alone.
+.TP
 .BI \-\-min\-size= SIZE
 With \fB\-\-dupes\fR, skip files smaller than \fISIZE\fR (as 10M).
 .TP
