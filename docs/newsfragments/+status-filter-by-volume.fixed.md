@@ -1,0 +1,1 @@
+On Windows, `rtrash status` with an age or size filter counts each item under the volume of its Recycle Bin, so items on a volume mounted on a folder show under that folder, as `trash-stats` shows them.

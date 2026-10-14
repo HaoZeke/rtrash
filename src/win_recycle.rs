@@ -1391,7 +1391,7 @@ space on each drive (a warning under 10% free).
     }
 
     /// `status` with a filter: the shell's per-drive totals cannot be
-    /// filtered, so count the passing items, by the drive of their bin.
+    /// filtered, so count the passing items, by the volume of their bin.
     fn filtered_status(prog: &str, filters: &BinFilters) -> i32 {
         let items = match os_limited::list() {
             Ok(i) => filters.apply(i, |it| it.time_deleted, item_size),
@@ -1400,10 +1400,12 @@ space on each drive (a warning under 10% free).
                 return 1;
             }
         };
+        // By volume, so items in the bin of a volume mounted on a folder
+        // count under that folder, as trash-stats groups them.
         let mut by_drive: std::collections::BTreeMap<PathBuf, (u64, u64)> =
             std::collections::BTreeMap::new();
         for it in &items {
-            let root = drive_root_of(Path::new(&it.id)).unwrap_or_default();
+            let root = bin_root_of(Path::new(&it.id)).unwrap_or_default();
             let e = by_drive.entry(root).or_default();
             e.0 += 1;
             e.1 = e.1.saturating_add(item_size(it));
