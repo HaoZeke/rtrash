@@ -49,6 +49,13 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
       --shared          also show what a delete would free: the bytes in
                           extents no other file shares, and the extents
                           shared by reflinks or snapshots, counted once
+      --when-below=SPEC run only when a reaped file system has less free
+                          than SPEC (a size such as 20G, a percent such
+                          as 10%, and ,inodes=PCT), then reap oldest first
+                          by profile until it is back above it; exits at
+                          once while space is fine, for a timer job
+      --until=SPEC      the target to reap back to under --when-below
+                          (default: the --when-below SPEC)
       --json            print a JSON object ({dry_run, older_than,
                           profiles, reaped, skipped, failed})
       --help            display this help and exit
@@ -159,6 +166,71 @@ pub fn tmpfiles_exclusions() -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// A free space target: `--when-below` and `--until`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Floor {
+    pub bytes: Option<u64>,
+    pub pct: Option<u64>,
+    pub inodes_pct: Option<u64>,
+}
+
+impl Floor {
+    /// `10G`, `15%`, either with `,inodes=PCT`, or `inodes=PCT` alone.
+    pub fn parse(spec: &str) -> Option<Floor> {
+        let mut f = Floor::default();
+        for part in spec.split(',') {
+            let part = part.trim();
+            if let Some(v) = part.strip_prefix("inodes=") {
+                f.inodes_pct = Some(parse_pct(v)?);
+            } else if part.ends_with('%') {
+                f.pct = Some(parse_pct(part)?);
+            } else {
+                f.bytes = Some(crate::filters::parse_size(part)?);
+            }
+        }
+        (f != Floor::default()).then_some(f)
+    }
+
+    /// Whether `s` is under any part of the target.
+    pub fn below(&self, s: &crate::space::Space) -> bool {
+        let (b, i) = self.need(s);
+        b > 0 || i > 0
+    }
+
+    /// Bytes and inodes to free for `s` to meet every part of the target.
+    pub fn need(&self, s: &crate::space::Space) -> (u64, u64) {
+        let pct_of = |p: u64, total: u64| (u128::from(total) * u128::from(p) / 100) as u64;
+        let mut want = self.bytes.unwrap_or(0);
+        if let Some(p) = self.pct {
+            want = want.max(pct_of(p, s.total));
+        }
+        let inodes = match (self.inodes_pct, s.inodes, s.inodes_avail) {
+            (Some(p), Some(t), Some(a)) => pct_of(p, t).saturating_sub(a),
+            _ => 0,
+        };
+        (want.saturating_sub(s.avail), inodes)
+    }
+}
+
+fn parse_pct(v: &str) -> Option<u64> {
+    let n: u64 = v.strip_suffix('%').unwrap_or(v).trim().parse().ok()?;
+    (n <= 100).then_some(n)
+}
+
+/// How many of `sizes` (bytes, inodes), taken in order, free `need`; all
+/// of them when they can't.
+fn enough(sizes: &[(u64, u64)], need: (u64, u64)) -> usize {
+    let (mut b, mut i) = (0u64, 0u64);
+    for (n, (sb, si)) in sizes.iter().enumerate() {
+        if b >= need.0 && i >= need.1 {
+            return n;
+        }
+        b = b.saturating_add(*sb);
+        i = i.saturating_add(*si);
+    }
+    sizes.len()
 }
 
 /// The tmpfiles.d age of each path a `d`, `D`, `e`, `q`, `Q` or `v` line
@@ -319,6 +391,8 @@ fn excluded(path: &Path, pats: &[String]) -> Option<String> {
 struct Walk {
     newest: i64,
     bytes: u64,
+    /// Files and directories in the entry, itself included.
+    inodes: u64,
     /// Why it must stay, found during the walk.
     keep: Option<String>,
 }
@@ -334,6 +408,7 @@ fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Wal
     let mut w = Walk {
         newest: ctx.age_by.newest(top),
         bytes: plat::bytes(top),
+        inodes: 1,
         keep: None,
     };
     if !top.is_dir() || w.newest > g.cutoff {
@@ -388,6 +463,7 @@ fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Wal
                 return w;
             }
             w.bytes += plat::bytes(&m);
+            w.inodes += 1;
             if m.is_dir() {
                 stack.push(p);
             }
@@ -418,6 +494,9 @@ struct Outcome {
     group: usize,
     age: i64,
     bytes: u64,
+    inodes: u64,
+    /// Device of the directory the entry sits in.
+    dev: u64,
     skip: Option<String>,
     /// Bytes only this entry uses (`--shared`).
     unique: Option<u64>,
@@ -462,6 +541,8 @@ fn judge(path: &Path, parent_dev: u64, gi: usize, g: &Group, ctx: &Ctx) -> Optio
         group: gi,
         age: ctx.now - ctx.age_by.newest(&m),
         bytes: 0,
+        inodes: 1,
+        dev: parent_dev,
         skip: None,
         unique: None,
     };
@@ -494,6 +575,7 @@ fn judge(path: &Path, parent_dev: u64, gi: usize, g: &Group, ctx: &Ctx) -> Optio
     let w = walk(path, &m, parent_dev, ctx, g);
     o.age = ctx.now - w.newest;
     o.bytes = w.bytes;
+    o.inodes = w.inodes;
     o.skip = if let Some(k) = w.keep {
         Some(k)
     } else if w.newest > g.cutoff {
@@ -849,6 +931,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut verbose = false;
     let mut json = false;
     let mut shared = false;
+    let mut when_below: Option<Floor> = None;
+    let mut until: Option<Floor> = None;
     let mut list = false;
     let mut use_tool = false;
     let mut profiles: Vec<String> = Vec::new();
@@ -884,6 +968,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--trash" => action = Some(Action::Trash),
             "--json" => json = true,
             "--shared" => shared = true,
+            a if a.starts_with("--when-below=") || a.starts_with("--until=") => {
+                let (name, v) = a.split_once('=').unwrap_or((a, ""));
+                let Some(f) = Floor::parse(v) else {
+                    return usage_err(
+                        prog,
+                        &format!("invalid {name} '{v}' (a size such as 10G, a percent such as 10%, and ,inodes=PCT)"),
+                    );
+                };
+                if name == "--until" {
+                    until = Some(f);
+                } else {
+                    when_below = Some(f);
+                }
+            }
             "--home-only" => dest.home_only = true,
             "--list-profiles" => list = true,
             "--tool" => use_tool = true,
@@ -934,6 +1032,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     if list {
         return list_profiles(prog, json, verbose, &roots_cli);
+    }
+    if until.is_some() && when_below.is_none() {
+        return usage_err(prog, "--until goes with --when-below");
     }
     let now = crate::util::now_epoch();
     let mut status = 0;
@@ -1056,6 +1157,42 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
+    // --when-below: keep only entries on file systems under the target,
+    // with what each must free, and stop here when none is.
+    let mut needs: Vec<(u64, (u64, u64))> = Vec::new();
+    if let Some(wb) = when_below {
+        let target = until.unwrap_or(wb);
+        for g in &mut groups {
+            g.entries.retain(|(e, dev)| {
+                if let Some((_, n)) = needs.iter().find(|(d, _)| d == dev) {
+                    return *n != (0, 0);
+                }
+                let Some(space) = e.parent().and_then(|p| crate::space::query(p).ok()) else {
+                    return false;
+                };
+                let n = if wb.below(&space) {
+                    target.need(&space)
+                } else {
+                    (0, 0)
+                };
+                // Below the trigger yet above --until still frees nothing.
+                needs.push((*dev, n));
+                n != (0, 0)
+            });
+        }
+        if groups.iter().all(|g| g.entries.is_empty()) {
+            if json {
+                println!(
+                    r#"{{"dry_run":{dry_run},"space_ok":true,"reaped":[],"skipped":[],"failed":0}}"#
+                );
+            } else if verbose {
+                eprintln!("{prog}: free space is above the target; nothing to do");
+            }
+            return status;
+        }
+        use_tool = false;
+    }
+
     // One process scan covers every entry, by way of the dirs they sit in.
     let mut scan_roots: Vec<PathBuf> = Vec::new();
     for g in &groups {
@@ -1124,6 +1261,23 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
 
+    // --when-below: oldest first within each profile, in profile order,
+    // until each file system has what it needs.
+    if when_below.is_some() {
+        outcomes.sort_by(|a, b| a.group.cmp(&b.group).then(b.age.cmp(&a.age)));
+        for (dev, need) in &needs {
+            let idx: Vec<usize> = (0..outcomes.len())
+                .filter(|&i| outcomes[i].dev == *dev && outcomes[i].skip.is_none())
+                .collect();
+            let sizes: Vec<(u64, u64)> = idx
+                .iter()
+                .map(|&i| (outcomes[i].bytes, outcomes[i].inodes))
+                .collect();
+            for &i in &idx[enough(&sizes, *need)..] {
+                outcomes[i].skip = Some("free space is back above the target".into());
+            }
+        }
+    }
     // Measured before anything goes, while the extents still exist.
     let mut shared_set = crate::du_extent::SharedSet::default();
     if shared {
@@ -1338,6 +1492,55 @@ mod tests {
         assert_eq!(parse_age("1w"), Some(604_800));
         assert_eq!(parse_age("3y"), None);
         assert_eq!(parse_age(""), None);
+    }
+
+    #[test]
+    fn floors_parse_and_say_what_to_free() {
+        assert_eq!(
+            Floor::parse("10%"),
+            Some(Floor {
+                pct: Some(10),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            Floor::parse("20G,inodes=5%"),
+            Some(Floor {
+                bytes: Some(20 << 30),
+                inodes_pct: Some(5),
+                ..Default::default()
+            })
+        );
+        assert_eq!(
+            Floor::parse("inodes=5"),
+            Some(Floor {
+                inodes_pct: Some(5),
+                ..Default::default()
+            })
+        );
+        for bad in ["", "101%", "x", "inodes=", "10%,inodes=200"] {
+            assert_eq!(Floor::parse(bad), None, "{bad}");
+        }
+        let s = crate::space::Space {
+            total: 1000,
+            avail: 50,
+            inodes: Some(100),
+            inodes_avail: Some(2),
+        };
+        let f = Floor::parse("10%,inodes=5%").unwrap();
+        assert!(f.below(&s));
+        assert_eq!(f.need(&s), (50, 3));
+        assert_eq!(Floor::parse("40").unwrap().need(&s), (0, 0));
+        assert!(!Floor::parse("5%").unwrap().below(&s));
+    }
+
+    #[test]
+    fn enough_takes_entries_until_the_need_is_met() {
+        let sizes = [(30, 1), (30, 1), (30, 1)];
+        assert_eq!(enough(&sizes, (0, 0)), 0);
+        assert_eq!(enough(&sizes, (31, 0)), 2);
+        assert_eq!(enough(&sizes, (10, 3)), 3);
+        assert_eq!(enough(&sizes, (1000, 0)), 3);
     }
 
     #[test]

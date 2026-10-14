@@ -1,0 +1,1 @@
+`rtrash reap --when-below=SPEC` exits at once while free space is above a size, a percent or an inode percent, and otherwise reaps oldest first by profile until `--until` (or the same target) is met, so a frequent timer costs almost nothing.

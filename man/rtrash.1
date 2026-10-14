@@ -1775,6 +1775,33 @@ Always use the home trash.
 .BR \-v ", " \-\-verbose
 Also print each entry kept and why.
 .TP
+.BI \-\-when\-below= SPEC
+Reap only when a file system holding the entries has less free than
+.IR SPEC :
+a size such as
+.BR 20G ,
+a percent of its size such as
+.BR 10% ,
+or both, each optionally with
+.BI ,inodes= PCT\fR.
+While every such file system is above it, reap exits 0 at once,
+without the process scan, so a timer can run it often.
+Below it, entries on that file system go oldest first, profile by
+profile in the order given, until their sizes cover the shortfall;
+the rest are kept as
+.RI \(oq "free space is back above the target" \(cq.
+Trashed entries free space only once the trash is emptied, so profiles
+whose action is permanent, or
+.BR \-\-permanent ,
+suit it best.
+.TP
+.BI \-\-until= SPEC
+The target to reap back to under
+.BR \-\-when\-below ,
+in the same form; by default the
+.B \-\-when\-below
+target itself.
+.TP
 .B \-\-shared
 Also give what a delete would free, measured before anything goes: each
 entry's bytes in extents no other file shares, then the extents that

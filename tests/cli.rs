@@ -3086,6 +3086,60 @@ fn reap_shared_reports_what_a_delete_frees() {
     assert!(big.exists());
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_when_below_exits_while_space_is_fine_and_reaps_when_short() {
+    let sb = Sandbox::new("reap-below");
+    let tmp = sb.root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let old = stale_file(&tmp, "old.txt");
+    let tmp_arg = tmp.to_str().unwrap();
+    // Every file system has a byte free.
+    let out = sb.run(&[
+        "reap",
+        "--age-by=m",
+        "--older-than=1h",
+        "--when-below=1",
+        "-v",
+        tmp_arg,
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("free space is above the target"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(old.exists());
+    let out = sb.run(&[
+        "reap",
+        "--age-by=m",
+        "--older-than=1h",
+        "--when-below=1",
+        "--json",
+        tmp_arg,
+    ]);
+    assert!(
+        stdout_of(&out).contains(r#""space_ok":true"#),
+        "{}",
+        stdout_of(&out)
+    );
+    // No file system is entirely free, so this always reaps.
+    let out = sb.run(&[
+        "reap",
+        "--age-by=m",
+        "--older-than=1h",
+        "--when-below=100%",
+        "--until=100%",
+        "--permanent",
+        tmp_arg,
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!old.exists());
+    for bad in [&["reap", "--when-below=lots"][..], &["reap", "--until=10%"]] {
+        assert_eq!(sb.run(bad).status.code(), Some(2), "{bad:?}");
+    }
+}
+
 /// A file in `dir` whose access and modification times are a day old.
 fn stale_file(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);
