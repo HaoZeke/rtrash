@@ -731,16 +731,21 @@ impl App {
         // The order may have changed while the scan ran.
         sort_rows(&mut fresh.rows, self.sorting);
         let stopped = fresh.partial;
+        if on_screen {
+            self.stash_marks();
+        }
         if refresh {
             self.apply_fresh(&dir, fresh);
         } else {
             self.cache.insert(dir.clone(), fresh);
         }
+        self.prune_marks(&dir);
         if on_screen && self.narrowed() {
             self.refilter();
         }
         if on_screen {
             self.sel.clear();
+            self.restore_marks();
             let at = keep
                 .and_then(|p| self.rows().iter().position(|r| r.path == p))
                 .unwrap_or(0);
@@ -944,12 +949,15 @@ impl App {
                 return;
             }
         };
+        self.stash_marks();
         self.apply_fresh(&cur, fresh);
         self.take_below(below);
+        self.prune_marks(&cur);
         if self.narrowed() {
             self.refilter();
         }
         self.sel.clear();
+        self.restore_marks();
         let at = self.list_state.selected().unwrap_or(0);
         self.select(at);
         self.status = format!("rescanned · {} entries", self.rows().len());
@@ -1006,6 +1014,28 @@ impl App {
         }
     }
 
+    /// After a scan of `dir`: drop the marks held for entries of `dir` the
+    /// scan no longer lists, since they are gone.
+    fn prune_marks(&mut self, dir: &Path) {
+        let Some(v) = self.cache.get(dir) else {
+            return;
+        };
+        let listed = |p: &Path| v.rows.iter().chain(&v.stash).any(|r| r.path == p);
+        let roots = &self.roots;
+        self.away
+            .retain(|p, _| up(roots, p).as_deref() != Some(dir) || listed(p));
+    }
+
+    /// `it` with the sizes its view now shows, when that view is cached;
+    /// a mark keeps the sizes of when it was made otherwise.
+    fn current(&self, it: &Item) -> Item {
+        up(&self.roots, &it.path)
+            .and_then(|d| self.cache.get(&d))
+            .and_then(|v| v.rows.iter().chain(&v.stash).find(|r| r.path == it.path))
+            .cloned()
+            .unwrap_or_else(|| it.clone())
+    }
+
     /// Take back the marks `away` holds for rows of this view.
     fn restore_marks(&mut self) {
         if self.away.is_empty() {
@@ -1023,7 +1053,7 @@ impl App {
 
     /// Every mark, from this view and the others, in path order.
     fn all_marks(&self) -> Vec<Item> {
-        let mut out: Vec<Item> = self.away.values().cloned().collect();
+        let mut out: Vec<Item> = self.away.values().map(|it| self.current(it)).collect();
         out.extend(
             self.sel
                 .marked_sorted()
@@ -1107,7 +1137,7 @@ impl App {
     /// else the cursor row. A mark under another marked directory goes
     /// with it and is not counted twice.
     fn batch(&self) -> Vec<Item> {
-        let mut out: Vec<Item> = self.away.values().cloned().collect();
+        let mut out: Vec<Item> = self.away.values().map(|it| self.current(it)).collect();
         let marked = self.sel.marked_sorted();
         let idxs = if marked.is_empty() && self.away.is_empty() {
             self.list_state.selected().into_iter().collect()
@@ -2496,6 +2526,36 @@ mod tests {
         a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
         assert_eq!(a.mode, Mode::Browse);
         assert_eq!(a.marked_count(), 0);
+    }
+
+    #[test]
+    fn marks_survive_a_rescan_and_drop_entries_that_went() {
+        let t = tree("markrescan");
+        let mut a = app(&t);
+        // Rows: big, file, small. Mark file and small, and side in big.
+        a.select(0);
+        a.open();
+        a.select(1);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        a.back();
+        a.select(1);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        a.select(2);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        fs::write(t.0.join("w/file"), vec![1u8; 90_000]).unwrap();
+        fs::remove_dir_all(t.0.join("w/small")).unwrap();
+        a.on_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        // small went with the rescan; file keeps its mark and new size.
+        let marks = a.all_marks();
+        let names: Vec<_> = marks.iter().map(|m| m.path.clone()).collect();
+        assert_eq!(names, [t.0.join("w/big/side"), t.0.join("w/file")]);
+        let file = a
+            .rows()
+            .iter()
+            .position(|r| r.path == t.0.join("w/file"))
+            .unwrap();
+        assert!(a.sel.is_marked(file) && a.sel.len() == 1);
+        assert!(marks[1].apparent >= 90_000, "{:?}", marks[1].apparent);
     }
 
     /// A mark under a marked directory goes with the directory.
