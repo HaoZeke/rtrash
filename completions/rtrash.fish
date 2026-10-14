@@ -167,6 +167,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l cw
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l plain -d 'numbered selection even on a TTY'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l no-space-check -d 'copy across devices even when space or inodes run low'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l newest-first -d 'list the most recently trashed item first'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l overwrite -d 'same as --force'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l sort -d 'numbered table order' -x -a 'date path none'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l oldest-first -d 'list the oldest trashed item first'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l name -r -d 'match by file name or trash name'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l latest -d 'of several matches, restore the newest'
@@ -267,6 +269,8 @@ complete -c trash-restore -l cwd-only
 complete -c trash-restore -l plain
 complete -c trash-restore -l no-space-check
 complete -c trash-restore -l newest-first
+complete -c trash-restore -l overwrite
+complete -c trash-restore -l sort -x -a 'date path none'
 complete -c trash-restore -l oldest-first
 complete -c trash-restore -l name -r
 complete -c trash-restore -l latest

@@ -1,0 +1,1 @@
+`trash-restore` now behaves as trash-cli's command: without PATH it offers only items trashed from under the current directory, PATH also matches items trashed from under it, a single match still asks, and the table columns take one space. `restore` gains `--sort=date|path|none` and `--overwrite` under every name.

@@ -23,12 +23,18 @@ and commas such as '0-2,5', or 'all'.
 By default every trashed item in scope is listed; pass --cwd-only to limit to
 items whose original path is under the current directory. A single match
 restores immediately.
+Run as trash-restore, it follows trash-cli: without PATH it offers only items
+from under the current directory, PATH also matches items trashed from
+under it, a single match still asks, and the table uses single spaces.
 
 The browser lists the most recently trashed item first, with the cursor on
 it. The numbered table lists oldest first, so the newest item sits next to
 the index prompt. --newest-first and --oldest-first set the order for both.
 
   -f, --force     overwrite an existing file (same as --conflict=overwrite)
+      --overwrite  same as --force (trash-cli spelling)
+      --sort=ORDER  numbered table order: date (oldest first, default),
+                    path (original path) or none (as read)
       --conflict=POLICY  when the destination exists: refuse (default),
                     overwrite, rename (restore next to it as NAME.1.EXT)
                     or skip
@@ -53,6 +59,25 @@ the index prompt. --newest-first and --oldest-first set the order for both.
       --help      display this help and exit
       --version   output version information and exit
 ";
+
+/// The `--sort` orders of trash-cli's trash-restore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sort {
+    Date,
+    Path,
+    None,
+}
+
+impl Sort {
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "date" => Sort::Date,
+            "path" => Sort::Path,
+            "none" => Sort::None,
+            _ => return None,
+        })
+    }
+}
 
 /// What to do when the restore destination already exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +138,9 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut all = false;
     let mut json = false;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
+    let mut sort: Option<Sort> = None;
+    // Run as trash-restore, behave as trash-cli's command does.
+    let trash_cli = prog == "trash-restore";
     for arg in args {
         let mut set_matcher = |m: Matcher| {
             if matcher.is_some() {
@@ -123,7 +151,17 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             true
         };
         match arg.as_str() {
-            "-f" | "--force" => conflict = Conflict::Overwrite,
+            "-f" | "--force" | "--overwrite" => conflict = Conflict::Overwrite,
+            a if a.starts_with("--sort=") => match Sort::parse(&a["--sort=".len()..]) {
+                Some(k) => sort = Some(k),
+                None => {
+                    eprintln!(
+                        "{prog}: invalid --sort '{}' (date, path or none)",
+                        &a["--sort=".len()..]
+                    );
+                    return 2;
+                }
+            },
             "--latest" => latest = true,
             "--no-space-check" => crate::space::skip_check(true),
             "--all" => all = true,
@@ -235,19 +273,29 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     }
     let entries = list::collect(&dirs);
     let mut matches: Vec<&list::Entry> = match (&target, &matcher) {
+        // trash-cli takes PATH as a scope: the item there and everything
+        // trashed from under it.
+        (Some(t), _) if trash_cli => {
+            let abs = absolutize(t);
+            entries
+                .iter()
+                .filter(|e| e.original.starts_with(&abs))
+                .collect()
+        }
         (Some(t), _) => {
             let abs = absolutize(t);
             entries.iter().filter(|e| e.original == abs).collect()
         }
         (None, Some(m)) => entries.iter().filter(|e| m.matches(e)).collect(),
-        (None, None) if cwd_only => {
+        (None, None) if cwd_only || trash_cli => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
             entries
                 .iter()
                 .filter(|e| e.original.starts_with(&cwd))
                 .collect()
         }
-        // trash-cli parity: bare `restore` offers every item in scope.
+        // Bare `rtrash restore` offers every item in scope; trash-restore
+        // keeps trash-cli's current directory scope above.
         (None, None) => entries.iter().collect(),
     };
 
@@ -256,6 +304,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         conflict,
         quiet: json,
     };
+    if matches.is_empty() && trash_cli && target.is_none() && matcher.is_none() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        println!("No files trashed from current dir ('{}')", cwd.display());
+        return 1;
+    }
     if matches.is_empty() {
         eprintln!("{prog}: no trashed files match");
         if json {
@@ -285,16 +338,23 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     }
     #[cfg(not(feature = "tui"))]
     let _ = plain;
-    order_entries(&mut matches, newest_first.unwrap_or(false));
+    match sort {
+        Some(Sort::Path) => matches.sort_by(|a, b| a.original.cmp(&b.original)),
+        Some(Sort::None) => {}
+        Some(Sort::Date) | None => order_entries(&mut matches, newest_first.unwrap_or(false)),
+    }
 
-    let chosen: Vec<&list::Entry> = if matches.len() == 1 || all {
+    // trash-cli asks even for one match; rtrash restores it right away.
+    let chosen: Vec<&list::Entry> = if (matches.len() == 1 && !trash_cli) || all || latest {
         matches
     } else {
         for (i, e) in matches.iter().enumerate() {
             let date = e.date.as_deref().unwrap_or("????-??-??T??:??:??");
             let gone = if e.missing() { "  [payload gone]" } else { "" };
+            // trash-cli separates the columns with one space.
+            let gap = if trash_cli { " " } else { "  " };
             let row = format!(
-                "{i:4}  {}  {}{gone}",
+                "{i:4}{gap}{}{gap}{}{gone}",
                 date.replacen('T', " ", 1),
                 e.original.display()
             );
@@ -321,6 +381,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         if io::stdin().lock().read_line(&mut line).is_err() {
             eprintln!("{prog}: failed to read selection from stdin");
             return 1;
+        }
+        if line.trim().is_empty() && trash_cli {
+            println!("No files were restored");
+            return 0;
         }
         if line.trim().is_empty() {
             eprintln!(

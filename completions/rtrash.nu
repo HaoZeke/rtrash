@@ -205,6 +205,8 @@ export extern "rtrash restore" [
     --plain  # force numbered line selection even on a TTY (no TUI)
     --no-space-check  # copy across devices even when the copy would leave
     --newest-first  # list the most recently trashed item first
+    --overwrite  # same as --force (trash-cli spelling)
+    --sort: string  # numbered table order: date, path or none
     --oldest-first  # list the oldest trashed item first
     --name: string  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original
@@ -395,6 +397,8 @@ export extern "trash-restore" [
     --plain  # force numbered line selection even on a TTY (no TUI)
     --no-space-check  # copy across devices even when the copy would leave
     --newest-first  # list the most recently trashed item first
+    --overwrite  # same as --force (trash-cli spelling)
+    --sort: string  # numbered table order: date, path or none
     --oldest-first  # list the oldest trashed item first
     --name: string  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original

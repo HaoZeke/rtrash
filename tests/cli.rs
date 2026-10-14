@@ -1790,6 +1790,73 @@ fn trash_cli_command_lines_work_under_the_trash_names() {
 }
 
 #[test]
+fn trash_restore_name_follows_trash_cli() {
+    let sb = Sandbox::new("trash-restore-cli");
+    let bindir = sb.root.join("bin");
+    fs::create_dir_all(&bindir).unwrap();
+    std::os::unix::fs::symlink(bin(), bindir.join("trash-restore")).unwrap();
+    let run_in = |dir: &std::path::Path, args: &[&str], stdin: &str| {
+        use std::io::Write;
+        let mut child = Command::new(bindir.join("trash-restore"))
+            .args(args)
+            .current_dir(dir)
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("HOME", &sb.root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    fs::create_dir(sb.work().join("sub")).unwrap();
+    sb.touch("x");
+    sb.touch("sub/y");
+    assert!(sb.run(&["put", "x", "sub/y"]).status.success());
+    let t = format!("--trash-dir={}", sb.trash().display());
+
+    // Outside the trashed paths, nothing is in scope.
+    let other = sb.root.join("other");
+    fs::create_dir(&other).unwrap();
+    let out = run_in(&other, &[&t], "");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stdout_of(&out).starts_with("No files trashed from current dir"));
+
+    // From the work dir, both items are offered, by path, one space apart.
+    let out = run_in(&sb.work(), &[&t, "--sort", "path"], "");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let s = stdout_of(&out);
+    let rows: Vec<&str> = s.lines().filter(|l| l.starts_with("   ")).collect();
+    assert_eq!(rows.len(), 2, "{s}");
+    assert!(
+        rows[0].starts_with("   0 2") && rows[0].ends_with("/sub/y"),
+        "{s}"
+    );
+    assert!(rows[1].ends_with("/x"), "{s}");
+    assert!(s.contains("No files were restored"));
+
+    // PATH is a scope, and a single match still asks.
+    let sub = sb.work().join("sub");
+    let out = run_in(&sb.work(), &[&t, sub.to_str().unwrap()], "0\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stdout_of(&out).contains("   0 "));
+    assert!(sub.join("y").exists());
+    assert!(!sb.work().join("x").exists());
+
+    // --overwrite replaces an existing file, as -f does.
+    fs::write(sb.work().join("x"), b"new").unwrap();
+    let out = run_in(&sb.work(), &[&t, "--overwrite"], "0\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_ne!(fs::read(sb.work().join("x")).unwrap(), b"new");
+}
+
+#[test]
 fn trash_rm_removes_match_keeps_other() {
     let sb = Sandbox::new("trash-rm-select");
     sb.touch("keep.dat");

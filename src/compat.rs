@@ -4,7 +4,7 @@
 
 /// Options that take a value, which trash-cli also accepts as a separate
 /// word (`--trash-dir DIR`); rtrash reads the `--opt=VALUE` form.
-const VALUED: &[&str] = &["--trash-dir"];
+const VALUED: &[&str] = &["--trash-dir", "--sort"];
 
 /// `args` with each `--opt VALUE` pair of [`VALUED`] joined into
 /// `--opt=VALUE`. Words after `--` stay as they are.

@@ -213,6 +213,8 @@ restore_opts=(
   '--plain[numbered selection even on a TTY]'
   '--no-space-check[copy across devices even when space or inodes run low]'
   '(--oldest-first)--newest-first[list the most recently trashed item first]'
+  '--overwrite[same as --force]'
+  '--sort=[numbered table order]:order:(date path none)'
   '(--newest-first)--oldest-first[list the oldest trashed item first]'
   '(1 --glob --regex)--name=[match by file name or trash name]:name:'
   '(1 --name --regex)--glob=[match by shell pattern]:pattern:'

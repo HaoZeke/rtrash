@@ -14,7 +14,7 @@ var opts = [
   &status=[--home-only --trash-dir= --older-than= --newer-than= --larger-than= --smaller-than= --json --help --version]
   &trash-stats=[--top= --home-only --trash-dir= --history --since= --total --measure --space --json --help --version]
   &du=[-n --top= -x --one-file-system -L --follow-symlinks --apparent --sort= -C --count --inodes --types --unique --shared --max-depth= --threads= --all-dirs --artefacts --exclude= -X --exclude-from= --exclude-caches --gitignore --dirs --files --older-than= --newer-than= --since= --until= --home-only --trash-dir= --no-git --include-dirty --json --print0 --dupes --trash-dupes --link-dupes --clone-dupes --min-size= -o --output= --devices --ncdu= --ncdu-binary= -f --file= --stacks --pick -i --interactive --no-delete --si --help --version]
-  &restore=[-f --force --conflict= --to= --cwd-only --plain --no-space-check --newest-first --oldest-first --name= --glob= --regex= --latest --all --json --home-only --trash-dir= --help --version]
+  &restore=[-f --force --overwrite --sort= --conflict= --to= --cwd-only --plain --no-space-check --newest-first --oldest-first --name= --glob= --regex= --latest --all --json --home-only --trash-dir= --help --version]
   &undo=[-l --list -n --dry-run -f --force --conflict= --json --home-only --trash-dir= --help --version]
   &rm=[--trash-dir= --home-only --older-than= --newer-than= --larger-than= --smaller-than= -n --dry-run -f --force -v --verbose --json --help --version]
   &who=[--json --help --version]

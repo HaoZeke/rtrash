@@ -1533,6 +1533,19 @@ restores such an item into
 Overwrite an existing file at the destination (same as
 .BR \-\-conflict=overwrite ).
 .TP
+.B \-\-overwrite
+The trash-cli spelling of
+.BR \-\-force .
+.TP
+.BI \-\-sort= ORDER
+Order of the numbered table:
+.B date
+(oldest first, the default),
+.B path
+(by original path) or
+.B none
+(as the trash reads).
+.TP
 .BI \-\-conflict= POLICY
 What to do when the destination exists:
 .B refuse
@@ -1553,6 +1566,11 @@ instead of the original location, keeping each item's file name.
 .TP
 .B \-\-cwd\-only
 Without PATH, only items trashed from under the current directory.
+Run as
+.BR trash\-restore ,
+restore follows trash-cli: without PATH it offers only these items,
+PATH also matches items trashed from under it, a single match still asks,
+an empty answer restores nothing, and table columns take one space.
 .TP
 .B \-\-plain
 Force numbered line selection even on a TTY (skip the TUI browser).
