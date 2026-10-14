@@ -77,6 +77,11 @@ mimalloc = { version = "0.1", default-features = false }
 # paths, so Unicode classes do not matter.
 [target.'cfg(unix)'.dependencies]
 regex-lite = "0.1"
+# Finder may keep a name decomposed (NFD) where the user types it
+# composed (NFC); matching compares the NFC forms.
+unicode-normalization = { version = "0.1", default-features = false, features = [
+  "std",
+] }
 
 # Windows system Recycle Bin (shell APIs). Not used on Unix FreeDesktop builds.
 [target.'cfg(windows)'.dependencies]

@@ -645,3 +645,41 @@ fn a_finder_put_warns_past_the_warn_size() {
     let o = put("third.bin", "1G");
     assert!(!err(&o).contains("past"), "{}", err(&o));
 }
+
+#[test]
+fn finder_matching_ignores_unicode_normalization() {
+    let b = Box_::new("nfc");
+    let nfd = "ne\u{301}e.txt";
+    let nfc = "n\u{e9}e.txt";
+    let f = b.work().join(nfd);
+    fs::write(&f, b"x").unwrap();
+    assert!(b.run(&["put", nfd], "").status.success());
+    b.put_back(nfd, &f);
+
+    // The list shows the composed spelling a user types.
+    let o = b.run(&["list"], "");
+    assert!(out(&o).contains(nfc), "{}", out(&o));
+    assert!(!out(&o).contains(nfd), "{}", out(&o));
+
+    // Restore by the composed name, by a matcher, and by the full path.
+    let o = b.run(&["restore", nfc], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(f.exists(), "restored to the bytes Finder recorded");
+    assert!(b.run(&["put", nfd], "").status.success());
+    b.put_back(nfd, &f);
+    let o = b.run(&["restore", &format!("--name={nfc}")], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(f.exists());
+    assert!(b.run(&["put", nfd], "").status.success());
+    b.put_back(nfd, &f);
+    let o = b.run(&["finder", "restore", nfc], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(f.exists());
+
+    // rm takes a composed glob for a decomposed name.
+    assert!(b.run(&["put", nfd], "").status.success());
+    b.put_back(nfd, &f);
+    let o = b.run(&["rm", "n\u{e9}*"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!b.finder().join(nfd).exists());
+}

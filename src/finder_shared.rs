@@ -58,6 +58,26 @@ pub fn entries() -> std::io::Result<Vec<Entry>> {
     Ok(all)
 }
 
+/// `s` in Unicode NFC, the form a user types and the FreeDesktop trash
+/// keeps; Finder may hand back a name decomposed (NFD).
+pub fn nfc(s: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    s.nfc().collect()
+}
+
+/// `p` in NFC when it is UTF-8; other bytes stay as they are.
+pub fn nfc_path(p: &Path) -> PathBuf {
+    match p.to_str() {
+        Some(s) => PathBuf::from(nfc(s)),
+        None => p.to_path_buf(),
+    }
+}
+
+/// Whether `a` and `b` name the same path once both are in NFC.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    a == b || nfc_path(a) == nfc_path(b)
+}
+
 fn from_items(trash: &Path) -> std::io::Result<Vec<Entry>> {
     use std::os::unix::fs::MetadataExt;
     let items: Vec<Item> = match finder::items(trash) {
@@ -69,7 +89,9 @@ fn from_items(trash: &Path) -> std::io::Result<Vec<Entry>> {
         .into_iter()
         .map(|i| {
             let epoch = fs::symlink_metadata(trash.join(&i.name)).map_or(0, |m| m.ctime());
-            let shown = i.original.clone().unwrap_or_else(|| trash.join(&i.name));
+            // Shown, listed and matched in NFC; `original` keeps the bytes
+            // Finder recorded, so a restore lands on exactly that path.
+            let shown = nfc_path(&i.original.clone().unwrap_or_else(|| trash.join(&i.name)));
             Entry {
                 trash: trash.to_path_buf(),
                 date: crate::info::local_string(epoch),
@@ -491,10 +513,12 @@ pub fn rm(
             .file_name()
             .map(|b| b.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let name = nfc(&e.name);
         let hit = patterns.iter().any(|p| {
-            crate::util::fnmatch(p, &path_s)
-                || crate::util::fnmatch(p, &base)
-                || crate::util::fnmatch(p, &e.name)
+            let p = nfc(p);
+            crate::util::fnmatch(&p, &path_s)
+                || crate::util::fnmatch(&p, &base)
+                || crate::util::fnmatch(&p, &name)
         });
         if !hit {
             continue;

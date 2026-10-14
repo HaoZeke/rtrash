@@ -271,9 +271,12 @@ fn restore(prog: &str, args: &[String]) -> i32 {
         chosen.extend(items.iter().filter(|i| i.original.is_some()));
     }
     for w in &wanted {
-        let hit = items
-            .iter()
-            .find(|i| i.name == *w || i.original.as_deref().is_some_and(|o| o == Path::new(w)));
+        let hit = items.iter().find(|i| {
+            crate::finder_shared::nfc(&i.name) == crate::finder_shared::nfc(w)
+                || i.original
+                    .as_deref()
+                    .is_some_and(|o| crate::finder_shared::same_path(o, Path::new(w)))
+        });
         match hit {
             Some(i) if !chosen.contains(&i) => chosen.push(i),
             Some(_) => {}
@@ -602,14 +605,19 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
         placed
             .iter()
             .copied()
-            .filter(|e| m.matches_parts(&e.shown, &e.name))
+            .filter(|e| m.matches_parts(&e.shown, &crate::finder_shared::nfc(&e.name)))
             .collect()
     } else if let Some(t) = o.target {
         let abs = std::env::current_dir()
             .map(|c| c.join(t))
             .unwrap_or_else(|_| t.to_path_buf());
         rows.iter()
-            .filter(|e| e.original.as_deref() == Some(abs.as_path()) || Path::new(&e.name) == t)
+            .filter(|e| {
+                e.original
+                    .as_deref()
+                    .is_some_and(|o| crate::finder_shared::same_path(o, &abs))
+                    || crate::finder_shared::same_path(Path::new(&e.name), t)
+            })
             .collect()
     } else if o.all {
         placed.clone()
