@@ -155,7 +155,18 @@ pub const TR_MAX: usize = 261;
 pub fn task_xml(exe: &Path, args: &[String], every: i64) -> String {
     let mut words = vec!["reap".to_string()];
     words.extend(args.iter().map(|a| task_word(a)));
-    let trigger = if every < 86_400 {
+    // A watch starts at this user's logon, has no time limit and comes back
+    // a minute after it fails; a schedule stops after the default 72 hours.
+    let watch = is_watch(args);
+    let trigger = if watch {
+        let user = match (std::env::var("USERDOMAIN"), std::env::var("USERNAME")) {
+            (Ok(d), Ok(u)) if !d.is_empty() && !u.is_empty() => {
+                format!("      <UserId>{}</UserId>\n", xml(&format!("{d}\\{u}")))
+            }
+            _ => String::new(),
+        };
+        format!("    <LogonTrigger>\n{user}      <Enabled>true</Enabled>\n    </LogonTrigger>\n")
+    } else if every < 86_400 {
         let n = ((every + 59) / 60).clamp(1, 1439);
         format!(
             "    <TimeTrigger>\n      <StartBoundary>2000-01-01T00:00:00</StartBoundary>\n\
@@ -180,11 +191,18 @@ pub fn task_xml(exe: &Path, args: &[String], every: i64) -> String {
          \x20   <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n\
          \x20   <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n\
          \x20   <StartWhenAvailable>true</StartWhenAvailable>\n\
-         \x20   <Priority>7</Priority>\n\
+         \x20   <Priority>7</Priority>\n{}\
          \x20 </Settings>\n\
          \x20 <Actions Context=\"Author\">\n\
          \x20   <Exec>\n      <Command>{}</Command>\n      <Arguments>{}</Arguments>\n    </Exec>\n\
          \x20 </Actions>\n</Task>\n",
+        if watch {
+            "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n\
+             \x20   <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n\
+             \x20   <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>\n"
+        } else {
+            ""
+        },
         xml(&exe.to_string_lossy()),
         xml(&words.join(" "))
     )
@@ -290,7 +308,11 @@ fn removal() -> Result<Removal, String> {
     if cfg!(windows) {
         return Ok((
             task_xml_path().into_iter().collect(),
-            vec![words(&["schtasks", "/Delete", "/F", "/TN", NAME])],
+            // A running watch is ended first; only the delete must work.
+            vec![
+                words(&["schtasks", "/End", "/TN", NAME]),
+                words(&["schtasks", "/Delete", "/F", "/TN", NAME]),
+            ],
             Vec::new(),
         ));
     }
@@ -354,9 +376,8 @@ pub fn remove(prog: &str, dry_run: bool) -> i32 {
     };
     // Every stop command runs: on Linux only one of them has a job to stop.
     let ran: Vec<bool> = before.iter().map(run).collect();
-    let stopped = ran.iter().all(|&b| b);
     if cfg!(windows) && !dry_run {
-        if !stopped {
+        if ran.last() != Some(&true) {
             eprintln!("{prog}: schtasks could not delete the task {NAME} (is it installed?)");
             return 1;
         }
@@ -571,11 +592,10 @@ pub fn status(prog: &str, json: bool) -> i32 {
 /// Create the Windows task, or with `dry_run` print the command.
 fn install_task(prog: &str, exe: &Path, args: &[String], every: i64, dry_run: bool) -> i32 {
     let mut words = schtasks_args(exe, args, every);
-    if words.last().is_some_and(|tr| tr.len() > TR_MAX) {
+    let watch = is_watch(args);
+    if watch || words.last().is_some_and(|tr| tr.len() > TR_MAX) {
         let Some(path) = task_xml_path() else {
-            eprintln!(
-                "{prog}: the command is too long for schtasks /TR and LOCALAPPDATA is not set"
-            );
+            eprintln!("{prog}: this task needs a task XML file and LOCALAPPDATA is not set");
             return 1;
         };
         let body = task_xml(exe, args, every);
@@ -603,6 +623,9 @@ fn install_task(prog: &str, exe: &Path, args: &[String], every: i64, dry_run: bo
     if dry_run {
         let shown: Vec<String> = words.iter().map(|w| task_word(w)).collect();
         println!("schtasks {}", shown.join(" "));
+        if watch {
+            println!("schtasks /Run /TN {NAME}");
+        }
         return 0;
     }
     match tool("schtasks").args(&words).status() {
@@ -610,6 +633,15 @@ fn install_task(prog: &str, exe: &Path, args: &[String], every: i64, dry_run: bo
             println!(
                 "created the scheduled task {NAME}; remove it with: schtasks /Delete /TN {NAME}"
             );
+            // A logon task would first start at the next logon; start it now.
+            if watch {
+                match tool("schtasks").args(["/Run", "/TN", NAME]).status() {
+                    Ok(s) if s.success() => println!("started the watch"),
+                    _ => eprintln!(
+                        "{prog}: the watch starts at the next logon (schtasks /Run failed)"
+                    ),
+                }
+            }
             0
         }
         Ok(s) => {
@@ -633,10 +665,6 @@ pub fn install(prog: &str, args: &[String], every: i64, dry_run: bool) -> i32 {
             return 1;
         }
     };
-    if cfg!(windows) && is_watch(args) {
-        eprintln!("{prog}: --install-timer --watch makes a service on Linux and macOS only; on Windows use --install-timer without --watch");
-        return 2;
-    }
     if cfg!(windows) {
         return install_task(prog, &exe, args, every, dry_run);
     }
@@ -735,6 +763,33 @@ mod tests {
         let x = task_xml(exe, &[], 2 * 86_400 + 1);
         assert!(x.contains("<DaysInterval>3</DaysInterval>"), "{x}");
         assert!(x.contains("<Arguments>reap</Arguments>"), "{x}");
+    }
+
+    #[test]
+    fn a_watch_task_starts_at_logon_and_never_times_out() {
+        let args: Vec<String> = ["--watch=5m", "--when-below=10%"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let x = task_xml(Path::new(r"C:\rtrash.exe"), &args, 3600);
+        assert!(
+            x.contains("<LogonTrigger>") && !x.contains("TimeTrigger"),
+            "{x}"
+        );
+        assert!(
+            x.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"),
+            "{x}"
+        );
+        assert!(x.contains("<RestartOnFailure>"), "{x}");
+        assert!(
+            x.contains("<Arguments>reap --watch=5m --when-below=10%</Arguments>"),
+            "{x}"
+        );
+        let x = task_xml(Path::new(r"C:\rtrash.exe"), &args[1..], 3600);
+        assert!(
+            !x.contains("ExecutionTimeLimit") && !x.contains("LogonTrigger"),
+            "{x}"
+        );
     }
 
     #[test]

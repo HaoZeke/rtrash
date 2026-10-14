@@ -2113,12 +2113,14 @@ With
 the job is a service that stays up instead of a schedule: on Linux a
 user unit \fIrtrash\-reap.service\fR (\fBType=simple\fR, restarted 30 s
 after a failure, no timer), on macOS a launchd agent with
-\fBKeepAlive\fR.
+\fBKeepAlive\fR, and on Windows a task in a task XML file that starts at
+this user's logon (and at once, through
+.BR "schtasks /Run" ),
+with no time limit and a restart a minute after a failure.
 .B \-\-timer\-status
 and
 .B \-\-remove\-timer
 handle it as they handle the timer.
-Windows takes only the scheduled form.
 .TP
 .B \-\-remove\-timer
 Stop and remove the job
@@ -2128,6 +2130,8 @@ made: on Linux,
 then the unit files and a daemon reload; on macOS,
 .B launchctl bootout
 then the plist; on Windows,
+.B schtasks /End
+(for a running watch) then
 .BR "schtasks /Delete /F /TN rtrash\-reap" .
 The service manager's commands are best effort, so a job that was
 never turned on still loses its files.

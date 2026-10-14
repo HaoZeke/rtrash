@@ -225,9 +225,62 @@ fn reap_remove_timer_dry_run_prints_the_schtasks_delete() {
     );
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
-        text.starts_with("schtasks /Delete /F /TN rtrash-reap"),
+        text.starts_with("schtasks /End /TN rtrash-reap\nschtasks /Delete /F /TN rtrash-reap"),
         "{text}"
     );
+}
+
+/// `--install-timer --watch` writes a logon task with no time limit,
+/// creates it from the XML and starts it, all through the stand-in.
+#[cfg(debug_assertions)]
+#[test]
+fn reap_install_timer_with_watch_makes_a_logon_task_and_starts_it() {
+    let (fake, log) = fake_schtasks("watch-task");
+    let local = log.parent().unwrap().join("local");
+    let out = Command::new(bin())
+        .args(["reap", "--install-timer", "--watch=5m", "--when-below=10%"])
+        .env("RTRASH_TEST_SERVICE_TOOL", &fake)
+        .env("LOCALAPPDATA", &local)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let xml = local.join("rtrash").join("rtrash-reap.xml");
+    let bytes = std::fs::read(&xml).unwrap();
+    let units: Vec<u16> = bytes[2..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&p| u16::from_le_bytes(p))
+        .collect();
+    let body = String::from_utf16_lossy(&units);
+    assert!(body.contains("<LogonTrigger>"), "{body}");
+    assert!(
+        body.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"),
+        "{body}"
+    );
+    assert!(body.contains("--watch=5m"), "{body}");
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("/Create /F /TN rtrash-reap /XML"), "{calls}");
+    assert!(calls.contains("/Run /TN rtrash-reap"), "{calls}");
+    let out = Command::new(bin())
+        .args(["reap", "--remove-timer"])
+        .env("RTRASH_TEST_SERVICE_TOOL", &fake)
+        .env("LOCALAPPDATA", &local)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("/End /TN rtrash-reap"), "{calls}");
+    assert!(calls.contains("/Delete /F /TN rtrash-reap"), "{calls}");
+    let _ = std::fs::remove_dir_all(log.parent().unwrap());
 }
 
 /// A stand-in for schtasks that logs each call and prints nothing, so the
