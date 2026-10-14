@@ -26,6 +26,8 @@ matching *trash* entries — not a synonym for put.
       --larger-than=SIZE  only match items taking more than SIZE on disk
       --smaller-than=SIZE only match items taking less than SIZE on disk
                      (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
+      --batch=ID   only items from one put run: an ID from `undo --list`,
+                     or `last` for the latest; with no PATTERN, all of it
   -n, --dry-run    list matches and reclaimable size; do not delete
   -f, --force      allow mass patterns that match everything (e.g. '*')
   -v, --verbose    print each permanently removed original path
@@ -38,6 +40,7 @@ Examples:
   {prog} -n '*.o'
   {prog} foo
   {prog} /home/you/old-project
+  {prog} --batch=last
 ";
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
@@ -58,6 +61,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut newer_than: Option<i64> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut patterns: Vec<String> = Vec::new();
+    let mut batch: Option<String> = None;
     let mut size = list::SizeFilter::default();
 
     let mut i = 0usize;
@@ -87,6 +91,18 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "--version" => {
                 println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
                 return 0;
+            }
+            a if a.starts_with("--batch=") => {
+                let id = &a["--batch=".len()..];
+                if id.is_empty() {
+                    eprintln!("{prog}: --batch needs an ID (or last)");
+                    return 2;
+                }
+                batch = Some(id.to_string());
+            }
+            "--batch" => {
+                eprintln!("{prog}: --batch needs a value (--batch=ID or --batch=last)");
+                return 2;
             }
             a if a.starts_with("--trash-dir=") => {
                 trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
@@ -139,6 +155,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: {e}");
         return 2;
     }
+    // A put run is a scope of its own: with no PATTERN, take all of it.
+    let scoped = batch.is_some() && patterns.is_empty();
+    if scoped {
+        patterns.push("*".into());
+    }
     if patterns.is_empty() {
         eprintln!("{prog}: missing operand");
         eprintln!("Try '{prog} --help' for more information.");
@@ -147,6 +168,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
 
     // Refuse accidental host-wide permanent purge of the whole trash.
     if !force
+        && !scoped
         && patterns
             .iter()
             .any(|p| p == "*" || p == "*.*" || p == "**" || p == "**/*")
@@ -178,13 +200,37 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             },
             size,
         };
-        return crate::finder_shared::rm(prog, &patterns, dry_run, verbose, json, filter);
+        return crate::finder_shared::rm(
+            prog,
+            &patterns,
+            batch.as_deref(),
+            dry_run,
+            verbose,
+            json,
+            filter,
+        );
     }
     let mut entries = list::filter_age_secs(list::collect(&dirs), older_than, newer_than);
     // Payloads with no .trashinfo match by their name or their path under
     // files/; having no date, they stay out of an age-filtered rm.
     if older_than.is_none() && newer_than.is_none() {
         entries.extend(list::orphans(&dirs));
+    }
+    if let Some(want) = &batch {
+        let id = if want == "last" {
+            crate::undo::batches(&entries).first().map(|b| b.id.clone())
+        } else {
+            Some(want.clone())
+        };
+        let Some(id) = id else {
+            eprintln!("{prog}: no put run in the trash (items from other tools carry no batch id)");
+            return 1;
+        };
+        entries.retain(|e| e.batch.as_deref() == Some(id.as_str()));
+        if entries.is_empty() {
+            eprintln!("{prog}: no trashed items from put run '{id}'");
+            return 1;
+        }
     }
     let mut status = 0i32;
     let mut removed = 0u64;

@@ -239,6 +239,7 @@ rm_opts=(
   '--newer-than=[only match items trashed within the last AGE]:age:'
   '--larger-than=[only match items taking more than SIZE on disk]:size:'
   '--smaller-than=[only match items taking less than SIZE on disk]:size:'
+  '--batch=[only items from one put run (an ID or last)]:batch:'
   '(-n --dry-run)'{-n,--dry-run}'[list matches and reclaimable size; do not delete]'
   '(-f --force)'{-f,--force}'[allow mass patterns that match everything]'
   '(-v --verbose)'{-v,--verbose}'[print each permanently removed original path]'

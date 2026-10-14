@@ -1,0 +1,1 @@
+`rtrash rm --batch=ID` (or `--batch=last`) permanently removes only the items of one put run, on the FreeDesktop and Finder trashes; with no PATTERN it takes the whole run, a scoped alternative to emptying the trash.

@@ -6008,3 +6008,24 @@ fn an_unscoped_empty_needs_all_for_items_other_puts_left() {
     assert!(sb.run(&["empty", "--home-only"]).status.success());
     assert!(!sb.trash().join("files/c").exists());
 }
+
+#[test]
+fn rm_batch_removes_one_put_run() {
+    let sb = Sandbox::new("rmbatch");
+    for n in ["a", "b", "c"] {
+        fs::write(sb.work().join(n), b"x").unwrap();
+    }
+    assert!(sb.run(&["put", "a"]).status.success());
+    assert!(sb.run(&["put", "b", "c"]).status.success());
+    let out = sb.run(&["rm", "--home-only", "--batch=last", "-n"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(sb.trash().join("files/b").exists());
+    let out = sb.run(&["rm", "--home-only", "--batch=last"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.trash().join("files/b").exists() && !sb.trash().join("files/c").exists());
+    assert!(sb.trash().join("files/a").exists());
+    // A PATTERN narrows the run; an unknown run removes nothing.
+    let out = sb.run(&["rm", "--home-only", "--batch=nope"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(sb.trash().join("files/a").exists());
+}

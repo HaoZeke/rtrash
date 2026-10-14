@@ -741,3 +741,17 @@ fn restore_takes_a_path_through_a_linked_folder() {
     assert!(o.status.success(), "{}", err(&o));
     assert_eq!(fs::read(b.work().join("l.txt")).unwrap(), b"l");
 }
+
+#[test]
+fn rm_batch_takes_the_latest_finder_put() {
+    let b = Box_::new("rmbatch");
+    for n in ["k", "d1", "d2"] {
+        fs::write(b.work().join(n), b"x").unwrap();
+    }
+    assert!(b.run(&["put", "k"], "").status.success());
+    assert!(b.run(&["put", "d1", "d2"], "").status.success());
+    let o = b.run(&["rm", "--batch=last"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!b.finder().join("d1").exists() && !b.finder().join("d2").exists());
+    assert!(b.finder().join("k").exists());
+}

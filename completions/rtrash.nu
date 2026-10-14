@@ -244,6 +244,7 @@ export extern "rtrash rm" [
     --newer-than: string  # only match items trashed within the last AGE
     --larger-than: string  # only match items taking more than SIZE on disk
     --smaller-than: string  # only match items taking less than SIZE on disk
+    --batch: string  # only items from one put run: an ID from `undo --list`, or `last`
     --dry-run(-n)  # list matches and reclaimable size; do not delete
     --force(-f)  # allow mass patterns that match everything (e.g. '*')
     --verbose(-v)  # print each permanently removed original path
@@ -426,6 +427,7 @@ export extern "trash-rm" [
     --larger-than: string  # only match items taking more than SIZE on disk
     --smaller-than: string  # only match items taking less than SIZE on disk
     --dry-run(-n)  # list matches and reclaimable size; do not delete
+    --batch: string  # only items from one put run: an ID from `undo --list`, or `last`
     --force(-f)  # allow mass patterns that match everything (e.g. '*')
     --verbose(-v)  # print each permanently removed original path
     --json  # emit a JSON summary (and matched originals array)

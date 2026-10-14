@@ -2849,6 +2849,19 @@ Only match items taking less than
 .I SIZE
 on disk.
 .TP
+.BI \-\-batch =ID
+Only items from one put run: an
+.I ID
+from
+.BR "undo \-\-list" ,
+or
+.B last
+for the latest.
+With no
+.IR PATTERN ,
+remove the whole run; this is the scoped way to permanently delete
+exactly what one put moved.
+.TP
 .BR \-n ", " \-\-dry\-run
 List matches and reclaimable size; do not delete.
 .TP

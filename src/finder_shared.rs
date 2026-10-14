@@ -534,6 +534,7 @@ pub fn stats(top: usize) -> Vec<crate::trash_stats::Stats> {
 pub fn rm(
     prog: &str,
     patterns: &[String],
+    batch: Option<&str>,
     dry_run: bool,
     verbose: bool,
     json: bool,
@@ -544,6 +545,28 @@ pub fn rm(
         Err(e) => {
             eprintln!("{prog}: cannot read the Finder Trash: {e}");
             return 1;
+        }
+    };
+    // --batch: only the items one put run left (`last`: the latest).
+    let rows = match batch {
+        None => rows,
+        Some(want) => {
+            let runs = runs();
+            let run = if want == "last" {
+                runs.first()
+            } else {
+                runs.iter().find(|(b, _)| b == want)
+            };
+            let Some((_, items)) = run else {
+                match want {
+                    "last" => eprintln!("{prog}: no put run in the Finder Trash"),
+                    id => eprintln!("{prog}: no trashed items from put run '{id}'"),
+                }
+                return 1;
+            };
+            rows.into_iter()
+                .filter(|e| items.iter().any(|l| l.trash == e.trash && l.name == e.name))
+                .collect()
         }
     };
     let (mut removed, mut bytes, mut status) = (0u64, 0u64, 0);
