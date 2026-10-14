@@ -3775,6 +3775,13 @@ fn trash_stats_history_records_each_change_rtrash_makes() {
     // Text lists the same lines; without --history there are none.
     let text = stdout_of(&sb.run(&["trash-stats", "--home-only", "--history"]));
     assert_eq!(text.matches("  put  ").count(), 3, "{text}");
+    // Each line after the first shows how the size moved.
+    assert_eq!(text.matches(" (+").count(), 2, "{text}");
+    assert!(
+        text.lines()
+            .any(|l| l.contains("  empty") && l.contains(" (-")),
+        "{text}"
+    );
     let plain = stdout_of(&sb.run(&["trash-stats", "--home-only", "--json"]));
     assert!(!plain.contains("history"), "{plain}");
     // --since keeps only recent lines: an old one written by hand drops.

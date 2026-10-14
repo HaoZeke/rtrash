@@ -24,7 +24,8 @@ directories under files/ and info/), orphans (payloads without a
       --trash-dir=PATH  only this trash directory (repeatable)
       --history         also show each trash's history: its size and items
                         after each put, restore, rm, empty, reap
-                        and purge that changed it
+                        and purge that changed it, with the change
+                        from the line before
       --since=AGE       with --history, only the lines from the last AGE
                         (90m, 12h, 7d, 2w; a bare number is days)
       --json            print a JSON object ({trashes, total})
@@ -215,6 +216,16 @@ pub fn to_json(all: &[Stats], with_history: bool) -> String {
     )
 }
 
+/// How a history line's size moved from the line before it: ` (+1.2
+/// KiB)` or ` (-300 B)`, or nothing for the first line or no change.
+fn change(prev: Option<u64>, now: u64) -> String {
+    match prev {
+        Some(p) if now > p => format!(" (+{})", format_bytes(now - p)),
+        Some(p) if now < p => format!(" (-{})", format_bytes(p - now)),
+        _ => String::new(),
+    }
+}
+
 fn print_text(all: &[Stats], with_history: bool) {
     let line = |label: &str, i: &Item| {
         println!(
@@ -247,14 +258,17 @@ fn print_text(all: &[Stats], with_history: bool) {
             if s.history.is_empty() {
                 println!("  history: none yet");
             }
+            let mut prev = None;
             for (t, e, b, n) in &s.history {
                 println!(
-                    "  {}  {:<5}  {}, {}",
+                    "  {}  {:<5}  {}, {}{}",
                     crate::platform::epoch_to_iso_utc(*t),
                     crate::util::term_text(e),
                     format_bytes(*b),
-                    crate::util::plural(*n, "item", "items")
+                    crate::util::plural(*n, "item", "items"),
+                    change(prev, *b)
                 );
+                prev = Some(*b);
             }
         }
     }
@@ -376,4 +390,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         print_text(&all, with_history);
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn change_shows_the_growth_or_drop_from_the_line_before() {
+        assert_eq!(change(None, 5), "");
+        assert_eq!(change(Some(5), 5), "");
+        assert_eq!(change(Some(5), 8), format!(" (+{})", format_bytes(3)));
+        assert_eq!(change(Some(8), 0), format!(" (-{})", format_bytes(8)));
+    }
 }
