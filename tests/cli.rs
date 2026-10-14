@@ -3245,6 +3245,43 @@ fn reap_purge_trash_empties_the_oldest_trash_items_when_short() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn put_warns_when_the_trash_grows_past_the_warn_size() {
+    let sb = Sandbox::new("put-warn");
+    let put = |name: &str, limit: &str| {
+        let f = write_at(&sb.root, &format!("work/{name}"), "some bytes");
+        Command::new(bin())
+            .args(["put", f.to_str().unwrap()])
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .env("RTRASH_WARN_SIZE", limit)
+            .output()
+            .unwrap()
+    };
+    let out = put("a.txt", "1");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("past RTRASH_WARN_SIZE"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = put("b.txt", "100%");
+    assert!(
+        !stderr_of(&out).contains("past RTRASH_WARN_SIZE"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = put("c.txt", "lots");
+    assert!(out.status.success());
+    assert!(
+        stderr_of(&out).contains("ignoring RTRASH_WARN_SIZE='lots'"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
 /// A file in `dir` whose access and modification times are a day old.
 fn stale_file(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);

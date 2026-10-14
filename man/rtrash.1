@@ -2003,6 +2003,7 @@ reverse = false           # \-\-reverse
 [policy]
 max_size = "50G"          # RTRASH_MAX_SIZE
 min_free = "10G"          # RTRASH_MIN_FREE
+warn_size = "20%"         # RTRASH_WARN_SIZE: a size or a percent
 in_use = "warn"           # RTRASH_IN_USE: warn, refuse or ignore
 prune = "oldest"          # RTRASH_PRUNE: oldest or largest
 
@@ -2208,6 +2209,19 @@ directory it used back under that size, removing older items first.
 Items of the same put run never go. It overrides
 .B policy.max_size
 in the config file, and an empty value turns the prune off.
+.TP
+.B RTRASH_WARN_SIZE
+A size such as 20G, or a percent of the disk such as 10%: after a put,
+each trash it used that holds more than this gets a warning on stderr
+with its size and share of the disk.
+Measuring the trash costs a pass over it, so it is off unless set.
+It overrides
+.B policy.warn_size
+in the config file; an empty value turns it off, and
+.B \-q
+or
+.B \-\-json
+silence it.
 .TP
 .B RTRASH_MIN_FREE
 A size such as 10G that a put or restore copying across devices must

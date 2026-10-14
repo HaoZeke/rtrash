@@ -102,6 +102,12 @@ const KEYS: &[(&str, &str, Kind, &str)] = &[
     ),
     (
         "policy",
+        "warn_size",
+        Kind::Str,
+        "trash size, or percent of its disk, a put warns past (RTRASH_WARN_SIZE)",
+    ),
+    (
+        "policy",
         "min_free",
         Kind::Str,
         "bytes a copy across devices must leave free (RTRASH_MIN_FREE)",
@@ -521,6 +527,7 @@ pub fn template() -> String {
             ("list", "sort", _) => "\"date\"".to_string(),
             ("policy", "max_size", _) => "\"50G\"".to_string(),
             ("policy", "min_free", _) => "\"10G\"".to_string(),
+            ("policy", "warn_size", _) => "\"20%\"".to_string(),
             ("policy", "in_use", _) => "\"warn\"".to_string(),
             ("policy", "prune", _) => "\"oldest\"".to_string(),
             ("protect", "paths", _) => "[\"/srv/data\"]".to_string(),

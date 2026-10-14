@@ -310,6 +310,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     if !trashed.is_empty() {
         prune_after_put(prog, &trashed, opts.quiet || json);
+        if !(opts.quiet || json) {
+            warn_big_trash(prog, &trashed);
+        }
     }
     status
 }
@@ -348,6 +351,103 @@ fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
                 crate::util::plural(done.removed, "item", "items"),
                 dir.root.display(),
                 crate::fastdelete::format_bytes(max)
+            );
+        }
+    }
+}
+
+/// A trash size to warn at: a size, or a percent of its disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarnSize {
+    Bytes(u64),
+    Percent(u64),
+}
+
+impl WarnSize {
+    pub fn parse(v: &str) -> Option<WarnSize> {
+        let v = v.trim();
+        match v.strip_suffix('%') {
+            Some(p) => p
+                .trim()
+                .parse()
+                .ok()
+                .filter(|&p| p > 0 && p <= 100)
+                .map(WarnSize::Percent),
+            None => crate::filters::parse_size(v)
+                .filter(|&b| b > 0)
+                .map(WarnSize::Bytes),
+        }
+    }
+
+    /// Whether `bytes` of trash on a disk of `disk` bytes is past it.
+    pub fn exceeded(&self, bytes: u64, disk: u64) -> bool {
+        match *self {
+            WarnSize::Bytes(b) => bytes > b,
+            WarnSize::Percent(p) => {
+                disk > 0 && u128::from(bytes) * 100 > u128::from(disk) * u128::from(p)
+            }
+        }
+    }
+}
+
+/// `RTRASH_WARN_SIZE`, else `policy.warn_size`, with where it came from.
+fn warn_size(prog: &str) -> Option<(WarnSize, &'static str)> {
+    let (raw, src) = match std::env::var("RTRASH_WARN_SIZE") {
+        Ok(v) => (v, "RTRASH_WARN_SIZE"),
+        Err(_) => (
+            crate::config::get().str("policy", "warn_size")?.to_string(),
+            "policy.warn_size",
+        ),
+    };
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let w = WarnSize::parse(&raw);
+    if w.is_none() {
+        eprintln!("{prog}: warning: ignoring {src}='{raw}' (want a size such as 20G or a percent such as 10%)");
+    }
+    w.map(|w| (w, src))
+}
+
+/// Warn when a trash this put used holds more than the warn size.
+fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
+    let Some((limit, src)) = warn_size(prog) else {
+        return;
+    };
+    let mut roots: Vec<PathBuf> = trashed.iter().map(|t| t.trash_dir.clone()).collect();
+    roots.sort();
+    roots.dedup();
+    for root in roots {
+        let Ok(dir) = trashdir::TrashDir::from_root(&root) else {
+            continue;
+        };
+        let bytes = crate::retention::prune(
+            prog,
+            std::slice::from_ref(&dir),
+            &crate::retention::Prune {
+                max: u64::MAX,
+                policy: crate::retention::Policy::Oldest,
+                dry_run: true,
+                verbose: false,
+                protect_batch: None,
+                gone_before: None,
+            },
+        )
+        .left;
+        let disk = crate::space::query(&root).map_or(0, |s| s.total);
+        if limit.exceeded(bytes, disk) {
+            let share = if disk > 0 {
+                format!(
+                    " ({}% of its disk)",
+                    u128::from(bytes) * 100 / u128::from(disk)
+                )
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "{prog}: warning: trash '{}' holds {}{share}, past {src}; free it with `rtrash empty`",
+                root.display(),
+                crate::fastdelete::format_bytes(bytes)
             );
         }
     }
@@ -633,5 +733,24 @@ mod json_tests {
             r#"{"trashed":[{"original":"/w/a \"q\".txt","name":"a \"q\".txt","trash_dir":"/x/Trash"}],"failed":2}"#
         );
         assert_eq!(summary_json(&[], 0), r#"{"trashed":[],"failed":0}"#);
+    }
+}
+
+#[cfg(test)]
+mod warn_size_tests {
+    use super::WarnSize;
+
+    #[test]
+    fn warn_sizes_parse_and_compare() {
+        assert_eq!(WarnSize::parse("20G"), Some(WarnSize::Bytes(20 << 30)));
+        assert_eq!(WarnSize::parse("10%"), Some(WarnSize::Percent(10)));
+        for bad in ["", "0", "0%", "101%", "lots"] {
+            assert_eq!(WarnSize::parse(bad), None, "{bad}");
+        }
+        assert!(WarnSize::Bytes(10).exceeded(11, 0));
+        assert!(!WarnSize::Bytes(10).exceeded(10, 0));
+        assert!(WarnSize::Percent(10).exceeded(11, 100));
+        assert!(!WarnSize::Percent(10).exceeded(10, 100));
+        assert!(!WarnSize::Percent(10).exceeded(10, 0));
     }
 }
