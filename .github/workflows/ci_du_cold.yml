@@ -1,0 +1,68 @@
+# Cold-cache du benchmark: rtrash du against dua, gdu and du with the page
+# cache dropped before each run. It reports numbers in the job summary and
+# never gates a merge.
+name: du cold cache
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: du-cold-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  du-cold:
+    name: du · cold cache (report only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Fetch hyperfine, dua and gdu
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP/bin"
+          curl -sSfL https://github.com/sharkdp/hyperfine/releases/download/v1.19.0/hyperfine-v1.19.0-x86_64-unknown-linux-musl.tar.gz | tar xz --strip-components=1 --wildcards '*/hyperfine'
+          curl -sSfL https://github.com/Byron/dua-cli/releases/download/v2.45.1/dua-v2.45.1-x86_64-unknown-linux-musl.tar.gz | tar xz --strip-components=1 --wildcards '*/dua'
+          curl -sSfL https://github.com/dundee/gdu/releases/download/v5.38.0/gdu_linux_amd64_static.tgz | tar xz
+          mv gdu_linux_amd64_static gdu
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # The cargo registry sources from the build, and a synthetic tree of
+      # 200,000 small files in 1,000 directories.
+      - name: Make the trees
+        run: |
+          python3 - <<'PY'
+          import os
+          root = os.path.join(os.environ["RUNNER_TEMP"], "synthetic")
+          for d in range(1000):
+              p = os.path.join(root, f"d{d // 50}", f"e{d}")
+              os.makedirs(p, exist_ok=True)
+              for f in range(200):
+                  with open(os.path.join(p, f"f{f}"), "wb") as fh:
+                      fh.write(b"x" * (f * 37 % 4096))
+          PY
+
+      - name: Cold-cache runs
+        run: |
+          {
+            echo "## du, cold cache ($(nproc) CPUs, $(df -T "$RUNNER_TEMP" | awk 'NR==2 {print $2}'))"
+            echo
+            COLD=1 RUNS=5 benches/compare_du.sh "$PWD/target/release/rtrash" \
+              "$RUNNER_TEMP/synthetic" "$HOME/.cargo/registry/src"
+            echo "## du, warm cache, same trees"
+            echo
+            RUNS=5 benches/compare_du.sh "$PWD/target/release/rtrash" \
+              "$RUNNER_TEMP/synthetic" "$HOME/.cargo/registry/src"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

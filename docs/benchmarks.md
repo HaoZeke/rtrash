@@ -164,6 +164,9 @@ All four agree on the synthetic tree's disk use (1.31 GiB). More dua threads (`-
 
 Reproduce: `cargo build --release && benches/compare_du.sh target/release/rtrash /path/to/tree ~/.cargo/registry/src`
 
+A cold-cache run needs root to drop the page cache: `COLD=1 RUNS=5 benches/compare_du.sh ...` drops it with sudo before each run.
+The "du cold cache" workflow (`.github/workflows/ci_du_cold.yml`) runs it on a GitHub Linux runner on each push to main and writes the tables to the job summary; it reports numbers and gates nothing.
+
 ### One wide directory (2026-10-14)
 
 A single directory with 224,985 files of 100 bytes each and no subdirectories, warm page cache, same host, `hyperfine -N --warmup 1 --runs 5`.
