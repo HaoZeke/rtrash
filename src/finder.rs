@@ -995,7 +995,7 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
         let path = e.path();
         if dry_run {
             if !json {
-                println!("would remove {}", crate::util::term_path(&path));
+                println!("would remove {}", crate::util::term_path(&e.shown));
             }
             removed += 1;
             continue;
@@ -1006,7 +1006,8 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
                 crate::finder_total::carry(&e.trash, (b, inodes), false);
                 removed += 1;
                 if verbose && !json {
-                    println!("removed {}", crate::util::term_path(&path));
+                    // The Put Back place, else the path in the trash.
+                    println!("removed {}", crate::util::term_path(&e.shown));
                 }
             }
             Err(err) => {

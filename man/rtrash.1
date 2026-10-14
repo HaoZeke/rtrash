@@ -357,7 +357,15 @@ Report what would be removed without removing anything; also prints
 approximate reclaimable disk space.
 .TP
 .BR \-v ", " \-\-verbose
-Print each removed item.
+Print each removed item as
+.I removed ORIGINAL
+(
+.I would remove ORIGINAL (SIZE)
+with
+.BR \-\-dry\-run ),
+by the original path its record names, the Put Back place on the Finder
+Trash, or the Recycle Bin original on Windows; an item with no record
+shows its path in the trash.
 .TP
 .BR \-i ", " \-\-interactive
 List the trash directories in scope and ask before emptying them, as

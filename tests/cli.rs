@@ -6113,6 +6113,39 @@ fn list_format_prints_fields_through_a_template() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+// macOS empties the Finder Trash here; tests/finder_default.rs covers it.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn verbose_empty_names_original_paths() {
+    let sb = Sandbox::new("emptyv");
+    for n in ["a.txt", "b.txt"] {
+        fs::write(sb.work().join(n), b"x").unwrap();
+        assert!(sb.run(&["put", n]).status.success());
+    }
+    let want = sb.work().join("a.txt");
+    let want = fs::canonicalize(want.parent().unwrap())
+        .unwrap()
+        .join("a.txt");
+    for args in [
+        &["empty", "--home-only", "--all", "-n", "-v"][..],
+        &["empty", "--home-only", "--all", "-v"][..],
+        &["empty", "--home-only", "-v"][..],
+    ] {
+        if args.len() == 3 {
+            fs::write(sb.work().join("a.txt"), b"x").unwrap();
+            assert!(sb.run(&["put", "a.txt"]).status.success());
+        }
+        let out = sb.run(args);
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+        let o = stdout_of(&out);
+        assert!(
+            o.lines().any(|l| l.contains(&*want.to_string_lossy())),
+            "{args:?}: {o}"
+        );
+        assert!(!o.contains("/files/"), "{args:?}: {o}");
+    }
+}
+
 #[test]
 fn put_dry_run_checks_and_moves_nothing() {
     let sb = Sandbox::new("putdry");

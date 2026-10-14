@@ -1239,7 +1239,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         }
         if verbose && !json {
             for it in &items {
-                println!("{}", crate::util::term_path(&original_of(it)));
+                println!("removed {}", crate::util::term_path(&original_of(it)));
             }
         }
         // Sizes come from the records, so read them before the purge.

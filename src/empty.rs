@@ -25,7 +25,7 @@ permanent delete). Use --plain to skip the TUI.
   -n, --dry-run    report what would be removed without removing anything;
                      also prints approximate reclaimable disk space (fast
                      in-process walk, like du of the victims)
-  -v, --verbose    print each removed item
+  -v, --verbose    print each removed item by its original path
   -i, --interactive  list the trash directories and ask before emptying
                      them (as trash-cli); skips the TUI
   -f, --force      do not ask (cancels an earlier -i)
@@ -618,10 +618,16 @@ fn empty_one(
                 }
             };
             if take {
+                // -v names the original path, as trash-cli users asked.
+                let shown = if opts.verbose {
+                    original_of(dir, &info_path)
+                } else {
+                    None
+                };
                 victims.push((
                     crate::util::join_name(&files_dir, name),
                     Some(info_path),
-                    crate::util::join_name(&dir.root.join("files"), name),
+                    shown.unwrap_or_else(|| crate::util::join_name(&dir.root.join("files"), name)),
                 ));
             } else {
                 kept_names.push(name.to_string());
@@ -726,6 +732,13 @@ fn empty_one(
     }
 }
 
+/// The original path a `.trashinfo` records, resolved against its trash.
+fn original_of(dir: &TrashDir, info_path: &std::path::Path) -> Option<PathBuf> {
+    let raw = info::read_bounded(info_path, info::RECORD_CAP).ok()?;
+    let rec = info::parse_bytes(&raw);
+    (!rec.path.as_os_str().is_empty()).then(|| dir.resolve_original(&rec.path))
+}
+
 /// Dry-run inventory matching full wipe: every top-level child of `files/` and
 /// non-counted-as-item names under `info/` still contribute reclaim size; item
 /// count is top-level `files/` children (same as live wipe `n_files`).
@@ -743,9 +756,12 @@ fn full_empty_dry_run(dir: &TrashDir, opts: &Opts, removed: &AtomicU64, bytes: &
             total = total.saturating_add(sz);
             n_files += 1;
             if opts.verbose {
+                let mut info = entry.file_name();
+                info.push(".trashinfo");
+                let shown = original_of(dir, &info_dir.join(info)).unwrap_or(p);
                 println!(
                     "would remove {} ({})",
-                    p.display(),
+                    crate::util::term_path(&shown),
                     crate::fastdelete::format_bytes(sz)
                 );
             }
@@ -774,11 +790,15 @@ fn full_empty_wipe(
     let info_dir = dir.info();
     let files_dir = dir.files();
 
-    // Verbose still lists intended removals before delete (stable UX).
+    // Verbose still lists intended removals before delete (stable UX),
+    // by original path where a record names one.
     if opts.verbose {
         if let Ok(entries) = fs::read_dir(&files_dir) {
             for entry in entries.flatten() {
-                println!("removed {}", crate::util::term_path(&entry.path()));
+                let mut info = entry.file_name();
+                info.push(".trashinfo");
+                let shown = original_of(dir, &info_dir.join(info)).unwrap_or_else(|| entry.path());
+                println!("removed {}", crate::util::term_path(&shown));
             }
         }
     }

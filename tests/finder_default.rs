@@ -784,3 +784,18 @@ fn list_format_reads_the_finder_trash() {
     assert_eq!(name, "x.log");
     assert!(size.parse::<u64>().unwrap() >= 3, "{line}");
 }
+
+#[test]
+fn verbose_finder_empty_names_the_put_back_place() {
+    let b = Box_::new("emptyv");
+    fs::write(b.work().join("x.log"), b"abc").unwrap();
+    assert!(b.run(&["put", "x.log"], "").status.success());
+    let o = b.run(&["empty", "--all", "-v"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let line = out(&o).lines().next().unwrap_or_default().to_string();
+    assert!(
+        line.starts_with("removed ") && line.ends_with("/x.log"),
+        "{line}"
+    );
+    assert!(!line.contains(".Trash"), "{line}");
+}
