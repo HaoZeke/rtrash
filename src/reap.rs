@@ -568,7 +568,7 @@ fn judge(path: &Path, parent_dev: u64, gi: usize, g: &Group, ctx: &Ctx) -> Optio
         Some("the XDG runtime directory".to_string())
     } else if let Some(pat) = excluded(path, &ctx.excl) {
         Some(format!("excluded by tmpfiles.d '{pat}'"))
-    } else if plat::dev(&m) != parent_dev {
+    } else if plat::fs_key(path, &m) != parent_dev {
         Some("a mount point".to_string())
     } else if let Some(k) = kind_reason(&m.file_type()) {
         Some(k.to_string())
@@ -582,7 +582,8 @@ fn judge(path: &Path, parent_dev: u64, gi: usize, g: &Group, ctx: &Ctx) -> Optio
     if o.skip.is_some() {
         return Some(o);
     }
-    let w = walk(path, &m, parent_dev, ctx, g);
+    // Below the entry, a mount point is any change of device.
+    let w = walk(path, &m, plat::dev(&m), ctx, g);
     o.age = ctx.now - w.newest;
     o.bytes = w.bytes;
     o.inodes = w.inodes;
@@ -658,6 +659,10 @@ mod plat {
     use std::path::{Path, PathBuf};
 
     pub fn dev(m: &fs::Metadata) -> u64 {
+        m.dev()
+    }
+    /// Which file system `--when-below` measures for `_path`.
+    pub fn fs_key(_path: &Path, m: &fs::Metadata) -> u64 {
         m.dev()
     }
     pub fn uid(m: &fs::Metadata) -> u32 {
@@ -760,6 +765,11 @@ mod plat {
     }
     pub fn dev(_m: &fs::Metadata) -> u64 {
         0
+    }
+    /// Which drive `--when-below` measures for `path`: its letter or
+    /// network share, since Windows metadata carries no device number.
+    pub fn fs_key(path: &Path, _m: &fs::Metadata) -> u64 {
+        crate::win_recycle::drive_key(path)
     }
     pub fn uid(_m: &fs::Metadata) -> u32 {
         0
@@ -1143,7 +1153,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             };
             let mut names: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
             names.sort();
-            entries.extend(names.into_iter().map(|p| (p, plat::dev(&root_meta))));
+            entries.extend(
+                names
+                    .into_iter()
+                    .map(|p| (p, plat::fs_key(root, &root_meta))),
+            );
         }
         groups.push(Group {
             name: "tmp".into(),
@@ -1181,8 +1195,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 for e in reap_profiles::glob(&full, max) {
                     let dev = e
                         .parent()
-                        .and_then(|d| fs::symlink_metadata(d).ok())
-                        .map_or(u64::MAX, |m| plat::dev(&m));
+                        .and_then(|d| fs::symlink_metadata(d).ok().map(|m| plat::fs_key(d, &m)))
+                        .unwrap_or(u64::MAX);
                     if !entries.iter().any(|(x, _)| *x == e) {
                         entries.push((e, dev));
                     }
@@ -1220,9 +1234,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         // The plain directories count even when empty, for --purge-trash.
         for r in &roots {
             if let (Ok(m), Ok(space)) = (fs::symlink_metadata(r), crate::space::query(r)) {
-                if !needs.iter().any(|(d, _)| *d == plat::dev(&m)) {
-                    needs.push((plat::dev(&m), need_of(&space)));
-                    on.push((plat::dev(&m), r.clone()));
+                let key = plat::fs_key(r, &m);
+                if !needs.iter().any(|(d, _)| *d == key) {
+                    needs.push((key, need_of(&space)));
+                    on.push((key, r.clone()));
                 }
             }
         }

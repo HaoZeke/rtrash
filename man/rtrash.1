@@ -1898,6 +1898,8 @@ permanent, or
 .BR \-\-permanent ,
 suit it best.
 A dry run cannot measure, so it adds up the entries' sizes instead.
+On Windows each drive letter (or network share) counts as its own file
+system.
 .TP
 .B \-\-purge\-trash
 Under
@@ -1911,7 +1913,7 @@ once enough have gone.
 A put onto the same disk frees nothing, so this is what turns old trash
 into free space.
 A dry run says how many items it would empty.
-On Windows it empties the oldest items of the Recycle Bin of the drive
+On Windows it empties the oldest items of the Recycle Bin of each drive
 that is short instead, counting the files in each.
 .TP
 .BI \-\-until= SPEC

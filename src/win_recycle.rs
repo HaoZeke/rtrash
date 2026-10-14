@@ -137,6 +137,38 @@ pub fn drive_root_of(path: &Path) -> Option<PathBuf> {
         .then(|| PathBuf::from(format!("{}:\\", char::from(b[0].to_ascii_uppercase()))))
 }
 
+/// A key for the volume that holds `path`, for telling drives apart where
+/// there are no device numbers: the drive letter for `C:\\...`, a hash of
+/// `\\\\server\\share` for a network path, else 0. A relative path counts
+/// from the current directory.
+pub fn drive_key(path: &Path) -> u64 {
+    match key_of(&path.to_string_lossy()) {
+        0 => std::path::absolute(path).map_or(0, |a| key_of(&a.to_string_lossy())),
+        k => k,
+    }
+}
+
+fn key_of(s: &str) -> u64 {
+    let s = s.replace('/', "\\");
+    let s = s
+        .strip_prefix(r"\\?\UNC\")
+        .map(|r| format!(r"\\{r}"))
+        .unwrap_or_else(|| s.strip_prefix(r"\\?\").unwrap_or(&s).to_string());
+    let b = s.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return u64::from(b[0].to_ascii_uppercase());
+    }
+    if let Some(rest) = s.strip_prefix(r"\\") {
+        let share: Vec<&str> = rest.splitn(3, '\\').take(2).collect();
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for c in share.join("\\").to_lowercase().bytes() {
+            h = (h ^ u64::from(c)).wrapping_mul(0x100_0000_01b3);
+        }
+        return h | 1 << 63;
+    }
+    0
+}
+
 /// Bytes each destination drive must take for a restore: items whose bin
 /// (`id`) sits on another drive than their original path are copied, so
 /// their size counts against that drive. Items on the same drive move.
@@ -1527,6 +1559,20 @@ pub fn purge_oldest_on(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn drive_key_tells_drives_and_shares_apart() {
+        let c = drive_key(Path::new(r"C:\Users\me\tmp"));
+        assert_eq!(c, u64::from(b'C'));
+        assert_eq!(drive_key(Path::new(r"c:/other")), c);
+        assert_eq!(drive_key(Path::new(r"\\?\C:\x")), c);
+        assert_ne!(drive_key(Path::new(r"D:\x")), c);
+        let share = drive_key(Path::new(r"\\srv\Share\a"));
+        assert_eq!(share, drive_key(Path::new(r"\\SRV\share\b\c")));
+        assert_eq!(share, drive_key(Path::new(r"\\?\UNC\srv\share\d")));
+        assert_ne!(share, drive_key(Path::new(r"\\srv\other")));
+        assert_ne!(share, c);
+    }
 
     #[test]
     fn pick_oldest_takes_items_by_age_until_enough_goes() {
