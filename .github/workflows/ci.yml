@@ -256,9 +256,10 @@ jobs:
         env:
           LANG: C.UTF-8
           LC_ALL: C.UTF-8
-          # GLib 2.80's gio restores 'x 100% é' with the é escaped; the
-          # script probes it and fails once the bug is gone.
-          RTRASH_INTEROP_EXPECT_GIO_PCT_BUG: "1"
+          # GLib 2.80's gio restores any non-ASCII name escaped ('x é'
+          # comes back as 'x \xc3\xa9'); the script probes it and fails
+          # once the bug is gone.
+          RTRASH_INTEROP_EXPECT_GIO_UTF8_BUG: "1"
         run: |
           cargo build --locked --release
           # gio reaches trash:// through gvfsd on a session bus, which a
