@@ -826,6 +826,8 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
         if let Some((bytes, items)) = before {
             let added = DirSizes::load(trash).entry_bytes(&name);
             crate::trash_total::store(trash, bytes.saturating_add(added), items + 1);
+        } else {
+            crate::trash_total::forget(trash);
         }
         crate::trash_total::touched(trash);
         name

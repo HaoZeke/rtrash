@@ -75,6 +75,10 @@ pub fn permanently_remove_entries(
             }
         }
         trashdir::directorysizes_remove(&entry.dir, &entry.name);
+        // The total does not follow this removal; drop it, and mark the
+        // trash for the history line.
+        crate::trash_total::forget(&entry.dir);
+        crate::trash_total::touched(&entry.dir);
         succeeded.push(true);
     }
     RemoveBatchResult {
@@ -545,6 +549,36 @@ mod tests {
     use super::*;
     use crate::trashdir::TrashDir;
     use std::path::PathBuf;
+
+    #[test]
+    fn removing_entries_drops_the_running_total() {
+        let root = std::env::temp_dir().join(format!("rtrash-tui-total-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("info")).unwrap();
+        std::fs::create_dir_all(root.join("files")).unwrap();
+        std::fs::write(root.join("files/x"), "x").unwrap();
+        std::fs::write(root.join("info/x.trashinfo"), "[Trash Info]\nPath=/x\n").unwrap();
+        let dir = TrashDir::from_root(&root).unwrap();
+        crate::trash_total::store(&dir, 999, 99);
+        assert!(root.join("rtrash-total").exists());
+        let e = Entry {
+            date: None,
+            epoch: 0,
+            original: PathBuf::from("/x"),
+            name: "x".into(),
+            dir: dir.clone(),
+            batch: None,
+        };
+        let r = permanently_remove_entries("rtrash", &[&e], false);
+        assert_eq!(r.succeeded, vec![true]);
+        assert!(!root.join("files/x").exists());
+        // In the same clock tick the old stamp could still match info/.
+        assert!(
+            !root.join("rtrash-total").exists(),
+            "the stale total stayed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn footer_shows_the_status_line() {

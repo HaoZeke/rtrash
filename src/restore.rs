@@ -727,6 +727,8 @@ pub(crate) fn restore_one_to(
                         b.saturating_sub(sz),
                         n.saturating_sub(1),
                     );
+                } else {
+                    crate::trash_total::forget(&entry.dir);
                 }
             }
             Err(e) => warnings.push(format!("cannot remove '{}': {e}", info_path.display())),

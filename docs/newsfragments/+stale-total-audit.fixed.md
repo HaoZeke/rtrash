@@ -1,0 +1,1 @@
+Every command that changes a trash now updates or drops its stored total: the interactive `empty` also writes a history line, and put, restore and `empty DAYS` no longer leave an old total that a coarse clock could make look current.

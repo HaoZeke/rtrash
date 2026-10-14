@@ -308,6 +308,8 @@ fn empty_one(
             // failed somewhere leaves it stale for the next reader.
             if errors.load(Ordering::Relaxed) == before {
                 crate::trash_total::store(dir, 0, 0);
+            } else {
+                crate::trash_total::forget(dir);
             }
         }
         return;
@@ -439,6 +441,8 @@ fn empty_one(
                 b.saturating_sub(gone.into_inner()),
                 n.saturating_sub(gone_items.into_inner()),
             );
+        } else {
+            crate::trash_total::forget(dir);
         }
     }
 }

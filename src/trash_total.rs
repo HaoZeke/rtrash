@@ -7,7 +7,9 @@
 //! changes that time, so a stale total is never trusted; the next reader
 //! measures the trash once and stores a fresh one. Put, restore, empty
 //! and the prune behind `empty --max-size` and `reap` carry a total that
-//! was current before them, under the trash lock.
+//! was current before them, under the trash lock. A change that cannot
+//! carry the total drops it with [`forget`], since the stamp alone cannot
+//! tell a change in the same tick of a coarse clock from none.
 
 use std::fs;
 use std::path::PathBuf;
