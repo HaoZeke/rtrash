@@ -1901,7 +1901,8 @@ once enough have gone.
 A put onto the same disk frees nothing, so this is what turns old trash
 into free space.
 A dry run says how many items it would empty.
-Not on Windows.
+On Windows it empties the oldest items of the Recycle Bin of the drive
+that is short instead, counting the files in each.
 .TP
 .BI \-\-until= SPEC
 The target to reap back to under

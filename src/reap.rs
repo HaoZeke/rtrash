@@ -61,8 +61,9 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
                           until it is back above it; exits at
                           once while space is fine, for a timer job
       --purge-trash     under --when-below, first empty the oldest items
-                          of your trash on a short file system, since a
-                          put there frees nothing
+                          of your trash (the drive's Recycle Bin on
+                          Windows) on a short file system, since a put
+                          there frees nothing
       --until=SPEC      the target to reap back to under --when-below
                           (default: the --when-below SPEC)
       --json            print a JSON object ({dry_run, older_than,
@@ -1081,9 +1082,6 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if purge_trash && when_below.is_none() {
         return usage_err(prog, "--purge-trash goes with --when-below");
     }
-    if purge_trash && cfg!(windows) {
-        return usage_err(prog, "--purge-trash is not available on Windows");
-    }
     let now = crate::util::now_epoch();
     let mut status = 0;
     let mut groups: Vec<Group> = Vec::new();
@@ -1208,6 +1206,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     // --when-below: keep only entries on file systems under the target,
     // with what each must free, and stop here when none is.
     let mut needs: Vec<(u64, (u64, u64))> = Vec::new();
+    // A path on each file system in `needs`, for --purge-trash.
+    let mut on: Vec<(u64, PathBuf)> = Vec::new();
     if let Some(wb) = when_below {
         let target = until.unwrap_or(wb);
         let need_of = |space: &crate::space::Space| {
@@ -1222,6 +1222,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             if let (Ok(m), Ok(space)) = (fs::symlink_metadata(r), crate::space::query(r)) {
                 if !needs.iter().any(|(d, _)| *d == plat::dev(&m)) {
                     needs.push((plat::dev(&m), need_of(&space)));
+                    on.push((plat::dev(&m), r.clone()));
                 }
             }
         }
@@ -1236,12 +1237,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 let n = need_of(&space);
                 // Below the trigger yet above --until still frees nothing.
                 needs.push((*dev, n));
+                on.push((*dev, e.clone()));
                 n != (0, 0)
             });
         }
         if purge_trash {
             for (dev, need) in needs.iter_mut().filter(|(_, n)| *n != (0, 0)) {
-                *need = purge_oldest(prog, *dev, *need, target, dry_run, verbose);
+                let at = on.iter().find(|(d, _)| d == dev).map(|(_, p)| p.as_path());
+                *need = purge_oldest(prog, *dev, at, *need, target, dry_run, verbose);
             }
             for g in &mut groups {
                 g.entries
@@ -1550,6 +1553,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 fn purge_oldest(
     prog: &str,
     dev: u64,
+    _at: Option<&Path>,
     need: (u64, u64),
     target: Floor,
     dry_run: bool,
@@ -1609,9 +1613,43 @@ fn purge_oldest(
     left
 }
 
-#[cfg(not(unix))]
-fn purge_oldest(_: &str, _: u64, need: (u64, u64), _: Floor, _: bool, _: bool) -> (u64, u64) {
-    need
+/// The Windows side: the oldest items in the Recycle Bin of the drive
+/// that holds `at`, until `need` (bytes, files) is freed.
+#[cfg(windows)]
+fn purge_oldest(
+    prog: &str,
+    _dev: u64,
+    at: Option<&Path>,
+    need: (u64, u64),
+    target: Floor,
+    dry_run: bool,
+    verbose: bool,
+) -> (u64, u64) {
+    let Some(drive) = at
+        .map(|p| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+        .and_then(|p| {
+            let s = p.to_string_lossy();
+            crate::win_recycle::drive_root_of(Path::new(s.strip_prefix(r"\\?\").unwrap_or(&s)))
+        })
+    else {
+        return need;
+    };
+    let (n, bytes, files) =
+        crate::win_recycle::purge_oldest_on(prog, &drive, need, dry_run, verbose);
+    if n > 0 {
+        eprintln!(
+            "{prog}: {} {} ({}) from the Recycle Bin of {}",
+            if dry_run { "would empty" } else { "emptied" },
+            crate::util::plural(n, "item", "items"),
+            crate::util::format_bytes(bytes),
+            drive.display()
+        );
+    }
+    if dry_run {
+        (need.0.saturating_sub(bytes), need.1.saturating_sub(files))
+    } else {
+        crate::space::query(&drive).map_or(need, |s| target.need(&s))
+    }
 }
 
 /// Bytes on disk only the tree at `path` uses: what deleting it frees

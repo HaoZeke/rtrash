@@ -220,6 +220,24 @@ pub fn parse_with_filters(
     Ok(f)
 }
 
+/// Indices of `items` (deletion time, bytes, files), oldest first, to
+/// purge until at least `need` (bytes, files) goes; all of them when that
+/// is more than they hold.
+pub fn pick_oldest(items: &[(i64, u64, u64)], need: (u64, u64)) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_key(|&i| items[i].0);
+    let (mut bytes, mut files) = (0u64, 0u64);
+    order
+        .into_iter()
+        .take_while(|&i| {
+            let more = bytes < need.0 || files < need.1;
+            bytes = bytes.saturating_add(items[i].1);
+            files = files.saturating_add(items[i].2);
+            more
+        })
+        .collect()
+}
+
 /// What a Recycle Bin item takes, from its `$R` payload path: the size
 /// its `$I` record holds (Windows writes a folder's total there), else
 /// the bytes of the files under the payload.
@@ -229,6 +247,25 @@ pub fn recycled_size(payload: &Path) -> u64 {
         .and_then(|b| parse_recycle_i(&b))
         .map(|m| m.size)
         .unwrap_or_else(|| tree_bytes(payload))
+}
+
+/// Files and directories at or below `root`, without following links.
+#[cfg(windows)]
+fn tree_files(root: &Path) -> u64 {
+    let mut n = 0u64;
+    let mut todo = vec![root.to_path_buf()];
+    while let Some(p) = todo.pop() {
+        let Ok(md) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        n += 1;
+        if md.is_dir() {
+            if let Ok(rd) = std::fs::read_dir(&p) {
+                todo.extend(rd.flatten().map(|e| e.path()));
+            }
+        }
+    }
+    n
 }
 
 /// Bytes of the files under `root` (or of `root` itself), without
@@ -766,6 +803,56 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 1
             }
         }
+    }
+
+    /// Purge the oldest items in the Recycle Bin of `drive` until `need`
+    /// (bytes, files) goes, and return (items, bytes, files) taken.
+    pub fn purge_oldest_on(
+        prog: &str,
+        drive: &Path,
+        need: (u64, u64),
+        dry_run: bool,
+        verbose: bool,
+    ) -> (u64, u64, u64) {
+        let items: Vec<TrashItem> = match os_limited::list() {
+            Ok(i) => i
+                .into_iter()
+                .filter(|it| drive_root_of(Path::new(&it.id)).as_deref() == Some(drive))
+                .collect(),
+            Err(e) => {
+                eprintln!("{prog}: cannot list Recycle Bin: {}", err_msg(e));
+                return (0, 0, 0);
+            }
+        };
+        let sized: Vec<(i64, u64, u64)> = items
+            .iter()
+            .map(|it| {
+                let p = Path::new(&it.id);
+                (it.time_deleted, recycled_size(p), tree_files(p))
+            })
+            .collect();
+        let picked = pick_oldest(&sized, need);
+        let (bytes, files) = picked
+            .iter()
+            .fold((0u64, 0u64), |(b, f), &i| (b + sized[i].1, f + sized[i].2));
+        let chosen: Vec<TrashItem> = picked.iter().map(|&i| items[i].clone()).collect();
+        if verbose || dry_run {
+            for it in &chosen {
+                println!(
+                    "{} {}",
+                    if dry_run { "would remove" } else { "removed" },
+                    crate::util::term_path(&it.original_path())
+                );
+            }
+        }
+        let n = chosen.len() as u64;
+        if !dry_run && n > 0 {
+            if let Err(e) = os_limited::purge_all(chosen) {
+                eprintln!("{prog}: cannot empty Recycle Bin: {}", err_msg(e));
+                return (0, 0, 0);
+            }
+        }
+        (n, bytes, files)
     }
 
     pub fn restore_run(prog: &str, args: &[String]) -> i32 {
@@ -1384,11 +1471,31 @@ pub fn rm_run(prog: &str, args: &[String]) -> i32 {
 pub fn setup_run(prog: &str, args: &[String]) -> i32 {
     os::setup_run(prog, args)
 }
+#[cfg(windows)]
+pub fn purge_oldest_on(
+    prog: &str,
+    drive: &Path,
+    need: (u64, u64),
+    dry_run: bool,
+    verbose: bool,
+) -> (u64, u64, u64) {
+    os::purge_oldest_on(prog, drive, need, dry_run, verbose)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn pick_oldest_takes_items_by_age_until_enough_goes() {
+        let items = [(30, 5, 1), (10, 4, 1), (20, 100, 9), (40, 1, 1)];
+        assert_eq!(pick_oldest(&items, (0, 0)), Vec::<usize>::new());
+        assert_eq!(pick_oldest(&items, (4, 0)), vec![1]);
+        assert_eq!(pick_oldest(&items, (5, 0)), vec![1, 2]);
+        assert_eq!(pick_oldest(&items, (0, 11)), vec![1, 2, 0]);
+        assert_eq!(pick_oldest(&items, (u64::MAX, 0)), vec![1, 2, 0, 3]);
+    }
 
     #[test]
     fn recycle_i_v2_roundtrip() {
