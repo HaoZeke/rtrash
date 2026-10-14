@@ -156,6 +156,14 @@ fn usage_err(prog: &str, msg: &str) -> i32 {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    #[cfg(unix)]
+    let before = crate::trash_total::snapshot();
+    let code = run_inner(prog, args);
+    crate::trash_total::log_changed("put", &before);
+    code
+}
+
+fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut opts = Opts::default();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut no_more_opts = false;

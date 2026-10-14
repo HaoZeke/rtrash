@@ -22,6 +22,8 @@ directories under files/ and info/), orphans (payloads without a
       --top=N           list the N largest items (default 5; 0 for none)
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  only this trash directory (repeatable)
+      --history         also show each trash's history: its size and items
+                        after each put, empty and reap that changed it
       --json            print a JSON object ({trashes, total})
       --help            display this help and exit
       --version         output version information and exit
@@ -48,6 +50,9 @@ pub struct Stats {
     pub oldest: Option<Item>,
     pub newest: Option<Item>,
     pub top: Vec<Item>,
+    /// (epoch, event, bytes, items) after each command that changed it,
+    /// oldest first; filled only for `--history`.
+    pub history: Vec<(i64, String, u64, u64)>,
 }
 
 /// Files and directories at or below `path`, links not followed.
@@ -94,6 +99,7 @@ pub fn summarize(
         oldest,
         newest,
         top: items,
+        history: Vec::new(),
     }
 }
 
@@ -161,14 +167,29 @@ fn item_json(i: &Item) -> String {
 }
 
 /// The JSON object for a set of summaries.
-pub fn to_json(all: &[Stats]) -> String {
+pub fn to_json(all: &[Stats], with_history: bool) -> String {
     let opt = |i: &Option<Item>| i.as_ref().map_or("null".to_string(), item_json);
     let trashes: Vec<String> = all
         .iter()
         .map(|s| {
             let top: Vec<String> = s.top.iter().map(item_json).collect();
+            let history = if with_history {
+                let points: Vec<String> = s
+                    .history
+                    .iter()
+                    .map(|(t, e, b, n)| {
+                        format!(
+                            r#"{{"epoch":{t},"event":"{}","bytes":{b},"items":{n}}}"#,
+                            json_escape(e)
+                        )
+                    })
+                    .collect();
+                format!(r#","history":[{}]"#, points.join(","))
+            } else {
+                String::new()
+            };
             format!(
-                r#"{{"path":{},"bytes":{},"items":{},"inodes":{},"orphans":{},"oldest":{},"newest":{},"top":[{}]}}"#,
+                r#"{{"path":{},"bytes":{},"items":{},"inodes":{},"orphans":{},"oldest":{},"newest":{},"top":[{}]{history}}}"#,
                 path_json(&s.root),
                 s.bytes,
                 s.items,
@@ -191,7 +212,7 @@ pub fn to_json(all: &[Stats]) -> String {
     )
 }
 
-fn print_text(all: &[Stats]) {
+fn print_text(all: &[Stats], with_history: bool) {
     let line = |label: &str, i: &Item| {
         println!(
             "  {label}: {} ({}, {}, from {})",
@@ -219,6 +240,20 @@ fn print_text(all: &[Stats]) {
         for (n, i) in s.top.iter().enumerate() {
             line(&format!("#{}", n + 1), i);
         }
+        if with_history {
+            if s.history.is_empty() {
+                println!("  history: none yet");
+            }
+            for (t, e, b, n) in &s.history {
+                println!(
+                    "  {}  {:<5}  {}, {}",
+                    crate::platform::epoch_to_iso_utc(*t),
+                    crate::util::term_text(e),
+                    format_bytes(*b),
+                    crate::util::plural(*n, "item", "items")
+                );
+            }
+        }
     }
     let bytes: u64 = all.iter().map(|s| s.bytes).sum();
     let items: u64 = all.iter().map(|s| s.items).sum();
@@ -233,11 +268,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut pins: Vec<PathBuf> = Vec::new();
     let mut home_only = false;
     let mut json = false;
+    let mut with_history = false;
     let mut top = 5usize;
     for a in args {
         match a.as_str() {
             "--home-only" => home_only = true,
             "--json" => json = true,
+            "--history" => with_history = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -267,7 +304,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let all: Vec<Stats> = trashdir::resolve_dirs_opts(&pins, home_only)
         .iter()
         .filter(|d| d.info().is_dir() || d.files().is_dir())
-        .map(|d| gather(d, top))
+        .map(|d| {
+            let mut s = gather(d, top);
+            if with_history {
+                s.history = crate::trash_total::history(d)
+                    .into_iter()
+                    .map(|p| (p.epoch, p.event, p.bytes, p.items))
+                    .collect();
+            }
+            s
+        })
         .collect();
     // The Recycle Bin has one place per drive; there is nothing to narrow.
     #[cfg(windows)]
@@ -276,9 +322,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         gather_bins(top)
     };
     if json {
-        println!("{}", to_json(&all));
+        println!("{}", to_json(&all, with_history));
     } else {
-        print_text(&all);
+        print_text(&all, with_history);
     }
     0
 }

@@ -575,6 +575,20 @@ Only the home trash.
 .BI \-\-trash\-dir= PATH
 Only this trash directory (repeatable).
 .TP
+.B \-\-history
+Also show each trash's history: after every put, empty and reap that
+changed a trash, rtrash appends the time, the command, and the trash's
+size and item count to
+.I rtrash\-history
+in its root, keeping the newer half once the file passes 64 KiB.
+With
+.BR \-\-json ,
+each trash gains
+.IR history ,
+a list of
+.RI { epoch ", " event ", " bytes ", " items }.
+None on Windows.
+.TP
 .B \-\-json
 Print a JSON object:
 .I trashes
@@ -2374,6 +2388,9 @@ kept current by put, restore, empty and reap, and
 trusted only while
 .B info/
 is unchanged since it was written),
+.B rtrash\-history
+(a line per put, empty or reap that changed the trash, for
+.BR "trash\-stats \-\-history" ),
 and optional lock file.
 Cache sizes count allocated blocks as
 .B du \-B1

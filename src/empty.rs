@@ -61,6 +61,14 @@ fn usage_err(prog: &str, msg: &str) -> i32 {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    #[cfg(unix)]
+    let before = crate::trash_total::snapshot();
+    let code = run_inner(prog, args);
+    crate::trash_total::log_changed("empty", &before);
+    code
+}
+
+fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut opts = Opts {
         days: None,
         dry_run: false,

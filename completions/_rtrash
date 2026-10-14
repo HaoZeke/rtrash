@@ -93,6 +93,7 @@ trash_stats_opts=(
   '--top=[list the N largest items]:count:'
   '--home-only[only the home trash]'
   '*--trash-dir=[only this trash directory]:dir:_files -/'
+  '--history[also show each trash history]'
   '--json[print a JSON object]'
   '--help[display help]'
   '--version[display version]'

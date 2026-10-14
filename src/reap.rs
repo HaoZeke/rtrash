@@ -942,6 +942,15 @@ fn add_roots(out: &mut Vec<PathBuf>, v: &str) -> Result<(), String> {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    #[cfg(unix)]
+    let before = crate::trash_total::snapshot();
+    let code = run_inner(prog, args);
+    #[cfg(unix)]
+    crate::trash_total::log_changed("reap", &before);
+    code
+}
+
+fn run_inner(prog: &str, args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--remove-timer") {
         let dry = args.iter().any(|a| a == "-n" || a == "--dry-run");
         if let Some(a) = args

@@ -82,6 +82,96 @@ pub fn bytes(prog: &str, dir: &TrashDir) -> u64 {
     b
 }
 
+/// The history file beside the total: a line `EPOCH EVENT BYTES ITEMS`
+/// per command that changed the trash.
+const HISTORY: &str = "rtrash-history";
+/// Past this size the history keeps only its newer half.
+const HISTORY_CAP: u64 = 64 * 1024;
+
+/// One line of a trash's history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Point {
+    pub epoch: i64,
+    pub event: String,
+    pub bytes: u64,
+    pub items: u64,
+}
+
+fn parse_point(line: &str) -> Option<Point> {
+    let mut f = line.split_whitespace();
+    Some(Point {
+        epoch: f.next()?.parse().ok()?,
+        event: f.next()?.to_string(),
+        bytes: f.next()?.parse().ok()?,
+        items: f.next()?.parse().ok()?,
+    })
+}
+
+/// The history of `dir`, oldest first; lines that do not parse are left
+/// out.
+pub fn history(dir: &TrashDir) -> Vec<Point> {
+    fs::read_to_string(dir.root.join(HISTORY))
+        .map(|s| s.lines().filter_map(parse_point).collect())
+        .unwrap_or_default()
+}
+
+/// Append a line for `event` to the history of `dir`, trimming the file
+/// to its newer half once it passes [`HISTORY_CAP`]. Best effort.
+fn append(dir: &TrashDir, event: &str, bytes: u64, items: u64) {
+    use std::io::Write;
+    let p = dir.root.join(HISTORY);
+    if fs::metadata(&p).is_ok_and(|m| m.len() > HISTORY_CAP) {
+        if let Ok(body) = fs::read_to_string(&p) {
+            let lines: Vec<&str> = body.lines().collect();
+            let keep = lines[lines.len() / 2..].join("\n") + "\n";
+            let _ = crate::trashdir::atomic_write(&p, keep.as_bytes());
+        }
+    }
+    let line = format!("{} {event} {bytes} {items}\n", crate::util::now_epoch());
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&p) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// The modification time of each trash's `info/`, before a command.
+pub type Snapshot = Vec<(PathBuf, Option<std::time::SystemTime>)>;
+
+fn info_mtime(dir: &TrashDir) -> Option<std::time::SystemTime> {
+    fs::metadata(dir.info()).and_then(|m| m.modified()).ok()
+}
+
+/// Note when each trash last changed, for [`log_changed`].
+pub fn snapshot() -> Snapshot {
+    crate::trashdir::all()
+        .into_iter()
+        .map(|d| {
+            let t = info_mtime(&d);
+            (d.root, t)
+        })
+        .collect()
+}
+
+/// After a command: for each trash whose `info/` changed since `before`
+/// (or that is new), append its total (measured if stale) to its history
+/// under `event`.
+pub fn log_changed(event: &str, before: &Snapshot) {
+    for dir in crate::trashdir::all() {
+        let now = info_mtime(&dir);
+        let was = before.iter().find(|(r, _)| *r == dir.root).map(|(_, t)| *t);
+        if now.is_none() || was == Some(now) {
+            continue;
+        }
+        let (bytes, items) = match cached(&dir) {
+            Some(t) => t,
+            None => {
+                let b = bytes("rtrash", &dir);
+                (b, cached(&dir).map_or(0, |(_, i)| i))
+            }
+        };
+        append(&dir, event, bytes, items);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +192,18 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(root.join("info/x.trashinfo"), "[Trash Info]\n").unwrap();
         assert_eq!(cached(&dir), None, "a new item left the total current");
+        append(&dir, "put", 5, 1);
+        fs::write(root.join("rtrash-history"), {
+            let mut s = fs::read_to_string(root.join("rtrash-history")).unwrap();
+            s.push_str("garbage\n");
+            s
+        })
+        .unwrap();
+        append(&dir, "empty", 0, 0);
+        let h = history(&dir);
+        assert_eq!(h.len(), 2, "{h:?}");
+        assert_eq!((h[0].event.as_str(), h[0].bytes, h[0].items), ("put", 5, 1));
+        assert_eq!((h[1].event.as_str(), h[1].bytes), ("empty", 0));
         let _ = fs::remove_dir_all(&root);
     }
 }

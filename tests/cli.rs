@@ -3704,6 +3704,40 @@ fn status_warns_from_the_test_file_system_and_stops_once_it_is_freed() {
     assert!(!stderr_of(&status(false)).contains("is low"));
 }
 
+#[test]
+#[cfg(unix)]
+fn trash_stats_history_records_each_put_and_empty() {
+    let sb = Sandbox::new("stats-log");
+    let a = sb.work().join("a.bin");
+    fs::write(&a, vec![1u8; 30_000]).unwrap();
+    assert!(sb.run(&["put", a.to_str().unwrap()]).status.success());
+    let b = sb.work().join("b.txt");
+    fs::write(&b, "b").unwrap();
+    assert!(sb.run(&["put", b.to_str().unwrap()]).status.success());
+    // A dry run and a put that fails change nothing, so they add no line.
+    assert!(sb.run(&["empty", "--home-only", "-n"]).status.success());
+    assert!(!sb.run(&["put", "missing-file"]).status.success());
+    assert!(sb.run(&["empty", "--home-only"]).status.success());
+    let out = sb.run(&["trash-stats", "--home-only", "--history", "--json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let json = stdout_of(&out);
+    let events: Vec<&str> = json
+        .match_indices(r#""event":""#)
+        .map(|(i, m)| {
+            let rest = &json[i + m.len()..];
+            &rest[..rest.find('"').unwrap()]
+        })
+        .collect();
+    assert_eq!(events, ["put", "put", "empty"], "{json}");
+    assert!(json.contains(r#""bytes":0,"items":0}]"#), "{json}");
+    assert!(json.contains(r#""items":2}"#), "{json}");
+    // Text lists the same lines; without --history there are none.
+    let text = stdout_of(&sb.run(&["trash-stats", "--home-only", "--history"]));
+    assert_eq!(text.matches("  put  ").count(), 2, "{text}");
+    let plain = stdout_of(&sb.run(&["trash-stats", "--home-only", "--json"]));
+    assert!(!plain.contains("history"), "{plain}");
+}
+
 /// A file in `dir` whose access and modification times are a day old.
 fn stale_file(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);
