@@ -1946,7 +1946,9 @@ of Cursor, and
 .B aider
 (\fI\(ti/.aider/caches\fR; 14 days, trash),
 .B ollama
-(runner scratch in \fI$TMPDIR/ollama*\fR, never models; 2 days, permanent),
+(runner scratch in \fI$TMPDIR/ollama*\fR and partial model downloads,
+.IR $OLLAMA_MODELS/blobs/sha256\-*\-partial* ,
+never a finished blob; 2 days, permanent),
 .B huggingface
 (partial downloads,
 .IR $HF_HOME/hub/*/blobs/*.incomplete ,
@@ -1962,7 +1964,11 @@ checkpoint; 7 days, permanent),
 .B triton
 (\fI$TRITON_CACHE_DIR\fR, default \fI~/.triton/cache\fR; 14 days, permanent),
 .B jax
-(\fI$JAX_COMPILATION_CACHE_DIR\fR, default \fI~/.cache/jax\fR; 14 days, permanent).
+(\fI$JAX_COMPILATION_CACHE_DIR\fR, default \fI~/.cache/jax\fR; 14 days, permanent),
+.B playwright
+(browser builds in \fI$PLAYWRIGHT_BROWSERS_PATH\fR, default
+\fIms\-playwright\fR in the cache root, except the newest build of each
+browser; 30 days, permanent).
 The first four are guarded: an entry that is or holds a file named like
 settings, history, a credential, a key or a database stays.
 .TP
@@ -1998,6 +2004,10 @@ that of its first argument; 14 days),
 (group)
 .B pip
 (HTTP and wheel cache),
+.B pip\-build
+(pip's build, unpack and wheel scratch dirs,
+.IR $TMPDIR/pip\-* ;
+2 days),
 .B uv
 (cache buckets),
 .B npm
@@ -2061,7 +2071,15 @@ globs),
 .B depth
 (how far
 .B **
-reaches) and
+reaches),
+.B keep_newest
+(true to reap only entries named
+.IR NAME\-VERSION ,
+sparing the highest
+.I VERSION
+of each
+.IR NAME )
+and
 .B tool
 (the tool's own cleanup command, where
 .B {age}

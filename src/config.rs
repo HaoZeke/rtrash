@@ -310,6 +310,11 @@ const PROFILE_KEYS: &[(&str, Kind, &str)] = &[
         "keep entries holding credential-like files",
     ),
     (
+        "keep_newest",
+        Kind::Bool,
+        "spare the newest version of each NAME-VERSION entry",
+    ),
+    (
         "tool",
         Kind::List,
         "the tool's own cleanup command, for --tool",

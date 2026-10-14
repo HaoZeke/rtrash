@@ -49,6 +49,9 @@ pub struct Profile {
     pub busy: Vec<String>,
     /// Keep entries that hold credential-like files.
     pub guard: bool,
+    /// Only entries named `NAME-VERSION` count, and the highest VERSION of
+    /// each NAME stays, as for Playwright's `chromium-1148`.
+    pub keep_newest: bool,
     /// The tool's own cleanup, run by `--tool` when it is on PATH.
     /// `{age}` becomes the age in days or hours, such as `7d` or `2h`.
     pub tool: Vec<String>,
@@ -71,6 +74,7 @@ struct B {
     marker: Option<&'static str>,
     busy: &'static [&'static str],
     guard: bool,
+    keep_newest: bool,
     tool: &'static [&'static str],
 }
 
@@ -91,6 +95,7 @@ const fn b(
         marker: None,
         busy: &[],
         guard: false,
+        keep_newest: false,
         tool: &[],
     }
 }
@@ -109,7 +114,7 @@ use Action::{Permanent, Trash};
 const BUILTIN: &[B] = &[
     group(
         "ai",
-        "AI coding tools and model caches: claude, cursor, codex, aider, ollama, huggingface, torch, vllm, triton, jax",
+        "AI coding tools and model caches: claude, cursor, codex, aider, ollama, huggingface, torch, vllm, triton, jax, playwright",
         &[
             "claude",
             "cursor",
@@ -121,6 +126,7 @@ const BUILTIN: &[B] = &[
             "vllm",
             "triton",
             "jax",
+            "playwright",
         ],
     ),
     B {
@@ -175,8 +181,12 @@ const BUILTIN: &[B] = &[
     },
     b(
         "ollama",
-        "ollama runner scratch dirs in the temp dir (never models)",
-        &["unix:${TMPDIR:-/tmp}/ollama*", "windows:${TEMP}/ollama*"],
+        "ollama runner scratch dirs in the temp dir and partial model downloads (never finished blobs)",
+        &[
+            "unix:${TMPDIR:-/tmp}/ollama*",
+            "windows:${TEMP}/ollama*",
+            "${OLLAMA_MODELS:-~/.ollama/models}/blobs/sha256-*-partial*",
+        ],
         2,
         Permanent,
     ),
@@ -203,6 +213,16 @@ const BUILTIN: &[B] = &[
         7,
         Permanent,
     ),
+    B {
+        keep_newest: true,
+        ..b(
+            "playwright",
+            "Playwright browser builds older than the newest of each browser",
+            &["${PLAYWRIGHT_BROWSERS_PATH:-C/ms-playwright}/*-[0-9]*"],
+            30,
+            Permanent,
+        )
+    },
     b(
         "vllm",
         "vLLM torch.compile caches (rebuilt on the next start)",
@@ -265,9 +285,10 @@ const BUILTIN: &[B] = &[
     b("gradle", "Gradle build cache and daemon logs", &["${GRADLE_USER_HOME:-~/.gradle}/caches/build-cache-*/*", "${GRADLE_USER_HOME:-~/.gradle}/daemon/*/daemon-*.out.log"], 30, Permanent),
     group(
         "pkg",
-        "package caches: pip, uv, npm, pnpm, yarn, bun, conda, mamba, pre-commit, node-gyp",
+        "package caches: pip, pip-build, uv, npm, pnpm, yarn, bun, conda, mamba, pre-commit, node-gyp",
         &[
             "pip",
+            "pip-build",
             "uv",
             "npm",
             "pnpm",
@@ -283,6 +304,13 @@ const BUILTIN: &[B] = &[
         tool: &["pip", "cache", "purge"],
         ..b("pip", "pip HTTP and wheel cache", &["unix:${PIP_CACHE_DIR:-C/pip}/http*/*", "unix:${PIP_CACHE_DIR:-C/pip}/wheels/*", "windows:${PIP_CACHE_DIR:-C/pip/Cache}/http*/*", "windows:${PIP_CACHE_DIR:-C/pip/Cache}/wheels/*"], 30, Permanent)
     },
+    b(
+        "pip-build",
+        "pip build, unpack and wheel scratch dirs left in the temp dir",
+        &["unix:${TMPDIR:-/tmp}/pip-*", "windows:${TEMP}/pip-*"],
+        2,
+        Permanent,
+    ),
     B {
         tool: &["uv", "cache", "prune"],
         ..b("uv", "uv cache buckets", &["unix:${UV_CACHE_DIR:-~/.cache/uv}/*-v[0-9]*/*", "windows:${UV_CACHE_DIR:-C/uv/cache}/*-v[0-9]*/*"], 30, Permanent)
@@ -382,6 +410,7 @@ fn from_builtin(x: &B) -> Profile {
         marker: x.marker.map(str::to_string),
         busy: x.busy.iter().map(|s| s.to_string()).collect(),
         guard: x.guard,
+        keep_newest: x.keep_newest,
         tool: x.tool.iter().map(|s| s.to_string()).collect(),
         roots: Vec::new(),
         depth: None,
@@ -422,6 +451,7 @@ pub fn all(cfg: &crate::config::Config, warn: &mut Vec<String>) -> Vec<Profile> 
             marker: cfg.str(&sec, "marker").map(str::to_string),
             busy: cfg.list(&sec, "busy").to_vec(),
             guard: cfg.bool(&sec, "guard").unwrap_or(false),
+            keep_newest: cfg.bool(&sec, "keep_newest").unwrap_or(false),
             tool: cfg.list(&sec, "tool").to_vec(),
             roots: cfg.list(&sec, "roots").to_vec(),
             depth: cfg.int(&sec, "depth").and_then(|d| usize::try_from(d).ok()),
@@ -780,7 +810,8 @@ mod tests {
                 "torch",
                 "vllm",
                 "triton",
-                "jax"
+                "jax",
+                "playwright"
             ]
         );
         assert!(select(&all, &["nope".into()]).is_err());
@@ -801,6 +832,10 @@ mod tests {
                     "models",
                 ] {
                     if bad == "projects/*/" && path.contains("/terminals/") {
+                        continue;
+                    }
+                    // Only partial downloads under a models directory.
+                    if bad == "models" && path.ends_with("-partial*") {
                         continue;
                     }
                     assert!(!path.contains(bad), "{} reaches {path}", p.name);

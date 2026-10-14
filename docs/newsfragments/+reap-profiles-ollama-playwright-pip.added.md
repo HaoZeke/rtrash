@@ -1,0 +1,2 @@
+reap: the `ollama` profile also takes partial model downloads (`blobs/sha256-*-partial*`), the new `playwright` profile (in the `ai` group) takes every Playwright browser build but the newest of each browser, and the new `pip-build` profile (in the `pkg` group) takes the build dirs pip leaves in the temp dir.
+A config profile takes `keep_newest = true` to spare the highest version of each `NAME-VERSION` entry.

@@ -4906,6 +4906,8 @@ fn reap_cmd(sb: &Sandbox, args: &[&str]) -> Output {
         .env_remove("MAMBA_ROOT_PREFIX")
         .env_remove("PRE_COMMIT_HOME")
         .env_remove("PREK_HOME")
+        .env_remove("OLLAMA_MODELS")
+        .env("PLAYWRIGHT_BROWSERS_PATH", sb.root.join("pw"))
         .output()
         .unwrap()
 }
@@ -4943,6 +4945,56 @@ fn reap_profiles_take_partial_downloads_and_tarballs_only() {
     assert!(j.contains(&json_path(&tarball)), "{j}");
     assert!(!j.contains(&json_path(&done)), "{j}");
     assert!(!j.contains("numpy-2.0-py312_0\""), "{j}");
+}
+
+/// The ollama profile takes a stale partial blob and leaves a finished
+/// one, playwright takes every browser build but the newest of each, and
+/// pip-build takes pip's scratch dirs in the temp dir.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_profiles_take_ollama_partials_old_browsers_and_pip_scratch() {
+    let sb = Sandbox::new("reap-ollama-pw-pip");
+    let blobs = sb.root.join(".ollama/models/blobs");
+    fs::create_dir_all(&blobs).unwrap();
+    let partial = stale_file(&blobs, "sha256-ab12-partial-3");
+    let done = stale_file(&blobs, "sha256-cd34");
+    let pw = sb.root.join("pw");
+    for d in [
+        "chromium-1140",
+        "chromium-1148",
+        "firefox-1466",
+        "ffmpeg-1010",
+    ] {
+        fs::create_dir_all(pw.join(d)).unwrap();
+        stale_file(&pw.join(d), "INSTALLATION_COMPLETE");
+    }
+    let tmp = sb.root.join("tmp");
+    fs::create_dir_all(tmp.join("pip-req-build-x1")).unwrap();
+    stale_file(&tmp.join("pip-req-build-x1"), "setup.py");
+    let out = reap_cmd(
+        &sb,
+        &[
+            "reap",
+            "-n",
+            "--json",
+            "--older-than=1h",
+            "-p",
+            "ollama",
+            "-p",
+            "playwright",
+            "-p",
+            "pip-build",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let j = stdout_of(&out);
+    assert!(j.contains(&json_path(&partial)), "{j}");
+    assert!(!j.contains(&json_path(&done)), "{j}");
+    assert!(j.contains(&json_path(&pw.join("chromium-1140"))), "{j}");
+    for kept in ["chromium-1148", "firefox-1466", "ffmpeg-1010"] {
+        assert!(!j.contains(&json_path(&pw.join(kept))), "{j}");
+    }
+    assert!(j.contains(&json_path(&tmp.join("pip-req-build-x1"))), "{j}");
 }
 
 /// A user tmpfiles.d file gives a directory its age and exclusions, with

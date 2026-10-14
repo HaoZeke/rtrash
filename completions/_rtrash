@@ -70,7 +70,7 @@ who_opts=(
 )
 
 reap_opts=(
-  '*'{-p,--profile=}'[also reap a profile]:profile:(ai claude cursor codex aider ollama compilers cargo-target cargo-registry sccache ccache go zig bazel gradle pkg pip uv npm pnpm yarn bun conda thumbnails)'
+  '*'{-p,--profile=}'[also reap a profile]:profile:(ai claude cursor codex aider ollama playwright compilers cargo-target cargo-registry sccache ccache go zig bazel gradle pkg pip pip-build uv npm pnpm yarn bun conda thumbnails)'
   '--list-profiles[list the profiles]'
   '--shared[show what a delete frees, counting shared extents once]'
   '--install-timer=-[write a user timer that runs this reap]:every:'

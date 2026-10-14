@@ -526,6 +526,36 @@ fn parse_tmpfiles(body: &str, user: bool) -> Vec<String> {
     out
 }
 
+/// `NAME-VERSION` split at the last `-`, with VERSION all digits.
+fn name_version(p: &Path) -> Option<(String, u64)> {
+    let name = p.file_name()?.to_str()?;
+    let (n, v) = name.rsplit_once('-')?;
+    Some((n.to_string(), v.parse().ok()?))
+}
+
+/// Drop the entries not named `NAME-VERSION` and the highest VERSION of
+/// each NAME, leaving the older versions to reap.
+fn spare_newest_versions(entries: &mut Vec<(PathBuf, u64)>) {
+    let mut top: Vec<(PathBuf, String, u64)> = Vec::new();
+    for (e, _) in entries.iter() {
+        let Some((n, v)) = name_version(e) else {
+            continue;
+        };
+        let dir = e.parent().map(Path::to_path_buf).unwrap_or_default();
+        match top.iter_mut().find(|(d, m, _)| *d == dir && *m == n) {
+            Some(t) => t.2 = t.2.max(v),
+            None => top.push((dir, n, v)),
+        }
+    }
+    entries.retain(|(e, _)| match name_version(e) {
+        None => false,
+        Some((n, v)) => {
+            let dir = e.parent().map(Path::to_path_buf).unwrap_or_default();
+            top.iter().any(|(d, m, t)| *d == dir && *m == n && v < *t)
+        }
+    });
+}
+
 /// Does an exclusion cover `path` or something inside it?
 fn excluded(path: &Path, pats: &[String]) -> Option<String> {
     let text = str_from_os_ref(path.as_os_str());
@@ -1580,6 +1610,9 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                     }
                 }
             }
+            if p.keep_newest {
+                spare_newest_versions(&mut entries);
+            }
             let tool = (!p.tool.is_empty()).then(|| reap_profiles::tool_command(&p, age));
             groups.push(Group {
                 name: p.name.clone(),
@@ -2204,6 +2237,28 @@ mod tests {
         );
         assert_eq!(tmpfiles_age_for(Path::new("/srv/cache-pip/x"), &got), None);
         assert_eq!(tmpfiles_age_for(Path::new("/nope"), &got), None);
+    }
+
+    #[test]
+    fn only_older_versions_of_each_name_stay_to_reap() {
+        let mut e: Vec<(PathBuf, u64)> = [
+            "/c/chromium-1140",
+            "/c/chromium-1148",
+            "/c/chromium_headless_shell-1140",
+            "/c/firefox-1466",
+            "/c/firefox-990",
+            "/c/notes",
+            "/c/ffmpeg-beta",
+        ]
+        .iter()
+        .map(|p| (PathBuf::from(p), 0))
+        .collect();
+        spare_newest_versions(&mut e);
+        let got: Vec<&Path> = e.iter().map(|(p, _)| p.as_path()).collect();
+        assert_eq!(
+            got,
+            [Path::new("/c/chromium-1140"), Path::new("/c/firefox-990")]
+        );
     }
 
     #[test]
