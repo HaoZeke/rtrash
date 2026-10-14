@@ -37,6 +37,8 @@ setup options:
       --prefix=DIR   install root (default: $HOME/.local, or $PREFIX if set)
       --bin-dir=DIR  override binary/link directory (default: PREFIX/bin)
       --with-rm      also link `rm` → rtrash (put into trash; optional)
+      --powershell-profile[=PATH]  also add a line that loads the PowerShell
+                     completer to PATH (default: the profile pwsh reports)
   -n, --dry-run      print actions without writing
   -f, --force        replace existing links/files
   -v, --verbose      print each path written
@@ -201,6 +203,7 @@ fn run_setup(args: &[String]) -> i32 {
         force: false,
         verbose: false,
     };
+    let mut profile: Option<Option<String>> = None;
 
     for arg in args {
         match arg.as_str() {
@@ -212,6 +215,10 @@ fn run_setup(args: &[String]) -> i32 {
             "-f" | "--force" => opts.force = true,
             "-v" | "--verbose" => opts.verbose = true,
             "--with-rm" => opts.with_rm = true,
+            "--powershell-profile" => profile = Some(None),
+            a if a.starts_with("--powershell-profile=") => {
+                profile = Some(Some(a["--powershell-profile=".len()..].to_string()));
+            }
             a if a.starts_with("--prefix=") => {
                 opts.prefix = PathBuf::from(&a["--prefix=".len()..]);
             }
@@ -489,7 +496,10 @@ fn run_setup(args: &[String]) -> i32 {
     }
     println!();
     println!("Re-run with --force after upgrades to refresh completions/man.");
-    0
+    match profile {
+        Some(path) => crate::shell_assets::setup_powershell_profile(path.as_deref(), opts.dry_run),
+        None => 0,
+    }
 }
 
 /// Prefer fish's user config completions dir for the default user prefix.

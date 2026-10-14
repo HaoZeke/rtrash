@@ -2275,6 +2275,18 @@ Also link
 .B rm
 → rtrash (put into trash).
 .TP
+.BR \-\-powershell\-profile [=\fIPATH\fR]
+Also add a block that loads the PowerShell completer to
+.I PATH
+(default: the profile that
+.BR pwsh ,
+else Windows PowerShell, reports as
+.BR $PROFILE.CurrentUserCurrentHost ).
+The block runs only when rtrash is on PATH, and a second run leaves the
+profile alone. On Windows this is all
+.B rtrash setup
+writes.
+.TP
 .BR \-n ", " \-\-dry\-run
 Print actions without writing.
 .TP

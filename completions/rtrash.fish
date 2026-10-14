@@ -183,6 +183,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l json -d
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -l prefix -d 'install root' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -l bin-dir -d 'binary/link directory' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -l with-rm -d 'also link rm to rtrash'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -l powershell-profile -d 'also load the PowerShell completer from a profile' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -s n -l dry-run -d 'print actions without writing'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -s f -l force -d 'replace existing links/files'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q setup' -s v -l verbose -d 'print each path written'

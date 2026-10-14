@@ -292,6 +292,7 @@ export extern "rtrash setup" [
     --prefix: string  # install root (default: $HOME/.local, or $PREFIX if set)
     --bin-dir: string  # override binary/link directory (default: PREFIX/bin)
     --with-rm  # also link `rm` → rtrash (put into trash; optional)
+    --powershell-profile?: path  # also add a line that loads the PowerShell completer to PATH
     --dry-run(-n)  # print actions without writing
     --force(-f)  # replace existing links/files
     --verbose(-v)  # print each path written

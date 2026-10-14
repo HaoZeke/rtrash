@@ -1,0 +1,1 @@
+`rtrash setup --powershell-profile[=PATH]` adds a block that loads the PowerShell completer to the profile `pwsh` reports, or to PATH; it is opt-in, runs once, and is the one thing setup writes on Windows.

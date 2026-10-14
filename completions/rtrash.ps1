@@ -19,7 +19,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
         'reap' = @('-p', '--profile=', '--list-profiles', '--roots=', '--depth=', '--tool', '--older-than=', '--age-by=', '-n', '--dry-run', '--permanent', '--trash', '--trash-dir=', '--home-only', '-v', '--verbose', '--shared', '--install-timer', '--remove-timer', '--timer-status', '--when-below=', '--purge-trash', '--until=', '--json', '--help', '--version')
         'finder' = @('--trash-dir=', '--all', '-f', '--force', '--conflict=', '-v', '--verbose', '--json', '--help')
         'config' = @('--path', '--default', '--help', '--version')
-        'setup' = @('--prefix=', '--bin-dir=', '--with-rm', '-n', '--dry-run', '-f', '--force', '-v', '--verbose', '--help')
+        'setup' = @('--prefix=', '--bin-dir=', '--with-rm', '--powershell-profile', '-n', '--dry-run', '-f', '--force', '-v', '--verbose', '--help')
         'keys' = @('--list', '-l', '--sample', '--path', '--help')
         'completions' = @()
         'man' = @()

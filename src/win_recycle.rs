@@ -1528,6 +1528,8 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
     }
 
     pub fn setup_run(prog: &str, args: &[String]) -> i32 {
+        let mut profile: Option<Option<String>> = None;
+        let mut dry_run = false;
         for arg in args {
             match arg.as_str() {
                 "--help" => {
@@ -1537,10 +1539,19 @@ Usage: {prog} [OPTION]...
 Windows note: multi-call symlinks and man/completions install are Unix-oriented.
 On Windows, invoke `rtrash put|list|restore|empty|rm|status` directly.
 
-      --help  display this help and exit
+      --powershell-profile[=PATH]  add a line that loads the PowerShell
+                   completer to PATH (default: the profile pwsh, else
+                   Windows PowerShell, reports); nothing else is written
+  -n, --dry-run    say what --powershell-profile would do
+      --help       display this help and exit
 "
                     );
                     return 0;
+                }
+                "-n" | "--dry-run" => dry_run = true,
+                "--powershell-profile" => profile = Some(None),
+                a if a.starts_with("--powershell-profile=") => {
+                    profile = Some(Some(a["--powershell-profile=".len()..].to_string()));
                 }
                 "--version" => {
                     println!("{prog} (rtrash) {}", env!("CARGO_PKG_VERSION"));
@@ -1549,9 +1560,13 @@ On Windows, invoke `rtrash put|list|restore|empty|rm|status` directly.
                 _ => {}
             }
         }
+        if let Some(path) = profile {
+            return crate::shell_assets::setup_powershell_profile(path.as_deref(), dry_run);
+        }
         eprintln!(
             "{prog}: setup multi-call install is Unix-oriented; on Windows use subcommands directly"
         );
+        eprintln!("{prog}: for PowerShell completions, run `rtrash setup --powershell-profile`");
         eprintln!("{prog}: trash backend: {}", platform::trash_backend_label());
         0
     }

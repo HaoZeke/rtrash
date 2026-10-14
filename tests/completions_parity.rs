@@ -290,7 +290,7 @@ fn bash_completion_offers_the_right_words() {
     let keys = bash_complete(&["rtrash", "keys", "--"]);
     assert!(keys.contains(&"--sample".to_string()), "{keys:?}");
     assert!(!keys.contains(&"--recursive".to_string()), "{keys:?}");
-    let setup = bash_complete(&["rtrash", "setup", "--p"]);
+    let setup = bash_complete(&["rtrash", "setup", "--pr"]);
     assert_eq!(setup, ["--prefix="]);
     assert_eq!(bash_complete(&["rtrash", "restore", "--la"]), ["--latest"]);
     assert_eq!(bash_complete(&["trash-restore", "--js"]), ["--json"]);

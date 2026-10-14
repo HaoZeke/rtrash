@@ -82,7 +82,7 @@ _rtrash_keys_opts=(
 )
 
 _rtrash_setup_opts=(
-  --prefix= --bin-dir= --with-rm -n --dry-run -f --force -v --verbose --help
+  --prefix= --bin-dir= --with-rm --powershell-profile --powershell-profile= -n --dry-run -f --force -v --verbose --help
 )
 
 _rtrash_complete_from() {

@@ -3049,6 +3049,38 @@ fn copies_across_volumes_keep_macos_acls() {
     let _ = fs::remove_dir_all(&other);
 }
 
+/// `setup --powershell-profile=PATH` adds the completer block once and
+/// keeps what the profile had.
+#[test]
+fn setup_adds_the_powershell_completer_to_a_profile_once() {
+    let sb = Sandbox::new("ps-profile");
+    let profile = sb.root.join("ps").join("profile.ps1");
+    fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    fs::write(&profile, "Set-Alias ll Get-ChildItem\n").unwrap();
+    let prefix = format!("--prefix={}", sb.root.join("prefix").display());
+    let opt = format!("--powershell-profile={}", profile.display());
+    let out = sb.run(&["setup", &prefix, &opt]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("added the rtrash completer"),
+        "{}",
+        stdout_of(&out)
+    );
+    let out = sb.run(&["setup", &prefix, "-f", &opt]);
+    assert!(
+        stdout_of(&out).contains("loads the rtrash completer already"),
+        "{}",
+        stdout_of(&out)
+    );
+    let text = fs::read_to_string(&profile).unwrap();
+    assert!(text.starts_with("Set-Alias ll Get-ChildItem\n"), "{text}");
+    assert_eq!(
+        text.matches("rtrash completions powershell").count(),
+        1,
+        "{text}"
+    );
+}
+
 #[test]
 fn put_across_devices_keeps_the_target_from_filling() {
     let sb = Sandbox::new("put-space");

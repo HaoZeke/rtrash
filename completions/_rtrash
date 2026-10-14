@@ -336,6 +336,7 @@ _rtrash_dispatch() {
             '--prefix=[install root]:dir:_files -/' \
             '--bin-dir=[binary/link directory]:dir:_files -/' \
             '--with-rm[also link rm to rtrash]' \
+            '--powershell-profile=-[also load the PowerShell completer from a profile]::profile:_files' \
             '(-n --dry-run)'{-n,--dry-run}'[print actions without writing]' \
             '(-f --force)'{-f,--force}'[replace existing links/files]' \
             '(-v --verbose)'{-v,--verbose}'[print each path written]' \
