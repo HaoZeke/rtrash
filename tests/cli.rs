@@ -4907,6 +4907,7 @@ fn reap_cmd(sb: &Sandbox, args: &[&str]) -> Output {
         .env_remove("PRE_COMMIT_HOME")
         .env_remove("PREK_HOME")
         .env_remove("OLLAMA_MODELS")
+        .env_remove("PUPPETEER_CACHE_DIR")
         .env("PLAYWRIGHT_BROWSERS_PATH", sb.root.join("pw"))
         .output()
         .unwrap()
@@ -4995,6 +4996,33 @@ fn reap_profiles_take_ollama_partials_old_browsers_and_pip_scratch() {
         assert!(!j.contains(&json_path(&pw.join(kept))), "{j}");
     }
     assert!(j.contains(&json_path(&tmp.join("pip-req-build-x1"))), "{j}");
+}
+
+/// The puppeteer profile compares dotted versions and keeps the newest
+/// build of each browser.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_puppeteer_keeps_the_newest_dotted_version() {
+    let sb = Sandbox::new("reap-puppeteer");
+    let chrome = sb.root.join(".cache/puppeteer/chrome");
+    for d in ["linux-131.0.6778.85", "linux-131.0.6778.204"] {
+        fs::create_dir_all(chrome.join(d)).unwrap();
+        stale_file(&chrome.join(d), "chrome");
+    }
+    let out = reap_cmd(
+        &sb,
+        &["reap", "-n", "--json", "--older-than=1h", "-p", "puppeteer"],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let j = stdout_of(&out);
+    assert!(
+        j.contains(&json_path(&chrome.join("linux-131.0.6778.85"))),
+        "{j}"
+    );
+    assert!(
+        !j.contains(&json_path(&chrome.join("linux-131.0.6778.204"))),
+        "{j}"
+    );
 }
 
 /// A user tmpfiles.d file gives a directory its age and exclusions, with

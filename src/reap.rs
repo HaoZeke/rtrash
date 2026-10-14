@@ -526,24 +526,30 @@ fn parse_tmpfiles(body: &str, user: bool) -> Vec<String> {
     out
 }
 
-/// `NAME-VERSION` split at the last `-`, with VERSION all digits.
-fn name_version(p: &Path) -> Option<(String, u64)> {
+/// `NAME-VERSION` split at the last `-`, with VERSION digits in
+/// dot-separated parts (`1148`, `131.0.6778.85`), compared part by part.
+fn name_version(p: &Path) -> Option<(String, Vec<u64>)> {
     let name = p.file_name()?.to_str()?;
     let (n, v) = name.rsplit_once('-')?;
-    Some((n.to_string(), v.parse().ok()?))
+    let parts: Option<Vec<u64>> = v.split('.').map(|x| x.parse().ok()).collect();
+    Some((n.to_string(), parts?))
 }
 
 /// Drop the entries not named `NAME-VERSION` and the highest VERSION of
 /// each NAME, leaving the older versions to reap.
 fn spare_newest_versions(entries: &mut Vec<(PathBuf, u64)>) {
-    let mut top: Vec<(PathBuf, String, u64)> = Vec::new();
+    let mut top: Vec<(PathBuf, String, Vec<u64>)> = Vec::new();
     for (e, _) in entries.iter() {
         let Some((n, v)) = name_version(e) else {
             continue;
         };
         let dir = e.parent().map(Path::to_path_buf).unwrap_or_default();
         match top.iter_mut().find(|(d, m, _)| *d == dir && *m == n) {
-            Some(t) => t.2 = t.2.max(v),
+            Some(t) => {
+                if v > t.2 {
+                    t.2 = v;
+                }
+            }
             None => top.push((dir, n, v)),
         }
     }
@@ -2249,6 +2255,9 @@ mod tests {
             "/c/firefox-990",
             "/c/notes",
             "/c/ffmpeg-beta",
+            "/p/linux-131.0.6778.85",
+            "/p/linux-131.0.6778.204",
+            "/p/linux-99.1",
         ]
         .iter()
         .map(|p| (PathBuf::from(p), 0))
@@ -2257,7 +2266,12 @@ mod tests {
         let got: Vec<&Path> = e.iter().map(|(p, _)| p.as_path()).collect();
         assert_eq!(
             got,
-            [Path::new("/c/chromium-1140"), Path::new("/c/firefox-990")]
+            [
+                Path::new("/c/chromium-1140"),
+                Path::new("/c/firefox-990"),
+                Path::new("/p/linux-131.0.6778.85"),
+                Path::new("/p/linux-99.1")
+            ]
         );
     }
 

@@ -114,7 +114,7 @@ use Action::{Permanent, Trash};
 const BUILTIN: &[B] = &[
     group(
         "ai",
-        "AI coding tools and model caches: claude, cursor, codex, aider, ollama, huggingface, torch, vllm, triton, jax, playwright",
+        "AI coding tools and model caches: claude, cursor, codex, aider, ollama, huggingface, torch, vllm, triton, jax, playwright, puppeteer",
         &[
             "claude",
             "cursor",
@@ -127,6 +127,7 @@ const BUILTIN: &[B] = &[
             "triton",
             "jax",
             "playwright",
+            "puppeteer",
         ],
     ),
     B {
@@ -219,6 +220,16 @@ const BUILTIN: &[B] = &[
             "playwright",
             "Playwright browser builds older than the newest of each browser",
             &["${PLAYWRIGHT_BROWSERS_PATH:-C/ms-playwright}/*-[0-9]*"],
+            30,
+            Permanent,
+        )
+    },
+    B {
+        keep_newest: true,
+        ..b(
+            "puppeteer",
+            "Puppeteer browser builds older than the newest of each browser and platform",
+            &["${PUPPETEER_CACHE_DIR:-~/.cache/puppeteer}/*/*-[0-9]*"],
             30,
             Permanent,
         )
@@ -811,7 +822,8 @@ mod tests {
                 "vllm",
                 "triton",
                 "jax",
-                "playwright"
+                "playwright",
+                "puppeteer"
             ]
         );
         assert!(select(&all, &["nope".into()]).is_err());

@@ -301,7 +301,7 @@ complete -c trash-rm -l version
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q who' -l json -d 'print a JSON object'
 
 # reap
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -s p -l profile -x -a 'ai claude cursor codex aider ollama playwright compilers cargo-target cargo-registry sccache ccache go zig bazel gradle pkg pip pip-build uv npm pnpm yarn bun conda thumbnails' -d 'also reap a profile'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -s p -l profile -x -a 'ai claude cursor codex aider ollama playwright puppeteer compilers cargo-target cargo-registry sccache ccache go zig bazel gradle pkg pip pip-build uv npm pnpm yarn bun conda thumbnails' -d 'also reap a profile'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l list-profiles -d 'list the profiles'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l shared -d 'show what a delete frees, counting shared extents once'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l install-timer -d 'write a user timer that runs this reap'

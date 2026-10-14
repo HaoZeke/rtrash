@@ -1980,7 +1980,11 @@ checkpoint; 7 days, permanent),
 .B playwright
 (browser builds in \fI$PLAYWRIGHT_BROWSERS_PATH\fR, default
 \fIms\-playwright\fR in the cache root, except the newest build of each
-browser; 30 days, permanent).
+browser; 30 days, permanent),
+.B puppeteer
+(browser builds in \fI$PUPPETEER_CACHE_DIR\fR, default
+\fI~/.cache/puppeteer\fR, except the newest of each browser and platform;
+30 days, permanent).
 The first four are guarded: an entry that is or holds a file named like
 settings, history, a credential, a key or a database stays.
 .TP
@@ -2087,6 +2091,7 @@ reaches),
 .B keep_newest
 (true to reap only entries named
 .IR NAME\-VERSION ,
+VERSION being numbers joined by dots,
 sparing the highest
 .I VERSION
 of each
