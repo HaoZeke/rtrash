@@ -1741,14 +1741,21 @@ an
 .B x
 or
 .B X
-line in
-.IR /etc/tmpfiles.d ,
-.I /run/tmpfiles.d
-or
-.I /usr/lib/tmpfiles.d
-names it or a path inside it (specifiers such as
+line in a system
+.I tmpfiles.d
+directory
+.RI ( /etc ", " /run ", " /usr/local/lib " or " /usr/lib )
+or a user
+.I user\-tmpfiles.d
+directory (under
+.IR $XDG_CONFIG_HOME ", " $XDG_RUNTIME_DIR ", " $XDG_DATA_HOME ,
+.IR /etc/xdg ", " /usr/local/share " or " /usr/share )
+names it or a path inside it;
+.BR %h ", " %u ", " %U ", " %t ", " %T ", " %V ", " %C ", " %S " and " %L
+take their values (for the user in a user file, for the system in a system
+file) and other specifiers such as
 .B %b
-match anything);
+match anything;
 .IP \[u2022] 2
 its name starts with
 .IR .Trash ,
@@ -2034,9 +2041,12 @@ line
 .RB ( d ", " D ", " e ", " q ", " Q
 or
 .BR v )
-for that directory, read from
-.IR /etc ", " /run " and " /usr/lib/tmpfiles.d
-as systemd\-tmpfiles reads them, so
+for that directory, read from the user's
+.I user\-tmpfiles.d
+files first and then the system's
+.I tmpfiles.d
+files, as systemd\-tmpfiles reads them (a file masks one of the same name
+in a later directory, and specifiers are filled in as above), so
 .I /var/tmp
 usually waits 30 days; without such a line it is 10d.
 Directories with different ages are judged separately.

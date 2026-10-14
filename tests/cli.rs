@@ -4818,6 +4818,37 @@ fn reap_profiles_take_partial_downloads_and_tarballs_only() {
     assert!(!j.contains("numpy-2.0-py312_0\""), "{j}");
 }
 
+/// A user tmpfiles.d file gives a directory its age and exclusions, with
+/// %C read as the user's cache directory.
+#[cfg(target_os = "linux")]
+#[test]
+fn reap_reads_user_tmpfiles_with_specifiers() {
+    let sb = Sandbox::new("reap-user-tmpfiles");
+    let scratch = sb.root.join(".cache/scratch");
+    fs::create_dir_all(&scratch).unwrap();
+    let old = stale_file(&scratch, "old.bin");
+    let kept = stale_file(&scratch, "keep-me.bin");
+    let dir = scratch.to_string_lossy().into_owned();
+    let run = |sb: &Sandbox| {
+        let out = reap_cmd(sb, &["reap", "-n", "--json", "--age-by=m", &dir]);
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        let j = stdout_of(&out);
+        j.split(r#""skipped""#).next().unwrap().to_string()
+    };
+    // Without a tmpfiles.d line the default 10 days spare a day-old file.
+    assert!(!run(&sb).contains(&json_path(&old)));
+    let conf = sb.root.join(".config/user-tmpfiles.d");
+    fs::create_dir_all(&conf).unwrap();
+    fs::write(
+        conf.join("scratch.conf"),
+        "e %C/scratch - - - 12h\nx %C/scratch/keep-*\n",
+    )
+    .unwrap();
+    let reaped = run(&sb);
+    assert!(reaped.contains(&json_path(&old)), "{reaped}");
+    assert!(!reaped.contains(&json_path(&kept)), "{reaped}");
+}
+
 /// node-gyp takes old header downloads and leaves a fresh one.
 #[cfg(target_os = "linux")]
 #[test]

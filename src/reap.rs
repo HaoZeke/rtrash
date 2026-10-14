@@ -163,28 +163,130 @@ impl AgeBy {
     }
 }
 
+/// The tmpfiles.d files reap reads, each with whether it came from a
+/// user directory, in the order systemd-tmpfiles reads them. Within each
+/// set (the user's, then the system's) a file masks any same-named file
+/// in a later directory, and the files are taken in name order.
+fn tmpfiles_confs() -> Vec<(PathBuf, bool)> {
+    let env = |k: &str| {
+        std::env::var_os(k)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    };
+    let home = crate::util::home_dir();
+    let under_home = |rel: &str| home.as_ref().map(|h| h.join(rel));
+    let user_dirs: Vec<PathBuf> = [
+        env("XDG_CONFIG_HOME").or_else(|| under_home(".config")),
+        env("XDG_RUNTIME_DIR"),
+        env("XDG_DATA_HOME").or_else(|| under_home(".local/share")),
+        Some(PathBuf::from("/etc/xdg")),
+        Some(PathBuf::from("/usr/local/share")),
+        Some(PathBuf::from("/usr/share")),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|d| d.join("user-tmpfiles.d"))
+    .collect();
+    let system_dirs: Vec<PathBuf> = [
+        "/etc/tmpfiles.d",
+        "/run/tmpfiles.d",
+        "/usr/local/lib/tmpfiles.d",
+        "/usr/lib/tmpfiles.d",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    let mut out = Vec::new();
+    for (dirs, user) in [(user_dirs, true), (system_dirs, false)] {
+        let mut files: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();
+        for dir in dirs {
+            let Ok(rd) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for p in rd.flatten().map(|e| e.path()) {
+                let Some(name) = p.file_name().map(|n| n.to_os_string()) else {
+                    continue;
+                };
+                if p.extension().and_then(|x| x.to_str()) == Some("conf")
+                    && !files.iter().any(|(n, _)| *n == name)
+                {
+                    files.push((name, p));
+                }
+            }
+        }
+        files.sort();
+        // A conf file is small; a huge one is not a conf file.
+        out.extend(
+            files
+                .into_iter()
+                .map(|(_, p)| p)
+                .filter(|p| fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() <= 1 << 20))
+                .map(|p| (p, user)),
+        );
+    }
+    out
+}
+
+/// The value of tmpfiles.d specifier `c`, as the user's manager (`user`)
+/// or the system's would give it. `None` for one reap cannot know.
+fn specifier(c: char, user: bool) -> Option<String> {
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let home = || crate::util::home_dir().map(|h| h.to_string_lossy().into_owned());
+    let state = || env("XDG_STATE_HOME").or_else(|| home().map(|h| format!("{h}/.local/state")));
+    Some(match (c, user) {
+        ('%', _) => "%".into(),
+        ('h', true) => home()?,
+        ('h', false) => "/root".into(),
+        ('u', true) => env("USER").or_else(|| env("LOGNAME"))?,
+        ('u', false) => "root".into(),
+        #[cfg(unix)]
+        ('U', true) => unsafe { libc::getuid() }.to_string(),
+        ('U', false) => "0".into(),
+        ('t', true) => env("XDG_RUNTIME_DIR")?,
+        ('t', false) => "/run".into(),
+        ('T', true) => env("TMPDIR").unwrap_or_else(|| "/tmp".into()),
+        ('T', false) => "/tmp".into(),
+        ('V', true) => env("TMPDIR").unwrap_or_else(|| "/var/tmp".into()),
+        ('V', false) => "/var/tmp".into(),
+        ('C', true) => env("XDG_CACHE_HOME").or_else(|| home().map(|h| format!("{h}/.cache")))?,
+        ('C', false) => "/var/cache".into(),
+        ('S', true) => state()?,
+        ('S', false) => "/var/lib".into(),
+        ('L', true) => format!("{}/log", state()?),
+        ('L', false) => "/var/log".into(),
+        _ => return None,
+    })
+}
+
+/// `path` with its specifiers filled in; one reap cannot know becomes
+/// `unknown` (or the whole path `None` when `unknown` is `None`).
+fn expand_specifiers(path: &str, user: bool, unknown: Option<&str>) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = path.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            None => out.push('%'),
+            Some(k) => match specifier(k, user) {
+                Some(v) => out.push_str(&v),
+                None => out.push_str(unknown?),
+            },
+        }
+    }
+    Some(out)
+}
+
 /// tmpfiles.d paths to leave alone: the path field of every `x` and `X`
-/// line, with specifiers widened to `*`.
+/// line, user and system, with specifiers filled in where reap knows them
+/// and widened to `*` where it does not.
 pub fn tmpfiles_exclusions() -> Vec<String> {
     let mut out = Vec::new();
-    for dir in ["/etc/tmpfiles.d", "/run/tmpfiles.d", "/usr/lib/tmpfiles.d"] {
-        let Ok(rd) = fs::read_dir(dir) else {
-            continue;
-        };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) != Some("conf") {
-                continue;
-            }
-            // A conf file is small; a huge one is not a conf file.
-            if e.metadata()
-                .map_or(true, |m| !m.is_file() || m.len() > 1 << 20)
-            {
-                continue;
-            }
-            if let Ok(body) = fs::read_to_string(&p) {
-                out.extend(parse_tmpfiles(&body));
-            }
+    for (p, user) in tmpfiles_confs() {
+        if let Ok(body) = fs::read_to_string(&p) {
+            out.extend(parse_tmpfiles(&body, user));
         }
     }
     out.sort();
@@ -258,36 +360,14 @@ fn enough(sizes: &[(u64, u64)], need: (u64, u64)) -> usize {
 }
 
 /// The tmpfiles.d age of each path a `d`, `D`, `e`, `q`, `Q` or `v` line
-/// cleans, in seconds. Files in /etc override same-named ones in /run,
-/// which override /usr/lib, and the first line for a path wins, as
+/// cleans, in seconds, from the user's files and then the system's (see
+/// [`tmpfiles_confs`]); the first line for a path wins, as
 /// systemd-tmpfiles reads them.
 pub fn tmpfiles_ages() -> Vec<(PathBuf, i64)> {
-    let mut files: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();
-    for dir in ["/etc/tmpfiles.d", "/run/tmpfiles.d", "/usr/lib/tmpfiles.d"] {
-        let Ok(rd) = fs::read_dir(dir) else {
-            continue;
-        };
-        let mut here: Vec<_> = rd.flatten().map(|e| e.path()).collect();
-        here.sort();
-        for p in here {
-            let Some(name) = p.file_name().map(|n| n.to_os_string()) else {
-                continue;
-            };
-            if p.extension().and_then(|x| x.to_str()) == Some("conf")
-                && !files.iter().any(|(n, _)| *n == name)
-            {
-                files.push((name, p));
-            }
-        }
-    }
-    files.sort();
     let mut out: Vec<(PathBuf, i64)> = Vec::new();
-    for (_, p) in files {
-        if fs::metadata(&p).map_or(true, |m| !m.is_file() || m.len() > 1 << 20) {
-            continue;
-        }
+    for (p, user) in tmpfiles_confs() {
         if let Ok(body) = fs::read_to_string(&p) {
-            for (path, age) in parse_tmpfiles_ages(&body) {
+            for (path, age) in parse_tmpfiles_ages(&body, user) {
                 if !out.iter().any(|(x, _)| *x == path) {
                     out.push((path, age));
                 }
@@ -297,10 +377,11 @@ pub fn tmpfiles_ages() -> Vec<(PathBuf, i64)> {
     out
 }
 
-/// The `(path, age)` pairs of a tmpfiles.d body's cleaning lines. Paths
-/// with specifiers, and ages that are `-`, zero or unreadable, are left
-/// out.
-fn parse_tmpfiles_ages(body: &str) -> Vec<(PathBuf, i64)> {
+/// The `(path, age)` pairs of a tmpfiles.d body's cleaning lines, with
+/// specifiers filled in for a user file (`user`) or a system one. Paths
+/// with a specifier reap cannot know, and ages that are `-`, zero or
+/// unreadable, are left out.
+fn parse_tmpfiles_ages(body: &str, user: bool) -> Vec<(PathBuf, i64)> {
     let mut out = Vec::new();
     for line in body.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
@@ -308,14 +389,17 @@ fn parse_tmpfiles_ages(body: &str) -> Vec<(PathBuf, i64)> {
             continue;
         }
         let kind = f[0].trim_end_matches(['!', '-', '=', '~', '^', '+', '?']);
-        if !matches!(kind, "d" | "D" | "e" | "q" | "Q" | "v") || f[1].contains('%') {
+        if !matches!(kind, "d" | "D" | "e" | "q" | "Q" | "v") {
             continue;
         }
+        let Some(path) = expand_specifiers(f[1], user, None) else {
+            continue;
+        };
         // A leading ~ limits cleaning to the directory's own entries,
         // which is all reap looks at; a : keeps atime out (reap ignores).
         let age = f[5].trim_start_matches(['~', ':']);
         if let Some(secs) = parse_span(age).filter(|&s| s > 0) {
-            out.push((PathBuf::from(f[1]), secs));
+            out.push((PathBuf::from(path), secs));
         }
     }
     out
@@ -362,7 +446,7 @@ fn tmpfiles_age_for(root: &Path, ages: &[(PathBuf, i64)]) -> Option<i64> {
         .map(|(_, a)| *a)
 }
 
-fn parse_tmpfiles(body: &str) -> Vec<String> {
+fn parse_tmpfiles(body: &str, user: bool) -> Vec<String> {
     let mut out = Vec::new();
     for line in body.lines() {
         let mut f = line.split_whitespace();
@@ -376,20 +460,9 @@ fn parse_tmpfiles(body: &str) -> Vec<String> {
         if kind != "x" && kind != "X" {
             continue;
         }
-        let mut pat = String::new();
-        let mut chars = path.chars();
-        while let Some(c) = chars.next() {
-            if c == '%' {
-                match chars.next() {
-                    Some('%') => pat.push('%'),
-                    Some(_) => pat.push('*'),
-                    None => pat.push('%'),
-                }
-            } else {
-                pat.push(c);
-            }
+        if let Some(pat) = expand_specifiers(path, user, Some("*")) {
+            out.push(pat);
         }
-        out.push(pat);
     }
     out
 }
@@ -1954,13 +2027,14 @@ mod tests {
 
     #[test]
     fn tmpfiles_ages_read_cleaning_lines_and_systemd_spans() {
-        let body = "# c\nq /tmp 1777 root root 10d\nD /var/tmp 1777 root root 1w2d\nd /run/user/%U 0700 - - 1h\ne /srv/scratch - - - ~12h30min\nd /keep 0755 - - -\nd /zero 0755 - - 0\nx /tmp/x\nL /tmp/link - - - 3d\n";
-        let got = parse_tmpfiles_ages(body);
+        let body = "# c\nq /tmp 1777 root root 10d\nD /var/tmp 1777 root root 1w2d\nd /run/user/%b 0700 - - 1h\nd %V/sys 0700 - - 2h\ne /srv/scratch - - - ~12h30min\nd /keep 0755 - - -\nd /zero 0755 - - 0\nx /tmp/x\nL /tmp/link - - - 3d\n";
+        let got = parse_tmpfiles_ages(body, false);
         assert_eq!(
             got,
             vec![
                 (PathBuf::from("/tmp"), 10 * 86_400),
                 (PathBuf::from("/var/tmp"), 9 * 86_400),
+                (PathBuf::from("/var/tmp/sys"), 2 * 3600),
                 (PathBuf::from("/srv/scratch"), 12 * 3600 + 30 * 60),
             ]
         );
@@ -1978,7 +2052,7 @@ mod tests {
     fn tmpfiles_x_lines_become_patterns() {
         let body = "# c\nx /tmp/systemd-private-%b-*\nX! /var/tmp/keep\nd /tmp 1777 root root 10d\nq /var/tmp\n";
         assert_eq!(
-            parse_tmpfiles(body),
+            parse_tmpfiles(body, false),
             vec![
                 "/tmp/systemd-private-*-*".to_string(),
                 "/var/tmp/keep".to_string()

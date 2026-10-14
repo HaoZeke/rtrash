@@ -1,0 +1,1 @@
+`rtrash reap` reads user `user-tmpfiles.d` files as well as the system ones, fills in specifiers such as `%h`, `%C` and `%t` for ages and exclusions, honours `/usr/local/lib/tmpfiles.d`, and lets a file mask a same-named one in a later directory for exclusions too.
