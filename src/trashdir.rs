@@ -2209,11 +2209,14 @@ fn copy_sparse(from: &fs::File, to: &fs::File, len: u64) -> io::Result<()> {
 
 /// Extended attributes, best effort: a target file system without them,
 /// or a `security.*` name this user may not set, drops that attribute.
+/// On macOS the access control list comes along too.
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 fn copy_xattrs(src: &Path, dst: &Path) {
     let (Ok(s), Ok(d)) = (path_cstr(src), path_cstr(dst)) else {
         return;
     };
+    #[cfg(target_os = "macos")]
+    mac_acl::copy_path(&s, &d);
     let Some(names) = xattr_list(&s) else { return };
     for name in names.split(|&b| b == 0).filter(|n| !n.is_empty()) {
         let Ok(name) = std::ffi::CString::new(name) else {
@@ -2244,8 +2247,51 @@ fn copy_xattrs_fd(src: RawFd, dst: RawFd) {
     }
 }
 
+/// macOS keeps access control lists apart from extended attributes, so the
+/// attribute copy misses them; libSystem's `acl_*_np` calls copy them.
+#[cfg(target_os = "macos")]
+mod mac_acl {
+    use std::ffi::{c_char, c_int, c_void, CStr};
+    use std::os::fd::RawFd;
+
+    /// `ACL_TYPE_EXTENDED` from `<sys/acl.h>`, the only type macOS uses.
+    const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
+
+    extern "C" {
+        fn acl_get_fd_np(fd: c_int, ty: c_int) -> *mut c_void;
+        fn acl_set_fd_np(fd: c_int, acl: *mut c_void, ty: c_int) -> c_int;
+        fn acl_get_link_np(path: *const c_char, ty: c_int) -> *mut c_void;
+        fn acl_set_link_np(path: *const c_char, ty: c_int, acl: *mut c_void) -> c_int;
+        fn acl_free(obj: *mut c_void) -> c_int;
+    }
+
+    /// Best effort: a source without an ACL, or a target that refuses one,
+    /// leaves the target as it is.
+    pub fn copy_fd(src: RawFd, dst: RawFd) {
+        unsafe {
+            let acl = acl_get_fd_np(src, ACL_TYPE_EXTENDED);
+            if !acl.is_null() {
+                acl_set_fd_np(dst, acl, ACL_TYPE_EXTENDED);
+                acl_free(acl);
+            }
+        }
+    }
+
+    /// [`copy_fd`] by path, not following a final symlink.
+    pub fn copy_path(src: &CStr, dst: &CStr) {
+        unsafe {
+            let acl = acl_get_link_np(src.as_ptr(), ACL_TYPE_EXTENDED);
+            if !acl.is_null() {
+                acl_set_link_np(dst.as_ptr(), ACL_TYPE_EXTENDED, acl);
+                acl_free(acl);
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn copy_xattrs_fd(src: RawFd, dst: RawFd) {
+    mac_acl::copy_fd(src, dst);
     let Some(names) = xattr_buf(|b, n| unsafe { libc::flistxattr(src, b.cast(), n, 0) }) else {
         return;
     };

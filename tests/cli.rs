@@ -2949,6 +2949,75 @@ fn copies_across_devices_keep_posix_acls() {
     let _ = fs::remove_dir_all(&other);
 }
 
+/// macOS keeps access control lists outside the extended attributes. A put
+/// to a trash on another volume, and the restore back, keep the list of a
+/// file and of a directory. CI mounts a disk image and names it in
+/// `RTRASH_TEST_OTHER_VOLUME`; without one the test skips.
+#[cfg(target_os = "macos")]
+#[test]
+fn copies_across_volumes_keep_macos_acls() {
+    let Some(volume) = std::env::var_os("RTRASH_TEST_OTHER_VOLUME") else {
+        eprintln!("RTRASH_TEST_OTHER_VOLUME unset; skipping");
+        return;
+    };
+    let sb = Sandbox::new("mac-acl");
+    let other = Path::new(&volume).join(format!("rtrash-acl-{}", std::process::id()));
+    fs::create_dir_all(other.join("files")).unwrap();
+    fs::create_dir_all(other.join("info")).unwrap();
+    let file = sb.work().join("f.txt");
+    let dir = sb.work().join("d");
+    fs::write(&file, "x").unwrap();
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("inner"), "y").unwrap();
+    const ACE: &str = "user:nobody allow read";
+    for p in [&file, &dir, &dir.join("inner")] {
+        let ok = Command::new("chmod")
+            .args(["+a", ACE])
+            .arg(p)
+            .status()
+            .unwrap();
+        assert!(ok.success(), "chmod +a {}", p.display());
+    }
+    let acl = |p: &Path| -> String {
+        let out = Command::new("ls").arg("-led").arg(p).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let check = |base: &Path, when: &str| {
+        for p in [base.join("f.txt"), base.join("d"), base.join("d/inner")] {
+            let shown = acl(&p);
+            assert!(shown.contains("user:nobody allow read"), "{when}: {shown}");
+        }
+    };
+    check(&sb.work(), "before");
+    let pin = format!("--trash-dir={}", other.display());
+    let run = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .current_dir(sb.work())
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["put", "-r", "--no-space-check", &pin, "f.txt", "d"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!file.exists() && !dir.exists());
+    check(&other.join("files"), "trashed");
+    for p in [&file, &dir] {
+        let out = run(&[
+            "restore",
+            "--plain",
+            "--no-space-check",
+            &pin,
+            p.to_str().unwrap(),
+        ]);
+        assert!(out.status.success(), "{}", stderr_of(&out));
+    }
+    check(&sb.work(), "restored");
+    let _ = fs::remove_dir_all(&other);
+}
+
 #[test]
 fn put_across_devices_keeps_the_target_from_filling() {
     let sb = Sandbox::new("put-space");

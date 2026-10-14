@@ -170,6 +170,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # A second volume, so a put or restore copies across volumes and the
+      # access control list test has something to copy to.
+      - name: Mount a disk image as a second volume
+        run: |
+          hdiutil create -size 64m -fs APFS -volname rtrashacl -attach "$RUNNER_TEMP/rtrashacl.dmg"
+          echo "RTRASH_TEST_OTHER_VOLUME=/Volumes/rtrashacl" >> "$GITHUB_ENV"
+
       - name: Test
         run: cargo test --locked
 
