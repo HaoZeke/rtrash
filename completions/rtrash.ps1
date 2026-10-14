@@ -32,7 +32,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
         'empty' = @('-n', '--dry-run', '-v', '--verbose', '--older-than=', '--max-size=', '--prune=', '--until-free=', '--all', '--json', '--help', '--version')
         'restore' = @('-f', '--force', '--plain', '--newest-first', '--oldest-first', '--no-space-check', '--help', '--version')
         'status' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--help', '--version')
-        'rm' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '-n', '--dry-run', '-f', '--force', '-v', '--verbose', '--help')
+        'rm' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--batch=', '-n', '--dry-run', '-f', '--force', '-v', '--verbose', '--help')
     }
     if ($IsWindows -or $env:OS -eq 'Windows_NT') {
         foreach ($k in @($winOpts.Keys)) { $opts[$k] = $winOpts[$k] }

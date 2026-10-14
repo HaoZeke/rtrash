@@ -1666,10 +1666,12 @@ registry), then the total and the free space on each (a warning under
         let mut force = false;
         let mut verbose = false;
         let mut patterns: Vec<String> = Vec::new();
+        let mut batch: Option<String> = None;
         let filters = parse_with_filters(prog, args, |arg| {
             match arg {
                 "-n" | "--dry-run" => dry_run = true,
                 "-f" | "--force" => force = true,
+                a if a.starts_with("--batch=") => batch = Some(a["--batch=".len()..].to_string()),
                 "-v" | "--verbose" => verbose = true,
                 "--home-only" => {}
                 "--help" => {
@@ -1683,6 +1685,8 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
       --newer-than=AGE  only match items deleted within the last AGE
       --larger-than=SIZE  only match items over SIZE (500M, 1.5G, 64k)
       --smaller-than=SIZE only match items under SIZE
+      --batch=last  only the items the latest put moved (Windows keeps
+                   that one run); with no PATTERN, all of them
   -n, --dry-run  list matches only
   -f, --force    allow mass patterns (e.g. '*')
   -v, --verbose  print each path
@@ -1708,11 +1712,24 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             Ok(f) => f,
             Err(code) => return code,
         };
+        if let Some(b) = &batch {
+            if b != "last" {
+                eprintln!(
+                    "{prog}: the Recycle Bin keeps only the latest put run; use --batch=last"
+                );
+                return 2;
+            }
+        }
+        // The latest put is a scope of its own: with no PATTERN, take all.
+        let scoped = batch.is_some() && patterns.is_empty();
+        if scoped {
+            patterns.push("*".into());
+        }
         if patterns.is_empty() {
             eprintln!("{prog}: missing PATTERN");
             return 2;
         }
-        if patterns.iter().any(|p| p == "*") && !force {
+        if patterns.iter().any(|p| p == "*") && !force && !scoped {
             eprintln!("{prog}: refusing pattern '*' without --force");
             return 2;
         }
@@ -1722,6 +1739,28 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                 eprintln!("{prog}: cannot list Recycle Bin: {}", err_msg(e));
                 return 1;
             }
+        };
+        let items = if batch.is_some() {
+            let Some((since, last)) = last_put_path()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|t| crate::budget::parse_last_put(&t))
+            else {
+                eprintln!("{prog}: no put run recorded");
+                return 1;
+            };
+            let rows: Vec<(PathBuf, i64)> = items
+                .iter()
+                .map(|it| (original_of(it), it.time_deleted))
+                .collect();
+            let keep = crate::budget::from_last_put(&rows, &last, since);
+            let picked: Vec<TrashItem> = keep.into_iter().map(|i| items[i].clone()).collect();
+            if picked.is_empty() {
+                eprintln!("{prog}: nothing from the latest put is left in the Recycle Bin");
+                return 1;
+            }
+            picked
+        } else {
+            items
         };
         let matched: Vec<TrashItem> = items
             .into_iter()

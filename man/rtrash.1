@@ -2861,6 +2861,9 @@ With no
 .IR PATTERN ,
 remove the whole run; this is the scoped way to permanently delete
 exactly what one put moved.
+On Windows only
+.B \-\-batch=last
+works: the Recycle Bin keeps no run ids, and rtrash records the latest put.
 .TP
 .BR \-n ", " \-\-dry\-run
 List matches and reclaimable size; do not delete.

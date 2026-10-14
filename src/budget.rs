@@ -169,10 +169,15 @@ pub fn guard_ok(prog: &str, total: usize, foreign: usize) -> bool {
 /// How many of `items` (original path, deletion time) the last put did
 /// not move: that put moved `last`, starting at epoch `since`.
 pub fn not_from_last_put(items: &[(PathBuf, i64)], last: &[PathBuf], since: i64) -> usize {
-    items
-        .iter()
-        .filter(|(p, t)| *t < since || !last.iter().any(|l| l == p))
-        .count()
+    items.len() - from_last_put(items, last, since).len()
+}
+
+/// The indices of `items` (original path, deletion time) that the last
+/// put moved: that put moved `last`, starting at epoch `since`.
+pub fn from_last_put(items: &[(PathBuf, i64)], last: &[PathBuf], since: i64) -> Vec<usize> {
+    (0..items.len())
+        .filter(|&i| items[i].1 >= since && last.iter().any(|l| *l == items[i].0))
+        .collect()
 }
 
 /// The last-put record: its start epoch on the first line, then one
@@ -215,6 +220,7 @@ mod tests {
         ];
         assert_eq!(not_from_last_put(&items, &last, since), 2);
         assert_eq!(not_from_last_put(&items[..2], &last, since), 0);
+        assert_eq!(from_last_put(&items, &last, since), vec![0, 1]);
         assert_eq!(parse_last_put("garbled"), None);
     }
 
