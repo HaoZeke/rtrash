@@ -106,13 +106,20 @@ for p in "${putters[@]}"; do
       fail=1
       continue
     fi
-    if out=$(restore "$r" "$f" 2>&1) && [[ $(cat "$f" 2>/dev/null) == "$p $r" ]]; then
+    before=$(ls -b "$trash/info" 2>&1 || true)
+    uri_before=$( [[ $r == gio ]] && gio_uri "$f" 2>&1 || true)
+    if out=$(restore "$r" "$f" 2>&1; echo "exit $?") && [[ $(cat "$f" 2>/dev/null) == "$p $r" ]]; then
       echo "ok   $p -> $r"
     else
       echo "FAIL $p -> $r"
       printf '%s\n' "$out" | sed 's/^/  | /'
+      echo "  trash before the restore:"
+      printf '%s\n' "$before" | sed 's/^/  | /'
+      echo "  work folder after (ls -b):"
+      ls -b "$scratch/w" 2>&1 | sed 's/^/  | /' || true
       if [[ $r == gio ]]; then
-        echo "  uri: $(gio_uri "$f" 2>&1 || true)"
+        echo "  uri before: $uri_before"
+        echo "  uri now: $(gio_uri "$f" 2>&1 || true)"
         echo "  gio trash --list:"
         gio trash --list 2>&1 | sed 's/^/  | /' || true
         echo "  $trash/info:"
