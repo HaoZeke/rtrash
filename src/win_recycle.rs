@@ -457,6 +457,38 @@ pub fn pick_oldest(items: &[(i64, u64, u64)], need: (u64, u64)) -> Vec<usize> {
         .collect()
 }
 
+/// Indices of `items` (deletion time, bytes) to purge, in order, so the
+/// rest totals at most `max` bytes: oldest first, or largest first when
+/// `largest` is set (ties go to the older item).
+pub fn pick_budget(items: &[(i64, u64)], max: u64, largest: bool) -> Vec<usize> {
+    let mut total: u64 = items.iter().map(|i| i.1).sum();
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    if largest {
+        order.sort_by(|&a, &b| {
+            items[b]
+                .1
+                .cmp(&items[a].1)
+                .then(items[a].0.cmp(&items[b].0))
+        });
+    } else {
+        order.sort_by(|&a, &b| {
+            items[a]
+                .0
+                .cmp(&items[b].0)
+                .then(items[b].1.cmp(&items[a].1))
+        });
+    }
+    let mut out = Vec::new();
+    for i in order {
+        if total <= max {
+            break;
+        }
+        total -= items[i].1;
+        out.push(i);
+    }
+    out
+}
+
 /// What a Recycle Bin item takes, from its `$R` payload path: the size
 /// its `$I` record holds (Windows writes a folder's total there), else
 /// the bytes of the files under the payload.
@@ -972,6 +1004,8 @@ on Windows (there is no FreeDesktop layout here).
         let mut verbose = false;
         let mut json = false;
         let mut until: Option<(String, crate::reap::Floor)> = None;
+        let mut max_size: Option<u64> = None;
+        let mut largest = false;
         let mut age = AgeFilter::default();
         let mut i = 0usize;
         while i < args.len() {
@@ -998,6 +1032,21 @@ on Windows (there is no FreeDesktop layout here).
                 "-v" | "--verbose" => verbose = true,
                 "-f" | "--force" | "--plain" | "--home-only" => {}
                 "--json" => json = true,
+                a if a.starts_with("--max-size=") => {
+                    match crate::filters::parse_size(&a["--max-size=".len()..]) {
+                        Some(n) => max_size = Some(n),
+                        None => {
+                            eprintln!("{prog}: invalid SIZE in '{a}'");
+                            return 2;
+                        }
+                    }
+                }
+                "--prune=oldest" => largest = false,
+                "--prune=largest" => largest = true,
+                a if a.starts_with("--prune=") => {
+                    eprintln!("{prog}: --prune takes oldest or largest");
+                    return 2;
+                }
                 a if a.starts_with("--until-free=") => {
                     let v = &a["--until-free=".len()..];
                     match crate::reap::Floor::parse(v) {
@@ -1023,6 +1072,11 @@ With DAYS, only items deleted more than DAYS days ago, as on Linux.
                    10% or a size such as 20G), remove the oldest items of
                    its Recycle Bin until it is back at SPEC; exits 1 when
                    one stays short
+      --max-size=SIZE  remove items until the Recycle Bins together fit
+                   in SIZE, such as 500M or 10G; with DAYS, the age cut
+                   runs first
+      --prune=oldest|largest  which items --max-size removes first
+                   (default oldest)
       --json     with --until-free, print a JSON summary
       --help     display this help and exit
       --version  output version information and exit
@@ -1051,8 +1105,8 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             }
         }
         if let Some((spec, floor)) = until {
-            if age.older_than.is_some() {
-                eprintln!("{prog}: --until-free takes no DAYS");
+            if age.older_than.is_some() || max_size.is_some() {
+                eprintln!("{prog}: --until-free takes no DAYS or --max-size");
                 return 2;
             }
             let roots: Vec<PathBuf> = bin_items().into_iter().map(|(b, _)| b).collect();
@@ -1062,16 +1116,28 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             eprintln!("{prog}: --json goes with --until-free on Windows");
             return 2;
         }
-        let items = match os_limited::list() {
-            Ok(i) => i
-                .into_iter()
-                .filter(|it| age.keeps(Some(it.time_deleted)))
-                .collect::<Vec<_>>(),
+        let all = match os_limited::list() {
+            Ok(i) => i,
             Err(e) => {
                 eprintln!("{prog}: cannot list Recycle Bin: {}", err_msg(e));
                 return 1;
             }
         };
+        // DAYS alone, or nothing, takes by age (everything without DAYS);
+        // a budget then takes the oldest or largest of the rest.
+        let age_pass = age.older_than.is_some() || max_size.is_none();
+        let (mut items, rest): (Vec<TrashItem>, Vec<TrashItem>) = all
+            .into_iter()
+            .partition(|it| age_pass && age.keeps(Some(it.time_deleted)));
+        if let Some(max) = max_size {
+            let sized: Vec<(i64, u64)> = rest
+                .iter()
+                .map(|it| (it.time_deleted, recycled_size(Path::new(&it.id))))
+                .collect();
+            for i in pick_budget(&sized, max, largest) {
+                items.push(rest[i].clone());
+            }
+        }
         if dry_run {
             for it in &items {
                 println!("would remove {}", crate::util::term_path(&original_of(it)));
@@ -1898,6 +1964,15 @@ mod tests {
             history_name(r"C:\rtrash-mnt\", serial_key(0x1234_abcd)),
             "vol-1234abcd.txt"
         );
+    }
+
+    #[test]
+    fn pick_budget_trims_to_the_size_oldest_or_largest_first() {
+        let items = [(30, 5), (10, 4), (20, 100), (40, 1)];
+        assert_eq!(pick_budget(&items, 200, false), Vec::<usize>::new());
+        assert_eq!(pick_budget(&items, 10, false), vec![1, 2]);
+        assert_eq!(pick_budget(&items, 10, true), vec![2]);
+        assert_eq!(pick_budget(&items, 0, true), vec![2, 0, 1, 3]);
     }
 
     #[test]

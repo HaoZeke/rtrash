@@ -478,3 +478,50 @@ fn empty_until_free_dry_run_reports_each_short_drive() {
     );
     let _ = fs::remove_dir_all(&base);
 }
+
+/// `empty --max-size` on Windows: a budget larger than any bin takes
+/// nothing, and a zero budget lists the item just put (dry runs only).
+#[test]
+fn empty_max_size_dry_run_trims_the_recycle_bins() {
+    use std::fs;
+    let base = std::env::temp_dir().join(format!("rtrash-maxsize-{}", std::process::id()));
+    fs::create_dir_all(&base).unwrap();
+    let name = format!("rtrash-maxsize-{}.txt", std::process::id());
+    let p = base.join(&name);
+    fs::write(&p, "budget").unwrap();
+    let out = Command::new(bin()).arg("put").arg(&p).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dry = |args: &[&str]| {
+        let out = Command::new(bin())
+            .arg("empty")
+            .args(args)
+            .arg("-n")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let roomy = dry(&["--max-size=999999G"]);
+    assert!(roomy.contains("0 item(s)"), "{roomy}");
+    let tight = dry(&["--max-size=0", "--prune=largest"]);
+    assert!(tight.contains(&name), "{tight}");
+    let _ = Command::new(bin()).args(["rm", &name]).output();
+    assert_eq!(
+        Command::new(bin())
+            .args(["empty", "--prune=newest", "-n"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(2)
+    );
+    let _ = fs::remove_dir_all(&base);
+}
