@@ -139,6 +139,50 @@ pub fn index_file_for(payload: &Path) -> Option<PathBuf> {
     Some(payload.with_file_name(format!("$I{rest}")))
 }
 
+/// Move a Recycle Bin payload back to `dest`, its original path, and
+/// drop the `$I` record beside it. The shell's restore names the result
+/// after the display name, which loses a known extension, so rtrash moves
+/// the payload itself. Another volume gets a copy, then the payload goes.
+pub fn restore_payload(payload: &Path, dest: &Path) -> std::io::Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if std::fs::rename(payload, dest).is_err() {
+        // Most likely another volume: copy, then remove the payload.
+        copy_tree(payload, dest)?;
+        let meta = std::fs::symlink_metadata(payload)?;
+        if meta.is_dir() {
+            std::fs::remove_dir_all(payload)?;
+        } else {
+            std::fs::remove_file(payload)?;
+        }
+    }
+    if let Some(index) = index_file_for(payload) {
+        match std::fs::remove_file(&index) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Copy a file or directory tree; links copy as links where the system
+/// allows, else as their targets' content.
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.is_dir() {
+        std::fs::create_dir(dst)?;
+        for e in std::fs::read_dir(src)? {
+            let e = e?;
+            copy_tree(&e.path(), &dst.join(e.file_name()))?;
+        }
+        Ok(())
+    } else {
+        std::fs::copy(src, dst).map(|_| ())
+    }
+}
+
 /// The drive root (`C:\`) a Recycle Bin path such as
 /// `C:\$Recycle.Bin\S-1-5-21-…\$R1A2B3C.txt` lies on.
 pub fn drive_root_of(path: &Path) -> Option<PathBuf> {
@@ -1639,9 +1683,9 @@ Without PATH, print a numbered list and read an index from stdin.
                 super::remove_forcing(dest)
                     .map_err(|e| format!("cannot replace '{}': {e}", dest.display()))?;
             }
-            os_limited::restore_all(vec![self.item.clone()])
+            super::restore_payload(Path::new(&self.item.id), dest)
                 .map(|()| (dest.clone(), Vec::new()))
-                .map_err(|e| format!("restore failed: {}", err_msg(e)))
+                .map_err(|e| format!("restore failed: {e}"))
         }
     }
 
@@ -1669,13 +1713,15 @@ Without PATH, print a numbered list and read an index from stdin.
                 return 1;
             }
         }
-        match os_limited::restore_all(items) {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("{prog}: restore failed: {}", err_msg(e));
-                1
+        let mut status = 0;
+        for it in &items {
+            let dest = original_of(it);
+            if let Err(e) = super::restore_payload(Path::new(&it.id), &dest) {
+                eprintln!("{prog}: cannot restore '{}': {e}", dest.display());
+                status = 1;
             }
         }
+        status
     }
 
     pub fn status_run(prog: &str, args: &[String]) -> i32 {
@@ -2514,5 +2560,36 @@ mod tests {
     fn filetime_epoch_zero() {
         assert_eq!(filetime_to_unix_epoch(FILETIME_UNIX_EPOCH), 0);
         assert_eq!(filetime_to_unix_epoch(0), 0);
+    }
+
+    #[test]
+    fn restore_payload_keeps_the_extension_and_drops_the_index() {
+        let top = std::env::temp_dir().join(format!("rtrash-rp-ext-{}", std::process::id()));
+        let bin = top.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let payload = bin.join("$RAB12CD.txt");
+        let index = bin.join("$IAB12CD.txt");
+        std::fs::write(&payload, b"hello").unwrap();
+        std::fs::write(&index, b"meta").unwrap();
+        let dest = top.join("sub").join("notes.txt");
+        restore_payload(&payload, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+        assert!(!payload.exists());
+        assert!(!index.exists());
+        std::fs::remove_dir_all(&top).unwrap();
+    }
+
+    #[test]
+    fn restore_payload_moves_a_directory() {
+        let top = std::env::temp_dir().join(format!("rtrash-rp-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&top).unwrap();
+        let payload = top.join("$RAB12CD");
+        std::fs::create_dir(&payload).unwrap();
+        std::fs::write(payload.join("a.txt"), b"a").unwrap();
+        let dest = top.join("dir");
+        restore_payload(&payload, &dest).unwrap();
+        assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"a");
+        assert!(!payload.exists());
+        std::fs::remove_dir_all(&top).unwrap();
     }
 }

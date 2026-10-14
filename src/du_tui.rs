@@ -174,7 +174,7 @@ mod bin {
         else {
             return false;
         };
-        trash::os_limited::restore_all(vec![item]).is_ok()
+        crate::win_recycle::restore_payload(std::path::Path::new(&item.id), original).is_ok()
     }
 }
 

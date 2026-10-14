@@ -238,6 +238,25 @@ fn list_format_size_and_matchers_read_the_recycle_bin() {
 }
 
 #[test]
+fn restore_of_one_txt_keeps_its_extension() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let f = m.join(format!("keep-ext-{}.txt", std::process::id()));
+    put(&f);
+    assert!(!f.exists());
+    let out = Command::new(bin()).arg("restore").arg(&f).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(f.exists(), "restored without its extension");
+    assert!(!f.with_extension("").exists());
+    fs::remove_file(&f).unwrap();
+}
+
+#[test]
 fn restore_batch_last_brings_back_the_latest_put() {
     let Some(m) = mounted() else {
         return;
