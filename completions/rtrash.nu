@@ -1,6 +1,7 @@
 # nushell completions for rtrash and its multi-call names
-# Install: rtrash completions nu | save -f ($nu.default-config-dir | path join rtrash-completions.nu)
-# then add `source rtrash-completions.nu` to config.nu.
+# Preferred install: rtrash setup (into PREFIX/share/nushell/vendor/autoload)
+# Or: rtrash completions nu | save -f ($nu.default-config-dir | path join rtrash-completions.nu)
+# and add `source rtrash-completions.nu` to config.nu.
 
 def "nu-complete rtrash commands" [] {
     [

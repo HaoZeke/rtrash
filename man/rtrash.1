@@ -2243,7 +2243,7 @@ Output version information and exit.
 .B rtrash setup
 [\fIOPTION\fR]...
 .PP
-Install multi-call symlinks, bash/zsh completions, and this man page under a
+Install multi-call symlinks, bash, zsh, fish and nushell completions, and this man page under a
 user prefix (default
 .IR ~/.local ,
 or
@@ -2283,14 +2283,14 @@ Print each path written.
 Print the embedded completion script to stdout (packagers / custom paths).
 The nushell script declares each command as an
 .B extern
-with its options; save it, for example as
-.IR rtrash-completions.nu ,
-and
+with its options.
+.B rtrash setup
+installs it as
+.IR PREFIX/share/nushell/vendor/autoload/rtrash.nu ,
+which nushell sources at startup; elsewhere, save it and
 .B source
 it from
 .IR config.nu .
-.B rtrash setup
-does not install it.
 .SS man
 .B rtrash man
 .PP

@@ -31,7 +31,7 @@ Usage: rtrash setup [OPTION]...
        rtrash man
 
 After `cargo install`, run `rtrash setup` once to install multi-call
-symlinks, bash/zsh/fish completions, the man page, and an optional Midnight
+symlinks, bash/zsh/fish/nu completions, the man page, and an optional Midnight
 Commander menu sample under a user prefix (default: ~/.local). Assets are
 embedded (no source tree required).
 
@@ -46,8 +46,8 @@ setup options:
 
 completions:
   Print the embedded completion script for bash, zsh, fish or nu to stdout
-  (for package recipes or custom paths). setup does not install the nu
-  script: save it and `source` it from config.nu.
+  (for package recipes or custom paths). setup installs the nu script
+  into PREFIX/share/nushell/vendor/autoload, which nushell sources.
 
 man:
   Print the embedded man(1) page to stdout.
@@ -243,6 +243,10 @@ fn run_setup(args: &[String]) -> i32 {
     // ~/.config/fish/completions. Prefer that under HOME when prefix is the
     // default ~/.local; otherwise PREFIX/share/fish/vendor_completions.d.
     let fish_dir = fish_completions_dir(&opts.prefix);
+    // Nushell sources every file in its vendor autoload dirs at startup:
+    // $XDG_DATA_HOME/nushell/vendor/autoload and each
+    // XDG_DATA_DIRS/nushell/vendor/autoload, so PREFIX/share fits both.
+    let nu_dir = share.join("nushell/vendor/autoload");
     let man_dir = share.join("man/man1");
 
     let target = match resolve_self_exe() {
@@ -343,6 +347,15 @@ fn run_setup(args: &[String]) -> i32 {
         opts.verbose,
     ));
 
+    ok &= absorb(ensure_dir(&nu_dir, opts.dry_run, opts.verbose));
+    ok &= absorb(write_file(
+        &nu_dir.join("rtrash.nu"),
+        NU_COMPLETION,
+        opts.force,
+        opts.dry_run,
+        opts.verbose,
+    ));
+
     ok &= absorb(ensure_dir(&fish_dir, opts.dry_run, opts.verbose));
     ok &= absorb(write_file(
         &fish_dir.join("rtrash.fish"),
@@ -423,6 +436,7 @@ fn run_setup(args: &[String]) -> i32 {
         "  fish completion  → {}/rtrash.fish (+ multi-call *.fish links)",
         fish_dir.display()
     );
+    println!("  nu completion    → {}/rtrash.nu", nu_dir.display());
     println!("  man page         → {}/rtrash.1", man_dir.display());
     println!("  mc menu sample   → {}/mc.menu.sample", mc_dir.display());
     println!();
@@ -443,6 +457,9 @@ fn run_setup(args: &[String]) -> i32 {
     println!("  • fish: user completions are loaded from");
     println!("    ~/.config/fish/completions (default setup target) or");
     println!("    PREFIX/share/fish/vendor_completions.d when --prefix is not ~/.local.");
+    println!("  • nu: nushell sources its vendor autoload dirs at startup; see");
+    println!("    $nu.vendor-autoload-dirs (PREFIX/share must be in XDG_DATA_DIRS");
+    println!("    when --prefix is neither ~/.local nor /usr/local or /usr).");
     println!("  • man: if `man rtrash` misses the page, set:");
     println!(
         "      export MANPATH=\"{}:${{MANPATH:-}}\"",
@@ -594,6 +611,8 @@ mod tests {
         let fish_main = prefix.join("share/fish/vendor_completions.d/rtrash.fish");
         assert!(fish_main.is_file());
         assert!(prefix.join("share/man/man1/rtrash.1").is_file());
+        let nu = prefix.join("share/nushell/vendor/autoload/rtrash.nu");
+        assert_eq!(fs::read_to_string(nu).unwrap(), NU_COMPLETION);
         assert!(prefix.join("share/rtrash/mc.menu.sample").is_file());
         assert!(
             fs::read_to_string(prefix.join("share/rtrash/mc.menu.sample"))
