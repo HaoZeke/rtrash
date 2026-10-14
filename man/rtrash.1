@@ -1369,9 +1369,10 @@ Copy across devices even when the copy would leave the target file
 system with under 5% of its bytes or inodes free, or under
 .B RTRASH_MIN_FREE
 bytes.
-On Windows an item moves back within its drive, but one whose original
-path is on another drive than its Recycle Bin is copied, so the same
-byte rules apply to that drive before anything is restored.
+On Windows an item moves back within its volume, but one whose original
+path is on another volume than its Recycle Bin is copied, so the same
+byte rules apply to that volume before anything is restored; a volume
+mounted on a folder counts apart from the drive above it.
 .TP
 .B \-\-newest\-first
 List the most recently trashed item first (default in the interactive browser).

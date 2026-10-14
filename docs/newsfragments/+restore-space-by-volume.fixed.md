@@ -1,0 +1,1 @@
+On Windows, the free space check before a restore picks the volume of each path by its mount, so a restore onto a volume mounted on a folder checks that volume instead of the drive above it, and one that moves across such volumes is counted as the copy it is.

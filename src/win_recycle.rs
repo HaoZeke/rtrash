@@ -329,9 +329,19 @@ fn key_of(s: &str) -> u64 {
 /// (`id`) sits on another drive than their original path are copied, so
 /// their size counts against that drive. Items on the same drive move.
 pub fn cross_drive_needs(items: &[(PathBuf, PathBuf, u64)]) -> Vec<(PathBuf, u64)> {
+    cross_volume_needs(items, drive_root_of)
+}
+
+/// [`cross_drive_needs`] with the volume of each path from `root_of`: a
+/// volume mounted on a folder counts apart from the drive above it, so a
+/// restore onto it checks its own free space.
+pub fn cross_volume_needs(
+    items: &[(PathBuf, PathBuf, u64)],
+    root_of: impl Fn(&Path) -> Option<PathBuf>,
+) -> Vec<(PathBuf, u64)> {
     let mut out: std::collections::BTreeMap<PathBuf, u64> = std::collections::BTreeMap::new();
     for (bin, dest, size) in items {
-        let (Some(from), Some(to)) = (drive_root_of(bin), drive_root_of(dest)) else {
+        let (Some(from), Some(to)) = (root_of(bin), root_of(dest)) else {
             continue;
         };
         if from != to {
@@ -1268,7 +1278,7 @@ Without PATH, print a numbered list and read an index from stdin.
             .iter()
             .map(|it| (PathBuf::from(&it.id), original_of(it), item_size(it)))
             .collect();
-        for (dest, need) in super::cross_drive_needs(&pairs) {
+        for (dest, need) in super::cross_volume_needs(&pairs, super::bin_root_of) {
             if let Err(e) = crate::space::guard_bytes(need, &dest) {
                 eprintln!("{prog}: cannot restore: {e}");
                 return 1;
@@ -1956,6 +1966,35 @@ mod tests {
             (p("relative"), p("C:\\z"), 7),
         ];
         assert_eq!(cross_drive_needs(&items), [(p("C:\\"), 15)]);
+    }
+
+    #[test]
+    fn restores_onto_a_mounted_folder_count_against_that_volume() {
+        let p = PathBuf::from;
+        // C:\mnt\data is a volume of its own, as GetVolumePathNameW tells.
+        let root_of = |x: &Path| {
+            let s = x.to_string_lossy();
+            if s.starts_with(r"C:\mnt\data\") {
+                Some(p(r"C:\mnt\data\"))
+            } else {
+                drive_root_of(x)
+            }
+        };
+        let items = [
+            (p(r"C:\$Recycle.Bin\S-1\$R1"), p(r"C:\mnt\data\x"), 10),
+            (
+                p(r"C:\mnt\data\$Recycle.Bin\S-1\$R2"),
+                p(r"C:\mnt\data\y"),
+                99,
+            ),
+            (p(r"C:\mnt\data\$Recycle.Bin\S-1\$R3"), p(r"C:\z"), 5),
+        ];
+        assert_eq!(
+            cross_volume_needs(&items, root_of),
+            [(p(r"C:\"), 5), (p(r"C:\mnt\data\"), 10)]
+        );
+        // By drive letter alone, all three look like moves on C.
+        assert_eq!(cross_drive_needs(&items), []);
     }
 
     #[test]
