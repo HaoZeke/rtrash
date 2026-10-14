@@ -593,7 +593,10 @@ With
 each trash gains
 .IR history ,
 a list of
-.RI { epoch ", " event ", " bytes ", " items }.
+.RI { epoch ", " event ", " bytes ", " items ", " delta_bytes ", " delta_items },
+the deltas being the signed change from the line before
+.RB ( null
+on the first line).
 On Windows, the same commands append a line for each drive whose
 Recycle Bin changed to
 .IR %LOCALAPPDATA%\ertrash\ehistory\e X .txt

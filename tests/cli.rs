@@ -3774,8 +3774,21 @@ fn trash_stats_history_records_each_change_rtrash_makes() {
         ["put", "put", "put", "restore", "rm", "empty"],
         "{json}"
     );
-    assert!(json.contains(r#""bytes":0,"items":0}]"#), "{json}");
-    assert!(json.contains(r#""items":3}"#), "{json}");
+    assert!(
+        json.contains(r#""bytes":0,"items":0,"delta_bytes":-"#),
+        "{json}"
+    );
+    // The first line has no line before it; the empty drops one item.
+    assert!(
+        json.contains(r#""delta_bytes":null,"delta_items":null}"#),
+        "{json}"
+    );
+    assert!(
+        json.contains(r#""event":"empty","bytes":0,"items":0,"delta_bytes":-"#),
+        "{json}"
+    );
+    assert!(json.contains(r#","delta_items":-1}]"#), "{json}");
+    assert!(json.contains(r#""items":3,"delta_bytes":"#), "{json}");
     assert!(json.contains(r#""event":"rm","bytes":"#), "{json}");
     // Text lists the same lines; without --history there are none.
     let text = stdout_of(&sb.run(&["trash-stats", "--home-only", "--history"]));

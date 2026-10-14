@@ -28,7 +28,8 @@ directories under files/ and info/), orphans (payloads without a
                         from the line before and a trend bar
       --since=AGE       with --history, only the lines from the last AGE
                         (90m, 12h, 7d, 2w; a bare number is days)
-      --json            print a JSON object ({trashes, total})
+      --json            print a JSON object ({trashes, total}); history
+                        lines carry delta_bytes and delta_items
       --help            display this help and exit
       --version         output version information and exit
 ";
@@ -171,6 +172,16 @@ fn item_json(i: &Item) -> String {
 }
 
 /// The JSON object for a set of summaries.
+/// The change in bytes and items from the line before, as JSON numbers
+/// (negative for a drop), or `null` for the first line.
+fn deltas(prev: Option<(u64, u64)>, now: (u64, u64)) -> (String, String) {
+    let d = |a: u64, b: u64| (i128::from(b) - i128::from(a)).to_string();
+    match prev {
+        Some((pb, pn)) => (d(pb, now.0), d(pn, now.1)),
+        None => ("null".into(), "null".into()),
+    }
+}
+
 pub fn to_json(all: &[Stats], with_history: bool) -> String {
     let opt = |i: &Option<Item>| i.as_ref().map_or("null".to_string(), item_json);
     let trashes: Vec<String> = all
@@ -178,12 +189,15 @@ pub fn to_json(all: &[Stats], with_history: bool) -> String {
         .map(|s| {
             let top: Vec<String> = s.top.iter().map(item_json).collect();
             let history = if with_history {
+                let mut prev: Option<(u64, u64)> = None;
                 let points: Vec<String> = s
                     .history
                     .iter()
                     .map(|(t, e, b, n)| {
+                        let (db, dn) = deltas(prev, (*b, *n));
+                        prev = Some((*b, *n));
                         format!(
-                            r#"{{"epoch":{t},"event":"{}","bytes":{b},"items":{n}}}"#,
+                            r#"{{"epoch":{t},"event":"{}","bytes":{b},"items":{n},"delta_bytes":{db},"delta_items":{dn}}}"#,
                             json_escape(e)
                         )
                     })
@@ -425,6 +439,18 @@ mod tests {
         assert_eq!(change(Some(5), 5), "");
         assert_eq!(change(Some(5), 8), format!(" (+{})", format_bytes(3)));
         assert_eq!(change(Some(8), 0), format!(" (-{})", format_bytes(8)));
+    }
+
+    #[test]
+    fn deltas_are_signed_and_null_for_the_first_line() {
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(deltas(None, (5, 1)), s("null", "null"));
+        assert_eq!(deltas(Some((5, 1)), (8, 2)), s("3", "1"));
+        assert_eq!(deltas(Some((8, 2)), (0, 0)), s("-8", "-2"));
+        assert_eq!(
+            deltas(Some((u64::MAX, 0)), (0, 0)).0,
+            format!("-{}", u64::MAX)
+        );
     }
 
     #[test]
