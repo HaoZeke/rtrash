@@ -1,0 +1,1 @@
+On Windows, `rtrash reap --install-timer` writes a Task Scheduler XML file and passes it with `schtasks /XML` when the command is longer than the 261 characters `/TR` takes, so many `-p` options no longer make the install fail.

@@ -103,6 +103,61 @@ pub fn schtasks_args(exe: &Path, args: &[String], every: i64) -> Vec<String> {
     .collect()
 }
 
+/// The longest command `schtasks /TR` takes; a longer one goes in a task
+/// XML file instead.
+pub const TR_MAX: usize = 261;
+
+/// The Task Scheduler XML for a task running `exe reap ARGS` every
+/// `every` seconds as this user, for commands too long for `/TR`: a
+/// repetition by the minute under a day, else a daily trigger.
+pub fn task_xml(exe: &Path, args: &[String], every: i64) -> String {
+    let mut words = vec!["reap".to_string()];
+    words.extend(args.iter().map(|a| task_word(a)));
+    let trigger = if every < 86_400 {
+        let n = ((every + 59) / 60).clamp(1, 1439);
+        format!(
+            "    <TimeTrigger>\n      <StartBoundary>2000-01-01T00:00:00</StartBoundary>\n\
+             \x20     <Repetition><Interval>PT{n}M</Interval></Repetition>\n\
+             \x20     <Enabled>true</Enabled>\n    </TimeTrigger>\n"
+        )
+    } else {
+        let n = ((every + 86_399) / 86_400).clamp(1, 365);
+        format!(
+            "    <CalendarTrigger>\n      <StartBoundary>2000-01-01T00:00:00</StartBoundary>\n\
+             \x20     <ScheduleByDay><DaysInterval>{n}</DaysInterval></ScheduleByDay>\n\
+             \x20     <Enabled>true</Enabled>\n    </CalendarTrigger>\n"
+        )
+    };
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
+         <Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n\
+         \x20 <RegistrationInfo><Description>rtrash reap: clear stale temp files and caches</Description></RegistrationInfo>\n\
+         \x20 <Triggers>\n{trigger}  </Triggers>\n\
+         \x20 <Principals><Principal id=\"Author\"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n\
+         \x20 <Settings>\n\
+         \x20   <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n\
+         \x20   <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n\
+         \x20   <StartWhenAvailable>true</StartWhenAvailable>\n\
+         \x20   <Priority>7</Priority>\n\
+         \x20 </Settings>\n\
+         \x20 <Actions Context=\"Author\">\n\
+         \x20   <Exec>\n      <Command>{}</Command>\n      <Arguments>{}</Arguments>\n    </Exec>\n\
+         \x20 </Actions>\n</Task>\n",
+        xml(&exe.to_string_lossy()),
+        xml(&words.join(" "))
+    )
+}
+
+/// Where a task XML file goes: `%LOCALAPPDATA%\\rtrash\\rtrash-reap.xml`.
+fn task_xml_path() -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        PathBuf::from(base)
+            .join("rtrash")
+            .join(format!("{NAME}.xml")),
+    )
+}
+
 /// Files to write and the command that turns the job on.
 fn plan(
     exe: &Path,
@@ -145,7 +200,7 @@ fn removal() -> Result<Removal, String> {
     let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     if cfg!(windows) {
         return Ok((
-            Vec::new(),
+            task_xml_path().into_iter().collect(),
             vec![words(&["schtasks", "/Delete", "/F", "/TN", NAME])],
             Vec::new(),
         ));
@@ -395,7 +450,36 @@ pub fn status(prog: &str, json: bool) -> i32 {
 
 /// Create the Windows task, or with `dry_run` print the command.
 fn install_task(prog: &str, exe: &Path, args: &[String], every: i64, dry_run: bool) -> i32 {
-    let words = schtasks_args(exe, args, every);
+    let mut words = schtasks_args(exe, args, every);
+    if words.last().is_some_and(|tr| tr.len() > TR_MAX) {
+        let Some(path) = task_xml_path() else {
+            eprintln!(
+                "{prog}: the command is too long for schtasks /TR and LOCALAPPDATA is not set"
+            );
+            return 1;
+        };
+        let body = task_xml(exe, args, every);
+        words = ["/Create", "/F", "/TN", NAME, "/XML"]
+            .iter()
+            .map(|s| s.to_string())
+            .chain([path.to_string_lossy().into_owned()])
+            .collect();
+        if dry_run {
+            println!("would write {}:\n{body}", path.display());
+        } else {
+            // Task Scheduler reads the encoding the XML header names.
+            let mut bytes = vec![0xFF, 0xFE];
+            bytes.extend(body.encode_utf16().flat_map(u16::to_le_bytes));
+            let written = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|_| std::fs::write(&path, bytes));
+            if let Err(e) = written {
+                eprintln!("{prog}: cannot write {}: {e}", path.display());
+                return 1;
+            }
+        }
+    }
     if dry_run {
         let shown: Vec<String> = words.iter().map(|w| task_word(w)).collect();
         println!("schtasks {}", shown.join(" "));
@@ -501,6 +585,32 @@ mod tests {
         let w = schtasks_args(Path::new("rtrash"), &[], 2 * 86_400 + 1);
         let at = |k: &str| w[w.iter().position(|x| x == k).unwrap() + 1].clone();
         assert_eq!((at("/SC"), at("/MO")), ("DAILY".into(), "3".into()));
+    }
+
+    #[test]
+    fn task_xml_holds_a_long_command_and_its_schedule() {
+        let long = "x".repeat(TR_MAX);
+        let args = vec!["-p".to_string(), long.clone(), "a<&b".to_string()];
+        let exe = Path::new(r"C:\Program Files\rtrash.exe");
+        assert!(schtasks_args(exe, &args, 900).last().unwrap().len() > TR_MAX);
+        let x = task_xml(exe, &args, 900);
+        assert!(
+            x.contains(r"<Command>C:\Program Files\rtrash.exe</Command>"),
+            "{x}"
+        );
+        assert!(
+            x.contains(&format!(
+                "<Arguments>reap -p {long} a&lt;&amp;b</Arguments>"
+            )),
+            "{x}"
+        );
+        assert!(
+            x.contains("<Interval>PT15M</Interval>") && !x.contains("Calendar"),
+            "{x}"
+        );
+        let x = task_xml(exe, &[], 2 * 86_400 + 1);
+        assert!(x.contains("<DaysInterval>3</DaysInterval>"), "{x}");
+        assert!(x.contains("<Arguments>reap</Arguments>"), "{x}");
     }
 
     #[test]

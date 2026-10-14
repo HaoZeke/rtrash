@@ -1899,6 +1899,12 @@ to make a Task Scheduler task for this user, every
 .I EVERY
 rounded up to whole minutes (whole days from 1d on); remove it with
 .BR "schtasks /Delete /TN rtrash\-reap" .
+A command longer than the 261 characters
+.B /TR
+takes goes in a task XML file,
+.IR %LOCALAPPDATA%\\rtrash\\rtrash\-reap.xml ,
+passed with
+.BR /XML .
 None of them needs root or an administrator, and on Linux and macOS
 the job runs at low priority.
 With
