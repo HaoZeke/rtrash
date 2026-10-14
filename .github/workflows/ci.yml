@@ -1,5 +1,6 @@
 # Quality bar: fmt, clippy (-D warnings), nextest (locked), supply-chain (cargo-deny),
-# shell completion syntax, and tests plus a du smoke test on Windows and macOS.
+# shell completion syntax, shared extent tests on btrfs and XFS loop images,
+# and tests plus a du smoke test on Windows and macOS.
 # Spelling runs through prek (codespell) in pre_commit.yml.
 name: CI
 
@@ -58,6 +59,38 @@ jobs:
           mkdir -p "$fixture/d/e"
           echo hi > "$fixture/d/e/f"
           scripts/du-smoke.sh target/release/rtrash "$(rustc --print sysroot)" "${CARGO_HOME:-$HOME/.cargo}/registry/src" "$fixture"
+
+  reflink:
+    name: reflink · ${{ matrix.fs }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fs: [btrfs, xfs]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Mount a ${{ matrix.fs }} loop image
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq btrfs-progs xfsprogs
+          truncate -s 1G "$RUNNER_TEMP/reflink.img"
+          if [ "${{ matrix.fs }}" = xfs ]; then
+            mkfs.xfs -q -m reflink=1 "$RUNNER_TEMP/reflink.img"
+          else
+            mkfs.btrfs -q "$RUNNER_TEMP/reflink.img"
+          fi
+          sudo mkdir -p /mnt/reflink
+          sudo mount -o loop "$RUNNER_TEMP/reflink.img" /mnt/reflink
+          sudo chown "$(id -u):$(id -g)" /mnt/reflink
+          echo "RTRASH_REFLINK_DIR=/mnt/reflink" >> "$GITHUB_ENV"
+
+      - name: Shared extent tests
+        run: cargo test --locked --test reflink_fs -- --nocapture
 
   windows:
     name: windows · test · du smoke
