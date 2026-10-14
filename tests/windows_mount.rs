@@ -192,3 +192,47 @@ fn put_names_the_mounted_bin_and_status_counts_it() {
         "{text:?}"
     );
 }
+
+#[test]
+fn list_format_size_and_matchers_read_the_recycle_bin() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let name = format!("fmt-{}.txt", std::process::id());
+    let p = m.join(&name);
+    // A dry run checks and moves nothing.
+    fs::write(&p, b"x").unwrap();
+    let out = Command::new(bin())
+        .args(["put", "--dry-run"])
+        .arg(&p)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("would trash"));
+    assert!(p.exists());
+    put(&p);
+    let glob = format!("--glob={name}");
+    let out = Command::new(bin())
+        .args(["list", &glob, "--format={name}|{size}\\n"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().next().unwrap_or_default();
+    let (n, size) = line.split_once('|').expect("one row");
+    assert_eq!(n, name);
+    assert!(size.parse::<u64>().unwrap() > 0, "{line}");
+    let out = Command::new(bin())
+        .args(["list", &glob, "--size"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 1);
+    let out = Command::new(bin())
+        .args(["list", "--format={nope}"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}

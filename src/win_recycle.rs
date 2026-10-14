@@ -954,10 +954,28 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut matcher: Option<crate::budget::PathMatch> = None;
         let mut cwd_only = false;
         let mut bad: Option<String> = None;
+        let mut with_size = false;
+        let mut format: Option<Vec<crate::listfmt::FmtPart>> = None;
         let filters = parse_with_filters(prog, args, |arg| match arg {
             "--cwd-only" => {
                 cwd_only = true;
                 None
+            }
+            "--size" => {
+                with_size = true;
+                None
+            }
+            a if a.starts_with("--format=") => {
+                match crate::listfmt::parse_format(&a["--format=".len()..]) {
+                    Ok(f) => {
+                        format = Some(f);
+                        None
+                    }
+                    Err(e) => {
+                        bad = Some(e);
+                        Some(2)
+                    }
+                }
             }
             a if crate::budget::PathMatch::parse(a).is_some() => {
                 match crate::budget::PathMatch::parse(a) {
@@ -989,6 +1007,10 @@ List items in the Windows Recycle Bin (system trash).
       --regex=RE  only items whose original path matches RE
       --name=NAME  only items whose file name is NAME
       --cwd-only only items that came from the current directory or below
+      --size     add each item's size in the Recycle Bin
+      --format=TEMPLATE  print each item through TEMPLATE: {{date}} {{epoch}}
+                   {{path}} {{name}} {{trash}} {{size}} (bytes); {{batch}} and
+                   {{owner}} print nothing here; \\t \\n \\0 escapes
       --help     display this help and exit
       --version  output version information and exit
 
@@ -1036,13 +1058,45 @@ on Windows (there is no FreeDesktop layout here).
                     .collect();
                 let mut items = filters.apply(items, |it| it.time_deleted, item_size);
                 items.sort_by_key(|i| i.time_deleted);
+                use std::io::Write;
+                let mut out = std::io::BufWriter::new(std::io::stdout().lock());
                 for it in items {
                     let date = platform::epoch_to_iso_utc(it.time_deleted);
-                    println!(
-                        "{}",
-                        platform::format_deletion_list_line(Some(&date), &original_of(&it))
-                    );
+                    let original = original_of(&it);
+                    let res = if let Some(parts) = &format {
+                        let id = Path::new(&it.id);
+                        let name = it.name.to_string_lossy();
+                        let row = crate::listfmt::FmtRow {
+                            date: &date,
+                            epoch: it.time_deleted,
+                            path: &original,
+                            name: &name,
+                            trash: id.parent().unwrap_or(id),
+                            batch: "",
+                            size: Some(item_size(&it)),
+                            owner: Some(""),
+                        };
+                        out.write_all(&crate::listfmt::render_format(parts, &row))
+                    } else if with_size {
+                        writeln!(
+                            out,
+                            "{} {:>10} {}",
+                            date.replacen('T', " ", 1),
+                            crate::util::format_bytes(item_size(&it)),
+                            crate::util::term_path(&original)
+                        )
+                    } else {
+                        writeln!(
+                            out,
+                            "{}",
+                            platform::format_deletion_list_line(Some(&date), &original)
+                        )
+                    };
+                    if res.is_err() {
+                        return 0;
+                    }
                 }
+                let _ = out.flush();
                 0
             }
             Err(e) => {

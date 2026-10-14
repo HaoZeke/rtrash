@@ -76,7 +76,7 @@ listing, and the restore conflict policies (=--conflict=rename|skip=).
 | =list --glob/--regex/--name/--cwd-only= | same matchers as restore, on the Finder Trash and Windows too | no |
 | =put --dry-run= | every check, nothing moves (Windows too) | no |
 | bare =list PATTERN=, =restore '*.log'= | substring or glob, like =gtrash find= | no |
-| =list --format=TEMPLATE= | fields {date} {path} {name} {size} ..., raw bytes, \0 rows | no |
+| =list --format=TEMPLATE= | fields {date} {path} {name} {size} ..., raw bytes, \0 rows; Finder and Windows too | no |
 | =empty -v= | one =removed ORIGINAL= line per item, every backend | no |
 | WSL: =/mnt/c= files to the Recycle Bin | opt-in, =RTRASH_WSL_RECYCLE=1= | no |
 | FreeDesktop home trash                 | =RTRASH_MACOS_TRASH=freedesktop=, =macos.trash= or a =--trash-dir= pin | no |

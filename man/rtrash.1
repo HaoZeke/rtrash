@@ -645,8 +645,10 @@ and
 .B \e0
 print a tab, a newline and a NUL.
 An unknown field is an error.
-It reads the Finder Trash too (no batch there), but not the Windows
-Recycle Bin yet.
+It reads the Finder Trash (no batch there) and the Windows Recycle Bin
+(no batch or owner there; Windows list takes
+.B \-\-size
+too).
 The
 .B \-\-json
 field names are stable: new releases only add fields.
