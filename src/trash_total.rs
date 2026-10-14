@@ -22,10 +22,29 @@ fn path(dir: &TrashDir) -> PathBuf {
     dir.root.join(FILE)
 }
 
-/// Modification time of `info/` in nanoseconds.
+/// Modification time of `info/` in nanoseconds, rounded down to the
+/// test clock's tick (see [`tick`]).
 fn stamp(dir: &TrashDir) -> Option<u128> {
     let m = fs::metadata(dir.info()).ok()?.modified().ok()?;
-    Some(m.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos())
+    let ns = m.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    Some(match tick() {
+        Some(t) => ns / t * t,
+        None => ns,
+    })
+}
+
+/// Test seam, in debug builds only: `RTRASH_TEST_STAMP_TICK=NS` makes
+/// `info/` times as coarse as NS nanoseconds, so a test can make every
+/// change fall in the one tick that a coarse file system clock gives.
+fn tick() -> Option<u128> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var("RTRASH_TEST_STAMP_TICK")
+        .ok()?
+        .parse()
+        .ok()
+        .filter(|&t| t > 0)
 }
 
 /// Parse `v1 BYTES ITEMS STAMP`.

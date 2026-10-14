@@ -4391,3 +4391,69 @@ fn reap_busy_names_match_beyond_the_short_command_name() {
     );
     assert!(!stdout_of(&out).contains("is busy"), "{}", stdout_of(&out));
 }
+
+/// Under a clock as coarse as the test seam makes it, every change falls
+/// in one tick, so a stored total stays "current" by its stamp however
+/// much the trash changes. Each command must still leave the history
+/// with the right item count. Debug builds only.
+#[cfg(debug_assertions)]
+#[test]
+fn history_counts_stay_right_when_every_change_shares_a_clock_tick() {
+    let sb = Sandbox::new("coarse-tick");
+    // About eleven days a tick: the whole test runs in one.
+    let run = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .current_dir(sb.work())
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .env("RTRASH_TEST_STAMP_TICK", "1000000000000000")
+            .output()
+            .unwrap()
+    };
+    let last_items = || -> u64 {
+        let h = fs::read_to_string(sb.trash().join("rtrash-history")).unwrap();
+        h.lines()
+            .last()
+            .unwrap()
+            .rsplit(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    let file = |n: &str| {
+        let p = sb.work().join(n);
+        fs::write(&p, n).unwrap();
+        p
+    };
+    let (a, b, c, d) = (file("a"), file("b"), file("c"), file("d"));
+    for p in [&a, &b, &c, &d] {
+        assert!(run(&["put", p.to_str().unwrap()]).status.success());
+    }
+    assert_eq!(last_items(), 4, "put");
+    let out = run(&["restore", "--home-only", d.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(last_items(), 3, "restore");
+    let out = run(&["rm", "--home-only", c.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(last_items(), 2, "rm");
+    // An empty by age takes b once its record is dated back.
+    let info = sb.trash().join("info/b.trashinfo");
+    let body = fs::read_to_string(&info).unwrap();
+    let dated: Vec<String> = body
+        .lines()
+        .map(|l| match l.starts_with("DeletionDate=") {
+            true => "DeletionDate=2000-01-01T00:00:00".to_string(),
+            false => l.to_string(),
+        })
+        .collect();
+    fs::write(&info, dated.join("\n") + "\n").unwrap();
+    let out = run(&["empty", "--home-only", "30"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!info.exists());
+    assert_eq!(last_items(), 1, "empty by age");
+    let json = stdout_of(&run(&["trash-stats", "--home-only", "--json"]));
+    assert!(json.contains(r#""items":1,"#), "{json}");
+}
