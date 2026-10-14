@@ -344,6 +344,20 @@ fn restore(prog: &str, args: &[String]) -> i32 {
 /// Move `src` to `dest`, creating the parent. With `force`, an existing
 /// `dest` goes only after the item sits staged beside it.
 pub(crate) fn move_back(src: &Path, dest: &Path, force: bool) -> Result<(), String> {
+    // Carry the trash's total: the item's size leaves with it, and a
+    // failure, which may leave part of it behind, measures the trash.
+    let trash = src.parent().unwrap_or(src).to_path_buf();
+    let size = crate::finder_total::measure_item(src);
+    let r = move_back_inner(src, dest, force);
+    if src.symlink_metadata().is_err() && r.is_ok() {
+        crate::finder_total::carry(&trash, size, false);
+    } else if src.symlink_metadata().is_err() {
+        crate::finder_total::uncarried(&trash);
+    }
+    r
+}
+
+fn move_back_inner(src: &Path, dest: &Path, force: bool) -> Result<(), String> {
     let parent = dest
         .parent()
         .ok_or_else(|| format!("cannot restore to '{}': no parent", dest.display()))?;
@@ -782,9 +796,10 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
             removed += 1;
             continue;
         }
+        let inodes = 1 + crate::trash_stats::count_inodes(&path);
         match crate::trashdir::remove_any_path(&path) {
             Ok(()) => {
-                crate::finder_total::carry(&e.trash, b, false);
+                crate::finder_total::carry(&e.trash, (b, inodes), false);
                 removed += 1;
                 if verbose && !json {
                     println!("removed {}", crate::util::term_path(&path));

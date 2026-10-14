@@ -543,10 +543,11 @@ fn finder_run(
         } else {
             Vec::new()
         };
-        // Inodes need a walk, so only --measure counts them.
+        // The stored total carries the inodes; --measure counts a trash
+        // whose total is missing or stale.
         let inodes: Vec<Option<u64>> = trashes
             .iter()
-            .map(|t| measure.then(|| count_inodes(t)))
+            .map(|t| ft::stored_total(t).and_then(|(x, _)| x.inodes))
             .collect();
         if json {
             println!(

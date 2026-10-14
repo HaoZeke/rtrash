@@ -402,10 +402,14 @@ fn put_and_rm_carry_the_finder_total() {
         .join(format!("state/rtrash/finder-totals/{key}.total"));
     let body = fs::read_to_string(&total).unwrap();
     let f: Vec<&str> = body.split_whitespace().collect();
-    assert_eq!((f[0], f[2]), ("v1", "1"), "{body}");
-    fs::write(&total, format!("v1 1000000000 1 {}\n", f[3])).unwrap();
-    fs::write(b.work().join("second"), vec![b'x'; 9000]).unwrap();
-    assert!(b.run(&["put", "second"], "").status.success());
+    assert_eq!((f[0], f[2], f[3]), ("v2", "1", "1"), "{body}");
+    fs::write(&total, format!("v2 1000000000 1 1 {}\n", f[4])).unwrap();
+    // A directory of three files: four inodes.
+    fs::create_dir(b.work().join("second")).unwrap();
+    for n in ["a", "b", "c"] {
+        fs::write(b.work().join("second").join(n), vec![b'x'; 3000]).unwrap();
+    }
+    assert!(b.run(&["put", "-r", "second"], "").status.success());
     let o = b.run(&["trash-stats", "--total", "--json"], "");
     let j = out(&o);
     assert!(j.contains("\"items\":2,\"stale\":false"), "{j}");
@@ -414,14 +418,24 @@ fn put_and_rm_carry_the_finder_total() {
         j[i..].split(',').next().unwrap().parse().unwrap()
     };
     assert!(bytes(&j) > 1_000_000_000, "{j}");
+    assert!(j.contains("\"inodes\":5}"), "{j}");
     assert!(b.run(&["rm", "second", "--force"], "").status.success());
     let j = out(&b.run(&["trash-stats", "--total", "--json"], ""));
     assert!(j.contains("\"items\":1,\"stale\":false"), "{j}");
     assert_eq!(bytes(&j), 1_000_000_000, "{j}");
-    // A restore carries no sizes, so the trash is measured again.
+    assert!(j.contains("\"inodes\":1}"), "{j}");
+    // A restore carries the item's size out as well.
     let to = format!("--to={}", b.work().display());
     let o = b.run(&["restore", "--name=first", &to], "");
     assert!(o.status.success(), "{}", err(&o));
     let j = out(&b.run(&["trash-stats", "--total", "--json"], ""));
-    assert!(j.contains("\"bytes\":0,\"items\":0"), "{j}");
+    assert!(j.contains("\"items\":0,\"stale\":false"), "{j}");
+    assert!(j.contains("\"inodes\":0}"), "{j}");
+    assert!(bytes(&j) > 999_000_000, "{j}");
+    // --measure finds the trash current and keeps the carried figure;
+    // a change from outside makes it stale, and --measure then fixes it.
+    fs::write(b.finder().join("outside"), b"o").unwrap();
+    let j = out(&b.run(&["trash-stats", "--total", "--measure", "--json"], ""));
+    assert!(j.contains("\"items\":1,\"stale\":false"), "{j}");
+    assert!(bytes(&j) < 1_000_000, "{j}");
 }

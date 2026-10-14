@@ -4,17 +4,18 @@
 //! Finder shows every file in a trash, so nothing goes inside one. Each
 //! trash gets `KEY.total` and `KEY.history` under
 //! `$XDG_STATE_HOME/rtrash/finder-totals`, KEY being the trash path with
-//! `%` and `/` percent-encoded. A total (`v1 BYTES ITEMS STAMP`) carries
+//! `%` and `/` percent-encoded. A total (`v2 BYTES ITEMS INODES STAMP`; `v1` files lack INODES) carries
 //! the modification time and entry count of the trash directory, which
 //! change whenever Finder or rtrash adds or removes an item, so a total that another tool
 //! made out of date reads as stale.
 //!
 //! A command that may change a trash takes a [`Snapshot`] of the trash
 //! times before it and calls [`log`] after it: each trash whose time moved
-//! gets a new total and a history line. Put, rm and empty report each
-//! item they add or remove with [`carry`]; when the total was current
-//! before the command, the new one is the old plus those changes, with no
-//! walk. Any other change (restore, undo, a trash without a current total)
+//! gets a new total and a history line. Put, rm, empty, restore and undo
+//! report each item they add or remove with [`carry`]; when the total was
+//! current before the command, the new one is the old plus those changes,
+//! with no walk; the inodes of each item (itself and everything below it)
+//! carry the same way. A failed removal or a trash without a current total
 //! measures the trash once.
 
 use std::fs;
@@ -54,48 +55,75 @@ fn stamp(trash: &Path) -> Option<u128> {
     Some(ns.wrapping_mul(1_000_003).wrapping_add(count))
 }
 
-fn parse(body: &str) -> Option<(u64, u64, u128)> {
+/// A stored total: bytes, items, and inodes (files and directories in
+/// the trash, as `trash-stats` counts them) when known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Total {
+    pub bytes: u64,
+    pub items: u64,
+    pub inodes: Option<u64>,
+}
+
+fn parse(body: &str) -> Option<(Total, u128)> {
     let mut f = body.split_whitespace();
-    if f.next()? != "v1" {
-        return None;
-    }
+    let v = f.next()?;
+    let bytes = f.next()?.parse().ok()?;
+    let items = f.next()?.parse().ok()?;
+    let inodes = match v {
+        "v1" => None,
+        "v2" => Some(f.next()?.parse().ok()?),
+        _ => return None,
+    };
+    let s = f.next()?.parse().ok()?;
     Some((
-        f.next()?.parse().ok()?,
-        f.next()?.parse().ok()?,
-        f.next()?.parse().ok()?,
+        Total {
+            bytes,
+            items,
+            inodes,
+        },
+        s,
     ))
 }
 
-/// The stored bytes and items of `trash`, with whether they are current.
-/// Reads one small file and never walks the trash.
+/// The stored total of `trash`, with whether it is current. Reads one
+/// small file and never walks the trash.
+pub fn stored_total(trash: &Path) -> Option<(Total, bool)> {
+    let (t, s) = parse(&fs::read_to_string(file(trash, "total")?).ok()?)?;
+    Some((t, stamp(trash) == Some(s)))
+}
+
+/// [`stored_total`] as bytes, items and whether current.
 pub fn stored(trash: &Path) -> Option<(u64, u64, bool)> {
-    let (b, n, s) = parse(&fs::read_to_string(file(trash, "total")?).ok()?)?;
-    Some((b, n, stamp(trash) == Some(s)))
+    stored_total(trash).map(|(t, c)| (t.bytes, t.items, c))
 }
 
-/// Walk `trash` once (its items, as `trash-stats` counts them) and store
-/// the total. Best effort.
-pub fn measure(trash: &Path) -> (u64, u64) {
+/// Walk `trash` once (its items and inodes, as `trash-stats` counts
+/// them) and store the total. Best effort.
+pub fn measure(trash: &Path) -> Total {
     let before = stamp(trash);
-    let (b, n) = crate::finder_shared::size_of(trash);
-    if let (Some(s), Some(p)) = (before, file(trash, "total")) {
-        // A change during the walk leaves the total stale.
-        if stamp(trash) == Some(s) {
-            if let Some(d) = p.parent() {
-                let _ = fs::create_dir_all(d);
-            }
-            let _ = crate::trashdir::atomic_write(&p, format!("v1 {b} {n} {s}\n").as_bytes());
-        }
+    let (bytes, items) = crate::finder_shared::size_of(trash);
+    let t = Total {
+        bytes,
+        items,
+        inodes: Some(crate::trash_stats::count_inodes(trash)),
+    };
+    // A change during the walk leaves the total stale.
+    if before.is_some() && stamp(trash) == before {
+        store(trash, &t);
     }
-    (b, n)
+    t
 }
 
-fn store(trash: &Path, b: u64, n: u64) {
+fn store(trash: &Path, t: &Total) {
     if let (Some(s), Some(p)) = (stamp(trash), file(trash, "total")) {
         if let Some(d) = p.parent() {
             let _ = fs::create_dir_all(d);
         }
-        let _ = crate::trashdir::atomic_write(&p, format!("v1 {b} {n} {s}\n").as_bytes());
+        let line = match t.inodes {
+            Some(i) => format!("v2 {} {} {i} {s}\n", t.bytes, t.items),
+            None => format!("v1 {} {} {s}\n", t.bytes, t.items),
+        };
+        let _ = crate::trashdir::atomic_write(&p, line.as_bytes());
     }
 }
 
@@ -106,38 +134,63 @@ pub fn history(trash: &Path) -> Vec<crate::trash_history::Point> {
         .unwrap_or_default()
 }
 
-/// Per trash: bytes and items this command added (negative: removed),
-/// and whether every change it made was carried.
-type Carried = Vec<(PathBuf, i128, i64, bool)>;
-static CARRIED: std::sync::Mutex<Carried> = std::sync::Mutex::new(Vec::new());
+/// What one command changed in one trash: bytes, items and inodes added
+/// (negative: removed), and whether every change was carried.
+#[derive(Debug, Clone)]
+struct Change {
+    trash: PathBuf,
+    bytes: i128,
+    items: i64,
+    inodes: i128,
+    whole: bool,
+}
 
-fn note(trash: &Path, bytes: i128, items: i64, whole: bool) {
+static CARRIED: std::sync::Mutex<Vec<Change>> = std::sync::Mutex::new(Vec::new());
+
+fn note(trash: &Path, bytes: i128, items: i64, inodes: i128, whole: bool) {
     let mut c = CARRIED.lock().unwrap_or_else(|e| e.into_inner());
-    match c.iter_mut().find(|x| x.0 == trash) {
+    match c.iter_mut().find(|x| x.trash == trash) {
         Some(x) => {
-            x.1 += bytes;
-            x.2 += items;
-            x.3 &= whole;
+            x.bytes += bytes;
+            x.items += items;
+            x.inodes += inodes;
+            x.whole &= whole;
         }
-        None => c.push((trash.to_path_buf(), bytes, items, whole)),
+        None => c.push(Change {
+            trash: trash.to_path_buf(),
+            bytes,
+            items,
+            inodes,
+            whole,
+        }),
     }
 }
 
+/// The size on disk and inodes of an item about to move, for [`carry`].
+pub fn measure_item(path: &Path) -> (u64, u64) {
+    (
+        crate::fastdelete::disk_usage(path),
+        1 + crate::trash_stats::count_inodes(path),
+    )
+}
+
 /// Report one item this command put into `trash` (`added`) or removed
-/// from it, with its size on disk.
-pub fn carry(trash: &Path, bytes: u64, added: bool) {
-    let b = i128::from(bytes);
-    if added {
-        note(trash, b, 1, true);
-    } else {
-        note(trash, -b, -1, true);
-    }
+/// from it, with its size and inodes from [`measure_item`].
+pub fn carry(trash: &Path, (bytes, inodes): (u64, u64), added: bool) {
+    let sign = if added { 1 } else { -1 };
+    note(
+        trash,
+        sign * i128::from(bytes),
+        sign as i64,
+        sign * i128::from(inodes),
+        true,
+    );
 }
 
 /// Report a change to `trash` that carries no sizes, so [`log`]
 /// measures it.
 pub fn uncarried(trash: &Path) {
-    note(trash, 0, 0, false);
+    note(trash, 0, 0, 0, false);
 }
 
 /// The times of the Finder trashes before a command, each with its total
@@ -146,7 +199,7 @@ pub fn uncarried(trash: &Path) {
 pub struct Snapshot(Option<Vec<SnapRow>>);
 
 /// A trash, its stamp and its total when current.
-type SnapRow = (PathBuf, Option<u128>, Option<(u64, u64)>);
+type SnapRow = (PathBuf, Option<u128>, Option<Total>);
 
 pub fn snapshot() -> Snapshot {
     if !crate::finder::is_default(false) {
@@ -162,15 +215,29 @@ pub fn snapshot_always() -> Snapshot {
             .into_iter()
             .map(|t| {
                 let s = stamp(&t);
-                let cur = stored(&t).filter(|x| x.2).map(|x| (x.0, x.1));
+                let cur = stored_total(&t).filter(|x| x.1).map(|x| x.0);
                 (t, s, cur)
             })
             .collect(),
     ))
 }
 
-/// After a command: measure each trash whose time moved since `before`,
-/// store its total and append it to its history under `event`.
+fn add(v: u64, d: i128) -> u64 {
+    (i128::from(v) + d).clamp(0, i128::from(u64::MAX)) as u64
+}
+
+/// The total after `c`, from the total before it.
+fn carried_total(old: Total, c: &Change) -> Total {
+    Total {
+        bytes: add(old.bytes, c.bytes),
+        items: add(old.items, i128::from(c.items)),
+        inodes: old.inodes.map(|i| add(i, c.inodes)),
+    }
+}
+
+/// After a command: give each trash whose time moved since `before` a
+/// new total (carried when it can be, else measured) and a history line
+/// under `event`.
 pub fn log(event: &str, before: &Snapshot) {
     let Some(before) = &before.0 else {
         return;
@@ -184,18 +251,17 @@ pub fn log(event: &str, before: &Snapshot) {
             continue;
         }
         let old = snap.and_then(|x| x.2);
-        let c = carried.iter().find(|x| x.0 == t);
-        let (b, n) = match (old, c) {
-            (Some((ob, on)), Some(&(_, db, dn, true))) => {
-                let b = (i128::from(ob) + db).max(0) as u64;
-                let n = (on as i64 + dn).max(0) as u64;
-                store(&t, b, n);
-                (b, n)
+        let c = carried.iter().find(|x| x.trash == t && x.whole);
+        let total = match (old, c) {
+            (Some(old), Some(c)) => {
+                let n = carried_total(old, c);
+                store(&t, &n);
+                n
             }
             _ => measure(&t),
         };
         if let Some(p) = file(&t, "history") {
-            crate::trash_history::append(&p, event, b, n);
+            crate::trash_history::append(&p, event, total.bytes, total.items);
         }
     }
 }
@@ -211,7 +277,26 @@ mod tests {
             key(Path::new("/V/50%/.Trashes/501")),
             "%2FV%2F50%25%2F.Trashes%2F501"
         );
-        assert_eq!(parse("v1 10 2 99"), Some((10, 2, 99)));
+    }
+
+    #[test]
+    fn totals_parse_both_versions_and_carry_changes() {
+        let t = |b, n, i| Total {
+            bytes: b,
+            items: n,
+            inodes: i,
+        };
+        assert_eq!(parse("v1 10 2 99"), Some((t(10, 2, None), 99)));
+        assert_eq!(parse("v2 10 2 7 99"), Some((t(10, 2, Some(7)), 99)));
         assert_eq!(parse("v0 10 2 99"), None);
+        let c = Change {
+            trash: PathBuf::from("/t"),
+            bytes: -4,
+            items: -1,
+            inodes: -3,
+            whole: true,
+        };
+        assert_eq!(carried_total(t(10, 2, Some(7)), &c), t(6, 1, Some(4)));
+        assert_eq!(carried_total(t(1, 0, None), &c), t(0, 0, None));
     }
 }

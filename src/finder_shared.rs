@@ -499,7 +499,8 @@ pub fn rm(
         if !hit {
             continue;
         }
-        let sz = crate::fastdelete::disk_usage(&e.path());
+        let m = crate::finder_total::measure_item(&e.path());
+        let sz = m.0;
         if dry_run {
             if !json {
                 println!("{}", crate::util::term_path(&e.shown));
@@ -510,7 +511,7 @@ pub fn rm(
             status = 1;
             continue;
         } else {
-            crate::finder_total::carry(&e.trash, sz, false);
+            crate::finder_total::carry(&e.trash, m, false);
             if verbose && !json {
                 println!("removed '{}'", crate::util::term_path(&e.shown));
             }

@@ -76,9 +76,9 @@ Age filters count from the move into the trash and size filters from
 disk usage; restore takes =--name=, =--glob=, =--regex=, =--latest= and
 =--to=.
 =trash-stats --total= and =--history= read a total and history per Finder
-trash kept under =$XDG_STATE_HOME/rtrash/finder-totals=: put, rm and
-empty carry a current total by the sizes they move, and restore and undo
-measure the trash once; a change made outside rtrash marks
+trash kept under =$XDG_STATE_HOME/rtrash/finder-totals=: put, rm, empty,
+restore and undo carry a current total, inodes included, by the items
+they move; a change made outside rtrash marks
 the total stale until =--measure=.
 =empty --max-size= and =--prune= trim the Finder trashes together, by
 disk usage.

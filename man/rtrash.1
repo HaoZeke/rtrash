@@ -57,9 +57,11 @@ and
 .B \-\-history
 read a total and a history per Finder trash kept under
 .IR $XDG_STATE_HOME/rtrash/finder\-totals ,
-since a file inside the trash would show in Finder; put, rm and empty
-add or subtract the sizes of the items they move in or out of a current
-total, restore and undo measure each trash they changed once, and a change made outside rtrash marks the total stale until
+since a file inside the trash would show in Finder; put, rm, empty,
+restore and undo add or subtract the sizes and inodes of the items they
+move in or out of a current total, so
+.B \-\-total
+shows inodes without a walk, and a change made outside rtrash marks the total stale until
 .BR \-\-measure .
 .B "empty \-\-max\-size"
 and
