@@ -285,7 +285,7 @@ fn bash_complete(words: &[&str]) -> Vec<String> {
 fn bash_completion_offers_the_right_words() {
     assert_eq!(
         bash_complete(&["rtrash", "completions", ""]),
-        ["bash", "zsh", "fish"]
+        ["bash", "zsh", "fish", "nu"]
     );
     let keys = bash_complete(&["rtrash", "keys", "--"]);
     assert!(keys.contains(&"--sample".to_string()), "{keys:?}");
@@ -324,7 +324,7 @@ fn fish_completion_offers_the_right_words() {
         eprintln!("fish not installed; skipping");
         return;
     };
-    assert_eq!(shells, ["bash", "fish", "zsh"]);
+    assert_eq!(shells, ["bash", "fish", "nu", "zsh"]);
     let keys = run("rtrash keys --").unwrap();
     assert!(keys.contains(&"--sample".to_string()), "{keys:?}");
     let subs = run("rtrash k").unwrap();
@@ -335,6 +335,94 @@ fn fish_completion_offers_the_right_words() {
 fn zsh_completion_knows_keys_and_every_shell() {
     let zsh = read("completions/_rtrash");
     assert!(zsh.contains("'keys:"), "keys subcommand missing");
-    assert!(zsh.contains("'1:shell:(bash zsh fish)'"));
+    assert!(zsh.contains("'1:shell:(bash zsh fish nu)'"));
     assert!(zsh.contains("--sample["));
+}
+
+/// Lines of the nushell `export extern "NAME" [` ... `]` block.
+fn nu_block(script: &str, name: &str) -> String {
+    let start = format!("export extern \"{name}\" [");
+    let mut out = String::new();
+    let mut inside = false;
+    for line in script.lines() {
+        if !inside {
+            inside = line == start;
+            continue;
+        }
+        if line == "]" {
+            return out;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    panic!("nu extern {name} not found");
+}
+
+/// Every long option of `--help` is a flag of the matching nushell extern,
+/// or a comment line when it takes an optional value (nushell flags cannot).
+#[test]
+fn nu_externs_cover_every_help_option() {
+    let nu = read("completions/rtrash.nu");
+    let mut missing = Vec::new();
+    let multicall = [
+        ("trash-put", "put"),
+        ("trash-empty", "empty"),
+        ("trash-list", "list"),
+        ("trash-restore", "restore"),
+        ("trash-rm", "rm"),
+    ];
+    let subs = SUBCOMMANDS.iter().map(|s| (format!("rtrash {s}"), *s));
+    for (name, sub) in subs.chain(multicall.iter().map(|(n, s)| (n.to_string(), *s))) {
+        let block = nu_block(&nu, &name);
+        for opt in help_long_opts(sub) {
+            let flag = format!("--{opt}");
+            let found = block.lines().any(|l| {
+                let l = l.trim_start();
+                let l = l.strip_prefix("# ").unwrap_or(l);
+                let word: String = l
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
+                word == flag
+            });
+            if !found {
+                missing.push(format!("nu {name} {flag}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "missing in rtrash.nu:\n{}",
+        missing.join("\n")
+    );
+}
+
+/// `rtrash completions nu` prints the script, and nushell parses it when
+/// installed.
+#[test]
+fn nu_script_is_embedded_and_parses() {
+    let out = Command::new(bin())
+        .args(["completions", "nu"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        read("completions/rtrash.nu")
+    );
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("completions/rtrash.nu");
+    let prog = format!(
+        "source '{}'; scope externs | where name == 'rtrash empty' | length",
+        script.display()
+    );
+    let Ok(run) = Command::new("nu").args(["-n", "-c", &prog]).output() else {
+        eprintln!("nu not installed; skipping");
+        return;
+    };
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "1");
 }

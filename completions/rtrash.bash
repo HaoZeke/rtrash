@@ -183,7 +183,7 @@ _rtrash_main() {
       if [[ $cur == -* ]]; then
         COMPREPLY=($(compgen -W "--help" -- "$cur"))
       else
-        COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
+        COMPREPLY=($(compgen -W "bash zsh fish nu" -- "$cur"))
       fi
       ;;
     man)

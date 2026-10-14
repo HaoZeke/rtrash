@@ -30,7 +30,7 @@ Commands:
   config [--path|--default]   show the config file and the settings it makes
   setup [OPTION]...           install multi-call links, completions, man page
   keys [OPTION]...            show/sample TUI keybind config (customizable)
-  completions {bash|zsh|fish} print embedded shell completion script
+  completions SHELL           print embedded bash, zsh, fish or nu completion script
   man                         print embedded man(1) page to stdout
 
 Multi-call: a symlink or hardlink named rm or trash-put runs `put`;

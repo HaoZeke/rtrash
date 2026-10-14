@@ -344,7 +344,7 @@ _rtrash_dispatch() {
         completions)
           _arguments -s -C \
             '(- *)'--help'[display help and exit]' \
-            '1:shell:(bash zsh fish)'
+            '1:shell:(bash zsh fish nu)'
           ;;
         keys)
           _arguments -s -C \

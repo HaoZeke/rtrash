@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 const BASH_COMPLETION: &str = include_str!("../completions/rtrash.bash");
 const ZSH_COMPLETION: &str = include_str!("../completions/_rtrash");
 const FISH_COMPLETION: &str = include_str!("../completions/rtrash.fish");
+const NU_COMPLETION: &str = include_str!("../completions/rtrash.nu");
 const MAN_PAGE: &str = include_str!("../man/rtrash.1");
 const MC_MENU: &str = include_str!("../contrib/mc/menu.rtrash");
 
@@ -26,7 +27,7 @@ const MULTICALL: &[&str] = &[
 
 const HELP: &str = "\
 Usage: rtrash setup [OPTION]...
-       rtrash completions {bash|zsh|fish}
+       rtrash completions {bash|zsh|fish|nu}
        rtrash man
 
 After `cargo install`, run `rtrash setup` once to install multi-call
@@ -44,8 +45,9 @@ setup options:
       --help         display this help and exit
 
 completions:
-  Print the embedded completion script for bash, zsh, or fish to stdout
-  (for package recipes or custom paths).
+  Print the embedded completion script for bash, zsh, fish or nu to stdout
+  (for package recipes or custom paths). setup does not install the nu
+  script: save it and `source` it from config.nu.
 
 man:
   Print the embedded man(1) page to stdout.
@@ -491,8 +493,12 @@ fn run_completions(args: &[String]) -> i32 {
             print!("{FISH_COMPLETION}");
             0
         }
+        Some("nu") => {
+            print!("{NU_COMPLETION}");
+            0
+        }
         Some(other) => {
-            eprintln!("rtrash completions: unknown shell '{other}' (want bash, zsh, or fish)");
+            eprintln!("rtrash completions: unknown shell '{other}' (want bash, zsh, fish or nu)");
             2
         }
     }

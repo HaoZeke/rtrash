@@ -2269,9 +2269,19 @@ Replace existing links/files (use after upgrades).
 Print each path written.
 .SS completions
 .B rtrash completions
-.RB { bash | zsh }
+.RB { bash | zsh | fish | nu }
 .PP
 Print the embedded completion script to stdout (packagers / custom paths).
+The nushell script declares each command as an
+.B extern
+with its options; save it, for example as
+.IR rtrash-completions.nu ,
+and
+.B source
+it from
+.IR config.nu .
+.B rtrash setup
+does not install it.
 .SS man
 .B rtrash man
 .PP
@@ -2551,7 +2561,7 @@ Trash specification:
 .PP
 Shell completions ship in the source tree under
 .I completions/
-(bash and zsh). See the project README for install paths.
+(bash, zsh, fish and nushell). See the project README for install paths.
 .SH AUTHOR
 Written for the rtrash project.
 .SH COPYRIGHT
