@@ -159,7 +159,7 @@ jobs:
           "RTRASH_MOUNTED_DIR=$mnt" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
       - name: Folder-mounted volume tests
-        run: cargo test --locked --test windows_mount -- --nocapture
+        run: cargo test --locked --test windows_mount -- --nocapture --test-threads=1
 
   macos:
     name: ${{ matrix.os }} · test · du smoke

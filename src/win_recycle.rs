@@ -323,6 +323,87 @@ pub fn mounted_volumes() -> Vec<PathBuf> {
     out
 }
 
+/// Windows: each volume's GUID path (`\\?\Volume{…}\`) with the first
+/// folder or drive it is mounted on, so a path the shell wrote through the
+/// GUID can be read back as the path the user typed.
+#[cfg(windows)]
+pub fn volume_mounts() -> Vec<(String, String)> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetVolumePathNamesForVolumeNameW,
+    };
+    let mut out = Vec::new();
+    let mut name = [0u16; 64];
+    // SAFETY: `name` is as long as the length passed.
+    let h = unsafe { FindFirstVolumeW(name.as_mut_ptr(), name.len() as u32) };
+    if h == INVALID_HANDLE_VALUE {
+        return out;
+    }
+    loop {
+        let mut paths = vec![0u16; 4096];
+        let mut len = 0u32;
+        // SAFETY: `name` is NUL-terminated; `paths` is as long as passed.
+        let ok = unsafe {
+            GetVolumePathNamesForVolumeNameW(
+                name.as_ptr(),
+                paths.as_mut_ptr(),
+                paths.len() as u32,
+                &mut len,
+            )
+        };
+        if ok != 0 {
+            let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+            let guid = std::ffi::OsString::from_wide(&name[..end])
+                .to_string_lossy()
+                .into_owned();
+            if let Some(first) = paths.split(|&c| c == 0).find(|p| !p.is_empty()) {
+                let mount = std::ffi::OsString::from_wide(first)
+                    .to_string_lossy()
+                    .into_owned();
+                out.push((guid, mount));
+            }
+        }
+        // SAFETY: `h` came from FindFirstVolumeW; `name` as above.
+        if unsafe { FindNextVolumeW(h, name.as_mut_ptr(), name.len() as u32) } == 0 {
+            break;
+        }
+    }
+    // SAFETY: `h` came from FindFirstVolumeW and is closed once.
+    unsafe { FindVolumeClose(h) };
+    out
+}
+
+/// A comparison key for a Windows path: the verbatim prefix gone, a volume
+/// GUID path read as its mount point (`mounts` from `volume_mounts`),
+/// forward slashes turned back, no trailing separator, and lower case,
+/// since Windows file names compare without case.
+pub fn path_key(path: &str, mounts: &[(String, String)]) -> String {
+    let mut s = path.replace('/', "\\");
+    let lower = s.to_ascii_lowercase();
+    for (guid, mount) in mounts {
+        let g = guid.trim_end_matches('\\').to_ascii_lowercase();
+        if lower == g || lower.starts_with(&format!("{g}\\")) {
+            let rest = s[g.len()..].trim_start_matches('\\').to_string();
+            s = format!("{}\\{rest}", mount.trim_end_matches('\\'));
+            break;
+        }
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        s = format!(r"\\{rest}");
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        s = rest.to_string();
+    }
+    let t = s.trim_end_matches('\\');
+    // Keep `c:\` for a drive root.
+    let t = if t.len() == 2 && t.ends_with(':') {
+        s.as_str()
+    } else {
+        t
+    };
+    t.to_lowercase()
+}
+
 /// A volume path that is a folder rather than a drive root (`C:\\`).
 pub fn mounted_folder(path: &str) -> bool {
     let b = path.as_bytes();
@@ -893,7 +974,14 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                             removed_line(&crate::util::term_path(f), bin.as_deref())
                         );
                     }
-                    moved.push(abs);
+                    // The path as the user gave it, made absolute; the
+                    // canonical form can name a mounted folder by its
+                    // volume GUID.
+                    moved.push(
+                        std::path::absolute(f)
+                            .map(|p| strip_verbatim(&p))
+                            .unwrap_or_else(|_| abs.clone()),
+                    );
                     if let Some(r) = root {
                         if !roots.contains(&r) {
                             roots.push(r);
@@ -1297,6 +1385,12 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 .and_then(|p| std::fs::read_to_string(p).ok())
                 .and_then(|t| crate::budget::parse_last_put(&t))
                 .unwrap_or((i64::MAX, Vec::new()));
+            let mounts = super::volume_mounts();
+            let rows: Vec<(PathBuf, i64)> = rows
+                .into_iter()
+                .map(|(p, t)| (key_of(&p, &mounts), t))
+                .collect();
+            let last: Vec<PathBuf> = last.iter().map(|p| key_of(p, &mounts)).collect();
             let foreign = crate::budget::not_from_last_put(&rows, &last, since);
             if !crate::budget::guard_ok(prog, rows.len(), foreign) {
                 return 2;
@@ -1378,13 +1472,51 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             .iter()
             .map(|it| (original_of(it), it.time_deleted))
             .collect();
-        let keep = crate::budget::from_last_put(&rows, &last, since);
+        let mounts = super::volume_mounts();
+        let rows: Vec<(PathBuf, i64)> = rows
+            .into_iter()
+            .map(|(p, t)| (key_of(&p, &mounts), t))
+            .collect();
+        let want: Vec<PathBuf> = last.iter().map(|p| key_of(p, &mounts)).collect();
+        let keep = crate::budget::from_last_put(&rows, &want, since);
         let picked: Vec<TrashItem> = keep.into_iter().map(|i| items[i].clone()).collect();
         if picked.is_empty() {
             eprintln!("{prog}: nothing from the latest put is left in the Recycle Bin");
+            for p in &last {
+                eprintln!("{prog}:   the latest put moved '{}'", p.display());
+            }
+            explain_no_match(prog, items, since);
             return Err(1);
         }
+        if picked.len() < want.len() {
+            eprintln!(
+                "{prog}: only {} of the {} items from the latest put are left in the Recycle Bin",
+                picked.len(),
+                want.len()
+            );
+        }
         Ok(picked)
+    }
+
+    /// `path_key` as a path, for matching.
+    fn key_of(p: &Path, mounts: &[(String, String)]) -> PathBuf {
+        PathBuf::from(super::path_key(&p.to_string_lossy(), mounts))
+    }
+
+    /// When nothing matched: what the Recycle Bin holds, as each `$I`
+    /// record names it, so a path form that does not compare shows up.
+    fn explain_no_match(prog: &str, items: &[TrashItem], since: i64) {
+        let mounts = super::volume_mounts();
+        eprintln!("{prog}: the Recycle Bin holds {} items", items.len());
+        for it in items.iter().filter(|it| it.time_deleted >= since) {
+            let o = original_of(it);
+            eprintln!(
+                "{prog}:   original '{}' (compared as '{}', payload '{}')",
+                o.display(),
+                key_of(&o, &mounts).display(),
+                it.id.to_string_lossy()
+            );
+        }
     }
 
     fn write_last_put(since: i64, moved: &[PathBuf]) {
@@ -1591,11 +1723,23 @@ Without PATH, print a numbered list and read an index from stdin.
         }
         let mut matches: Vec<TrashItem> = match &target {
             Some(t) => {
-                let abs = std::fs::canonicalize(t).unwrap_or_else(|_| t.clone());
-                items
-                    .into_iter()
-                    .filter(|i| original_of(i) == abs || original_of(i) == *t)
-                    .collect()
+                let mounts = super::volume_mounts();
+                let abs = std::path::absolute(t).unwrap_or_else(|_| t.clone());
+                let want = key_of(&abs, &mounts);
+                let matched: Vec<TrashItem> = items
+                    .iter()
+                    .filter(|i| key_of(&original_of(i), &mounts) == want)
+                    .cloned()
+                    .collect();
+                if matched.is_empty() {
+                    eprintln!("{prog}: no trashed files match");
+                    if std::env::var_os("RTRASH_DEBUG").is_some() {
+                        eprintln!("{prog}:   wanted '{}'", want.display());
+                        explain_no_match(prog, &items, i64::MIN);
+                    }
+                    return 1;
+                }
+                matched
             }
             None => items,
         };
@@ -1718,6 +1862,12 @@ Without PATH, print a numbered list and read an index from stdin.
             let dest = original_of(it);
             if let Err(e) = super::restore_payload(Path::new(&it.id), &dest) {
                 eprintln!("{prog}: cannot restore '{}': {e}", dest.display());
+                status = 1;
+            } else if dest.symlink_metadata().is_err() {
+                eprintln!(
+                    "{prog}: restored '{}' but nothing is there now",
+                    dest.display()
+                );
                 status = 1;
             }
         }
@@ -2591,5 +2741,29 @@ mod tests {
         assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"a");
         assert!(!payload.exists());
         std::fs::remove_dir_all(&top).unwrap();
+    }
+
+    #[test]
+    fn path_key_reads_a_volume_guid_as_its_mount_point() {
+        let mounts = vec![(
+            r"\\?\Volume{1234-ab}\".to_string(),
+            r"C:\rtrash-mnt\".to_string(),
+        )];
+        assert_eq!(
+            path_key(r"\\?\Volume{1234-AB}\Run-A.txt", &mounts),
+            path_key(r"C:\rtrash-mnt\run-a.txt", &mounts)
+        );
+        assert_eq!(
+            path_key(r"\\?\Volume{1234-ab}\d\x.txt", &mounts),
+            r"c:\rtrash-mnt\d\x.txt"
+        );
+    }
+
+    #[test]
+    fn path_key_strips_verbatim_and_case() {
+        assert_eq!(path_key(r"\\?\C:\Users\A\B.TXT", &[]), r"c:\users\a\b.txt");
+        assert_eq!(path_key(r"\\?\UNC\srv\share\f", &[]), r"\\srv\share\f");
+        assert_eq!(path_key("C:/x/y/", &[]), r"c:\x\y");
+        assert_eq!(path_key(r"C:\", &[]), r"c:\");
     }
 }

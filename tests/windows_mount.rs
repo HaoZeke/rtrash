@@ -18,6 +18,21 @@ fn mounted() -> Option<PathBuf> {
     std::env::var_os("RTRASH_MOUNTED_DIR").map(PathBuf::from)
 }
 
+/// A private `%LOCALAPPDATA%` per test, so the last-put records of tests
+/// running side by side stay apart.
+fn local_app_data(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("rtrash-lad-{tag}-{}", std::process::id()));
+    fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// The binary with a private `%LOCALAPPDATA%` and debug output on.
+fn cmd(lad: &Path) -> Command {
+    let mut c = Command::new(bin());
+    c.env("LOCALAPPDATA", lad).env("RTRASH_DEBUG", "1");
+    c
+}
+
 fn put(p: &Path) {
     fs::write(p, p.to_string_lossy().as_bytes()).unwrap();
     let out = Command::new(bin()).arg("put").arg(p).output().unwrap();
@@ -242,10 +257,17 @@ fn restore_of_one_txt_keeps_its_extension() {
     let Some(m) = mounted() else {
         return;
     };
+    let lad = local_app_data("keep-ext");
     let f = m.join(format!("keep-ext-{}.txt", std::process::id()));
-    put(&f);
+    fs::write(&f, b"x").unwrap();
+    let out = cmd(&lad).arg("put").arg(&f).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(!f.exists());
-    let out = Command::new(bin()).arg("restore").arg(&f).output().unwrap();
+    let out = cmd(&lad).arg("restore").arg(&f).output().unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -254,6 +276,7 @@ fn restore_of_one_txt_keeps_its_extension() {
     assert!(f.exists(), "restored without its extension");
     assert!(!f.with_extension("").exists());
     fs::remove_file(&f).unwrap();
+    let _ = fs::remove_dir_all(&lad);
 }
 
 #[test]
@@ -261,37 +284,31 @@ fn restore_batch_last_brings_back_the_latest_put() {
     let Some(m) = mounted() else {
         return;
     };
+    let lad = local_app_data("batch-last");
     let id = std::process::id();
     let a = m.join(format!("run-a-{id}.txt"));
     let b = m.join(format!("run-b-{id}.txt"));
     for p in [&a, &b] {
         fs::write(p, b"x").unwrap();
     }
-    let out = Command::new(bin())
-        .arg("put")
-        .arg(&a)
-        .arg(&b)
-        .output()
-        .unwrap();
+    let out = cmd(&lad).arg("put").arg(&a).arg(&b).output().unwrap();
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!a.exists() && !b.exists());
-    let out = Command::new(bin())
+    let out = cmd(&lad)
         .args(["restore", "--batch=last"])
         .output()
         .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(a.exists() && b.exists());
-    let out = Command::new(bin())
-        .args(["restore", "--batch=7"])
-        .output()
-        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(a.exists() && b.exists(), "{err}");
+    let out = cmd(&lad).args(["restore", "--batch=7"]).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
+    for p in [&a, &b] {
+        fs::remove_file(p).unwrap();
+    }
+    let _ = fs::remove_dir_all(&lad);
 }

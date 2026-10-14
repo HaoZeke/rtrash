@@ -1,0 +1,1 @@
+On Windows, restore by path and `restore --batch=last` now match Recycle Bin items on a folder-mounted volume, comparing paths without case after mapping a volume GUID path back to its mount point, and `--batch=last` fails when an item it restored is not where it should be.
