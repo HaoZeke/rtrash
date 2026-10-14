@@ -4885,6 +4885,32 @@ fn reap_honours_tmpfiles_age_modifiers() {
     assert!(!reaped.contains(&json_path(&by_m)), "{j}");
 }
 
+/// Without a DIR, a glob age line under a temp dir makes each match a
+/// root with that age, and the temp dir's own pass leaves the match alone.
+#[cfg(target_os = "linux")]
+#[test]
+fn reap_default_dirs_take_glob_age_lines_as_roots() {
+    let sb = Sandbox::new("reap-tmpfiles-glob");
+    let tmp = fs::canonicalize(sb.root.join("tmp")).unwrap_or_else(|_| {
+        fs::create_dir_all(sb.root.join("tmp")).unwrap();
+        fs::canonicalize(sb.root.join("tmp")).unwrap()
+    });
+    let job = tmp.join("job-1");
+    fs::create_dir_all(&job).unwrap();
+    let old = stale_file(&job, "old.bin");
+    age_tree(&job);
+    let conf = sb.root.join(".config/user-tmpfiles.d");
+    fs::create_dir_all(&conf).unwrap();
+    fs::write(conf.join("jobs.conf"), "e %T/job-* - - - 1h\n").unwrap();
+    let out = reap_cmd(&sb, &["reap", "-n", "--json", "--age-by=m"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let j = stdout_of(&out);
+    let reaped = j.split(r#""skipped""#).next().unwrap();
+    assert!(reaped.contains(&json_path(&old)), "{j}");
+    // job-1 itself is a root now, never an entry of the temp dir.
+    assert!(!j.contains(&json_path(&job)), "{j}");
+}
+
 /// node-gyp takes old header downloads and leaves a fresh one.
 #[cfg(target_os = "linux")]
 #[test]

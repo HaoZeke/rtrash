@@ -2062,6 +2062,10 @@ usually waits 30 days; without such a line it is 10d.
 A glob line such as
 .I d /srv/cache\-* \- \- \- 1d
 gives its age to each directory it matches with as many path components.
+Without DIR, each directory such a line matches inside a default temp
+directory becomes a root of its own with that age.
+A root inside another root is judged as a root and never as an entry of
+the outer one.
 The age column's modifiers count too: a
 .B ~
 prefix reaps the entries inside each subdirectory of DIR and spares the

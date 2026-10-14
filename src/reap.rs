@@ -1445,6 +1445,40 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     } else {
         Vec::new()
     };
+    // In the default temp dirs a glob age line names directories of its
+    // own, such as `e /tmp/job-* - - - 1h`: each match becomes a root with
+    // that age, as systemd-tmpfiles cleans each match.
+    if !explicit {
+        let tops = roots.clone();
+        for (pat, _) in &ages {
+            let text = pat.to_string_lossy();
+            if !text.contains(['*', '?', '[']) {
+                continue;
+            }
+            let Ok(under) = fs::canonicalize(
+                pat.ancestors()
+                    .find(|a| !a.to_string_lossy().contains(['*', '?', '[']))
+                    .unwrap_or(Path::new("/")),
+            ) else {
+                continue;
+            };
+            if !tops.iter().any(|t| under.starts_with(t)) {
+                continue;
+            }
+            for m in reap_profiles::glob(&text, 16) {
+                let is_dir = fs::symlink_metadata(&m).is_ok_and(|md| md.is_dir());
+                if let (true, Ok(c)) = (is_dir, fs::canonicalize(&m)) {
+                    if !roots.contains(&c) {
+                        roots.push(c);
+                    }
+                }
+            }
+        }
+    }
+    // A root inside another is judged as a root, not as an entry of the
+    // outer one, as systemd-tmpfiles leaves a path with a line of its own
+    // to that line.
+    let all_roots = roots.clone();
     // A line's time letters count unless --age-by was given, and a ~ age
     // reaps inside each subdirectory instead of the directory itself.
     type Key = (i64, Option<AgeBy>);
@@ -1489,7 +1523,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 status = 1;
                 continue;
             };
-            let mut names: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+            let mut names: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| !all_roots.contains(p))
+                .collect();
             names.sort();
             entries.extend(
                 names
