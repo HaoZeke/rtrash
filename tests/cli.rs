@@ -4818,6 +4818,36 @@ fn reap_profiles_take_partial_downloads_and_tarballs_only() {
     assert!(!j.contains("numpy-2.0-py312_0\""), "{j}");
 }
 
+/// node-gyp takes old header downloads and leaves a fresh one.
+#[cfg(target_os = "linux")]
+#[test]
+fn reap_profiles_take_old_node_gyp_headers() {
+    let sb = Sandbox::new("reap-node-gyp");
+    let gyp = sb.root.join(".cache/node-gyp");
+    let old = gyp.join("16.20.2");
+    let fresh = gyp.join("22.1.0");
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&fresh).unwrap();
+    age_tree(&old);
+    let out = reap_cmd(
+        &sb,
+        &[
+            "reap",
+            "-n",
+            "--json",
+            "--older-than=1h",
+            "--age-by=m",
+            "-p",
+            "node-gyp",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let j = stdout_of(&out);
+    let reaped = j.split(r#""skipped""#).next().unwrap();
+    assert!(reaped.contains(&json_path(&old)), "{j}");
+    assert!(!reaped.contains(&json_path(&fresh)), "{j}");
+}
+
 /// torch takes a stale partial checkpoint and an old inductor cache and
 /// leaves the finished checkpoint; vllm takes an old compile cache.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -265,8 +265,19 @@ const BUILTIN: &[B] = &[
     b("gradle", "Gradle build cache and daemon logs", &["${GRADLE_USER_HOME:-~/.gradle}/caches/build-cache-*/*", "${GRADLE_USER_HOME:-~/.gradle}/daemon/*/daemon-*.out.log"], 30, Permanent),
     group(
         "pkg",
-        "package caches: pip, uv, npm, pnpm, yarn, bun, conda, mamba, pre-commit",
-        &["pip", "uv", "npm", "pnpm", "yarn", "bun", "conda", "mamba", "pre-commit"],
+        "package caches: pip, uv, npm, pnpm, yarn, bun, conda, mamba, pre-commit, node-gyp",
+        &[
+            "pip",
+            "uv",
+            "npm",
+            "pnpm",
+            "yarn",
+            "bun",
+            "conda",
+            "mamba",
+            "pre-commit",
+            "node-gyp",
+        ],
     ),
     B {
         tool: &["pip", "cache", "purge"],
@@ -344,6 +355,13 @@ const BUILTIN: &[B] = &[
             Permanent,
         )
     },
+    b(
+        "node-gyp",
+        "node-gyp header downloads for old Node versions (fetched again on the next native build)",
+        &["unix:C/node-gyp/*", "windows:C/node-gyp/Cache/*"],
+        90,
+        Permanent,
+    ),
     b(
         "thumbnails",
         "freedesktop thumbnails",
