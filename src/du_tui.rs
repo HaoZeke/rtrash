@@ -66,6 +66,8 @@ enum Mode {
     Info,
     /// Typing a name filter (`/`).
     Filter,
+    /// Every mark, from all directories (`m`).
+    Marks,
 }
 
 /// What the explorer orders rows by: a size, count or age key, or name.
@@ -193,6 +195,8 @@ struct App {
     /// Marks left behind in other views, by path: they stay marked while
     /// the user browses elsewhere and join the next trash, print or copy.
     away: BTreeMap<PathBuf, Item>,
+    /// The cursor in the marks panel.
+    marks_at: usize,
     mode: Mode,
     status: String,
     quit: bool,
@@ -626,6 +630,7 @@ impl App {
             list_state,
             sel: Selection::new(),
             away: BTreeMap::new(),
+            marks_at: 0,
             mode: Mode::Browse,
             status: String::new(),
             quit: false,
@@ -1013,6 +1018,83 @@ impl App {
             let p = self.rows()[i].path.clone();
             self.away.remove(&p);
             self.sel.mark(i);
+        }
+    }
+
+    /// Every mark, from this view and the others, in path order.
+    fn all_marks(&self) -> Vec<Item> {
+        let mut out: Vec<Item> = self.away.values().cloned().collect();
+        out.extend(
+            self.sel
+                .marked_sorted()
+                .into_iter()
+                .filter_map(|i| self.rows().get(i).cloned()),
+        );
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out
+    }
+
+    /// Open the marks panel (`m`).
+    fn show_marks(&mut self) {
+        if self.marked_count() == 0 {
+            self.status = "nothing marked".into();
+            return;
+        }
+        self.marks_at = self.marks_at.min(self.marked_count() - 1);
+        self.mode = Mode::Marks;
+    }
+
+    /// Drop the mark on `path`, here or in another view.
+    fn unmark(&mut self, path: &Path) {
+        if self.away.remove(path).is_some() {
+            return;
+        }
+        if let Some(i) = self.rows().iter().position(|r| r.path == path) {
+            if self.sel.is_marked(i) {
+                self.sel.toggle(i);
+            }
+        }
+    }
+
+    fn on_key_marks(&mut self, code: KeyCode, mods: KeyModifiers) {
+        let marks = self.all_marks();
+        let n = marks.len();
+        match code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.marks_at = (self.marks_at + 1).min(n.saturating_sub(1));
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.marks_at = self.marks_at.saturating_sub(1),
+            KeyCode::Char(' ') | KeyCode::Char('x') => {
+                if let Some(it) = marks.get(self.marks_at) {
+                    let p = it.path.clone();
+                    self.unmark(&p);
+                    self.status = format!("unmarked {} · {} marked", p.display(), n - 1);
+                }
+                if n <= 1 {
+                    self.mode = Mode::Browse;
+                } else {
+                    self.marks_at = self.marks_at.min(n - 2);
+                }
+            }
+            KeyCode::Enter => {
+                self.mode = Mode::Browse;
+                if let Some(it) = marks.get(self.marks_at) {
+                    if let Some(dir) = up(&self.roots, &it.path) {
+                        let p = it.path.clone();
+                        if dir != self.cur {
+                            self.go(dir, Some(&p));
+                        } else if let Some(i) = self.rows().iter().position(|r| r.path == p) {
+                            self.select(i);
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                self.mode = Mode::Browse;
+                self.ask_delete();
+            }
+            KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => self.quit = true,
+            _ => self.mode = Mode::Browse,
         }
     }
 
@@ -1467,6 +1549,7 @@ impl App {
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
         match self.mode {
             Mode::Filter => self.on_key_filter(code, mods),
+            Mode::Marks => self.on_key_marks(code, mods),
             Mode::Info => {
                 if self.keys.resolve_help(code, mods) == Some(Action::QuitHard) {
                     self.quit = true;
@@ -1508,6 +1591,7 @@ impl App {
                         KeyCode::Char('C') => return self.sort_by(Order::Key(SortKey::Items)),
                         KeyCode::Char('M') => return self.sort_by(Order::Key(SortKey::Mtime)),
                         KeyCode::Char('i') => return self.show_info(),
+                        KeyCode::Char('m') => return self.show_marks(),
                         KeyCode::Char('p') => return self.print_and_quit(),
                         KeyCode::Char('y') => return self.copy_paths(),
                         KeyCode::Char('b') => return self.ask_shell(),
@@ -1991,6 +2075,53 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             area,
         );
     }
+    if app.mode == Mode::Marks {
+        let r = f.area();
+        let w = r.width.saturating_sub(4).min(100);
+        let marks = app.all_marks();
+        let room = r.height.saturating_sub(4).max(1) as usize;
+        let first = app.marks_at.saturating_sub(room.saturating_sub(1));
+        let lines: Vec<Line> = marks
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(room)
+            .map(|(i, it)| {
+                let head = format!(
+                    "{} {:>9}  ",
+                    if i == app.marks_at { ">" } else { " " },
+                    format_bytes(it.disk)
+                );
+                let room = (w.saturating_sub(2) as usize).saturating_sub(head.chars().count());
+                let line = Line::from(format!(
+                    "{head}{}",
+                    fit_left(&crate::util::term_path(&it.path), room)
+                ));
+                if i == app.marks_at {
+                    line.style(Style::default().add_modifier(Modifier::REVERSED))
+                } else {
+                    line
+                }
+            })
+            .collect();
+        let h = (lines.len() as u16 + 2).min(r.height);
+        let area = ratatui::layout::Rect {
+            x: r.x + (r.width - w) / 2,
+            y: r.y + (r.height - h) / 2,
+            width: w,
+            height: h,
+        };
+        let total: u64 = app.targets().iter().map(|t| t.disk).sum();
+        f.render_widget(ratatui::widgets::Clear, area);
+        f.render_widget(
+            Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(
+                "{} marked, {} · space unmark · enter go · d trash · other keys close",
+                marks.len(),
+                format_bytes(total)
+            ))),
+            area,
+        );
+    }
     if app.mode == Mode::Help {
         crate::tui_term::draw_help_overlay(
             f,
@@ -2010,6 +2141,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 "s n C M — sort by size, name, items or newest change; again reverses",
                 "S — show apparent sizes instead of disk use, or back",
                 "i — details of the cursor row (any key closes them)",
+                "m — every mark, from all directories: space unmarks, enter goes there",
                 "p — quit and print the marked paths (or the cursor row) · y — copy them",
                 if app.read_only {
                     "b — no shell in read-only mode"
@@ -2325,6 +2457,45 @@ mod tests {
             assert!(t.0.join(back).exists(), "{back}");
         }
         assert_eq!(a.view().disk, top_before);
+    }
+
+    #[test]
+    fn m_lists_every_mark_unmarks_and_goes_to_one() {
+        let t = tree("markpanel");
+        let mut a = app(&t);
+        a.on_key(KeyCode::Char('m'), KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Browse);
+        assert_eq!(a.status, "nothing marked");
+        // Mark file here and side inside big, then come back up.
+        a.select(1);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        a.select(0);
+        a.open();
+        a.select(1);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        a.back();
+        a.on_key(KeyCode::Char('m'), KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Marks);
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("2 marked"), "{text}");
+        assert!(text.contains("side") && text.contains("file"), "{text}");
+        // Paths sort big/side before file; enter goes to big on side.
+        a.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Browse);
+        assert_eq!(a.cur, t.0.join("w/big"));
+        assert_eq!(a.selected().unwrap().path, t.0.join("w/big/side"));
+        assert!(a.sel.is_marked(1));
+        // Unmark file, which sits in another view, from the panel.
+        a.on_key(KeyCode::Char('m'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('j'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Marks);
+        assert_eq!(a.marked_count(), 1);
+        assert_eq!(a.chosen_paths(), [t.0.join("w/big/side")]);
+        // The last unmark closes the panel.
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Browse);
+        assert_eq!(a.marked_count(), 0);
     }
 
     /// A mark under a marked directory goes with the directory.
