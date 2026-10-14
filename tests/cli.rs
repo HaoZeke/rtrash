@@ -5422,7 +5422,15 @@ fn reap_profiles_take_triton_and_jax_caches() {
     }
     let reaped = j.split(r#""skipped""#).next().unwrap();
     assert!(!reaped.contains(&json_path(&fresh)), "{j}");
-    assert!(j.contains("touched 0s ago"), "{j}");
+    // Fresh is skipped as recently touched; the age itself depends on the
+    // runner's speed, so only the reason's kind is checked.
+    let skipped = j.split(r#""skipped""#).nth(1).expect("skipped list");
+    let at = skipped
+        .find(&json_path(&fresh))
+        .unwrap_or_else(|| panic!("fresh not skipped: {j}"));
+    let entry = &skipped[at..skipped[at..].find('}').map_or(skipped.len(), |e| at + e)];
+    assert!(entry.contains(r#""reason":"touched "#), "{entry}");
+    assert!(entry.contains(" ago\""), "{entry}");
 }
 
 fn json_path(p: &Path) -> String {
