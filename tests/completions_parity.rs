@@ -9,7 +9,18 @@ use std::path::Path;
 use std::process::Command;
 
 const SUBCOMMANDS: &[&str] = &[
-    "put", "empty", "list", "status", "du", "restore", "undo", "rm", "who", "reap", "finder",
+    "put",
+    "empty",
+    "list",
+    "status",
+    "trash-stats",
+    "du",
+    "restore",
+    "undo",
+    "rm",
+    "who",
+    "reap",
+    "finder",
     "config",
 ];
 
@@ -163,8 +174,8 @@ fn completion_scripts_cover_every_help_option() {
     let fish = read("completions/rtrash.fish");
     let mut missing = Vec::new();
     for sub in SUBCOMMANDS {
-        let bash_block = array_block(&bash, &format!("_rtrash_{sub}_opts"));
-        let zsh_block = array_block(&zsh, &format!("{sub}_opts"));
+        let bash_block = array_block(&bash, &format!("_rtrash_{}_opts", sub.replace('-', "_")));
+        let zsh_block = array_block(&zsh, &format!("{}_opts", sub.replace('-', "_")));
         let fish_block = fish_lines(&fish, sub);
         for opt in help_long_opts(sub) {
             let flag = format!("--{opt}");

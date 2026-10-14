@@ -24,6 +24,10 @@ _rtrash_list_opts=(
   --larger-than= --smaller-than= --size --sort= --reverse --all-users --help --version
 )
 
+_rtrash_trash_stats_opts=(
+  --top= --home-only --trash-dir= --json --help --version
+)
+
 _rtrash_status_opts=(
   --home-only --trash-dir= --older-than= --newer-than= --json
   --larger-than= --smaller-than= --help --version
@@ -71,7 +75,7 @@ _rtrash_config_opts=(
   --path --default --help --version
 )
 
-_rtrash_subcommands=(put empty list status du restore undo rm who reap finder config setup keys completions man)
+_rtrash_subcommands=(put empty list status trash-stats du restore undo rm who reap finder config setup keys completions man)
 
 _rtrash_keys_opts=(
   -l --list --sample --path --help
@@ -138,7 +142,7 @@ _rtrash_main() {
   local i sub=
   for ((i = 1; i < ${#COMP_WORDS[@]}; i++)); do
     case "${COMP_WORDS[i]}" in
-      put | empty | list | status | du | restore | undo | rm | who | reap | finder | config | setup | keys | completions | man)
+      put | empty | list | status | trash-stats | du | restore | undo | rm | who | reap | finder | config | setup | keys | completions | man)
         sub="${COMP_WORDS[i]}"
         break
         ;;
@@ -164,6 +168,7 @@ _rtrash_main() {
     empty) _rtrash_complete_from _rtrash_empty_opts ;;
     list) _rtrash_complete_from _rtrash_list_opts ;;
     status) _rtrash_complete_from _rtrash_status_opts ;;
+    trash-stats) _rtrash_complete_from _rtrash_trash_stats_opts ;;
     du) _rtrash_complete_from _rtrash_du_opts ;;
     restore) _rtrash_complete_from _rtrash_restore_opts ;;
     undo) _rtrash_complete_from _rtrash_undo_opts ;;

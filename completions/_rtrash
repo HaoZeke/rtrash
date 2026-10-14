@@ -3,7 +3,7 @@
 # Preferred install: rtrash setup
 # Or: rtrash completions zsh > …/zsh/site-functions/_rtrash
 
-local -a put_opts empty_opts list_opts status_opts du_opts restore_opts undo_opts who_opts reap_opts finder_opts rm_opts config_opts
+local -a put_opts empty_opts list_opts status_opts trash_stats_opts du_opts restore_opts undo_opts who_opts reap_opts finder_opts rm_opts config_opts
 
 put_opts=(
   '(-f --force)'{-f,--force}'[ignore nonexistent files, never prompt]'
@@ -86,6 +86,15 @@ reap_opts=(
   '--json[print a JSON object]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
+)
+
+trash_stats_opts=(
+  '--top=[list the N largest items]:count:'
+  '--home-only[only the home trash]'
+  '*--trash-dir=[only this trash directory]:dir:_files -/'
+  '--json[print a JSON object]'
+  '--help[display help]'
+  '--version[display version]'
 )
 
 status_opts=(
@@ -247,6 +256,7 @@ _rtrash_dispatch() {
     'empty:purge trashed items'
     'list:list trashed items'
     'status:item count and reclaimable size summary'
+    'trash-stats:per-trash size, inodes, oldest and largest items'
     'du:find the largest directories and files to trash'
     'restore:restore a trashed item'
     'undo:restore everything one put run trashed'
@@ -285,6 +295,9 @@ _rtrash_dispatch() {
           ;;
         list)
           _arguments -s -C $list_opts
+          ;;
+        trash-stats)
+          _arguments -s -C $trash_stats_opts
           ;;
         status)
           _arguments -s -C $status_opts

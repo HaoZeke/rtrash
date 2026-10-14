@@ -5,7 +5,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[cfg(feature = "tui")]
 use rtrash::tui_binds;
-use rtrash::{config, du, empty, finder, list, put, reap, restore, rm, setup, status, undo, who};
+use rtrash::{
+    config, du, empty, finder, list, put, reap, restore, rm, setup, status, trash_stats, undo, who,
+};
 
 const HELP: &str = "\
 Usage: rtrash <COMMAND> [ARGS]...
@@ -17,6 +19,7 @@ Commands:
   empty [OPTION]... [DAYS]    purge trashed items, optionally older than DAYS
   list [OPTION]...            list trashed items
   status [OPTION]...          item count and reclaimable size summary
+  trash-stats [OPTION]...     per-trash size, inodes, oldest and largest items
   du [OPTION]... [PATH]...    find the largest directories and files to trash
   restore [OPTION]... [PATH]  restore a trashed item
   undo [OPTION]... [BATCH]    restore everything the last (or BATCH) put run trashed
@@ -66,6 +69,7 @@ fn main() {
             Some("empty") => empty::run(&format!("{argv0} empty"), &rest[1..]),
             Some("list") => list::run(&format!("{argv0} list"), &rest[1..]),
             Some("status") => status::run(&format!("{argv0} status"), &rest[1..]),
+            Some("trash-stats") => trash_stats::run(&format!("{argv0} trash-stats"), &rest[1..]),
             Some("du") => du::run(&format!("{argv0} du"), &rest[1..]),
             Some("restore") => restore::run(&format!("{argv0} restore"), &rest[1..]),
             Some("rm") => rm::run(&format!("{argv0} rm"), &rest[1..]),

@@ -3282,6 +3282,52 @@ fn put_warns_when_the_trash_grows_past_the_warn_size() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn trash_stats_summarizes_each_trash_as_text_and_json() {
+    let sb = Sandbox::new("trash-stats");
+    let run = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .output()
+            .unwrap()
+    };
+    let small = write_at(&sb.root, "work/small.txt", "s");
+    let big = write_at(&sb.root, "work/big.bin", &"b".repeat(200_000));
+    let tree = write_at(&sb.root, "work/tree/a/b.txt", "t");
+    for p in [&small, &big] {
+        assert!(run(&["put", p.to_str().unwrap()]).status.success());
+    }
+    let tree_dir = tree.parent().unwrap().parent().unwrap();
+    assert!(run(&["put", "-r", tree_dir.to_str().unwrap()])
+        .status
+        .success());
+    fs::write(sb.root.join("xdg/Trash/files/stray"), "o").unwrap();
+    let out = run(&["trash-stats", "--home-only", "--top=1", "--json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.contains(r#""items":4,"#), "{text}");
+    assert!(text.contains(r#""orphans":1,"#), "{text}");
+    // files: small, big, tree, tree/a, tree/a/b.txt, stray; info: 3.
+    assert!(text.contains(r#""inodes":9,"#), "{text}");
+    let top = &text[text.find(r#""top":["#).unwrap()..];
+    assert!(
+        top.contains("big.bin") && !top.contains("small.txt"),
+        "{text}"
+    );
+    assert!(text.contains(r#""oldest":{"name":"#), "{text}");
+    let out = run(&["trash-stats", "--home-only"]);
+    let plain = stdout_of(&out);
+    assert!(
+        plain.contains("4 items") && plain.contains("#1: big.bin"),
+        "{plain}"
+    );
+    assert_eq!(run(&["trash-stats", "--top=x"]).status.code(), Some(2));
+}
+
 /// A file in `dir` whose access and modification times are a day old.
 fn stale_file(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);

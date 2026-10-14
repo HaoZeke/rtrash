@@ -7,7 +7,7 @@ function __rtrash_seen_subcommand
     set -e cmd[1]
     for c in $cmd
         switch $c
-            case put empty list status du restore undo rm who reap finder config setup keys completions man
+            case put empty list status trash-stats du restore undo rm who reap finder config setup keys completions man
                 echo $c
                 return 0
         end
@@ -20,6 +20,7 @@ complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'put' -d 'move files 
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'empty' -d 'purge trashed items'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'list' -d 'list trashed items'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'status' -d 'item count and reclaimable size summary'
+complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'trash-stats' -d 'per-trash size, inodes, oldest and largest items'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'du' -d 'find the largest directories and files to trash'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'restore' -d 'restore a trashed item'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'undo' -d 'restore everything one put run trashed'
@@ -298,3 +299,11 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l trash
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l home-only -d 'always use the home trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -s v -l verbose -d 'also show skipped entries'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q reap' -l json -d 'print a JSON object'
+
+# trash-stats
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l top -x -d 'list the N largest items'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l home-only -d 'only the home trash'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l trash-dir -r -d 'only this trash directory'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l json -d 'print a JSON object'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l help -d 'display help'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l version -d 'display version'

@@ -536,6 +536,61 @@ take the size filters.
 An item's size is the one its
 .I $I
 record holds, which for a folder is its total at deletion.
+.SS trash-stats
+.B rtrash trash\-stats
+[\fIOPTION\fR]...
+.PP
+For each trash directory, its size on disk, item count, inodes (the
+files and directories under
+.I files/
+and
+.IR info/ ),
+orphans (payloads without a
+.IR .trashinfo ),
+the oldest and newest items by deletion date, and the largest items,
+then the total.
+Sizes come from the same walk and
+.I directorysizes
+cache as
+.BR status .
+.TP
+.BI \-\-top= N
+List the
+.I N
+largest items (default 5; 0 lists none).
+.TP
+.B \-\-home\-only
+Only the home trash.
+.TP
+.BI \-\-trash\-dir= PATH
+Only this trash directory (repeatable).
+.TP
+.B \-\-json
+Print a JSON object:
+.I trashes
+(each with
+.IR path ", " bytes ", " items ", " inodes ", " orphans ", " oldest ", " newest
+and
+.IR top ,
+an item being
+.IR name ", " original ", " date ", " epoch
+and
+.IR bytes )
+and
+.I total
+(with
+.IR bytes ", " items ", " inodes
+and
+.IR orphans ).
+.TP
+.B \-\-help
+Display help and exit.
+.TP
+.B \-\-version
+Output version information and exit.
+.PP
+On Windows it is not available; use
+.BR status .
 .SS du
 .B rtrash du
 [\fIOPTION\fR]... [\fIPATH\fR]...
