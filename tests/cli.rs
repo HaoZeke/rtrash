@@ -4998,6 +4998,40 @@ fn reap_profiles_take_ollama_partials_old_browsers_and_pip_scratch() {
     assert!(j.contains(&json_path(&tmp.join("pip-req-build-x1"))), "{j}");
 }
 
+/// The pip-build profile keeps pip's scratch dirs while a process named
+/// pip works in the temp dir.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_pip_build_waits_for_a_running_pip() {
+    let sb = Sandbox::new("reap-pip-busy");
+    let tmp = sb.root.join("tmp");
+    fs::create_dir_all(tmp.join("pip-install-ab12")).unwrap();
+    stale_file(&tmp.join("pip-install-ab12"), "setup.py");
+    age_tree(&tmp.join("pip-install-ab12"));
+    let mut child = spawn_as(&sb.root.join("bin/pip"), &tmp);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let out = reap_cmd(
+        &sb,
+        &[
+            "reap",
+            "--json",
+            "--age-by=m",
+            "--older-than=1h",
+            "-p",
+            "pip-build",
+        ],
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let j = stdout_of(&out);
+    assert!(
+        j.contains("is busy with pid") && j.contains("(pip, cwd)"),
+        "{j}"
+    );
+    assert!(tmp.join("pip-install-ab12").exists());
+}
+
 /// The puppeteer profile compares dotted versions and keeps the newest
 /// build of each browser.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

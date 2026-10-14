@@ -315,13 +315,16 @@ const BUILTIN: &[B] = &[
         tool: &["pip", "cache", "purge"],
         ..b("pip", "pip HTTP and wheel cache", &["unix:${PIP_CACHE_DIR:-C/pip}/http*/*", "unix:${PIP_CACHE_DIR:-C/pip}/wheels/*", "windows:${PIP_CACHE_DIR:-C/pip/Cache}/http*/*", "windows:${PIP_CACHE_DIR:-C/pip/Cache}/wheels/*"], 30, Permanent)
     },
-    b(
-        "pip-build",
-        "pip build, unpack and wheel scratch dirs left in the temp dir",
-        &["unix:${TMPDIR:-/tmp}/pip-*", "windows:${TEMP}/pip-*"],
-        2,
-        Permanent,
-    ),
+    B {
+        busy: &["pip", "pip3", "uv"],
+        ..b(
+            "pip-build",
+            "pip build, unpack and wheel scratch dirs left in the temp dir, kept while pip or uv holds anything there",
+            &["unix:${TMPDIR:-/tmp}/pip-*", "windows:${TEMP}/pip-*"],
+            2,
+            Permanent,
+        )
+    },
     B {
         tool: &["uv", "cache", "prune"],
         ..b("uv", "uv cache buckets", &["unix:${UV_CACHE_DIR:-~/.cache/uv}/*-v[0-9]*/*", "windows:${UV_CACHE_DIR:-C/uv/cache}/*-v[0-9]*/*"], 30, Permanent)
