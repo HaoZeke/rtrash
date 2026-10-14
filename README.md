@@ -78,7 +78,7 @@ Source: [docs/demo/](docs/demo/).
 | [docs/getting-started.md](docs/getting-started.md) | Install CLI + Python, shortest paths |
 | [docs/demo/](docs/demo/) | Terminal demo cast/GIF + recorder |
 | [docs/architecture.md](docs/architecture.md) | FreeDesktop layout, safety vs `rm` / `os.remove` / trash-cli |
-| [docs/benchmarks.md](docs/benchmarks.md) | Measured safer/better/faster vs trash-cli |
+| [docs/benchmarks.md](docs/benchmarks.md) | Measured safer/better/faster vs trash-cli, and `du` against dua, gdu and du |
 | [docs/bindings.md](docs/bindings.md) | Maturin/PyO3 API (`unlink` / `rmtree` replacements) |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes (towncrier fragments in `docs/newsfragments/`) |
 

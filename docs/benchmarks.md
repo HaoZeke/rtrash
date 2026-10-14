@@ -150,3 +150,16 @@ A thread pool larger than the CPU count helps a cold walk, which waits on I/O.
 With `--threads 24`, `.rustup` cold took 339 milliseconds instead of 409.
 
 Cold or warm, with 24 threads or the default, the totals still match coreutils `du -sB1` (disk) and `du -sb` (apparent) to the byte on `.rustup`, the source tree and `/usr`, for both builds.
+
+## du against dua, gdu and du (Linux x86_64, 2026-10-13)
+
+`rtrash du` ranks directories and files and tags artefacts and git state, so it does more per run than `dua aggregate`, `gdu -n -p` or `du -s`, which print totals. Warm page cache, 8 CPUs, ext4-family root file system, `hyperfine -N --warmup 2 --runs 8`.
+
+| Tree | rtrash du | dua 2.45.1 aggregate | gdu (static) -n -p | GNU du -s |
+|---|---:|---:|---:|---:|
+| synthetic: 400,000 files in 2,041 directories (1.31 GiB on disk) | 69.9 ± 9.2 ms | 1025.9 ± 48.3 ms | 156.1 ± 8.6 ms | 370.6 ± 17.0 ms |
+| ~/.cargo/registry/src (1.4 GiB) | 38.0 ± 3.7 ms | 338.3 ± 19.4 ms | 75.6 ± 4.7 ms | 129.0 ± 4.3 ms |
+
+All four agree on the synthetic tree's disk use (1.31 GiB). More dua threads (`-t 8`, `-t 24`) and `gdu -m 8` did not change their times. Memory: rtrash 5 MiB, dua 4 MiB, gdu 26 to 41 MiB, du 2 MiB. A cold cache was not measured (no root on the build host to drop caches).
+
+Reproduce: `cargo build --release && benches/compare_du.sh target/release/rtrash /path/to/tree ~/.cargo/registry/src`

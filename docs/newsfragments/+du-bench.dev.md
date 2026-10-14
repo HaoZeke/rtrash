@@ -1,1 +1,1 @@
-`bench/du.sh` times `rtrash du` against du(1), diskus, dust, dua, pdu and gdu with hyperfine, on warm and (with sudo) cold caches.
+`benches/compare_du.sh` times `rtrash du` against dua, gdu and du with hyperfine; the measured results are in the benchmarks page.
