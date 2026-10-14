@@ -747,6 +747,14 @@ With
 walk each trash whose total is missing or stale once and store it, so
 later runs answer at once.
 .TP
+.B \-\-exit\-low
+With
+.BR \-\-total :
+.B \-\-space
+as below, and exit with status 3 when any trash's file system is under
+10% free bytes or inodes (the totals still print), so a guard needs no
+JSON parsing to know it should act.
+.TP
 .B \-\-space
 With
 .BR \-\-total ,

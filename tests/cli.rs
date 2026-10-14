@@ -4342,6 +4342,50 @@ fn restore_carries_a_total_stored_while_it_ran() {
     assert_eq!(total(true), carried);
 }
 
+/// `trash-stats --total --exit-low` exits 3 while the trash's file
+/// system is under 10% free, 0 otherwise, and still prints the totals.
+#[cfg(unix)]
+#[test]
+fn trash_stats_exit_low_flags_a_full_file_system() {
+    let sb = Sandbox::new("total-exit-low");
+    let run = |args: &[&str], total: u64| {
+        Command::new(bin())
+            .args(args)
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .env("RTRASH_TEST_FS", format!("{total}:{}", sb.root.display()))
+            .env_remove("RTRASH_WARN_SIZE")
+            .env_remove("RTRASH_MAX_SIZE")
+            .output()
+            .unwrap()
+    };
+    let p = write_at(&sb.root, "work/a.bin", &"z".repeat(50_000));
+    assert!(run(&["put", p.to_str().unwrap()], 1 << 40).status.success());
+    let args = [
+        "trash-stats",
+        "--home-only",
+        "--total",
+        "--exit-low",
+        "--json",
+    ];
+    let roomy = run(&args, 1 << 40);
+    assert_eq!(roomy.status.code(), Some(0), "{}", stderr_of(&roomy));
+    assert!(stdout_of(&roomy).contains(r#""low":false"#));
+    // The sandbox holds about 50 kB, so a 55 kB file system is over 90% full.
+    let full = run(&args, 55_000);
+    assert_eq!(full.status.code(), Some(3), "{}", stderr_of(&full));
+    assert!(
+        stdout_of(&full).contains(r#""low":true"#),
+        "{}",
+        stdout_of(&full)
+    );
+    assert_eq!(
+        run(&["trash-stats", "--exit-low"], 55_000).status.code(),
+        Some(2)
+    );
+}
+
 /// `empty --dangling` keeps a current total current.
 #[cfg(unix)]
 #[test]

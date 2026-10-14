@@ -41,6 +41,8 @@ directories under files/ and info/), orphans (payloads without a
       --space           with --total, also give each trash's file system:
                         free bytes and inodes and whether either is under
                         10% (one statfs per trash, no walk)
+      --exit-low        with --total: --space, and exit 3 when any trash's
+                        file system is under 10% free bytes or inodes
       --json            print a JSON object ({trashes, total}); history
                         lines carry delta_bytes and delta_items
       --help            display this help and exit
@@ -341,12 +343,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut total_only = false;
     let mut measure = false;
     let mut space = false;
+    let mut exit_low = false;
     for a in args {
         match a.as_str() {
             "--home-only" => home_only = true,
             "--total" => total_only = true,
             "--measure" => measure = true,
             "--space" => space = true,
+            "--exit-low" => {
+                space = true;
+                exit_low = true;
+            }
             "--json" => json = true,
             "--history" => with_history = true,
             a if a.starts_with("--since=") => {
@@ -396,6 +403,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             total_only,
             measure,
             space,
+            exit_low,
             with_history,
             since,
             json,
@@ -427,7 +435,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         } else {
             print_totals(&rows, space.then_some(&fs[..]), &inodes);
         }
-        return 0;
+        return low_exit(exit_low, &fs);
     }
     if since.is_some() && !with_history {
         eprintln!("{prog}: --since goes with --history");
@@ -491,6 +499,19 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     0
 }
 
+/// `--exit-low`: 3 when any of `fs` is under the warning level, else 0.
+fn low_exit(exit_low: bool, fs: &[Option<crate::space::Space>]) -> i32 {
+    let low = fs
+        .iter()
+        .flatten()
+        .any(|s| !s.lows(crate::space::WARN_FREE_PERCENT).is_empty());
+    if exit_low && low {
+        3
+    } else {
+        0
+    }
+}
+
 /// `trash-stats` on the Finder trashes, with `--total` and `--history`
 /// read from [`crate::finder_total`].
 #[cfg(unix)]
@@ -501,6 +522,7 @@ fn finder_run(
     total_only: bool,
     measure: bool,
     space: bool,
+    exit_low: bool,
     with_history: bool,
     since: Option<i64>,
     json: bool,
@@ -557,7 +579,7 @@ fn finder_run(
         } else {
             print_totals(&rows, space.then_some(&fs[..]), &inodes);
         }
-        return 0;
+        return low_exit(exit_low, &fs);
     }
     let mut all = crate::finder_shared::stats(top);
     if with_history {

@@ -333,6 +333,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l total -d 'only size and items, from the stored running total'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l space -d 'with --total, also give free bytes and inodes'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l measure -d 'with --total, measure a trash without a current total'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l space -d 'with --total, also give each trash file system free bytes and inodes'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l exit-low -d 'with --total, --space and exit 3 when a trash file system runs low'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l json -d 'print a JSON object'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l help -d 'display help'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q trash-stats' -l version -d 'display version'
