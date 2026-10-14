@@ -175,6 +175,43 @@ fn reap_purge_trash_dry_run_lists_the_drive_recycle_bin_oldest_first() {
 }
 
 #[test]
+fn reap_install_timer_dry_run_prints_task_xml_for_a_long_command() {
+    let local = std::env::temp_dir().join(format!("rtrash-xml-{}", std::process::id()));
+    let mut args = vec!["reap", "--install-timer=30m", "-n", "--when-below=10%"];
+    // Past the 261 characters /TR takes.
+    args.extend(std::iter::repeat_n("--older-than=1h", 20));
+    let out = Command::new(bin())
+        .args(&args)
+        .env("LOCALAPPDATA", &local)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let xml = local.join("rtrash").join("rtrash-reap.xml");
+    assert!(
+        text.contains(&format!("would write {}:", xml.display())),
+        "{text:?}"
+    );
+    assert!(text.contains("<Interval>PT30M</Interval>"), "{text:?}");
+    assert!(
+        text.contains("<Arguments>reap --when-below=10% --older-than=1h"),
+        "{text:?}"
+    );
+    assert!(
+        text.contains(&format!(
+            "schtasks /Create /F /TN rtrash-reap /XML {}",
+            xml.display()
+        )),
+        "{text:?}"
+    );
+    assert!(!xml.exists(), "a dry run wrote the XML");
+}
+
+#[test]
 fn reap_remove_timer_dry_run_prints_the_schtasks_delete() {
     let out = Command::new(bin())
         .args(["reap", "--remove-timer", "-n"])
