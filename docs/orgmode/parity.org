@@ -25,9 +25,12 @@ Each tool reads the others' duplicate names, so the spelling only shows in
 =files/=.
 gio lists and restores rtrash items (=gio trash --list=,
 =gio trash --restore trash:///NAME=), and rtrash restores gio items.
-GLib caveat: in the C or POSIX locale gio escapes non-ASCII bytes when it
-decodes a =trash://= URI, so a restored =é= comes back as a literal
-=\xc3\xa9=; run gio under a UTF-8 locale (=LANG=C.UTF-8=).
+GLib caveat: gio 2.80 (Ubuntu 24.04) restores a name holding both =%=
+and non-ASCII bytes, such as =x 100% é=, as =x 100% \xc3\xa9=, even for
+an item gio trashed itself, under a UTF-8 locale. gio 2.84 (Debian 13)
+restores it intact. The interop smoke test probes =x é=, =x 100%= and
+the pair, and counts gio restores of such names as known failures where
+the probe fails. No upstream GLib or gvfs issue turned up yet.
 
 * trash-cli command lines
 

@@ -100,6 +100,39 @@ restore() { # TOOL ABSPATH
 }
 
 fail=0
+# gio's own round trip, by name shape, to tell a gvfs restore bug from an
+# rtrash one. CI on Ubuntu 24.04 (GLib 2.80) restored 'x 100% é' as
+# 'x 100% \xc3\xa9' even between gio and gio, under a UTF-8 locale.
+gio_pct_bug=0
+if [[ " ${restorers[*]} " == *" gio "* ]]; then
+  echo "gio: $(gio --version 2>&1)"
+  if command -v dpkg-query >/dev/null; then
+    dpkg-query -W -f='  ${Package} ${Version}\n' 'libglib2.0-0*' 'libglib2.0-bin' gvfs gvfs-daemons 2>/dev/null || true
+  fi
+  probe() { # NAME -> 0 when gio trashes and restores it intact
+    local f="$scratch/w/probe $1"
+    echo probe > "$f"
+    gio trash "$f" 2>/dev/null || return 1
+    local uri
+    uri=$(gio_uri "$f") || return 1
+    gio trash --restore "$uri" 2>/dev/null
+    [[ $(cat "$f" 2>/dev/null) == probe ]] && rm -f -- "$f"
+  }
+  declare -A seen=()
+  for n in "x é" "x 100%" "x 100% é"; do
+    if probe "$n"; then seen[$n]=ok; else seen[$n]=FAIL; fi
+    echo "probe gio -> gio '$n': ${seen[$n]}"
+  done
+  ls -b "$scratch/w" | grep '^probe' | sed 's/^/  left: /' || true
+  if [[ ${seen["x 100% é"]} == FAIL ]]; then
+    gio_pct_bug=1
+    echo "note: this gio cannot restore a name with '%' and non-ASCII bytes; gio restores of such names count as known failures (xfail)"
+  elif [[ -n ${RTRASH_INTEROP_EXPECT_GIO_PCT_BUG:-} ]]; then
+    echo "FAIL probe: gio now restores '%' with non-ASCII; drop RTRASH_INTEROP_EXPECT_GIO_PCT_BUG and the xfail"
+    fail=1
+  fi
+fi
+
 for p in "${putters[@]}"; do
   for r in "${restorers[@]}"; do
     f="$scratch/w/$p to $r 100% é"
@@ -113,6 +146,13 @@ for p in "${putters[@]}"; do
     uri_before=$( [[ $r == gio ]] && gio_uri "$f" 2>&1 || true)
     if out=$(restore "$r" "$f" 2>&1; echo "exit $?") && [[ $(cat "$f" 2>/dev/null) == "$p $r" ]]; then
       echo "ok   $p -> $r"
+    elif [[ $r == gio && $gio_pct_bug == 1 ]]; then
+      echo "xfail $p -> $r (gio's own restore bug, see the probe above)"
+      ls -b "$scratch/w" 2>&1 | sed 's/^/  | /' || true
+      # Clear what gio left so later pairings start clean.
+      for left in "$scratch/w/$p to $r"*; do
+        [[ -e $left ]] && rm -f -- "$left"
+      done
     else
       echo "FAIL $p -> $r"
       printf '%s\n' "$out" | sed 's/^/  | /'
