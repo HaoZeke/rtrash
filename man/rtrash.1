@@ -3210,6 +3210,13 @@ or
 .I info
 folder refuses writes (made read-only, or a read-only remount): put
 warns once and falls back before the first item.
+The home trash has no fallback: when its
+.I files
+or
+.I info
+folder refuses writes, put fails each item with
+.I the home trash is not writable
+and names the folder, before moving anything.
 .SH EXIT STATUS
 .TP
 .B 0

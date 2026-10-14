@@ -360,6 +360,25 @@ fn ensure_user_trash(td: &TrashDir, uid: u32, fallback: &Path) -> io::Result<()>
     Ok(())
 }
 
+/// Make the home trash ready and check that `files/` and `info/` take
+/// writes. The home trash has no fallback, so a read-only one fails here
+/// with one clear reason instead of a failure for each item.
+pub fn ensure_home(td: &TrashDir) -> io::Result<()> {
+    td.ensure()?;
+    for d in [td.files(), td.info()] {
+        if !writable(&d) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "the home trash is not writable: '{}' refuses new entries",
+                    d.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// True when this process may create entries in `dir`.
 fn writable(dir: &Path) -> bool {
     let Ok(c) = CString::new(dir.as_os_str().as_bytes()) else {
@@ -442,7 +461,7 @@ pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
             root: home_trash(),
             topdir: None,
         };
-        home.ensure()?;
+        ensure_home(&home)?;
         return Ok(home);
     }
 
@@ -451,14 +470,14 @@ pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
         topdir: None,
     };
     if dev_of_deepest_existing(&home.root) == Some(dev) {
-        home.ensure()?;
+        ensure_home(&home)?;
         return Ok(home);
     }
 
     if let Some(td) = select_on_volume(&mount_top_of_path(abs), uid()) {
         return Ok(td);
     }
-    home.ensure()?;
+    ensure_home(&home)?;
     Ok(home)
 }
 
@@ -3229,6 +3248,29 @@ proc /proc proc rw 0 0
             None,
             "file payloads must not use directorysizes"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ensure_home_refuses_a_read_only_files_dir() {
+        let root = std::env::temp_dir().join(format!("rtrash-homero-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let td = TrashDir {
+            root: root.join("Trash"),
+            topdir: None,
+        };
+        ensure_home(&td).unwrap();
+        fs::set_permissions(td.files(), fs::Permissions::from_mode(0o555)).unwrap();
+        // Root may write anywhere, so only an ordinary user sees the refusal.
+        if unsafe { libc::geteuid() } != 0 {
+            let err = ensure_home(&td).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+            assert!(
+                err.to_string().contains("home trash is not writable"),
+                "{err}"
+            );
+        }
+        fs::set_permissions(td.files(), fs::Permissions::from_mode(0o700)).unwrap();
         let _ = fs::remove_dir_all(&root);
     }
 }

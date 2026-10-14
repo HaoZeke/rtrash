@@ -820,7 +820,7 @@ fn resolve_put_trash(
             root: trashdir::home_trash(),
             topdir: None,
         };
-        td.ensure()?;
+        trashdir::ensure_home(&td)?;
         return Ok(td);
     }
     trashdir::select(abs, meta.dev())

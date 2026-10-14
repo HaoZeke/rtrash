@@ -73,6 +73,8 @@ exactly; only the =trash-restore= name narrows to the current directory.
 These exist only in rtrash: =rm(1)= flags on put, =undo= of the last put
 run, size budgets (=empty --max-size=), =du= and =reap=, =--json= on every
 listing, and the restore conflict policies (=--conflict=rename|skip=).
+A read-only home trash fails put up front with one clear reason, since
+it has no fallback; trash-cli fails each item with a bare error.
 
 * macOS
 
