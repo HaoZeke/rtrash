@@ -2982,13 +2982,40 @@ fn copies_across_volumes_keep_macos_acls() {
         let out = Command::new("ls").arg("-led").arg(p).output().unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
+    // The entries without the first line of `ls -le`; macOS names the
+    // read right `list` on a directory, so compare with the source.
+    let entries = |p: &Path| -> Vec<String> {
+        acl(p)
+            .lines()
+            .skip(1)
+            .map(|l| l.trim().to_string())
+            .collect()
+    };
+    let names = ["f.txt", "d", "d/inner"];
+    let before: Vec<(String, Vec<String>)> = names
+        .iter()
+        .map(|n| {
+            let p = sb.work().join(n);
+            let e = entries(&p);
+            assert!(
+                e.iter().any(|l| l.contains("user:nobody allow")),
+                "before: {}",
+                acl(&p)
+            );
+            (acl(&p), e)
+        })
+        .collect();
     let check = |base: &Path, when: &str| {
-        for p in [base.join("f.txt"), base.join("d"), base.join("d/inner")] {
-            let shown = acl(&p);
-            assert!(shown.contains("user:nobody allow read"), "{when}: {shown}");
+        for (n, (shown_before, want)) in names.iter().zip(&before) {
+            let p = base.join(n);
+            assert_eq!(
+                &entries(&p),
+                want,
+                "{when}: {}\nbefore: {shown_before}",
+                acl(&p)
+            );
         }
     };
-    check(&sb.work(), "before");
     let pin = format!("--trash-dir={}", other.display());
     let run = |args: &[&str]| {
         Command::new(bin())
