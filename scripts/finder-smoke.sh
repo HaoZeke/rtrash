@@ -14,7 +14,19 @@ rt=$1
 unset RTRASH_MACOS_TRASH
 work=$(mktemp -d "$HOME/rtrash-finder.XXXXXX")
 f="$work/a b %é.txt"
-fail() { echo "FAIL $*"; exit 1; }
+# On failure, show what rtrash and the Finder Trash hold, so a CI log
+# says whether the item went missing or only its Put Back path did
+# (Finder may store the name decomposed, NFD, unlike the NFC we passed).
+fail() {
+  echo "FAIL $*"
+  echo "--- rtrash list"
+  "$rt" list 2>&1 | tail -n 20 || true
+  echo "--- ~/.Trash"
+  ls -la "$HOME/.Trash" 2>&1 | tail -n 20 || true
+  echo "--- wanted (hex)"
+  printf '%s' "$f" | od -An -tx1 | tail -n 3
+  exit 1
+}
 listed() { # PATH: wait until list shows PATH
   for _ in $(seq 20); do
     "$rt" list | grep -qF -- "$1" && return 0
