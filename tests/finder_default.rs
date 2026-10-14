@@ -712,3 +712,18 @@ fn undo_finds_a_name_finder_stored_decomposed() {
     assert!(o.status.success(), "{}{}", out(&o), err(&o));
     assert_eq!(fs::read(&f).unwrap(), b"x");
 }
+
+#[test]
+fn an_unscoped_finder_empty_needs_all_for_older_puts() {
+    let b = Box_::new("guard");
+    for n in ["g1", "g2"] {
+        fs::write(b.work().join(n), b"x").unwrap();
+        assert!(b.run(&["put", n], "").status.success());
+    }
+    let o = b.run(&["empty", "--plain"], "");
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+    assert!(b.finder().join("g1").exists() && b.finder().join("g2").exists());
+    let o = b.run(&["empty", "--plain", "--all"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!b.finder().join("g1").exists() && !b.finder().join("g2").exists());
+}

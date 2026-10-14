@@ -518,7 +518,7 @@ fn age_cuts_keep_items_whose_age_is_unknown() {
         );
     }
     // A full empty still clears them.
-    assert!(sb.run(&["empty", "--home-only"]).status.success());
+    assert!(sb.run(&["empty", "--home-only", "--all"]).status.success());
     assert!(!sb.trash().join("files/undated").exists());
 }
 
@@ -5812,7 +5812,7 @@ fn history_counts_stay_right_when_every_change_shares_a_clock_tick() {
     assert!(run(&["put", e.to_str().unwrap()]).status.success());
     assert_eq!(last_items(), 2, "put e");
     let out = Command::new(bin())
-        .args(["empty", "--home-only"])
+        .args(["empty", "--home-only", "--all"])
         .current_dir(sb.work())
         .env("XDG_DATA_HOME", sb.root.join("xdg"))
         .env("XDG_CONFIG_HOME", sb.root.join(".config"))
@@ -5984,4 +5984,27 @@ fn put_warns_when_the_trash_file_system_is_low() {
     let quiet = write_at(&sb.root, "work/ok.bin", "x");
     let out = sb.run(&["put", "--home-only", quiet.to_str().unwrap()]);
     assert!(!stderr_of(&out).contains("is low"), "{}", stderr_of(&out));
+}
+
+#[test]
+fn an_unscoped_empty_needs_all_for_items_other_puts_left() {
+    let sb = Sandbox::new("emptyguard");
+    for n in ["a", "b"] {
+        fs::write(sb.work().join(n), b"x").unwrap();
+        assert!(sb.run(&["put", n]).status.success());
+    }
+    // b's run is the latest; a came from another one.
+    let out = sb.run(&["empty", "--home-only"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("--all"), "{}", stderr_of(&out));
+    assert!(sb.trash().join("files/a").exists() && sb.trash().join("files/b").exists());
+    // Scoped or dry runs go ahead.
+    assert!(sb.run(&["empty", "--home-only", "-n"]).status.success());
+    assert!(sb.run(&["empty", "--home-only", "--all"]).status.success());
+    assert!(!sb.trash().join("files/a").exists());
+    // Only the latest put's items: no --all needed.
+    fs::write(sb.work().join("c"), b"x").unwrap();
+    assert!(sb.run(&["put", "c"]).status.success());
+    assert!(sb.run(&["empty", "--home-only"]).status.success());
+    assert!(!sb.trash().join("files/c").exists());
 }

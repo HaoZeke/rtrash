@@ -90,6 +90,7 @@ export extern "rtrash empty" [
     --force(-f)  # do not ask (cancels an earlier -i)
     --all-users  # every user's trash this account can write (root: all)
     --plain  # skip TUI; non-interactive empty (also used when stdin is not a TTY)
+    --all  # let an unscoped empty remove items other puts left
     --older-than: string  # same as positional DAYS, or a duration such as 2h or 1d12h
     --max-size: string  # remove items until the trash (all roots in scope
     --prune: string@"nu-complete rtrash prune"  # which items --max-size removes first
@@ -361,6 +362,7 @@ export extern "trash-empty" [
     --force(-f)  # do not ask (cancels an earlier -i)
     --all-users  # every user's trash this account can write (root: all)
     --plain  # skip TUI; non-interactive empty (also used when stdin is not a TTY)
+    --all  # let an unscoped empty remove items other puts left
     --older-than: string  # same as positional DAYS, or a duration such as 2h or 1d12h
     --max-size: string  # remove items until the trash (all roots in scope
     --prune: string@"nu-complete rtrash prune"  # which items --max-size removes first

@@ -466,6 +466,15 @@ Emit a JSON summary on stdout
 .B \-\-plain
 Never open the empty browser on a TTY.
 .TP
+.B \-\-all
+Let an empty with no age, size or free\-space cut and no
+.B \-\-trash\-dir
+remove items other put runs left.
+Without it, such an empty goes ahead only when every item came from the
+latest put; otherwise it asks on a terminal and exits 2 elsewhere.
+The trash is often shared by several sessions or agents, and an empty
+cannot be undone.
+.TP
 .B \-\-help
 Display help and exit.
 .TP

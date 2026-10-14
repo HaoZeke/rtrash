@@ -279,6 +279,23 @@ fn runs() -> Vec<(String, Vec<Logged>)> {
     by
 }
 
+/// Items in the Finder trashes, and how many of them the latest put run
+/// did not leave.
+pub fn outside_latest_put() -> (usize, usize) {
+    let all = entries().unwrap_or_default();
+    let runs = runs();
+    let latest = runs.first().map(|(_, v)| v.as_slice()).unwrap_or(&[]);
+    let foreign = all
+        .iter()
+        .filter(|e| {
+            !latest
+                .iter()
+                .any(|l| l.trash == e.trash && l.name == e.name)
+        })
+        .count();
+    (all.len(), foreign)
+}
+
 /// `undo` on the Finder Trash.
 pub fn undo(
     prog: &str,

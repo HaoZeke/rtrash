@@ -42,6 +42,7 @@ Linked as =trash-put=, =trash-list=, =trash-empty=, =trash-restore= and
 | =trash-empty DAYS=, =-f=           | same; DAYS also takes an age such as =2h=          |
 | =trash-empty -i=                   | same prompt, then empties                          |
 | =trash-empty --all-users=          | same                                               |
+| unscoped =trash-empty= (no DAYS)   | asks or refuses unless every item came from the latest put; =--all= skips the guard |
 | =trash-restore= (current dir)      | same scope and "No files trashed" message          |
 | =trash-restore PATH=               | same: the item at PATH and items from under it     |
 | =trash-restore --sort date/path/none= | same                                            |

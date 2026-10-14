@@ -39,6 +39,7 @@ empty_opts=(
   '--prune=[which items --max-size removes first]:policy:(oldest largest)'
   '--until-free=[remove the oldest items until each trash file system has SPEC free]:spec:'
   '--dangling[remove only records whose payload is gone]'
+  '--all[let an unscoped empty remove items other puts left]'
   '--json[emit a JSON summary]'
   '--plain[skip TUI]'
   '(- *)'--help'[display help and exit]'

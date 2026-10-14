@@ -7,10 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use rayon::prelude::*;
 
 use crate::info;
-#[cfg(feature = "tui")]
 use crate::list;
 use crate::trashdir::{self, TrashDir};
-#[cfg(feature = "tui")]
 use crate::util::stdin_is_tty;
 use crate::util::url_decode;
 
@@ -31,6 +29,10 @@ permanent delete). Use --plain to skip the TUI.
                      them (as trash-cli); skips the TUI
   -f, --force      do not ask (cancels an earlier -i)
       --plain      skip TUI; non-interactive empty (also used when stdin is not a TTY)
+      --all        allow an empty with no DAYS, --max-size, --until-free or
+                     --trash-dir to remove items other puts left; without
+                     it such an empty asks on a terminal and refuses
+                     elsewhere unless every item came from the latest put
       --older-than=AGE  same as positional DAYS; AGE may also be a duration
                      such as 2h, 30m or 1d12h
       --max-size=SIZE  remove items until the trash (all roots in scope
@@ -73,6 +75,8 @@ struct Opts {
     dangling: bool,
     /// `-i`: ask once before emptying, as trash-cli does.
     interactive: bool,
+    /// `--all`: an unscoped empty may take items other puts left.
+    all: bool,
     all_users: bool,
 }
 
@@ -177,6 +181,41 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
 }
 
 /// trash-cli's `-i` prompt: name the trash directories, read a y or n.
+/// Whether this empty would take everything: no age, size or free-space
+/// cut, no `--trash-dir` pin, no `--all`, and not a dry run.
+fn unscoped(opts: &Opts) -> bool {
+    opts.days.is_none()
+        && opts.max_size.is_none()
+        && opts.trash_dirs.is_empty()
+        && !opts.all
+        && !opts.dry_run
+}
+
+/// The guard on an unscoped empty: it goes ahead when every one of the
+/// `total` items came from the latest put run; otherwise it asks on a
+/// terminal and refuses elsewhere, since the trash may be shared (other
+/// agents, other sessions) and an empty cannot be undone.
+fn guard_ok(prog: &str, total: usize, foreign: usize) -> bool {
+    if foreign == 0 {
+        return true;
+    }
+    if stdin_is_tty() {
+        eprint!(
+            "Permanently delete all {total} items, {foreign} of them not from the latest put? (y/N) "
+        );
+        let mut line = String::new();
+        let _ = io::stdin().read_line(&mut line);
+        return matches!(line.trim(), "y" | "Y" | "yes" | "Yes");
+    }
+    eprintln!(
+        "{prog}: refusing to empty the whole trash: {foreign} of {total} items are not from the latest put"
+    );
+    eprintln!(
+        "{prog}: pass --all to remove everything, or scope it (DAYS, --max-size, --until-free, --trash-dir, or rm PATTERN)"
+    );
+    false
+}
+
 fn confirm(dirs: &[TrashDir]) -> bool {
     eprintln!("Would empty the following trash directories:");
     for d in dirs {
@@ -219,6 +258,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         dangling: false,
         interactive: false,
         all_users: false,
+        all: false,
     };
     for arg in args {
         match arg.as_str() {
@@ -228,6 +268,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "-i" | "--interactive" => opts.interactive = true,
             "--all-users" => opts.all_users = true,
             "--plain" => opts.plain = true,
+            "--all" => opts.all = true,
             "--json" => opts.json = true,
             "--dangling" => opts.dangling = true,
             "--home-only" => opts.home_only = true,
@@ -306,6 +347,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 "--dangling does not apply to the Finder Trash; pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop",
             );
         }
+        if !opts.interactive && unscoped(&opts) {
+            let (total, foreign) = crate::finder_shared::outside_latest_put();
+            if !guard_ok(prog, total, foreign) {
+                return 2;
+            }
+        }
         if opts.interactive && !opts.dry_run {
             eprint!("Would empty the Finder Trash. Proceed? (y/N) ");
             let mut line = String::new();
@@ -366,6 +413,18 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         entries.extend(list::orphans(&dirs));
         let refs: Vec<&list::Entry> = entries.iter().collect();
         return crate::empty_tui::run(prog, refs, opts.dry_run);
+    }
+
+    if !opts.interactive && unscoped(&opts) {
+        let entries = list::collect(&dirs);
+        let latest = crate::undo::batches(&entries).first().map(|b| b.id.clone());
+        let foreign = entries
+            .iter()
+            .filter(|e| latest.is_none() || e.batch != latest)
+            .count();
+        if !guard_ok(prog, entries.len(), foreign) {
+            return 2;
+        }
     }
 
     let cutoff = opts.days.map(|secs| info::now_epoch() - secs);
