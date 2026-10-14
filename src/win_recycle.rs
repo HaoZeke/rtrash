@@ -484,6 +484,18 @@ mod os {
         e.to_string()
     }
 
+    /// Where `it` came from, as its `$I` record holds it. The shell's
+    /// display name, which `TrashItem::original_path` builds on, hides
+    /// the extension of known file types, so `a.txt` would show as `a`.
+    fn original_of(it: &TrashItem) -> PathBuf {
+        index_file_for(Path::new(&it.id))
+            .and_then(|i| std::fs::read(i).ok())
+            .and_then(|b| parse_recycle_i(&b))
+            .map(|m| m.original)
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| it.original_path())
+    }
+
     fn item_size(it: &TrashItem) -> u64 {
         recycled_size(Path::new(&it.id))
     }
@@ -667,7 +679,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             .map(|orig| {
                 let hit = items
                     .iter()
-                    .filter(|it| it.original_path() == *orig)
+                    .filter(|it| original_of(it) == *orig)
                     .max_by_key(|it| it.time_deleted);
                 let (name, dir) = match hit {
                     Some(it) => {
@@ -738,7 +750,7 @@ on Windows (there is no FreeDesktop layout here).
                     let date = platform::epoch_to_iso_utc(it.time_deleted);
                     println!(
                         "{}",
-                        platform::format_deletion_list_line(Some(&date), &it.original_path())
+                        platform::format_deletion_list_line(Some(&date), &original_of(&it))
                     );
                 }
                 0
@@ -826,17 +838,14 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         };
         if dry_run {
             for it in &items {
-                println!(
-                    "would remove {}",
-                    crate::util::term_path(&it.original_path())
-                );
+                println!("would remove {}", crate::util::term_path(&original_of(it)));
             }
             println!("{} item(s)", items.len());
             return 0;
         }
         if verbose {
             for it in &items {
-                println!("{}", crate::util::term_path(&it.original_path()));
+                println!("{}", crate::util::term_path(&original_of(it)));
             }
         }
         match os_limited::purge_all(items) {
@@ -884,7 +893,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 println!(
                     "{} {}",
                     if dry_run { "would remove" } else { "removed" },
-                    crate::util::term_path(&it.original_path())
+                    crate::util::term_path(&original_of(it))
                 );
             }
         }
@@ -910,7 +919,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             let bin = drive.join("$Recycle.Bin");
             let item = BinStat {
                 name: it.name.to_string_lossy().into_owned(),
-                original: it.original_path(),
+                original: original_of(&it),
                 epoch: it.time_deleted,
                 bytes: recycled_size(p),
                 files: tree_files(p),
@@ -987,7 +996,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 let abs = std::fs::canonicalize(t).unwrap_or_else(|_| t.clone());
                 items
                     .into_iter()
-                    .filter(|i| i.original_path() == abs || i.original_path() == *t)
+                    .filter(|i| original_of(i) == abs || original_of(i) == *t)
                     .collect()
             }
             None => items,
@@ -1015,7 +1024,7 @@ Without PATH, print a numbered list and read an index from stdin.
             let date = platform::epoch_to_iso_utc(it.time_deleted);
             println!(
                 "  {i} {}",
-                platform::format_deletion_list_line(Some(&date), &it.original_path())
+                platform::format_deletion_list_line(Some(&date), &original_of(it))
             );
         }
         eprint!("What to restore [0..{}]: ", matches.len() - 1);
@@ -1046,7 +1055,7 @@ Without PATH, print a numbered list and read an index from stdin.
     #[cfg(feature = "tui")]
     impl BinItem {
         pub fn new(item: TrashItem) -> Self {
-            let original = item.original_path();
+            let original = original_of(&item);
             let date = platform::epoch_to_iso_utc(item.time_deleted);
             Self {
                 item,
@@ -1084,7 +1093,7 @@ Without PATH, print a numbered list and read an index from stdin.
 
     fn restore_one(prog: &str, items: Vec<TrashItem>, force: bool) -> i32 {
         for it in &items {
-            let dest = it.original_path();
+            let dest = original_of(it);
             if dest.exists() && !force {
                 eprintln!(
                     "{prog}: refusing to overwrite '{}' (use -f)",
@@ -1098,7 +1107,7 @@ Without PATH, print a numbered list and read an index from stdin.
         }
         let pairs: Vec<(PathBuf, PathBuf, u64)> = items
             .iter()
-            .map(|it| (PathBuf::from(&it.id), it.original_path(), item_size(it)))
+            .map(|it| (PathBuf::from(&it.id), original_of(it), item_size(it)))
             .collect();
         for (dest, need) in super::cross_drive_needs(&pairs) {
             if let Err(e) = crate::space::guard_bytes(need, &dest) {
@@ -1314,7 +1323,7 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
         let matched: Vec<TrashItem> = items
             .into_iter()
             .filter(|it| {
-                let orig = it.original_path();
+                let orig = original_of(it);
                 let full = orig.to_string_lossy().into_owned();
                 let base = orig
                     .file_name()
@@ -1329,13 +1338,13 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
         let matched = filters.apply(matched, |it| it.time_deleted, item_size);
         if dry_run {
             for it in &matched {
-                println!("{}", crate::util::term_path(&it.original_path()));
+                println!("{}", crate::util::term_path(&original_of(it)));
             }
             return 0;
         }
         if verbose {
             for it in &matched {
-                println!("{}", crate::util::term_path(&it.original_path()));
+                println!("{}", crate::util::term_path(&original_of(it)));
             }
         }
         match os_limited::purge_all(matched) {

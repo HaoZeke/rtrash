@@ -1,0 +1,1 @@
+On Windows, list, restore, rm, empty and `reap --purge-trash` now show and match the full original path from the `$I` record, so a file such as `notes.txt` no longer shows as `notes` when Explorer hides known extensions.
