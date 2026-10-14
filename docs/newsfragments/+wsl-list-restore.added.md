@@ -1,0 +1,1 @@
+New `rtrash wsl list` and `rtrash wsl restore PATH` list and restore Windows Recycle Bin items from inside WSL by reading the `$I` records under the automount root, so items the Recycle Bin route sent stay within reach.
