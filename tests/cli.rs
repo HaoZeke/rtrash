@@ -2634,7 +2634,8 @@ fn names_that_are_not_utf8_put_list_rm_restore_and_empty() {
     fs::create_dir(sb.work().join(d)).unwrap();
     fs::write(sb.work().join(d).join("inner"), "z").unwrap();
 
-    // Used to panic in argument parsing.
+    // Used to panic in argument parsing. Every later step names the home
+    // trash, so items in a volume trash such as /dev/shm/.Trash-UID stay out.
     let put = run_os(&sb, &[OsStr::new("put"), OsStr::new("-r"), a, b, d]);
     assert!(put.status.success(), "{}", stderr_of(&put));
     // Each name keeps its own bytes in the trash: no folding into U+FFFD.
@@ -2646,17 +2647,17 @@ fn names_that_are_not_utf8_put_list_rm_restore_and_empty() {
     }
     let sizes = fs::read_to_string(sb.trash().join("directorysizes")).unwrap();
     assert!(sizes.trim_end().ends_with(" d%FF"), "{sizes}");
-    let list = stdout_of(&sb.run(&["list", "--json"]));
+    let list = stdout_of(&sb.run(&["list", "--home-only", "--json"]));
     assert_eq!(list.matches("\"name\":").count(), 3, "{list}");
     assert!(!list.contains('\u{10FFFF}'), "{list}");
 
     // rm by the raw name removes that item only.
-    let rm = run_os(&sb, &[OsStr::new("rm"), b]);
+    let rm = run_os(&sb, &[OsStr::new("rm"), OsStr::new("--home-only"), b]);
     assert!(rm.status.success(), "{}", stderr_of(&rm));
     assert!(!sb.trash().join("files").join(b).exists());
     assert!(sb.trash().join("files").join(a).exists());
 
-    let restore = run_os(&sb, &[OsStr::new("restore"), a]);
+    let restore = run_os(&sb, &[OsStr::new("restore"), OsStr::new("--home-only"), a]);
     assert!(restore.status.success(), "{}", stderr_of(&restore));
     assert_eq!(fs::read(sb.work().join(a)).unwrap(), b"a");
 
@@ -2687,10 +2688,13 @@ fn trashinfo_with_raw_bytes_lists_restores_and_ages_out() {
     fs::write(info.join("raw.trashinfo"), &body).unwrap();
     fs::write(files.join("raw"), "r").unwrap();
 
-    let list = stdout_of(&sb.run(&["list"]));
+    let list = stdout_of(&sb.run(&["list", "--home-only"]));
     assert!(list.contains("/raw\u{fffd}"), "{list}");
     let name = OsStr::from_bytes(b"raw\xfe");
-    let restore = run_os(&sb, &[OsStr::new("restore"), name]);
+    let restore = run_os(
+        &sb,
+        &[OsStr::new("restore"), OsStr::new("--home-only"), name],
+    );
     assert!(restore.status.success(), "{}", stderr_of(&restore));
     assert_eq!(fs::read(sb.work().join(name)).unwrap(), b"r");
 
