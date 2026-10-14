@@ -245,3 +245,34 @@ fn put_adds_a_line_to_the_recycle_bin_history() {
         file.display()
     );
 }
+
+#[test]
+fn trash_stats_history_lists_a_drive_whose_bin_is_empty() {
+    use std::fs;
+    // The runner's bin may or may not hold items; either way, a drive
+    // with a history file must be listed with that history.
+    let drive = std::env::temp_dir()
+        .to_str()
+        .unwrap()
+        .chars()
+        .next()
+        .unwrap()
+        .to_ascii_uppercase();
+    let file = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+        .join(format!("rtrash/history/{drive}.txt"));
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let mut body = fs::read_to_string(&file).unwrap_or_default();
+    body.push_str("1700000000 empty 0 0\n");
+    fs::write(&file, body).unwrap();
+    let out = Command::new(bin())
+        .args(["trash-stats", "--history", "--json", "--top=0"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let bin_root = format!("{drive}:\\\\$Recycle.Bin");
+    assert!(text.contains(&bin_root), "{bin_root} missing: {text}");
+    assert!(
+        text.contains(r#""epoch":1700000000,"event":"empty""#),
+        "{text}"
+    );
+}
