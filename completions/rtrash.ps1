@@ -29,7 +29,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
     $winOpts = @{
         'put' = @('-f', '--force', '-v', '--verbose', '--plain', '--json', '--in-use=', '--trash-dir=', '--home-only', '--help', '--version')
         'list' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--help', '--version')
-        'empty' = @('-n', '--dry-run', '-v', '--verbose', '--older-than=', '--help', '--version')
+        'empty' = @('-n', '--dry-run', '-v', '--verbose', '--older-than=', '--until-free=', '--json', '--help', '--version')
         'restore' = @('-f', '--force', '--plain', '--newest-first', '--oldest-first', '--no-space-check', '--help', '--version')
         'status' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--help', '--version')
         'rm' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '-n', '--dry-run', '-f', '--force', '-v', '--verbose', '--help')

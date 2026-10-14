@@ -431,3 +431,50 @@ fn put_warns_when_the_recycle_bin_volume_is_low() {
     assert!(!err.contains("is low"), "{err}");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// `empty --until-free` on Windows: asked for far more free room than any
+/// drive has, the dry run counts the Recycle Bin of the drive it put to,
+/// reports it per file system in JSON, removes nothing and exits 1.
+#[test]
+fn empty_until_free_dry_run_reports_each_short_drive() {
+    use std::fs;
+    let base = std::env::temp_dir().join(format!("rtrash-untilfree-{}", std::process::id()));
+    fs::create_dir_all(&base).unwrap();
+    let name = format!("rtrash-untilfree-{}.txt", std::process::id());
+    let p = base.join(&name);
+    fs::write(&p, "until free").unwrap();
+    let out = Command::new(bin()).arg("put").arg(&p).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = Command::new(bin())
+        .args(["empty", "--until-free=999999G", "--json", "-n"])
+        .output()
+        .unwrap();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert_eq!(out.status.code(), Some(1), "{stdout} {stderr}");
+    assert!(
+        stdout.contains(r#""dry_run":true"#)
+            && stdout.contains(r#""file_systems":[{"path":"#)
+            && stdout.contains("$Recycle.Bin"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("from the Recycle Bin of"), "{stderr}");
+    // The dry run left the item; take it out by name.
+    let _ = Command::new(bin()).args(["rm", &name]).output();
+    assert_eq!(
+        Command::new(bin())
+            .args(["empty", "--until-free=10%", "3"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(2)
+    );
+    let _ = fs::remove_dir_all(&base);
+}

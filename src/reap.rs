@@ -2129,8 +2129,6 @@ pub(crate) fn purge_oldest(
 /// trash items there until it is back at `floor`. Exits 1 when one stays
 /// short. JSON lists each short file system with what it needed and what
 /// is still missing (estimated on a dry run).
-// Windows calls it from its own empty once that takes --until-free.
-#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn free_until(
     prog: &str,
     roots: &[PathBuf],

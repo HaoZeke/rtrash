@@ -970,6 +970,8 @@ on Windows (there is no FreeDesktop layout here).
     pub fn empty_run(prog: &str, args: &[String]) -> i32 {
         let mut dry_run = false;
         let mut verbose = false;
+        let mut json = false;
+        let mut until: Option<(String, crate::reap::Floor)> = None;
         let mut age = AgeFilter::default();
         let mut i = 0usize;
         while i < args.len() {
@@ -995,6 +997,17 @@ on Windows (there is no FreeDesktop layout here).
                 "-n" | "--dry-run" => dry_run = true,
                 "-v" | "--verbose" => verbose = true,
                 "-f" | "--force" | "--plain" | "--home-only" => {}
+                "--json" => json = true,
+                a if a.starts_with("--until-free=") => {
+                    let v = &a["--until-free=".len()..];
+                    match crate::reap::Floor::parse(v) {
+                        Some(f) => until = Some((v.to_string(), f)),
+                        None => {
+                            eprintln!("{prog}: invalid SPEC in '{a}' (a percent such as 10%, a size such as 20G)");
+                            return 2;
+                        }
+                    }
+                }
                 "--help" => {
                     print!(
                         "\
@@ -1006,6 +1019,11 @@ With DAYS, only items deleted more than DAYS days ago, as on Linux.
   -v, --verbose  print each removed original path
       --older-than=AGE  same as DAYS; AGE may also be a duration such as
                    2h, 30m or 1d12h
+      --until-free=SPEC  on each drive under SPEC free (a percent such as
+                   10% or a size such as 20G), remove the oldest items of
+                   its Recycle Bin until it is back at SPEC; exits 1 when
+                   one stays short
+      --json     with --until-free, print a JSON summary
       --help     display this help and exit
       --version  output version information and exit
 
@@ -1031,6 +1049,18 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                     return 2;
                 }
             }
+        }
+        if let Some((spec, floor)) = until {
+            if age.older_than.is_some() {
+                eprintln!("{prog}: --until-free takes no DAYS");
+                return 2;
+            }
+            let roots: Vec<PathBuf> = bin_items().into_iter().map(|(b, _)| b).collect();
+            return crate::reap::free_until(prog, &roots, &spec, floor, dry_run, verbose, json);
+        }
+        if json {
+            eprintln!("{prog}: --json goes with --until-free on Windows");
+            return 2;
         }
         let items = match os_limited::list() {
             Ok(i) => i
