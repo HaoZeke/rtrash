@@ -191,3 +191,46 @@ fn dupes_credit_a_reflink_copy_with_nothing_freed() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(dir.with_extension("home"));
 }
+
+#[test]
+fn clone_dupes_share_the_extents_and_keep_each_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(dir) = cloned_pair("clone") else {
+        eprintln!("RTRASH_REFLINK_DIR unset; skipping");
+        return;
+    };
+    let copy = dir.join("copy.bin");
+    let ok = Command::new("cp")
+        .arg("--reflink=never")
+        .arg(dir.join("a.bin"))
+        .arg(&copy)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    fs::set_permissions(&copy, fs::Permissions::from_mode(0o640)).unwrap();
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    fs::File::options()
+        .write(true)
+        .open(dir.join("a.bin"))
+        .unwrap()
+        .set_modified(day_ago)
+        .unwrap();
+    let before = fs::metadata(&copy).unwrap().modified().unwrap();
+    run(&dir, &["du", "--dupes", "--clone-dupes"]);
+    let m = fs::metadata(&copy).unwrap();
+    assert_eq!(m.permissions().mode() & 0o777, 0o640);
+    assert_eq!(m.modified().unwrap(), before);
+    assert_eq!(
+        fs::read(&copy).unwrap(),
+        fs::read(dir.join("a.bin")).unwrap()
+    );
+    // Every copy now shares the kept file's extents: nothing left to free.
+    let json = run(&dir, &["du", "--dupes", "--json", "."]);
+    assert!(
+        num(&json, "\"total\"", "reclaim") < (2u64 << 20) / 4,
+        "{json}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(dir.with_extension("home"));
+}

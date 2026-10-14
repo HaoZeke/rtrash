@@ -149,6 +149,7 @@ du_opts=(
   '--json[emit a JSON object]'
   '--print0[print listed paths NUL-separated]'
   '--dupes[list groups of files with the same contents]'
+  '--clone-dupes[reflink-clone every copy but one from the kept file]'
   '--link-dupes[hard-link every copy but one to the kept file]'
   '--trash-dupes[trash every copy but one in each group]'
   '--min-size=[with --dupes, skip smaller files]:size:'

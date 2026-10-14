@@ -341,6 +341,24 @@ pub struct Linked {
 /// made under a temporary name in the same directory and renamed over the
 /// extra, so the path is never missing.
 pub fn link_extras(groups: &[Group]) -> Linked {
+    replace_extras(groups, Replace::HardLink)
+}
+
+/// How `replace_extras` makes the new name.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Replace {
+    /// A hard link to the kept file: the extra's metadata goes.
+    HardLink,
+    /// A reflink clone of the kept file's extents: a file of its own that
+    /// keeps the extra's mode, owner and times, sharing the blocks until
+    /// either side is written.
+    Clone,
+}
+
+/// Replace every extra name with a hard link or a reflink clone of the
+/// kept file. See `link_extras`; a clone needs a file system that shares
+/// extents (btrfs, XFS, APFS and others).
+pub fn replace_extras(groups: &[Group], how: Replace) -> Linked {
     let mut out = Linked::default();
     for (gi, g) in groups.iter().enumerate() {
         let mut whole = true;
@@ -355,7 +373,7 @@ pub fn link_extras(groups: &[Group]) -> Linked {
                 continue;
             }
             for (ni, name) in std::iter::once(&f.path).chain(&f.links).enumerate() {
-                if let Err(e) = link_one(&g.keep.path, name, f, (gi, ni)) {
+                if let Err(e) = link_one(&g.keep.path, name, f, (gi, ni), how) {
                     out.skipped.push(format!("'{}': {e}", name.display()));
                     whole = false;
                 } else {
@@ -371,7 +389,13 @@ pub fn link_extras(groups: &[Group]) -> Linked {
     out
 }
 
-fn link_one(keep: &Path, name: &Path, seen: &File, tag: (usize, usize)) -> std::io::Result<()> {
+fn link_one(
+    keep: &Path,
+    name: &Path,
+    seen: &File,
+    tag: (usize, usize),
+    how: Replace,
+) -> std::io::Result<()> {
     let st = du_fs::lstat(name)?;
     if st.size != seen.size || st.mtime != seen.mtime || (seen.ino != 0 && st.ino != seen.ino) {
         return Err(std::io::Error::other("changed since the scan"));
@@ -383,10 +407,94 @@ fn link_one(keep: &Path, name: &Path, seen: &File, tag: (usize, usize)) -> std::
         tag.0,
         tag.1
     ));
-    fs::hard_link(keep, &tmp)?;
+    match how {
+        Replace::HardLink => fs::hard_link(keep, &tmp)?,
+        Replace::Clone => {
+            clone_file(keep, &tmp)?;
+            if let Err(e) = keep_metadata(name, &tmp) {
+                let _ = fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+    }
     fs::rename(&tmp, name).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
     })
+}
+
+/// A new file `to` sharing every extent of `from`.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn clone_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let src = fs::File::open(from)?;
+    let dst = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(to)?;
+    // SAFETY: both fds are open; FICLONE takes the source fd.
+    if unsafe { libc::ioctl(dst.as_raw_fd(), libc::FICLONE, src.as_raw_fd()) } == 0 {
+        return Ok(());
+    }
+    let e = std::io::Error::last_os_error();
+    drop(dst);
+    let _ = fs::remove_file(to);
+    Err(clone_error(e))
+}
+
+#[cfg(target_vendor = "apple")]
+fn clone_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+    };
+    let (a, b) = (c(from)?, c(to)?);
+    // SAFETY: both paths are NUL-terminated; flag 0 follows no link at `to`.
+    if unsafe { libc::clonefile(a.as_ptr(), b.as_ptr(), 0) } == 0 {
+        return Ok(());
+    }
+    Err(clone_error(std::io::Error::last_os_error()))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn clone_file(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "reflink clones are not supported on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn clone_error(e: std::io::Error) -> std::io::Error {
+    match e.raw_os_error() {
+        Some(libc::EOPNOTSUPP | libc::EINVAL | libc::EXDEV | libc::ENOTTY) => {
+            std::io::Error::other("the file system cannot share extents (no reflink support)")
+        }
+        _ => e,
+    }
+}
+
+/// Give the clone `to` the mode, owner and times of `from`, the file it
+/// replaces.
+#[cfg(unix)]
+fn keep_metadata(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::symlink_metadata(from)?;
+    // Only root may give a file away; a user's own files keep their owner.
+    let _ = std::os::unix::fs::lchown(to, Some(m.uid()), Some(m.gid()));
+    fs::set_permissions(to, m.permissions())?;
+    let f = fs::File::options().write(true).open(to)?;
+    f.set_times(
+        fs::FileTimes::new()
+            .set_accessed(m.accessed()?)
+            .set_modified(m.modified()?),
+    )
+}
+
+#[cfg(not(unix))]
+fn keep_metadata(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 pub fn print_text(groups: &[Group], top: usize) {

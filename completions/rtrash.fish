@@ -115,6 +115,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l include
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l json -d 'emit a JSON object'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l print0 -d 'print listed paths NUL-separated'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dupes -d 'list groups of files with the same contents'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l clone-dupes -d 'reflink-clone every copy but one from the kept file'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l link-dupes -d 'hard-link every copy but one to the kept file'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l trash-dupes -d 'trash every copy but one in each group'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l min-size -r -d 'with --dupes, skip smaller files'

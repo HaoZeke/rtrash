@@ -1900,3 +1900,41 @@ fn link_dupes_turns_copies_into_hard_links_of_the_kept_file() {
         assert!(after.contains(r#""total":{"groups":0,"#), "{after}");
     }
 }
+
+/// Without reflink support the clone fails, says why and leaves the copy.
+/// The box and CI home directories sit on ext4 or tmpfs, which cannot share
+/// extents; tests/reflink_fs.rs covers the case where it works.
+#[cfg(target_os = "linux")]
+#[test]
+fn clone_dupes_leave_the_copy_where_extents_cannot_be_shared() {
+    let t = Tree::new("dupes-clone");
+    let old = t.file("keep/a.bin", 50_000);
+    let copy = t.file("x/a-copy.bin", 50_000);
+    let f = fs::File::options().write(true).open(&old).unwrap();
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    f.set_modified(day_ago).unwrap();
+    let probe = t.root.join("probe");
+    fs::write(&probe, b"p").unwrap();
+    let reflinks = std::process::Command::new("cp")
+        .arg("--reflink=always")
+        .arg(&probe)
+        .arg(t.root.join("probe2"))
+        .status()
+        .is_ok_and(|s| s.success());
+    let out = t.du(&["--dupes", "--clone-dupes", "--link-dupes"]);
+    assert_eq!(out.status.code(), Some(2));
+    if reflinks {
+        eprintln!("this file system shares extents; reflink_fs.rs covers it");
+        return;
+    }
+    let out = t.du(&["--dupes", "--clone-dupes", "--min-size=1k"]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("not cloned") && err.contains("no reflink support"),
+        "{err}"
+    );
+    assert!(copy.exists());
+    let names: Vec<_> = fs::read_dir(t.root.join("x")).unwrap().flatten().collect();
+    assert_eq!(names.len(), 1);
+}

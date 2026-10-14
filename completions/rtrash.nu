@@ -174,6 +174,7 @@ export extern "rtrash du" [
     --print0  # print the listed paths, NUL-separated, for
     --output(-o): string  # write a snapshot of every directory total (to
     --dupes  # list groups of files with the same contents
+    --clone-dupes  # replace every copy but the kept one with a reflink clone of it
     --link-dupes  # replace every copy but the kept one with a hard link to it
     --trash-dupes  # trash every copy but one in each duplicate group
     --min-size: string  # with --dupes, skip files smaller than SIZE
