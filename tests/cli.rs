@@ -3507,6 +3507,34 @@ fn reap_watch_reaps_on_each_pass_and_needs_when_below() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!old.exists());
+    // While space is fine, ticks after the first skip the full pass after
+    // one statfs per file system.
+    let fresh = stale_file(&tmp, "new-old.txt");
+    let out = Command::new(bin())
+        .args([
+            "reap",
+            "--watch=1s",
+            "--age-by=m",
+            "--older-than=1h",
+            "--when-below=1",
+            "-v",
+            tmp_arg,
+        ])
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .env("RTRASH_TEST_WATCH_ROUNDS", "3")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert_eq!(
+        err.matches("free space is above the target").count(),
+        3,
+        "{err}"
+    );
+    assert_eq!(err.matches("skipping this pass").count(), 2, "{err}");
+    assert!(fresh.exists());
     for bad in [
         &["reap", "--watch", tmp_arg][..],
         &["reap", "--watch=0s", "--when-below=10%", tmp_arg],

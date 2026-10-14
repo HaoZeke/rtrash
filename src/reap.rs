@@ -56,8 +56,11 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
                           1h); with -n print them instead
       --watch[=EVERY]   stay running and reap again every EVERY (default
                           1m, at least 1s); needs --when-below, so a pass
-                          does nothing while space is fine; stops on
-                          Ctrl-C
+                          does nothing while space is fine; between full
+                          passes a tick checks the last pass's file
+                          systems (one statfs each) and skips while they
+                          are above the target, with a full pass at least
+                          every 10 ticks; stops on Ctrl-C
                           with --watch, a service that stays running
                           instead (Linux and macOS)
       --remove-timer    stop and remove the job --install-timer made; with
@@ -998,8 +1001,31 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     code
 }
 
-/// `--watch`: one reap pass every interval, for good. A debug build stops
-/// after `RTRASH_TEST_WATCH_ROUNDS` passes so tests can run it.
+/// The paths whose file systems the last `--when-below` pass measured.
+static WATCHED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// A full pass at least every this many ticks, so entries on a file
+/// system the last pass did not see are still found.
+const FULL_EVERY: u64 = 10;
+
+/// Whether a tick can skip the full pass: every file system the last pass
+/// measured is still above `floor`, by one statfs each.
+fn all_above(floor: &Floor) -> Option<usize> {
+    let paths = WATCHED.lock().ok()?.clone();
+    if paths.is_empty() {
+        return None;
+    }
+    paths
+        .iter()
+        .all(|p| crate::space::query(p).is_ok_and(|s| !floor.below(&s)))
+        .then_some(paths.len())
+}
+
+/// `--watch`: one reap pass every interval, for good. Between full passes
+/// a tick first checks the file systems the last pass measured, one
+/// statfs each, and skips the pass while all of them are above the
+/// target. A debug build stops after `RTRASH_TEST_WATCH_ROUNDS` ticks so
+/// tests can run it.
 fn watch(prog: &str, args: &[String], i: usize) -> i32 {
     let every = match args[i].split_once('=') {
         None => 60,
@@ -1038,10 +1064,30 @@ fn watch(prog: &str, args: &[String], i: usize) -> i32 {
     } else {
         None
     };
+    let floor = rest
+        .iter()
+        .find_map(|a| a.strip_prefix("--when-below="))
+        .and_then(Floor::parse);
+    let verbose = rest.iter().any(|a| a == "-v" || a == "--verbose");
     let mut done = 0u64;
+    let mut since_full = 0u64;
     let mut code = 0;
     loop {
-        code = code.max(run(prog, &rest));
+        let skip = (since_full > 0 && since_full < FULL_EVERY)
+            .then(|| floor.as_ref().and_then(all_above))
+            .flatten();
+        if let Some(n) = skip {
+            since_full += 1;
+            if verbose {
+                eprintln!(
+                    "{prog}: free space is above the target on {}; skipping this pass",
+                    crate::util::plural(n as u64, "file system", "file systems")
+                );
+            }
+        } else {
+            since_full = 1;
+            code = code.max(run(prog, &rest));
+        }
         if code == 2 {
             return code;
         }
@@ -1386,6 +1432,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 on.push((*dev, e.clone()));
                 n != (0, 0)
             });
+        }
+        // For --watch: the file systems this pass measured, which the next
+        // tick checks with one statfs each before a full pass.
+        if let Ok(mut w) = WATCHED.lock() {
+            *w = on.iter().map(|(_, p)| p.clone()).collect();
         }
         if purge_trash {
             for (dev, need) in needs.iter_mut().filter(|(_, n)| *n != (0, 0)) {

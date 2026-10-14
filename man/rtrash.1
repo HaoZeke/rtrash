@@ -2093,6 +2093,10 @@ It needs
 so a pass does nothing while space is fine, and it does not go with
 .BR \-n .
 This suits a session without a timer service.
+Between full passes a tick costs one statfs per file system the last pass
+measured: while all of them are above the target the pass is skipped
+(\fB\-v\fR says so), and a full pass runs at least every 10 ticks so a new
+file system is still found.
 With
 .BR \-\-install\-timer ,
 the job is a service that stays up instead of a schedule: on Linux a
