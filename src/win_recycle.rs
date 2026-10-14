@@ -196,6 +196,135 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
 }
 
+/// One Recycle Bin item read from its `$I` record, paired with its `$R`
+/// payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinRecord {
+    /// The `$R` payload.
+    pub payload: PathBuf,
+    /// The original path, as the record holds it.
+    pub original: PathBuf,
+    /// Deletion time, Unix seconds.
+    pub deleted: i64,
+    /// The size the record gives, in bytes.
+    pub size: u64,
+}
+
+/// Every item in one user's Recycle Bin folder (`X:\$Recycle.Bin\SID`):
+/// each `$I` record that parses and still has its `$R` payload, oldest
+/// first. Names stay exact, so one odd name cannot hide the rest. A
+/// missing or unreadable folder gives none.
+pub fn scan_bin_dir(dir: &Path) -> Vec<BinRecord> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let kept = crate::util::str_from_os(e.file_name());
+        let Some(rest) = kept.strip_prefix("$I") else {
+            continue;
+        };
+        let payload = dir.join(crate::util::os_from_str(&format!("$R{rest}")));
+        if std::fs::symlink_metadata(&payload).is_err() {
+            continue;
+        }
+        let Some(meta) = std::fs::read(e.path())
+            .ok()
+            .and_then(|b| parse_recycle_i(&b))
+        else {
+            continue;
+        };
+        out.push(BinRecord {
+            payload,
+            original: meta.original,
+            deleted: filetime_to_unix_epoch(meta.delete_filetime),
+            size: meta.size,
+        });
+    }
+    out.sort_by(|a, b| {
+        a.deleted
+            .cmp(&b.deleted)
+            .then_with(|| a.payload.cmp(&b.payload))
+    });
+    out
+}
+
+/// Windows: the current user's SID as text (`S-1-5-21-…`).
+#[cfg(windows)]
+pub fn current_user_sid() -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut tok: HANDLE = std::ptr::null_mut();
+    // SAFETY: the pseudo handle needs no closing; `tok` receives a handle.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) } == 0 {
+        return None;
+    }
+    let mut len = 0u32;
+    // SAFETY: a size query with no buffer.
+    unsafe { GetTokenInformation(tok, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+    // u64 units keep TOKEN_USER aligned.
+    let mut buf = vec![0u64; (len as usize).div_ceil(8).max(1)];
+    // SAFETY: `buf` holds at least `len` bytes.
+    let ok = unsafe { GetTokenInformation(tok, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) };
+    // SAFETY: `tok` came from OpenProcessToken and is closed once.
+    unsafe { CloseHandle(tok) };
+    if ok == 0 {
+        return None;
+    }
+    // SAFETY: the call filled `buf` with a TOKEN_USER.
+    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut text: windows_sys::core::PWSTR = std::ptr::null_mut();
+    // SAFETY: `sid` points into `buf`, alive here; `text` receives a LocalAlloc string.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 || text.is_null() {
+        return None;
+    }
+    // SAFETY: `text` is NUL-terminated, and freed once after the copy.
+    let out = unsafe {
+        let n = (0..).take_while(|&i| *text.add(i) != 0).count();
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
+        LocalFree(text.cast());
+        s
+    };
+    Some(out)
+}
+
+/// Windows: every item in the current user's Recycle Bins, on the drives
+/// and on folder-mounted volumes, oldest first. Reads the `$I` records
+/// itself: the `trash` crate's list fails as a whole when one name holds
+/// an unpaired surrogate.
+#[cfg(windows)]
+pub fn list_items() -> io::Result<Vec<trash::TrashItem>> {
+    let sid = current_user_sid().ok_or_else(|| io::Error::other("cannot read the user's SID"))?;
+    let mut recs = Vec::new();
+    for root in crate::trash_history::bin_roots() {
+        recs.extend(scan_bin_dir(&root.join("$Recycle.Bin").join(&sid)));
+    }
+    recs.sort_by(|a, b| {
+        a.deleted
+            .cmp(&b.deleted)
+            .then_with(|| a.payload.cmp(&b.payload))
+    });
+    Ok(recs
+        .into_iter()
+        .map(|r| trash::TrashItem {
+            id: r.payload.into_os_string(),
+            name: r
+                .original
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_default(),
+            original_parent: r
+                .original
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            time_deleted: r.deleted,
+        })
+        .collect())
+}
+
 /// The drive root (`C:\`) a Recycle Bin path such as
 /// `C:\$Recycle.Bin\S-1-5-21-…\$R1A2B3C.txt` lies on.
 pub fn drive_root_of(path: &Path) -> Option<PathBuf> {
@@ -1062,7 +1191,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
     /// newest item with that original path. The shell API does not return
     /// them from the move itself.
     fn locate_trashed(moved: &[PathBuf]) -> Vec<(PathBuf, String, PathBuf)> {
-        let items = os_limited::list().unwrap_or_default();
+        let items = super::list_items().unwrap_or_default();
         moved
             .iter()
             .map(|orig| {
@@ -1189,7 +1318,7 @@ on Windows (there is no FreeDesktop layout here).
                 .ok()
                 .and_then(|d| std::fs::canonicalize(&d).ok().map(|c| strip_verbatim(&c)))
         });
-        match os_limited::list() {
+        match super::list_items() {
             Ok(items) => {
                 let items: Vec<TrashItem> = items
                     .into_iter()
@@ -1380,7 +1509,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             let roots: Vec<PathBuf> = bin_items().into_iter().map(|(b, _)| b).collect();
             return crate::reap::free_until(prog, &roots, &spec, floor, dry_run, verbose, json);
         }
-        let all = match os_limited::list() {
+        let all = match super::list_items() {
             Ok(i) => i,
             Err(e) => {
                 eprintln!("{prog}: cannot list Recycle Bin: {}", err_msg(e));
@@ -1547,7 +1676,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let Some((max, policy, source)) = crate::budget::budget(prog) else {
             return;
         };
-        let Ok(all) = os_limited::list() else {
+        let Ok(all) = super::list_items() else {
             return;
         };
         let rows: Vec<(PathBuf, i64, u64)> = all
@@ -1586,7 +1715,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         dry_run: bool,
         verbose: bool,
     ) -> (u64, u64, u64) {
-        let items: Vec<TrashItem> = match os_limited::list() {
+        let items: Vec<TrashItem> = match super::list_items() {
             Ok(all) => {
                 let ids: Vec<PathBuf> = all.iter().map(|it| PathBuf::from(&it.id)).collect();
                 on_volume(&ids, volume_key, volume_key(at))
@@ -1634,7 +1763,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
     /// drive, in drive order.
     pub fn bin_items() -> Vec<(PathBuf, Vec<BinStat>)> {
         let mut out: Vec<(PathBuf, Vec<BinStat>)> = Vec::new();
-        for it in os_limited::list().unwrap_or_default() {
+        for it in super::list_items().unwrap_or_default() {
             let p = Path::new(&it.id);
             let Some(drive) = bin_root_of(p) else {
                 continue;
@@ -1717,7 +1846,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 }
             }
         }
-        let items = match os_limited::list() {
+        let items = match super::list_items() {
             Ok(i) => i,
             Err(e) => {
                 eprintln!("{prog}: cannot list Recycle Bin: {}", err_msg(e));
@@ -1989,7 +2118,7 @@ registry), then the total and the free space on each (a warning under
     /// `status` with a filter: the shell's per-drive totals cannot be
     /// filtered, so count the passing items, by the volume of their bin.
     fn filtered_status(prog: &str, filters: &BinFilters) -> i32 {
-        let items = match os_limited::list() {
+        let items = match super::list_items() {
             Ok(i) => filters.apply(i, |it| it.time_deleted, item_size),
             Err(e) => {
                 eprintln!("{prog}: cannot list Recycle Bin: {}", err_msg(e));
@@ -2098,7 +2227,7 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             eprintln!("{prog}: refusing pattern '*' without --force");
             return 2;
         }
-        let items = match os_limited::list() {
+        let items = match super::list_items() {
             Ok(i) => i,
             Err(e) => {
                 eprintln!("{prog}: cannot list Recycle Bin: {}", err_msg(e));
@@ -2811,5 +2940,62 @@ mod tests {
     #[test]
     fn lone_surrogate_name_is_skipped_off_windows() {
         assert!(parse_recycle_i(&record_with_lone_surrogate()).is_none());
+    }
+
+    #[test]
+    fn scan_bin_dir_pairs_records_with_payloads() {
+        let dir = std::env::temp_dir().join(format!("rtrash-scanbin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ft = |s: u64| FILETIME_UNIX_EPOCH + s * 10_000_000;
+        let put = |id: &str, orig: &str, secs: u64| {
+            std::fs::write(dir.join(format!("$R{id}")), b"x").unwrap();
+            let rec = encode_recycle_i_v2(Path::new(orig), 1, ft(secs));
+            std::fs::write(dir.join(format!("$I{id}")), rec).unwrap();
+        };
+        put("BBBBBB.txt", r"C:\b\new.txt", 200);
+        put("AAAAAA.txt", r"C:\a\old.txt", 100);
+        // A record without its payload, a payload without its record and
+        // a damaged record are skipped; the rest still list.
+        std::fs::write(
+            dir.join("$ICCCCCC.txt"),
+            encode_recycle_i_v2(Path::new(r"C:\gone.txt"), 1, ft(50)),
+        )
+        .unwrap();
+        std::fs::write(dir.join("$RDDDDDD"), b"x").unwrap();
+        std::fs::write(dir.join("$REEEEEE"), b"x").unwrap();
+        std::fs::write(dir.join("$IEEEEEE"), b"junk").unwrap();
+        std::fs::write(dir.join("desktop.ini"), b"x").unwrap();
+        let got = scan_bin_dir(&dir);
+        let originals: Vec<String> = got
+            .iter()
+            .map(|r| r.original.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(originals, [r"C:\a\old.txt", r"C:\b\new.txt"]);
+        assert_eq!(got[0].payload, dir.join("$RAAAAAA.txt"));
+        assert_eq!(got[0].deleted, 100);
+        assert!(scan_bin_dir(&dir.join("missing")).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_bin_dir_keeps_a_payload_name_that_is_not_text() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = std::env::temp_dir().join(format!("rtrash-scanbin-raw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = dir.join(std::ffi::OsStr::from_bytes(b"$RABCDEF.\xe9"));
+        let i = dir.join(std::ffi::OsStr::from_bytes(b"$IABCDEF.\xe9"));
+        std::fs::write(&r, b"x").unwrap();
+        std::fs::write(
+            &i,
+            encode_recycle_i_v2(Path::new(r"C:\odd"), 1, FILETIME_UNIX_EPOCH),
+        )
+        .unwrap();
+        let got = scan_bin_dir(&dir);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].payload, r);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

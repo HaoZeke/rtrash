@@ -1,0 +1,1 @@
+On Windows, rtrash now reads the Recycle Bin index records itself instead of asking the shell, so one item whose name holds an unpaired surrogate no longer makes list, restore, empty and the rest fail for every item.

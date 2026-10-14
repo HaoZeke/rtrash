@@ -409,14 +409,22 @@ fn unpaired_surrogate_names_survive_the_recycle_bin() {
         .args(["list", "--format={name}\\n"])
         .output()
         .unwrap();
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let out = cmd(&lad).arg("restore").arg(&f).output().unwrap();
     let err = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(!err.contains("panicked"), "{err}");
     assert!(out.status.success(), "{err}");
     assert_eq!(fs::read(&f).unwrap(), b"surrogate", "{err}");
     let out = cmd(&lad).arg("put").arg(&f).output().unwrap();
-    assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let out = cmd(&lad)
         .args(["restore", "--batch=last"])
         .output()

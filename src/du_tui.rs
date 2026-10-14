@@ -164,7 +164,7 @@ mod bin {
         if original.symlink_metadata().is_ok() {
             return false;
         }
-        let Ok(items) = trash::os_limited::list() else {
+        let Ok(items) = crate::win_recycle::list_items() else {
             return false;
         };
         let Some(item) = items
