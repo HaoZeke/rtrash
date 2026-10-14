@@ -1000,7 +1000,7 @@ on Windows (there is no FreeDesktop layout here).
         let mut json = false;
         let mut until: Option<(String, crate::reap::Floor)> = None;
         let mut max_size: Option<u64> = None;
-        let mut largest = false;
+        let mut policy = crate::budget::Policy::Oldest;
         let mut age = AgeFilter::default();
         let mut i = 0usize;
         while i < args.len() {
@@ -1036,11 +1036,14 @@ on Windows (there is no FreeDesktop layout here).
                         }
                     }
                 }
-                "--prune=oldest" => largest = false,
-                "--prune=largest" => largest = true,
                 a if a.starts_with("--prune=") => {
-                    eprintln!("{prog}: --prune takes oldest or largest");
-                    return 2;
+                    match crate::budget::Policy::parse(&a["--prune=".len()..]) {
+                        Some(p) => policy = p,
+                        None => {
+                            eprintln!("{prog}: --prune takes oldest or largest");
+                            return 2;
+                        }
+                    }
                 }
                 a if a.starts_with("--until-free=") => {
                     let v = &a["--until-free=".len()..];
@@ -1127,6 +1130,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 .iter()
                 .map(|it| (it.time_deleted, recycled_size(Path::new(&it.id))))
                 .collect();
+            let largest = policy == crate::budget::Policy::Largest;
             for i in pick_budget(&sized, max, largest) {
                 items.push(rest[i].clone());
             }
