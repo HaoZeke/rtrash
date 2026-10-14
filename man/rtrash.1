@@ -1950,6 +1950,9 @@ on macOS its state, runs and last exit code from
 .BR "launchctl print" ;
 on Windows its status, last and next run time and last result from
 .BR "schtasks /Query" .
+A task made from a task XML file also shows its
+.I Command
+in full, read from that file, which then counts among its files.
 With
 .BR \-\-json ,
 it prints an object:

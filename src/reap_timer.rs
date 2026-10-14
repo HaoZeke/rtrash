@@ -158,6 +158,41 @@ fn task_xml_path() -> Option<PathBuf> {
     )
 }
 
+/// The text of a file Task Scheduler reads: UTF-16 after a byte-order
+/// mark, else UTF-8.
+fn utf16_text(b: &[u8]) -> String {
+    match b {
+        [0xFF, 0xFE, rest @ ..] => {
+            let (pairs, _) = rest.as_chunks::<2>();
+            let units: Vec<u16> = pairs.iter().map(|&p| u16::from_le_bytes(p)).collect();
+            String::from_utf16_lossy(&units)
+        }
+        _ => String::from_utf8_lossy(b).into_owned(),
+    }
+}
+
+/// The command a task XML runs: its `<Command>` and `<Arguments>`, joined
+/// and unescaped. `None` without a `<Command>`.
+pub fn xml_command(body: &str) -> Option<String> {
+    let tag = |t: &str| -> Option<String> {
+        let open = format!("<{t}>");
+        let start = body.find(&open)? + open.len();
+        let end = start + body[start..].find(&format!("</{t}>"))?;
+        Some(
+            body[start..end]
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&amp;", "&"),
+        )
+    };
+    let cmd = task_word(&tag("Command")?);
+    Some(match tag("Arguments") {
+        Some(a) if !a.is_empty() => format!("{cmd} {a}"),
+        _ => cmd,
+    })
+}
+
 /// Files to write and the command that turns the job on.
 fn plan(
     exe: &Path,
@@ -337,10 +372,25 @@ fn find() -> Result<Found, String> {
                 "Task To Run:",
             ],
         );
+        let mut fields = fields;
+        let mut files = Vec::new();
+        // A task made from an XML file: show the command the file holds
+        // in full, since schtasks may cut a long one short.
+        if let Some(p) = task_xml_path().filter(|p| p.exists()) {
+            if !fields.is_empty() {
+                if let Some(cmd) = std::fs::read(&p)
+                    .ok()
+                    .and_then(|b| xml_command(&utf16_text(&b)))
+                {
+                    fields.push(format!("Command: {cmd}"));
+                }
+            }
+            files.push(p);
+        }
         return Ok(Found {
             manager: "schtasks",
             installed: !fields.is_empty(),
-            files: Vec::new(),
+            files,
             fields,
         });
     }
@@ -611,6 +661,21 @@ mod tests {
         let x = task_xml(exe, &[], 2 * 86_400 + 1);
         assert!(x.contains("<DaysInterval>3</DaysInterval>"), "{x}");
         assert!(x.contains("<Arguments>reap</Arguments>"), "{x}");
+    }
+
+    #[test]
+    fn xml_command_reads_back_what_task_xml_wrote() {
+        let args = vec!["-p".to_string(), "a<&b".to_string(), "my dir".to_string()];
+        let exe = Path::new(r"C:\Program Files\rtrash.exe");
+        let body = task_xml(exe, &args, 900);
+        assert_eq!(
+            xml_command(&body).as_deref(),
+            Some(r#""C:\Program Files\rtrash.exe" reap -p a<&b "my dir""#)
+        );
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(body.encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(utf16_text(&bytes), body);
+        assert_eq!(xml_command("<Task/>"), None);
     }
 
     #[test]
