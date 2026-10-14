@@ -1,0 +1,1 @@
+Every command now rebuilds path operands and path option values with their exact bytes, so names that are not valid text (stray bytes on Unix, unpaired surrogates on Windows) reach put and restore on Windows, `du diff`, `finder restore`, `setup --prefix`, `--bin-dir` and `--powershell-profile`.

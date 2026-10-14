@@ -442,7 +442,7 @@ pub fn run_diff(prog: &str, args: &[String]) -> i32 {
                 eprintln!("Try '{prog} diff --help' for more information.");
                 return 2;
             }
-            _ => files.push(PathBuf::from(a)),
+            _ => files.push(crate::util::arg_path(a)),
         }
         i += 1;
     }

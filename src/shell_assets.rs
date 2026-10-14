@@ -127,7 +127,7 @@ pub fn add_to_powershell_profile(profile: &std::path::Path, dry_run: bool) -> io
 /// profile PowerShell reports. Prints what it did; returns the exit code.
 pub fn setup_powershell_profile(arg: Option<&str>, dry_run: bool) -> i32 {
     let path = match arg {
-        Some(p) => std::path::PathBuf::from(p),
+        Some(p) => crate::util::arg_path(p),
         None => match powershell_profile_path() {
             Some(p) => p,
             None => {

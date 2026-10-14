@@ -318,7 +318,7 @@ fn restore(prog: &str, args: &[String]) -> i32 {
             crate::finder_shared::nfc(&i.name) == crate::finder_shared::nfc(w)
                 || i.original
                     .as_deref()
-                    .is_some_and(|o| crate::finder_shared::same_path(o, Path::new(w)))
+                    .is_some_and(|o| crate::finder_shared::same_path(o, &crate::util::arg_path(w)))
         });
         match hit {
             Some(i) if !chosen.contains(&i) => chosen.push(i),

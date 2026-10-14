@@ -220,10 +220,10 @@ fn run_setup(args: &[String]) -> i32 {
                 profile = Some(Some(a["--powershell-profile=".len()..].to_string()));
             }
             a if a.starts_with("--prefix=") => {
-                opts.prefix = PathBuf::from(&a["--prefix=".len()..]);
+                opts.prefix = crate::util::arg_path(&a["--prefix=".len()..]);
             }
             a if a.starts_with("--bin-dir=") => {
-                opts.bin_dir = Some(PathBuf::from(&a["--bin-dir=".len()..]));
+                opts.bin_dir = Some(crate::util::arg_path(&a["--bin-dir=".len()..]));
             }
             other => {
                 eprintln!("rtrash setup: unknown option '{other}'");

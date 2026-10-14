@@ -2099,6 +2099,27 @@ fn man_subcommand_prints_page() {
     assert!(s.contains("setup"));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn setup_prefix_keeps_a_name_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    let top = std::env::temp_dir().join(format!("rtrash-setup-bytes-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&top);
+    fs::create_dir_all(&top).unwrap();
+    let prefix = top.join(std::ffi::OsStr::from_bytes(b"p\xe9"));
+    let mut arg = b"--prefix=".to_vec();
+    arg.extend_from_slice(prefix.as_os_str().as_bytes());
+    let out = Command::new(bin())
+        .arg("setup")
+        .arg(std::ffi::OsStr::from_bytes(&arg))
+        .arg("-f")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "setup failed: {}", stderr_of(&out));
+    assert!(prefix.join("share/man/man1/rtrash.1").is_file());
+    let _ = fs::remove_dir_all(&top);
+}
+
 #[test]
 fn setup_installs_under_prefix() {
     let prefix = std::env::temp_dir().join(format!(

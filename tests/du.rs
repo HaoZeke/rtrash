@@ -1966,3 +1966,42 @@ fn clone_dupes_leave_the_copy_where_extents_cannot_be_shared() {
     let names: Vec<_> = fs::read_dir(t.root.join("x")).unwrap().flatten().collect();
     assert_eq!(names.len(), 1);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn diff_reads_a_snapshot_whose_name_is_not_utf8() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let t = Tree::new("diffbytes");
+    t.file("d/a", 4000);
+    let snap = OsStr::from_bytes(b"snap-\xe9.json");
+    let run = |args: &[&OsStr]| {
+        Command::new(bin())
+            .arg("du")
+            .args(args)
+            .current_dir(&t.root)
+            .env("XDG_DATA_HOME", t.root.join(".xdg"))
+            .env("XDG_CONFIG_HOME", t.root.join(".cfg"))
+            .env("HOME", &t.root)
+            .output()
+            .unwrap()
+    };
+    let out = run(&[
+        OsStr::new("--no-git"),
+        OsStr::new("-o"),
+        snap,
+        OsStr::new("d"),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(t.root.join(snap).is_file());
+    let out = run(&[OsStr::new("diff"), snap, snap]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

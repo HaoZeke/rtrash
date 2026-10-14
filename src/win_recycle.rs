@@ -852,7 +852,7 @@ mod os {
         let mut dry_run = false;
         for arg in args {
             if no_more_opts || arg == "-" || !arg.starts_with('-') {
-                files.push(PathBuf::from(arg));
+                files.push(crate::util::arg_path(arg));
                 continue;
             }
             match arg.as_str() {
@@ -918,7 +918,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return 2;
                 }
-                a => files.push(PathBuf::from(a)),
+                a => files.push(crate::util::arg_path(a)),
             }
         }
         let _ = plain;
@@ -1713,7 +1713,7 @@ Without PATH, print a numbered list and read an index from stdin.
                         eprintln!("{prog}: only one PATH may be given");
                         return 2;
                     }
-                    target = Some(PathBuf::from(a));
+                    target = Some(crate::util::arg_path(a));
                 }
             }
         }
