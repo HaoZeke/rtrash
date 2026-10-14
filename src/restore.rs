@@ -11,6 +11,7 @@ Usage: {prog} [OPTION]... [PATH]
 Restore a trashed item to its original location.
 
 With PATH, restore the item originally at PATH (exact original path match).
+A PATH with * or ? (quoted, so the shell leaves it) works as --glob.
 With --name=NAME, restore the item whose file name, or whose name inside
 the trash, is NAME. --glob and --regex match many items at once. When several
 items match, --latest restores the most recently trashed one and --all
@@ -255,6 +256,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 if target.is_some() {
                     eprintln!("{prog}: only one PATH may be given");
                     return 2;
+                }
+                // A quoted '*.log' the shell left alone is a glob; a literal
+                // name with * or ? still goes through --name.
+                if a.contains(['*', '?']) && matcher.is_none() {
+                    matcher = Some(Matcher::Glob(crate::finder_shared::nfc(a)));
+                    continue;
                 }
                 target = Some(crate::util::arg_path(a));
             }

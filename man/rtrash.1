@@ -286,6 +286,7 @@ Run every check put makes (protected paths, the home and mount\-point
 failsafes, git work, live holders) and print
 .I would trash PATH
 for each item that would move; nothing moves.
+On Windows, the dry run checks missing files and live holders.
 .TP
 .B \-\-plain
 Never open the put browser; require
@@ -611,6 +612,12 @@ Only items whose file name is
 .B \-\-cwd\-only
 Only items that came from the current directory or below it.
 Names and patterns compare in Unicode NFC, as restore does.
+A bare
+.I PATTERN
+after the options keeps items whose file name contains it, or, when it
+holds a glob character (* ? [), works as
+.BR \-\-glob .
+On Windows, list takes these matchers too.
 .TP
 .B \-\-size
 Add a column with each item's disk usage: the payload plus its
@@ -1676,6 +1683,13 @@ removes it.
 Pass
 .B \-\-cwd\-only
 to limit bare restore to originals under the current directory.
+A quoted
+.I PATH
+with * or ? works as
+.BR \-\-glob ;
+use
+.B \-\-name
+for a literal name holding those characters.
 A single match restores directly; multiple matches require a selection.
 .PP
 Whatever the flags, restore refuses a destination that is, contains or

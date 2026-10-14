@@ -6064,6 +6064,30 @@ fn list_filters_by_glob_regex_name_and_cwd() {
 }
 
 #[test]
+fn bare_patterns_filter_list_and_glob_restore() {
+    let sb = Sandbox::new("barepat");
+    for n in ["report.log", "notes.txt", "old.log"] {
+        fs::write(sb.work().join(n), b"x").unwrap();
+        assert!(sb.run(&["put", n]).status.success());
+    }
+    let lines = |pat: &str| -> Vec<String> {
+        let out = sb.run(&["list", "--home-only", pat]);
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        stdout_of(&out).lines().map(str::to_string).collect()
+    };
+    // No glob character: a piece of the name.
+    assert_eq!(lines("port").len(), 1);
+    assert_eq!(lines("*.log").len(), 2);
+    assert!(lines("nothing").is_empty());
+    let out = sb.run(&["list", "--home-only", "port", "--name=x"]);
+    assert_eq!(out.status.code(), Some(2));
+    // A quoted glob restores like --glob.
+    let out = sb.run(&["restore", "--home-only", "*.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(sb.work().join("notes.txt").exists());
+}
+
+#[test]
 fn put_dry_run_checks_and_moves_nothing() {
     let sb = Sandbox::new("putdry");
     fs::write(sb.work().join("a"), b"x").unwrap();

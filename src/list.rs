@@ -5,8 +5,10 @@ use crate::info;
 use crate::trashdir::{self, TrashDir};
 
 const HELP: &str = "\
-Usage: {prog} [OPTION]...
+Usage: {prog} [OPTION]... [PATTERN]
 List trashed items as 'DELETION-DATE ORIGINAL-PATH', oldest first.
+PATTERN keeps items whose file name holds it, or matches it when it has
+a glob character (* ? [), like --glob.
 Payloads with no .trashinfo come last, dated ????-??-??, under their path
 in the trash (\"orphan\":true in JSON); an age filter leaves them out.
 
@@ -335,6 +337,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                         return 2;
                     }
                 }
+            }
+            a if !a.starts_with('-') => {
+                // A bare PATTERN: a glob if it has one, else a piece of the
+                // file name, as `gtrash find` and `fd` take it.
+                if matcher.is_some() {
+                    eprintln!("{prog}: give only one of PATTERN, --glob, --regex and --name");
+                    return 2;
+                }
+                let p = crate::finder_shared::nfc(a);
+                let p = if p.contains(['*', '?', '[']) {
+                    p
+                } else {
+                    format!("*{p}*")
+                };
+                matcher = Some(crate::restore::Matcher::Glob(p));
             }
             a => {
                 eprintln!("{prog}: unrecognized option '{a}'");

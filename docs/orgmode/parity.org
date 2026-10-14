@@ -69,6 +69,7 @@ listing, and the restore conflict policies (=--conflict=rename|skip=).
 | Plain =list=, =restore=, =empty=       | Finder Trash, by Put Back location              | yes     |
 | =list --glob/--regex/--name/--cwd-only= | same matchers as restore, on the Finder Trash and Windows too | no |
 | =put --dry-run= | every check, nothing moves (Windows too) | no |
+| bare =list PATTERN=, =restore '*.log'= | substring or glob, like =gtrash find= | no |
 | FreeDesktop home trash                 | =RTRASH_MACOS_TRASH=freedesktop=, =macos.trash= or a =--trash-dir= pin | no |
 | =undo=, =status=, =trash-stats=, restore browser | Finder Trash; undo from a put-run log | n/a |
 | Symbolic links                         | move in as themselves, without Put Back         | follows |
