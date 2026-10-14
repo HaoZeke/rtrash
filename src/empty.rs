@@ -181,6 +181,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 verbose: opts.verbose,
                 protect_batch: None,
                 gone_before: cutoff,
+                free_inodes: 0,
             },
         );
         removed.fetch_add(done.removed, Ordering::Relaxed);

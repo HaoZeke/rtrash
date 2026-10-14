@@ -3328,6 +3328,160 @@ fn trash_stats_summarizes_each_trash_as_text_and_json() {
     assert_eq!(run(&["trash-stats", "--top=x"]).status.code(), Some(2));
 }
 
+/// Set a file's access and modification times `secs` into the past.
+#[cfg(unix)]
+fn age_by(p: &Path, secs: u64) {
+    let t = std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+    fs::File::options()
+        .write(true)
+        .open(p)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_accessed(t).set_modified(t))
+        .unwrap();
+}
+
+/// Files and directories at or below `dir`, as RTRASH_TEST_FS counts them.
+#[cfg(unix)]
+fn count_entries(dir: &Path) -> u64 {
+    let mut n = 0;
+    for e in fs::read_dir(dir).unwrap().flatten() {
+        n += 1;
+        if e.file_type().unwrap().is_dir() {
+            n += count_entries(&e.path());
+        }
+    }
+    n
+}
+
+#[cfg(unix)]
+#[test]
+fn reap_when_below_stops_once_the_measured_space_is_back() {
+    let sb = Sandbox::new("reap-seam");
+    let tmp = sb.root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let files: Vec<PathBuf> = (0..3)
+        .map(|i| {
+            let p = tmp.join(format!("f{i}.bin"));
+            fs::write(&p, vec![1u8; 100_000]).unwrap();
+            // f0 is the oldest.
+            age_by(&p, 86_400 * (10 - i as u64));
+            p
+        })
+        .collect();
+    let used: u64 = files
+        .iter()
+        .map(|p| {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(p).unwrap().blocks() * 512
+        })
+        .sum();
+    let total = 1_000_000u64;
+    // Short by about one and a half files: the two oldest must go.
+    let below = total - used + used / 2;
+    let spec = format!("{total}:{}", tmp.display());
+    let run = |extra: &[&str]| {
+        let mut args = vec![
+            "reap".to_string(),
+            "--older-than=1h".into(),
+            "--age-by=m".into(),
+            "--permanent".into(),
+            format!("--when-below={below}"),
+        ];
+        args.extend(extra.iter().map(|s| s.to_string()));
+        args.push(tmp.to_str().unwrap().into());
+        Command::new(bin())
+            .args(&args)
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("HOME", &sb.root)
+            .env("RTRASH_TEST_FS", &spec)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["-n", "-v"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(text.contains("f0.bin") && text.contains("f1.bin"), "{text}");
+    assert!(
+        text.contains("kept") && text.contains("back above the target"),
+        "{text}"
+    );
+    let out = run(&[]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        !files[0].exists() && !files[1].exists(),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(
+        files[2].exists(),
+        "reaped past the target: {}",
+        stdout_of(&out)
+    );
+    // Now above the target: a second run exits at once.
+    let out = run(&["-v"]);
+    assert!(
+        stderr_of(&out).contains("free space is above the target"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(files[2].exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn reap_purge_trash_counts_the_inodes_each_item_frees() {
+    let sb = Sandbox::new("reap-inodes");
+    let tmp = sb.root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let tree = sb.root.join("work/tree");
+    for i in 0..20 {
+        write_at(&tree, &format!("f{i}"), "x");
+    }
+    let single = write_at(&sb.root, "work/single.txt", "s");
+    let env = |c: &mut Command| {
+        c.env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root);
+    };
+    let mut put = Command::new(bin());
+    put.args(["put", "-r", tree.to_str().unwrap()]);
+    env(&mut put);
+    assert!(put.output().unwrap().status.success());
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let mut put = Command::new(bin());
+    put.args(["put", single.to_str().unwrap()]);
+    env(&mut put);
+    assert!(put.output().unwrap().status.success());
+    let info = sb.root.join("xdg/Trash/info");
+    assert_eq!(fs::read_dir(&info).unwrap().count(), 2);
+    // 1000 inodes; short by a few, which the tree (22 inodes) covers.
+    let n0 = count_entries(&sb.root);
+    let pct = (1000 - n0 + 5).div_ceil(10);
+    let spec = format!("{}:1000:{}", u64::MAX / 2, sb.root.display());
+    let mut reap = Command::new(bin());
+    reap.args([
+        "reap",
+        &format!("--when-below=inodes={pct}%"),
+        "--purge-trash",
+        "--older-than=1h",
+        tmp.to_str().unwrap(),
+    ])
+    .env("RTRASH_TEST_FS", &spec);
+    env(&mut reap);
+    let out = reap.output().unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("emptied 1 item"),
+        "{}",
+        stderr_of(&out)
+    );
+    let left: Vec<String> = fs::read_dir(&info)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["single.txt.trashinfo"], "the newer item went too");
+}
+
 /// A file in `dir` whose access and modification times are a day old.
 fn stale_file(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);

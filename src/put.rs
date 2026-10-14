@@ -343,6 +343,7 @@ fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
                 verbose: false,
                 protect_batch: Some(crate::info::batch_id()),
                 gone_before: None,
+                free_inodes: 0,
             },
         );
         if done.removed > 0 && !quiet {
@@ -431,6 +432,7 @@ fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
                 verbose: false,
                 protect_batch: None,
                 gone_before: None,
+                free_inodes: 0,
             },
         )
         .left;

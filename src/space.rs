@@ -70,9 +70,67 @@ fn percent(part: u64, whole: u64) -> u64 {
     (u128::from(part) * 100 / u128::from(whole)) as u64
 }
 
+/// Test seam, in debug builds only: `RTRASH_TEST_FS=TOTAL:DIR` or
+/// `TOTAL:INODES:DIR` makes every path under DIR sit on a file system of
+/// TOTAL bytes (and INODES inodes) whose used part is what DIR holds, so
+/// deleting under DIR frees space as a real disk would.
+#[cfg(debug_assertions)]
+fn fake(path: &Path) -> Option<Space> {
+    let spec = std::env::var("RTRASH_TEST_FS").ok()?;
+    let mut parts = spec.splitn(3, ':');
+    let total: u64 = parts.next()?.parse().ok()?;
+    let second = parts.next()?;
+    let (inodes, dir) = match parts.next() {
+        Some(d) => (Some(second.parse::<u64>().ok()?), d),
+        None => (None, second),
+    };
+    let dir = std::fs::canonicalize(dir).ok()?;
+    let p = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !p.starts_with(&dir) {
+        return None;
+    }
+    let (mut bytes, mut count) = (0u64, 0u64);
+    let mut stack = vec![dir];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let Ok(m) = e.metadata() else { continue };
+            count += 1;
+            bytes = bytes.saturating_add(disk_bytes(&m));
+            if m.is_dir() {
+                stack.push(e.path());
+            }
+        }
+    }
+    Some(Space {
+        total,
+        avail: total.saturating_sub(bytes),
+        inodes,
+        inodes_avail: inodes.map(|i| i.saturating_sub(count)),
+    })
+}
+
+#[cfg(all(debug_assertions, unix))]
+fn disk_bytes(m: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    m.blocks().saturating_mul(512)
+}
+
+#[cfg(all(debug_assertions, not(unix)))]
+fn disk_bytes(m: &std::fs::Metadata) -> u64 {
+    m.len()
+}
+
+#[cfg(not(debug_assertions))]
+fn fake(_path: &Path) -> Option<Space> {
+    None
+}
+
 /// The file system holding `path`.
 #[cfg(unix)]
 pub fn query(path: &Path) -> io::Result<Space> {
+    if let Some(s) = fake(path) {
+        return Ok(s);
+    }
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -99,6 +157,9 @@ pub fn query(path: &Path) -> io::Result<Space> {
 /// The volume holding `path`. Windows gives no inode count.
 #[cfg(windows)]
 pub fn query(path: &Path) -> io::Result<Space> {
+    if let Some(s) = fake(path) {
+        return Ok(s);
+    }
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let w: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();

@@ -1573,20 +1573,17 @@ fn purge_oldest(
             verbose: false,
             protect_batch: None,
             gone_before: None,
+            free_inodes: 0,
         };
         let total = prune(prog, one, &opts(u64::MAX)).left;
-        // Inodes: without a count per item, take every item when short.
-        let max = if left.1 > 0 {
-            0
-        } else {
-            total.saturating_sub(left.0)
-        };
+        let max = total.saturating_sub(left.0);
         let done = prune(
             prog,
             one,
             &Prune {
                 dry_run,
                 verbose,
+                free_inodes: left.1,
                 ..opts(max)
             },
         );
@@ -1602,7 +1599,7 @@ fn purge_oldest(
         left = if dry_run {
             (
                 left.0.saturating_sub(done.bytes),
-                if done.removed > 0 { 0 } else { left.1 },
+                left.1.saturating_sub(done.inodes),
             )
         } else {
             crate::space::query(&dir.root).map_or(left, |s| target.need(&s))

@@ -1889,6 +1889,8 @@ first empty the oldest items of your trashes on each file system that is
 short, as
 .B empty \-\-max\-size
 would, until it is back above the target, and only then reap.
+When inodes are short, it counts the inodes each item takes and stops
+once enough have gone.
 A put onto the same disk frees nothing, so this is what turns old trash
 into free space.
 A dry run says how many items it would empty.

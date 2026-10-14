@@ -37,6 +37,9 @@ pub struct Candidate {
     pub name: String,
     pub bytes: u64,
     pub epoch: i64,
+    /// Inodes the item takes (its `.trashinfo` and payload tree), counted
+    /// only when a prune must free inodes; 0 otherwise.
+    pub inodes: u64,
     /// Never removed (items of the put run that triggered the prune).
     pub protected: bool,
 }
@@ -45,8 +48,15 @@ pub struct Candidate {
 /// most `max` bytes. Protected items count toward the total but are never
 /// picked, so the budget can stay exceeded when they alone exceed it.
 pub fn plan(items: &[Candidate], max: u64, policy: Policy) -> Vec<usize> {
+    plan_freeing(items, max, policy, 0)
+}
+
+/// [`plan`] that also keeps picking until the picked items free at least
+/// `free_inodes` inodes.
+pub fn plan_freeing(items: &[Candidate], max: u64, policy: Policy, free_inodes: u64) -> Vec<usize> {
     let mut total: u64 = items.iter().map(|c| c.bytes).sum();
-    if total <= max {
+    let mut freed_inodes = 0u64;
+    if total <= max && free_inodes == 0 {
         return Vec::new();
     }
     let mut order: Vec<usize> = (0..items.len()).filter(|&i| !items[i].protected).collect();
@@ -60,10 +70,11 @@ pub fn plan(items: &[Candidate], max: u64, policy: Policy) -> Vec<usize> {
     });
     let mut out = Vec::new();
     for i in order {
-        if total <= max {
+        if total <= max && freed_inodes >= free_inodes {
             break;
         }
         total = total.saturating_sub(items[i].bytes);
+        freed_inodes = freed_inodes.saturating_add(items[i].inodes);
         out.push(i);
     }
     out
@@ -75,6 +86,8 @@ pub struct Outcome {
     pub removed: u64,
     pub bytes: u64,
     pub errors: u64,
+    /// Inodes the removed items took, when the prune counted them.
+    pub inodes: u64,
     /// Bytes left in the trash afterwards.
     pub left: u64,
 }
@@ -90,6 +103,9 @@ pub struct Prune<'a> {
     /// Items trashed at or before this epoch count as already gone (an age
     /// pass of the same `empty` run takes them).
     pub gone_before: Option<i64>,
+    /// Inodes the removed items must free besides the byte budget (0 for
+    /// none); each item's inodes are then counted.
+    pub free_inodes: u64,
 }
 
 /// Bring the trash roots in `dirs`, taken together, under `p.max` bytes.
@@ -130,6 +146,11 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
             root: ri,
             bytes: sizes.entry_bytes(&e.name),
             epoch: e.epoch,
+            inodes: if p.free_inodes > 0 {
+                1 + tree_inodes(&crate::util::join_name(&dir.files(), &e.name))
+            } else {
+                0
+            },
             protected: p.protect_batch.is_some() && e.batch.as_deref() == p.protect_batch,
             name: e.name,
         }));
@@ -137,7 +158,7 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
     }
     let total: u64 = items.iter().map(|c| c.bytes).sum();
     out.left = total;
-    for i in plan(&items, p.max, p.policy) {
+    for i in plan_freeing(&items, p.max, p.policy, p.free_inodes) {
         let c = &items[i];
         let dir = &dirs[c.root];
         let shown = crate::util::join_name(&dir.files(), &c.name);
@@ -164,6 +185,7 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
         }
         out.removed += 1;
         out.bytes += c.bytes;
+        out.inodes += c.inodes;
         out.left = out.left.saturating_sub(c.bytes);
     }
     if !p.dry_run && out.removed > 0 {
@@ -176,6 +198,27 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
     }
     drop(locks);
     out
+}
+
+/// The inode of `path` and of everything below it, links not followed.
+fn tree_inodes(path: &std::path::Path) -> u64 {
+    let Ok(m) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    let mut n = 1u64;
+    if !m.is_dir() {
+        return n;
+    }
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+            n += 1;
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(e.path());
+            }
+        }
+    }
+    n
 }
 
 fn remove_entry(dir: &TrashDir, name: &str) -> io::Result<()> {
@@ -257,6 +300,7 @@ mod tests {
             name: name.into(),
             bytes,
             epoch,
+            inodes: 0,
             protected: false,
         }
     }
@@ -271,6 +315,18 @@ mod tests {
         assert_eq!(parse_size("10X"), None);
         assert_eq!(parse_size("-1G"), None);
         assert_eq!(parse_size(""), None);
+    }
+
+    #[test]
+    fn plan_freeing_keeps_picking_until_enough_inodes_go() {
+        let mut items = vec![c("a", 10, 1), c("b", 10, 2), c("c", 10, 3)];
+        for (it, n) in items.iter_mut().zip([2, 30, 2]) {
+            it.inodes = n;
+        }
+        assert!(plan_freeing(&items, 1000, Policy::Oldest, 0).is_empty());
+        assert_eq!(plan_freeing(&items, 1000, Policy::Oldest, 2), vec![0]);
+        assert_eq!(plan_freeing(&items, 1000, Policy::Oldest, 3), vec![0, 1]);
+        assert_eq!(plan_freeing(&items, 5, Policy::Oldest, 3), vec![0, 1, 2]);
     }
 
     #[test]
