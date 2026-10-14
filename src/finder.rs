@@ -770,6 +770,51 @@ fn empty_pick(
     gone
 }
 
+/// `reap --purge-trash` on the Finder trashes of device `dev`: remove
+/// the oldest items until `need` (bytes, inodes) is freed, and return
+/// what is still needed. A dry run counts the items instead.
+pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(rows) = read_all(prog) else {
+        return need;
+    };
+    let mut rows: Vec<_> = rows
+        .into_iter()
+        .filter(|e| std::fs::metadata(&e.trash).is_ok_and(|m| m.dev() == dev))
+        .collect();
+    rows.sort_by_key(|e| e.epoch);
+    let mut left = need;
+    let (mut n, mut freed) = (0u64, 0u64);
+    for e in rows {
+        if left == (0, 0) {
+            break;
+        }
+        let path = e.path();
+        let b = crate::fastdelete::disk_usage(&path);
+        let inodes = 1 + crate::trash_stats::count_inodes(&path);
+        if !dry_run {
+            if let Err(err) = crate::trashdir::remove_any_path(&path) {
+                crate::finder_total::uncarried(&e.trash);
+                eprintln!("{prog}: cannot remove '{}': {err}", path.display());
+                continue;
+            }
+            crate::finder_total::carry(&e.trash, (b, inodes), false);
+        }
+        n += 1;
+        freed += b;
+        left = (left.0.saturating_sub(b), left.1.saturating_sub(inodes));
+    }
+    if n > 0 {
+        eprintln!(
+            "{prog}: {} {} ({}) from the Finder Trash",
+            if dry_run { "would empty" } else { "emptied" },
+            crate::util::plural(n, "item", "items"),
+            crate::util::format_bytes(freed),
+        );
+    }
+    left
+}
+
 pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
     let (dry_run, verbose, json) = (o.dry_run, o.verbose, o.json);
     let rows = match read_all(prog) {

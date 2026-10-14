@@ -484,3 +484,47 @@ fn stale_finder_totals_of_gone_volumes_are_pruned() {
         .any(|e| e.file_name().to_string_lossy().ends_with(".Trash.total"));
     assert!(home, "the live home total stays");
 }
+
+/// `reap --purge-trash` empties the Finder Trash on a short file system,
+/// since a put there frees nothing, and carries the Finder total.
+#[test]
+fn reap_purge_trash_empties_the_finder_trash() {
+    let b = Box_::new("reap-purge");
+    let tmp = b.root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let gone = b.work().join("gone.txt");
+    fs::write(&gone, "g").unwrap();
+    let o = b.run(&["put", gone.to_str().unwrap()], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(b.finder().join("gone.txt").exists());
+    let tmp_arg = tmp.to_str().unwrap();
+    let args = [
+        "reap",
+        "--when-below=100%",
+        "--until=100%",
+        "--purge-trash",
+        "--older-than=1h",
+        "--age-by=m",
+    ];
+    let mut dry: Vec<&str> = args.to_vec();
+    dry.extend(["-n", tmp_arg]);
+    let o = b.run(&dry, "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(
+        err(&o).contains("would empty 1 item") && err(&o).contains("Finder Trash"),
+        "{}",
+        err(&o)
+    );
+    assert!(
+        b.finder().join("gone.txt").exists(),
+        "the dry run emptied it"
+    );
+    let mut real: Vec<&str> = args.to_vec();
+    real.push(tmp_arg);
+    let o = b.run(&real, "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(err(&o).contains("emptied 1 item"), "{}", err(&o));
+    assert!(!b.finder().join("gone.txt").exists());
+    let o = b.run(&["trash-stats", "--total", "--json"], "");
+    assert!(out(&o).contains(r#""items":0"#), "{}", out(&o));
+}

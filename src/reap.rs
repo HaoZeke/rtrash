@@ -75,9 +75,9 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
                           until it is back above it; exits at
                           once while space is fine, for a timer job
       --purge-trash     under --when-below, first empty the oldest items
-                          of your trash (the drive's Recycle Bin on
-                          Windows) on a short file system, since a put
-                          there frees nothing
+                          of your trash (the Finder Trash first on macOS,
+                          the drive's Recycle Bin on Windows) on a short
+                          file system, since a put there frees nothing
       --until=SPEC      the target to reap back to under --when-below
                           (default: the --when-below SPEC)
       --json            print a JSON object ({dry_run, older_than,
@@ -1169,6 +1169,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     #[cfg(windows)]
     let bins = crate::trash_history::bin_snapshot();
+    #[cfg(unix)]
+    let finder = crate::finder_total::snapshot();
     let code = run_inner(prog, args);
     let event = if PURGED.load(std::sync::atomic::Ordering::Relaxed) {
         "purge"
@@ -1177,6 +1179,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     };
     #[cfg(unix)]
     crate::trash_total::log_touched(event);
+    #[cfg(unix)]
+    crate::finder_total::log(event, &finder);
     #[cfg(windows)]
     crate::trash_history::log_bins(event, &bins);
     code
@@ -2001,7 +2005,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
 fn purge_oldest(
     prog: &str,
     dev: u64,
-    _at: Option<&Path>,
+    at: Option<&Path>,
     need: (u64, u64),
     target: Floor,
     dry_run: bool,
@@ -2013,7 +2017,18 @@ fn purge_oldest(
         .into_iter()
         .filter(|d| fs::metadata(&d.root).is_ok_and(|m| m.dev() == dev))
         .collect();
+    // On macOS a put lands in the Finder Trash, so purge that first.
     let mut left = need;
+    if crate::finder::is_default(false) {
+        let before = left;
+        left = crate::finder::purge_oldest(prog, dev, left, dry_run);
+        purged(dry_run, u64::from(left != before));
+        if !dry_run && left != before {
+            if let Some(at) = at {
+                left = crate::space::query(at).map_or(left, |s| target.need(&s));
+            }
+        }
+    }
     for dir in &dirs {
         if left.0 == 0 && left.1 == 0 {
             break;

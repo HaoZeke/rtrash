@@ -82,6 +82,8 @@ they move; a change made outside rtrash marks
 the total stale until =--measure=.
 =empty --max-size= and =--prune= trim the Finder trashes together, by
 disk usage.
+=reap --purge-trash= empties the oldest Finder items first on a short
+file system, since a put there goes to the Finder Trash.
 =empty --dangling= needs FreeDesktop records, so on the Finder Trash it
 is refused with a hint.
 CI runs plain put, list, restore and empty on a real macOS runner against

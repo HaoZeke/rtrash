@@ -2418,6 +2418,9 @@ once enough have gone.
 A put onto the same disk frees nothing, so this is what turns old trash
 into free space.
 A dry run says how many items it would empty.
+On macOS, where a put goes to the Finder Trash, it empties the oldest
+Finder items on that file system first (unless the FreeDesktop trash is
+pinned by setting).
 On Windows it empties the oldest items of the Recycle Bin of each volume
 that is short instead, counting the files in each; a volume mounted on a
 folder has a Recycle Bin of its own.
