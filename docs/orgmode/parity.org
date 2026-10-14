@@ -19,6 +19,7 @@ CI repeats the cross-restore rows on every push with
 | Names with spaces, =%= and Unicode          | yes             | yes       | yes     | yes       |
 | Second item with the same name              | =name_1=        | =name_1=  | =name.2= | =name.2= |
 | Restores items the others trashed           | yes             | yes       | yes     | yes       |
+| Removes and empties rtrash items            | yes             | yes       | yes     | not run   |
 
 Each tool reads the others' duplicate names, so the spelling only shows in
 =files/=.
