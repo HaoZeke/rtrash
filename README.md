@@ -101,7 +101,7 @@ $ pip install rtrash
 | OS | Backend | Notes |
 | -- | ------- | ----- |
 | **Linux** | FreeDesktop home + per-mount trash | Primary niche; multi-call `setup`, musl releases, full suite tests |
-| **macOS** | FreeDesktop **home** trash (experimental); Finder Trash through `rtrash finder` (experimental, untested on a real Mac) | `$XDG_DATA_HOME/Trash` or `~/.local/share/Trash`; `rtrash finder` uses `~/.Trash` with Put Back |
+| **macOS** | Finder Trash with Put Back by default (experimental); FreeDesktop **home** trash with `RTRASH_MACOS_TRASH=freedesktop`, `macos.trash` or a `--trash-dir` pin | `~/.Trash`; FreeDesktop: `$XDG_DATA_HOME/Trash` or `~/.local/share/Trash` |
 | **Windows** | System **Recycle Bin** (shell APIs) | put/list/restore/empty/rm/status/du. **Not** FreeDesktop on-disk layout. Multi-call `setup` is Unix-oriented |
 
 On a TTY, bare `rtrash restore` opens the **interactive restore browser** (ratatui), on Windows too, where it lists the Recycle Bin. `--plain` keeps the numbered selection. On Windows `rtrash du -i` deletes into the Recycle Bin and `u` restores from it. `rtrash status` and the trash line of `rtrash du` show the cap of each drive (`MaxCapacity` in the registry) and how much of it is in use. The age filters (`--older-than`, `--newer-than`, `empty DAYS`) and size filters (`--larger-than`, `--smaller-than`) work on the Recycle Bin too, for `list`, `status` and `rm`, and `empty` takes the age ones; sizes come from each item's `$I` record.
@@ -139,7 +139,7 @@ does **not** look for a non-existent `*-linux-gnu*.tar.gz` on x86_64 or aarch64 
 
 Naming matches `[package.metadata.binstall]` in `Cargo.toml` / `scripts/package-release.sh`.
 
-Prebuilt musl tarballs are **Linux-only**. macOS (experimental FreeDesktop home trash) and Windows (Recycle Bin backend) are **from-source** (`cargo install rtrash`); there are no Finder Trash or FreeDesktop-as-Recycle-Bin assets.
+Prebuilt musl tarballs are **Linux-only**. macOS (experimental; Finder Trash by default) and Windows (Recycle Bin backend) are **from-source** (`cargo install rtrash`); there are no Finder Trash or FreeDesktop-as-Recycle-Bin assets.
 
 ### 2. Manual musl tarball (no cargo at all)
 
@@ -495,7 +495,7 @@ Previously deferred items are implemented in the shipped put/empty path:
 
 ## Limitations
 
-- **Platform:** Linux FreeDesktop is the primary niche. macOS is experimental FreeDesktop **home** trash; the Finder Trash lives behind `rtrash finder`, also experimental and untested on a real Mac. Windows uses the system Recycle Bin (not FreeDesktop layout).
+- **Platform:** Linux FreeDesktop is the primary niche. On macOS, plain put, list, restore and empty use the Finder Trash (experimental); `RTRASH_MACOS_TRASH=freedesktop` keeps the FreeDesktop home trash. Windows uses the system Recycle Bin (not FreeDesktop layout).
 - **Restore UI:** bare `rtrash restore` on a TTY opens the **ratatui restore browser** (filter, navigate, multi-restore). Use `--plain` or a piped index for non-interactive selection. Scripts and path restore stay first-class.
 - **Not a general soft-delete database:** only the FreeDesktop on-disk layout.
 - **Across file systems:** hard links to files outside the trashed tree become separate copies, the copy leaves out an extended attribute the target refuses, sockets fail, and device nodes need privilege.

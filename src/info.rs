@@ -144,8 +144,13 @@ fn trim_start(mut b: &[u8]) -> &[u8] {
 
 /// Current local time as `YYYY-MM-DDTHH:MM:SS` (the trashinfo format).
 pub fn now_local_string() -> String {
+    local_string(unsafe { libc::time(std::ptr::null_mut()) } as i64)
+}
+
+/// `epoch` as local time in the trashinfo format.
+pub fn local_string(epoch: i64) -> String {
     unsafe {
-        let t = libc::time(std::ptr::null_mut());
+        let t = epoch as libc::time_t;
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&t, &mut tm);
         format!(

@@ -10,7 +10,7 @@
 | Drop-in mental model for =rm= | =rtrash -rf path= or symlink =rm= → put |
 | Permanent purge of trash entries | =rtrash empty= / =rtrash rm PATTERN= |
 | Windows system Recycle Bin | =rtrash put/list/restore/empty= (from source; not FreeDesktop layout) |
-| macOS Finder Trash | *Not supported* — experimental FreeDesktop *home* trash only |
+| macOS Finder Trash | Default for plain put, list, restore and empty (experimental); =RTRASH_MACOS_TRASH=freedesktop= keeps the FreeDesktop home trash |
 
 Safety model and FreeDesktop layout: [[file:architecture.org][architecture.org]].
 Measured comparison to Python trash-cli: [[file:benchmarks.org][benchmarks.org]].

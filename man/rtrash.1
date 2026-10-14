@@ -27,6 +27,33 @@ implements the freedesktop.org Trash specification on Linux: home trash
 files. It provides an rm-compatible put path and a trash-cli-style suite
 (list, restore, empty, selective permanent delete).
 .PP
+On macOS, plain
+.BR put ,
+.BR list ,
+.B restore
+and
+.B empty
+use the Finder Trash
+.RI ( ~/.Trash ):
+put asks Finder to move each item, so Finder's Put Back works, and a
+symbolic link moves in as itself without a record.
+List shows each item's Put Back location (its path in the trash when
+Finder kept none), restore moves items back to it, and empty removes
+the items and leaves
+.I .DS_Store
+to Finder.
+Options that read the FreeDesktop layout, such as age filters or
+.BR \-\-max\-size ,
+get refused there.
+A
+.B \-\-trash\-dir
+pin,
+.B RTRASH_MACOS_TRASH=freedesktop
+or
+.B macos.trash
+in the config file selects the FreeDesktop home trash instead.
+Undo, status and trash-stats read only the FreeDesktop layout.
+.PP
 Invoked as
 .B rtrash
 with a known subcommand, that command runs. Invoked as
@@ -2468,6 +2495,9 @@ gitignore = false         # \-\-gitignore
 no_delete = false         # \-\-no\-delete for every \-i
 si = false                # \-\-si
 
+[macos]
+trash = "finder"          # RTRASH_MACOS_TRASH: finder or freedesktop
+
 [list]
 sort = "date"             # \-\-sort: date, size, name or path
 size = false              # \-\-size
@@ -2703,6 +2733,16 @@ trash-rm foo
 .RE
 .fi
 .SH ENVIRONMENT
+.TP
+.B RTRASH_MACOS_TRASH
+.B finder
+or
+.BR freedesktop :
+the trash plain put, list, restore and empty use.
+macOS defaults to finder, and other systems to freedesktop.
+It overrides
+.B macos.trash
+in the config file.
 .TP
 .B XDG_DATA_HOME
 Base for the home trash directory

@@ -1,8 +1,9 @@
 //! FreeDesktop trash library used by the `rtrash` CLI and optional Python bindings.
 //!
 //! On Linux this crate implements the freedesktop.org Trash specification with an
-//! rm-compatible put path. On **macOS** (experimental) the same FreeDesktop *home*
-//! trash layout is used — not Finder Trash. On **Windows**, put/list/restore/empty
+//! rm-compatible put path. On **macOS** (experimental) plain put, list, restore
+//! and empty use the Finder Trash (see [`finder`]); the FreeDesktop *home*
+//! trash stays one setting away. On **Windows**, put/list/restore/empty
 //! use the system Recycle Bin (see [`win_recycle`]), not a FreeDesktop fiction.
 //! The binary is a thin multi-call dispatcher over these backends; PyO3 wraps the
 //! FreeDesktop path when the `python` feature is enabled (Unix).

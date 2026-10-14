@@ -106,11 +106,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The suite checks the FreeDesktop layout; the Finder default has its
+      # own job below.
       - name: Test
         run: cargo test --locked
+        env:
+          RTRASH_MACOS_TRASH: freedesktop
 
       - name: Test without the TUI feature
         run: cargo test --locked --no-default-features
+        env:
+          RTRASH_MACOS_TRASH: freedesktop
 
       # The PowerShell tables against what this build's --help shows, and a
       # live completion through the runner's pwsh.
@@ -203,6 +209,24 @@ jobs:
             RTRASH_DU_BULK=$bulk scripts/du-smoke.sh target/release/rtrash \
               "$(rustc --print sysroot)" "${CARGO_HOME:-$HOME/.cargo}/registry/src" "$fixture"
           done
+
+  macos-finder:
+    name: macOS Finder Trash (plain put · list · restore · empty)
+    runs-on: macos-latest
+    # Finder must accept Apple events from the runner; until a run shows
+    # the runner image allows that, a failure here does not fail CI.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Finder default against the real Finder
+        run: |
+          cargo build --locked --release
+          scripts/finder-smoke.sh target/release/rtrash
 
   interop:
     name: interop (trash-cli · gtrash · gio cross-restore)

@@ -11,7 +11,8 @@ use rtrash::{
 
 const HELP: &str = "\
 Usage: rtrash <COMMAND> [ARGS]...
-Fast trash tool: FreeDesktop on Linux (and experimental macOS home trash);
+Fast trash tool: FreeDesktop on Linux; on macOS the Finder Trash with Put
+Back (RTRASH_MACOS_TRASH=freedesktop for the FreeDesktop home trash);
 Windows uses the system Recycle Bin. rm-compatible put interface.
 
 Commands:

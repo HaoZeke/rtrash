@@ -25,7 +25,7 @@ Broader surface (rm flags, multi-call, `rm` globs, dry-run, keys):
   <img src="https://raw.githubusercontent.com/HaoZeke/rtrash/main/docs/demo/rtrash-suite.gif" width="720" alt="rtrash suite demo" />
 </p>
 
-Regenerate: [`docs/demo/record.sh`](demo/record.sh). Platform: Linux FreeDesktop primary; macOS experimental home FDO trash; Windows system Recycle Bin.
+Regenerate: [`docs/demo/record.sh`](demo/record.sh). Platform: Linux FreeDesktop primary; macOS Finder Trash by default (experimental); Windows system Recycle Bin.
 
 ## When to use what
 
@@ -36,7 +36,7 @@ Regenerate: [`docs/demo/record.sh`](demo/record.sh). Platform: Linux FreeDesktop
 | Drop-in mental model for `rm` | `rtrash -rf path` or symlink `rm` → put |
 | Permanent purge of trash entries | `rtrash empty` / `rtrash rm PATTERN` |
 | Windows system Recycle Bin | `rtrash put/list/restore/empty` (from source; not FreeDesktop layout) |
-| macOS Finder Trash | **Not supported** — experimental FreeDesktop **home** trash only |
+| macOS Finder Trash | Default for plain put, list, restore and empty (experimental); `RTRASH_MACOS_TRASH=freedesktop` keeps the FreeDesktop home trash |
 
 - [architecture.md](architecture.md) — FreeDesktop placement, fail-safes
 - [benchmarks.md](benchmarks.md) — measured comparison vs trash-cli

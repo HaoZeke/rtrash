@@ -60,17 +60,17 @@ listing, and the restore conflict policies (=--conflict=rename|skip=).
 
 * macOS
 
-| Behaviour                          | rtrash                                         | Finder  |
-|------------------------------------+------------------------------------------------+---------|
-| Plain =rtrash put=                 | FreeDesktop home trash =~/.local/share/Trash=  | no      |
-| Trash into =~/.Trash= with Put Back | =rtrash finder put= asks Finder               | yes     |
-| Read Put Back records (=.DS_Store=) | =rtrash finder list=                          | yes     |
-| Put Back without Finder            | =rtrash finder restore=                        | n/a     |
-| Volume trash =/Volumes/X/.Trashes/UID= | =finder list= and =restore= with =--trash-dir= | yes |
+| Behaviour                              | rtrash                                          | Finder  |
+|----------------------------------------+-------------------------------------------------+---------|
+| Plain =rtrash put=                     | Finder Trash =~/.Trash=, through Finder         | yes     |
+| Put Back after a plain put             | yes; Finder records it                          | yes     |
+| Plain =list=, =restore=, =empty=       | Finder Trash, by Put Back location              | yes     |
+| FreeDesktop home trash                 | =RTRASH_MACOS_TRASH=freedesktop=, =macos.trash= or a =--trash-dir= pin | no |
+| Symbolic links                         | move in as themselves, without Put Back         | follows |
+| Volume trash =/Volumes/X/.Trashes/UID= | =finder list= and =restore= with =--trash-dir=  | yes     |
 
-Plain put on macOS keeps the FreeDesktop layout, so trash-cli and gtrash
-see its items, while Finder does not; =rtrash finder= covers the Finder
-Trash.
-The macOS rows describe the code paths and their unit tests, which run on
-files written by rtrash and by the Python =ds_store= package.
-No real Mac has run them yet, so treat them as untested.
+Age and size filters, =--max-size=, =undo=, =status= and =trash-stats=
+read the FreeDesktop layout, so on the Finder Trash they are refused or
+cover only the FreeDesktop side.
+CI runs plain put, list, restore and empty on a real macOS runner against
+Finder.

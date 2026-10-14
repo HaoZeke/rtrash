@@ -315,7 +315,9 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     if json {
         println!("{}", summary_json(&trashed, failed));
     }
-    if !trashed.is_empty() {
+    // The Finder Trash keeps no .trashinfo, so budgets and warnings that
+    // read the FreeDesktop layout skip it.
+    if !trashed.is_empty() && !crate::finder::is_default(opts.trash_pin.is_some()) {
         prune_after_put(prog, &trashed, opts.quiet || json);
         if !(opts.quiet || json) {
             warn_big_trash(prog, &trashed);
@@ -609,6 +611,25 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             }
             eprintln!("{prog}: warning: '{name}' is in use by {who}");
         }
+    }
+    if crate::finder::is_default(opts.trash_pin.is_some()) {
+        return match crate::finder::put_item(&abs, &meta) {
+            Ok((trash_name, trash_dir)) => {
+                if opts.verbose && !opts.quiet {
+                    let to = crate::util::term_path(&trash_dir);
+                    println!("removed '{}' (trash {to})", crate::util::term_text(&name));
+                }
+                Ok(Some(Trashed {
+                    original: abs,
+                    name: trash_name,
+                    trash_dir,
+                }))
+            }
+            Err(e) => {
+                eprintln!("{prog}: cannot trash '{name}': {e}");
+                Err(1)
+            }
+        };
     }
     let trash = match resolve_put_trash(opts, &abs, &meta) {
         Ok(t) => t,

@@ -35,6 +35,12 @@ enum Kind {
 
 /// Every key the file may set: (section, key, kind, what it does).
 const KEYS: &[(&str, &str, Kind, &str)] = &[
+    (
+        "macos",
+        "trash",
+        Kind::Str,
+        "finder (macOS default) or freedesktop: the trash plain put, list, restore and empty use",
+    ),
     ("du", "top", Kind::Int, "rows per list (--top)"),
     (
         "du",

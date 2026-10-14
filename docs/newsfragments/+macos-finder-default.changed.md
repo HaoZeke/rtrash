@@ -1,0 +1,1 @@
+macOS: plain `put`, `list`, `restore` and `empty` now use the Finder Trash (`~/.Trash`), and put goes through Finder so its Put Back works. `RTRASH_MACOS_TRASH=freedesktop`, `macos.trash = "freedesktop"` in the config file or a `--trash-dir` pin keeps the FreeDesktop home trash. A new CI job runs the commands against Finder on a macOS runner.

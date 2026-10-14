@@ -1,0 +1,179 @@
+//! Plain put, list, restore and empty on the Finder Trash, the macOS
+//! default. `RTRASH_MACOS_TRASH=finder` picks it on any Unix, and a stand-in
+//! for osascript moves each file into `~/.Trash` as Finder would; the test
+//! then writes the Put Back record Finder keeps in `.DS_Store`.
+#![cfg(unix)]
+
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+
+use rtrash::ds_store::{self, Record, Value};
+
+struct Box_ {
+    root: PathBuf,
+}
+
+impl Box_ {
+    fn new(tag: &str) -> Self {
+        let root = std::env::temp_dir().join(format!("rtrash-fd-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("work")).unwrap();
+        let fake = root.join("osascript");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nshift 2\nfor p in \"$@\"; do mv \"$p\" \"$HOME/.Trash/\" || exit 1; done\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        Box_ { root }
+    }
+
+    fn work(&self) -> PathBuf {
+        self.root.join("work")
+    }
+
+    fn finder(&self) -> PathBuf {
+        self.root.join(".Trash")
+    }
+
+    fn run(&self, args: &[&str], stdin: &str) -> Output {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            .args(args)
+            .current_dir(self.work())
+            .env("HOME", &self.root)
+            .env("XDG_DATA_HOME", self.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", self.root.join(".config"))
+            .env("RTRASH_MACOS_TRASH", "finder")
+            .env("RTRASH_OSASCRIPT", self.root.join("osascript"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    /// Record Put Back for `name` in the Finder Trash, as Finder does.
+    fn put_back(&self, name: &str, original: &Path) {
+        let folder = original.parent().unwrap().to_string_lossy();
+        let rec = Record {
+            name: name.into(),
+            code: *b"ptbL",
+            value: Value::Ustr(format!("{}/", folder.trim_start_matches('/'))),
+        };
+        fs::write(self.finder().join(".DS_Store"), ds_store::write(&[rec])).unwrap();
+    }
+}
+
+impl Drop for Box_ {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn out(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+fn err(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+#[test]
+fn plain_commands_use_the_finder_trash() {
+    let b = Box_::new("plain");
+    let f = b.work().join("a b.txt");
+    fs::write(&f, b"payload").unwrap();
+
+    let o = b.run(&["put", "a b.txt"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!f.exists());
+    assert!(b.finder().join("a b.txt").exists());
+    // Nothing reaches the FreeDesktop trash.
+    assert!(!b.root.join("xdg/Trash/files/a b.txt").exists());
+
+    b.put_back("a b.txt", &f);
+    let o = b.run(&["list"], "");
+    assert!(
+        out(&o).trim_end().ends_with(&*f.to_string_lossy()),
+        "{}",
+        out(&o)
+    );
+    let o = b.run(&["list", "--json"], "");
+    assert!(out(&o).contains("\"name\":\"a b.txt\""), "{}", out(&o));
+    let o = b.run(&["list", "--older-than=1d"], "");
+    assert_eq!(o.status.code(), Some(2));
+
+    let o = b.run(&["restore", "a b.txt"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(fs::read(&f).unwrap(), b"payload");
+
+    // A bare restore offers a numbered table and reads the pick.
+    assert!(b.run(&["put", "a b.txt"], "").status.success());
+    b.put_back("a b.txt", &f);
+    let o = b.run(&["restore", "--plain"], "0\n");
+    assert!(o.status.success(), "{}{}", out(&o), err(&o));
+    assert!(f.exists());
+
+    // Empty removes the items and keeps .DS_Store.
+    assert!(b.run(&["put", "a b.txt"], "").status.success());
+    let o = b.run(&["empty", "--plain"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!b.finder().join("a b.txt").exists());
+    assert!(b.finder().join(".DS_Store").exists());
+}
+
+#[test]
+fn a_pin_or_the_setting_keeps_the_freedesktop_trash() {
+    let b = Box_::new("pin");
+    fs::write(b.work().join("x"), b"x").unwrap();
+    let pin = format!("--trash-dir={}", b.root.join("xdg/Trash").display());
+    let o = b.run(&["put", &pin, "x"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(b.root.join("xdg/Trash/files/x").exists());
+    assert!(!b.finder().join("x").exists());
+
+    // macos.trash in the config file switches every command back.
+    fs::create_dir_all(b.root.join(".config/rtrash")).unwrap();
+    fs::write(
+        b.root.join(".config/rtrash/config.toml"),
+        "[macos]\ntrash = \"freedesktop\"\n",
+    )
+    .unwrap();
+    let mut c = Command::new(env!("CARGO_BIN_EXE_rtrash"));
+    let o = c
+        .args(["list"])
+        .env("HOME", &b.root)
+        .env("XDG_DATA_HOME", b.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", b.root.join(".config"))
+        .env_remove("RTRASH_MACOS_TRASH")
+        .output()
+        .unwrap();
+    assert!(out(&o).contains("/x"), "{}{}", out(&o), err(&o));
+}
+
+#[test]
+fn a_symlink_moves_in_as_itself() {
+    let b = Box_::new("link");
+    fs::write(b.work().join("target"), b"t").unwrap();
+    std::os::unix::fs::symlink("target", b.work().join("ln")).unwrap();
+    let o = b.run(&["put", "ln"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(b
+        .finder()
+        .join("ln")
+        .symlink_metadata()
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(b.work().join("target").exists());
+}

@@ -41,7 +41,7 @@ pub fn trash_backend_label() -> &'static str {
     match trash_backend() {
         TrashBackend::FreeDesktop => "FreeDesktop",
         TrashBackend::MacosFdoExperimental => {
-            "macOS FreeDesktop home (experimental; not Finder Trash)"
+            "macOS FreeDesktop home (experimental; plain commands default to the Finder Trash)"
         }
         TrashBackend::WindowsRecycleBin => "Windows Recycle Bin",
     }
