@@ -106,17 +106,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The suite checks the FreeDesktop layout; the Finder default has its
-      # own job below.
       - name: Test
         run: cargo test --locked
-        env:
-          RTRASH_MACOS_TRASH: freedesktop
 
       - name: Test without the TUI feature
         run: cargo test --locked --no-default-features
-        env:
-          RTRASH_MACOS_TRASH: freedesktop
 
       # The PowerShell tables against what this build's --help shows, and a
       # live completion through the runner's pwsh.
@@ -189,11 +183,17 @@ jobs:
           hdiutil create -size 64m -fs APFS -volname rtrashacl -attach "$RUNNER_TEMP/rtrashacl.dmg"
           echo "RTRASH_TEST_OTHER_VOLUME=/Volumes/rtrashacl" >> "$GITHUB_ENV"
 
+      # The suite checks the FreeDesktop layout; the Finder default has its
+      # own tests (which set RTRASH_MACOS_TRASH=finder) and job below.
       - name: Test
         run: cargo test --locked
+        env:
+          RTRASH_MACOS_TRASH: freedesktop
 
       - name: Test without the TUI feature
         run: cargo test --locked --no-default-features
+        env:
+          RTRASH_MACOS_TRASH: freedesktop
 
       - name: du smoke test with getattrlistbulk and with stat
         run: |
