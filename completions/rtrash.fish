@@ -7,7 +7,7 @@ function __rtrash_seen_subcommand
     set -e cmd[1]
     for c in $cmd
         switch $c
-            case put empty list status trash-stats du restore undo rm who reap finder config setup keys completions man
+            case put empty list status trash-stats du restore undo rm who reap finder wsl config setup keys completions man
                 echo $c
                 return 0
         end
@@ -28,6 +28,7 @@ complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'rm' -d 'permanently 
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'who' -d 'list the live processes holding PATH'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'reap' -d 'trash stale temp entries no live process holds'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'finder' -d 'macOS Finder Trash with Put Back'
+complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'wsl' -d 'the Windows Recycle Bin from inside WSL'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'config' -d 'show the config file and the settings it makes'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'setup' -d 'install multi-call links, completions, man page'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'keys' -d 'show or sample the TUI keybind config'
@@ -141,6 +142,10 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l ncdu -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l ncdu-binary -r -d 'write an ncdu binary export of PATH (ncdu -O)'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s f -l file -r -d 'list from a snapshot or an ncdu export instead of scanning'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l stacks -d 'print folded stacks for flame graph tools'
+
+# wsl
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -f -a 'list restore'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s f -l force -d 'restore over an existing file'
 
 # finder
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -f -a 'put list restore'

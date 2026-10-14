@@ -17,6 +17,7 @@ def "nu-complete rtrash commands" [] {
         "who"
         "reap"
         "finder"
+        "wsl"
         "config"
         "setup"
         "keys"
@@ -27,6 +28,10 @@ def "nu-complete rtrash commands" [] {
 
 def "nu-complete rtrash shells" [] {
     ["bash" "zsh" "fish" "nu" "powershell" "elvish"]
+}
+
+def "nu-complete rtrash wsl" [] {
+    ["list" "restore"]
 }
 
 def "nu-complete rtrash finder" [] {
@@ -306,6 +311,13 @@ export extern "rtrash finder" [
     --help  # display this help and exit
     action?: string@"nu-complete rtrash finder"
     ...args: path
+]
+
+export extern "rtrash wsl" [
+    --force(-f)  # restore over an existing file
+    --help  # display this help and exit
+    action?: string@"nu-complete rtrash wsl"
+    ...paths: path
 ]
 
 export extern "rtrash config" [
