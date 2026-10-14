@@ -90,7 +90,8 @@ restore() { # TOOL ABSPATH
     gio)
       # gio restores by trash URI; `gio trash --list` pairs each with its path.
       local uri
-      uri=$(gio_uri "$2") && gio trash --restore "$uri"
+      uri=$(gio_uri "$2") || { echo "no trash URI for $2"; return 1; }
+      gio trash --restore "$uri"
       ;;
   esac
 }
@@ -105,10 +106,18 @@ for p in "${putters[@]}"; do
       fail=1
       continue
     fi
-    if restore "$r" "$f" >/dev/null 2>&1 && [[ $(cat "$f" 2>/dev/null) == "$p $r" ]]; then
+    if out=$(restore "$r" "$f" 2>&1) && [[ $(cat "$f" 2>/dev/null) == "$p $r" ]]; then
       echo "ok   $p -> $r"
     else
       echo "FAIL $p -> $r"
+      printf '%s\n' "$out" | sed 's/^/  | /'
+      if [[ $r == gio ]]; then
+        echo "  uri: $(gio_uri "$f" 2>&1 || true)"
+        echo "  gio trash --list:"
+        gio trash --list 2>&1 | sed 's/^/  | /' || true
+        echo "  $trash/info:"
+        ls "$trash/info" 2>&1 | sed 's/^/  | /' || true
+      fi
       fail=1
     fi
   done
