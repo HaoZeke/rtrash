@@ -107,7 +107,11 @@ use Action::{Permanent, Trash};
 /// `C` is the per-user cache root: `$XDG_CACHE_HOME` on Linux,
 /// `~/Library/Caches` on macOS.
 const BUILTIN: &[B] = &[
-    group("ai", "AI coding tools: claude, cursor, codex, aider, ollama", &["claude", "cursor", "codex", "aider", "ollama"]),
+    group(
+        "ai",
+        "AI coding tools: claude, cursor, codex, aider, ollama, huggingface",
+        &["claude", "cursor", "codex", "aider", "ollama", "huggingface"],
+    ),
     B {
         guard: true,
         ..b(
@@ -165,6 +169,18 @@ const BUILTIN: &[B] = &[
         2,
         Permanent,
     ),
+    b(
+        "huggingface",
+        "Hugging Face partial downloads and the xet chunk cache (never finished model or dataset files)",
+        &[
+            "unix:${HF_HOME:-~/.cache/huggingface}/hub/*/blobs/*.incomplete",
+            "unix:${HF_HOME:-~/.cache/huggingface}/xet/*/chunk-cache/*",
+            "windows:${HF_HOME:-~/.cache/huggingface}/hub/*/blobs/*.incomplete",
+            "windows:${HF_HOME:-~/.cache/huggingface}/xet/*/chunk-cache/*",
+        ],
+        2,
+        Permanent,
+    ),
     group(
         "compilers",
         "build caches: cargo targets and registry, sccache, ccache, go, zig, bazel, gradle",
@@ -204,7 +220,11 @@ const BUILTIN: &[B] = &[
     b("zig", "Zig global cache", &["linux:${XDG_CACHE_HOME:-~/.cache}/zig/o/*", "linux:${XDG_CACHE_HOME:-~/.cache}/zig/tmp/*", "macos:~/Library/Caches/zig/o/*", "macos:~/Library/Caches/zig/tmp/*", "windows:C/zig/o/*", "windows:C/zig/tmp/*"], 30, Permanent),
     b("bazel", "Bazel output bases no server holds", &["linux:${XDG_CACHE_HOME:-~/.cache}/bazel/_bazel_*/[0-9a-f]*", "macos:/private/var/tmp/_bazel_*/[0-9a-f]*"], 30, Permanent),
     b("gradle", "Gradle build cache and daemon logs", &["${GRADLE_USER_HOME:-~/.gradle}/caches/build-cache-*/*", "${GRADLE_USER_HOME:-~/.gradle}/daemon/*/daemon-*.out.log"], 30, Permanent),
-    group("pkg", "package caches: pip, uv, npm, pnpm, yarn, bun, conda", &["pip", "uv", "npm", "pnpm", "yarn", "bun", "conda"]),
+    group(
+        "pkg",
+        "package caches: pip, uv, npm, pnpm, yarn, bun, conda, mamba, pre-commit",
+        &["pip", "uv", "npm", "pnpm", "yarn", "bun", "conda", "mamba", "pre-commit"],
+    ),
     B {
         tool: &["pip", "cache", "purge"],
         ..b("pip", "pip HTTP and wheel cache", &["unix:${PIP_CACHE_DIR:-C/pip}/http*/*", "unix:${PIP_CACHE_DIR:-C/pip}/wheels/*", "windows:${PIP_CACHE_DIR:-C/pip/Cache}/http*/*", "windows:${PIP_CACHE_DIR:-C/pip/Cache}/wheels/*"], 30, Permanent)
@@ -243,6 +263,39 @@ const BUILTIN: &[B] = &[
                 "~/anaconda3/pkgs/*.tar.bz2",
                 "~/.conda/pkgs/*.conda",
                 "~/.conda/pkgs/*.tar.bz2",
+            ],
+            30,
+            Permanent,
+        )
+    },
+    B {
+        tool: &["micromamba", "clean", "--tarballs", "--yes"],
+        ..b(
+            "mamba",
+            "micromamba and mamba package tarballs (not the extracted packages envs link to)",
+            &[
+                "${MAMBA_ROOT_PREFIX:-~/micromamba}/pkgs/*.conda",
+                "${MAMBA_ROOT_PREFIX:-~/micromamba}/pkgs/*.tar.bz2",
+                "~/.local/share/mamba/pkgs/*.conda",
+                "~/.local/share/mamba/pkgs/*.tar.bz2",
+                "~/.mamba/pkgs/*.conda",
+                "~/.mamba/pkgs/*.tar.bz2",
+            ],
+            30,
+            Permanent,
+        )
+    },
+    B {
+        tool: &["pre-commit", "gc"],
+        busy: &["pre-commit", "prek"],
+        ..b(
+            "pre-commit",
+            "pre-commit and prek hook environments, which they rebuild on the next run",
+            &[
+                "unix:${PRE_COMMIT_HOME:-C/pre-commit}/repo*",
+                "unix:${PREK_HOME:-C/prek}/repos/*",
+                "windows:${PRE_COMMIT_HOME:-~/.cache/pre-commit}/repo*",
+                "windows:${PREK_HOME:-~/.cache/prek}/repos/*",
             ],
             30,
             Permanent,
@@ -654,7 +707,17 @@ mod tests {
         let all: Vec<Profile> = BUILTIN.iter().map(from_builtin).collect();
         let got = select(&all, &["ai".into(), "claude".into()]).unwrap();
         let names: Vec<&str> = got.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["claude", "cursor", "codex", "aider", "ollama"]);
+        assert_eq!(
+            names,
+            [
+                "claude",
+                "cursor",
+                "codex",
+                "aider",
+                "ollama",
+                "huggingface"
+            ]
+        );
         assert!(select(&all, &["nope".into()]).is_err());
     }
 

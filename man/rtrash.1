@@ -1751,7 +1751,12 @@ of Cursor, and
 .B aider
 (\fI\(ti/.aider/caches\fR; 14 days, trash),
 .B ollama
-(runner scratch in \fI$TMPDIR/ollama*\fR, never models; 2 days, permanent).
+(runner scratch in \fI$TMPDIR/ollama*\fR, never models; 2 days, permanent),
+.B huggingface
+(partial downloads,
+.IR $HF_HOME/hub/*/blobs/*.incomplete ,
+and the xet chunk cache, never a finished model or dataset file;
+2 days, permanent).
 The first four are guarded: an entry that is or holds a file named like
 settings, history, a credential, a key or a database stays.
 .TP
@@ -1800,7 +1805,15 @@ that of its first argument; 14 days),
 (install cache),
 .B conda
 (package tarballs only, never the extracted packages environments link
-to); 30 days, permanent.
+to),
+.B mamba
+(the same for micromamba and mamba, under
+.I $MAMBA_ROOT_PREFIX/pkgs
+and
+.IR \(ti/.local/share/mamba/pkgs ),
+.B pre\-commit
+(pre\-commit and prek hook environments, kept while either runs);
+30 days, permanent.
 .TP
 .B thumbnails
 (freedesktop thumbnails; 90 days, permanent).
@@ -1864,9 +1877,11 @@ a profile with a tool on PATH runs it instead of its own pass:
 .BR "npm cache clean \-\-force" ,
 .BR "pnpm store prune" ,
 .BR "yarn cache clean" ,
-.B bun pm cache rm
+.BR "bun pm cache rm" ,
+.BR "conda clean \-\-tarballs" ,
+.B micromamba clean \-\-tarballs
 and
-.BR "conda clean \-\-tarballs" .
+.BR "pre\-commit gc" .
 A dry run only names the command.
 .TP
 .BR \-p ", " \-\-profile= NAME

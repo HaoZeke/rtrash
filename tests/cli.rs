@@ -4468,8 +4468,51 @@ fn reap_cmd(sb: &Sandbox, args: &[&str]) -> Output {
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("CARGO_HOME")
         .env_remove("CODEX_HOME")
+        .env_remove("HF_HOME")
+        .env_remove("MAMBA_ROOT_PREFIX")
+        .env_remove("PRE_COMMIT_HOME")
+        .env_remove("PREK_HOME")
         .output()
         .unwrap()
+}
+
+/// The huggingface profile takes a stale partial download and leaves the
+/// finished blob beside it; mamba takes a stale tarball and leaves the
+/// extracted package.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_profiles_take_partial_downloads_and_tarballs_only() {
+    let sb = Sandbox::new("reap-hf-mamba");
+    let blobs = sb.root.join(".cache/huggingface/hub/models--org--m/blobs");
+    let pkgs = sb.root.join("micromamba/pkgs");
+    fs::create_dir_all(&blobs).unwrap();
+    fs::create_dir_all(pkgs.join("numpy-2.0-py312_0")).unwrap();
+    let partial = stale_file(&blobs, "abc123.incomplete");
+    let done = stale_file(&blobs, "def456");
+    let tarball = stale_file(&pkgs, "numpy-2.0-py312_0.conda");
+    let out = reap_cmd(
+        &sb,
+        &[
+            "reap",
+            "-n",
+            "--json",
+            "--older-than=1h",
+            "-p",
+            "huggingface",
+            "-p",
+            "mamba",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let j = stdout_of(&out);
+    assert!(j.contains(&json_path(&partial)), "{j}");
+    assert!(j.contains(&json_path(&tarball)), "{j}");
+    assert!(!j.contains(&json_path(&done)), "{j}");
+    assert!(!j.contains("numpy-2.0-py312_0\""), "{j}");
+}
+
+fn json_path(p: &Path) -> String {
+    format!("\"{}\"", p.display())
 }
 
 fn write_at(root: &Path, rel: &str, body: &str) -> PathBuf {

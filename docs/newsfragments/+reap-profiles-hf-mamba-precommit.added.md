@@ -1,0 +1,1 @@
+New reap profiles: `huggingface` (partial downloads and the xet chunk cache, in the `ai` group), `mamba` (micromamba and mamba package tarballs) and `pre-commit` (pre-commit and prek hook environments), both in the `pkg` group.
