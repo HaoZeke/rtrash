@@ -93,6 +93,7 @@ export extern "rtrash empty" [
     --older-than: string  # same as positional DAYS, or a duration such as 2h or 1d12h
     --max-size: string  # remove items until the trash (all roots in scope
     --prune: string@"nu-complete rtrash prune"  # which items --max-size removes first
+    --until-free: string  # remove the oldest items until each trash file system has SPEC free
     --dangling  # remove only the .trashinfo records whose payload is gone
     --json  # emit a JSON summary on stdout ({dry_run, removed, bytes, days})
     --trash-dir: string  # empty only this trash directory (repeatable);
@@ -363,6 +364,7 @@ export extern "trash-empty" [
     --older-than: string  # same as positional DAYS, or a duration such as 2h or 1d12h
     --max-size: string  # remove items until the trash (all roots in scope
     --prune: string@"nu-complete rtrash prune"  # which items --max-size removes first
+    --until-free: string  # remove the oldest items until each trash file system has SPEC free
     --dangling  # remove only the .trashinfo records whose payload is gone
     --json  # emit a JSON summary on stdout ({dry_run, removed, bytes, days})
     --trash-dir: string  # empty only this trash directory (repeatable);

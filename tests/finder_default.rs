@@ -528,3 +528,35 @@ fn reap_purge_trash_empties_the_finder_trash() {
     let o = b.run(&["trash-stats", "--total", "--json"], "");
     assert!(out(&o).contains(r#""items":0"#), "{}", out(&o));
 }
+
+/// `empty --until-free` takes the oldest Finder items on a short file
+/// system first.
+#[test]
+fn empty_until_free_takes_finder_items() {
+    let b = Box_::new("until-free");
+    let p = b.work().join("gone.txt");
+    fs::write(&p, "g").unwrap();
+    assert!(b.run(&["put", p.to_str().unwrap()], "").status.success());
+    let fs_spec = format!("{}:{}", 1u64 << 40, b.root.display());
+    let run = |args: &[&str], spec: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            .args(args)
+            .env("HOME", &b.root)
+            .env("XDG_DATA_HOME", b.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", b.root.join(".config"))
+            .env("XDG_STATE_HOME", b.root.join("state"))
+            .env("RTRASH_MACOS_TRASH", "finder")
+            .env("RTRASH_TEST_FS", spec)
+            .output()
+            .unwrap()
+    };
+    // A 1 TiB fake disk asked for all but one byte free: short.
+    let want = format!("--until-free={}", (1u64 << 40) - 1);
+    let o = run(&["empty", "--home-only", &want], &fs_spec);
+    assert!(
+        err(&o).contains("emptied 1 item") && err(&o).contains("Finder Trash"),
+        "{}",
+        err(&o)
+    );
+    assert!(!b.finder().join("gone.txt").exists());
+}

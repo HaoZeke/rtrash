@@ -392,6 +392,25 @@ Which items
 .B \-\-max\-size
 removes first (default oldest).
 .TP
+.BI \-\-until\-free= SPEC
+On each file system that holds a trash in scope and has less free than
+.I SPEC
+(a percent such as 10%, a size such as 20G, either with
+.IR ,inodes=PCT ,
+as for
+.BR "reap \-\-when\-below" ),
+remove the oldest items of every trash there, Finder's first on macOS,
+until it is back at
+.IR SPEC .
+A dry run says what it would empty.
+The exit status is 1 when a file system stays short because its trash
+held too little.
+It takes no DAYS,
+.BR \-\-max\-size ,
+.B \-\-dangling
+or
+.BR \-\-all\-users .
+.TP
 .B \-\-dangling
 Remove only the
 .B .trashinfo

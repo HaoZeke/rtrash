@@ -37,6 +37,7 @@ empty_opts=(
   '--older-than=[only items trashed more than AGE ago (DAYS, 2h, 1d12h)]:age:'
   '--max-size=[remove items until the trash fits in SIZE]:size:'
   '--prune=[which items --max-size removes first]:policy:(oldest largest)'
+  '--until-free=[remove the oldest items until each trash file system has SPEC free]:spec:'
   '--dangling[remove only records whose payload is gone]'
   '--json[emit a JSON summary]'
   '--plain[skip TUI]'

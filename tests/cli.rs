@@ -4386,6 +4386,102 @@ fn trash_stats_exit_low_flags_a_full_file_system() {
     );
 }
 
+/// `empty --until-free` removes the oldest trash items until the file
+/// system has the asked free room, and no more.
+#[cfg(unix)]
+#[test]
+fn empty_until_free_removes_the_oldest_until_there_is_room() {
+    let sb = Sandbox::new("until-free");
+    let run = |args: &[&str], total: u64| {
+        Command::new(bin())
+            .args(args)
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .env("RTRASH_TEST_FS", format!("{total}:{}", sb.root.display()))
+            .env_remove("RTRASH_WARN_SIZE")
+            .env_remove("RTRASH_MAX_SIZE")
+            .output()
+            .unwrap()
+    };
+    let big = 1u64 << 40;
+    for n in ["old.bin", "new.bin"] {
+        let p = write_at(&sb.root, &format!("work/{n}"), &"z".repeat(40_000));
+        assert!(run(&["put", p.to_str().unwrap()], big).status.success());
+    }
+    let info = sb.root.join("xdg/Trash/info");
+    let old = info.join("old.bin.trashinfo");
+    let body = fs::read_to_string(&old).unwrap();
+    let date = body
+        .lines()
+        .find(|l| l.starts_with("DeletionDate="))
+        .unwrap();
+    fs::write(&old, body.replace(date, "DeletionDate=2020-01-01T00:00:00")).unwrap();
+    let spaced = stdout_of(&run(
+        &["trash-stats", "--home-only", "--total", "--space", "--json"],
+        big,
+    ));
+    let avail: u64 = spaced
+        .split(r#""avail":"#)
+        .nth(1)
+        .unwrap()
+        .split(',')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let used = big - avail;
+    // 10 kB free, 30 kB wanted: one 40 kB item is enough.
+    let total = used + 10_000;
+    let roomy = run(
+        &["empty", "--home-only", "--until-free=30000", "--json"],
+        big,
+    );
+    assert_eq!(roomy.status.code(), Some(0), "{}", stderr_of(&roomy));
+    assert!(
+        stdout_of(&roomy).contains(r#""short":0"#),
+        "{}",
+        stdout_of(&roomy)
+    );
+    let dry = run(&["empty", "--home-only", "--until-free=30000", "-n"], total);
+    assert!(
+        stderr_of(&dry).contains("would empty 1 item"),
+        "{}",
+        stderr_of(&dry)
+    );
+    assert!(old.exists());
+    let o = run(
+        &["empty", "--home-only", "--until-free=30000", "--json"],
+        total,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr_of(&o));
+    assert!(
+        stdout_of(&o).contains(r#""short":1,"still_short":0"#),
+        "{}",
+        stdout_of(&o)
+    );
+    assert!(!old.exists() && info.join("new.bin.trashinfo").exists());
+    // Nothing left can make 200 kB free: exit 1.
+    let o = run(
+        &["empty", "--home-only", "--until-free=200000"],
+        used + 10_000,
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", stderr_of(&o));
+    assert!(stderr_of(&o).contains("still under"), "{}", stderr_of(&o));
+    assert_eq!(
+        run(&["empty", "--home-only", "--until-free=10%", "3"], big)
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        run(&["empty", "--home-only", "--until-free=lots"], big)
+            .status
+            .code(),
+        Some(2)
+    );
+}
+
 /// `empty --dangling` keeps a current total current.
 #[cfg(unix)]
 #[test]

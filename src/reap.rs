@@ -2002,7 +2002,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
 /// `need` (bytes, inodes) is freed, and return what is still needed:
 /// measured again after a real purge, estimated on a dry run.
 #[cfg(unix)]
-fn purge_oldest(
+pub(crate) fn purge_oldest(
     prog: &str,
     dev: u64,
     at: Option<&Path>,
@@ -2080,7 +2080,7 @@ fn purge_oldest(
 /// The Windows side: the oldest items in the Recycle Bin of the drive
 /// that holds `at`, until `need` (bytes, files) is freed.
 #[cfg(windows)]
-fn purge_oldest(
+pub(crate) fn purge_oldest(
     prog: &str,
     _dev: u64,
     at: Option<&Path>,

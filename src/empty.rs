@@ -38,6 +38,12 @@ permanent delete). Use --plain to skip the TUI.
                      DAYS, the age cut runs first
       --prune=oldest|largest  which items --max-size removes first
                      (default oldest)
+      --until-free=SPEC  on each file system under SPEC free (a percent
+                     such as 10%, a size such as 20G, and ,inodes=PCT),
+                     remove the oldest items of every trash there (with
+                     --home-only or --trash-dir, only file systems those
+                     hold) until
+                     it is back at SPEC; exits 1 when one stays short
       --dangling   remove only the .trashinfo records whose payload is gone
                      (they list as items that cannot be restored); takes
                      no DAYS or --max-size
@@ -61,6 +67,7 @@ struct Opts {
     plain: bool,
     json: bool,
     max_size: Option<u64>,
+    until_free: Option<(String, crate::reap::Floor)>,
     prune: crate::retention::Policy,
     dangling: bool,
     /// `-i`: ask once before emptying, as trash-cli does.
@@ -206,6 +213,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         plain: false,
         json: false,
         max_size: None,
+        until_free: None,
         prune: crate::retention::Policy::Oldest,
         dangling: false,
         interactive: false,
@@ -246,7 +254,19 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                     None => return usage_err(prog, "--prune takes oldest or largest"),
                 }
             }
-            "--max-size" | "--prune" => {
+            a if a.starts_with("--until-free=") => {
+                let v = &a["--until-free=".len()..];
+                match crate::reap::Floor::parse(v) {
+                    Some(f) => opts.until_free = Some((v.to_string(), f)),
+                    None => {
+                        return usage_err(
+                            prog,
+                            &format!("invalid SPEC in '{a}' (a percent such as 10%, a size such as 20G, and ,inodes=PCT)"),
+                        )
+                    }
+                }
+            }
+            "--max-size" | "--prune" | "--until-free" => {
                 return usage_err(prog, &format!("{arg} needs a value ({arg}=VALUE)"));
             }
             a if a.starts_with("--older-than=") => {
@@ -264,6 +284,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             },
             a => return usage_err(prog, &format!("unrecognized option '{a}'")),
         }
+    }
+
+    if let Some((spec, floor)) = &opts.until_free {
+        if opts.days.is_some() || opts.max_size.is_some() || opts.dangling || opts.all_users {
+            return usage_err(
+                prog,
+                "--until-free takes no DAYS, --max-size, --dangling or --all-users",
+            );
+        }
+        return until_free(prog, spec, *floor, &opts);
     }
 
     // macOS empties the Finder Trash unless a pin or the setting says
@@ -431,6 +461,73 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     } else {
         0
     }
+}
+
+/// `--until-free`: on each file system that holds a trash in scope and has less
+/// free than `floor`, remove the oldest trash items there (the Finder
+/// Trash first where it is the default) until it is back at `floor`.
+fn until_free(prog: &str, spec: &str, floor: crate::reap::Floor, opts: &Opts) -> i32 {
+    // One path per file system, keyed as reap keys them.
+    let mut roots: Vec<PathBuf> = trashdir::resolve_dirs_opts(&opts.trash_dirs, opts.home_only)
+        .into_iter()
+        .map(|d| d.root)
+        .collect();
+    #[cfg(unix)]
+    if crate::finder::is_default(!opts.trash_dirs.is_empty()) {
+        roots.extend(crate::finder::trashes());
+    }
+    let mut seen: Vec<u64> = Vec::new();
+    let (mut short, mut still) = (0u64, 0u64);
+    for root in roots {
+        #[cfg(unix)]
+        let dev = {
+            use std::os::unix::fs::MetadataExt;
+            match std::fs::metadata(&root) {
+                Ok(m) => m.dev(),
+                Err(_) => continue,
+            }
+        };
+        #[cfg(windows)]
+        let dev = crate::win_recycle::volume_key(&root);
+        if seen.contains(&dev) {
+            continue;
+        }
+        seen.push(dev);
+        let Ok(space) = crate::space::query(&root) else {
+            continue;
+        };
+        let need = floor.need(&space);
+        if need == (0, 0) {
+            continue;
+        }
+        short += 1;
+        let left = crate::reap::purge_oldest(
+            prog,
+            dev,
+            Some(&root),
+            need,
+            floor,
+            opts.dry_run,
+            opts.verbose,
+        );
+        if left != (0, 0) {
+            still += 1;
+            eprintln!(
+                "{prog}: the file system of '{}' is still under {spec} free; the trash there held too little",
+                root.display()
+            );
+        }
+    }
+    if opts.json {
+        println!(
+            "{{\"dry_run\":{},\"until_free\":\"{}\",\"short\":{short},\"still_short\":{still}}}",
+            opts.dry_run,
+            crate::util::json_escape(spec)
+        );
+    } else if short == 0 && (opts.verbose || opts.dry_run) {
+        eprintln!("{prog}: every trash file system has {spec} free; nothing to do");
+    }
+    i32::from(still > 0)
 }
 
 /// Older-than-cutoff check. An entry with a missing or unreadable
