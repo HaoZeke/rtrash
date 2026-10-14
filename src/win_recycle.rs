@@ -1065,7 +1065,12 @@ on Windows (there is no FreeDesktop layout here).
                     let original = original_of(&it);
                     let res = if let Some(parts) = &format {
                         let id = Path::new(&it.id);
-                        let name = it.name.to_string_lossy();
+                        // The shell's display name drops known extensions;
+                        // the original path keeps the real file name.
+                        let name = original
+                            .file_name()
+                            .map(|n| n.to_string_lossy())
+                            .unwrap_or_else(|| it.name.to_string_lossy());
                         let row = crate::listfmt::FmtRow {
                             date: &date,
                             epoch: it.time_deleted,
