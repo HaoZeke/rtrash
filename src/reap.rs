@@ -56,7 +56,8 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
       --when-below=SPEC run only when a reaped file system has less free
                           than SPEC (a size such as 20G, a percent such
                           as 10%, and ,inodes=PCT), then reap oldest first
-                          by profile until it is back above it; exits at
+                          by profile, measuring again before each entry,
+                          until it is back above it; exits at
                           once while space is fine, for a timer job
       --until=SPEC      the target to reap back to under --when-below
                           (default: the --when-below SPEC)
@@ -1297,9 +1298,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
 
     // --when-below: oldest first within each profile, in profile order,
-    // until each file system has what it needs.
+    // until each file system has what it needs. A dry run estimates from
+    // the sizes; a real run measures the file system before each entry.
     if when_below.is_some() {
         outcomes.sort_by(|a, b| a.group.cmp(&b.group).then(b.age.cmp(&a.age)));
+    }
+    if when_below.is_some() && dry_run {
         for (dev, need) in &needs {
             let idx: Vec<usize> = (0..outcomes.len())
                 .filter(|&i| outcomes[i].dev == *dev && outcomes[i].skip.is_none())
@@ -1323,10 +1327,27 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     let shared_once = shared_set.distinct();
     let mut failed = 0usize;
-    let mut reaped: Vec<&Outcome> = Vec::new();
-    for o in &outcomes {
+    let target = until
+        .or(when_below)
+        .filter(|_| when_below.is_some() && !dry_run);
+    // Bytes and inodes moved to a trash per device: they free space only
+    // once the trash is emptied, but count toward the target so a trash
+    // on the same disk does not take every entry.
+    let mut credit: std::collections::HashMap<u64, (u64, u64)> = std::collections::HashMap::new();
+    let mut reaped_idx: Vec<usize> = Vec::new();
+    for (i, o) in outcomes.iter_mut().enumerate() {
         if o.skip.is_some() {
             continue;
+        }
+        if let Some(t) = target {
+            if let Some(space) = o.path.parent().and_then(|p| crate::space::query(p).ok()) {
+                let (nb, ni) = t.need(&space);
+                let (cb, ci) = credit.get(&o.dev).copied().unwrap_or_default();
+                if nb <= cb && ni <= ci {
+                    o.skip = Some("free space is back above the target".into());
+                    continue;
+                }
+            }
         }
         if !dry_run {
             let done = if groups[o.group].action == Action::Permanent {
@@ -1341,9 +1362,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 status = 1;
                 continue;
             }
+            if groups[o.group].action != Action::Permanent {
+                let c = credit.entry(o.dev).or_default();
+                c.0 = c.0.saturating_add(o.bytes);
+                c.1 = c.1.saturating_add(o.inodes);
+            }
         }
-        reaped.push(o);
+        reaped_idx.push(i);
     }
+    let reaped: Vec<&Outcome> = reaped_idx.iter().map(|&i| &outcomes[i]).collect();
     // Per group: entries reaped, their bytes, entries kept.
     let totals: Vec<(usize, u64, usize)> = (0..groups.len())
         .map(|gi| {

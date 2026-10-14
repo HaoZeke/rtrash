@@ -1816,13 +1816,16 @@ or both, each optionally with
 While every such file system is above it, reap exits 0 at once,
 without the process scan, so a timer can run it often.
 Below it, entries on that file system go oldest first, profile by
-profile in the order given, until their sizes cover the shortfall;
-the rest are kept as
+profile in the order given.
+Before each one, reap measures the file system again and stops once it
+is back above the target; the rest are kept as
 .RI \(oq "free space is back above the target" \(cq.
-Trashed entries free space only once the trash is emptied, so profiles
-whose action is permanent, or
+A trashed entry frees space only once the trash is emptied, so its size
+counts toward the target as if freed; profiles whose action is
+permanent, or
 .BR \-\-permanent ,
 suit it best.
+A dry run cannot measure, so it adds up the entries' sizes instead.
 .TP
 .BI \-\-until= SPEC
 The target to reap back to under
