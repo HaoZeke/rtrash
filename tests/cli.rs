@@ -5042,3 +5042,30 @@ fn put_verbose_names_the_trash_directory() {
         "{text}"
     );
 }
+
+/// A put onto a file system short of space says that it freed nothing.
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn put_warns_when_the_trash_file_system_is_low() {
+    let sb = Sandbox::new("put-low");
+    let f = write_at(&sb.root, "work/big.bin", &"b".repeat(90_000));
+    let out = Command::new(bin())
+        .args(["put", "--home-only", f.to_str().unwrap()])
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .env_remove("RTRASH_WARN_SIZE")
+        .env_remove("RTRASH_MAX_SIZE")
+        .env("RTRASH_TEST_FS", format!("100000:{}", sb.root.display()))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("is low (") && err.contains("trashing frees nothing"),
+        "{err}"
+    );
+    let quiet = write_at(&sb.root, "work/ok.bin", "x");
+    let out = sb.run(&["put", "--home-only", quiet.to_str().unwrap()]);
+    assert!(!stderr_of(&out).contains("is low"), "{}", stderr_of(&out));
+}

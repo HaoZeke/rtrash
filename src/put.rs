@@ -319,6 +319,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         prune_after_put(prog, &trashed, opts.quiet || json);
         if !(opts.quiet || json) {
             warn_big_trash(prog, &trashed);
+            warn_low_space(prog, &trashed);
         }
     }
     status
@@ -457,6 +458,28 @@ fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
                 "{prog}: warning: trash '{}' holds {}{share}, past {src}; free it with `rtrash empty`",
                 root.display(),
                 crate::fastdelete::format_bytes(bytes)
+            );
+        }
+    }
+}
+
+/// Warn when a trash this run used sits on a file system under
+/// [`crate::space::WARN_FREE_PERCENT`] free, in bytes or inodes: a put
+/// there freed nothing, since the payload only moved.
+fn warn_low_space(prog: &str, trashed: &[Trashed]) {
+    let mut roots: Vec<PathBuf> = trashed.iter().map(|t| t.trash_dir.clone()).collect();
+    roots.sort();
+    roots.dedup();
+    for root in roots {
+        let Ok(s) = crate::space::query(&root) else {
+            continue;
+        };
+        let lows = s.lows(crate::space::WARN_FREE_PERCENT);
+        if !lows.is_empty() {
+            eprintln!(
+                "{prog}: warning: the file system of trash '{}' is low ({}); trashing frees nothing there until the trash is emptied (`rtrash empty`, or `rtrash reap --when-below=10% --purge-trash`)",
+                root.display(),
+                lows.join(", ")
             );
         }
     }

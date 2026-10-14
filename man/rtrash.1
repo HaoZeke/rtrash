@@ -2535,6 +2535,9 @@ in the config file; an empty value turns it off, and
 or
 .B \-\-json
 silence it.
+A put also warns when a trash it used sits on a file system with less
+than 10% of its bytes or inodes free, since moving a file into that
+trash frees nothing there.
 .TP
 .B RTRASH_MIN_FREE
 A size such as 10G that a put or restore copying across devices must
