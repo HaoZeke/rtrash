@@ -285,7 +285,7 @@ fn bash_complete(words: &[&str]) -> Vec<String> {
 fn bash_completion_offers_the_right_words() {
     assert_eq!(
         bash_complete(&["rtrash", "completions", ""]),
-        ["bash", "zsh", "fish", "nu", "powershell"]
+        ["bash", "zsh", "fish", "nu", "powershell", "elvish"]
     );
     let keys = bash_complete(&["rtrash", "keys", "--"]);
     assert!(keys.contains(&"--sample".to_string()), "{keys:?}");
@@ -324,7 +324,10 @@ fn fish_completion_offers_the_right_words() {
         eprintln!("fish not installed; skipping");
         return;
     };
-    assert_eq!(shells, ["bash", "fish", "nu", "powershell", "zsh"]);
+    assert_eq!(
+        shells,
+        ["bash", "elvish", "fish", "nu", "powershell", "zsh"]
+    );
     let keys = run("rtrash keys --").unwrap();
     assert!(keys.contains(&"--sample".to_string()), "{keys:?}");
     let subs = run("rtrash k").unwrap();
@@ -335,7 +338,7 @@ fn fish_completion_offers_the_right_words() {
 fn zsh_completion_knows_keys_and_every_shell() {
     let zsh = read("completions/_rtrash");
     assert!(zsh.contains("'keys:"), "keys subcommand missing");
-    assert!(zsh.contains("'1:shell:(bash zsh fish nu powershell)'"));
+    assert!(zsh.contains("'1:shell:(bash zsh fish nu powershell elvish)'"));
     assert!(zsh.contains("--sample["));
 }
 
@@ -499,6 +502,98 @@ fn powershell_script_is_embedded_and_completes() {
         .output()
     else {
         eprintln!("pwsh not installed; skipping");
+        return;
+    };
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let got: Vec<String> = String::from_utf8_lossy(&run.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(got, ["--dangling", "--latest", "keys"]);
+}
+
+/// The words of the `&SUB=[...]` line of the elvish script.
+fn elvish_words(script: &str, sub: &str) -> Vec<String> {
+    let start = format!("&{sub}=[");
+    let line = script
+        .lines()
+        .map(str::trim_start)
+        .find(|l| l.starts_with(&start))
+        .unwrap_or_else(|| panic!("elvish map entry for {sub} not found"));
+    line[start.len()..]
+        .trim_end_matches(']')
+        .split_whitespace()
+        .map(|w| w.trim_end_matches('=').to_string())
+        .collect()
+}
+
+/// Every long option of `--help` is in the elvish script's map for that
+/// subcommand; the multi-call names share the map.
+#[test]
+fn elvish_map_covers_every_help_option() {
+    let elv = read("completions/rtrash.elv");
+    let mut missing = Vec::new();
+    for sub in SUBCOMMANDS {
+        let words = elvish_words(&elv, sub);
+        for opt in help_long_opts(sub) {
+            let flag = format!("--{opt}");
+            if !words.contains(&flag) {
+                missing.push(format!("elvish {sub} {flag}"));
+            }
+        }
+    }
+    for (name, sub) in [
+        ("trash-put", "put"),
+        ("trash-empty", "empty"),
+        ("trash-list", "list"),
+        ("trash-restore", "restore"),
+        ("trash-rm", "rm"),
+    ] {
+        if !elv.contains(&format!("&{name}={sub}")) {
+            missing.push(format!("elvish multi-call {name}"));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "missing in rtrash.elv:\n{}",
+        missing.join("\n")
+    );
+}
+
+/// `rtrash completions elvish` prints the script, and elvish completes
+/// from it when installed. The line editor exists only in an interactive
+/// shell, so the run leaves out the lines that register the completer.
+#[test]
+fn elvish_script_is_embedded_and_completes() {
+    let out = Command::new(bin())
+        .args(["completions", "elvish"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let script = read("completions/rtrash.elv");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), script);
+    let (body, hooks) = script
+        .split_once("# Register with the line editor")
+        .expect("hook marker");
+    assert!(hooks.contains("edit:completion:arg-completer[rtrash]"));
+    let dir = std::env::temp_dir().join(format!("rtrash-elvish-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("t.elv");
+    fs::write(
+        &file,
+        format!(
+            "{body}\nfor l [[rtrash empty --da] [trash-restore --la] [rtrash k]] {{ echo (str:join ' ' [(complete $@l)]) }}\n"
+        ),
+    )
+    .unwrap();
+    let run = Command::new("elvish").arg("-norc").arg(&file).output();
+    let _ = fs::remove_dir_all(&dir);
+    let Ok(run) = run else {
+        eprintln!("elvish not installed; skipping");
         return;
     };
     assert!(

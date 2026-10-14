@@ -2285,7 +2285,7 @@ Replace existing links/files (use after upgrades).
 Print each path written.
 .SS completions
 .B rtrash completions
-.RB { bash | zsh | fish | nu | powershell }
+.RB { bash | zsh | fish | nu | powershell | elvish }
 .PP
 Print the embedded completion script to stdout (packagers / custom paths).
 The nushell script declares each command as an
@@ -2305,6 +2305,12 @@ names; add
 .B "rtrash completions powershell | Out-String | Invoke-Expression"
 to
 .IR $PROFILE .
+The elvish script is a module: save it as
+.I ~/.config/elvish/lib/rtrash.elv
+and add
+.B use rtrash
+to
+.IR rc.elv .
 .SS man
 .B rtrash man
 .PP
@@ -2584,7 +2590,7 @@ Trash specification:
 .PP
 Shell completions ship in the source tree under
 .I completions/
-(bash, zsh, fish, nushell and PowerShell). See the project README for install paths.
+(bash, zsh, fish, nushell, PowerShell and elvish). See the project README for install paths.
 .SH AUTHOR
 Written for the rtrash project.
 .SH COPYRIGHT

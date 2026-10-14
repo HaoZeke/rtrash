@@ -193,7 +193,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q keys' -f -l sa
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q keys' -f -l path -d 'print the config path'
 
 # completions shell names
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q completions' -f -a 'bash zsh fish nu powershell' -d 'shell'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q completions' -f -a 'bash zsh fish nu powershell elvish' -d 'shell'
 
 # Multi-call names: complete flags for each tool (no system rm by default)
 for cmd in trash-put trash

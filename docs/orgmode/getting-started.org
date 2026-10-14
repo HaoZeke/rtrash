@@ -29,7 +29,7 @@ cargo binstall rtrash
 rtrash setup
 #+end_src
 
-~rtrash setup~ installs multi-call links, bash/zsh/fish/nu completions, and the man page under =~/.local= from assets *embedded in the binary* (no source checkout). Flags: ~--dry-run~, ~--force~ (after upgrades), ~--with-rm~, ~--prefix=DIR~. Packagers: ~rtrash completions bash|zsh|fish|nu|powershell~, ~rtrash man~, or ~rtrash setup --prefix=/usr~.
+~rtrash setup~ installs multi-call links, bash/zsh/fish/nu completions, and the man page under =~/.local= from assets *embedded in the binary* (no source checkout). Flags: ~--dry-run~, ~--force~ (after upgrades), ~--with-rm~, ~--prefix=DIR~. Packagers: ~rtrash completions bash|zsh|fish|nu|powershell|elvish~, ~rtrash man~, or ~rtrash setup --prefix=/usr~.
 
 MSRV *1.88*.
 Default =cargo install= is a normal dynamically linked Linux binary.

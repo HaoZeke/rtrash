@@ -25,7 +25,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
         'man' = @()
     }
     $multi = @{'trash' = 'put'; 'trash-put' = 'put'; 'trash-empty' = 'empty'; 'trash-list' = 'list'; 'trash-restore' = 'restore'; 'trash-rm' = 'rm'}
-    $values = @{'completions' = @('bash', 'zsh', 'fish', 'nu', 'powershell'); 'finder' = @('put', 'list', 'restore')}
+    $values = @{'completions' = @('bash', 'zsh', 'fish', 'nu', 'powershell', 'elvish'); 'finder' = @('put', 'list', 'restore')}
     $words = @($commandAst.CommandElements | ForEach-Object { $_.ToString() })
     $cmd = [System.IO.Path]::GetFileNameWithoutExtension($words[0])
     $sub = $multi[$cmd]

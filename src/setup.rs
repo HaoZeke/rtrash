@@ -14,6 +14,7 @@ const ZSH_COMPLETION: &str = include_str!("../completions/_rtrash");
 const FISH_COMPLETION: &str = include_str!("../completions/rtrash.fish");
 const NU_COMPLETION: &str = include_str!("../completions/rtrash.nu");
 const POWERSHELL_COMPLETION: &str = include_str!("../completions/rtrash.ps1");
+const ELVISH_COMPLETION: &str = include_str!("../completions/rtrash.elv");
 const MAN_PAGE: &str = include_str!("../man/rtrash.1");
 const MC_MENU: &str = include_str!("../contrib/mc/menu.rtrash");
 
@@ -28,7 +29,7 @@ const MULTICALL: &[&str] = &[
 
 const HELP: &str = "\
 Usage: rtrash setup [OPTION]...
-       rtrash completions {bash|zsh|fish|nu|powershell}
+       rtrash completions {bash|zsh|fish|nu|powershell|elvish}
        rtrash man
 
 After `cargo install`, run `rtrash setup` once to install multi-call
@@ -46,8 +47,8 @@ setup options:
       --help         display this help and exit
 
 completions:
-  Print the embedded completion script for bash, zsh, fish, nu or
-  powershell (also pwsh) to stdout
+  Print the embedded completion script for bash, zsh, fish, nu,
+  powershell (also pwsh) or elvish to stdout
   (for package recipes or custom paths). setup installs the nu script
   into PREFIX/share/nushell/vendor/autoload, which nushell sources.
 
@@ -520,8 +521,12 @@ fn run_completions(args: &[String]) -> i32 {
             print!("{POWERSHELL_COMPLETION}");
             0
         }
+        Some("elvish") => {
+            print!("{ELVISH_COMPLETION}");
+            0
+        }
         Some(other) => {
-            eprintln!("rtrash completions: unknown shell '{other}' (want bash, zsh, fish, nu or powershell)");
+            eprintln!("rtrash completions: unknown shell '{other}' (want bash, zsh, fish, nu, powershell or elvish)");
             2
         }
     }
