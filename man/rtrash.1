@@ -1907,6 +1907,21 @@ With
 it prints the commands and files instead.
 It takes no other option.
 .TP
+.B \-\-timer\-status
+Say whether the job
+.B \-\-install\-timer
+made is installed (its files, or on Windows its task), then what the
+service manager reports: on Linux the timer's
+.BR ActiveState ,
+last trigger and next run from
+.BR "systemctl \-\-user show" ;
+on macOS its state, runs and last exit code from
+.BR "launchctl print" ;
+on Windows its status, last and next run time and last result from
+.BR "schtasks /Query" .
+It exits 0 when the job is installed and 1 when it is not, and takes no
+other option.
+.TP
 .BI \-\-when\-below= SPEC
 Reap only when a file system holding the entries has less free than
 .IR SPEC :

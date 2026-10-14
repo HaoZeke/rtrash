@@ -56,6 +56,8 @@ no live process holds. Without DIR or --profile: $TMPDIR, /tmp and /var/tmp.
                           1h); with -n print them instead
       --remove-timer    stop and remove the job --install-timer made; with
                           -n print what that would run and remove
+      --timer-status    say whether that job is installed, and its state
+                          and last and next run; exits 1 when it is not
       --when-below=SPEC run only when a reaped file system has less free
                           than SPEC (a size such as 20G, a percent such
                           as 10%, and ,inodes=PCT), then reap oldest first
@@ -942,6 +944,12 @@ fn add_roots(out: &mut Vec<PathBuf>, v: &str) -> Result<(), String> {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--timer-status") {
+        if args.len() > 1 {
+            return usage_err(prog, "--timer-status takes no other option");
+        }
+        return crate::reap_timer::status(prog);
+    }
     #[cfg(unix)]
     let before = crate::trash_total::snapshot();
     let code = run_inner(prog, args);

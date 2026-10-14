@@ -191,3 +191,14 @@ fn reap_remove_timer_dry_run_prints_the_schtasks_delete() {
         "{text}"
     );
 }
+
+#[test]
+fn reap_timer_status_says_when_no_task_is_installed() {
+    let out = Command::new(bin())
+        .args(["reap", "--timer-status"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("no reap timer installed"), "{text}");
+}

@@ -3198,6 +3198,21 @@ fn reap_install_timer_prints_on_dry_run_and_writes_user_units() {
         Some(2)
     );
     // --remove-timer: -n lists the files and keeps them; then they go.
+    // --timer-status names the installed files.
+    let out = reap_cmd(&sb, &["reap", "--timer-status"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(
+        text.starts_with("installed:")
+            && files.iter().all(|f| text.contains(&*f.to_string_lossy())),
+        "{text}"
+    );
+    assert_eq!(
+        reap_cmd(&sb, &["reap", "--timer-status", "-n"])
+            .status
+            .code(),
+        Some(2)
+    );
     let out = reap_cmd(&sb, &["reap", "--remove-timer", "-n"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
@@ -3224,6 +3239,9 @@ fn reap_install_timer_prints_on_dry_run_and_writes_user_units() {
             .code(),
         Some(2)
     );
+    let out = reap_cmd(&sb, &["reap", "--timer-status"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
+    assert!(stdout_of(&out).contains("no reap timer installed"));
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

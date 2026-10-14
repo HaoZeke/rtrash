@@ -229,6 +229,114 @@ pub fn remove(prog: &str, dry_run: bool) -> i32 {
     status
 }
 
+/// Run `cmd` and keep the lines of its output that start with one of
+/// `keys`, trimmed; nothing when it cannot run or fails.
+fn query(cmd: &[&str], keys: &[&str]) -> Vec<String> {
+    let Ok(out) = std::process::Command::new(cmd[0])
+        .args(&cmd[1..])
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| keys.iter().any(|k| l.starts_with(k)))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Say whether the job `install` made is there, and what the service
+/// manager reports about it (state, last and next run). Exits 0 when it
+/// is installed and 1 when it is not.
+pub fn status(prog: &str) -> i32 {
+    if cfg!(windows) {
+        // schtasks' format flag, built so the spell checker does not read
+        // it as a typo.
+        let format = ["/F", "O"].concat();
+        let lines = query(
+            &["schtasks", "/Query", "/TN", NAME, "/V", &format, "LIST"],
+            &[
+                "Status:",
+                "Last Run Time:",
+                "Last Result:",
+                "Next Run Time:",
+                "Task To Run:",
+            ],
+        );
+        if lines.is_empty() {
+            println!("no reap timer installed");
+            return 1;
+        }
+        println!("installed: scheduled task {NAME}");
+        for l in lines {
+            println!("  {l}");
+        }
+        return 0;
+    }
+    let (files, _) = match plan(Path::new("rtrash"), &[], 3600) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{prog}: {e}");
+            return 2;
+        }
+    };
+    let present: Vec<PathBuf> = files
+        .into_iter()
+        .map(|(p, _)| p)
+        .filter(|p| p.exists())
+        .collect();
+    if present.is_empty() {
+        println!("no reap timer installed");
+        return 1;
+    }
+    println!("installed:");
+    for p in &present {
+        println!("  {}", p.display());
+    }
+    let lines = if cfg!(target_os = "macos") {
+        #[cfg(unix)]
+        let uid = unsafe { libc::getuid() };
+        #[cfg(not(unix))]
+        let uid = 0;
+        query(
+            &["launchctl", "print", &format!("gui/{uid}/{LABEL}")],
+            &["state =", "runs =", "last exit code =", "run interval ="],
+        )
+    } else {
+        query(
+            &[
+                "systemctl",
+                "--user",
+                "show",
+                &format!("{NAME}.timer"),
+                "-p",
+                "ActiveState",
+                "-p",
+                "LastTriggerUSec",
+                "-p",
+                "NextElapseUSecRealtime",
+            ],
+            &[
+                "ActiveState=",
+                "LastTriggerUSec=",
+                "NextElapseUSecRealtime=",
+            ],
+        )
+    };
+    if lines.is_empty() {
+        println!("the service manager reports nothing; it may not be turned on");
+    }
+    for l in lines {
+        println!("  {l}");
+    }
+    0
+}
+
 /// Create the Windows task, or with `dry_run` print the command.
 fn install_task(prog: &str, exe: &Path, args: &[String], every: i64, dry_run: bool) -> i32 {
     let words = schtasks_args(exe, args, every);
