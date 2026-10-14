@@ -160,6 +160,9 @@ pub fn guard_ok(prog: &str, total: usize, foreign: usize) -> bool {
     eprintln!(
         "{prog}: pass --all to remove everything, or scope it (DAYS, --max-size, --until-free, --trash-dir, or rm PATTERN)"
     );
+    if cfg!(unix) {
+        eprintln!("{prog}: to free only what your latest put moved: {prog} rm --batch=last");
+    }
     false
 }
 

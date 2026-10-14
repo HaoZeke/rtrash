@@ -5997,6 +5997,11 @@ fn an_unscoped_empty_needs_all_for_items_other_puts_left() {
     let out = sb.run(&["empty", "--home-only"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
     assert!(stderr_of(&out).contains("--all"), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("rm --batch=last"),
+        "{}",
+        stderr_of(&out)
+    );
     assert!(sb.trash().join("files/a").exists() && sb.trash().join("files/b").exists());
     // Scoped or dry runs go ahead.
     assert!(sb.run(&["empty", "--home-only", "-n"]).status.success());
