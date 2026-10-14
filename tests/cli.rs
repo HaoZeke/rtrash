@@ -3887,6 +3887,107 @@ fn age_tree(p: &Path) {
 
 /// `rtrash` in the sandbox, with its HOME and config, without the
 /// variables that would point profiles at the host's real caches.
+/// What `reap --timer-status` prints from the service manager, with
+/// stand-in `systemctl` and `launchctl` scripts first on PATH: the fields
+/// it asks for, as text and as JSON, and only those.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_timer_status_reports_what_the_service_manager_says() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new("timer-status-manager");
+    let bin_dir = sb.root.join("fake-bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let asked = sb.root.join("asked");
+    let script = |name: &str, body: &str| {
+        let p = bin_dir.join(name);
+        fs::write(
+            &p,
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\n{body}", asked.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    script(
+        "systemctl",
+        "printf 'ActiveState=active\\nLastTriggerUSec=Tue 2026-10-13 21:00:00 CDT\\nNextElapseUSecRealtime=Tue 2026-10-13 22:00:00 CDT\\nUnrelated=x\\n'\n",
+    );
+    script(
+        "launchctl",
+        "printf '\\tstate = running\\n\\truns = 3\\n\\tlast exit code = 0\\n\\tunrelated = x\\n'\n",
+    );
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let run = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .current_dir(sb.work())
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .env("PATH", &path)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["reap", "--install-timer=1h"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let out = run(&["reap", "--timer-status"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    let json = stdout_of(&run(&["reap", "--timer-status", "--json"]));
+    assert!(json.starts_with(r#"{"installed":true,"#), "{json}");
+    assert!(
+        !text.contains("nrelated") && !json.contains("nrelated"),
+        "{text}{json}"
+    );
+    let asked = fs::read_to_string(&asked).unwrap();
+    if cfg!(target_os = "macos") {
+        for want in ["state = running", "runs = 3", "last exit code = 0"] {
+            assert!(text.contains(want), "{text}");
+        }
+        assert!(json.contains(r#""manager":"launchd""#), "{json}");
+        assert!(
+            json.contains(r#""state":{"state":"running","runs":"3","last exit code":"0"}"#),
+            "{json}"
+        );
+        assert!(
+            asked.contains("print gui/") && asked.contains("io.github.haozeke.rtrash-reap"),
+            "{asked}"
+        );
+    } else {
+        for want in [
+            "ActiveState=active",
+            "LastTriggerUSec=Tue 2026-10-13 21:00:00 CDT",
+            "NextElapseUSecRealtime=Tue 2026-10-13 22:00:00 CDT",
+        ] {
+            assert!(text.contains(want), "{text}");
+        }
+        assert!(json.contains(r#""manager":"systemd""#), "{json}");
+        assert!(
+            json.contains(
+                r#""ActiveState":"active","LastTriggerUSec":"Tue 2026-10-13 21:00:00 CDT""#
+            ),
+            "{json}"
+        );
+        assert!(asked.contains("--user show rtrash-reap.timer"), "{asked}");
+    }
+    // A manager that fails reports nothing, and the text says so.
+    script("systemctl", "exit 1\n");
+    script("launchctl", "exit 1\n");
+    let text = stdout_of(&run(&["reap", "--timer-status"]));
+    assert!(
+        text.contains("the service manager reports nothing"),
+        "{text}"
+    );
+    let json = stdout_of(&run(&["reap", "--timer-status", "--json"]));
+    assert!(json.ends_with("\"state\":{}}\n"), "{json}");
+    assert_eq!(
+        run(&["reap", "--timer-status", "-n"]).status.code(),
+        Some(2)
+    );
+}
+
 fn reap_cmd(sb: &Sandbox, args: &[&str]) -> Output {
     Command::new(bin())
         .args(args)
