@@ -298,6 +298,68 @@ fn bash_completion_offers_the_right_words() {
     assert_eq!(bash_complete(&["rtrash", "du", "--print"]), ["--print0"]);
 }
 
+/// bash completes `restore` with the original paths and names in the
+/// trash, read from `rtrash list --format`, and quotes the spaces.
+#[cfg(unix)]
+#[test]
+fn bash_restore_completes_trashed_items() {
+    let root = std::env::temp_dir().join(format!("rtrash-compl-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("work")).unwrap();
+    fs::write(root.join("work/a b.txt"), "x").unwrap();
+    let envs = [
+        ("XDG_DATA_HOME", root.join("xdg")),
+        ("XDG_CONFIG_HOME", root.join(".config")),
+        ("HOME", root.clone()),
+    ];
+    let put = Command::new(bin())
+        .args(["put", "a b.txt"])
+        .current_dir(root.join("work"))
+        .envs(envs.iter().map(|(k, v)| (*k, v.as_os_str())))
+        .output()
+        .unwrap();
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let bin_dir = Path::new(bin()).parent().unwrap();
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("completions/rtrash.bash");
+    let run = |words: &str| -> Vec<String> {
+        let prog = format!(
+            "source '{}'; COMP_WORDS=({words}); COMP_CWORD=$((${{#COMP_WORDS[@]}} - 1)); _rtrash_main; printf '%s\\n' \"${{COMPREPLY[@]}}\"",
+            script.display()
+        );
+        let out = Command::new("bash")
+            .args(["--norc", "--noprofile", "-c", &prog])
+            .envs(envs.iter().map(|(k, v)| (*k, v.as_os_str())))
+            .env("PATH", &path)
+            .output()
+            .expect("run bash");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    let paths = run("rtrash restore ''");
+    let names = run("rtrash restore --name=a");
+    let multi = run("trash-restore ''");
+    let _ = fs::remove_dir_all(&root);
+    assert!(paths.iter().any(|p| p.ends_with("/a\\ b.txt")), "{paths:?}");
+    assert!(names.contains(&"a\\ b.txt".to_string()), "{names:?}");
+    assert!(multi.iter().any(|p| p.ends_with("/a\\ b.txt")), "{multi:?}");
+}
+
 /// Same check through fish, when it is installed.
 #[cfg(unix)]
 #[test]

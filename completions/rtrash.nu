@@ -54,6 +54,26 @@ def "nu-complete rtrash preserve-root" [] {
     ["all"]
 }
 
+# Trashed original paths or names, for restore.
+def "nu-complete rtrash trashed" [field: string] {
+    let fmt = $"--format={($field)}\\0"
+    try {
+        if (which rtrash | is-not-empty) {
+            ^rtrash list $fmt
+        } else {
+            ^trash-list $fmt
+        } | split row (char nul) | where $it != ""
+    } catch { [] }
+}
+
+def "nu-complete rtrash trashed paths" [] {
+    nu-complete rtrash trashed path
+}
+
+def "nu-complete rtrash trashed names" [] {
+    nu-complete rtrash trashed name
+}
+
 def "nu-complete rtrash conflict" [] {
     ["refuse" "overwrite" "rename" "skip"]
 }
@@ -223,7 +243,7 @@ export extern "rtrash restore" [
     --overwrite  # same as --force (trash-cli spelling)
     --sort: string  # numbered table order: date, path or none
     --oldest-first  # list the oldest trashed item first
-    --name: string  # match items by file name or trash name instead of PATH
+    --name: string@"nu-complete rtrash trashed names"  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original
     --regex: string  # match items whose original path contains REGEX
     --latest  # of several matches, restore the most recently trashed
@@ -233,7 +253,7 @@ export extern "rtrash restore" [
     --trash-dir: string  # only consider this trash directory (repeatable)
     --help  # display this help and exit
     --version  # output version information and exit
-    path?: path
+    path?: string@"nu-complete rtrash trashed paths"
 ]
 
 export extern "rtrash undo" [
@@ -439,7 +459,7 @@ export extern "trash-restore" [
     --overwrite  # same as --force (trash-cli spelling)
     --sort: string  # numbered table order: date, path or none
     --oldest-first  # list the oldest trashed item first
-    --name: string  # match items by file name or trash name instead of PATH
+    --name: string@"nu-complete rtrash trashed names"  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original
     --regex: string  # match items whose original path contains REGEX
     --latest  # of several matches, restore the most recently trashed
@@ -449,7 +469,7 @@ export extern "trash-restore" [
     --trash-dir: string  # only consider this trash directory (repeatable)
     --help  # display this help and exit
     --version  # output version information and exit
-    path?: path
+    path?: string@"nu-complete rtrash trashed paths"
 ]
 
 export extern "trash-rm" [

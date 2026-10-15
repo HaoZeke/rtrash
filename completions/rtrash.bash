@@ -107,6 +107,37 @@ _rtrash_complete_from() {
   done
 }
 
+# Trashed items whose FIELD (path or name) starts with PREFIX, from
+# `rtrash list` (or trash-list when only the multi-call names exist).
+_rtrash_trashed() {
+  local field=$1 prefix=$2 p
+  local -a lister=(rtrash list)
+  command -v rtrash >/dev/null 2>&1 || lister=(trash-list)
+  while IFS= read -r -d '' p; do
+    [[ $p == "$prefix"* ]] && COMPREPLY+=("$(printf '%q' "$p")")
+  done < <(command "${lister[@]}" --format="{$field}\\0" 2>/dev/null)
+}
+
+# restore: options, names after --name=, otherwise trashed original paths.
+_rtrash_complete_restore() {
+  local cur="${COMP_WORDS[COMP_CWORD]}" i=$COMP_CWORD
+  COMPREPLY=()
+  # Readline splits --name=x at the '=' (COMP_WORDBREAKS).
+  if [[ $cur == = && ${COMP_WORDS[i - 1]} == --name ]]; then
+    _rtrash_trashed name ""
+    return
+  fi
+  if ((i > 1)) && [[ ${COMP_WORDS[i - 1]} == = && ${COMP_WORDS[i - 2]} == --name ]]; then
+    _rtrash_trashed name "$cur"
+    return
+  fi
+  case "$cur" in
+    --name=*) _rtrash_trashed name "${cur#--name=}" ;;
+    -*) COMPREPLY=($(compgen -W "${_rtrash_restore_opts[*]}" -- "$cur")) ;;
+    *) _rtrash_trashed path "$cur" ;;
+  esac
+}
+
 _rtrash_main() {
   local cur prev words cword
   # Prefer bash-completion helper when available
@@ -129,7 +160,7 @@ _rtrash_main() {
       return
       ;;
     trash-restore)
-      _rtrash_complete_from _rtrash_restore_opts
+      _rtrash_complete_restore
       return
       ;;
     trash-rm)
@@ -174,7 +205,7 @@ _rtrash_main() {
     status) _rtrash_complete_from _rtrash_status_opts ;;
     trash-stats) _rtrash_complete_from _rtrash_trash_stats_opts ;;
     du) _rtrash_complete_from _rtrash_du_opts ;;
-    restore) _rtrash_complete_from _rtrash_restore_opts ;;
+    restore) _rtrash_complete_restore ;;
     undo) _rtrash_complete_from _rtrash_undo_opts ;;
     who) _rtrash_complete_from _rtrash_who_opts ;;
     reap) _rtrash_complete_from _rtrash_reap_opts ;;

@@ -3,6 +3,7 @@
 # Or: rtrash completions elvish > ~/.config/elvish/lib/rtrash.elv
 # Then add `use rtrash` to ~/.config/elvish/rc.elv.
 
+use os
 use path
 use str
 
@@ -30,6 +31,18 @@ var opts = [
 var multi = [&trash=put &trash-put=put &trash-empty=empty &trash-list=list &trash-restore=restore &trash-rm=rm]
 var values = [&completions=[bash zsh fish nu powershell elvish] &finder=[put list restore] &wsl=[list restore rm empty]]
 
+# Trashed original paths (path) or names (name), for restore.
+fn trashed {|field|
+  var fmt = '--format={'$field'}\0'
+  try {
+    if (has-external rtrash) {
+      rtrash list $fmt 2>$os:dev-null | from-terminated "\x00"
+    } else {
+      trash-list $fmt 2>$os:dev-null | from-terminated "\x00"
+    }
+  } catch { }
+}
+
 fn complete {|@words|
   var cmd = (path:base $words[0])
   var cur = $words[-1]
@@ -52,8 +65,12 @@ fn complete {|@words|
     } else {
       set cands = $subs
     }
+  } elif (and (eq $sub restore) (str:has-prefix $cur --name=)) {
+    set cands = [(trashed name | each {|n| put --name=$n })]
   } elif (str:has-prefix $cur -) {
     set cands = $opts[$sub]
+  } elif (eq $sub restore) {
+    set cands = [(trashed path)]
   } elif (has-key $values $sub) {
     set cands = $values[$sub]
   }

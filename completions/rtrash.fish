@@ -15,6 +15,13 @@ function __rtrash_seen_subcommand
     return 1
 end
 
+# Trashed original paths (path) or names (name), for restore.
+function __rtrash_trashed
+    set -l lister rtrash list
+    command -q rtrash; or set lister trash-list
+    command $lister --format="{$argv[1]}\0" 2>/dev/null | string split0
+end
+
 # Top-level rtrash: subcommands when no subcommand yet
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'put' -d 'move files to the trash (rm-compatible flags)'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'empty' -d 'purge trashed items'
@@ -191,7 +198,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l ne
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l overwrite -d 'same as --force'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l sort -d 'numbered table order' -x -a 'date path none'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l oldest-first -d 'list the oldest trashed item first'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l name -r -d 'match by file name or trash name'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l name -x -a '(__rtrash_trashed name)' -d 'match by file name or trash name'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -f -a '(__rtrash_trashed path)'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l latest -d 'of several matches, restore the newest'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l all -d 'of several matches, restore every one'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l glob -x -d 'match by shell pattern'
@@ -303,7 +311,8 @@ complete -c trash-restore -l newest-first
 complete -c trash-restore -l overwrite
 complete -c trash-restore -l sort -x -a 'date path none'
 complete -c trash-restore -l oldest-first
-complete -c trash-restore -l name -r
+complete -c trash-restore -l name -x -a '(__rtrash_trashed name)'
+complete -c trash-restore -f -a '(__rtrash_trashed path)'
 complete -c trash-restore -l latest
 complete -c trash-restore -l all
 complete -c trash-restore -l glob -x

@@ -2902,6 +2902,17 @@ Print each path written.
 .RB { bash | zsh | fish | nu | powershell | elvish }
 .PP
 Print the embedded completion script to stdout (packagers / custom paths).
+Every script completes the
+.B restore
+PATH with the original paths in the trash, and
+.B \-\-name=
+with the trashed names, read from
+.BR "rtrash list \-\-format" .
+The zsh script adds them through
+.BR compadd ,
+so a
+.B matcher\-list
+style (case-insensitive or partial-word matching) applies to them as it does to files.
 The nushell script declares each command as an
 .B extern
 with its options.

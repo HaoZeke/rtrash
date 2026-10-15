@@ -46,7 +46,22 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
     if ($cmd -eq 'rtrash') {
         $sub = $words | Select-Object -Skip 1 | Where-Object { $subs -contains $_ } | Select-Object -First 1
     }
-    if (-not $sub) {
+    # Trashed original paths (path) or names (name), for restore.
+    $trashed = {
+        param($field)
+        $fmt = "--format={$field}\0"
+        $out = if (Get-Command rtrash -CommandType Application -ErrorAction SilentlyContinue) {
+            & rtrash list $fmt 2>$null
+        } else {
+            & trash-list $fmt 2>$null
+        }
+        (@($out) -join "`n") -split "`0" | Where-Object { $_ -ne '' }
+    }
+    if ($sub -eq 'restore' -and $wordToComplete -notlike '-*') {
+        $cands = @(& $trashed 'path')
+    } elseif ($sub -eq 'restore' -and $wordToComplete -like '--name=*') {
+        $cands = @(& $trashed 'name' | ForEach-Object { "--name=$_" })
+    } elseif (-not $sub) {
         # Bare rtrash: a subcommand, or the put options it falls through to.
         $cands = if ($wordToComplete -like '-*') { $opts['put'] + @('-h', '-V') } else { $subs }
     } elseif ($wordToComplete -like '-*') {
@@ -54,7 +69,9 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
     } else {
         $cands = $values[$sub]
     }
-    $cands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
-        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    $cands | Where-Object { $_ -like ([WildcardPattern]::Escape($wordToComplete) + '*') } | ForEach-Object {
+        # Quote trashed paths with spaces or quotes so they stay one argument.
+        $text = if ($_ -match "[\s'`$]") { "'" + ($_ -replace "'", "''") + "'" } else { $_ }
+        [System.Management.Automation.CompletionResult]::new($text, $_, 'ParameterValue', $_)
     }
 }

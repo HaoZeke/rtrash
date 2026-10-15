@@ -49,6 +49,7 @@ Linked as =trash-put=, =trash-list=, =trash-empty=, =trash-restore= and
 |------------------------------------+----------------------------------------------------|
 | =--trash-dir DIR= (two words)      | same; =--trash-dir=DIR= works too                  |
 | =--print-completion bash= or =zsh= | same; tcsh has no script (exit 2)                  |
+| zsh matcher-list (trash-cli #363)  | restore completes trashed paths and names through compadd, so matcher-list applies; all six scripts complete them |
 | =trash-put= exit 74 on a failure   | same                                               |
 | =trash-list --volumes=             | same                                               |
 | =trash-list --trash-dirs=          | same                                               |
