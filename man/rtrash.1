@@ -2716,6 +2716,7 @@ Restore:
 Display help and exit.
 .SS wsl
 .B rtrash wsl list
+[\fB\-\-json\fR] [\fB\-\-glob=\fIPATTERN\fR|\fB\-\-regex=\fIRE\fR|\fB\-\-name=\fINAME\fR]
 .br
 .B rtrash wsl restore
 [\fB\-f\fR|\fB\-\-force\fR] \fIPATH\fR...
@@ -2743,9 +2744,34 @@ moves the newest item from each
 back and removes its record, refusing to overwrite an existing file
 unless
 .BR \-f / \-\-force .
+.B rtrash wsl rm
+[\fB\-n\fR|\fB\-\-dry\-run\fR] \fIMATCH\fR|\fIPATH\fR...
+deletes the matching items for good: the payload, then its record.
+.BR \-\-glob= ,
+.B \-\-regex=
+and
+.B \-\-name=
+pick items as for
+.BR list ,
+by the path as WSL shows it; a
+.I PATH
+picks every item from that path.
+No match prints a note and exits 0, as
+.B rtrash rm
+does;
+.B \-\-dry\-run
+prints what would go.
+.B list \-\-json
+prints an array of objects with
+.IR original ,
+.IR path ,
+.IR deleted ,
+.I date
+and
+.IR size .
 .B \-\-help
 prints the usage.
-Outside WSL both fail.
+Outside WSL every action fails.
 .SS config
 .B rtrash config
 [\fB\-\-path\fR | \fB\-\-default\fR]

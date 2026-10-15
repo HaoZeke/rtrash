@@ -144,7 +144,12 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s f -l fi
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l stacks -d 'print folded stacks for flame graph tools'
 
 # wsl
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -f -a 'list restore'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -f -a 'list restore rm'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l json -d 'list: print a JSON array'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l glob -x -d 'items whose path or name matches'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l regex -x -d 'items whose path matches'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l name -x -d 'items with exactly this file name'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s n -l dry-run -d 'rm: print what would go'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s f -l force -d 'restore over an existing file'
 
 # finder

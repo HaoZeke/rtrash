@@ -105,12 +105,20 @@ pub fn scan(root: &Path, sid: &str) -> Vec<BinEntry> {
 }
 
 const USAGE: &str = "\
-Usage: rtrash wsl list
+Usage: rtrash wsl list [--json] [MATCH]
        rtrash wsl restore [-f] PATH...
+       rtrash wsl rm [-n] MATCH|PATH...
 The Windows Recycle Bin from inside WSL: list its items by original path
-under the automount root, or restore the newest item from each PATH.
-  -f, --force   restore over an existing file
-  -h, --help    show this help
+under the automount root, restore the newest item from each PATH, or
+delete items for good. MATCH is --glob=PATTERN, --regex=RE or --name=NAME,
+tested against the original path as WSL sees it.
+      --json             list: a JSON array
+      --glob=PATTERN     items whose path (or name, without a slash) matches
+      --regex=RE         items whose path matches RE
+      --name=NAME        items with exactly this file name
+  -n, --dry-run          rm: print what would go, delete nothing
+  -f, --force            restore over an existing file
+  -h, --help             show this help
 ";
 
 /// `rtrash wsl ...`.
@@ -123,7 +131,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         print!("{USAGE}");
         return 0;
     }
-    if !matches!(cmd, "list" | "restore") {
+    if !matches!(cmd, "list" | "restore" | "rm") {
         eprintln!("{prog}: unknown action '{cmd}'");
         eprint!("{USAGE}");
         return 2;
@@ -141,19 +149,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     };
     let root = crate::wsl::automount_root();
     let items = scan(&root, &sid);
-    if cmd == "list" {
-        if args.len() > 1 {
-            eprintln!("{prog}: list takes no arguments");
-            return 2;
-        }
-        for it in &items {
-            let date = crate::platform::epoch_to_iso_utc(it.deleted);
-            println!(
-                "{}",
-                crate::platform::format_deletion_list_line(Some(&date), &it.local)
-            );
-        }
-        return 0;
+    match cmd {
+        "list" => return list(prog, &args[1..], &items),
+        "rm" => return rm(prog, &args[1..], &items),
+        _ => {}
     }
     let mut force = false;
     let mut paths = Vec::new();
@@ -222,6 +221,160 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
     }
     status
+}
+
+/// Take one `--glob`, `--regex` or `--name` from `a`: Ok(false) when `a` is no
+/// matcher, Err(exit code) after an error message.
+fn take_matcher(
+    prog: &str,
+    a: &str,
+    slot: &mut Option<crate::budget::PathMatch>,
+) -> Result<bool, i32> {
+    match crate::budget::PathMatch::parse(a) {
+        Some(Ok(m)) if slot.is_none() => {
+            *slot = Some(m);
+            Ok(true)
+        }
+        Some(Ok(_)) => {
+            eprintln!("{prog}: give one of --glob, --regex and --name");
+            Err(2)
+        }
+        Some(Err(e)) => {
+            eprintln!("{prog}: {e}");
+            Err(2)
+        }
+        None => Ok(false),
+    }
+}
+
+/// `wsl list [--json] [MATCH]`.
+fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
+    let mut json = false;
+    let mut matcher = None;
+    for a in args {
+        if a == "--json" {
+            json = true;
+            continue;
+        }
+        match take_matcher(prog, a, &mut matcher) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("{prog}: list: unknown argument '{a}'");
+                return 2;
+            }
+            Err(c) => return c,
+        }
+    }
+    let shown: Vec<&BinEntry> = items
+        .iter()
+        .filter(|it| matcher.as_ref().is_none_or(|m| m.keeps(&it.local)))
+        .collect();
+    if json {
+        println!("{}", list_json(&shown));
+        return 0;
+    }
+    for it in shown {
+        let date = crate::platform::epoch_to_iso_utc(it.deleted);
+        println!(
+            "{}",
+            crate::platform::format_deletion_list_line(Some(&date), &it.local)
+        );
+    }
+    0
+}
+
+/// The `wsl list --json` array: original Windows path, path under the
+/// automount root, deletion time (epoch and ISO date) and size.
+pub fn list_json(items: &[&BinEntry]) -> String {
+    let rows: Vec<String> = items
+        .iter()
+        .map(|it| {
+            format!(
+                r#"{{"original":"{}","path":"{}","deleted":{},"date":"{}","size":{}}}"#,
+                crate::util::json_escape(&it.original),
+                crate::util::json_escape(&it.local.to_string_lossy()),
+                it.deleted,
+                crate::platform::epoch_to_iso_utc(it.deleted),
+                it.size
+            )
+        })
+        .collect();
+    format!("[{}]", rows.join(","))
+}
+
+/// `wsl rm [-n] MATCH|PATH...`: delete the matching items for good, the
+/// `$R` payload and then its `$I` record. No match is not an error, as with
+/// `rtrash rm`.
+fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
+    let mut dry = false;
+    let mut matcher = None;
+    let mut paths = Vec::new();
+    for a in args {
+        if matches!(a.as_str(), "-n" | "--dry-run") {
+            dry = true;
+            continue;
+        }
+        match take_matcher(prog, a, &mut matcher) {
+            Ok(true) => {}
+            Ok(false) if a.starts_with('-') && a != "-" => {
+                eprintln!("{prog}: rm: unknown option '{a}'");
+                return 2;
+            }
+            Ok(false) => {
+                let p = crate::util::arg_path(a);
+                paths.push(std::path::absolute(&p).unwrap_or(p));
+            }
+            Err(c) => return c,
+        }
+    }
+    if matcher.is_none() && paths.is_empty() {
+        eprintln!("{prog}: rm needs --glob, --regex, --name or a PATH");
+        return 2;
+    }
+    let chosen: Vec<&BinEntry> = items
+        .iter()
+        .filter(|it| {
+            matcher.as_ref().is_some_and(|m| m.keeps(&it.local)) || paths.contains(&it.local)
+        })
+        .collect();
+    if chosen.is_empty() {
+        eprintln!("{prog}: no Recycle Bin items match");
+        return 0;
+    }
+    let mut status = 0;
+    for it in chosen {
+        if dry {
+            println!("would remove '{}'", it.local.display());
+            continue;
+        }
+        match remove_entry(it) {
+            Ok(()) => println!("removed '{}'", it.local.display()),
+            Err(e) => {
+                eprintln!("{prog}: cannot remove '{}': {e}", it.local.display());
+                status = 1;
+            }
+        }
+    }
+    status
+}
+
+/// Delete one item: the payload (a file or a whole tree), then its record,
+/// so a failure leaves the record that still names the payload.
+fn remove_entry(it: &BinEntry) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(&it.payload)?;
+    if meta.is_dir() {
+        std::fs::remove_dir_all(&it.payload)?;
+    } else {
+        std::fs::remove_file(&it.payload)?;
+    }
+    if let Some(index) = crate::win_recycle::index_file_for(&it.payload) {
+        match std::fs::remove_file(&index) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

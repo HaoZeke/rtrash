@@ -143,3 +143,69 @@ fn wsl_commands_need_wsl_and_a_known_action() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
 }
+
+#[test]
+fn wsl_list_filters_and_prints_json() {
+    let f = Fake::new("json");
+    f.recycle("AB12CD.txt", r"C:\Users\me\notes.txt", b"n", 1_700_000_000);
+    f.recycle("EF34GH.log", r"C:\Users\me\run.log", b"ll", 1_700_000_100);
+    let out = f.run(&["list", "--glob=*.log"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.contains("run.log"), "{text}");
+    let out = f.run(&["list", "--json", "--name=notes.txt"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.starts_with("[{") && text.trim_end().ends_with("}]"),
+        "{text}"
+    );
+    assert!(
+        text.contains(r#""original":"C:\\Users\\me\\notes.txt""#),
+        "{text}"
+    );
+    assert!(text.contains(r#""deleted":1700000000"#), "{text}");
+    assert!(!text.contains("run.log"), "{text}");
+    assert_eq!(f.run(&["list", "--regex=("]).status.code(), Some(2));
+    assert_eq!(f.run(&["list", "extra"]).status.code(), Some(2));
+}
+
+#[test]
+fn wsl_rm_deletes_matching_items_for_good() {
+    let f = Fake::new("rm");
+    f.recycle("AB12CD.txt", r"C:\a.txt", b"a", 1_700_000_000);
+    f.recycle("EF34GH.log", r"C:\b.log", b"b", 1_700_000_100);
+    let out = f.run(&["rm", "-n", "--glob=*.log"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("would remove"));
+    assert!(f.bin().join("$REF34GH.log").exists());
+    let out = f.run(&["rm", "--glob=*.log"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!f.bin().join("$REF34GH.log").exists());
+    assert!(!f.bin().join("$IEF34GH.log").exists());
+    assert!(f.bin().join("$RAB12CD.txt").exists());
+    let dest = f.root.join("c/a.txt");
+    let out = f.run(&["rm", &dest.display().to_string()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!f.bin().join("$RAB12CD.txt").exists());
+    // No match is not an error; no selector is.
+    assert!(f.run(&["rm", "--name=none"]).status.success());
+    assert_eq!(f.run(&["rm"]).status.code(), Some(2));
+}
