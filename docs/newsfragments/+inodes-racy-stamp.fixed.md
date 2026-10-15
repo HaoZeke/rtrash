@@ -1,0 +1,1 @@
+The inode count in `trash-stats` no longer serves a stale cached answer when another tool adds a record within the same clock tick as the last count; an `info/` stamp from the last two seconds is recounted.

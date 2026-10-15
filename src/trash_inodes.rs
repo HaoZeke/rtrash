@@ -11,6 +11,9 @@
 //! The answer itself is kept on the file's first line, stamped with the
 //! modification time of `info/` as the running total is, so a trash no
 //! tool changed since is answered from that line alone.
+//! A stamp from the last two seconds is not trusted: directory times can
+//! tick coarsely, so a record added in the same tick leaves the stamp
+//! unchanged (the racy-git problem).
 //!
 //! Orphans (payloads without a record) are left out, as in the total.
 
@@ -70,6 +73,15 @@ fn mtime_ns(p: &Path) -> Option<u128> {
     Some(m.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos())
 }
 
+/// Whether a change to `info/` could hide behind the stamp `s`: it is
+/// less than two seconds old, or in the future.
+fn racy(s: u128) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    now.saturating_sub(s) < 2_000_000_000
+}
+
 /// Cache the tree count of the directory item `name`, just trashed.
 /// The caller holds the trash lock. Best effort.
 pub fn record(dir: &TrashDir, name: &str, inodes: u64) {
@@ -108,7 +120,7 @@ pub fn count(dir: &TrashDir, measure: bool) -> Option<u64> {
     let stamp = mtime_ns(&dir.info());
     let (answer, cache) = load_all(dir);
     if let (Some((n, s)), Some(now)) = (answer, stamp) {
-        if s == now {
+        if s == now && !racy(s) {
             return Some(n);
         }
     }
@@ -173,12 +185,34 @@ mod tests {
         assert_eq!(count(&dir, false), None);
         assert_eq!(count(&dir, true), Some(6));
         assert_eq!(count(&dir, false), Some(6));
-        // The answer line serves the next count while info/ is unchanged.
+        // The answer line is written, but a fresh info/ stamp is not
+        // trusted: a record added in the same clock tick leaves it as is.
         let body = fs::read_to_string(root.join(FILE)).unwrap();
         assert!(body.starts_with("v1 6 "), "{body}");
+        let stamp = mtime_ns(&dir.info()).unwrap();
         fs::write(dir.files().join("g"), b"g").unwrap();
         fs::write(dir.info().join("g.trashinfo"), b"[Trash Info]\n").unwrap();
         assert_eq!(count(&dir, false), Some(8));
+        // Same stamp, as on a coarse clock: still counted, not served.
+        // (Setting a directory's time needs a directory handle: Unix only.)
+        #[cfg(unix)]
+        {
+            let body = fs::read_to_string(root.join(FILE)).unwrap();
+            let rest = body.split_once('\n').unwrap().1.to_string();
+            fs::write(root.join(FILE), format!("v1 6 {stamp}\n{rest}")).unwrap();
+            let info = fs::File::open(dir.info()).unwrap();
+            let when = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(stamp as u64);
+            info.set_modified(when).unwrap();
+            assert_eq!(count(&dir, false), Some(8));
+            // An old stamp that matches is served from the line alone.
+            let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+            info.set_modified(old).unwrap();
+            let old_ns = mtime_ns(&dir.info()).unwrap();
+            fs::write(root.join(FILE), format!("v1 99 {old_ns}\n{rest}")).unwrap();
+            assert_eq!(count(&dir, false), Some(99));
+        }
+        #[cfg(not(unix))]
+        let _ = stamp;
         let _ = fs::remove_dir_all(&root);
     }
 }
