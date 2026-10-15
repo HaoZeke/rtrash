@@ -189,20 +189,21 @@ mod tests {
         // trusted: a record added in the same clock tick leaves it as is.
         let body = fs::read_to_string(root.join(FILE)).unwrap();
         assert!(body.starts_with("v1 6 "), "{body}");
-        let stamp = mtime_ns(&dir.info()).unwrap();
         fs::write(dir.files().join("g"), b"g").unwrap();
         fs::write(dir.info().join("g.trashinfo"), b"[Trash Info]\n").unwrap();
         assert_eq!(count(&dir, false), Some(8));
-        // Same stamp, as on a coarse clock: still counted, not served.
+        // A stale answer whose stamp matches a fresh info/ time, as a
+        // coarse clock leaves it: still counted, not served. The time is
+        // set to now so the check does not depend on how long the test ran.
         // (Setting a directory's time needs a directory handle: Unix only.)
         #[cfg(unix)]
         {
             let body = fs::read_to_string(root.join(FILE)).unwrap();
             let rest = body.split_once('\n').unwrap().1.to_string();
-            fs::write(root.join(FILE), format!("v1 6 {stamp}\n{rest}")).unwrap();
             let info = fs::File::open(dir.info()).unwrap();
-            let when = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(stamp as u64);
-            info.set_modified(when).unwrap();
+            info.set_modified(std::time::SystemTime::now()).unwrap();
+            let fresh = mtime_ns(&dir.info()).unwrap();
+            fs::write(root.join(FILE), format!("v1 6 {fresh}\n{rest}")).unwrap();
             assert_eq!(count(&dir, false), Some(8));
             // An old stamp that matches is served from the line alone.
             let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
@@ -211,8 +212,6 @@ mod tests {
             fs::write(root.join(FILE), format!("v1 99 {old_ns}\n{rest}")).unwrap();
             assert_eq!(count(&dir, false), Some(99));
         }
-        #[cfg(not(unix))]
-        let _ = stamp;
         let _ = fs::remove_dir_all(&root);
     }
 }
