@@ -183,12 +183,14 @@ du_opts=(
 )
 
 wsl_opts=(
-  '1:action:(list restore rm)'
+  '1:action:(list restore rm empty)'
+  '--older-than=[empty: items deleted more than AGE ago]:age:'
+  '--all[empty: every item, without asking]'
   '--json[list: print a JSON array]'
   '--glob=[items whose path or name matches]:pattern:'
   '--regex=[items whose path matches]:regex:'
   '--name=[items with exactly this file name]:name:'
-  '(-n --dry-run)'{-n,--dry-run}'[rm: print what would go]'
+  '(-n --dry-run)'{-n,--dry-run}'[rm, empty: print what would go]'
   '(-f --force)'{-f,--force}'[restore over an existing file]'
   '(- *)'--help'[display help and exit]'
   '*:file:_files'

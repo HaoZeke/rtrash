@@ -2761,6 +2761,17 @@ No match prints a note and exits 0, as
 does;
 .B \-\-dry\-run
 prints what would go.
+.B rtrash wsl empty
+[\fB\-n\fR] [\fB\-\-all\fR] [\fB\-\-older\-than=\fIAGE\fR|\fIDAYS\fR]
+deletes items moved to the Recycle Bin more than
+.I AGE
+ago (or every item).
+rtrash keeps no record of which put sent an item there from WSL, so
+emptying everything asks on a terminal and otherwise refuses unless
+.B \-\-all
+is given, as the guard of
+.B rtrash empty
+does.
 .B list \-\-json
 prints an array of objects with
 .IR original ,

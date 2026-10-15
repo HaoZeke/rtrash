@@ -1,0 +1,1 @@
+New `rtrash wsl empty` deletes Windows Recycle Bin items from inside WSL by age (`--older-than=AGE` or DAYS), or all of them with `--all`; a whole empty asks on a terminal and otherwise refuses, like the guard of `rtrash empty`.

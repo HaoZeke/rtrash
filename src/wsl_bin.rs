@@ -108,15 +108,19 @@ const USAGE: &str = "\
 Usage: rtrash wsl list [--json] [MATCH]
        rtrash wsl restore [-f] PATH...
        rtrash wsl rm [-n] MATCH|PATH...
+       rtrash wsl empty [-n] [--all] [--older-than=AGE | DAYS]
 The Windows Recycle Bin from inside WSL: list its items by original path
 under the automount root, restore the newest item from each PATH, or
-delete items for good. MATCH is --glob=PATTERN, --regex=RE or --name=NAME,
+delete items for good (rm by match, empty by age or all of them; a whole
+empty asks first, or needs --all). MATCH is --glob=PATTERN, --regex=RE or --name=NAME,
 tested against the original path as WSL sees it.
       --json             list: a JSON array
       --glob=PATTERN     items whose path (or name, without a slash) matches
       --regex=RE         items whose path matches RE
       --name=NAME        items with exactly this file name
-  -n, --dry-run          rm: print what would go, delete nothing
+      --older-than=AGE   empty: items deleted more than AGE ago (2h, 7d)
+      --all              empty: every item, without asking
+  -n, --dry-run          rm, empty: print what would go, delete nothing
   -f, --force            restore over an existing file
   -h, --help             show this help
 ";
@@ -131,7 +135,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         print!("{USAGE}");
         return 0;
     }
-    if !matches!(cmd, "list" | "restore" | "rm") {
+    if !matches!(cmd, "list" | "restore" | "rm" | "empty") {
         eprintln!("{prog}: unknown action '{cmd}'");
         eprint!("{USAGE}");
         return 2;
@@ -152,6 +156,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     match cmd {
         "list" => return list(prog, &args[1..], &items),
         "rm" => return rm(prog, &args[1..], &items),
+        "empty" => return empty(prog, &args[1..], &items, now_epoch()),
         _ => {}
     }
     let mut force = false;
@@ -356,6 +361,90 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
         }
     }
     status
+}
+
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// `wsl empty [-n] [--all] [--older-than=AGE | DAYS]`: delete items by
+/// age, or all of them. rtrash keeps no record of which put sent an item
+/// to the Recycle Bin from WSL, so emptying everything always counts as
+/// touching items from elsewhere: it asks on a terminal and otherwise
+/// needs --all, like the guard of `rtrash empty`.
+pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
+    let mut dry = false;
+    let mut all = false;
+    let mut age: Option<i64> = None;
+    for a in args {
+        let a = a.as_str();
+        let value = a
+            .strip_prefix("--older-than=")
+            .or_else(|| (a.bytes().all(|b| b.is_ascii_digit()) && !a.is_empty()).then_some(a));
+        match a {
+            "-n" | "--dry-run" => dry = true,
+            "--all" => all = true,
+            _ if value.is_some() => match crate::filters::parse_age_secs(value.unwrap_or("")) {
+                Ok(s) if age.is_none() => age = Some(s),
+                Ok(_) => {
+                    eprintln!("{prog}: give one age");
+                    return 2;
+                }
+                Err(e) => {
+                    eprintln!("{prog}: {e}");
+                    return 2;
+                }
+            },
+            _ => {
+                eprintln!("{prog}: empty: unknown argument '{a}'");
+                return 2;
+            }
+        }
+    }
+    if all && age.is_some() {
+        eprintln!("{prog}: give --all or an age, not both");
+        return 2;
+    }
+    let chosen: Vec<&BinEntry> = items
+        .iter()
+        .filter(|it| age.is_none_or(|s| now - it.deleted > s))
+        .collect();
+    if chosen.is_empty() {
+        return 0;
+    }
+    if age.is_none() && !all && !dry && !confirm_whole(prog, chosen.len()) {
+        return 2;
+    }
+    let mut status = 0;
+    for it in chosen {
+        if dry {
+            println!("would remove '{}'", it.local.display());
+            continue;
+        }
+        if let Err(e) = remove_entry(it) {
+            eprintln!("{prog}: cannot remove '{}': {e}", it.local.display());
+            status = 1;
+        }
+    }
+    status
+}
+
+/// The guard for a whole `wsl empty`: ask on a terminal, else refuse with
+/// the ways to go on.
+fn confirm_whole(prog: &str, total: usize) -> bool {
+    if crate::util::stdin_is_tty() {
+        use std::io::Write;
+        eprint!("Permanently delete all {total} items in the Windows Recycle Bin? (y/N) ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        return matches!(line.trim(), "y" | "Y" | "yes" | "Yes");
+    }
+    eprintln!("{prog}: refusing to empty the whole Windows Recycle Bin ({total} items)");
+    eprintln!("{prog}: pass --all to remove everything, or scope it (DAYS, --older-than=AGE, or rm MATCH)");
+    false
 }
 
 /// Delete one item: the payload (a file or a whole tree), then its record,

@@ -19,7 +19,7 @@ var opts = [
   &rm=[--trash-dir= --home-only --older-than= --newer-than= --larger-than= --smaller-than= --batch= -n --dry-run -f --force -v --verbose --json --help --version]
   &who=[--json --help --version]
   &reap=[-p --profile= --list-profiles --roots= --depth= --tool --older-than= --age-by= -n --dry-run --permanent --trash --trash-dir= --home-only -v --verbose --shared --install-timer --watch --watch= --remove-timer --timer-status --when-below= --purge-trash --until= --json --help --version]
-  &wsl=[--json --glob= --regex= --name= -n --dry-run -f --force --help]
+  &wsl=[--older-than= --all --json --glob= --regex= --name= -n --dry-run -f --force --help]
   &finder=[--trash-dir= --all -f --force --conflict= -v --verbose --json --help]
   &config=[--path --default --help --version]
   &setup=[--prefix= --bin-dir= --with-rm --powershell-profile -n --dry-run -f --force -v --verbose --help]
@@ -28,7 +28,7 @@ var opts = [
   &man=[]
 ]
 var multi = [&trash=put &trash-put=put &trash-empty=empty &trash-list=list &trash-restore=restore &trash-rm=rm]
-var values = [&completions=[bash zsh fish nu powershell elvish] &finder=[put list restore] &wsl=[list restore rm]]
+var values = [&completions=[bash zsh fish nu powershell elvish] &finder=[put list restore] &wsl=[list restore rm empty]]
 
 fn complete {|@words|
   var cmd = (path:base $words[0])

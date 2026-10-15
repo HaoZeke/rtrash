@@ -144,7 +144,9 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s f -l fi
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l stacks -d 'print folded stacks for flame graph tools'
 
 # wsl
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -f -a 'list restore rm'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -f -a 'list restore rm empty'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l older-than -x -d 'empty: items deleted more than AGE ago'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l all -d 'empty: every item, without asking'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l json -d 'list: print a JSON array'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l glob -x -d 'items whose path or name matches'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l regex -x -d 'items whose path matches'

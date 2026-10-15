@@ -31,7 +31,7 @@ def "nu-complete rtrash shells" [] {
 }
 
 def "nu-complete rtrash wsl" [] {
-    ["list" "restore" "rm"]
+    ["list" "restore" "rm" "empty"]
 }
 
 def "nu-complete rtrash finder" [] {
@@ -318,7 +318,9 @@ export extern "rtrash wsl" [
     --glob: string  # items whose path (or name, without a slash) matches
     --regex: string  # items whose path matches
     --name: string  # items with exactly this file name
-    --dry-run(-n)  # rm: print what would go, delete nothing
+    --older-than: string  # empty: items deleted more than AGE ago
+    --all  # empty: every item, without asking
+    --dry-run(-n)  # rm, empty: print what would go, delete nothing
     --force(-f)  # restore over an existing file
     --help  # display this help and exit
     action?: string@"nu-complete rtrash wsl"

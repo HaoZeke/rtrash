@@ -28,7 +28,7 @@ Commands:
   who [OPTION]... PATH...     list the live processes holding PATH
   reap [OPTION]... [DIR]...   trash stale temp entries no live process holds
   finder put|list|restore     macOS Finder Trash with Put Back
-  wsl list|restore|rm         the Windows Recycle Bin from inside WSL
+  wsl list|restore|rm|empty   the Windows Recycle Bin from inside WSL
   config [--path|--default]   show the config file and the settings it makes
   setup [OPTION]...           install multi-call links, completions, man page
   keys [OPTION]...            show/sample TUI keybind config (customizable)

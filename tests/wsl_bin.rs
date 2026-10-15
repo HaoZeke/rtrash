@@ -51,6 +51,7 @@ impl Fake {
             .env("RTRASH_WSL_OSRELEASE", self.top.join("osrelease"))
             .env("RTRASH_WSL_CONF", self.top.join("wsl.conf"))
             .env("RTRASH_WSL_SID", SID)
+            .stdin(std::process::Stdio::null())
             .output()
             .unwrap()
     }
@@ -208,4 +209,53 @@ fn wsl_rm_deletes_matching_items_for_good() {
     // No match is not an error; no selector is.
     assert!(f.run(&["rm", "--name=none"]).status.success());
     assert_eq!(f.run(&["rm"]).status.code(), Some(2));
+}
+
+#[test]
+fn wsl_empty_goes_by_age_and_guards_the_whole_bin() {
+    let f = Fake::new("empty");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    f.recycle("AB12CD.txt", r"C:\old.txt", b"o", 1_700_000_000);
+    f.recycle("EF34GH.txt", r"C:\new.txt", b"n", now);
+    let out = f.run(&["empty", "-n", "--older-than=1d"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("old.txt") && !text.contains("new.txt"),
+        "{text}"
+    );
+    assert!(f.bin().join("$RAB12CD.txt").exists());
+    let out = f.run(&["empty", "7"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!f.bin().join("$RAB12CD.txt").exists());
+    assert!(!f.bin().join("$IAB12CD.txt").exists());
+    assert!(f.bin().join("$REF34GH.txt").exists());
+    // A whole empty without a terminal refuses unless --all.
+    let out = f.run(&["empty"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--all"));
+    assert!(f.bin().join("$REF34GH.txt").exists());
+    assert_eq!(f.run(&["empty", "--all", "3"]).status.code(), Some(2));
+    assert_eq!(
+        f.run(&["empty", "--older-than=soon"]).status.code(),
+        Some(2)
+    );
+    let out = f.run(&["empty", "--all"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!f.bin().join("$REF34GH.txt").exists());
 }
