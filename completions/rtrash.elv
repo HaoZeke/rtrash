@@ -31,7 +31,7 @@ var opts = [
 var multi = [&trash=put &trash-put=put &trash-empty=empty &trash-list=list &trash-restore=restore &trash-rm=rm]
 var values = [&completions=[bash zsh fish nu powershell elvish] &finder=[put list restore] &wsl=[list restore rm empty]]
 
-# Trashed original paths (path) or names (name), for restore.
+# Trashed original paths (path) or names (name), for restore and rm.
 fn trashed {|field|
   var fmt = '--format={'$field'}\0'
   try {
@@ -69,7 +69,7 @@ fn complete {|@words|
     set cands = [(trashed name | each {|n| put --name=$n })]
   } elif (str:has-prefix $cur -) {
     set cands = $opts[$sub]
-  } elif (eq $sub restore) {
+  } elif (or (eq $sub restore) (eq $sub rm)) {
     set cands = [(trashed path)]
   } elif (has-key $values $sub) {
     set cands = $values[$sub]

@@ -15,7 +15,7 @@ function __rtrash_seen_subcommand
     return 1
 end
 
-# Trashed original paths (path) or names (name), for restore.
+# Trashed original paths (path) or names (name), for restore and rm.
 function __rtrash_trashed
     set -l lister rtrash list
     command -q rtrash; or set lister trash-list
@@ -209,6 +209,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l co
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l json -d 'print the result as JSON'
 
 # rm (trash-rm)
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -f -a '(__rtrash_trashed path)'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l trash-dir -d 'only this trash directory' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l home-only -d 'only the home trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l older-than -d 'only match items older than AGE (DAYS, 2h, 1d12h)' -r
@@ -323,6 +324,7 @@ complete -c trash-restore -l json
 complete -c trash-restore -l help
 complete -c trash-restore -l version
 
+complete -c trash-rm -f -a '(__rtrash_trashed path)'
 complete -c trash-rm -l trash-dir -r
 complete -c trash-rm -l home-only
 complete -c trash-rm -l older-than -r

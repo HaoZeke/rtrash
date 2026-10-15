@@ -54,7 +54,7 @@ def "nu-complete rtrash preserve-root" [] {
     ["all"]
 }
 
-# Trashed original paths or names, for restore.
+# Trashed original paths or names, for restore and rm.
 def "nu-complete rtrash trashed" [field: string] {
     let fmt = $"--format={($field)}\\0"
     try {
@@ -283,7 +283,7 @@ export extern "rtrash rm" [
     --json  # emit a JSON summary (and matched originals array)
     --help  # display this help and exit
     --version  # output version information and exit
-    ...patterns: string
+    ...patterns: string@"nu-complete rtrash trashed paths"
 ]
 
 export extern "rtrash who" [
@@ -486,5 +486,5 @@ export extern "trash-rm" [
     --json  # emit a JSON summary (and matched originals array)
     --help  # display this help and exit
     --version  # output version information and exit
-    ...patterns: string
+    ...patterns: string@"nu-complete rtrash trashed paths"
 ]

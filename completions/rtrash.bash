@@ -138,6 +138,16 @@ _rtrash_complete_restore() {
   esac
 }
 
+# rm: options, otherwise trashed original paths (a path is a pattern).
+_rtrash_complete_rm() {
+  local cur="${COMP_WORDS[COMP_CWORD]}"
+  COMPREPLY=()
+  case "$cur" in
+    -*) COMPREPLY=($(compgen -W "${_rtrash_rm_opts[*]}" -- "$cur")) ;;
+    *) _rtrash_trashed path "$cur" ;;
+  esac
+}
+
 _rtrash_main() {
   local cur prev words cword
   # Prefer bash-completion helper when available
@@ -164,7 +174,7 @@ _rtrash_main() {
       return
       ;;
     trash-rm)
-      _rtrash_complete_from _rtrash_rm_opts
+      _rtrash_complete_rm
       return
       ;;
     rm | trash | trash-put)
@@ -212,7 +222,7 @@ _rtrash_main() {
     finder) _rtrash_complete_from _rtrash_finder_opts ;;
     wsl) _rtrash_complete_from _rtrash_wsl_opts ;;
     config) _rtrash_complete_from _rtrash_config_opts ;;
-    rm) _rtrash_complete_from _rtrash_rm_opts ;;
+    rm) _rtrash_complete_rm ;;
     setup) _rtrash_complete_from _rtrash_setup_opts ;;
     keys) COMPREPLY=($(compgen -W "${_rtrash_keys_opts[*]}" -- "$cur")) ;;
     completions)

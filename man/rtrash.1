@@ -2904,7 +2904,9 @@ Print each path written.
 Print the embedded completion script to stdout (packagers / custom paths).
 Every script completes the
 .B restore
-PATH with the original paths in the trash, and
+PATH and the
+.B rm
+PATTERN with the original paths in the trash, and
 .B \-\-name=
 with the trashed names, read from
 .BR "rtrash list \-\-format" .

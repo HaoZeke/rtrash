@@ -298,7 +298,7 @@ fn bash_completion_offers_the_right_words() {
     assert_eq!(bash_complete(&["rtrash", "du", "--print"]), ["--print0"]);
 }
 
-/// bash completes `restore` with the original paths and names in the
+/// bash completes `restore` and `rm` with the original paths and names in the
 /// trash, read from `rtrash list --format`, and quotes the spaces.
 #[cfg(unix)]
 #[test]
@@ -354,10 +354,12 @@ fn bash_restore_completes_trashed_items() {
     let paths = run("rtrash restore ''");
     let names = run("rtrash restore --name=a");
     let multi = run("trash-restore ''");
+    let rm = run("rtrash rm ''");
     let _ = fs::remove_dir_all(&root);
     assert!(paths.iter().any(|p| p.ends_with("/a\\ b.txt")), "{paths:?}");
     assert!(names.contains(&"a\\ b.txt".to_string()), "{names:?}");
     assert!(multi.iter().any(|p| p.ends_with("/a\\ b.txt")), "{multi:?}");
+    assert!(rm.iter().any(|p| p.ends_with("/a\\ b.txt")), "{rm:?}");
 }
 
 /// Same check through fish, when it is installed.

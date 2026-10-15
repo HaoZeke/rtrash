@@ -46,7 +46,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
     if ($cmd -eq 'rtrash') {
         $sub = $words | Select-Object -Skip 1 | Where-Object { $subs -contains $_ } | Select-Object -First 1
     }
-    # Trashed original paths (path) or names (name), for restore.
+    # Trashed original paths (path) or names (name), for restore and rm.
     $trashed = {
         param($field)
         $fmt = "--format={$field}\0"
@@ -57,7 +57,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
         }
         (@($out) -join "`n") -split "`0" | Where-Object { $_ -ne '' }
     }
-    if ($sub -eq 'restore' -and $wordToComplete -notlike '-*') {
+    if ($sub -in @('restore', 'rm') -and $wordToComplete -notlike '-*') {
         $cands = @(& $trashed 'path')
     } elseif ($sub -eq 'restore' -and $wordToComplete -like '--name=*') {
         $cands = @(& $trashed 'name' | ForEach-Object { "--name=$_" })

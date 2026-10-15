@@ -267,10 +267,10 @@ rm_opts=(
   '--json[emit a JSON summary with matches]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'
-  '*:pattern:'
+  '*:trashed path:_rtrash_trashed path'
 )
 
-# Trashed items for restore: original paths (path) or names (name).
+# Trashed items for restore and rm: original paths (path) or names (name).
 # compadd applies the user's matcher-list, so case-insensitive and
 # partial-word matching work as they do for files.
 (( $+functions[_rtrash_trashed] )) || _rtrash_trashed() {
