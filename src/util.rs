@@ -323,9 +323,23 @@ pub fn set_si_units(on: bool) {
     SI_UNITS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// `du --no-prefix`: [`format_bytes`] prints plain byte counts for the
+/// rest of the run.
+static RAW_BYTES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Switch [`format_bytes`] to plain byte counts (`123456`), as
+/// `du --no-prefix` does.
+pub fn set_raw_bytes(on: bool) {
+    RAW_BYTES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Human-readable sizes for CLI summaries: binary units (KiB/MiB/GiB), or
-/// decimal ones after [`set_si_units`].
+/// decimal ones after [`set_si_units`], or plain bytes after
+/// [`set_raw_bytes`].
 pub fn format_bytes(n: u64) -> String {
+    if RAW_BYTES.load(std::sync::atomic::Ordering::Relaxed) {
+        return n.to_string();
+    }
     format_bytes_in(n, SI_UNITS.load(std::sync::atomic::Ordering::Relaxed))
 }
 

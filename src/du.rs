@@ -194,6 +194,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           show git state and artefact kind
       --no-delete       with -i, browse only: d, u and b do nothing
       --si              show sizes in powers of 1000 (kB, MB, GB)
+      --no-prefix       show sizes as plain byte counts, for sort -n and
+                          scripts (gdu --no-prefix, GNU du -b); not with
+                          --interactive
       --help            display this help and exit
       --version         output version information and exit
 ";
@@ -3064,6 +3067,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     opts.one_file_system = cfg.bool("du", "one_file_system").unwrap_or(false);
     use_git = cfg.bool("du", "git").unwrap_or(use_git);
     let mut si = cfg.bool("du", "si").unwrap_or(false);
+    let mut raw_bytes = false;
     // The config key only shapes -i; the flag alone is an error below.
     let mut read_only = cfg.bool("du", "no_delete").unwrap_or(false);
     filter.exclude_caches = cfg.bool("du", "exclude_caches").unwrap_or(false);
@@ -3294,6 +3298,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "-i" | "--interactive" => interactive = true,
                 "--no-delete" => no_delete = true,
                 "--si" => si = true,
+                "--no-prefix" => raw_bytes = true,
                 "--help" => {
                     print!("{}", HELP.replace("{prog}", prog));
                     return 0;
@@ -3356,6 +3361,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         > 1
     {
         eprintln!("{prog}: --json, --print0, --pick and --interactive are mutually exclusive");
+        return 2;
+    }
+    if raw_bytes && interactive {
+        eprintln!("{prog}: --no-prefix is for printed sizes; the explorer keeps units");
         return 2;
     }
     if pick && !pick_available() {
@@ -3446,6 +3455,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     // Text sizes everywhere in this run, the explorer included; JSON,
     // snapshots and stacks stay in bytes.
     crate::util::set_si_units(si);
+    crate::util::set_raw_bytes(raw_bytes);
     if no_delete && !interactive {
         eprintln!("{prog}: --no-delete applies to --interactive; other modes never delete");
         return 2;

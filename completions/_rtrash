@@ -197,6 +197,7 @@ du_opts=(
   '(-i --interactive)'{-i,--interactive}'[explore one directory at a time; trash, undo, rescan]'
   '--no-delete[with -i, browse only: no trash or undo]'
   '--si[sizes in powers of 1000 (kB, MB, GB)]'
+  '--no-prefix[sizes as plain byte counts]'
   '(-o --output)'{-o,--output=}'[write a snapshot of every directory total]:file:_files'
   '--stacks[print folded stacks for flame graph tools]'
   '--devices[list every mounted file system with its size and free space]'

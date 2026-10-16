@@ -2407,3 +2407,29 @@ fn graph_style_draws_the_bars_in_blocks() {
     let bad = t.du(&["--no-git", "--graph-style=blocks"]);
     assert_eq!(bad.status.code(), Some(2));
 }
+
+#[test]
+fn no_prefix_prints_plain_byte_counts() {
+    let t = Tree::new("dunoprefix");
+    // 123_456 bytes is 120.6 KiB, so a unit would show if one slipped in.
+    t.file("one/odd.bin", 123_456);
+    let args = ["--no-git", "--apparent", "--files", "--no-prefix"];
+    let out = t.du(&args);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    let row = text.lines().find(|l| l.ends_with("odd.bin")).expect("row");
+    // The APPARENT column is the second field: the length exactly.
+    let apparent = row.split_whitespace().nth(1);
+    assert_eq!(apparent, Some("123456"), "{row}");
+    assert!(!text.contains("KiB") && !text.contains("MiB"), "{text}");
+    let plain = String::from_utf8(t.du(&["--no-git", "--files"]).stdout).unwrap();
+    assert!(plain.contains("KiB"), "{plain}");
+    let tui = t.du(&["--no-git", "--no-prefix", "-i"]);
+    assert_eq!(tui.status.code(), Some(2));
+    let said = String::from_utf8_lossy(&tui.stderr);
+    assert!(said.contains("--no-prefix"), "{said}");
+}

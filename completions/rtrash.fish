@@ -174,6 +174,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l pick -d
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s i -l interactive -d 'explore one directory at a time; trash, undo, rescan'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-delete -d 'with -i, browse only: no trash or undo'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l si -d 'sizes in powers of 1000 (kB, MB, GB)'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-prefix -d 'sizes as plain byte counts'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s o -l output -r -d 'write a snapshot of every directory total'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l devices -d 'list every mounted file system with its size and free space'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l ncdu -r -d 'write an ncdu export of PATH'

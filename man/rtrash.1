@@ -1899,6 +1899,21 @@ The
 config key turns it on for every
 .BR \-i .
 .TP
+.B \-\-no\-prefix
+Show every printed size as a plain byte count
+.RI ( 123456 )
+in the listing, the tree, the totals and the trash line, for
+.B sort \-n
+and scripts, as gdu
+.B \-\-no\-prefix
+and GNU
+.B du \-b
+print them. It overrides
+.BR \-\-si ;
+the explorer
+.RB ( \-i )
+refuses it.
+.TP
 .B \-\-si
 Show sizes in powers of 1000 (kB, MB, GB, TB) instead of 1024 (KiB,
 MiB, GiB), in the listing, the totals, the trash line and the explorer.

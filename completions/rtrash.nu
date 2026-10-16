@@ -272,6 +272,7 @@ export extern "rtrash du" [
     --interactive(-i)  # explore PATH one directory at a time (several PATHs
     --no-delete  # with -i, browse only: d, u and b do nothing
     --si  # show sizes in powers of 1000 (kB, MB, GB)
+    --no-prefix  # show sizes as plain byte counts
     --help  # display this help and exit
     --version  # output version information and exit
     ...paths: path
