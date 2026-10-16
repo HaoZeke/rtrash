@@ -139,6 +139,23 @@ fn plain_commands_use_the_finder_trash() {
 }
 
 #[test]
+fn list_last_keeps_the_newest_finder_items() {
+    let b = Box_::new("last");
+    for n in ["old.txt", "new.txt"] {
+        fs::write(b.work().join(n), b"x").unwrap();
+        assert!(b.run(&["put", n], "").status.success());
+        // Keep the two trash dates a second apart.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    let o = b.run(&["list", "--last=1"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(out(&o).lines().count(), 1, "{}", out(&o));
+    assert!(out(&o).contains("new.txt"), "{}", out(&o));
+    let o = b.run(&["list", "--last=0"], "");
+    assert!(o.status.success() && out(&o).is_empty(), "{}", out(&o));
+}
+
+#[test]
 fn a_pin_or_the_setting_keeps_the_freedesktop_trash() {
     let b = Box_::new("pin");
     fs::write(b.work().join("x"), b"x").unwrap();

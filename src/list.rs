@@ -440,8 +440,6 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if crate::finder::is_default(!trash_dirs.is_empty() || all_users) {
         let refused = if volumes || show_dirs {
             Some("--volumes or --trash-dirs")
-        } else if last.is_some() {
-            Some("--last")
         } else {
             None
         };
@@ -452,7 +450,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             },
             size: size_filter,
         };
-        return crate::finder::default_list(prog, json, format.as_deref(), refused, filter, &keep);
+        return crate::finder::default_list(
+            prog,
+            json,
+            format.as_deref(),
+            refused,
+            filter,
+            last,
+            &keep,
+        );
     }
     if all_users && (home_only || !trash_dirs.is_empty()) {
         eprintln!("{prog}: --all-users takes no --home-only or --trash-dir");

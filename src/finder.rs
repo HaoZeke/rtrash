@@ -595,13 +595,15 @@ fn read_all(prog: &str) -> Result<Vec<crate::finder_shared::Entry>, i32> {
 }
 
 /// `list` on the Finder trashes: `DATE ORIGINAL` rows, oldest first, as
-/// the FreeDesktop listing prints them (`--json` too).
+/// the FreeDesktop listing prints them (`--json` too). `last` keeps only
+/// the newest rows, as tail -n would.
 pub fn default_list(
     prog: &str,
     json: bool,
     format: Option<&[crate::list::FmtPart]>,
     refused: Option<&str>,
     filter: crate::finder_shared::Filter,
+    last: Option<usize>,
     keep: &dyn Fn(&Path, &str) -> bool,
 ) -> i32 {
     if let Some(what) = refused {
@@ -611,10 +613,14 @@ pub fn default_list(
         Ok(r) => filter.apply(r),
         Err(c) => return c,
     };
-    let rows: Vec<_> = rows
+    let mut rows: Vec<_> = rows
         .into_iter()
         .filter(|e| keep(&e.shown, &e.name))
         .collect();
+    if let Some(n) = last {
+        let cut = rows.len().saturating_sub(n);
+        rows.drain(..cut);
+    }
     if json {
         let out: Vec<String> = rows
             .iter()
