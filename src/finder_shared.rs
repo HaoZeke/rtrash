@@ -94,30 +94,56 @@ pub fn resolve_name(dir: &Path, name: &str) -> Option<String> {
     })
 }
 
-/// Whether `a` and `b` name the same path once both are in NFC.
-pub fn same_path(a: &Path, b: &Path) -> bool {
-    if a == b || nfc_path(a) == nfc_path(b) {
-        return true;
+/// A path as Finder compares it: folders resolved through symbolic links
+/// and firmlinks (/var is /private/var on macOS), then put in NFC (Finder
+/// may hand back a decomposed name). Two spellings of one place give equal
+/// values, so code and tests compare these and never assume Linux paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinderPath(PathBuf);
+
+impl FinderPath {
+    /// `p` with its deepest existing folder resolved, component by
+    /// component; a part that is gone keeps its written tail.
+    pub fn resolved(p: &Path) -> Self {
+        Self(nfc_path(&crate::trashdir::resolve_existing(p)))
     }
-    // One spelling may run through a symbolic link (/var against
-    // /private/var on macOS) or a firmlink; compare the real folders.
-    let real = |p: &Path| {
-        let dir = std::fs::canonicalize(p.parent()?).ok()?;
-        Some(nfc_path(&dir.join(p.file_name()?)))
-    };
-    matches!((real(a), real(b)), (Some(x), Some(y)) if x == y)
+
+    /// `p` with its folder resolved and its last name kept as written, so
+    /// an item that is itself a symbolic link stays that link.
+    pub fn item(p: &Path) -> Self {
+        match (p.parent(), p.file_name()) {
+            (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => {
+                let dir = crate::trashdir::resolve_existing(dir);
+                Self(nfc_path(&dir.join(name)))
+            }
+            _ => Self(nfc_path(p)),
+        }
+    }
+
+    /// Whether `self` is `dir` or below it.
+    pub fn is_under(&self, dir: &FinderPath) -> bool {
+        self.0.starts_with(&dir.0)
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
 }
 
-/// Whether `path` is `dir` or below it. Either spelling may run through a
-/// symbolic link (/var against /private/var on macOS), so both sides also
-/// compare with their deepest existing folder resolved, component by
-/// component; a folder that is gone keeps its written tail.
+/// Whether `a` and `b` name the same item as Finder sees it (see
+/// [`FinderPath::item`]).
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    a == b || FinderPath::item(a) == FinderPath::item(b)
+}
+
+/// Whether `path` is `dir` or below it as Finder sees them (see
+/// [`FinderPath::resolved`]).
 pub fn under(path: &Path, dir: &Path) -> bool {
-    if path.starts_with(dir) || nfc_path(path).starts_with(nfc_path(dir)) {
+    if path.starts_with(dir) {
         return true;
     }
-    let real = |p: &Path| nfc_path(&crate::trashdir::resolve_existing(p));
-    real(path).starts_with(real(dir))
+    let (path, dir) = (FinderPath::resolved(path), FinderPath::resolved(dir));
+    path.is_under(&dir)
 }
 
 fn from_items(trash: &Path) -> std::io::Result<Vec<Entry>> {
@@ -687,6 +713,31 @@ mod tests {
         assert!(under(&real.join("sub/gone.txt"), &link.join("sub")));
         assert!(!under(&real.join("subway/x"), &link.join("sub")));
         assert!(!under(&real.join("other.txt"), &link.join("sub")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn finder_paths_match_across_a_link_and_a_decomposed_name() {
+        let base = std::env::temp_dir().join(format!("rtrash-fpath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("real")).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(base.join("real"), &link).unwrap();
+        // Composed through the link, decomposed through the real folder.
+        let typed = link.join("n\u{e9}e.txt");
+        let given = base.join("real/ne\u{301}e.txt");
+        assert_eq!(FinderPath::item(&typed), FinderPath::item(&given));
+        assert!(same_path(&typed, &given));
+        let (inside, top) = (FinderPath::resolved(&typed), FinderPath::resolved(&base));
+        assert!(inside.is_under(&top));
+        // An item that is itself a link keeps its own name.
+        let item = FinderPath::item(&link);
+        assert_ne!(item, FinderPath::resolved(&link));
+        assert_eq!(
+            item.as_path().file_name(),
+            Some(std::ffi::OsStr::new("link"))
+        );
+        assert!(!same_path(&typed, &base.join("real/other.txt")));
         let _ = std::fs::remove_dir_all(&base);
     }
 
