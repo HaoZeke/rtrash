@@ -686,6 +686,34 @@ fn config_file_sets_du_defaults_and_options_win() {
 }
 
 #[test]
+fn show_mtime_swaps_age_for_a_date_column() {
+    let t = Tree::new("showmtime");
+    t.file("d/a.bin", 100_000);
+    let plain = String::from_utf8(t.du(&["--no-git"]).stdout).unwrap();
+    assert!(plain.contains("AGE"), "{plain}");
+
+    let out = t.du(&["--no-git", "--show-mtime"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("MTIME") && !text.contains(" AGE "), "{text}");
+    // A row such as `... 2026-10-16 07:30  ...  d/a.bin`.
+    let row = text
+        .lines()
+        .find(|l| l.ends_with("a.bin"))
+        .expect("a.bin row");
+    let words: Vec<&str> = row.split_whitespace().collect();
+    let dated = words.windows(2).any(|w| {
+        let (d, m) = (w[0].as_bytes(), w[1].as_bytes());
+        d.len() == 10 && d[4] == b'-' && d[7] == b'-' && m.len() == 5 && m[2] == b':'
+    });
+    assert!(dated, "{row}");
+}
+
+#[test]
 fn no_hidden_leaves_dot_entries_out() {
     let t = Tree::new("nohidden");
     t.file("seen/a.bin", 100_000);

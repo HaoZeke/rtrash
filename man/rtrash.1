@@ -1152,6 +1152,13 @@ takes every key but
 Add an ITEMS column. The JSON rows always carry
 .BR items .
 .TP
+.B \-\-show\-mtime
+Show the local modification time as
+.I YYYY-MM-DD HH:MM
+in place of the AGE column. The JSON rows keep
+.B mtime
+as seconds since the epoch.
+.TP
 .B \-\-inodes
 Rank by inodes, the same as
 .BR \-\-sort=items :

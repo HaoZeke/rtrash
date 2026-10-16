@@ -140,6 +140,7 @@ du_opts=(
   '--apparent[rank by apparent size instead of disk use]'
   '--sort=[rank rows by this key]:key:(disk apparent items inodes mtime)'
   '(-C --count)'{-C,--count}'[add an ITEMS column]'
+  '--show-mtime[show the modification time in place of AGE]'
   '--inodes[rank by inodes and total them]'
   '--unique[add a UNIQUE column of bytes no other file shares]'
   '--shared[count each shared extent once in sizes]'

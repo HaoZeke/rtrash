@@ -34,7 +34,7 @@ _rtrash_status_opts=(
 )
 
 _rtrash_du_opts=(
-  -n --top= -x --one-file-system -L --follow-symlinks --apparent --sort= -C --count --inodes --unique --shared --types --max-depth= --threads= --all-dirs
+  -n --top= -x --one-file-system -L --follow-symlinks --apparent --sort= -C --count --show-mtime --inodes --unique --shared --types --max-depth= --threads= --all-dirs
   --artefacts --exclude= -X --exclude-from= --exclude-caches --no-hidden --gitignore
   --dirs --files --older-than= --newer-than= --since= --until= --home-only
   --trash-dir= --no-git --include-dirty --json --print0 --dupes --trash-dupes --link-dupes --clone-dupes --min-size= --pick -i --interactive --no-delete --si -o --output= --devices --ncdu= --ncdu-binary= -f --file= --stacks --help

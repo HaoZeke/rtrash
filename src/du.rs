@@ -60,6 +60,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           directory gives way to the subdirectory that has
                           its newest change)
   -C, --count           add an ITEMS column (each hard-linked file once)
+      --show-mtime      show the local modification time (YYYY-MM-DD HH:MM)
+                          in place of the AGE column; --json keeps mtime
+                          as epoch seconds
       --inodes          rank by inodes, as --sort=items: files and
                           directories, each hard-linked file once; the
                           total gives the inodes each PATH uses
@@ -2131,6 +2134,21 @@ pub fn format_age(mtime: i64, now: i64) -> String {
     }
 }
 
+/// Local modification time as `YYYY-MM-DD HH:MM` (gdu --show-mtime), or
+/// `-` for [`MTIME_UNKNOWN`].
+pub fn format_mtime(mtime: i64) -> String {
+    if mtime == MTIME_UNKNOWN {
+        return "-".into();
+    }
+    #[cfg(unix)]
+    let iso = crate::info::local_string(mtime);
+    #[cfg(windows)]
+    let iso = crate::platform::epoch_to_local(mtime);
+    #[cfg(not(any(unix, windows)))]
+    let iso = crate::platform::epoch_to_iso_utc(mtime);
+    iso.get(..16).unwrap_or(&iso).replacen('T', " ", 1)
+}
+
 fn json_opt(v: Option<&str>) -> String {
     match v {
         Some(s) => format!("\"{}\"", json_escape(s)),
@@ -2328,7 +2346,7 @@ fn print_types(title: &str, rows: &[TypeRow], top: usize) {
     }
 }
 
-fn print_table(title: &str, items: &[Item], now: i64, count: bool) {
+fn print_table(title: &str, items: &[Item], now: i64, count: bool, show_mtime: bool) {
     if items.is_empty() {
         return;
     }
@@ -2355,13 +2373,26 @@ fn print_table(title: &str, items: &[Item], now: i64, count: bool) {
             String::new()
         }
     };
+    // --show-mtime swaps the AGE column for the local modification time.
+    let (when, when_width) = if show_mtime {
+        ("MTIME", 16)
+    } else {
+        ("AGE", 4)
+    };
+    let when_of = |it: &Item| {
+        if show_mtime {
+            format_mtime(it.mtime)
+        } else {
+            format_age(it.mtime, now)
+        }
+    };
     println!(
-        "{:>10}  {:>10}  {}{}{:>4}  {:<width$}  PATH",
+        "{:>10}  {:>10}  {}{}{:>when_width$}  {:<width$}  PATH",
         "DISK",
         "APPARENT",
         uniques("UNIQUE"),
         counts("ITEMS"),
-        "AGE",
+        when,
         "NOTE"
     );
     for it in items {
@@ -2370,12 +2401,12 @@ fn print_table(title: &str, items: &[Item], now: i64, count: bool) {
             path.push(std::path::MAIN_SEPARATOR);
         }
         println!(
-            "{:>10}  {:>10}  {}{}{:>4}  {:<width$}  {}",
+            "{:>10}  {:>10}  {}{}{:>when_width$}  {:<width$}  {}",
             format_bytes(it.disk),
             format_bytes(it.apparent),
             uniques(&it.unique.map(format_bytes).unwrap_or_default()),
             counts(&it.items.to_string()),
-            format_age(it.mtime, now),
+            when_of(it),
             notes(it),
             path
         );
@@ -2654,6 +2685,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut threads: Option<usize> = None;
     let mut filter = du_filter::Spec::default();
     let mut count = false;
+    let mut show_mtime = false;
     let now = crate::util::now_epoch();
     // Defaults from the config file; the options below override them.
     let cfg = crate::config::get();
@@ -2805,6 +2837,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "-L" | "--follow-symlinks" => opts.follow = true,
                 "--apparent" => opts.sort = SortKey::Apparent,
                 "-C" | "--count" => count = true,
+                "--show-mtime" => show_mtime = true,
                 "--inodes" => opts.sort = SortKey::Items,
                 "--all-dirs" => opts.all_dirs = true,
                 "--artefacts" => opts.artefacts_only = true,
@@ -3072,6 +3105,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 &report.dirs,
                 now,
                 false,
+                show_mtime,
             );
             for t in &report.roots {
                 println!(
@@ -3231,8 +3265,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         if opts.types {
             print_types(&opts.sort.title("file types"), &report.types, opts.top);
         } else {
-            print_table(&opts.sort.title("directories"), &report.dirs, now, count);
-            print_table(&opts.sort.title("files"), &report.files, now, count);
+            print_table(
+                &opts.sort.title("directories"),
+                &report.dirs,
+                now,
+                count,
+                show_mtime,
+            );
+            print_table(
+                &opts.sort.title("files"),
+                &report.files,
+                now,
+                count,
+                show_mtime,
+            );
         }
         for t in &report.roots {
             let kind = t.artefact.map(|k| format!(" ({k})")).unwrap_or_default();
@@ -3488,6 +3534,10 @@ mod tests {
         assert_eq!(format_age(0, 800 * 86_400), "2y");
         assert_eq!(format_age(10, 0), "0s");
         assert_eq!(format_age(MTIME_UNKNOWN, 0), "-");
+        assert_eq!(format_mtime(MTIME_UNKNOWN), "-");
+        let m = format_mtime(1_700_000_000);
+        assert_eq!(m.len(), 16, "{m}");
+        assert_eq!((&m[4..5], &m[10..11], &m[13..14]), ("-", " ", ":"), "{m}");
     }
 
     #[test]
