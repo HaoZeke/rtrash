@@ -187,6 +187,7 @@ wsl_opts=(
   '--older-than=[empty: items deleted more than AGE ago]:age:'
   '--all[empty: every item, without asking]'
   '--json[list: print a JSON array]'
+  '--format=[list: print each item through a template]:template:'
   '--glob=[items whose path or name matches]:pattern:'
   '--regex=[items whose path matches]:regex:'
   '--name=[items with exactly this file name]:name:'

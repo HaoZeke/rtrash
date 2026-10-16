@@ -64,7 +64,7 @@ _rtrash_finder_opts=(
 )
 
 _rtrash_wsl_opts=(
-  list restore rm empty --older-than= --all --json --glob= --regex= --name= -n --dry-run -f --force --help
+  list restore rm empty --older-than= --all --json --format= --glob= --regex= --name= -n --dry-run -f --force --help
 )
 
 _rtrash_who_opts=(

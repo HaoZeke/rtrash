@@ -105,7 +105,7 @@ pub fn scan(root: &Path, sid: &str) -> Vec<BinEntry> {
 }
 
 const USAGE: &str = "\
-Usage: rtrash wsl list [--json] [MATCH]
+Usage: rtrash wsl list [--json | --format=TEMPLATE] [MATCH]
        rtrash wsl restore [-f] PATH...
        rtrash wsl rm [-n] MATCH|PATH...
        rtrash wsl empty [-n] [--all] [--older-than=AGE | DAYS]
@@ -115,6 +115,9 @@ delete items for good (rm by match, empty by age or all of them; a whole
 empty asks first, or needs --all). MATCH is --glob=PATTERN, --regex=RE or --name=NAME,
 tested against the original path as WSL sees it.
       --json             list: a JSON array
+      --format=TEMPLATE  list: each item through TEMPLATE, as list --format
+                         does: {date} {epoch} {path} (under the automount
+                         root) {name} ($R payload) {trash} (its bin) {size}
       --glob=PATTERN     items whose path (or name, without a slash) matches
       --regex=RE         items whose path matches RE
       --name=NAME        items with exactly this file name
@@ -252,13 +255,24 @@ fn take_matcher(
     }
 }
 
-/// `wsl list [--json] [MATCH]`.
+/// `wsl list [--json | --format=TEMPLATE] [MATCH]`.
 fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     let mut json = false;
+    let mut format = None;
     let mut matcher = None;
     for a in args {
         if a == "--json" {
             json = true;
+            continue;
+        }
+        if let Some(t) = a.strip_prefix("--format=") {
+            match crate::listfmt::parse_format(t) {
+                Ok(f) => format = Some(f),
+                Err(e) => {
+                    eprintln!("{prog}: list: {e}");
+                    return 2;
+                }
+            }
             continue;
         }
         match take_matcher(prog, a, &mut matcher) {
@@ -270,12 +284,27 @@ fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
             Err(c) => return c,
         }
     }
+    if json && format.is_some() {
+        eprintln!("{prog}: list: give --json or --format, not both");
+        return 2;
+    }
     let shown: Vec<&BinEntry> = items
         .iter()
         .filter(|it| matcher.as_ref().is_none_or(|m| m.keeps(&it.local)))
         .collect();
     if json {
         println!("{}", list_json(&shown));
+        return 0;
+    }
+    if let Some(parts) = format {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        for it in shown {
+            if out.write_all(&format_row(&parts, it)).is_err() {
+                break;
+            }
+        }
+        let _ = out.flush();
         return 0;
     }
     for it in shown {
@@ -286,6 +315,28 @@ fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
         );
     }
     0
+}
+
+/// One `wsl list --format` row: the path under the automount root, the
+/// `$R` payload's name and its bin; no batch or owner.
+pub fn format_row(parts: &[crate::listfmt::FmtPart], it: &BinEntry) -> Vec<u8> {
+    let date = crate::platform::epoch_to_iso_utc(it.deleted);
+    let name = it
+        .payload
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let row = crate::listfmt::FmtRow {
+        date: &date,
+        epoch: it.deleted,
+        path: &it.local,
+        name: &name,
+        trash: it.payload.parent().unwrap_or(&it.payload),
+        batch: "",
+        size: Some(it.size),
+        owner: Some(""),
+    };
+    crate::listfmt::render_format(parts, &row)
 }
 
 /// The `wsl list --json` array: original Windows path, path under the

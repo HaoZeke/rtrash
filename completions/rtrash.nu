@@ -335,6 +335,7 @@ export extern "rtrash finder" [
 
 export extern "rtrash wsl" [
     --json  # list: print a JSON array
+    --format: string  # list: print each item through a template
     --glob: string  # items whose path (or name, without a slash) matches
     --regex: string  # items whose path matches
     --name: string  # items with exactly this file name

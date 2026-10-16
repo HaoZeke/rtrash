@@ -2716,7 +2716,7 @@ Restore:
 Display help and exit.
 .SS wsl
 .B rtrash wsl list
-[\fB\-\-json\fR] [\fB\-\-glob=\fIPATTERN\fR|\fB\-\-regex=\fIRE\fR|\fB\-\-name=\fINAME\fR]
+[\fB\-\-json\fR|\fB\-\-format=\fITEMPLATE\fR] [\fB\-\-glob=\fIPATTERN\fR|\fB\-\-regex=\fIRE\fR|\fB\-\-name=\fINAME\fR]
 .br
 .B rtrash wsl restore
 [\fB\-f\fR|\fB\-\-force\fR] \fIPATH\fR...
@@ -2780,6 +2780,24 @@ prints an array of objects with
 .I date
 and
 .IR size .
+.B list \-\-format=\fITEMPLATE\fR
+prints each item through a template, as
+.B rtrash list \-\-format
+does:
+.I {path}
+is the path under the automount root,
+.I {name}
+the
+.I $R
+payload and
+.I {trash}
+its bin;
+.I {batch}
+and
+.I {owner}
+are empty.
+It cannot be combined with
+.BR \-\-json .
 .B \-\-help
 prints the usage.
 Outside WSL every action fails.

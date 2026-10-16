@@ -181,6 +181,35 @@ fn wsl_list_filters_and_prints_json() {
 }
 
 #[test]
+fn wsl_list_prints_through_a_format() {
+    let f = Fake::new("format");
+    f.recycle("AB12CD.txt", r"C:\Users\me\notes.txt", b"n", 1_700_000_000);
+    f.recycle("EF34GH.log", r"C:\Users\me\run.log", b"ll", 1_700_000_100);
+    let out = f.run(&["list", "--format={epoch}\t{size}\t{name}\t{path}\n"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    let notes = f.root.join("c/Users/me/notes.txt");
+    let run = f.root.join("c/Users/me/run.log");
+    assert_eq!(
+        text,
+        format!(
+            "1700000000\t1\t$RAB12CD.txt\t{}\n1700000100\t2\t$REF34GH.log\t{}\n",
+            notes.display(),
+            run.display()
+        )
+    );
+    let out = f.run(&["list", "--name=run.log", "--format={path}\\0"]);
+    assert_eq!(out.stdout, format!("{}\0", run.display()).into_bytes());
+    assert_eq!(f.run(&["list", "--format={nope}"]).status.code(), Some(2));
+    let both = f.run(&["list", "--json", "--format={path}"]);
+    assert_eq!(both.status.code(), Some(2));
+}
+
+#[test]
 fn wsl_rm_deletes_matching_items_for_good() {
     let f = Fake::new("rm");
     f.recycle("AB12CD.txt", r"C:\a.txt", b"a", 1_700_000_000);

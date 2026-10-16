@@ -155,6 +155,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -f -a 'li
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l older-than -x -d 'empty: items deleted more than AGE ago'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l all -d 'empty: every item, without asking'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l json -d 'list: print a JSON array'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l format -x -d 'list: print each item through a template'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l glob -x -d 'items whose path or name matches'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l regex -x -d 'items whose path matches'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l name -x -d 'items with exactly this file name'
