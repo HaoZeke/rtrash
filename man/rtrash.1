@@ -3591,20 +3591,37 @@ On Windows it names the Recycle Bin of the volume and counts bytes only.
 .B RTRASH_NO_PERMANENT
 When set to anything but empty or
 .BR 0 ,
+rtrash deletes nothing for good.
 .BR rm ,
 .BR empty ,
-.B trash\-rm
+.BR trash\-rm ,
+.BR trash\-empty ,
+.B wsl rm
 and
-.B trash\-empty
-refuse to delete anything for good and exit 2, before they read the
-trash.
+.BR "wsl empty" ,
+and
+.B reap
+with
+.B \-\-permanent
+or
+.BR \-\-purge\-trash ,
+exit 2 before they start.
+Every other removal of trashed or live data is refused as well, with an
+error that names the variable: the size cap after a put
+.RB ( RTRASH_MAX_SIZE )
+keeps the older items, a reap profile set to delete leaves its entries,
+and a restore over an existing file
+.RB ( \-f ,
+.BR \-\-conflict=overwrite )
+fails with both copies in place.
 Dry runs
 .RB ( \-n ,
 .BR \-\-dry\-run ),
 .B \-\-help
 and
 .B \-\-version
-still work, and so do put, list, restore and undo.
+still work, and so do put, list, undo and a restore with nothing in the
+way.
 Set it for agents and shared accounts, so that trash stays the only
 way to remove files and every trashed item stays recoverable.
 .TP

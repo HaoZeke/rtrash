@@ -320,7 +320,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             removed += 1;
             continue;
         }
-        if let Err(e) = trashdir::remove_any_path(&payload) {
+        if let Err(e) = crate::permanent_guard::remove(&payload) {
             eprintln!(
                 "{prog}: cannot remove '{}': {e}",
                 crate::util::err_path(&payload)

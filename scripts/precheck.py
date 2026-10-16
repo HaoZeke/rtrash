@@ -273,6 +273,42 @@ def check_removed_literals(base):
                                 "update the assert or the example (tests/windows_mount.rs runs only in CI)")
 
 
+REMOVAL = re.compile(r"\b(remove_any_path|remove_path|remove_any|remove_forcing|wipe_two_parallel|"
+                     r"wipe_children_parallel|wipe_children_except|purge_all|remove_dir_all)\s*\(")
+
+
+def check_permanent_gate(reach=8):
+    """Every removal outside the primitives passes permanent_guard, or says why it is scratch."""
+    skip = {"fastdelete.rs", "permanent_guard.rs"}
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        if path.name in skip:
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        test_lines, k = set(), 0
+        while k < len(lines):
+            m = re.match(r"(\s*)(pub )?mod \w+ \{", lines[k + 1]) if k + 1 < len(lines) else None
+            if lines[k].strip() == "#[cfg(test)]" and m:
+                close = m.group(1) + "}"
+                j = k + 1
+                while j < len(lines) and lines[j].rstrip() != close:
+                    j += 1
+                test_lines.update(range(k, j + 1))
+                k = j
+            k += 1
+        for k, line in enumerate(lines):
+            if k in test_lines:
+                continue
+            code = strip_comments(line)
+            if not REMOVAL.search(code) or re.search(r"\bfn\s+\w+\s*[(<]", code):
+                continue
+            near = "\n".join(lines[max(0, k - reach):k + 1])
+            if "permanent_guard::" in near or "// scratch:" in near:
+                continue
+            rel = path.relative_to(ROOT)
+            errors.append(f"{rel}:{k + 1}: a removal that skips permanent_guard; route user data "
+                          "through permanent_guard::remove or gate(), or add a `// scratch:` reason")
+
+
 def check_rustfmt():
     """`cargo fmt --check` when a toolchain is there; three rounds in a row
     (170-172) needed a format-only amend after CI."""
@@ -294,7 +330,7 @@ def check_rustfmt():
 def main():
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps()
-    check_fn_params()
+    check_fn_params(); check_permanent_gate()
     check_long_lines(base); check_removed_literals(base)
     if "--no-fmt" not in sys.argv:
         check_rustfmt()

@@ -69,6 +69,28 @@ impl Box_ {
         child.wait_with_output().unwrap()
     }
 
+    /// `run` with `RTRASH_NO_PERMANENT=1` (and `RTRASH_MAX_SIZE` when
+    /// `budget` names one), stdin closed.
+    fn run_guarded(&self, args: &[&str], budget: Option<&str>) -> Output {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_rtrash"));
+        c.args(args)
+            .current_dir(self.work())
+            .env("HOME", &self.root)
+            .env("XDG_DATA_HOME", self.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", self.root.join(".config"))
+            .env("RTRASH_MACOS_TRASH", "finder")
+            .env("RTRASH_OSASCRIPT", self.root.join("osascript"))
+            .env("XDG_STATE_HOME", self.root.join("state"))
+            .env("RTRASH_NO_PERMANENT", "1")
+            .env_remove("RTRASH_PRUNE")
+            .stdin(Stdio::null());
+        match budget {
+            Some(v) => c.env("RTRASH_MAX_SIZE", v),
+            None => c.env_remove("RTRASH_MAX_SIZE"),
+        };
+        c.output().unwrap()
+    }
+
     /// Record Put Back for `name` in the Finder Trash, as Finder does.
     fn put_back(&self, name: &str, original: &Path) {
         let folder = original.parent().unwrap().to_string_lossy();
@@ -1256,4 +1278,37 @@ fn list_show_trashpath_names_the_item_in_the_finder_trash() {
     assert!(Path::new(at).exists(), "{text}");
     let o = b.run(&["list", "--json", "--show-trashpath"], "");
     assert!(out(&o).contains(".Trash/seen.txt\""), "{}", out(&o));
+}
+
+/// Under `RTRASH_NO_PERMANENT` the Finder Trash keeps everything: empty
+/// and rm refuse, the size cap after a put keeps the older item, and a
+/// restore that would overwrite a file fails with both copies intact.
+#[test]
+fn no_permanent_guard_covers_the_finder_trash() {
+    let b = Box_::new("noperm");
+    for (n, len) in [("old.bin", 60_000), ("new.bin", 60_000), ("pg.txt", 3)] {
+        fs::write(b.work().join(n), vec![b'x'; len]).unwrap();
+    }
+    assert!(b.run(&["put", "old.bin", "pg.txt"], "").status.success());
+    for args in [
+        &["empty", "--all"][..],
+        &["empty", "--max-size=10K"],
+        &["rm", "--name=old.bin"],
+    ] {
+        let o = b.run_guarded(args, None);
+        assert_eq!(o.status.code(), Some(2), "{args:?}: {}", err(&o));
+        assert!(err(&o).contains("RTRASH_NO_PERMANENT"), "{args:?}");
+        assert!(b.finder().join("old.bin").exists(), "{args:?}");
+    }
+    let o = b.run_guarded(&["put", "new.bin"], Some("100K"));
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(b.finder().join("new.bin").exists());
+    assert!(b.finder().join("old.bin").exists(), "the cap removed it");
+    assert!(err(&o).contains("RTRASH_NO_PERMANENT"), "{}", err(&o));
+    fs::write(b.work().join("pg.txt"), b"newer").unwrap();
+    let o = b.run_guarded(&["restore", "--name=pg.txt", "-f"], None);
+    assert!(!o.status.success(), "{}", out(&o));
+    assert!(err(&o).contains("RTRASH_NO_PERMANENT"), "{}", err(&o));
+    assert_eq!(fs::read(b.work().join("pg.txt")).unwrap(), b"newer");
+    assert!(b.finder().join("pg.txt").exists());
 }

@@ -202,11 +202,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 status = 1;
                 continue;
             }
-            let gone = if std::fs::symlink_metadata(&it.local).is_ok_and(|m| m.is_dir()) {
-                std::fs::remove_dir_all(&it.local)
-            } else {
-                std::fs::remove_file(&it.local)
-            };
+            let gone = crate::permanent_guard::remove(&it.local);
             if let Err(e) = gone {
                 eprintln!("{prog}: cannot replace '{}': {e}", it.local.display());
                 status = 1;
@@ -501,12 +497,8 @@ fn confirm_whole(prog: &str, total: usize) -> bool {
 /// Delete one item: the payload (a file or a whole tree), then its record,
 /// so a failure leaves the record that still names the payload.
 fn remove_entry(it: &BinEntry) -> std::io::Result<()> {
-    let meta = std::fs::symlink_metadata(&it.payload)?;
-    if meta.is_dir() {
-        std::fs::remove_dir_all(&it.payload)?;
-    } else {
-        std::fs::remove_file(&it.payload)?;
-    }
+    std::fs::symlink_metadata(&it.payload)?;
+    crate::permanent_guard::remove(&it.payload)?;
     if let Some(index) = crate::win_recycle::index_file_for(&it.payload) {
         match std::fs::remove_file(&index) {
             Ok(()) => {}

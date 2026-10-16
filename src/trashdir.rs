@@ -982,6 +982,7 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
         Err(e) => {
             let _ = fs::remove_file(join_info(&trash.info(), &name));
             make_tree_writable(&dest);
+            // scratch: a partial copy; the original is still in place.
             let _ = remove_any_path(&dest);
             return Err(e);
         }
@@ -990,6 +991,7 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
         // The copy is whole. If the original then can't go (a read-only
         // directory inside it), part of it may already be gone, so the
         // trash entry stays: dropping it would lose those files.
+        // scratch: the original, now whole in the trash.
         if let Err(e) = remove_any(abs, meta) {
             return Err(io::Error::new(
                 e.kind(),
@@ -1339,6 +1341,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
 
 fn remove_any(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
     if meta.is_dir() {
+        // scratch: callers decide; permanent_guard::remove gates user data.
         crate::fastdelete::remove_path(path)
     } else {
         fs::remove_file(path)
@@ -1633,6 +1636,7 @@ fn chmod_dir_fd(fd: RawFd) {
 /// Remove a path whatever it is; used by empty, restore force-overwrite, and error cleanup.
 /// Directory trees use the bulk unlinkat walker (and btrfs subvolume destroy when applicable).
 pub fn remove_any_path(path: &Path) -> io::Result<()> {
+    // scratch: the primitive; permanent_guard::remove gates user data.
     crate::fastdelete::remove_path(path)
 }
 
@@ -1659,6 +1663,7 @@ fn relocate_with(src: &Path, dest: &Path, check_space: bool) -> io::Result<()> {
                 let parent = dest.parent().filter(|p| !p.as_os_str().is_empty());
                 crate::space::guard_copy(src, &meta, parent.unwrap_or(Path::new(".")))?;
             }
+            // scratch: a move; the copy is whole first.
             copy_recursive(src, dest, &meta).and_then(|_| remove_any(src, &meta))
         }
         Err(e) => Err(e),

@@ -927,6 +927,7 @@ mod plat {
     }
 
     pub fn remove(p: &Path) -> std::io::Result<()> {
+        crate::permanent_guard::gate()?;
         crate::fastdelete::remove_path(p)
     }
 
@@ -1028,6 +1029,7 @@ mod plat {
     }
 
     pub fn remove(p: &Path) -> std::io::Result<()> {
+        crate::permanent_guard::gate()?;
         if fs::symlink_metadata(p)?.is_dir() {
             fs::remove_dir_all(p)
         } else {

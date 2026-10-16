@@ -226,7 +226,7 @@ fn tree_inodes(path: &std::path::Path) -> u64 {
 }
 
 fn remove_entry(dir: &TrashDir, name: &str) -> io::Result<()> {
-    trashdir::remove_any_path(&crate::util::join_name(&dir.files(), name))?;
+    crate::permanent_guard::remove(&crate::util::join_name(&dir.files(), name))?;
     match fs::remove_file(crate::util::join_info(&dir.info(), name)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
