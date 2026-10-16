@@ -2844,12 +2844,14 @@ registry), then the total and the free space on each (a warning under
         let mut force = false;
         let mut verbose = false;
         let mut regex = false;
+        let mut json = false;
         let mut patterns: Vec<String> = Vec::new();
         let mut batch: Option<String> = None;
         let filters = parse_with_filters(prog, args, |arg| {
             match arg {
                 "-n" | "--dry-run" => dry_run = true,
                 "--regex" => regex = true,
+                "--json" => json = true,
                 "-f" | "--force" => force = true,
                 a if a.starts_with("--batch=") => batch = Some(a["--batch=".len()..].to_string()),
                 "-v" | "--verbose" => verbose = true,
@@ -2872,6 +2874,7 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
   -n, --dry-run  list matches only
   -f, --force    allow mass patterns (e.g. '*')
   -v, --verbose  print each path
+      --json     print a JSON summary (and the matched originals)
       --help     display this help and exit
 "
                     );
@@ -2951,24 +2954,39 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             .collect();
         // Size last: only the matches need their `$I` read.
         let matched = filters.apply(matched, |it| it.time_deleted, item_size);
-        if dry_run {
+        // Taken before the purge: the `$R` payloads are gone after it.
+        let summary = json.then(|| {
+            let names: Vec<String> = matched
+                .iter()
+                .map(|it| original_of(it).to_string_lossy().into_owned())
+                .collect();
+            let sum = crate::filters::RmSummary {
+                dry_run,
+                removed: matched.len() as u64,
+                bytes: matched.iter().map(item_size).sum(),
+            };
+            (sum, names)
+        });
+        if !json && (dry_run || verbose) {
             for it in &matched {
                 println!("{}", crate::util::term_path(&original_of(it)));
             }
-            return 0;
         }
-        if verbose {
-            for it in &matched {
-                println!("{}", crate::util::term_path(&original_of(it)));
+        let code = if dry_run {
+            0
+        } else {
+            match os_limited::purge_all(matched) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{prog}: purge failed: {}", err_msg(e));
+                    1
+                }
             }
+        };
+        if let Some((sum, names)) = summary {
+            print!("{}", sum.json(&names));
         }
-        match os_limited::purge_all(matched) {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("{prog}: purge failed: {}", err_msg(e));
-                1
-            }
-        }
+        code
     }
 
     pub fn setup_run(prog: &str, args: &[String]) -> i32 {

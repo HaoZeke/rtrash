@@ -65,6 +65,14 @@ pub fn nfc(s: &str) -> String {
     s.nfc().collect()
 }
 
+/// The `rm --regex` expressions in NFC, as restore compiles its own, so a
+/// regex typed decomposed matches the composed paths compared against it.
+pub fn nfc_regexes(rs: &[regex_lite::Regex]) -> Vec<regex_lite::Regex> {
+    rs.iter()
+        .filter_map(|r| regex_lite::Regex::new(&nfc(r.as_str())).ok())
+        .collect()
+}
+
 /// `p` in NFC when it is UTF-8; other bytes stay as they are.
 pub fn nfc_path(p: &Path) -> PathBuf {
     match p.to_str() {
@@ -583,6 +591,7 @@ pub fn rm(
     };
     let (mut removed, mut bytes, mut status) = (0u64, 0u64, 0);
     let mut matched: Vec<String> = Vec::new();
+    let regex = nfc_regexes(&patterns.regex);
     for e in &rows {
         let path_s = e.shown.to_string_lossy();
         let base = e
@@ -599,7 +608,8 @@ pub fn rm(
                     || crate::util::fnmatch(&p, &name)
             })
         } else {
-            patterns.hit(&nfc(&path_s), &base, &name)
+            let path_s = nfc(&path_s);
+            regex.iter().any(|r| r.is_match(&path_s))
         };
         if !hit {
             continue;
@@ -649,6 +659,13 @@ pub fn rm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rm_regexes_compose_a_decomposed_pattern() {
+        let typed = regex_lite::Regex::new("/ne\u{301}e\\.txt$").unwrap();
+        let rs = nfc_regexes(&[typed]);
+        assert!(rs[0].is_match("/tmp/n\u{e9}e.txt"));
+    }
 
     #[test]
     fn under_sees_through_a_linked_folder_on_either_side() {

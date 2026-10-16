@@ -33,7 +33,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
         'empty' = @('-n', '--dry-run', '-v', '--verbose', '--older-than=', '--max-size=', '--prune=', '--until-free=', '--all', '--json', '--help', '--version')
         'restore' = @('-f', '--force', '--conflict=', '--to=', '--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--sort=', '--cwd-only', '--directory=', '--name=', '--glob=', '--regex=', '--latest', '--all', '-n', '--dry-run', '--json', '--plain', '--newest-first', '--oldest-first', '--batch=', '--no-space-check', '--help', '--version')
         'status' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--help', '--version')
-        'rm' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--batch=', '--regex', '-n', '--dry-run', '-f', '--force', '-v', '--verbose', '--help')
+        'rm' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--batch=', '--regex', '-n', '--dry-run', '-f', '--force', '-v', '--verbose', '--json', '--help')
     }
     if ($IsWindows -or $env:OS -eq 'Windows_NT') {
         foreach ($k in @($winOpts.Keys)) { $opts[$k] = $winOpts[$k] }

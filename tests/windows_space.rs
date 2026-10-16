@@ -551,3 +551,42 @@ fn put_under_a_roomy_budget_trims_nothing() {
     assert!(!err.contains("to keep them under"), "{err}");
     let _ = Command::new(bin()).args(["rm", &name]).output();
 }
+
+/// `rm --json` on the Recycle Bin prints the FreeDesktop summary: a dry
+/// run lists the match, the real run removes it and says so.
+#[test]
+fn rm_json_summarizes_the_recycle_bin_removal() {
+    use std::fs;
+    let name = format!("rtrash-rm-json-{}.txt", std::process::id());
+    let p = std::env::temp_dir().join(&name);
+    fs::write(&p, "rm json").unwrap();
+    let put = Command::new(bin()).arg("put").arg(&p).output().unwrap();
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let rm = |args: &[&str]| {
+        let out = Command::new(bin())
+            .arg("rm")
+            .args(args)
+            .arg(&name)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let dry = rm(&["--json", "-n"]);
+    assert!(dry.contains("\"dry_run\": true"), "{dry}");
+    assert!(dry.contains("\"removed\": 1"), "{dry}");
+    assert!(dry.contains(&name), "{dry}");
+    let done = rm(&["--json"]);
+    assert!(done.contains("\"dry_run\": false"), "{done}");
+    assert!(done.contains("\"removed\": 1"), "{done}");
+    let again = rm(&["--json"]);
+    assert!(again.contains("\"removed\": 0"), "{again}");
+}

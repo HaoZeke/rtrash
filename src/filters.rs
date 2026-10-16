@@ -411,6 +411,34 @@ impl Patterns {
     }
 }
 
+/// What an `rm` run did, for `--json`.
+pub struct RmSummary {
+    pub dry_run: bool,
+    pub removed: u64,
+    pub bytes: u64,
+}
+
+impl RmSummary {
+    /// The `rm --json` object: the counts and the matched originals.
+    pub fn json(&self, matches: &[String]) -> String {
+        let mut out = format!(
+            "{{\n  \"dry_run\": {},\n  \"removed\": {},\n  \"bytes\": {},\n  \"matches\": [\n",
+            self.dry_run, self.removed, self.bytes
+        );
+        for (i, path) in matches.iter().enumerate() {
+            if i > 0 {
+                out.push_str(",\n");
+            }
+            out.push_str(&format!("    \"{}\"", crate::util::json_escape(path)));
+        }
+        if !matches.is_empty() {
+            out.push('\n');
+        }
+        out.push_str("  ]\n}\n");
+        out
+    }
+}
+
 #[cfg(test)]
 mod pattern_tests {
     use super::Patterns;
@@ -426,5 +454,24 @@ mod pattern_tests {
         let g = Patterns::new(vec!["*.o".into()], false).unwrap();
         assert!(g.hit("/x/a.o", "a.o", "a.o"));
         assert!(!g.is_mass());
+    }
+
+    #[test]
+    fn rm_summary_json_lists_the_matches() {
+        let sum = super::RmSummary {
+            dry_run: true,
+            removed: 1,
+            bytes: 4096,
+        };
+        let j = sum.json(&["C:\\a \"b\".txt".into()]);
+        assert!(j.contains("\"dry_run\": true"), "{j}");
+        assert!(j.contains("\"bytes\": 4096"), "{j}");
+        assert!(j.contains(r#""C:\\a \"b\".txt""#), "{j}");
+        let none = super::RmSummary {
+            dry_run: false,
+            removed: 0,
+            bytes: 0,
+        };
+        assert!(none.json(&[]).ends_with("\"matches\": [\n  ]\n}\n"));
     }
 }

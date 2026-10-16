@@ -340,24 +340,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         s.write_back();
     }
     if json {
-        let mut out = String::from("{\n");
-        out.push_str(&format!(
-            "  \"dry_run\": {},\n  \"removed\": {},\n  \"bytes\": {},\n  \"matches\": [\n",
-            if dry_run { "true" } else { "false" },
+        let sum = crate::filters::RmSummary {
+            dry_run,
             removed,
-            bytes
-        ));
-        for (i, path) in matched_paths.iter().enumerate() {
-            if i > 0 {
-                out.push_str(",\n");
-            }
-            out.push_str(&format!("    \"{}\"", list::json_escape(path)));
-        }
-        if !matched_paths.is_empty() {
-            out.push('\n');
-        }
-        out.push_str("  ]\n}\n");
-        print!("{out}");
+            bytes,
+        };
+        print!("{}", sum.json(&matched_paths));
     } else if dry_run {
         let noun = if removed == 1 { "item" } else { "items" };
         eprintln!(

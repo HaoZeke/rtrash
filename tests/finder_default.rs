@@ -1043,6 +1043,16 @@ fn finder_matching_ignores_unicode_normalization() {
     let o = b.run(&["rm", "n\u{e9}*"], "");
     assert!(o.status.success(), "{}", err(&o));
     assert!(!b.finder().join(nfd).exists());
+
+    // And a regex typed decomposed for the same name. The glob rm above
+    // deleted the payload, and put_back only writes the record, so the
+    // file is made again first.
+    fs::write(&f, b"x").unwrap();
+    assert!(b.run(&["put", nfd], "").status.success());
+    b.put_back(nfd, &f);
+    let o = b.run(&["rm", "--regex", "/ne\u{301}e\\.txt$"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!b.finder().join(nfd).exists());
 }
 
 #[test]
