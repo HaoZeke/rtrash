@@ -25,6 +25,18 @@ const SUBCOMMANDS: &[&str] = &[
     "config",
 ];
 
+/// An agent run with RTRASH_REQUIRE_SHELLS=1 must run every shell check: a
+/// quiet skip on the cloud agent hid a stale pwsh expectation (round 143c).
+/// CI installs pwsh on every runner, so pwsh is required there too.
+fn require_shell(name: &str) {
+    let on_ci = name == "pwsh" && std::env::var_os("CI").is_some();
+    let required = on_ci || std::env::var_os("RTRASH_REQUIRE_SHELLS").is_some();
+    assert!(
+        !required,
+        "{name} is not installed but this run requires it"
+    );
+}
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_rtrash")
 }
@@ -464,6 +476,7 @@ fn fish_completion_offers_the_right_words() {
         )
     };
     let Some(shells) = run("rtrash completions ") else {
+        require_shell("fish");
         eprintln!("fish not installed; skipping");
         return;
     };
@@ -585,6 +598,7 @@ fn nu_script_is_embedded_and_parses() {
         script.display()
     );
     let Ok(run) = Command::new("nu").args(["-n", "-c", &prog]).output() else {
+        require_shell("nu");
         eprintln!("nu not installed; skipping");
         return;
     };
@@ -671,7 +685,7 @@ fn powershell_script_is_embedded_and_completes() {
     else {
         // CI installs pwsh on every runner, so a missing one there is a
         // broken job, not a reason to pass quietly.
-        assert!(std::env::var_os("CI").is_none(), "pwsh missing on CI");
+        require_shell("pwsh");
         eprintln!("pwsh not installed; skipping");
         return;
     };
@@ -773,6 +787,7 @@ fn elvish_script_is_embedded_and_completes() {
     let run = Command::new("elvish").arg("-norc").arg(&file).output();
     let _ = fs::remove_dir_all(&dir);
     let Ok(run) = run else {
+        require_shell("elvish");
         eprintln!("elvish not installed; skipping");
         return;
     };
