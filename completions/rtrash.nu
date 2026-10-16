@@ -207,6 +207,7 @@ export extern "rtrash trash-stats" [
 export extern "rtrash du" [
     --top(-n): string  # list N directories and N files (default 20)
     --one-file-system(-x)  # skip directories on other file systems
+    --include-kernfs  # also walk kernel pseudo file systems such as /proc,
     --follow-symlinks(-L)  # follow symlinks; loops and repeats count once
     --apparent  # rank by apparent size (file length) instead of disk use
     --sort: string  # rank by KEY: disk (default), apparent, items (files

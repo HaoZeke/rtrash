@@ -49,6 +49,26 @@ fn retry<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     }
 }
 
+/// statfs magic numbers of the kernel pseudo file systems ncdu's
+/// --exclude-kernfs skips, in this order: proc, sysfs, cgroup, cgroup2,
+/// debugfs, tracefs, securityfs, pstore, bpf, configfs, efivarfs and
+/// selinuxfs.
+#[cfg(target_os = "linux")]
+const KERNFS_MAGIC: [u32; 12] = [
+    0x9fa0,
+    0x6265_6572,
+    0x0027_e0eb,
+    0x6367_7270,
+    0x6462_6720,
+    0x7472_6163,
+    0x7363_6673,
+    0x6165_676c,
+    0xcafe_4a11,
+    0x6265_6570,
+    0xde5e_81e4,
+    0xf97c_ff8c,
+];
+
 const OPEN_DIR: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
 
@@ -103,6 +123,26 @@ impl Dir {
         // SAFETY: `name` is NUL-terminated; a returned fd is owned by us.
         let fd = retry(|| cvt(unsafe { libc::openat(self.fd.as_raw_fd(), name.as_ptr(), FLAGS) }))?;
         Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) }))
+    }
+
+    /// True when the directory is on a kernel pseudo file system (proc,
+    /// sysfs, cgroup, debugfs and the like), whose sizes are not disk use.
+    /// Only Linux reports these; elsewhere it is always false.
+    pub fn is_kernfs(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let mut s = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: fstatfs fills `s` on success; it is read only then.
+            if unsafe { libc::fstatfs(self.fd.as_raw_fd(), s.as_mut_ptr()) } != 0 {
+                return false;
+            }
+            let kind = unsafe { s.assume_init() }.f_type as u32;
+            KERNFS_MAGIC.contains(&kind)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
     }
 
     /// Stat of the directory itself.

@@ -121,6 +121,11 @@ pub struct Dir {
 }
 
 impl Dir {
+    /// Windows has no kernel pseudo file systems to skip.
+    pub fn is_kernfs(&self) -> bool {
+        false
+    }
+
     /// Open the directory at `path`; a symlink or junction is refused.
     pub fn open(path: &Path) -> io::Result<Dir> {
         let handle = open_handle(path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?;

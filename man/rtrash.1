@@ -1097,6 +1097,18 @@ files (default 20).
 .BR \-x ", " \-\-one\-file\-system
 Skip directories on other file systems.
 .TP
+.B \-\-include\-kernfs
+Also walk kernel pseudo file systems met below
+.IR PATH ,
+such as
+.IR /proc ,
+.I /sys
+and cgroup mounts. On Linux they are skipped by default, as
+.B ncdu \-\-exclude\-kernfs
+does, since their sizes are not disk use; a
+.I PATH
+on one of them is still walked.
+.TP
 .BR \-L ", " \-\-follow\-symlinks
 Follow symlinks, as
 .B "du \-L"

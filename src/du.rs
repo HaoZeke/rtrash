@@ -101,6 +101,9 @@ directories appear as one `trash` row and are never printed by --print0.
       --type=EXTS       count only files ending in one of EXTS, such as
                           yaml,json (directories are still walked)
       --exclude-type=EXTS  leave out files ending in one of EXTS
+      --include-kernfs  also walk kernel pseudo file systems such as /proc,
+                          /sys and cgroup mounts met below PATH (skipped by
+                          default on Linux; their sizes are not disk use)
       --no-hidden       leave out hidden entries, those named with a
                           leading dot (same as --exclude='.*')
       --gitignore       leave out what git ignores: .gitignore files,
@@ -317,6 +320,9 @@ pub struct ScanOpts {
     pub control: Option<Arc<ScanControl>>,
     /// `--types`: total the files of each file type.
     pub types: bool,
+    /// `--include-kernfs`: also walk kernel pseudo file systems (proc,
+    /// sysfs, cgroup, ...) met below a scan root; skipped by default.
+    pub include_kernfs: bool,
 }
 
 impl Default for ScanOpts {
@@ -338,6 +344,7 @@ impl Default for ScanOpts {
             shared_once: false,
             control: None,
             types: false,
+            include_kernfs: false,
         }
     }
 }
@@ -1058,6 +1065,12 @@ fn enter(
         },
     };
     if ctx.opts.one_file_system && st.dev != ctx.root_dev {
+        return None;
+    }
+    // A mount of proc, sysfs and the like below the root reports sizes
+    // that are not disk use (/proc/kcore alone claims the address space),
+    // so it stays out unless asked for. A root named on purpose is walked.
+    if !ctx.opts.include_kernfs && st.dev != ctx.root_dev && dir.is_kernfs() {
         return None;
     }
     // -L: a directory met again, through a loop or a second link, is
@@ -2895,6 +2908,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             match arg {
                 "--" => no_more_opts = true,
                 "-x" | "--one-file-system" => opts.one_file_system = true,
+                "--include-kernfs" => opts.include_kernfs = true,
                 "-L" | "--follow-symlinks" => opts.follow = true,
                 "--apparent" => opts.sort = SortKey::Apparent,
                 "-C" | "--count" => count = true,

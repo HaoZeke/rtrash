@@ -782,6 +782,17 @@ fn type_filters_count_files_by_extension() {
 }
 
 #[test]
+fn include_kernfs_is_taken() {
+    let t = Tree::new("include-kernfs");
+    t.file("a.bin", 1_000);
+    // The flag only changes what happens at a kernel file system mount;
+    // a plain tree scans the same with it.
+    let with = t.json(&["--no-git", "--include-kernfs"]);
+    let without = t.json(&["--no-git"]);
+    assert_eq!(field(&with, "apparent"), field(&without, "apparent"));
+}
+
+#[test]
 fn no_hidden_leaves_dot_entries_out() {
     let t = Tree::new("nohidden");
     t.file("seen/a.bin", 100_000);

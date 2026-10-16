@@ -511,6 +511,18 @@ mod fileid {
 mod tests {
     use super::*;
 
+    #[test]
+    fn kernel_file_systems_are_told_apart() {
+        let tmp = Dir::open(&std::env::temp_dir()).unwrap();
+        assert!(!tmp.is_kernfs());
+        // proc and sysfs are mounted on any Linux host CI runs on.
+        #[cfg(target_os = "linux")]
+        for p in ["/proc", "/sys"] {
+            let d = Dir::open(std::path::Path::new(p)).unwrap();
+            assert!(d.is_kernfs(), "{p}");
+        }
+    }
+
     /// The values one crafted bulk record carries.
     #[derive(Clone, Copy)]
     struct Rec<'a> {
