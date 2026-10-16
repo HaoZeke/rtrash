@@ -1224,6 +1224,20 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         }
     }
 
+    /// The current directory as given and as resolved, for --cwd-only: a
+    /// volume mounted on a folder may resolve to its GUID path, which no
+    /// original path starts with. Empty when the directory cannot be read.
+    fn cwd_forms() -> Vec<PathBuf> {
+        let Ok(here) = std::env::current_dir() else {
+            return Vec::new();
+        };
+        let mut dirs = vec![std::path::absolute(&here).unwrap_or_else(|_| here.clone())];
+        if let Ok(c) = std::fs::canonicalize(&here) {
+            dirs.push(strip_verbatim(&c));
+        }
+        dirs
+    }
+
     pub fn list_run(prog: &str, args: &[String]) -> i32 {
         let mut matcher: Option<crate::budget::PathMatch> = None;
         let mut cwd_only = false;
@@ -1313,11 +1327,7 @@ on Windows (there is no FreeDesktop layout here).
             Ok(f) => f,
             Err(code) => return code,
         };
-        let cwd = cwd_only.then(|| {
-            std::env::current_dir()
-                .ok()
-                .and_then(|d| std::fs::canonicalize(&d).ok().map(|c| strip_verbatim(&c)))
-        });
+        let cwd = cwd_only.then(cwd_forms);
         match super::list_items() {
             Ok(items) => {
                 let items: Vec<TrashItem> = items
@@ -1327,7 +1337,7 @@ on Windows (there is no FreeDesktop layout here).
                         matcher.as_ref().is_none_or(|m| m.keeps(&o))
                             && cwd
                                 .as_ref()
-                                .is_none_or(|d| d.as_ref().is_some_and(|d| o.starts_with(d)))
+                                .is_none_or(|dirs| dirs.iter().any(|d| o.starts_with(d)))
                     })
                     .collect();
                 let mut items = filters.apply(items, |it| it.time_deleted, item_size);
@@ -2003,13 +2013,10 @@ Without PATH, print a numbered list and read an index from stdin.
                 // The directory as given and as resolved both count, since
                 // a volume mounted on a folder may resolve to its GUID path.
                 None if cwd_only => {
-                    let Ok(here) = std::env::current_dir() else {
+                    let dirs = cwd_forms();
+                    if dirs.is_empty() {
                         eprintln!("{prog}: cannot read the current directory");
                         return 1;
-                    };
-                    let mut dirs = vec![std::path::absolute(&here).unwrap_or(here.clone())];
-                    if let Ok(c) = std::fs::canonicalize(&here) {
-                        dirs.push(strip_verbatim(&c));
                     }
                     items
                         .into_iter()

@@ -617,6 +617,20 @@ fn restore_cwd_only_keeps_items_from_here() {
     );
     assert_eq!(said.matches("would restore").count(), 1, "{said}");
     assert!(said.contains("in.txt"), "{said}");
+    // list --cwd-only sees the same item from the mounted folder.
+    let out = cmd(&lad)
+        .args(["list", "--cwd-only"])
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(listed.contains("in.txt"), "{listed}");
+    assert!(!listed.contains(&format!("cwd-out-{id}")), "{listed}");
     // A single match restores right away.
     let out = cmd(&lad)
         .args(["restore", "--cwd-only"])
