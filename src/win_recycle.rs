@@ -1922,9 +1922,21 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut directory: Option<PathBuf> = None;
         // Run as trash-restore, scope to the current directory as trash-cli does.
         let trash_cli = prog == "trash-restore";
+        let mut age = crate::filters::AgeFilter::default();
         for arg in args {
             match arg.as_str() {
                 "-f" | "--force" => conflict = Conflict::Overwrite,
+                a if a.starts_with("--older-than=") || a.starts_with("--newer-than=") => {
+                    let (name, value) = a.split_once('=').unwrap_or((a, ""));
+                    match crate::filters::parse_age_secs(value) {
+                        Ok(d) if name == "--older-than" => age.older_than = Some(d),
+                        Ok(d) => age.newer_than = Some(d),
+                        Err(e) => {
+                            eprintln!("{prog}: {e}");
+                            return 2;
+                        }
+                    }
+                }
                 "--latest" => latest = true,
                 "--all" => all = true,
                 a if a.starts_with("--to=") => {
@@ -2026,6 +2038,9 @@ Without PATH, print a numbered list and read an index from stdin.
                 separator) or file name matches a shell glob
       --regex=RE  match items whose original path matches RE
       --to=DIR  restore into DIR, keeping each item's file name
+      --older-than=AGE  only items deleted more than AGE ago; AGE is DAYS
+                or a duration such as 2h, 30m or 1d12h
+      --newer-than=AGE  only items deleted within the last AGE
       --latest  of several matches, restore the most recently deleted
       --all     of several matches, restore every one
       --plain   numbered selection instead of the browser
@@ -2092,13 +2107,18 @@ Without PATH, print a numbered list and read an index from stdin.
             dry_run,
             to: to.clone(),
         };
-        let items = match super::list_items() {
+        let mut items = match super::list_items() {
             Ok(i) => i,
             Err(e) => {
                 eprintln!("{prog}: cannot list Recycle Bin: {}", err_msg(e));
                 return 1;
             }
         };
+        // --older-than and --newer-than, as list reads them.
+        if age.is_set() {
+            let now = crate::util::now_epoch();
+            items.retain(|i| age.keeps_at(Some(i.time_deleted), now));
+        }
         if last_run {
             if target.is_some() {
                 eprintln!("{prog}: give PATH or --batch=last, not both");

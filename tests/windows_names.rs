@@ -266,3 +266,59 @@ fn a_blank_pick_asks_for_an_index() {
     );
     assert!(kept, "a blank answer restored something");
 }
+
+#[test]
+fn restore_takes_age_filters_on_windows() {
+    let dir = std::env::temp_dir().join(format!("rtrash-names-age-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("fresh.txt");
+    fs::write(&file, "fresh").unwrap();
+    let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
+    let put = Command::new(rtrash).arg("put").arg(&file).output().unwrap();
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let scope = format!("--directory={}", dir.display());
+    // Trashed just now, so nothing is older than a day.
+    let old = run_with(
+        rtrash,
+        &dir,
+        &["restore", &scope, "--older-than=1", "--all"],
+        "",
+    );
+    let kept = !file.exists();
+    let bad = run_with(rtrash, &dir, &["restore", "--older-than=soon"], "");
+    let new = run_with(
+        rtrash,
+        &dir,
+        &["restore", &scope, "--newer-than=1h", "--all"],
+        "",
+    );
+    let back = fs::read(&file).ok();
+    if back.is_none() {
+        let _ = Command::new(rtrash).arg("restore").arg(&file).output();
+    }
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        old.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&old.stderr)
+    );
+    assert!(kept, "--older-than=1 restored a fresh item");
+    assert_eq!(
+        bad.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+    assert!(
+        new.status.success(),
+        "{}",
+        String::from_utf8_lossy(&new.stderr)
+    );
+    assert_eq!(back.as_deref(), Some(&b"fresh"[..]));
+}
