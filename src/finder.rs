@@ -684,6 +684,9 @@ pub(crate) struct RestoreOpts<'a> {
     pub(crate) directory: Option<&'a Path>,
     /// trash-restore's own scope: with nothing in it, say so as trash-cli does.
     pub(crate) cwd_note: bool,
+    /// trash-restore takes PATH as a scope: the item there and every item
+    /// trashed from under it.
+    pub(crate) path_scope: bool,
     pub(crate) all: bool,
     pub(crate) latest: bool,
     /// `--to=DIR`: restore there, keeping each file name.
@@ -733,6 +736,9 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
                     .as_deref()
                     .is_some_and(|o| crate::finder_shared::same_path(o, &abs))
                     || crate::finder_shared::same_path(Path::new(&e.name), t)
+                    || (o.path_scope
+                        && e.original.is_some()
+                        && crate::finder_shared::under(&e.shown, &abs))
             })
             .collect()
     } else if o.all {

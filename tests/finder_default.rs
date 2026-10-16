@@ -437,6 +437,27 @@ fn trash_restore_scopes_the_finder_trash_to_the_cwd() {
 }
 
 #[test]
+fn trash_restore_takes_path_as_a_scope_on_the_finder_trash() {
+    let b = Box_::new("tpath");
+    let sub = b.work().join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let inner = sub.join("inner.txt");
+    fs::write(&inner, "in").unwrap();
+    assert!(b.run(&["put", "sub/inner.txt"], "").status.success());
+    // The record keeps the written path (/var on macOS).
+    b.put_back("inner.txt", &inner);
+    let tr = b.root.join("trash-restore");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rtrash"), &tr).unwrap();
+
+    // rtrash restore wants the exact place; trash-restore takes sub as a scope.
+    let o = b.run(&["restore", "sub"], "");
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    let o = b.run_as(&tr, &["sub"], "0\n");
+    assert!(o.status.success(), "{}{}", out(&o), err(&o));
+    assert_eq!(fs::read(&inner).unwrap(), b"in");
+}
+
+#[test]
 fn restore_matchers_work_on_the_finder_trash() {
     let b = Box_::new("match");
     for n in ["r1.log", "r2.log", "keep.txt"] {

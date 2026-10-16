@@ -362,6 +362,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 matcher: matcher.as_ref(),
                 directory: scope.as_deref(),
                 cwd_note: cwd_scope && directory.is_none(),
+                path_scope: trash_cli,
                 all,
                 latest,
                 to: to.as_deref(),
