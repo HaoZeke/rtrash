@@ -327,10 +327,6 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // macOS restores from the Finder Trash unless a pin or the setting
     // says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty()) {
-        if dry_run {
-            eprintln!("{prog}: --dry-run needs a FreeDesktop trash here; pin one with --trash-dir");
-            return 2;
-        }
         return crate::finder::default_restore(
             prog,
             &crate::finder::RestoreOpts {
@@ -343,6 +339,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 json,
                 plain,
                 newest_first,
+                dry_run,
             },
         );
     }

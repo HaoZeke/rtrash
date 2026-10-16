@@ -682,6 +682,8 @@ pub(crate) struct RestoreOpts<'a> {
     pub(crate) json: bool,
     pub(crate) plain: bool,
     pub(crate) newest_first: Option<bool>,
+    /// `--dry-run`: say what each restore would do and move nothing.
+    pub(crate) dry_run: bool,
 }
 
 /// `restore` on the Finder trashes. PATH names the item by its Put Back
@@ -726,7 +728,7 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
             return 1;
         }
         #[cfg(feature = "tui")]
-        if !o.plain && !o.json && o.to.is_none() && crate::util::stdin_is_tty() {
+        if !o.plain && !o.json && !o.dry_run && o.to.is_none() && crate::util::stdin_is_tty() {
             let newest = o.newest_first.unwrap_or(true);
             let mut refs = placed.clone();
             if newest {
@@ -776,6 +778,14 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
     }
     let conflict = o.conflict;
     let json = o.json;
+    // A dry-run line: stdout, or stderr when stdout carries the JSON.
+    let say = |line: String| {
+        if json {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    };
     let (mut done, mut failed, mut skipped) = (Vec::new(), 0usize, 0usize);
     for e in chosen {
         let to_dir = o.to.map(|d| {
@@ -794,13 +804,48 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
         let exists = dest.symlink_metadata().is_ok();
         let (dest, force) = match (exists, conflict) {
             (true, Conflict::Skip) => {
-                eprintln!("{prog}: skipping '{}': it exists", dest.display());
+                if o.dry_run {
+                    say(format!(
+                        "would skip '{}': it exists",
+                        crate::util::term_path(&dest)
+                    ));
+                } else {
+                    eprintln!("{prog}: skipping '{}': it exists", dest.display());
+                }
                 skipped += 1;
                 continue;
             }
             (true, Conflict::Rename) => (crate::restore::free_name(&dest), false),
             (_, c) => (dest, c == Conflict::Overwrite),
         };
+        if o.dry_run {
+            if e.path().symlink_metadata().is_err() {
+                say(format!(
+                    "would fail: '{}' is gone from the trash",
+                    crate::util::term_path(&e.shown)
+                ));
+                failed += 1;
+            } else if !force && dest.symlink_metadata().is_ok() {
+                say(format!(
+                    "would fail: '{}' exists",
+                    crate::util::term_path(&dest)
+                ));
+                failed += 1;
+            } else {
+                let from = e.original.as_deref().unwrap_or(&e.shown);
+                if from == dest.as_path() {
+                    say(format!("would restore '{}'", crate::util::term_path(&dest)));
+                } else {
+                    say(format!(
+                        "would restore '{}' as '{}'",
+                        crate::util::term_path(from),
+                        crate::util::term_path(&dest)
+                    ));
+                }
+                done.push((e, dest));
+            }
+            continue;
+        }
         match e.restore_to(&dest, force) {
             Ok(()) => {
                 if !json {
@@ -825,8 +870,9 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
                 )
             })
             .collect();
+        let dry = if o.dry_run { "\"dry_run\":true," } else { "" };
         println!(
-            "{{\"restored\":[{}],\"failed\":{failed},\"skipped\":{skipped}}}",
+            "{{{dry}\"restored\":[{}],\"failed\":{failed},\"skipped\":{skipped}}}",
             rows.join(",")
         );
     }

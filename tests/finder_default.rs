@@ -342,6 +342,25 @@ fn restore_matchers_work_on_the_finder_trash() {
         .collect();
     fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
 
+    // A dry run names where the item would go and moves nothing.
+    let o = b.run(&["restore", "-n", "--name=keep.txt"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).starts_with("would restore '"), "{}", out(&o));
+    assert!(out(&o).contains("keep.txt"), "{}", out(&o));
+    assert!(!b.work().join("keep.txt").exists());
+    let o = b.run(
+        &["restore", "--dry-run", "--json", "--glob=*.log", "--all"],
+        "",
+    );
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(
+        out(&o).starts_with("{\"dry_run\":true,\"restored\":["),
+        "{}",
+        out(&o)
+    );
+    assert_eq!(err(&o).matches("would restore").count(), 2, "{}", err(&o));
+    assert!(!b.work().join("r1.log").exists());
+
     // Two matches need --latest or --all.
     let o = b.run(&["restore", "--glob=*.log"], "");
     assert_eq!(o.status.code(), Some(1), "{}", err(&o));
