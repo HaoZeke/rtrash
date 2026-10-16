@@ -686,6 +686,34 @@ fn config_file_sets_du_defaults_and_options_win() {
 }
 
 #[test]
+fn show_relative_size_adds_a_share_of_the_path_total() {
+    let t = Tree::new("relsize");
+    t.file("big/a.bin", 300_000);
+    t.file("small/b.bin", 100_000);
+    let out = t.du(&["--no-git", "--apparent", "--show-relative-size"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("SHARE"), "{text}");
+    let share = |name: &str| {
+        let row = text.lines().find(|l| l.ends_with(name)).expect(name);
+        let pct = row.split_whitespace().find(|w| w.ends_with('%'));
+        pct.and_then(|p| p.trim_end_matches('%').parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("{row}"))
+    };
+    // Apparent sizes: 300k of 400k and 100k of 400k, give or take the
+    // directory entries themselves.
+    let (a, b) = (share("a.bin"), share("b.bin"));
+    assert!((70.0..=75.0).contains(&a), "{a} {text}");
+    assert!((20.0..=25.0).contains(&b), "{b} {text}");
+    let plain = String::from_utf8(t.du(&["--no-git"]).stdout).unwrap();
+    assert!(!plain.contains("SHARE"), "{plain}");
+}
+
+#[test]
 fn show_mtime_swaps_age_for_a_date_column() {
     let t = Tree::new("showmtime");
     t.file("d/a.bin", 100_000);

@@ -1159,6 +1159,13 @@ in place of the AGE column. The JSON rows keep
 .B mtime
 as seconds since the epoch.
 .TP
+.B \-\-show\-relative\-size
+Add a SHARE column: each row as a percent of the total of the
+.I PATH
+that holds it, by apparent size with
+.BR \-\-apparent ,
+else by disk use. The JSON rows keep the byte counts.
+.TP
 .B \-\-inodes
 Rank by inodes, the same as
 .BR \-\-sort=items :

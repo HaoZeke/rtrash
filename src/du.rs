@@ -63,6 +63,9 @@ directories appear as one `trash` row and are never printed by --print0.
       --show-mtime      show the local modification time (YYYY-MM-DD HH:MM)
                           in place of the AGE column; --json keeps mtime
                           as epoch seconds
+      --show-relative-size  add a SHARE column: each row's percent of its
+                          PATH total (apparent size with --apparent, else
+                          disk use); the JSON rows keep the byte counts
       --inodes          rank by inodes, as --sort=items: files and
                           directories, each hard-linked file once; the
                           total gives the inodes each PATH uses
@@ -2346,7 +2349,41 @@ fn print_types(title: &str, rows: &[TypeRow], top: usize) {
     }
 }
 
-fn print_table(title: &str, items: &[Item], now: i64, count: bool, show_mtime: bool) {
+/// Optional columns of the plain du rows.
+#[derive(Clone, Copy)]
+struct Columns<'a> {
+    /// `-C`: the ITEMS column.
+    count: bool,
+    /// `--show-mtime`: MTIME in place of AGE.
+    show_mtime: bool,
+    /// `--show-relative-size`: each row's share of its scan root, by
+    /// apparent size when `apparent`, else by disk use.
+    share: Option<(&'a [RootTotals], bool)>,
+}
+
+/// `42.5%`: the part of the scan root that holds `it`, or `-` when no
+/// root holds it or the root is empty.
+fn share_of(it: &Item, roots: &[RootTotals], apparent: bool) -> String {
+    let root = roots
+        .iter()
+        .filter(|r| it.path.starts_with(&r.path))
+        .max_by_key(|r| r.path.as_os_str().len());
+    let pick = |a: u64, d: u64| if apparent { a } else { d };
+    match root.map(|r| pick(r.apparent, r.disk)) {
+        Some(total) if total > 0 => {
+            let part = pick(it.apparent, it.disk) as f64 * 100.0 / total as f64;
+            format!("{:.1}%", part.min(100.0))
+        }
+        _ => "-".into(),
+    }
+}
+
+fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
+    let Columns {
+        count,
+        show_mtime,
+        share,
+    } = cols;
     if items.is_empty() {
         return;
     }
@@ -2379,6 +2416,10 @@ fn print_table(title: &str, items: &[Item], now: i64, count: bool, show_mtime: b
     } else {
         ("AGE", 4)
     };
+    let shares = |v: &str| match share {
+        Some(_) => format!("{v:>6}  "),
+        None => String::new(),
+    };
     let when_of = |it: &Item| {
         if show_mtime {
             format_mtime(it.mtime)
@@ -2387,9 +2428,10 @@ fn print_table(title: &str, items: &[Item], now: i64, count: bool, show_mtime: b
         }
     };
     println!(
-        "{:>10}  {:>10}  {}{}{:>when_width$}  {:<width$}  PATH",
+        "{:>10}  {:>10}  {}{}{}{:>when_width$}  {:<width$}  PATH",
         "DISK",
         "APPARENT",
+        shares("SHARE"),
         uniques("UNIQUE"),
         counts("ITEMS"),
         when,
@@ -2401,9 +2443,10 @@ fn print_table(title: &str, items: &[Item], now: i64, count: bool, show_mtime: b
             path.push(std::path::MAIN_SEPARATOR);
         }
         println!(
-            "{:>10}  {:>10}  {}{}{:>when_width$}  {:<width$}  {}",
+            "{:>10}  {:>10}  {}{}{}{:>when_width$}  {:<width$}  {}",
             format_bytes(it.disk),
             format_bytes(it.apparent),
+            shares(&share.map_or(String::new(), |(r, a)| share_of(it, r, a))),
             uniques(&it.unique.map(format_bytes).unwrap_or_default()),
             counts(&it.items.to_string()),
             when_of(it),
@@ -2686,6 +2729,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut filter = du_filter::Spec::default();
     let mut count = false;
     let mut show_mtime = false;
+    let mut relative = false;
     let now = crate::util::now_epoch();
     // Defaults from the config file; the options below override them.
     let cfg = crate::config::get();
@@ -2838,6 +2882,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--apparent" => opts.sort = SortKey::Apparent,
                 "-C" | "--count" => count = true,
                 "--show-mtime" => show_mtime = true,
+                "--show-relative-size" => relative = true,
                 "--inodes" => opts.sort = SortKey::Items,
                 "--all-dirs" => opts.all_dirs = true,
                 "--artefacts" => opts.artefacts_only = true,
@@ -3073,6 +3118,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: --stacks weighs by disk use or --apparent size");
         return 2;
     }
+    // --show-relative-size weighs rows as the ranking does.
+    let apparent_share = opts.sort == SortKey::Apparent;
     if let Some(file) = &from_file {
         if print0 || pick || interactive {
             eprintln!(
@@ -3104,8 +3151,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 &format!("{} in {}", opts.sort.title("directories"), file.display()),
                 &report.dirs,
                 now,
-                false,
-                show_mtime,
+                Columns {
+                    count: false,
+                    show_mtime,
+                    share: relative.then_some((&report.roots[..], apparent_share)),
+                },
             );
             for t in &report.roots {
                 println!(
@@ -3265,20 +3315,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         if opts.types {
             print_types(&opts.sort.title("file types"), &report.types, opts.top);
         } else {
-            print_table(
-                &opts.sort.title("directories"),
-                &report.dirs,
-                now,
+            let cols = Columns {
                 count,
                 show_mtime,
-            );
-            print_table(
-                &opts.sort.title("files"),
-                &report.files,
-                now,
-                count,
-                show_mtime,
-            );
+                share: relative.then_some((&report.roots[..], apparent_share)),
+            };
+            print_table(&opts.sort.title("directories"), &report.dirs, now, cols);
+            print_table(&opts.sort.title("files"), &report.files, now, cols);
         }
         for t in &report.roots {
             let kind = t.artefact.map(|k| format!(" ({k})")).unwrap_or_default();

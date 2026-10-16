@@ -118,6 +118,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l apparen
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l sort -d 'rank rows by this key' -x -a 'disk apparent items inodes mtime'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s C -l count -d 'add an ITEMS column'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l show-mtime -d 'show the modification time in place of AGE'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l show-relative-size -d 'add each row as a percent of its PATH total'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l inodes -d 'rank by inodes and total them'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l unique -d 'add a UNIQUE column of bytes no other file shares'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l shared -d 'count each shared extent once in sizes'

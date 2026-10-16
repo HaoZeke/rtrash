@@ -210,6 +210,7 @@ export extern "rtrash du" [
     --sort: string  # rank by KEY: disk (default), apparent, items (files
     --count(-C)  # add an ITEMS column (each hard-linked file once)
     --show-mtime  # show the local modification time (YYYY-MM-DD HH:MM)
+    --show-relative-size  # add a SHARE column: each row's percent of its
     --inodes  # rank by inodes, as --sort=items: files and
     --types  # list file types instead of directories and files:
     --unique  # add a UNIQUE column: the bytes in extents no other
