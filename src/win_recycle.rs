@@ -2189,7 +2189,8 @@ Without PATH, print a numbered list and read an index from stdin.
             let newest = matches.pop().into_iter().collect();
             return restore_one(prog, newest, &opts);
         }
-        if all || matches.len() == 1 {
+        // trash-cli asks even when one item matches.
+        if all || (matches.len() == 1 && !trash_cli) {
             return restore_one(prog, matches, &opts);
         }
         match sort {
@@ -2231,6 +2232,10 @@ Without PATH, print a numbered list and read an index from stdin.
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() {
             return 1;
+        }
+        if line.trim().is_empty() && trash_cli {
+            println!("No files were restored");
+            return 0;
         }
         let Ok(idx) = line.trim().parse::<usize>() else {
             eprintln!("{prog}: invalid index");

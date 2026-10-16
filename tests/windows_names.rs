@@ -3,7 +3,27 @@
 #![cfg(windows)]
 
 use std::fs;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Output, Stdio};
+
+/// Run `exe` in `dir` with `args`, feeding `input` on stdin.
+fn run_with(exe: &std::path::Path, dir: &std::path::Path, args: &[&str], input: &str) -> Output {
+    let mut child = Command::new(exe)
+        .args(args)
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
 
 #[test]
 fn trash_cli_names_run_without_their_exe_suffix() {
@@ -98,7 +118,7 @@ fn trash_restore_takes_path_as_a_scope() {
     let _ = fs::remove_dir_all(&dir);
     let sub = dir.join("sub");
     fs::create_dir_all(&sub).unwrap();
-    // One item from under sub/: trash-restore sub restores it.
+    // One item from under sub/: trash-restore sub asks, as trash-cli does.
     let inner = sub.join("inner.txt");
     fs::write(&inner, "in").unwrap();
     let put = Command::new(env!("CARGO_BIN_EXE_rtrash"))
@@ -113,11 +133,10 @@ fn trash_restore_takes_path_as_a_scope() {
     );
     let restore = dir.join("trash-restore.exe");
     fs::copy(env!("CARGO_BIN_EXE_rtrash"), &restore).unwrap();
-    let out = Command::new(&restore)
-        .arg("sub")
-        .current_dir(&dir)
-        .output()
-        .unwrap();
+    // A blank answer restores nothing.
+    let blank = run_with(&restore, &dir, &["sub"], "\n");
+    let kept = !inner.exists();
+    let out = run_with(&restore, &dir, &["sub"], "0\n");
     let back = fs::read(&inner).ok();
     if back.is_none() {
         let _ = Command::new(env!("CARGO_BIN_EXE_rtrash"))
@@ -126,6 +145,11 @@ fn trash_restore_takes_path_as_a_scope() {
             .output();
     }
     let _ = fs::remove_dir_all(&dir);
+    let said = String::from_utf8_lossy(&blank.stdout).into_owned();
+    assert_eq!(blank.status.code(), Some(0), "{said}");
+    assert!(said.contains("  0 "), "{said}");
+    assert!(said.contains("No files were restored"), "{said}");
+    assert!(kept, "a blank answer restored the item");
     assert!(
         out.status.success(),
         "{}{}",
