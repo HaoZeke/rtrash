@@ -53,6 +53,8 @@ the index prompt. --newest-first and --oldest-first set the order for both.
       --regex=REGEX  match items whose original path contains REGEX
       --latest    of several matches, restore the most recently trashed
       --all       of several matches, restore every one
+  -n, --dry-run   show where each chosen item would go and change nothing;
+                    a conflict prints as would skip or would fail
       --batch=ID  restore one whole put run, as `undo ID` does: an ID
                     from `undo --list`, or last for the latest run
       --json      print {restored, failed, skipped} as JSON on stdout;
@@ -152,12 +154,13 @@ fn by_batch(prog: &str, args: &[String]) -> Option<i32> {
             a if a.starts_with("--batch=") => {}
             "-f" | "--force" | "--overwrite" => pass.push("--force".into()),
             "--json" | "--home-only" => pass.push(a.to_string()),
+            "-n" | "--dry-run" => pass.push("--dry-run".into()),
             a if a.starts_with("--conflict=") || a.starts_with("--trash-dir=") => {
                 pass.push(a.to_string())
             }
             a => {
                 eprintln!(
-                    "{prog}: --batch takes only --force, --conflict, --json, --home-only and --trash-dir, not '{a}'"
+                    "{prog}: --batch takes only --force, --conflict, --dry-run, --json, --home-only and --trash-dir, not '{a}'"
                 );
                 return Some(2);
             }
@@ -184,6 +187,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut latest = false;
     let mut all = false;
     let mut json = false;
+    let mut dry_run = false;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut sort: Option<Sort> = None;
     // Run as trash-restore, behave as trash-cli's command does.
@@ -210,6 +214,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 }
             },
             "--latest" => latest = true,
+            "-n" | "--dry-run" => dry_run = true,
             "--no-space-check" => crate::space::skip_check(true),
             "--all" => all = true,
             "--json" => {
@@ -322,6 +327,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // macOS restores from the Finder Trash unless a pin or the setting
     // says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty()) {
+        if dry_run {
+            eprintln!("{prog}: --dry-run needs a FreeDesktop trash here; pin one with --trash-dir");
+            return 2;
+        }
         return crate::finder::default_restore(
             prog,
             &crate::finder::RestoreOpts {
@@ -374,6 +383,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         to: to.as_deref(),
         conflict,
         quiet: json,
+        dry_run,
     };
     if matches.is_empty() && trash_cli && target.is_none() && matcher.is_none() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
@@ -395,6 +405,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // TTY + multi-item: prefer ratatui browser when built with `tui` (unless --plain).
     #[cfg(feature = "tui")]
     if !plain
+        && !dry_run
         && !all
         && target.is_none()
         && matcher.is_none()
@@ -485,7 +496,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     }
     if json {
-        println!("{}", restored_json(&done, failed, skipped));
+        let body = restored_json(&done, failed, skipped);
+        if dry_run {
+            println!("{{\"dry_run\":true,{}", &body[1..]);
+        } else {
+            println!("{body}");
+        }
     }
     i32::from(failed > 0)
 }
@@ -495,6 +511,9 @@ pub(crate) struct Plan<'a> {
     pub to: Option<&'a Path>,
     pub conflict: Conflict,
     pub quiet: bool,
+    /// Report each outcome as would restore, would skip or would fail,
+    /// and move nothing.
+    pub dry_run: bool,
 }
 
 pub(crate) enum Outcome {
@@ -523,15 +542,25 @@ impl Plan<'_> {
         let exists = dest.symlink_metadata().is_ok();
         let (dest, force) = match (exists, self.conflict) {
             (true, Conflict::Skip) => {
-                eprintln!(
-                    "{prog}: skipping '{}': it exists",
-                    crate::util::err_path(&dest)
-                );
+                if self.dry_run {
+                    self.say(format!(
+                        "would skip '{}': it exists",
+                        crate::util::term_path(&dest)
+                    ));
+                } else {
+                    eprintln!(
+                        "{prog}: skipping '{}': it exists",
+                        crate::util::err_path(&dest)
+                    );
+                }
                 return Outcome::Skipped;
             }
             (true, Conflict::Rename) => (free_name(&dest), false),
             (_, c) => (dest, c == Conflict::Overwrite),
         };
+        if self.dry_run {
+            return self.dry(e, dest, force);
+        }
         match restore_one_to(e, &dest, force) {
             Ok(done) => {
                 for w in &done.warnings {
@@ -548,6 +577,63 @@ impl Plan<'_> {
                 Outcome::Failed
             }
         }
+    }
+}
+
+impl Plan<'_> {
+    /// One dry-run line: on stdout, or on stderr when stdout carries JSON.
+    fn say(&self, line: String) {
+        if self.quiet {
+            let line = if stderr_is_tty() {
+                scrub(&line).into_owned()
+            } else {
+                line
+            };
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    }
+
+    /// What restoring `e` to `dest` would do, checked without moving it:
+    /// a relative record, a target inside the trash, a gone payload and a
+    /// blocked destination fail as the real restore would.
+    fn dry(&self, e: &list::Entry, dest: PathBuf, force: bool) -> Outcome {
+        let src = crate::util::join_name(&e.dir.files(), &e.name);
+        let why = if !dest.is_absolute() {
+            Some(format!(
+                "'{}' names no absolute location",
+                crate::util::term_path(&dest)
+            ))
+        } else if let Some(err) = trash_conflict(e, &dest) {
+            Some(err)
+        } else if src.symlink_metadata().is_err() {
+            Some(format!(
+                "the payload of '{}' is gone",
+                crate::util::term_path(&e.original)
+            ))
+        } else if !force && dest.symlink_metadata().is_ok() {
+            Some(format!("'{}' exists", crate::util::term_path(&dest)))
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            self.say(format!("would fail: {why}"));
+            return Outcome::Failed;
+        }
+        if dest == e.original {
+            self.say(format!(
+                "would restore '{}'",
+                crate::util::term_path(&e.original)
+            ));
+        } else {
+            self.say(format!(
+                "would restore '{}' as '{}'",
+                crate::util::term_path(&e.original),
+                crate::util::term_path(&dest)
+            ));
+        }
+        Outcome::Restored(dest)
     }
 }
 

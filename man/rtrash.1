@@ -1825,6 +1825,28 @@ and
 .B \-\-latest
 When several items match, restore the most recently trashed one without asking.
 .TP
+.BR \-n ", " \-\-dry\-run
+Print where each chosen item would go
+.RB ( "would restore" ,
+.B would skip
+or
+.BR "would fail" )
+and change nothing.
+The checks are those of a real restore: a taken destination under the
+conflict policy, a gone payload, a target inside the trash.
+With
+.BR \-\-json ,
+the summary gains
+.B \(dqdry_run\(dq: true
+and the lines go to stderr.
+With
+.BR \-\-batch ,
+it runs
+.BR "undo \-\-dry\-run" .
+FreeDesktop trashes only: on the macOS Finder Trash it needs a
+.B \-\-trash\-dir
+pin, and the Windows build does not take it.
+.TP
 .BI \-\-batch =ID
 Restore one whole put run, as
 .B undo

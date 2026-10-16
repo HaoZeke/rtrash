@@ -208,6 +208,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l ol
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l name -x -a '(__rtrash_trashed name)' -d 'match by file name or trash name'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -f -a '(__rtrash_trashed path)'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l latest -d 'of several matches, restore the newest'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s n -l dry-run -d 'show what would be restored'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l all -d 'of several matches, restore every one'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l glob -x -d 'match by shell pattern'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l regex -x -d 'match original paths by regex'
@@ -322,6 +323,7 @@ complete -c trash-restore -l oldest-first
 complete -c trash-restore -l name -x -a '(__rtrash_trashed name)'
 complete -c trash-restore -f -a '(__rtrash_trashed path)'
 complete -c trash-restore -l latest
+complete -c trash-restore -s n -l dry-run
 complete -c trash-restore -l all
 complete -c trash-restore -l glob -x
 complete -c trash-restore -l regex -x

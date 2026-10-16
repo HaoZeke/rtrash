@@ -1464,6 +1464,63 @@ fn restore_by_name_latest_json() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+#[test]
+fn restore_dry_run_reports_and_moves_nothing() {
+    let sb = Sandbox::new("restore-dry");
+    let f = sb.touch("a.txt");
+    assert!(sb.run(&["put", "a.txt"]).status.success());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+
+    let out = sb.run(&["restore", &pin, "-n", "--name=a.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(
+        stdout_of(&out).trim(),
+        format!("would restore '{}'", f.display())
+    );
+    assert!(!f.exists());
+    assert_eq!(trash_names(&sb), vec!["a.txt".to_string()]);
+
+    // A blocked destination fails under the default policy, and renames
+    // under --conflict=rename, still without moving anything.
+    fs::write(&f, b"live").unwrap();
+    let out = sb.run(&["restore", &pin, "--dry-run", "--name=a.txt"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stdout_of(&out).starts_with("would fail: "),
+        "{}",
+        stdout_of(&out)
+    );
+    let out = sb.run(&[
+        "restore",
+        &pin,
+        "-n",
+        "--conflict=rename",
+        "--json",
+        "--name=a.txt",
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("as '"), "{}", stderr_of(&out));
+    let json = stdout_of(&out);
+    assert!(
+        json.starts_with("{\"dry_run\":true,\"restored\":[{"),
+        "{json}"
+    );
+    assert!(json.contains("a.1.txt"), "{json}");
+    assert_eq!(fs::read(&f).unwrap(), b"live");
+    assert!(!sb.work().join("a.1.txt").exists());
+    assert_eq!(trash_names(&sb), vec!["a.txt".to_string()]);
+
+    // --batch hands the dry run to undo.
+    let out = sb.run(&["restore", &pin, "-n", "--batch=last", "--conflict=rename"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("would restore"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert_eq!(trash_names(&sb), vec!["a.txt".to_string()]);
+}
+
 #[cfg(unix)]
 #[test]
 fn restore_glob_regex_ranges_to_and_conflicts() {

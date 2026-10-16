@@ -245,6 +245,7 @@ restore_opts=(
   '(1 --name --regex)--glob=[match by shell pattern]:pattern:'
   '(1 --name --glob)--regex=[match original paths by regex]:regex:'
   '(--all)--latest[of several matches, restore the newest]'
+  '(-n --dry-run)'{-n,--dry-run}'[show what would be restored, change nothing]'
   '(--latest)--all[of several matches, restore every one]'
   '--to=[restore into this directory]:dir:_files -/'
   '--conflict=[when the destination exists]:policy:(refuse overwrite rename skip)'

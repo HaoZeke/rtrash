@@ -267,6 +267,7 @@ export extern "rtrash restore" [
     --glob: string  # match items by shell pattern: against the original
     --regex: string  # match items whose original path contains REGEX
     --latest  # of several matches, restore the most recently trashed
+    --dry-run(-n)  # show where each chosen item would go and change nothing
     --all  # of several matches, restore every one
     --json  # print {restored, failed, skipped} as JSON on stdout;
     --home-only  # only the home trash (skip volume trash)
@@ -484,6 +485,7 @@ export extern "trash-restore" [
     --glob: string  # match items by shell pattern: against the original
     --regex: string  # match items whose original path contains REGEX
     --latest  # of several matches, restore the most recently trashed
+    --dry-run(-n)  # show where each chosen item would go and change nothing
     --all  # of several matches, restore every one
     --json  # print {restored, failed, skipped} as JSON on stdout;
     --home-only  # only the home trash (skip volume trash)

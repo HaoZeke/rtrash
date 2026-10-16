@@ -231,6 +231,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         to: None,
         conflict,
         quiet: json,
+        dry_run: false,
     };
     let mut restored: Vec<(&list::Entry, PathBuf)> = Vec::new();
     let (mut failed, mut skipped) = (0usize, 0usize);
