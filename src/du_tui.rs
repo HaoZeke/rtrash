@@ -2385,7 +2385,13 @@ mod tests {
     fn o_opens_the_row_with_the_opener_and_keeps_the_screen() {
         let t = tree("open");
         let mut a = app(&t);
-        a.opener = ["/bin/sh", "-c", "cp \"$1\" \"$1.opened\"", "sh"]
+        // The opener runs detached, as a real one does, so the test cannot
+        // wait on it. It copies to a temporary name and renames that into
+        // place: once file.opened exists, it holds all 9000 bytes. A plain
+        // cp made the name first and the bytes after, and macos-15-intel
+        // read it empty in between.
+        let script = "cp \"$1\" \"$1.part\" && mv \"$1.part\" \"$1.opened\"";
+        a.opener = ["/bin/sh", "-c", script, "sh"]
             .map(std::ffi::OsString::from)
             .to_vec();
         a.move_sel(1); // file
