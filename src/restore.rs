@@ -680,43 +680,7 @@ pub(crate) fn free_name(dest: &Path) -> PathBuf {
         .unwrap_or_else(|| dest.to_path_buf())
 }
 
-/// Parse a pick like `0-2,5 7` or `all` against `len` rows: indices in
-/// the order given, each once.
-pub fn parse_selection(line: &str, len: usize) -> Result<Vec<usize>, String> {
-    let line = line.trim();
-    if line.eq_ignore_ascii_case("all") || line == "*" {
-        return Ok((0..len).collect());
-    }
-    let mut out: Vec<usize> = Vec::new();
-    let mut seen = vec![false; len];
-    for tok in line.split([',', ' ', '\t']).filter(|t| !t.is_empty()) {
-        let (lo, hi) = match tok.split_once('-') {
-            Some((a, b)) => (a.trim(), b.trim()),
-            None => (tok, tok),
-        };
-        let num = |s: &str| {
-            s.parse::<usize>()
-                .map_err(|_| format!("'{tok}' is no index or range"))
-        };
-        let (lo, hi) = (num(lo)?, num(hi)?);
-        if lo > hi {
-            return Err(format!("range '{tok}' runs backwards"));
-        }
-        if hi >= len {
-            return Err(format!("{hi} lies outside 0..{}", len - 1));
-        }
-        for (i, was) in seen.iter_mut().enumerate().take(hi + 1).skip(lo) {
-            if !*was {
-                *was = true;
-                out.push(i);
-            }
-        }
-    }
-    if out.is_empty() {
-        return Err("nothing selected".into());
-    }
-    Ok(out)
-}
+pub use crate::util::parse_selection;
 
 /// Shell-pattern match: against the original path when the pattern names a
 /// directory part, else against the file name or the trash name.

@@ -163,3 +163,48 @@ fn trash_restore_takes_path_as_a_scope() {
     );
     assert_eq!(back.as_deref(), Some(&b"in"[..]));
 }
+
+#[test]
+fn trash_restore_takes_a_range_pick() {
+    let dir = std::env::temp_dir().join(format!("rtrash-names-pick-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let sub = dir.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let names = ["a.txt", "b.txt", "c.txt"];
+    for n in names {
+        fs::write(sub.join(n), n).unwrap();
+        let put = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            .arg("put")
+            .arg(sub.join(n))
+            .output()
+            .unwrap();
+        assert!(
+            put.status.success(),
+            "{}",
+            String::from_utf8_lossy(&put.stderr)
+        );
+        // Deletion times on Windows are whole seconds.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    let restore = dir.join("trash-restore.exe");
+    fs::copy(env!("CARGO_BIN_EXE_rtrash"), &restore).unwrap();
+    // Rows run oldest first: 0 is a.txt, 2 is c.txt.
+    let out = run_with(&restore, &dir, &["sub"], "0,2\n");
+    let back: Vec<bool> = names.iter().map(|n| sub.join(n).exists()).collect();
+    for n in names {
+        if !sub.join(n).exists() {
+            let _ = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+                .arg("restore")
+                .arg(sub.join(n))
+                .output();
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(back, [true, false, true]);
+}

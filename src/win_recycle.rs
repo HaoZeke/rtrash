@@ -2254,16 +2254,15 @@ Without PATH, print a numbered list and read an index from stdin.
             println!("No files were restored");
             return 0;
         }
-        let Ok(idx) = line.trim().parse::<usize>() else {
-            eprintln!("{prog}: invalid index");
-            return 1;
+        // A pick like `0-2,4`, as on FreeDesktop.
+        let picked = match crate::util::parse_selection(&line, matches.len()) {
+            Ok(idx) => idx.into_iter().map(|i| matches[i].clone()).collect(),
+            Err(e) => {
+                eprintln!("{prog}: invalid selection: {e}");
+                return 1;
+            }
         };
-        if idx >= matches.len() {
-            eprintln!("{prog}: index out of range");
-            return 1;
-        }
-        let item = matches.into_iter().nth(idx).unwrap();
-        restore_one(prog, vec![item], &opts)
+        restore_one(prog, picked, &opts)
     }
 
     /// A Recycle Bin item as the restore browser sees it.
