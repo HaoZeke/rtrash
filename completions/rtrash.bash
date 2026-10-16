@@ -44,7 +44,8 @@ _rtrash_du_opts=(
 _rtrash_restore_opts=(
   -f --force --home-only --trash-dir= --cwd-only --directory= --plain --no-space-check
   --newest-first --oldest-first --overwrite --sort= --name= --glob= --regex= --latest --all --batch=
-  -n --dry-run --to= --conflict= --older-than= --newer-than= --json --help --version
+  -n --dry-run --to= --conflict= --older-than= --newer-than= --larger-than= --smaller-than=
+  --json --help --version
 )
 
 _rtrash_rm_opts=(

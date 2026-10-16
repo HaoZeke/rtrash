@@ -576,6 +576,36 @@ fn finder_restore_json_reports_an_empty_match() {
 }
 
 #[test]
+fn finder_restore_takes_size_filters() {
+    let b = Box_::new("size");
+    fs::write(b.work().join("big.bin"), vec![7u8; 1 << 20]).unwrap();
+    fs::write(b.work().join("small.txt"), b"s").unwrap();
+    for n in ["big.bin", "small.txt"] {
+        assert!(b.run(&["put", n], "").status.success());
+    }
+    let recs: Vec<Record> = ["big.bin", "small.txt"]
+        .iter()
+        .map(|n| Record {
+            name: n.to_string(),
+            code: *b"ptbL",
+            value: Value::Ustr(format!(
+                "{}/",
+                b.work().to_string_lossy().trim_start_matches('/')
+            )),
+        })
+        .collect();
+    fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
+
+    let o = b.run(&["restore", "--larger-than=100k", "--all"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(b.work().join("big.bin").exists());
+    assert!(!b.work().join("small.txt").exists());
+    let o = b.run(&["restore", "--smaller-than=100k", "--all"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(fs::read(b.work().join("small.txt")).unwrap(), b"s");
+}
+
+#[test]
 fn restore_matchers_work_on_the_finder_trash() {
     let b = Box_::new("match");
     for n in ["r1.log", "r2.log", "keep.txt"] {

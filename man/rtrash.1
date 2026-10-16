@@ -1821,6 +1821,22 @@ An item with no readable deletion date has no age and stays out.
 Only items trashed within the last
 .IR AGE .
 .TP
+.BI \-\-larger\-than= SIZE
+Only items taking more than
+.I SIZE
+on disk, counted as
+.B list \-\-size
+counts them;
+.I SIZE
+as in
+.BR "empty \-\-max\-size" ,
+such as 500M, 1.5G or 64k.
+.TP
+.BI \-\-smaller\-than= SIZE
+Only items taking less than
+.I SIZE
+on disk.
+.TP
 .B \-\-cwd\-only
 Without PATH, only items trashed from under the current directory.
 .TP

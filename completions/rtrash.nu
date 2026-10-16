@@ -259,6 +259,8 @@ export extern "rtrash restore" [
     --to: string  # restore into DIR, keeping each item's file name
     --older-than: string  # only items trashed more than AGE ago (DAYS, 2h, 1d12h)
     --newer-than: string  # only items trashed within the last AGE
+    --larger-than: string  # only items taking more than SIZE on disk (500M, 1.5G, 64k)
+    --smaller-than: string  # only items taking less than SIZE on disk
     --cwd-only  # without PATH, only items trashed from under the current directory
     --directory: path  # without PATH, only items trashed from under DIR
     --plain  # force numbered line selection even on a TTY (no TUI)
@@ -482,6 +484,8 @@ export extern "trash-restore" [
     --to: string  # restore into DIR, keeping each item's file name
     --older-than: string  # only items trashed more than AGE ago (DAYS, 2h, 1d12h)
     --newer-than: string  # only items trashed within the last AGE
+    --larger-than: string  # only items taking more than SIZE on disk (500M, 1.5G, 64k)
+    --smaller-than: string  # only items taking less than SIZE on disk
     --cwd-only  # without PATH, only items trashed from under the current directory
     --directory: path  # without PATH, only items trashed from under DIR
     --plain  # force numbered line selection even on a TTY (no TUI)

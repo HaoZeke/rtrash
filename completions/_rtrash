@@ -253,6 +253,8 @@ restore_opts=(
   '--to=[restore into this directory]:dir:_files -/'
   '--older-than=[only items trashed more than AGE ago (DAYS, 2h, 1d12h)]:age:'
   '--newer-than=[only items trashed within the last AGE]:age:'
+  '--larger-than=[only items taking more than SIZE on disk]:size:'
+  '--smaller-than=[only items taking less than SIZE on disk]:size:'
   '--conflict=[when the destination exists]:policy:(refuse overwrite rename skip)'
   '--json[print the result as JSON]'
   '(- *)'--help'[display help and exit]'

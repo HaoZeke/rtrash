@@ -43,6 +43,9 @@ the index prompt. --newest-first and --oldest-first set the order for both.
       --older-than=AGE  only items trashed more than AGE ago; AGE is DAYS
                     or a duration such as 2h, 30m or 1d12h (as in list)
       --newer-than=AGE  only items trashed within the last AGE
+      --larger-than=SIZE  only items taking more than SIZE on disk (500M,
+                    1.5G, 64k; as list --size counts them)
+      --smaller-than=SIZE  only items taking less than SIZE on disk
       --cwd-only  without PATH, only items trashed from under the current directory
       --directory=DIR  without PATH, only items trashed from under DIR
                     (which need not exist any more)
@@ -199,6 +202,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // Run as trash-restore, behave as trash-cli's command does.
     let trash_cli = prog == "trash-restore";
     let mut age = crate::filters::AgeFilter::default();
+    let mut size = crate::filters::SizeFilter::default();
     for arg in args {
         let mut set_matcher = |m: Matcher| {
             if matcher.is_some() {
@@ -219,6 +223,18 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                         eprintln!("{prog}: {e}");
                         return 2;
                     }
+                }
+            }
+            a if a.starts_with("--larger-than=") || a.starts_with("--smaller-than=") => {
+                let (name, value) = a.split_once('=').unwrap_or((a, ""));
+                let Some(n) = crate::filters::parse_size(value) else {
+                    eprintln!("{prog}: invalid size '{value}' for {name}");
+                    return 2;
+                };
+                if name == "--larger-than" {
+                    size.larger_than = Some(n);
+                } else {
+                    size.smaller_than = Some(n);
                 }
             }
             a if a.starts_with("--sort=") => match Sort::parse(&a["--sort=".len()..]) {
@@ -339,6 +355,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: give PATH or a --name, --glob or --regex match, not both");
         return 2;
     }
+    if let Err(e) = size.check() {
+        eprintln!("{prog}: {e}");
+        return 2;
+    }
     if cwd_only && directory.is_some() {
         eprintln!("{prog}: give --cwd-only or --directory, not both");
         return 2;
@@ -387,6 +407,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 newest_first,
                 sort,
                 age,
+                size,
                 dry_run,
             },
         );
@@ -440,6 +461,21 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     if age.is_set() {
         let now = crate::util::now_epoch();
         matches.retain(|e| age.keeps_at(e.date.is_some().then_some(e.epoch), now));
+    }
+    // --larger-than and --smaller-than, by the bytes list --size shows.
+    if size.is_set() {
+        let caches: Vec<trashdir::DirSizes> = dirs.iter().map(trashdir::DirSizes::load).collect();
+        matches.retain(|e| {
+            let bytes = caches
+                .iter()
+                .zip(&dirs)
+                .find(|(_, d)| d.root == e.dir.root)
+                .map_or(0, |(c, _)| c.entry_bytes(&e.name));
+            size.keeps(bytes)
+        });
+        for c in caches {
+            c.write_back();
+        }
     }
 
     let plan = Plan {

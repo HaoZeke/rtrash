@@ -699,6 +699,8 @@ pub(crate) struct RestoreOpts<'a> {
     pub(crate) sort: Option<crate::restore::Sort>,
     /// `--older-than` and `--newer-than`.
     pub(crate) age: crate::filters::AgeFilter,
+    /// `--larger-than` and `--smaller-than`, on each item's disk usage.
+    pub(crate) size: crate::filters::SizeFilter,
     /// `--dry-run`: say what each restore would do and move nothing.
     pub(crate) dry_run: bool,
 }
@@ -795,6 +797,7 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
     let rows: Vec<_> = rows
         .into_iter()
         .filter(|e| o.age.keeps_at(Some(e.epoch), now))
+        .filter(|e| !o.size.is_set() || o.size.keeps(crate::fastdelete::disk_usage(&e.path())))
         .collect();
     // Without --to, only an item with a Put Back record has a place to go.
     // --directory keeps the items from under DIR, which may be gone.

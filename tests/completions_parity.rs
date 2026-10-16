@@ -293,7 +293,11 @@ fn bash_completion_offers_the_right_words() {
     assert!(!keys.contains(&"--recursive".to_string()), "{keys:?}");
     let setup = bash_complete(&["rtrash", "setup", "--pr"]);
     assert_eq!(setup, ["--prefix="]);
-    assert_eq!(bash_complete(&["rtrash", "restore", "--la"]), ["--latest"]);
+    assert_eq!(bash_complete(&["rtrash", "restore", "--lat"]), ["--latest"]);
+    assert_eq!(
+        bash_complete(&["rtrash", "restore", "--la"]),
+        ["--latest", "--larger-than="]
+    );
     assert_eq!(bash_complete(&["trash-restore", "--js"]), ["--json"]);
     assert_eq!(bash_complete(&["rtrash", "du", "--print"]), ["--print0"]);
 }

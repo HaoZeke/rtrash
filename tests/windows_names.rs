@@ -322,3 +322,52 @@ fn restore_takes_age_filters_on_windows() {
     );
     assert_eq!(back.as_deref(), Some(&b"fresh"[..]));
 }
+
+#[test]
+fn restore_takes_size_filters_on_windows() {
+    let dir = std::env::temp_dir().join(format!("rtrash-names-size-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let (big, small) = (dir.join("big.bin"), dir.join("small.txt"));
+    fs::write(&big, vec![7u8; 1 << 20]).unwrap();
+    fs::write(&small, "s").unwrap();
+    let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
+    for f in [&big, &small] {
+        let put = Command::new(rtrash).arg("put").arg(f).output().unwrap();
+        assert!(
+            put.status.success(),
+            "{}",
+            String::from_utf8_lossy(&put.stderr)
+        );
+    }
+    let scope = format!("--directory={}", dir.display());
+    let out = run_with(
+        rtrash,
+        &dir,
+        &["restore", &scope, "--smaller-than=100k", "--all"],
+        "",
+    );
+    let (big_back, small_back) = (big.exists(), small.exists());
+    let bad = run_with(rtrash, &dir, &["restore", "--larger-than=lots"], "");
+    for f in [&big, &small] {
+        if !f.exists() {
+            let _ = Command::new(rtrash).arg("restore").arg(f).output();
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        small_back && !big_back,
+        "small {small_back}, big {big_back}"
+    );
+    assert_eq!(
+        bad.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&bad.stderr)
+    );
+}

@@ -391,6 +391,28 @@ fn restore_takes_age_filters() {
 }
 
 #[test]
+fn restore_takes_size_filters() {
+    let sb = Sandbox::new("restore-size");
+    fs::write(sb.work().join("big.bin"), vec![7u8; 1 << 20]).unwrap();
+    fs::write(sb.work().join("small.txt"), b"s").unwrap();
+    assert!(sb.run(&["put", "big.bin", "small.txt"]).status.success());
+
+    let out = sb.run(&["restore", "--larger-than=100k", "--all"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(sb.work().join("big.bin").exists());
+    assert!(!sb.work().join("small.txt").exists());
+    let out = sb.run(&["restore", "--larger-than=100k", "--all"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    for bad in ["--smaller-than=lots", "--larger-than=2K"] {
+        let out = sb.run(&["restore", bad, "--smaller-than=1K", "--all"]);
+        assert_eq!(out.status.code(), Some(2), "{bad}: {}", stderr_of(&out));
+    }
+    let out = sb.run(&["restore", "--smaller-than=100k", "--all"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(fs::read(sb.work().join("small.txt")).unwrap(), b"s");
+}
+
+#[test]
 fn restore_never_writes_to_the_trash_or_what_contains_it() {
     let sb = Sandbox::new("restore-into-trash");
     fs::write(sb.work().join("keep"), b"real").unwrap();

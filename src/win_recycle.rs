@@ -1923,6 +1923,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         // Run as trash-restore, scope to the current directory as trash-cli does.
         let trash_cli = prog == "trash-restore";
         let mut age = crate::filters::AgeFilter::default();
+        let mut size = crate::filters::SizeFilter::default();
         for arg in args {
             match arg.as_str() {
                 "-f" | "--force" => conflict = Conflict::Overwrite,
@@ -1935,6 +1936,18 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                             eprintln!("{prog}: {e}");
                             return 2;
                         }
+                    }
+                }
+                a if a.starts_with("--larger-than=") || a.starts_with("--smaller-than=") => {
+                    let (name, value) = a.split_once('=').unwrap_or((a, ""));
+                    let Some(n) = crate::filters::parse_size(value) else {
+                        eprintln!("{prog}: invalid size '{value}' for {name}");
+                        return 2;
+                    };
+                    if name == "--larger-than" {
+                        size.larger_than = Some(n);
+                    } else {
+                        size.smaller_than = Some(n);
                     }
                 }
                 "--latest" => latest = true,
@@ -2041,6 +2054,8 @@ Without PATH, print a numbered list and read an index from stdin.
       --older-than=AGE  only items deleted more than AGE ago; AGE is DAYS
                 or a duration such as 2h, 30m or 1d12h
       --newer-than=AGE  only items deleted within the last AGE
+      --larger-than=SIZE  only items over SIZE (500M, 1.5G, 64k)
+      --smaller-than=SIZE  only items under SIZE
       --latest  of several matches, restore the most recently deleted
       --all     of several matches, restore every one
       --plain   numbered selection instead of the browser
@@ -2087,6 +2102,10 @@ Without PATH, print a numbered list and read an index from stdin.
             eprintln!("{prog}: give --latest or --all, not both");
             return 2;
         }
+        if let Err(e) = size.check() {
+            eprintln!("{prog}: {e}");
+            return 2;
+        }
         if cwd_only && directory.is_some() {
             eprintln!("{prog}: give --cwd-only or --directory, not both");
             return 2;
@@ -2118,6 +2137,10 @@ Without PATH, print a numbered list and read an index from stdin.
         if age.is_set() {
             let now = crate::util::now_epoch();
             items.retain(|i| age.keeps_at(Some(i.time_deleted), now));
+        }
+        // --larger-than and --smaller-than; only the items left get sized.
+        if size.is_set() {
+            items.retain(|i| size.keeps(item_size(i)));
         }
         if last_run {
             if target.is_some() {
