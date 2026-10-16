@@ -231,6 +231,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s n 
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l all -d 'of several matches, restore every one'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l glob -x -d 'match by shell pattern'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l regex -x -d 'match original paths by regex'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s m -l match -d 'read PATH as a pattern of KIND' -xa 'glob regex substring exact'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l to -x -a '(__fish_complete_directories)' -d 'restore into this directory'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l older-than -d 'only items older than AGE (DAYS, 2h, 1d12h)' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l newer-than -d 'only items within the last AGE' -r
@@ -357,6 +358,7 @@ complete -c trash-restore -s n -l dry-run
 complete -c trash-restore -l all
 complete -c trash-restore -l glob -x
 complete -c trash-restore -l regex -x
+complete -c trash-restore -s m -l match -xa 'glob regex substring exact'
 complete -c trash-restore -l to -x -a '(__fish_complete_directories)'
 complete -c trash-restore -l older-than -r
 complete -c trash-restore -l newer-than -r

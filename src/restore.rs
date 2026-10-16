@@ -60,6 +60,9 @@ the index prompt. --newest-first and --oldest-first set the order for both.
       --glob=PATTERN  match items by shell pattern: against the original
                     path when PATTERN has a '/', else against the file name
       --regex=REGEX  match items whose original path contains REGEX
+  -m, --match=KIND  read PATH as a pattern of KIND, as trashy's -m does:
+                    glob, regex, substring (text in the original path) or
+                    exact (the whole original path)
       --latest    of several matches, restore the most recently trashed
       --all       of several matches, restore every one
   -n, --dry-run   show where each chosen item would go and change nothing;
@@ -122,9 +125,28 @@ pub(crate) enum Matcher {
     Name(String),
     Glob(String),
     Regex(regex_lite::Regex),
+    /// `--match=substring`: text anywhere in the original path.
+    Substring(String),
+    /// `--match=exact`: the whole original path.
+    Exact(String),
 }
 
 impl Matcher {
+    /// PATTERN read as `--match=KIND` says (trashy's `-m`).
+    pub(crate) fn of_kind(kind: crate::filters::Match, pat: &str) -> Result<Matcher, String> {
+        use crate::filters::Match;
+        let pat = crate::finder_shared::nfc(pat);
+        Ok(match kind {
+            Match::Glob => Matcher::Glob(pat),
+            Match::Substring => Matcher::Substring(pat),
+            Match::Exact => Matcher::Exact(pat),
+            Match::Regex => match regex_lite::Regex::new(&pat) {
+                Ok(re) => Matcher::Regex(re),
+                Err(e) => return Err(format!("invalid regex '{pat}': {e}")),
+            },
+        })
+    }
+
     /// The same test for an item known by its original path and its name
     /// in the trash (a Finder Trash item).
     pub(crate) fn matches_parts(&self, original: &Path, name: &str) -> bool {
@@ -136,6 +158,11 @@ impl Matcher {
             Matcher::Name(n) => name_matches_parts(original, name, n),
             Matcher::Glob(p) => glob_matches_parts(original, name, p),
             Matcher::Regex(re) => re.is_match(&crate::util::str_from_os_ref(original.as_os_str())),
+            Matcher::Substring(s) => {
+                let full = crate::util::str_from_os_ref(original.as_os_str());
+                full.contains(s.as_str())
+            }
+            Matcher::Exact(s) => crate::util::str_from_os_ref(original.as_os_str()) == *s,
         }
     }
 
@@ -204,6 +231,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut newest_first: Option<bool> = None;
     let mut target: Option<PathBuf> = None;
     let mut matcher: Option<Matcher> = None;
+    // `--match=KIND`: the PATH operand is a pattern of that kind.
+    let mut kind: Option<crate::filters::Match> = None;
+    let mut operand: Option<String> = None;
+    let mut auto_glob = false;
     let mut to: Option<PathBuf> = None;
     let mut latest = false;
     let mut all = false;
@@ -319,6 +350,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                     }
                 }
             }
+            a if a.starts_with("--match=") || a.starts_with("-m=") => {
+                match crate::filters::match_arg(a) {
+                    Some(Ok(k)) => kind = Some(k),
+                    Some(Err(e)) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                    None => {}
+                }
+            }
             "--home-only" => home_only = true,
             "--cwd-only" => cwd_only = true,
             a if a.starts_with("--directory=") => {
@@ -348,14 +389,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 return 2;
             }
             a => {
-                if target.is_some() {
+                if target.is_some() || operand.is_some() {
                     eprintln!("{prog}: only one PATH may be given");
                     return 2;
                 }
+                operand = Some(a.to_string());
                 // A quoted '*.log' the shell left alone is a glob; a literal
                 // name with * or ? still goes through --name.
                 if a.contains(['*', '?']) && matcher.is_none() {
                     matcher = Some(Matcher::Glob(crate::finder_shared::nfc(a)));
+                    auto_glob = true;
                     continue;
                 }
                 target = Some(crate::util::arg_path(a));
@@ -363,6 +406,24 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     }
 
+    if let Some(k) = kind {
+        let Some(pat) = operand.as_deref() else {
+            eprintln!("{prog}: --match needs a PATTERN");
+            return 2;
+        };
+        if matcher.is_some() && !auto_glob {
+            eprintln!("{prog}: give --match with a PATTERN or a --name, --glob or --regex match");
+            return 2;
+        }
+        match Matcher::of_kind(k, pat) {
+            Ok(m) => matcher = Some(m),
+            Err(e) => {
+                eprintln!("{prog}: {e}");
+                return 2;
+            }
+        }
+        target = None;
+    }
     if target.is_some() && matcher.is_some() {
         eprintln!("{prog}: give PATH or a --name, --glob or --regex match, not both");
         return 2;

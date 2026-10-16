@@ -207,9 +207,27 @@ pub enum PathMatch {
     Glob(String),
     Regex(regex_lite::Regex),
     Name(String),
+    /// `restore --match=substring`: text anywhere in the original path.
+    Substring(String),
+    /// `restore --match=exact`: the whole original path.
+    Exact(String),
 }
 
 impl PathMatch {
+    /// PATTERN read as `--match=KIND` says (trashy's `-m`).
+    pub fn of_kind(kind: crate::filters::Match, pat: &str) -> Result<PathMatch, String> {
+        use crate::filters::Match;
+        Ok(match kind {
+            Match::Glob => PathMatch::Glob(pat.to_string()),
+            Match::Substring => PathMatch::Substring(pat.to_string()),
+            Match::Exact => PathMatch::Exact(pat.to_string()),
+            Match::Regex => match regex_lite::Regex::new(pat) {
+                Ok(re) => PathMatch::Regex(re),
+                Err(e) => return Err(format!("invalid regex '{pat}': {e}")),
+            },
+        })
+    }
+
     /// From `--glob=`, `--regex=` or `--name=`; None for another option.
     pub fn parse(arg: &str) -> Option<Result<PathMatch, String>> {
         let (key, val) = arg.split_once('=')?;
@@ -239,6 +257,8 @@ impl PathMatch {
             PathMatch::Glob(p) => crate::util::fnmatch(p, &base),
             PathMatch::Regex(re) => re.is_match(&full),
             PathMatch::Name(n) => base == *n,
+            PathMatch::Substring(s) => full.contains(s.as_str()),
+            PathMatch::Exact(s) => full == *s,
         }
     }
 }

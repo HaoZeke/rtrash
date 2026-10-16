@@ -2034,6 +2034,9 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut last_run = false;
         let mut dry_run = false;
         let mut matcher: Option<crate::budget::PathMatch> = None;
+        // `--match=KIND`: the PATH operand is a pattern of that kind.
+        let mut kind: Option<crate::filters::Match> = None;
+        let mut operand: Option<String> = None;
         let mut latest = false;
         let mut all = false;
         let mut to: Option<PathBuf> = None;
@@ -2104,6 +2107,16 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                     json = true;
                     plain = true;
                 }
+                a if a.starts_with("--match=") || a.starts_with("-m=") => {
+                    match crate::filters::match_arg(a) {
+                        Some(Ok(k)) => kind = Some(k),
+                        Some(Err(e)) => {
+                            eprintln!("{prog}: {e}");
+                            return 2;
+                        }
+                        None => {}
+                    }
+                }
                 a if a.starts_with("--conflict=") => {
                     let v = &a["--conflict=".len()..];
                     match Conflict::parse(v) {
@@ -2171,6 +2184,8 @@ Without PATH, print a numbered list and read an index from stdin.
       --glob=PATTERN  match items whose original path (PATTERN with a
                 separator) or file name matches a shell glob
       --regex=RE  match items whose original path matches RE
+  -m, --match=KIND  read PATH as a pattern of KIND, as trashy's -m does:
+                glob, regex, substring or exact (the whole original path)
       --to=DIR  restore into DIR, keeping each item's file name
       --older-than=AGE  only items deleted more than AGE ago; AGE is DAYS
                 or a duration such as 2h, 30m or 1d12h
@@ -2216,9 +2231,30 @@ Without PATH, print a numbered list and read an index from stdin.
                         eprintln!("{prog}: only one PATH may be given");
                         return 2;
                     }
+                    operand = Some(a.to_string());
                     target = Some(crate::util::arg_path(a));
                 }
             }
+        }
+        if let Some(k) = kind {
+            let Some(pat) = operand.as_deref() else {
+                eprintln!("{prog}: --match needs a PATTERN");
+                return 2;
+            };
+            if matcher.is_some() {
+                eprintln!(
+                    "{prog}: give --match with a PATTERN or a --name, --glob or --regex match"
+                );
+                return 2;
+            }
+            match crate::budget::PathMatch::of_kind(k, pat) {
+                Ok(m) => matcher = Some(m),
+                Err(e) => {
+                    eprintln!("{prog}: {e}");
+                    return 2;
+                }
+            }
+            target = None;
         }
         if latest && all {
             eprintln!("{prog}: give --latest or --all, not both");

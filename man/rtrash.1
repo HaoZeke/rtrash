@@ -2019,6 +2019,26 @@ Give only one of
 and
 .BR \-\-regex .
 .TP
+.BR \-m ", " \-\-match =\fIKIND\fR
+Read the
+.I PATH
+operand as a pattern of
+.IR KIND ,
+as trashy's
+.B \-m
+does:
+.BR glob ,
+.BR regex ,
+.B substring
+(text anywhere in the original path) or
+.B exact
+(the whole original path).
+It takes the place of
+.BR \-\-name ,
+.B \-\-glob
+and
+.BR \-\-regex .
+.TP
 .B \-\-latest
 When several items match, restore the most recently trashed one without asking.
 .TP

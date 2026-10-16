@@ -2,13 +2,25 @@
 //! `--older-than`/`--newer-than` on when an item was trashed, and
 //! `--larger-than`/`--smaller-than` on how much it takes on disk.
 
-/// The age and size flags restore reads in `--flag=VALUE` form.
-const SPACED: [&str; 4] = [
+/// The age, size and match flags restore reads in `--flag=VALUE` form.
+const SPACED: [&str; 6] = [
     "--older-than",
     "--newer-than",
     "--larger-than",
     "--smaller-than",
+    "--match",
+    "-m",
 ];
+
+/// The KIND of restore's `--match=KIND` (or `-m KIND`, which
+/// [`join_spaced`] makes `-m=KIND`), when `a` is that option.
+pub fn match_arg(a: &str) -> Option<Result<Match, String>> {
+    let v = match a.strip_prefix("--match=") {
+        Some(v) => v,
+        None => a.strip_prefix("-m=")?,
+    };
+    Some(Match::parse(v))
+}
 
 /// Join `--older-than 30` and the other [`SPACED`] flags given as two
 /// words into `--older-than=30`, as list takes them, so a parser that

@@ -1808,6 +1808,48 @@ fn restore_glob_regex_ranges_to_and_conflicts() {
 
 #[cfg(unix)]
 #[test]
+fn restore_match_reads_path_as_a_kind() {
+    let sb = Sandbox::new("restore-match-kinds");
+    for n in ["old-a.txt", "old-b.txt", "new.txt"] {
+        sb.touch(n);
+    }
+    assert!(sb
+        .run(&["put", "old-a.txt", "old-b.txt", "new.txt"])
+        .status
+        .success());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+
+    // A substring, in the -m KIND form trashy takes.
+    let out = sb.run(&["restore", &pin, "-m", "substring", "/old-a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(sb.work().join("old-a.txt").exists());
+
+    // The whole original path, as put recorded it.
+    let info = fs::read_to_string(sb.trash().join("info/old-b.txt.trashinfo")).unwrap();
+    let exact = info
+        .lines()
+        .find_map(|l| l.strip_prefix("Path="))
+        .unwrap()
+        .to_string();
+    let out = sb.run(&["restore", &pin, "--match=exact", &exact]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(sb.work().join("old-b.txt").exists());
+    assert_eq!(trash_names(&sb), ["new.txt"]);
+
+    // No PATTERN, a clash with --glob, or a bad kind exit 2.
+    for bad in [
+        vec!["restore", pin.as_str(), "--match=regex"],
+        vec!["restore", pin.as_str(), "--match=glob", "--glob=*", "x"],
+        vec!["restore", pin.as_str(), "--match=fuzzy", "x"],
+    ] {
+        let out = sb.run(&bad);
+        assert_eq!(out.status.code(), Some(2), "{bad:?}: {}", stderr_of(&out));
+    }
+    assert_eq!(trash_names(&sb), ["new.txt"]);
+}
+
+#[cfg(unix)]
+#[test]
 fn list_size_and_sort() {
     let sb = Sandbox::new("list-sort");
     fs::write(sb.work().join("big"), vec![1u8; 64 * 1024]).unwrap();

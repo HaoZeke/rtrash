@@ -289,6 +289,7 @@ export extern "rtrash restore" [
     --name: string@"nu-complete rtrash trashed names"  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original
     --regex: string  # match items whose original path contains REGEX
+    --match(-m): string  # read PATH as glob, regex, substring or exact
     --latest  # of several matches, restore the most recently trashed
     --dry-run(-n)  # show where each chosen item would go and change nothing
     --all  # of several matches, restore every one
@@ -518,6 +519,7 @@ export extern "trash-restore" [
     --name: string@"nu-complete rtrash trashed names"  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original
     --regex: string  # match items whose original path contains REGEX
+    --match(-m): string  # read PATH as glob, regex, substring or exact
     --latest  # of several matches, restore the most recently trashed
     --dry-run(-n)  # show where each chosen item would go and change nothing
     --all  # of several matches, restore every one

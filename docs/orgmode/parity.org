@@ -87,6 +87,8 @@ In rtrash a flag names the kind:
 |---------------------------------+---------------------------------------|
 | ~trashy restore PATTERN~        | ~rtrash restore --regex=PATTERN~      |
 | ~trashy restore --match=glob P~ | ~rtrash restore --glob=P~             |
+| ~trashy restore -m substring P~ | ~rtrash restore -m substring P~       |
+| ~trashy restore -m exact P~     | ~rtrash restore -m exact P~           |
 | ~trashy empty PATTERN~          | ~rtrash rm --regex PATTERN~           |
 | ~trashy empty --match=glob P~   | ~rtrash rm P~ (globs are the default) |
 | ~trashy empty -m substring P~   | ~rtrash rm -m substring P~            |
@@ -95,8 +97,8 @@ In rtrash a flag names the kind:
 A regex for =rm= searches the whole original path, on the FreeDesktop,
 Finder and Windows trashes alike.
 One that matches every path (such as =.*=) needs =--force=, as =*= does.
-=rm -m substring= and =-m exact= read the text against the original path
-as trashy does; only the default differs (glob here, regex in trashy).
+=restore -m= and =rm -m= with =substring= or =exact= read the text
+against the original path as trashy does; only the default differs (glob here, regex in trashy).
 
 * macOS
 
