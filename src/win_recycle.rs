@@ -2114,9 +2114,19 @@ Without PATH, print a numbered list and read an index from stdin.
                 let mounts = super::volume_mounts();
                 let abs = std::path::absolute(t).unwrap_or_else(|_| t.clone());
                 let want = key_of(&abs, &mounts);
+                // trash-restore takes PATH as a scope, as trash-cli does:
+                // the item there and everything trashed from under it.
+                let scope = if trash_cli {
+                    dir_forms(&abs)
+                } else {
+                    Vec::new()
+                };
                 let matched: Vec<TrashItem> = items
                     .iter()
-                    .filter(|i| key_of(&original_of(i), &mounts) == want)
+                    .filter(|i| {
+                        let o = original_of(i);
+                        key_of(&o, &mounts) == want || scope.iter().any(|d| o.starts_with(d))
+                    })
                     .cloned()
                     .collect();
                 if matched.is_empty() {

@@ -91,3 +91,46 @@ fn trash_restore_scopes_to_the_current_directory() {
     );
     assert!(stdout.contains("here"), "{stdout}");
 }
+
+#[test]
+fn trash_restore_takes_path_as_a_scope() {
+    let dir = std::env::temp_dir().join(format!("rtrash-names-scope-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let sub = dir.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    // One item from under sub/: trash-restore sub restores it.
+    let inner = sub.join("inner.txt");
+    fs::write(&inner, "in").unwrap();
+    let put = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        .arg("put")
+        .arg(&inner)
+        .output()
+        .unwrap();
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let restore = dir.join("trash-restore.exe");
+    fs::copy(env!("CARGO_BIN_EXE_rtrash"), &restore).unwrap();
+    let out = Command::new(&restore)
+        .arg("sub")
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let back = fs::read(&inner).ok();
+    if back.is_none() {
+        let _ = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            .arg("restore")
+            .arg(&inner)
+            .output();
+    }
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(back.as_deref(), Some(&b"in"[..]));
+}
