@@ -651,7 +651,7 @@ fn restore_sort_orders_the_numbered_list() {
     );
     assert!(pick(&["--sort=path"]).contains("sort-a-"), "path order");
     assert!(pick(&["--sort=date", "--newest-first"]).contains("sort-a-"));
-    let bad = cmd(&lad).args(["restore", "--sort=size"]).output().unwrap();
+    let bad = cmd(&lad).args(["restore", "--sort=bulk"]).output().unwrap();
     assert_eq!(bad.status.code(), Some(2));
     for p in [&a, &b] {
         let _ = cmd(&lad).arg("restore").arg(p).output();
