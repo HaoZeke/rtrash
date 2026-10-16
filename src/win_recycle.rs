@@ -2216,7 +2216,12 @@ Without PATH, print a numbered list and read an index from stdin.
         let _ = plain;
         // Numbered pick.
         for (i, it) in matches.iter().enumerate() {
-            let date = platform::epoch_to_iso_utc(it.time_deleted);
+            // trash-cli shows the deletion time in local time.
+            let date = if trash_cli {
+                platform::epoch_to_local(it.time_deleted)
+            } else {
+                platform::epoch_to_iso_utc(it.time_deleted)
+            };
             // trash-cli prints `   0 2026-01-02 03:04:05 PATH`: a width-4
             // index and one space between the columns.
             let row = if trash_cli {

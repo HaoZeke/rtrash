@@ -114,6 +114,80 @@ pub fn epoch_to_iso_utc(epoch: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}")
 }
 
+/// `epoch` as local wall-clock time, `YYYY-MM-DDTHH:MM:SS`, through the
+/// current Windows time zone (trash-cli shows local time). Falls back to
+/// UTC when Windows cannot convert it.
+#[cfg(windows)]
+pub fn epoch_to_local(epoch: i64) -> String {
+    local_in(epoch, None)
+}
+
+/// [`epoch_to_local`] in `zone`, or the current zone for `None`.
+#[cfg(windows)]
+fn local_in(
+    epoch: i64,
+    zone: Option<&windows_sys::Win32::System::Time::TIME_ZONE_INFORMATION>,
+) -> String {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::Time::SystemTimeToTzSpecificLocalTime;
+    let iso = epoch_to_iso_utc(epoch);
+    let num = |r: std::ops::Range<usize>| iso.get(r).and_then(|t| t.parse::<u16>().ok());
+    let (Some(y), Some(mo), Some(d), Some(h), Some(mi), Some(s)) = (
+        num(0..4),
+        num(5..7),
+        num(8..10),
+        num(11..13),
+        num(14..16),
+        num(17..19),
+    ) else {
+        return iso;
+    };
+    let utc = SYSTEMTIME {
+        wYear: y,
+        wMonth: mo,
+        wDayOfWeek: 0,
+        wDay: d,
+        wHour: h,
+        wMinute: mi,
+        wSecond: s,
+        wMilliseconds: 0,
+    };
+    // SAFETY: SYSTEMTIME is plain data, so all zeroes is a valid value.
+    let mut local: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    let zone = zone.map_or(std::ptr::null(), |z| z as *const _);
+    // SAFETY: both SYSTEMTIME pointers name live values, and the zone is
+    // null (the current one) or a live TIME_ZONE_INFORMATION.
+    if unsafe { SystemTimeToTzSpecificLocalTime(zone, &utc, &mut local) } == 0 {
+        return iso;
+    }
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond
+    )
+}
+
+#[cfg(all(test, windows))]
+mod local_tests {
+    use super::*;
+
+    #[test]
+    fn local_in_applies_the_zone_bias() {
+        use windows_sys::Win32::System::Time::TIME_ZONE_INFORMATION;
+        // SAFETY: TIME_ZONE_INFORMATION is plain data; a zero StandardDate
+        // means the zone has no daylight saving time.
+        let mut zone: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
+        // Bias is minutes west of UTC: -90 is UTC+01:30, 300 is UTC-05:00.
+        zone.Bias = -90;
+        assert_eq!(local_in(0, Some(&zone)), "1970-01-01T01:30:00");
+        zone.Bias = 300;
+        assert_eq!(local_in(86_400, Some(&zone)), "1970-01-01T19:00:00");
+        // The current zone still gives the trashinfo layout.
+        let now = epoch_to_local(1_700_000_000);
+        assert_eq!(now.len(), 19, "{now}");
+        assert_eq!(&now[10..11], "T", "{now}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
