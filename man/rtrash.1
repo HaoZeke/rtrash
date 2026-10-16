@@ -628,6 +628,10 @@ or below it, as
 for another directory;
 .I DIR
 need not exist any more.
+On Windows
+.I DIR
+counts both as given and as resolved, so a volume mounted on a folder
+still matches.
 Names and patterns compare in Unicode NFC, as restore does.
 A bare
 .I PATTERN
@@ -1809,6 +1813,11 @@ Without PATH, only items trashed from under the current directory.
 Without PATH, only items trashed from under
 .IR DIR ,
 which need not exist any more.
+On Windows it implies
+.BR \-\-plain ,
+as
+.B \-\-cwd\-only
+does there.
 Not on the macOS Finder Trash without a
 .B \-\-trash\-dir
 pin.

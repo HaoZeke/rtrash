@@ -649,6 +649,75 @@ fn restore_cwd_only_keeps_items_from_here() {
     let _ = fs::remove_dir_all(&lad);
 }
 
+#[test]
+fn directory_scopes_list_and_restore_on_the_mounted_volume() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let lad = local_app_data("directory");
+    let id = std::process::id();
+    let proj = m.join(format!("dir-proj-{id}"));
+    fs::create_dir_all(&proj).unwrap();
+    let inside = proj.join("in.txt");
+    let outside = m.join(format!("dir-out-{id}.txt"));
+    for p in [&inside, &outside] {
+        fs::write(p, b"x").unwrap();
+        let out = cmd(&lad).arg("put").arg(p).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    // The folder is gone; its items still match by DIR.
+    fs::remove_dir_all(&proj).unwrap();
+    let dir = format!("--directory={}", proj.display());
+    let out = cmd(&lad).args(["list", &dir]).output().unwrap();
+    let listed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(listed.contains("in.txt"), "{listed}");
+    assert!(!listed.contains(&format!("dir-out-{id}")), "{listed}");
+    // A relative DIR counts from the current directory.
+    let rel = format!("--directory=dir-proj-{id}");
+    let out = cmd(&lad)
+        .args(["restore", &rel, "--all", "--dry-run"])
+        .current_dir(&m)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(said.matches("would restore").count(), 1, "{said}");
+    for bad in [
+        vec!["list", "--directory="],
+        vec!["restore", "--directory="],
+        vec!["list", "--cwd-only", dir.as_str()],
+        vec!["restore", "--cwd-only", dir.as_str()],
+    ] {
+        let out = cmd(&lad).args(&bad).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{bad:?}");
+    }
+    // A single match restores right away and recreates the folder.
+    let out = cmd(&lad).args(["restore", &dir]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(inside.exists() && !outside.exists());
+    let _ = cmd(&lad).arg("restore").arg(&outside).output();
+    let _ = fs::remove_file(&outside);
+    let _ = fs::remove_dir_all(&proj);
+    let _ = fs::remove_dir_all(&lad);
+}
+
 /// Odd but valid NTFS names through put, list, restore and a vanished
 /// Recycle Bin payload; no command may panic.
 #[test]

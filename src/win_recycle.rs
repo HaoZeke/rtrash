@@ -1224,23 +1224,40 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         }
     }
 
-    /// The current directory as given and as resolved, for --cwd-only: a
-    /// volume mounted on a folder may resolve to its GUID path, which no
-    /// original path starts with. Empty when the directory cannot be read.
+    /// The current directory as given and as resolved, for --cwd-only.
+    /// Empty when the directory cannot be read.
     fn cwd_forms() -> Vec<PathBuf> {
-        let Ok(here) = std::env::current_dir() else {
-            return Vec::new();
-        };
-        let mut dirs = vec![std::path::absolute(&here).unwrap_or_else(|_| here.clone())];
-        if let Ok(c) = std::fs::canonicalize(&here) {
+        match std::env::current_dir() {
+            Ok(here) => dir_forms(&here),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// A directory as given and as resolved, for --cwd-only and
+    /// --directory: a volume mounted on a folder may resolve to its GUID
+    /// path, which no original path starts with. A directory that is gone
+    /// keeps only its absolute form.
+    fn dir_forms(dir: &Path) -> Vec<PathBuf> {
+        let mut dirs = vec![std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())];
+        if let Ok(c) = std::fs::canonicalize(dir) {
             dirs.push(strip_verbatim(&c));
         }
         dirs
     }
 
+    /// The value of --directory=DIR: absolute from here, or an error.
+    fn directory_arg(v: &str) -> Result<PathBuf, String> {
+        if v.is_empty() {
+            return Err("--directory needs a non-empty DIR".into());
+        }
+        let d = crate::util::arg_path(v);
+        Ok(std::path::absolute(&d).unwrap_or(d))
+    }
+
     pub fn list_run(prog: &str, args: &[String]) -> i32 {
         let mut matcher: Option<crate::budget::PathMatch> = None;
         let mut cwd_only = false;
+        let mut directory: Option<PathBuf> = None;
         let mut bad: Option<String> = None;
         let mut with_size = false;
         let mut format: Option<Vec<crate::listfmt::FmtPart>> = None;
@@ -1253,6 +1270,16 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 with_size = true;
                 None
             }
+            a if a.starts_with("--directory=") => match directory_arg(&a["--directory=".len()..]) {
+                Ok(d) => {
+                    directory = Some(d);
+                    None
+                }
+                Err(e) => {
+                    bad = Some(e);
+                    Some(2)
+                }
+            },
             a if a.starts_with("--format=") => {
                 match crate::listfmt::parse_format(&a["--format=".len()..]) {
                     Ok(f) => {
@@ -1295,6 +1322,8 @@ List items in the Windows Recycle Bin (system trash).
       --regex=RE  only items whose original path matches RE
       --name=NAME  only items whose file name is NAME
       --cwd-only only items that came from the current directory or below
+      --directory=DIR  only items that came from DIR or below it (DIR
+                   need not exist any more)
       --size     add each item's size in the Recycle Bin
       --format=TEMPLATE  print each item through TEMPLATE: {{date}} {{epoch}}
                    {{path}} {{name}} {{trash}} {{size}} (bytes); {{batch}} and
@@ -1327,7 +1356,14 @@ on Windows (there is no FreeDesktop layout here).
             Ok(f) => f,
             Err(code) => return code,
         };
-        let cwd = cwd_only.then(cwd_forms);
+        if cwd_only && directory.is_some() {
+            eprintln!("{prog}: give --cwd-only or --directory, not both");
+            return 2;
+        }
+        let cwd = match &directory {
+            Some(d) => Some(dir_forms(d)),
+            None => cwd_only.then(cwd_forms),
+        };
         match super::list_items() {
             Ok(items) => {
                 let items: Vec<TrashItem> = items
@@ -1809,6 +1845,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut to: Option<PathBuf> = None;
         let mut sort: Option<TableSort> = None;
         let mut cwd_only = false;
+        let mut directory: Option<PathBuf> = None;
         for arg in args {
             match arg.as_str() {
                 "-f" | "--force" => conflict = Conflict::Overwrite,
@@ -1869,6 +1906,16 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                     cwd_only = true;
                     plain = true;
                 }
+                a if a.starts_with("--directory=") => {
+                    match directory_arg(&a["--directory=".len()..]) {
+                        Ok(d) => directory = Some(d),
+                        Err(e) => {
+                            eprintln!("{prog}: {e}");
+                            return 2;
+                        }
+                    }
+                    plain = true;
+                }
                 "--plain" | "--home-only" => plain = true,
                 a if a.starts_with("--sort=") => match &a["--sort=".len()..] {
                     "date" => sort = Some(TableSort::Date),
@@ -1911,6 +1958,8 @@ Without PATH, print a numbered list and read an index from stdin.
                 implies --plain, and the numbered list goes to stderr
       --cwd-only  without PATH or a match, only items deleted from the
                 current directory or below (implies --plain)
+      --directory=DIR  as --cwd-only, for items deleted from under DIR;
+                DIR need not exist any more (implies --plain)
       --sort=ORDER  numbered list order: date (oldest first, default),
                 path (original path) or none (as read)
       --newest-first  list the most recently deleted item first
@@ -1945,6 +1994,10 @@ Without PATH, print a numbered list and read an index from stdin.
         }
         if latest && all {
             eprintln!("{prog}: give --latest or --all, not both");
+            return 2;
+        }
+        if cwd_only && directory.is_some() {
+            eprintln!("{prog}: give --cwd-only or --directory, not both");
             return 2;
         }
         if target.is_some() && matcher.is_some() {
@@ -2012,8 +2065,11 @@ Without PATH, print a numbered list and read an index from stdin.
                 // came from here or below, as on FreeDesktop.
                 // The directory as given and as resolved both count, since
                 // a volume mounted on a folder may resolve to its GUID path.
-                None if cwd_only => {
-                    let dirs = cwd_forms();
+                None if cwd_only || directory.is_some() => {
+                    let dirs = match &directory {
+                        Some(d) => dir_forms(d),
+                        None => cwd_forms(),
+                    };
                     if dirs.is_empty() {
                         eprintln!("{prog}: cannot read the current directory");
                         return 1;
