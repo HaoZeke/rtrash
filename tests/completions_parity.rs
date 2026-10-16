@@ -362,6 +362,72 @@ fn bash_restore_completes_trashed_items() {
     assert!(rm.iter().any(|p| p.ends_with("/a\\ b.txt")), "{rm:?}");
 }
 
+/// bash completes `wsl restore` with the Recycle Bin items, read from
+/// `rtrash wsl list --format`, against a made-up WSL drive tree.
+#[cfg(unix)]
+#[test]
+fn bash_wsl_restore_completes_recycled_items() {
+    use rtrash::win_recycle::{encode_recycle_i_v2, FILETIME_UNIX_EPOCH};
+    let sid = "S-1-5-21-1-2-3-1001";
+    let top = std::env::temp_dir().join(format!("rtrash-compl-wsl-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&top);
+    let drives = top.join("drives");
+    let bin_dir = drives.join("c").join("$Recycle.Bin").join(sid);
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(top.join("osrelease"), "5.15.0-microsoft-standard-WSL2\n").unwrap();
+    fs::write(
+        top.join("wsl.conf"),
+        format!("[automount]\nroot = {}/\n", drives.display()),
+    )
+    .unwrap();
+    fs::write(bin_dir.join("$RAB12CD.txt"), "n").unwrap();
+    let rec = encode_recycle_i_v2(
+        Path::new(r"C:\Users\me\a b.txt"),
+        1,
+        FILETIME_UNIX_EPOCH + 1_700_000_000 * 10_000_000,
+    );
+    fs::write(bin_dir.join("$IAB12CD.txt"), rec).unwrap();
+    let exe_dir = Path::new(bin()).parent().unwrap();
+    let path = format!(
+        "{}:{}",
+        exe_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("completions/rtrash.bash");
+    let run = |words: &str| -> Vec<String> {
+        let prog = format!(
+            "source '{}'; COMP_WORDS=({words}); COMP_CWORD=$((${{#COMP_WORDS[@]}} - 1)); _rtrash_main; printf '%s\\n' \"${{COMPREPLY[@]}}\"",
+            script.display()
+        );
+        let out = Command::new("bash")
+            .args(["--norc", "--noprofile", "-c", &prog])
+            .env("PATH", &path)
+            .env("RTRASH_WSL_OSRELEASE", top.join("osrelease"))
+            .env("RTRASH_WSL_CONF", top.join("wsl.conf"))
+            .env("RTRASH_WSL_SID", sid)
+            .output()
+            .expect("run bash");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    let items = run("rtrash wsl restore ''");
+    let actions = run("rtrash wsl ''");
+    let _ = fs::remove_dir_all(&top);
+    assert!(
+        items.iter().any(|p| p.ends_with("/c/Users/me/a\\ b.txt")),
+        "{items:?}"
+    );
+    assert!(!items.contains(&"restore".to_string()), "{items:?}");
+    assert!(actions.contains(&"restore".to_string()), "{actions:?}");
+}
+
 /// Same check through fish, when it is installed.
 #[cfg(unix)]
 #[test]

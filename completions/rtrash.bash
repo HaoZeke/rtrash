@@ -138,6 +138,24 @@ _rtrash_complete_restore() {
   esac
 }
 
+# wsl: after the restore action, Recycle Bin items by their path under
+# the automount root, from `rtrash wsl list`; otherwise actions, options
+# and files.
+_rtrash_complete_wsl() {
+  local cur="${COMP_WORDS[COMP_CWORD]}" i act= p
+  for ((i = 1; i < COMP_CWORD; i++)); do
+    [[ ${COMP_WORDS[i - 1]} == wsl ]] && act=${COMP_WORDS[i]} && break
+  done
+  if [[ $act == restore && $cur != -* ]]; then
+    COMPREPLY=()
+    while IFS= read -r -d '' p; do
+      [[ $p == "$cur"* ]] && COMPREPLY+=("$(printf '%q' "$p")")
+    done < <(command rtrash wsl list --format='{path}\0' 2>/dev/null)
+    return
+  fi
+  _rtrash_complete_from _rtrash_wsl_opts
+}
+
 # rm: options, otherwise trashed original paths (a path is a pattern).
 _rtrash_complete_rm() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
@@ -220,7 +238,7 @@ _rtrash_main() {
     who) _rtrash_complete_from _rtrash_who_opts ;;
     reap) _rtrash_complete_from _rtrash_reap_opts ;;
     finder) _rtrash_complete_from _rtrash_finder_opts ;;
-    wsl) _rtrash_complete_from _rtrash_wsl_opts ;;
+    wsl) _rtrash_complete_wsl ;;
     config) _rtrash_complete_from _rtrash_config_opts ;;
     rm) _rtrash_complete_rm ;;
     setup) _rtrash_complete_from _rtrash_setup_opts ;;

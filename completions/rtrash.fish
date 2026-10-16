@@ -22,6 +22,11 @@ function __rtrash_trashed
     command $lister --format="{$argv[1]}\0" 2>/dev/null | string split0
 end
 
+# Recycle Bin items by their path under the automount root, for wsl restore.
+function __rtrash_wsl_items
+    command rtrash wsl list --format='{path}\0' 2>/dev/null | string split0
+end
+
 # Top-level rtrash: subcommands when no subcommand yet
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'put' -d 'move files to the trash (rm-compatible flags)'
 complete -c rtrash -n 'not __rtrash_seen_subcommand' -f -a 'empty' -d 'purge trashed items'
@@ -151,7 +156,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s f -l fi
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l stacks -d 'print folded stacks for flame graph tools'
 
 # wsl
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -f -a 'list restore rm empty'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl; and not __fish_seen_subcommand_from list restore rm empty' -f -a 'list restore rm empty'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl; and __fish_seen_subcommand_from restore' -f -a '(__rtrash_wsl_items)'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l older-than -x -d 'empty: items deleted more than AGE ago'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l all -d 'empty: every item, without asking'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l json -d 'list: print a JSON array'

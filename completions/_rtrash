@@ -194,7 +194,7 @@ wsl_opts=(
   '(-n --dry-run)'{-n,--dry-run}'[rm, empty: print what would go]'
   '(-f --force)'{-f,--force}'[restore over an existing file]'
   '(- *)'--help'[display help and exit]'
-  '*:file:_files'
+  '*:item:_rtrash_wsl_item'
 )
 
 finder_opts=(
@@ -278,6 +278,18 @@ rm_opts=(
   local -a items expl
   items=(${(0)"$(_call_program trashed "rtrash list --format='{$1}\\0'" 2>/dev/null)"})
   _wanted trashed expl "trashed $1" compadd -a items
+}
+
+# wsl restore: Recycle Bin items by their path under the automount root,
+# through compadd like _rtrash_trashed; files for the other actions.
+(( $+functions[_rtrash_wsl_item] )) || _rtrash_wsl_item() {
+  if [[ $line[1] != restore ]]; then
+    _files
+    return
+  fi
+  local -a items expl
+  items=(${(0)"$(_call_program wsl-items "rtrash wsl list --format='{path}\\0'" 2>/dev/null)"})
+  _wanted wsl-items expl 'recycled path' compadd -a items
 }
 
 _rtrash_dispatch() {

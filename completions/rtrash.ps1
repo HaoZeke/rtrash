@@ -61,6 +61,9 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
         $cands = @(& $trashed 'path')
     } elseif ($sub -eq 'restore' -and $wordToComplete -like '--name=*') {
         $cands = @(& $trashed 'name' | ForEach-Object { "--name=$_" })
+    } elseif ($sub -eq 'wsl' -and $wordToComplete -notlike '-*' -and (@($words | Select-Object -SkipLast ([int]($wordToComplete -ne ''))) -contains 'restore')) {
+        # wsl restore: Recycle Bin items by their path under the automount root.
+        $cands = @((@(& rtrash wsl list '--format={path}\0' 2>$null) -join "`n") -split "`0" | Where-Object { $_ -ne '' })
     } elseif (-not $sub) {
         # Bare rtrash: a subcommand, or the put options it falls through to.
         $cands = if ($wordToComplete -like '-*') { $opts['put'] + @('-h', '-V') } else { $subs }

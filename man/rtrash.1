@@ -2924,7 +2924,11 @@ Every script completes the
 .B restore
 PATH and the
 .B rm
-PATTERN with the original paths in the trash, and
+PATTERN with the original paths in the trash,
+.B wsl restore
+PATH with the Recycle Bin items from
+.BR "rtrash wsl list \-\-format" ,
+and
 .B \-\-name=
 with the trashed names, read from
 .BR "rtrash list \-\-format" .

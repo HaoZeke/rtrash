@@ -70,6 +70,17 @@ def "nu-complete rtrash trashed paths" [] {
     nu-complete rtrash trashed path
 }
 
+# Recycle Bin items by their path under the automount root, after
+# wsl restore; nothing for the other actions.
+def "nu-complete rtrash wsl items" [context: string] {
+    if not ($context | split row " " | any {|w| $w == "restore" }) {
+        return []
+    }
+    try {
+        ^rtrash wsl list "--format={path}\\0" | split row (char nul) | where $it != ""
+    } catch { [] }
+}
+
 def "nu-complete rtrash trashed names" [] {
     nu-complete rtrash trashed name
 }
@@ -345,7 +356,7 @@ export extern "rtrash wsl" [
     --force(-f)  # restore over an existing file
     --help  # display this help and exit
     action?: string@"nu-complete rtrash wsl"
-    ...paths: path
+    ...paths: string@"nu-complete rtrash wsl items"
 ]
 
 export extern "rtrash config" [
