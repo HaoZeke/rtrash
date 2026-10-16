@@ -253,6 +253,49 @@ fn list_format_size_and_matchers_read_the_recycle_bin() {
 }
 
 #[test]
+fn list_last_keeps_the_most_recently_deleted() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let lad = local_app_data("list-last");
+    let dir = m.join(format!("last-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    for n in ["old.txt", "new.txt"] {
+        let p = dir.join(n);
+        fs::write(&p, b"x").unwrap();
+        let out = cmd(&lad).arg("put").arg(&p).output().unwrap();
+        assert!(out.status.success());
+        // Keep the two deletion times apart on a coarse clock.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let scope = format!("--directory={}", dir.display());
+    let out = cmd(&lad)
+        .args(["list", scope.as_str(), "--last=1"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.contains("new.txt"), "{text}");
+    let out = cmd(&lad)
+        .args(["list", scope.as_str(), "--last=0"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).is_empty());
+    let out = cmd(&lad).args(["list", "--last=x"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let _ = cmd(&lad)
+        .args(["restore", scope.as_str(), "--all"])
+        .output();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&lad);
+}
+
+#[test]
 fn restore_of_one_txt_keeps_its_extension() {
     let Some(m) = mounted() else {
         return;

@@ -1258,6 +1258,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut matcher: Option<crate::budget::PathMatch> = None;
         let mut cwd_only = false;
         let mut directory: Option<PathBuf> = None;
+        let mut last: Option<usize> = None;
         let mut bad: Option<String> = None;
         let mut with_size = false;
         let mut format: Option<Vec<crate::listfmt::FmtPart>> = None;
@@ -1277,6 +1278,19 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 }
                 Err(e) => {
                     bad = Some(e);
+                    Some(2)
+                }
+            },
+            a if a.starts_with("--last=") => match a["--last=".len()..].parse::<usize>() {
+                Ok(n) => {
+                    last = Some(n);
+                    None
+                }
+                Err(_) => {
+                    bad = Some(format!(
+                        "--last needs a count of rows, not '{}'",
+                        &a["--last=".len()..]
+                    ));
                     Some(2)
                 }
             },
@@ -1324,6 +1338,7 @@ List items in the Windows Recycle Bin (system trash).
       --cwd-only only items that came from the current directory or below
       --directory=DIR  only items that came from DIR or below it (DIR
                    need not exist any more)
+      --last=N   only the last N rows, the N most recently deleted items
       --size     add each item's size in the Recycle Bin
       --format=TEMPLATE  print each item through TEMPLATE: {{date}} {{epoch}}
                    {{path}} {{name}} {{trash}} {{size}} (bytes); {{batch}} and
@@ -1378,6 +1393,11 @@ on Windows (there is no FreeDesktop layout here).
                     .collect();
                 let mut items = filters.apply(items, |it| it.time_deleted, item_size);
                 items.sort_by_key(|i| i.time_deleted);
+                // --last keeps the tail of the listing, as tail -n would.
+                if let Some(n) = last {
+                    let cut = items.len().saturating_sub(n);
+                    items.drain(..cut);
+                }
                 use std::io::Write;
                 let mut out = std::io::BufWriter::new(std::io::stdout().lock());
                 for it in items {
