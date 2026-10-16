@@ -39,8 +39,13 @@ impl Box_ {
     }
 
     fn run(&self, args: &[&str], stdin: &str) -> Output {
+        self.run_as(Path::new(env!("CARGO_BIN_EXE_rtrash")), args, stdin)
+    }
+
+    /// `run` with another program, such as a link named trash-restore.
+    fn run_as(&self, exe: &Path, args: &[&str], stdin: &str) -> Output {
         use std::io::Write;
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        let mut child = Command::new(exe)
             .args(args)
             .current_dir(self.work())
             .env("HOME", &self.root)
@@ -399,6 +404,36 @@ fn restore_cwd_only_scopes_the_finder_trash() {
     assert!(!there.exists());
     let o = b.run(&["restore", "--cwd-only", "--all"], "");
     assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+}
+
+#[test]
+fn trash_restore_scopes_the_finder_trash_to_the_cwd() {
+    let b = Box_::new("tcwd");
+    let away = b.root.join("away");
+    fs::create_dir_all(&away).unwrap();
+    let there = away.join("there.txt");
+    fs::write(&there, "there").unwrap();
+    assert!(b
+        .run(&["put", &there.to_string_lossy()], "")
+        .status
+        .success());
+    b.put_back("there.txt", &there);
+    let tr = b.root.join("trash-restore");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rtrash"), &tr).unwrap();
+
+    // Nothing came from work/, so trash-restore says so and restores nothing.
+    let o = b.run_as(&tr, &[], "0\n");
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(
+        out(&o).starts_with("No files trashed from current dir ('"),
+        "{}",
+        out(&o)
+    );
+    assert!(!there.exists());
+    // rtrash restore keeps every item in scope.
+    let o = b.run(&["restore", "--all"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(fs::read(&there).unwrap(), b"there");
 }
 
 #[test]

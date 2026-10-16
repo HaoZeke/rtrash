@@ -342,8 +342,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // macOS restores from the Finder Trash unless a pin or the setting
     // says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty()) {
-        // --cwd-only is --directory on the current directory.
-        let scope = match (&directory, cwd_only) {
+        // --cwd-only is --directory on the current directory, and so is
+        // trash-restore without PATH or a match, as trash-cli scopes it.
+        let cwd_scope = trash_cli && target.is_none() && matcher.is_none();
+        let scope = match (&directory, cwd_only || cwd_scope) {
             (None, true) => match std::env::current_dir() {
                 Ok(d) => Some(d),
                 Err(e) => {
@@ -359,6 +361,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 target: target.as_deref(),
                 matcher: matcher.as_ref(),
                 directory: scope.as_deref(),
+                cwd_note: cwd_scope && directory.is_none(),
                 all,
                 latest,
                 to: to.as_deref(),

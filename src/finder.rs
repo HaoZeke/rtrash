@@ -682,6 +682,8 @@ pub(crate) struct RestoreOpts<'a> {
     pub(crate) matcher: Option<&'a crate::restore::Matcher>,
     /// `--directory=DIR`: only items whose Put Back place is under DIR.
     pub(crate) directory: Option<&'a Path>,
+    /// trash-restore's own scope: with nothing in it, say so as trash-cli does.
+    pub(crate) cwd_note: bool,
     pub(crate) all: bool,
     pub(crate) latest: bool,
     /// `--to=DIR`: restore there, keeping each file name.
@@ -736,6 +738,11 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
     } else if o.all {
         placed.clone()
     } else {
+        if placed.is_empty() && o.cwd_note {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            println!("No files trashed from current dir ('{}')", cwd.display());
+            return 1;
+        }
         if placed.is_empty() {
             eprintln!("{prog}: no trashed files match");
             return 1;
