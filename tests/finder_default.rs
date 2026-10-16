@@ -458,6 +458,49 @@ fn trash_restore_takes_path_as_a_scope_on_the_finder_trash() {
 }
 
 #[test]
+fn finder_trash_restore_asks_on_a_scope() {
+    let b = Box_::new("task");
+    let sub = b.work().join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    for n in ["a.txt", "b.txt"] {
+        fs::write(sub.join(n), n).unwrap();
+        assert!(b.run(&["put", &format!("sub/{n}")], "").status.success());
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    let recs: Vec<Record> = ["a.txt", "b.txt"]
+        .iter()
+        .map(|n| Record {
+            name: n.to_string(),
+            code: *b"ptbL",
+            value: Value::Ustr(format!(
+                "{}/",
+                sub.to_string_lossy().trim_start_matches('/')
+            )),
+        })
+        .collect();
+    fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
+    let tr = b.root.join("trash-restore");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rtrash"), &tr).unwrap();
+
+    // A blank answer restores nothing, with trash-cli's one-space rows.
+    let o = b.run_as(&tr, &["sub"], "\n");
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    assert!(out(&o).contains("No files were restored"), "{}", out(&o));
+    let row = out(&o)
+        .lines()
+        .find(|l| l.starts_with("   0 "))
+        .unwrap_or("")
+        .to_string();
+    assert!(!row.is_empty() && !row.starts_with("   0  "), "{}", out(&o));
+    assert!(!sub.join("a.txt").exists() && !sub.join("b.txt").exists());
+    // Rows run oldest first; 1 is b.txt, and a.txt stays in the trash.
+    let o = b.run_as(&tr, &["sub"], "1\n");
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(fs::read(sub.join("b.txt")).unwrap(), b"b.txt");
+    assert!(!sub.join("a.txt").exists());
+}
+
+#[test]
 fn restore_matchers_work_on_the_finder_trash() {
     let b = Box_::new("match");
     for n in ["r1.log", "r2.log", "keep.txt"] {

@@ -699,6 +699,56 @@ pub(crate) struct RestoreOpts<'a> {
     pub(crate) dry_run: bool,
 }
 
+/// The numbered pick over `list` (oldest first): the restore browser on a
+/// terminal, else rows and an answer on stdin. `Err` carries the exit code.
+fn pick<'a>(
+    prog: &str,
+    list: &[&'a crate::finder_shared::Entry],
+    o: &RestoreOpts,
+) -> Result<Vec<&'a crate::finder_shared::Entry>, i32> {
+    #[cfg(feature = "tui")]
+    if !o.plain && !o.json && !o.dry_run && o.to.is_none() && crate::util::stdin_is_tty() {
+        let newest = o.newest_first.unwrap_or(true);
+        let mut refs = list.to_vec();
+        if newest {
+            refs.reverse();
+        }
+        return Err(crate::restore_tui::run(
+            prog,
+            refs,
+            o.conflict == Conflict::Overwrite,
+            newest,
+        ));
+    }
+    let _ = (o.plain, o.newest_first);
+    // trash-cli separates the columns with one space.
+    let gap = if o.path_scope { " " } else { "  " };
+    for (k, e) in list.iter().enumerate() {
+        println!(
+            "{k:4}{gap}{}{gap}{}",
+            e.date.replacen('T', " ", 1),
+            crate::util::term_path(&e.shown)
+        );
+    }
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line);
+    if read.is_ok() && line.trim().is_empty() && o.path_scope {
+        println!("No files were restored");
+        return Err(0);
+    }
+    if read.is_err() || line.trim().is_empty() {
+        eprintln!("{prog}: provide an index 0..{} on stdin", list.len() - 1);
+        return Err(1);
+    }
+    match crate::restore::parse_selection(&line, list.len()) {
+        Ok(idx) => Ok(idx.into_iter().map(|k| list[k]).collect()),
+        Err(e) => {
+            eprintln!("{prog}: invalid selection: {e}");
+            Err(1)
+        }
+    }
+}
+
 /// `restore` on the Finder trashes. PATH names the item by its Put Back
 /// place or its name in the trash, and `--name`, `--glob` and `--regex`
 /// match as on the FreeDesktop trash; several matches need `--all` or
@@ -730,7 +780,8 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
         let abs = std::env::current_dir()
             .map(|c| c.join(t))
             .unwrap_or_else(|_| t.to_path_buf());
-        rows.iter()
+        let matched: Vec<&crate::finder_shared::Entry> = rows
+            .iter()
             .filter(|e| {
                 e.original
                     .as_deref()
@@ -740,7 +791,16 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
                         && e.original.is_some()
                         && crate::finder_shared::under(&e.shown, &abs))
             })
-            .collect()
+            .collect();
+        // trash-restore asks even on one match, as trash-cli does.
+        if o.path_scope && !o.all && !o.latest && !matched.is_empty() {
+            match pick(prog, &matched, o) {
+                Ok(v) => v,
+                Err(c) => return c,
+            }
+        } else {
+            matched
+        }
     } else if o.all {
         placed.clone()
     } else {
@@ -753,34 +813,9 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
             eprintln!("{prog}: no trashed files match");
             return 1;
         }
-        #[cfg(feature = "tui")]
-        if !o.plain && !o.json && !o.dry_run && o.to.is_none() && crate::util::stdin_is_tty() {
-            let newest = o.newest_first.unwrap_or(true);
-            let mut refs = placed.clone();
-            if newest {
-                refs.reverse();
-            }
-            return crate::restore_tui::run(prog, refs, o.conflict == Conflict::Overwrite, newest);
-        }
-        let _ = (o.plain, o.newest_first);
-        for (k, e) in placed.iter().enumerate() {
-            println!(
-                "{k:4}  {}  {}",
-                e.date.replacen('T', " ", 1),
-                crate::util::term_path(&e.shown)
-            );
-        }
-        let mut line = String::new();
-        if std::io::stdin().read_line(&mut line).is_err() || line.trim().is_empty() {
-            eprintln!("{prog}: provide an index 0..{} on stdin", placed.len() - 1);
-            return 1;
-        }
-        match crate::restore::parse_selection(&line, placed.len()) {
-            Ok(idx) => idx.into_iter().map(|k| placed[k]).collect(),
-            Err(e) => {
-                eprintln!("{prog}: invalid selection: {e}");
-                return 1;
-            }
+        match pick(prog, &placed, o) {
+            Ok(v) => v,
+            Err(c) => return c,
         }
     };
     if chosen.is_empty() {
@@ -790,7 +825,11 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
     // Rows come oldest first, so the newest match is the last.
     if o.latest {
         chosen = vec![*chosen.last().unwrap()];
-    } else if chosen.len() > 1 && !o.all && (o.matcher.is_some() || o.target.is_some()) {
+    } else if chosen.len() > 1
+        && !o.all
+        && !(o.path_scope && o.target.is_some())
+        && (o.matcher.is_some() || o.target.is_some())
+    {
         if o.target.is_some() {
             // Several items with one Put Back place: the newest, as before.
             chosen = vec![*chosen.last().unwrap()];
