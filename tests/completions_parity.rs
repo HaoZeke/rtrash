@@ -688,7 +688,8 @@ fn powershell_script_is_embedded_and_completes() {
         got,
         [
             "--dangling",
-            "--latest",
+            // The restore table lists --larger-than= before --latest.
+            "--larger-than= --latest",
             "keys",
             "--dry-run --verbose --older-than= --max-size= --prune= --until-free= --all --json --help --version"
         ]
@@ -784,7 +785,8 @@ fn elvish_script_is_embedded_and_completes() {
         .lines()
         .map(str::to_string)
         .collect();
-    assert_eq!(got, ["--dangling", "--latest", "keys"]);
+    // The elvish &restore list has --larger-than= before --latest.
+    assert_eq!(got, ["--dangling", "--larger-than= --latest", "keys"]);
 }
 
 /// Long options in each Windows help text of src/win_recycle.rs, keyed by
