@@ -55,7 +55,9 @@ echo "ok   plain put, list and restore"
 
 "$rt" put "$f" || fail "second put"
 listed "$f" || fail "second list"
-name=$("$rt" finder list | awk -F' -> ' -v p="$f" '$2 == p { print $1; exit }')
+# awk reads to the end: an early exit would close the pipe, and the
+# 141 rtrash then exits with fails the step under pipefail.
+name=$("$rt" finder list | awk -F' -> ' -v p="$f" '$2 == p && n == "" { n = $1 } END { print n }')
 [[ -n $name ]] || fail "finder list does not show the item"
 sleep 1  # the age cut counts whole seconds
 "$rt" empty --plain --older-than=0 || fail "plain empty"
