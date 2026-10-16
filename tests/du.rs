@@ -19,7 +19,12 @@ struct Tree {
 
 impl Tree {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("rtrash-du-{}-{tag}", std::process::id()));
+        // Tests run in parallel in one process, so the pid alone does not
+        // keep two trees apart; a counter does, even if two tags clash.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("rtrash-du-{}-{n}-{tag}", std::process::id());
+        let root = std::env::temp_dir().join(name);
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         Tree {
@@ -743,7 +748,7 @@ fn show_mtime_swaps_age_for_a_date_column() {
 
 #[test]
 fn type_filters_count_files_by_extension() {
-    let t = Tree::new("types");
+    let t = Tree::new("type-filters");
     t.file("a/disc.iso", 400_000);
     t.file("a/b/notes.yaml", 30_000);
     t.file("c/data.json", 20_000);
