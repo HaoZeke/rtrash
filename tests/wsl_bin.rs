@@ -4,6 +4,8 @@
 //! for the call to powershell.exe.
 #![cfg(unix)]
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,8 +21,7 @@ struct Fake {
 
 impl Fake {
     fn new(tag: &str) -> Self {
-        let top = std::env::temp_dir().join(format!("rtrash-wslbin-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&top);
+        let top = common::scratch_dir("wslbin", tag);
         let root = top.join("drives");
         fs::create_dir_all(root.join("c").join("$Recycle.Bin").join(SID)).unwrap();
         fs::write(top.join("osrelease"), "5.15.0-microsoft-standard-WSL2\n").unwrap();

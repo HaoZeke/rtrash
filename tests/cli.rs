@@ -2,6 +2,8 @@
 //! Windows sends put to the Recycle Bin instead, so these run on Unix only.
 #![cfg(unix)]
 
+mod common;
+
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -19,8 +21,7 @@ struct Sandbox {
 
 impl Sandbox {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("rtrash-test-{}-{tag}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = common::scratch_dir("test", tag);
         fs::create_dir_all(root.join("work")).unwrap();
         // put records originals with symlinked parents resolved (on macOS
         // the temp dir sits under /var, a symlink to /private/var), so the

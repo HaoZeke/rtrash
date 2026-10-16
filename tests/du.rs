@@ -4,6 +4,8 @@
 //! not make them by default), symlinks (they need a privilege there), the
 //! GNU du parity check, and the FreeDesktop trash row.
 
+mod common;
+
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -19,14 +21,7 @@ struct Tree {
 
 impl Tree {
     fn new(tag: &str) -> Self {
-        // Tests run in parallel in one process, so the pid alone does not
-        // keep two trees apart; a counter does, even if two tags clash.
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let name = format!("rtrash-du-{}-{n}-{tag}", std::process::id());
-        let root = std::env::temp_dir().join(name);
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
+        let root = common::scratch_dir("du", tag);
         Tree {
             root: plain(fs::canonicalize(&root).unwrap()),
         }

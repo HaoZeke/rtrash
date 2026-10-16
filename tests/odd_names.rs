@@ -4,6 +4,8 @@
 //! finish without a panic, and restore must bring back the exact bytes.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -58,8 +60,7 @@ struct Sb {
 }
 impl Sb {
     fn new(tag: &str) -> Sb {
-        let root = std::env::temp_dir().join(format!("rtrash-odd-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = common::scratch_dir("odd", tag);
         fs::create_dir_all(root.join("w")).unwrap();
         Sb { root }
     }

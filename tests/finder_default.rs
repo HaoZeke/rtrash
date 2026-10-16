@@ -4,6 +4,8 @@
 //! then writes the Put Back record Finder keeps in `.DS_Store`.
 #![cfg(unix)]
 
+mod common;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -17,8 +19,7 @@ struct Box_ {
 
 impl Box_ {
     fn new(tag: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("rtrash-fd-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = common::scratch_dir("fd", tag);
         fs::create_dir_all(root.join("work")).unwrap();
         let fake = root.join("osascript");
         fs::write(
