@@ -2010,6 +2010,9 @@ fn trash_cli_command_lines_work_under_the_trash_names() {
     // -i asks first; anything but y keeps the trash.
     let out = run_as("trash-empty", &["-i", "--trash-dir", &t], "n\n");
     assert!(stderr_of(&out).contains("Proceed? (y/N)"));
+    // Each trash line names its size and item count.
+    let err = stderr_of(&out);
+    assert!(err.contains(", 1 item)"), "{err}");
     assert_eq!(trash_names(&sb), vec!["a"]);
     let out = run_as("trash-empty", &["-i", "--trash-dir", &t], "y\n");
     assert!(out.status.success(), "{}", stderr_of(&out));

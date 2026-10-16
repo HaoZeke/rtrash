@@ -195,7 +195,8 @@ fn unscoped(opts: &Opts) -> bool {
 fn confirm(dirs: &[TrashDir]) -> bool {
     eprintln!("Would empty the following trash directories:");
     for d in dirs {
-        eprintln!("    - {}", d.root.display());
+        let (size, n) = holds(&d.files());
+        eprintln!("    - {} ({size}, {n})", d.root.display());
     }
     eprint!("Proceed? (y/N) ");
     let mut line = String::new();
@@ -203,6 +204,14 @@ fn confirm(dirs: &[TrashDir]) -> bool {
         return false;
     }
     matches!(line.trim(), "y" | "Y" | "yes" | "Yes")
+}
+
+/// What a trash's payload directory takes on disk and how many items sit
+/// at its top, as `12.0 KiB` and `3 items`, for the `-i` prompt.
+fn holds(files: &std::path::Path) -> (String, String) {
+    let n = fs::read_dir(files).map_or(0, |d| d.flatten().count()) as u64;
+    let size = crate::util::format_bytes(crate::fastdelete::disk_usage(files));
+    (size, crate::util::plural(n, "item", "items"))
 }
 
 fn usage_err(prog: &str, msg: &str) -> i32 {
@@ -330,7 +339,14 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
         }
         if opts.interactive && !opts.dry_run {
-            eprint!("Would empty the Finder Trash. Proceed? (y/N) ");
+            let (mut bytes, mut n) = (0u64, 0u64);
+            for t in crate::finder::trashes() {
+                bytes += crate::fastdelete::disk_usage(&t);
+                n += fs::read_dir(&t).map_or(0, |d| d.flatten().count()) as u64;
+            }
+            let size = crate::util::format_bytes(bytes);
+            let items = crate::util::plural(n, "item", "items");
+            eprint!("Would empty the Finder Trash ({size}, {items}). Proceed? (y/N) ");
             let mut line = String::new();
             let _ = io::stdin().read_line(&mut line);
             if !matches!(line.trim(), "y" | "Y" | "yes" | "Yes") {
