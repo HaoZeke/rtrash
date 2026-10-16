@@ -267,6 +267,15 @@ fn restore_of_one_txt_keeps_its_extension() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!f.exists());
+    let out = cmd(&lad).args(["restore", "-n"]).arg(&f).output().unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(said.starts_with("would restore '"), "{said}");
+    assert!(!f.exists(), "a dry run restored the file");
     let out = cmd(&lad).arg("restore").arg(&f).output().unwrap();
     assert!(
         out.status.success(),
@@ -298,6 +307,18 @@ fn restore_batch_last_brings_back_the_latest_put() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!a.exists() && !b.exists());
+    let out = cmd(&lad)
+        .args(["restore", "--dry-run", "--batch=last"])
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(said.matches("would restore '").count(), 2, "{said}");
+    assert!(!a.exists() && !b.exists(), "a dry run restored the run");
     let out = cmd(&lad)
         .args(["restore", "--batch=last"])
         .output()

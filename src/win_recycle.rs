@@ -1791,9 +1791,14 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut newest_first = false;
         let mut target: Option<PathBuf> = None;
         let mut last_run = false;
+        let mut dry_run = false;
         for arg in args {
             match arg.as_str() {
                 "-f" | "--force" => force = true,
+                "-n" | "--dry-run" => {
+                    dry_run = true;
+                    plain = true;
+                }
                 "--batch=last" => last_run = true,
                 a if a.starts_with("--batch=") => {
                     eprintln!(
@@ -1816,6 +1821,7 @@ Without PATH, print a numbered list and read an index from stdin.
 
   -f, --force   overwrite when the destination exists (best-effort)
       --plain   numbered selection instead of the browser
+  -n, --dry-run show where each chosen item would go and change nothing
       --newest-first  list the most recently deleted item first
       --oldest-first  list the oldest deleted item first (default)
       --batch=last  restore every item the latest put moved, by the
@@ -1859,7 +1865,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 return 2;
             }
             return match last_put_items(prog, &items) {
-                Ok(run) => restore_one(prog, run, force),
+                Ok(run) => restore_one(prog, run, force, dry_run),
                 Err(c) => c,
             };
         }
@@ -1890,7 +1896,7 @@ Without PATH, print a numbered list and read an index from stdin.
             return 1;
         }
         if matches.len() == 1 {
-            return restore_one(prog, matches, force);
+            return restore_one(prog, matches, force, dry_run);
         }
         matches.sort_by_key(|it| it.time_deleted);
         if newest_first {
@@ -1925,7 +1931,7 @@ Without PATH, print a numbered list and read an index from stdin.
             return 1;
         }
         let item = matches.into_iter().nth(idx).unwrap();
-        restore_one(prog, vec![item], force)
+        restore_one(prog, vec![item], force, dry_run)
     }
 
     /// A Recycle Bin item as the restore browser sees it.
@@ -1975,7 +1981,10 @@ Without PATH, print a numbered list and read an index from stdin.
         }
     }
 
-    fn restore_one(prog: &str, items: Vec<TrashItem>, force: bool) -> i32 {
+    fn restore_one(prog: &str, items: Vec<TrashItem>, force: bool, dry_run: bool) -> i32 {
+        if dry_run {
+            return dry_restore(&items, force);
+        }
         for it in &items {
             let dest = original_of(it);
             if dest.exists() && !force {
@@ -2011,6 +2020,26 @@ Without PATH, print a numbered list and read an index from stdin.
                     dest.display()
                 );
                 status = 1;
+            }
+        }
+        status
+    }
+
+    /// What restoring `items` would do, as the FreeDesktop dry run says
+    /// it: would restore, or would fail when the original location is
+    /// taken without -f or the payload is gone. Nothing moves.
+    fn dry_restore(items: &[TrashItem], force: bool) -> i32 {
+        let mut status = 0;
+        for it in items {
+            let dest = original_of(it);
+            if Path::new(&it.id).symlink_metadata().is_err() {
+                println!("would fail: the payload of '{}' is gone", dest.display());
+                status = 1;
+            } else if dest.symlink_metadata().is_ok() && !force {
+                println!("would fail: '{}' exists", dest.display());
+                status = 1;
+            } else {
+                println!("would restore '{}'", dest.display());
             }
         }
         status

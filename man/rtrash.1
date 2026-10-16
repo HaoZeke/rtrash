@@ -1843,9 +1843,13 @@ With
 .BR \-\-batch ,
 it runs
 .BR "undo \-\-dry\-run" .
-FreeDesktop trashes only: on the macOS Finder Trash it needs a
-.B \-\-trash\-dir
-pin, and the Windows build does not take it.
+On Windows it prints
+.B would restore
+or
+.B would fail
+for each Recycle Bin item, and
+.B \-\-batch=last
+previews the latest put run.
 .TP
 .BI \-\-batch =ID
 Restore one whole put run, as
