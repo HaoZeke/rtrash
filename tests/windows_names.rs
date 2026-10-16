@@ -147,7 +147,12 @@ fn trash_restore_takes_path_as_a_scope() {
     let _ = fs::remove_dir_all(&dir);
     let said = String::from_utf8_lossy(&blank.stdout).into_owned();
     assert_eq!(blank.status.code(), Some(0), "{said}");
-    assert!(said.contains("  0 "), "{said}");
+    // trash-cli's row: a width-4 index, then one space between columns.
+    let row = said.lines().find(|l| l.starts_with("   0 ")).unwrap_or("");
+    assert_eq!(row.as_bytes().get(15), Some(&b' '), "{said}");
+    assert!(row.ends_with("inner.txt"), "{said}");
+    let asked = String::from_utf8_lossy(&blank.stderr).into_owned();
+    assert!(asked.contains("What file to restore [0..0]"), "{asked}");
     assert!(said.contains("No files were restored"), "{said}");
     assert!(kept, "a blank answer restored the item");
     assert!(

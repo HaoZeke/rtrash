@@ -2217,10 +2217,22 @@ Without PATH, print a numbered list and read an index from stdin.
         // Numbered pick.
         for (i, it) in matches.iter().enumerate() {
             let date = platform::epoch_to_iso_utc(it.time_deleted);
-            let row = format!(
-                "  {i} {}",
-                platform::format_deletion_list_line(Some(&date), &original_of(it))
-            );
+            // trash-cli prints `   0 2026-01-02 03:04:05 PATH`: a width-4
+            // index and one space between the columns.
+            let row = if trash_cli {
+                format!(
+                    "{i:4} {}",
+                    platform::format_deletion_list_line(
+                        Some(&date.replacen('T', " ", 1)),
+                        &original_of(it)
+                    )
+                )
+            } else {
+                format!(
+                    "  {i} {}",
+                    platform::format_deletion_list_line(Some(&date), &original_of(it))
+                )
+            };
             // Keep stdout for the JSON summary.
             if json {
                 eprintln!("{row}");
@@ -2228,7 +2240,12 @@ Without PATH, print a numbered list and read an index from stdin.
                 println!("{row}");
             }
         }
-        eprint!("What to restore [0..{}]: ", matches.len() - 1);
+        let ask = if trash_cli {
+            "What file to restore"
+        } else {
+            "What to restore"
+        };
+        eprint!("{ask} [0..{}]: ", matches.len() - 1);
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() {
             return 1;
