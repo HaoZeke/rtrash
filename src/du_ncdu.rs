@@ -768,7 +768,32 @@ pub fn export(
     created: i64,
     w: &mut impl Write,
 ) -> io::Result<Exported> {
-    walk_export(root, one_file_system, spec, &mut JsonSink { w, created })
+    let mounts = Mounts {
+        one_file_system,
+        include_kernfs: false,
+    };
+    export_with(root, mounts, spec, created, w)
+}
+
+/// Which mounts below the root an export walks into.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Mounts {
+    /// `-x`: none on another file system.
+    pub one_file_system: bool,
+    /// `--include-kernfs`: also proc, sysfs and the like, which are left
+    /// out by default as a scan leaves them out.
+    pub include_kernfs: bool,
+}
+
+/// [`export`] with both mount settings.
+pub fn export_with(
+    root: &Path,
+    mounts: Mounts,
+    spec: Option<&du_filter::Spec>,
+    created: i64,
+    w: &mut impl Write,
+) -> io::Result<Exported> {
+    walk_export(root, mounts, spec, &mut JsonSink { w, created })
 }
 
 /// [`export`] in ncdu 2's binary format (`ncdu -O`), which ncdu 2.6 and
@@ -779,20 +804,31 @@ pub fn export_binary(
     spec: Option<&du_filter::Spec>,
     w: &mut impl Write,
 ) -> io::Result<Exported> {
-    walk_export(
-        root,
+    let mounts = Mounts {
         one_file_system,
-        spec,
-        &mut crate::du_ncdu_bin::Writer::new(w),
-    )
+        include_kernfs: false,
+    };
+    export_binary_with(root, mounts, spec, w)
+}
+
+/// [`export_binary`] with both mount settings.
+pub fn export_binary_with(
+    root: &Path,
+    mounts: Mounts,
+    spec: Option<&du_filter::Spec>,
+    w: &mut impl Write,
+) -> io::Result<Exported> {
+    let sink = &mut crate::du_ncdu_bin::Writer::new(w);
+    walk_export(root, mounts, spec, sink)
 }
 
 fn walk_export(
     root: &Path,
-    one_file_system: bool,
+    mounts: Mounts,
     spec: Option<&du_filter::Spec>,
     sink: &mut impl Sink,
 ) -> io::Result<Exported> {
+    let one_file_system = mounts.one_file_system;
     let abs = crate::du::absolute(root)?;
     let st = du_fs::lstat(&abs)?;
     if !st.is_dir() {
@@ -897,6 +933,17 @@ fn walk_export(
             out.unreadable += 1;
             continue;
         };
+        // proc, sysfs and the like stay out, as in a scan: written by
+        // name and marked as another file system.
+        if !mounts.include_kernfs && st.dev != root_dev && dir.is_kernfs() {
+            sink.leaf(
+                name.to_bytes(),
+                Leaf::Dir(&st, DirLeaf::OtherFs),
+                parent_dev,
+            )?;
+            out.excluded += 1;
+            continue;
+        }
         let (entries, failed) = dir.entries();
         let (git, ignore) = repo_markers(&entries);
         if let Some(f) = &filter {
@@ -971,6 +1018,33 @@ fn path_bytes(p: &Path) -> Vec<u8> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// A cgroup mount under /sys/fs is left out of an export unless
+    /// asked for, as a scan leaves it out.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exports_leave_kernel_file_systems_out() {
+        let cg = Path::new("/sys/fs/cgroup");
+        let dev = |p: &str| du_fs::lstat(Path::new(p)).ok().map(|s| s.dev);
+        let is_mount = dev("/sys/fs/cgroup") != dev("/sys/fs")
+            && du_fs::Dir::open(cg).is_ok_and(|d| d.is_kernfs());
+        if !is_mount || !cg.join("cgroup.procs").exists() {
+            return;
+        }
+        let run = |include_kernfs| {
+            let mounts = Mounts {
+                one_file_system: false,
+                include_kernfs,
+            };
+            let mut buf = Vec::new();
+            export_with(Path::new("/sys/fs"), mounts, None, 0, &mut buf).unwrap();
+            String::from_utf8_lossy(&buf).into_owned()
+        };
+        let skipped = run(false);
+        assert!(!skipped.contains("\"cgroup.procs\""), "cgroup walked");
+        assert!(skipped.contains("\"cgroup\""), "cgroup not named");
+        assert!(run(true).contains("\"cgroup.procs\""));
+    }
 
     fn read(s: &str) -> Snapshot {
         parse(s.as_bytes()).unwrap()

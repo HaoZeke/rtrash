@@ -1896,6 +1896,7 @@ fn dupes_out(
         crate::du_dupes::Opts {
             min_size,
             one_file_system: opts.one_file_system,
+            include_kernfs: opts.include_kernfs,
         },
     );
     let groups = crate::du_dupes::find(files);
@@ -1945,13 +1946,16 @@ fn dupes_out(
 
 fn ncdu_out(prog: &str, path: &Path, out: &Path, binary: bool, opts: &ScanOpts, now: i64) -> i32 {
     let spec = opts.filter.as_deref();
-    let xdev = opts.one_file_system;
+    let mounts = crate::du_ncdu::Mounts {
+        one_file_system: opts.one_file_system,
+        include_kernfs: opts.include_kernfs,
+    };
     let write = |w: &mut dyn Write| {
         let mut w = io::BufWriter::new(w);
         if binary {
-            crate::du_ncdu::export_binary(path, xdev, spec, &mut w)
+            crate::du_ncdu::export_binary_with(path, mounts, spec, &mut w)
         } else {
-            crate::du_ncdu::export(path, xdev, spec, now, &mut w)
+            crate::du_ncdu::export_with(path, mounts, spec, now, &mut w)
         }
     };
     let written = if out.as_os_str() == "-" {

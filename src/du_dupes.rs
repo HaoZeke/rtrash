@@ -55,6 +55,8 @@ pub struct Group {
 pub struct Opts {
     pub min_size: u64,
     pub one_file_system: bool,
+    /// Also walk proc, sysfs and the like below a root (`--include-kernfs`).
+    pub include_kernfs: bool,
 }
 
 /// Trash directories hold what is already on its way out, so the walk
@@ -131,7 +133,13 @@ fn walk_dir(dir: &Path, root_dev: u64, opts: Opts, home: Option<(u64, u64)>) -> 
     let deeper: Vec<File> = subdirs
         .par_iter()
         .flat_map(|d| {
-            if opts.one_file_system && du_fs::lstat(d).is_ok_and(|s| s.dev != root_dev) {
+            let other_fs = du_fs::lstat(d).is_ok_and(|s| s.dev != root_dev);
+            if other_fs && opts.one_file_system {
+                return Vec::new();
+            }
+            // As a scan does: proc, sysfs and the like stay out.
+            let kernfs = || du_fs::Dir::open(d).is_ok_and(|x| x.is_kernfs());
+            if other_fs && !opts.include_kernfs && kernfs() {
                 return Vec::new();
             }
             walk_dir(d, root_dev, opts, home)
@@ -707,6 +715,7 @@ mod tests {
         let opts = Opts {
             min_size: 1,
             one_file_system: false,
+            include_kernfs: false,
         };
         let groups = find(walk(std::slice::from_ref(&t), opts));
         assert_eq!(groups.len(), 2, "{groups:?}");
