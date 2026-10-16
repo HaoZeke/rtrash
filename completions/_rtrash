@@ -146,6 +146,8 @@ du_opts=(
   '--show-mtime[show the modification time in place of AGE]'
   '--show-relative-size[add each row as a percent of its PATH total]'
   '--reverse[print each table in reverse, the top row last]'
+  '(-s --summarize --skip-total)'{-s,--summarize}'[print only the totals, no rows]'
+  '(-s --summarize)--skip-total[print the rows without the Total lines]'
   '--inodes[rank by inodes and total them]'
   '--unique[add a UNIQUE column of bytes no other file shares]'
   '--shared[count each shared extent once in sizes]'

@@ -66,6 +66,8 @@ directories appear as one `trash` row and are never printed by --print0.
       --show-relative-size  add a SHARE column: each row's percent of its
                           PATH total (apparent size with --apparent, else
                           disk use); the JSON rows keep the byte counts
+  -s, --summarize       print only the totals, no rows (GNU du -s, gdu)
+      --skip-total      print the rows without the Total lines (dust)
       --reverse         print each table in reverse, the top row last
                           (dust -r); JSON and --print0 keep the ranking
       --inodes          rank by inodes, as --sort=items: files and
@@ -2681,10 +2683,6 @@ fn parse_count(s: &str, what: &str) -> Result<usize, String> {
         .map_err(|_| format!("invalid {what} '{s}'"))
 }
 
-/// Value of `--name=V` or of the next argument for `--name V` / `-n V`.
-/// The paths of a `--files-from` (one per line) or `--files0-from` (NUL
-/// separated) list, read from FILE or, for `-`, stdin. Blank entries are
-/// skipped; a line's trailing CR goes, so CRLF lists work.
 /// `--files-from=FILE` or `--files0-from=FILE` (true for the NUL form).
 type PathListArg<'a> = Option<(Result<&'a str, String>, bool)>;
 
@@ -2695,6 +2693,9 @@ fn path_list_arg<'a>(args: &'a [String], i: &mut usize, arg: &'a str) -> PathLis
     take_value(args, i, arg, "--files0-from", None).map(|v| (v, true))
 }
 
+/// The paths of a `--files-from` (one per line) or `--files0-from` (NUL
+/// separated) list, read from FILE or, for `-`, stdin. Blank entries are
+/// skipped; a line's trailing CR goes, so CRLF lists work.
 fn read_path_list(src: &str, nul: bool) -> io::Result<Vec<PathBuf>> {
     let mut bytes = Vec::new();
     if src == "-" {
@@ -2723,6 +2724,7 @@ fn read_path_list(src: &str, nul: bool) -> io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// Value of `--name=V` or of the next argument for `--name V` / `-n V`.
 fn take_value<'a>(
     args: &'a [String],
     i: &mut usize,
@@ -2810,6 +2812,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut show_mtime = false;
     let mut relative = false;
     let mut reverse = false;
+    let mut summarize = false;
+    let mut skip_total = false;
     let now = crate::util::now_epoch();
     // Defaults from the config file; the options below override them.
     let cfg = crate::config::get();
@@ -2990,6 +2994,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--show-mtime" => show_mtime = true,
                 "--show-relative-size" => relative = true,
                 "--reverse" => reverse = true,
+                // GNU du -s and gdu --summarize: the totals, no rows.
+                "-s" | "--summarize" => summarize = true,
+                "--skip-total" => skip_total = true,
                 "--inodes" => opts.sort = SortKey::Items,
                 "--all-dirs" => opts.all_dirs = true,
                 "--artefacts" => opts.artefacts_only = true,
@@ -3045,6 +3052,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
         i += 1;
+    }
+    if summarize {
+        // After the loop, so a later -n does not bring rows back.
+        opts.top = 0;
+    }
+    if summarize && skip_total {
+        eprintln!("{prog}: give --summarize or --skip-total, not both");
+        return 2;
     }
     if !keep_types.is_empty() {
         // First, so every --exclude and --exclude-type still applies.
@@ -3275,7 +3290,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     reverse,
                 },
             );
-            for t in &report.roots {
+            for t in report.roots.iter().filter(|_| !skip_total) {
                 println!(
                     "Total {}: {} on disk, {} apparent",
                     crate::util::term_path(&t.path),
@@ -3442,7 +3457,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             print_table(&opts.sort.title("directories"), &report.dirs, now, cols);
             print_table(&opts.sort.title("files"), &report.files, now, cols);
         }
-        for t in &report.roots {
+        // --skip-total: the rows alone, as dust --skip-total.
+        for t in report.roots.iter().filter(|_| !skip_total) {
             let kind = t.artefact.map(|k| format!(" ({k})")).unwrap_or_default();
             // Under -L a repeat may come through a symlink as well as a
             // hard link, so the total names both as repeated names.

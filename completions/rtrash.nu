@@ -215,6 +215,8 @@ export extern "rtrash du" [
     --show-mtime  # show the local modification time (YYYY-MM-DD HH:MM)
     --show-relative-size  # add a SHARE column: each row's percent of its
     --reverse  # print each table in reverse, the top row last
+    --summarize(-s)  # print only the totals, no rows (GNU du -s, gdu)
+    --skip-total  # print the rows without the Total lines (dust)
     --inodes  # rank by inodes, as --sort=items: files and
     --types  # list file types instead of directories and files:
     --unique  # add a UNIQUE column: the bytes in extents no other

@@ -1191,6 +1191,19 @@ that holds it, by apparent size with
 .BR \-\-apparent ,
 else by disk use. The JSON rows keep the byte counts.
 .TP
+.BR \-s ", " \-\-summarize
+Print only the Total lines, no rows, as
+.B du \-s
+and
+.B gdu \-\-summarize
+do; the same as
+.BR "\-n 0" .
+.TP
+.B \-\-skip\-total
+Print the rows without the Total lines, as
+.B dust \-\-skip\-total
+does.
+.TP
 .B \-\-reverse
 Print each table in reverse, so the top row comes last, next to the
 prompt, as

@@ -845,6 +845,31 @@ fn reverse_prints_the_top_row_last() {
 }
 
 #[test]
+fn summarize_and_skip_total_split_rows_from_totals() {
+    let t = Tree::new("du-summarize");
+    t.file("d/a.bin", 100_000);
+    let text = |args: &[&str]| -> String {
+        let out = t.du(args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // Totals only, even with a later -n.
+    let sum = text(&["--no-git", "-s", "-n", "5"]);
+    assert!(sum.contains("Total "), "{sum}");
+    assert!(!sum.lines().any(|l| l.ends_with("a.bin")), "{sum}");
+    // Rows only.
+    let rows = text(&["--no-git", "--skip-total"]);
+    assert!(rows.lines().any(|l| l.ends_with("a.bin")), "{rows}");
+    assert!(!rows.contains("Total "), "{rows}");
+    let both = t.du(&["--summarize", "--skip-total"]);
+    assert_eq!(both.status.code(), Some(2));
+}
+
+#[test]
 fn no_hidden_leaves_dot_entries_out() {
     let t = Tree::new("nohidden");
     t.file("seen/a.bin", 100_000);
