@@ -29,6 +29,8 @@ permanent delete). Use --plain to skip the TUI.
   -i, --interactive  list the trash directories and ask before emptying
                      them (as trash-cli); skips the TUI
   -f, --force      do not ask (cancels an earlier -i)
+      --max-count=N  refuse, deleting nothing, when more than N items
+                     would go (also RTRASH_MAX_PERMANENT)
       --plain      skip TUI; non-interactive empty (also used when stdin is not a TTY)
       --all        allow an empty with no DAYS, --max-size, --until-free or
                      --trash-dir to remove items other puts left; without
@@ -269,6 +271,15 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 opts.trash_dirs
                     .push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
+            a if a.starts_with("--max-count=") => match crate::permanent_guard::max_count_arg(a) {
+                Some(Ok(n)) => crate::permanent_guard::set_max_count(n),
+                _ => {
+                    return usage_err(
+                        prog,
+                        &format!("--max-count takes a whole number of items, not '{a}'"),
+                    )
+                }
+            },
             a if a.starts_with("--max-size=") => {
                 match crate::retention::parse_size(&a["--max-size=".len()..]) {
                     Some(n) => opts.max_size = Some(n),
@@ -427,6 +438,35 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
 
     // A size budget alone removes nothing by age.
     let age_pass = !(opts.max_size.is_some() && cutoff.is_none());
+
+    // A cap counts what would go first, so a refused empty deletes nothing.
+    if !opts.dry_run && crate::permanent_guard::cap().is_some() {
+        let mut n = if age_pass {
+            would_remove(&dirs, cutoff)
+        } else {
+            0
+        };
+        if let Some(max) = opts.max_size {
+            // The age cut runs first; gone_before leaves out what it takes.
+            n += crate::retention::prune(
+                prog,
+                &dirs,
+                &crate::retention::Prune {
+                    max,
+                    policy: opts.prune,
+                    dry_run: true,
+                    verbose: false,
+                    protect_batch: None,
+                    gone_before: cutoff,
+                    free_inodes: 0,
+                },
+            )
+            .removed;
+        }
+        if let Some(code) = crate::permanent_guard::check_count(prog, n) {
+            return code;
+        }
+    }
     for dir in dirs.iter().filter(|_| age_pass) {
         // Exclusive lock for this trash root so put cannot interleave a half pair.
         let _lock = match trashdir::TrashLock::acquire(&dir.root) {
@@ -537,6 +577,33 @@ fn until_free(prog: &str, spec: &str, floor: crate::reap::Floor, opts: &Opts) ->
         opts.verbose,
         opts.json,
     )
+}
+
+/// How many items a plain empty of `dirs` would delete: every child of
+/// files/ for a full empty, else the records older than `cutoff`.
+fn would_remove(dirs: &[TrashDir], cutoff: Option<i64>) -> u64 {
+    let old_record = |e: &fs::DirEntry, cut: i64| {
+        let fname = e.file_name();
+        let fname = crate::util::str_from_os_ref(&fname);
+        if crate::util::trash_item_name(&fname).is_none() {
+            return false;
+        }
+        let parsed = info::read_bounded(&e.path(), info::RECORD_CAP)
+            .map(|c| info::parse_bytes(&c))
+            .ok();
+        is_old(
+            parsed.as_ref().and_then(|i| i.deletion_date.as_deref()),
+            cut,
+        )
+    };
+    dirs.iter()
+        .map(|dir| match cutoff {
+            None => fs::read_dir(dir.files()).map_or(0, |r| r.count() as u64),
+            Some(cut) => fs::read_dir(dir.info()).map_or(0, |r| {
+                r.flatten().filter(|e| old_record(e, cut)).count() as u64
+            }),
+        })
+        .sum()
 }
 
 /// Older-than-cutoff check. An entry with a missing or unreadable
@@ -821,7 +888,9 @@ fn full_empty_wipe(
 
     // A payload that cannot go stays, with its .trashinfo; the rest of the
     // trash still empties, and the failures are reported at the end.
-    if let Err(e) = crate::permanent_guard::gate() {
+    // The whole trash goes at once, so the cap takes every item or none.
+    let items = fs::read_dir(&files_dir).map_or(0, |r| r.count() as u64);
+    if let Err(e) = crate::permanent_guard::gate_many(items) {
         eprintln!("{prog}: {e}");
         errors.fetch_add(1, Ordering::Relaxed);
         return;

@@ -409,6 +409,13 @@ The JSON summary then gives \fIdays\fR as a fraction and
 The Windows build prints the same JSON summary, with the sizes the
 Recycle Bin records give.
 .TP
+.BI \-\-max\-count =N
+Refuse with exit 2, deleting nothing, when more than
+.I N
+items would go for good.
+It overrides
+.BR RTRASH_MAX_PERMANENT .
+.TP
 .BI \-\-max\-size =SIZE
 Remove items until the trash directories in scope, taken together, fit in
 .I SIZE
@@ -3438,6 +3445,13 @@ Only match items taking less than
 .I SIZE
 on disk.
 .TP
+.BI \-\-max\-count =N
+Refuse with exit 2, deleting nothing, when more than
+.I N
+items would go for good.
+It overrides
+.BR RTRASH_MAX_PERMANENT .
+.TP
 .BI \-\-batch =ID
 Only items from one put run: an
 .I ID
@@ -3624,6 +3638,23 @@ still work, and so do put, list, undo and a restore with nothing in the
 way.
 Set it for agents and shared accounts, so that trash stays the only
 way to remove files and every trashed item stays recoverable.
+.TP
+.B RTRASH_MAX_PERMANENT
+A whole number
+.I N
+that caps a run at
+.I N
+permanent deletions.
+.BR rm ,
+.B empty
+and their trash\-cli names count what they would delete first and
+refuse with exit 2, deleting nothing, when it is more; on Windows the
+whole Recycle Bin purge counts at once.
+Every other removal of user data (the size cap after a put, reap) stops
+once the run reaches the cap, with an error that names the variable.
+.B \-\-max\-count
+overrides it for one run.
+A value that is not a whole number refuses every permanent deletion.
 .TP
 .B RTRASH_MIN_FREE
 A size such as 10G that a put or restore copying across devices must

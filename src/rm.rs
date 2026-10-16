@@ -35,6 +35,8 @@ matching *trash* entries — not a synonym for put.
                      or `last` for the latest; with no PATTERN, all of it
   -n, --dry-run    list matches and reclaimable size; do not delete
   -f, --force      allow mass patterns that match everything (e.g. '*')
+      --max-count=N  refuse, deleting nothing, when more than N items
+                     would go (also RTRASH_MAX_PERMANENT)
   -v, --verbose    print each permanently removed original path
       --json       emit a JSON summary (and matched originals array)
       --help       display this help and exit
@@ -136,6 +138,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             a if a.starts_with("--trash-dir=") => {
                 trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
             }
+            a if a.starts_with("--max-count=") => match crate::permanent_guard::max_count_arg(a) {
+                Some(Ok(n)) => crate::permanent_guard::set_max_count(n),
+                _ => {
+                    eprintln!("{prog}: --max-count takes a whole number of items, not '{a}'");
+                    return 2;
+                }
+            },
             a if a.starts_with("--older-than=") => {
                 match crate::filters::parse_age_secs(&a["--older-than=".len()..]) {
                     Ok(d) => older_than = Some(d),
@@ -285,6 +294,26 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
         }
     };
+
+    // A cap counts the matches first, so a refused rm deletes nothing.
+    if !dry_run && crate::permanent_guard::cap().is_some() {
+        let n = entries
+            .iter()
+            .filter(|entry| {
+                let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
+                let base = entry
+                    .original
+                    .file_name()
+                    .map(crate::util::str_from_os_ref)
+                    .unwrap_or_default();
+                pats.hit(path_s.as_ref(), base.as_str(), entry.name.as_str())
+                    && size.keeps(size_of(entry))
+            })
+            .count();
+        if let Some(code) = crate::permanent_guard::check_count(prog, n as u64) {
+            return code;
+        }
+    }
 
     for entry in &entries {
         let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());

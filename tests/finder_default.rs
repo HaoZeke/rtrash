@@ -69,6 +69,24 @@ impl Box_ {
         child.wait_with_output().unwrap()
     }
 
+    /// `run` with `envs` set on top, stdin closed.
+    fn run_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            .args(args)
+            .current_dir(self.work())
+            .env("HOME", &self.root)
+            .env("XDG_DATA_HOME", self.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", self.root.join(".config"))
+            .env("RTRASH_MACOS_TRASH", "finder")
+            .env("RTRASH_OSASCRIPT", self.root.join("osascript"))
+            .env("XDG_STATE_HOME", self.root.join("state"))
+            .env_remove("RTRASH_MAX_PERMANENT")
+            .envs(envs.iter().copied())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    }
+
     /// `run` with `RTRASH_NO_PERMANENT=1` (and `RTRASH_MAX_SIZE` when
     /// `budget` names one), stdin closed.
     fn run_guarded(&self, args: &[&str], budget: Option<&str>) -> Output {
@@ -1311,4 +1329,36 @@ fn no_permanent_guard_covers_the_finder_trash() {
     assert!(err(&o).contains("RTRASH_NO_PERMANENT"), "{}", err(&o));
     assert_eq!(fs::read(b.work().join("pg.txt")).unwrap(), b"newer");
     assert!(b.finder().join("pg.txt").exists());
+}
+
+/// The cap on permanent deletions counts Finder Trash matches first: an
+/// rm or empty past it refuses and leaves every item.
+#[test]
+fn max_count_refuses_finder_rm_and_empty_past_the_cap() {
+    let b = Box_::new("maxcount");
+    let names = ["fc-a", "fc-b", "fc-c"];
+    for n in names {
+        fs::write(b.work().join(n), n).unwrap();
+    }
+    assert!(b.run(&["put", "fc-a", "fc-b", "fc-c"], "").status.success());
+    let cap2 = [("RTRASH_MAX_PERMANENT", "2")];
+    for (args, envs) in [
+        (&["rm", "--max-count=2", "fc-*"][..], &[][..]),
+        (&["rm", "fc-*"][..], &cap2[..]),
+        (&["empty", "--all"][..], &cap2[..]),
+    ] {
+        let o = b.run_env(args, envs);
+        assert_eq!(o.status.code(), Some(2), "{args:?}: {}", err(&o));
+        assert!(err(&o).contains("3 items would be deleted"), "{}", err(&o));
+        assert!(
+            names.iter().all(|n| b.finder().join(n).exists()),
+            "{args:?}"
+        );
+    }
+    let o = b.run_env(&["rm", "--max-count=1", "fc-a"], &cap2);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!b.finder().join("fc-a").exists());
+    let o = b.run_env(&["empty", "--all"], &cap2);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!b.finder().join("fc-b").exists() && !b.finder().join("fc-c").exists());
 }

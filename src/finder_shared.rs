@@ -623,7 +623,7 @@ pub fn rm(
         texts: patterns.texts.iter().map(|t| nfc(t)).collect(),
         ..patterns.clone()
     };
-    for e in &rows {
+    let hit = |e: &Entry| -> bool {
         let path_s = e.shown.to_string_lossy();
         let base = e
             .shown
@@ -631,7 +631,7 @@ pub fn rm(
             .map(|b| b.to_string_lossy().into_owned())
             .unwrap_or_default();
         let name = nfc(&e.name);
-        let hit = match patterns.kind {
+        match patterns.kind {
             crate::filters::Match::Glob => patterns.texts.iter().any(|p| {
                 let p = nfc(p);
                 crate::util::fnmatch(&p, &path_s)
@@ -643,10 +643,17 @@ pub fn rm(
                 regex.iter().any(|r| r.is_match(&path_s))
             }
             _ => texts.hit(&nfc(&path_s), &base, &name),
-        };
-        if !hit {
-            continue;
         }
+    };
+    let hits: Vec<&Entry> = rows.iter().filter(|e| hit(e)).collect();
+    // A cap counts the matches first, so a refused rm deletes nothing.
+    if !dry_run {
+        if let Some(code) = crate::permanent_guard::check_count(prog, hits.len() as u64) {
+            return code;
+        }
+    }
+    for e in hits {
+        let path_s = e.shown.to_string_lossy();
         let m = crate::finder_total::measure_item(&e.path());
         let sz = m.0;
         if dry_run {

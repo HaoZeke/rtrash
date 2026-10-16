@@ -1680,6 +1680,17 @@ on Windows (there is no FreeDesktop layout here).
                 "-f" | "--force" | "--plain" | "--home-only" => {}
                 "--json" => json = true,
                 "--all" => every = true,
+                a if a.starts_with("--max-count=") => {
+                    match crate::permanent_guard::max_count_arg(a) {
+                        Some(Ok(n)) => crate::permanent_guard::set_max_count(n),
+                        _ => {
+                            eprintln!(
+                                "{prog}: --max-count takes a whole number of items, not '{a}'"
+                            );
+                            return 2;
+                        }
+                    }
+                }
                 a if a.starts_with("--max-size=") => {
                     match crate::filters::parse_size(&a["--max-size=".len()..]) {
                         Some(n) => max_size = Some(n),
@@ -1728,6 +1739,8 @@ With DAYS, only items deleted more than DAYS days ago, as on Linux.
                    runs first
       --prune=oldest|largest  which items --max-size removes first
                    (default oldest)
+      --max-count=N  refuse, deleting nothing, when more than N items
+                   would go (also RTRASH_MAX_PERMANENT)
       --all      let an empty with no DAYS, --max-size or --until-free
                    remove items other puts left; without it such an
                    empty asks on a terminal and refuses elsewhere unless
@@ -1836,6 +1849,9 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             println!("{} item(s)", items.len());
             return 0;
         }
+        if let Some(code) = crate::permanent_guard::check_count(prog, items.len() as u64) {
+            return code;
+        }
         if verbose && !json {
             for it in &items {
                 println!("removed {}", crate::util::term_path(&original_of(it)));
@@ -1845,7 +1861,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         if json {
             summary(&items);
         }
-        if let Err(e) = crate::permanent_guard::gate() {
+        if let Err(e) = crate::permanent_guard::gate_many(items.len() as u64) {
             eprintln!("{prog}: {e}");
             return 1;
         }
@@ -1959,7 +1975,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         }
         let n = picked.len() as u64;
         let chosen: Vec<TrashItem> = picked.iter().map(|&i| all[i].clone()).collect();
-        if let Err(e) = crate::permanent_guard::gate() {
+        if let Err(e) = crate::permanent_guard::gate_many(n) {
             if !quiet {
                 eprintln!("{prog}: {e}");
             }
@@ -2021,7 +2037,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         }
         let n = chosen.len() as u64;
         if !dry_run && n > 0 {
-            if let Err(e) = crate::permanent_guard::gate() {
+            if let Err(e) = crate::permanent_guard::gate_many(n) {
                 eprintln!("{prog}: {e}");
                 return (0, 0, 0);
             }
@@ -2949,6 +2965,17 @@ registry), then the total and the free space on each (a warning under
                 },
                 "--json" => json = true,
                 "-f" | "--force" => force = true,
+                a if a.starts_with("--max-count=") => {
+                    match crate::permanent_guard::max_count_arg(a) {
+                        Some(Ok(n)) => crate::permanent_guard::set_max_count(n),
+                        _ => {
+                            eprintln!(
+                                "{prog}: --max-count takes a whole number of items, not '{a}'"
+                            );
+                            return Some(2);
+                        }
+                    }
+                }
                 a if a.starts_with("--batch=") => batch = Some(a["--batch=".len()..].to_string()),
                 "-v" | "--verbose" => verbose = true,
                 "--home-only" => {}
@@ -2971,6 +2998,8 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                    that one run); with no PATTERN, all of them
   -n, --dry-run  list matches only
   -f, --force    allow mass patterns (e.g. '*')
+      --max-count=N  refuse, deleting nothing, when more than N items
+                   would go (also RTRASH_MAX_PERMANENT)
   -v, --verbose  print each path
       --json     print a JSON summary (and the matched originals)
       --help     display this help and exit
@@ -3070,6 +3099,11 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             };
             (sum, names)
         });
+        if !dry_run {
+            if let Some(code) = crate::permanent_guard::check_count(prog, matched.len() as u64) {
+                return code;
+            }
+        }
         if !json && (dry_run || verbose) {
             for it in &matched {
                 println!("{}", crate::util::term_path(&original_of(it)));
@@ -3077,7 +3111,7 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
         }
         let code = if dry_run {
             0
-        } else if let Err(e) = crate::permanent_guard::gate() {
+        } else if let Err(e) = crate::permanent_guard::gate_many(matched.len() as u64) {
             eprintln!("{prog}: {e}");
             1
         } else {

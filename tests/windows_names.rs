@@ -527,3 +527,61 @@ fn no_permanent_guard_keeps_the_recycle_bin_on_windows() {
     assert!(back.status.success(), "{}", text(&back));
     assert_eq!(restored, "trashed", "the guard lost the trashed copy");
 }
+
+/// The cap on permanent deletions counts Recycle Bin matches first, so an
+/// rm past it purges nothing. The PATTERN names files only (no folder),
+/// so a short 8.3 %TEMP% and the long path the bin records both match.
+#[test]
+fn max_count_refuses_a_recycle_bin_rm_past_the_cap() {
+    let dir = common::scratch_dir("names", "maxcount");
+    let tag = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let files: Vec<_> = ["a", "b", "c"]
+        .iter()
+        .map(|n| dir.join(format!("{tag}-{n}.txt")))
+        .collect();
+    let rtrash = env!("CARGO_BIN_EXE_rtrash");
+    for f in &files {
+        fs::write(f, "x").unwrap();
+    }
+    let put = Command::new(rtrash)
+        .arg("put")
+        .args(&files)
+        .output()
+        .unwrap();
+    let pattern = format!("{tag}-*.txt");
+    let rm = |args: &[&str], cap: Option<&str>| {
+        let mut c = Command::new(rtrash);
+        c.arg("rm").args(args).arg(&pattern).current_dir(&dir);
+        match cap {
+            Some(v) => c.env("RTRASH_MAX_PERMANENT", v),
+            None => c.env_remove("RTRASH_MAX_PERMANENT"),
+        };
+        c.output().unwrap()
+    };
+    // A dry run prints one line per matched item, its original path. The
+    // tag names the folder and starts each file name, so count lines.
+    let listed = |o: &Output| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| l.contains(&tag))
+            .count()
+    };
+    let before = listed(&rm(&["-n"], None));
+    let flag = rm(&["--max-count=2"], None);
+    let env = rm(&[], Some("2"));
+    let still = listed(&rm(&["-n"], Some("2")));
+    // Within the cap the purge runs, which also leaves the bin as found.
+    let done = rm(&["--max-count=3"], Some("2"));
+    let after = listed(&rm(&["-n"], None));
+    let _ = fs::remove_dir_all(&dir);
+    let text = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(put.status.success(), "{}", text(&put));
+    assert_eq!(before, 3, "the put did not leave three items");
+    for o in [&flag, &env] {
+        assert_eq!(o.status.code(), Some(2), "{}", text(o));
+        assert!(text(o).contains("3 items would be deleted"), "{}", text(o));
+    }
+    assert_eq!(still, before, "a refused rm purged items");
+    assert!(done.status.success(), "{}", text(&done));
+    assert_eq!(after, 0);
+}

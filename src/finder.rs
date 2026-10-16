@@ -1175,7 +1175,14 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
     let mut removed = 0u64;
     let mut bytes = 0u64;
     let mut failed = 0u64;
-    for (e, b) in empty_pick(rows, o.cutoff, o.max_size, o.prune) {
+    let picked = empty_pick(rows, o.cutoff, o.max_size, o.prune);
+    // A cap counts the picks first, so a refused empty deletes nothing.
+    if !dry_run {
+        if let Some(code) = crate::permanent_guard::check_count(prog, picked.len() as u64) {
+            return code;
+        }
+    }
+    for (e, b) in picked {
         bytes += b;
         let path = e.path();
         if dry_run {
