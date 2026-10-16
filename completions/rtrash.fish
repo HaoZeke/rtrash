@@ -99,6 +99,7 @@ end
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l size -d 'add each item size'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l sort -x -a 'date size name path' -d 'row order'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l reverse -d 'reverse the order'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l last -x -d 'only the last N rows'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l glob -r -d 'only items whose path or name matches a glob'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l regex -r -d 'only items whose original path matches RE'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l name -r -d 'only items with this file name'
@@ -303,6 +304,7 @@ complete -c trash-list -l json
 complete -c trash-list -l size
 complete -c trash-list -l sort -x -a 'date size name path'
 complete -c trash-list -l reverse
+complete -c trash-list -l last -x
 complete -c trash-list -l all-users
 complete -c trash-list -l volumes
 complete -c trash-list -l trash-dirs

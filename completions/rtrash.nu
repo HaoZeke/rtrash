@@ -163,6 +163,7 @@ export extern "rtrash list" [
     --size  # add each item's disk usage (payload plus its
     --sort: string  # order by date (default), size, name (file name)
     --reverse  # reverse the order
+    --last: int  # only the last N rows of the listing (after --sort and --reverse)
     --glob: string  # only items whose original path or file name matches a glob
     --regex: string  # only items whose original path matches RE
     --name: string  # only items with this file name
@@ -459,6 +460,7 @@ export extern "trash-list" [
     --size  # add each item's disk usage (payload plus its
     --sort: string  # order by date (default), size, name (file name)
     --reverse  # reverse the order
+    --last: int  # only the last N rows of the listing (after --sort and --reverse)
     --glob: string  # only items whose original path or file name matches a glob
     --regex: string  # only items whose original path matches RE
     --name: string  # only items with this file name

@@ -38,6 +38,8 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
       --sort=KEY        order by date (default), size, name (file name)
                      or path (original path); size implies --size
       --reverse         reverse the order
+      --last=N          only the last N rows of the listing (after --sort and
+                     --reverse), like tail -n: the N newest by default
       --json            emit a JSON array (scripts; one object per item;
                      \"size\" in bytes with --size; \"missing\" is true
                      when the payload is gone); field names are stable,
@@ -240,6 +242,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut size_filter = SizeFilter::default();
     let mut matcher: Option<crate::restore::Matcher> = None;
     let mut cwd_only = false;
+    let mut last: Option<usize> = None;
     let mut format: Option<Vec<FmtPart>> = None;
     let mut i = 0usize;
     while i < args.len() {
@@ -271,6 +274,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--size" => with_size = true,
             "--reverse" => reverse = true,
             "--cwd-only" => cwd_only = true,
+            a if a.starts_with("--last=") => match a["--last=".len()..].parse::<usize>() {
+                Ok(n) => last = Some(n),
+                Err(_) => {
+                    eprintln!(
+                        "{prog}: --last needs a count of rows, not '{}'",
+                        &a["--last=".len()..]
+                    );
+                    return 2;
+                }
+            },
             a if a.starts_with("--glob=")
                 || a.starts_with("--regex=")
                 || a.starts_with("--name=") =>
@@ -409,6 +422,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if crate::finder::is_default(!trash_dirs.is_empty() || all_users) {
         let refused = if volumes || show_dirs {
             Some("--volumes or --trash-dirs")
+        } else if last.is_some() {
+            Some("--last")
         } else {
             None
         };
@@ -479,6 +494,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if sort == SortKey::Date {
         // Keep orphans after the recorded items whichever way dates run.
         order.sort_by_key(|&i| i >= recorded);
+    }
+    // --last keeps the tail of the listing, as tail -n would.
+    if let Some(n) = last {
+        let cut = order.len().saturating_sub(n);
+        order.drain(..cut);
     }
     let orphan_rows: Vec<bool> = order.iter().map(|&i| i >= recorded).collect();
     let rows: Vec<&Entry> = order.iter().map(|&i| &entries[i]).collect();

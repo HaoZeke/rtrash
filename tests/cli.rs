@@ -2418,6 +2418,35 @@ fn rm_json_and_age_filters() {
 }
 
 #[test]
+fn list_last_keeps_the_tail_of_the_listing() {
+    let sb = Sandbox::new("list-last");
+    for n in ["a.txt", "b.txt", "c.txt"] {
+        sb.touch(n);
+        assert!(sb.run(&["put", n]).status.success());
+    }
+    backdate_trashinfo(&sb, "a.txt", "2001-01-01T00:00:00");
+    backdate_trashinfo(&sb, "b.txt", "2002-01-01T00:00:00");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let names = |args: &[&str]| -> Vec<String> {
+        let mut all = vec!["list", pin.as_str()];
+        all.extend_from_slice(args);
+        let out = sb.run(&all);
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        stdout_of(&out)
+            .lines()
+            .map(|l| l.rsplit('/').next().unwrap_or("").to_string())
+            .collect()
+    };
+    assert_eq!(names(&["--last=2"]), ["b.txt", "c.txt"]);
+    assert_eq!(names(&["--last=1", "--reverse"]), ["a.txt"]);
+    assert_eq!(names(&["--last=9"]).len(), 3);
+    assert!(names(&["--last=0"]).is_empty());
+    assert_eq!(names(&["--last=1", "--sort=name"]), ["c.txt"]);
+    let out = sb.run(&["list", &pin, "--last=x"]);
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
 fn list_json_and_age_filters() {
     let sb = Sandbox::new("list-json");
     let pin = format!("--trash-dir={}", sb.trash().display());

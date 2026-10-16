@@ -59,6 +59,7 @@ list_opts=(
   '--size[add each item size]'
   '--sort=[row order]:key:(date size name path)'
   '--reverse[reverse the order]'
+  '--last=[only the last N rows of the listing]:count:'
   '--glob=[only items whose path or name matches a glob]:pattern:'
   '--regex=[only items whose original path matches RE]:regex:'
   '--name=[only items with this file name]:name:'
