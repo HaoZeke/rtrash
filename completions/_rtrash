@@ -10,6 +10,7 @@ put_opts=(
   '(-i)'-i'[prompt before every removal]'
   '(-I)'-I'[prompt once for more than three files or recursive]'
   '--interactive=-[prompt according to WHEN]::when:(never once always)'
+  '--inspect[prompt before every removal, showing its size]'
   '(-r -R --recursive)'{-r,-R,--recursive}'[remove directories and contents]'
   '(-d --dir)'{-d,--dir}'[remove empty directories]'
   '(-v --verbose)'{-v,--verbose}'[explain what is being done]'

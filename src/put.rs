@@ -62,6 +62,9 @@ pub(crate) struct Opts {
     pub empty_dirs: bool,
     pub verbose: bool,
     pub interactive: Interactive,
+    /// `--inspect`: show each item's size (and a directory's file count)
+    /// and ask before trashing it, as rip2 does.
+    pub inspect: bool,
     pub preserve_root: bool,
     /// Explicit FreeDesktop trash root (`files/` + `info/`); created if needed.
     pub trash_pin: Option<PathBuf>,
@@ -103,6 +106,7 @@ impl Default for Opts {
             empty_dirs: false,
             verbose: false,
             interactive: Interactive::Never,
+            inspect: false,
             preserve_root: true,
             trash_pin: None,
             home_only: false,
@@ -121,6 +125,8 @@ to require CLI operands even on a TTY.
 
   -f, --force           ignore nonexistent files and arguments, never prompt
   -i                    prompt before every removal
+      --inspect         prompt before every removal, showing its size and,
+                          for a directory, how many files it holds
   -I                    prompt once before removing more than three files,
                           or when removing recursively
       --interactive[=WHEN]  prompt according to WHEN: never, once (-I), or
@@ -196,11 +202,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "--force" => {
                 opts.force = true;
                 opts.interactive = Interactive::Never;
+                opts.inspect = false;
             }
             "--recursive" => opts.recursive = true,
             "--dir" => opts.empty_dirs = true,
             "--verbose" => opts.verbose = true,
             "--dry-run" => opts.dry_run = true,
+            "--inspect" => {
+                opts.force = false;
+                opts.inspect = true;
+            }
             "--one-file-system" => {}
             // GNU's =all also refuses arguments on another device than
             // their parent; rtrash refuses mount roots under plain
@@ -258,6 +269,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                         'f' => {
                             opts.force = true;
                             opts.interactive = Interactive::Never;
+                            opts.inspect = false;
                         }
                         'r' | 'R' => opts.recursive = true,
                         'd' => opts.empty_dirs = true,
@@ -551,6 +563,26 @@ fn config_protected() -> &'static [String] {
     })
 }
 
+/// Files below `dir` (anything that is not a directory), without
+/// following symlinks; what cannot be read counts as nothing.
+fn count_files(dir: &Path) -> u64 {
+    let mut n = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            match e.file_type() {
+                Ok(t) if t.is_dir() => stack.push(e.path()),
+                Ok(_) => n += 1,
+                Err(_) => {}
+            }
+        }
+    }
+    n
+}
+
 fn describe(meta: &fs::Metadata, path: &Path) -> &'static str {
     let ft = meta.file_type();
     if ft.is_symlink() {
@@ -616,7 +648,19 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         }
     }
 
-    if opts.interactive == Interactive::Always {
+    if opts.inspect {
+        let kind = describe(&meta, path);
+        let size = crate::util::format_bytes(crate::fastdelete::disk_usage(path));
+        let what = if meta.is_dir() {
+            let n = count_files(path);
+            format!("{size}, {n} file{}", if n == 1 { "" } else { "s" })
+        } else {
+            size
+        };
+        if !confirm(&format!("{prog}: remove {kind} '{name}' ({what})? ")) {
+            return Ok(None);
+        }
+    } else if opts.interactive == Interactive::Always {
         let kind = describe(&meta, path);
         if !confirm(&format!("{prog}: remove {kind} '{name}'? ")) {
             return Ok(None);

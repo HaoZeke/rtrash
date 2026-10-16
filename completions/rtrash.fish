@@ -55,6 +55,7 @@ complete -c rtrash -n $put_cond -s f -l force -d 'ignore nonexistent files, neve
 complete -c rtrash -n $put_cond -s i -d 'prompt before every removal'
 complete -c rtrash -n $put_cond -s I -d 'prompt once for more than three files or recursive'
 complete -c rtrash -n $put_cond -l interactive -d 'prompt according to WHEN'
+complete -c rtrash -n $put_cond -l inspect -d 'prompt before every removal, showing its size'
 complete -c rtrash -n $put_cond -s r -s R -l recursive -d 'remove directories and contents'
 complete -c rtrash -n $put_cond -s d -l dir -d 'remove empty directories'
 complete -c rtrash -n $put_cond -s v -l verbose -d 'explain what is being done'
@@ -268,6 +269,7 @@ for cmd in trash-put trash
     complete -c $cmd -s i
     complete -c $cmd -s I
     complete -c $cmd -l interactive
+    complete -c $cmd -l inspect
     complete -c $cmd -l one-file-system
     complete -c $cmd -l preserve-root
     complete -c $cmd -l no-preserve-root

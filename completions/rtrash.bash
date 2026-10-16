@@ -5,7 +5,7 @@
 # Or: rtrash completions bash > …/bash-completion/completions/rtrash
 
 _rtrash_put_opts=(
-  -f --force -i -I --interactive
+  -f --force -i -I --interactive --inspect
   -r -R --recursive -d --dir -v --verbose
   --one-file-system --preserve-root --preserve-root=all --no-preserve-root
   --trash-dir= --home-only --plain --no-space-check --dry-run --in-use= --json

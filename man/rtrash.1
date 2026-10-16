@@ -196,6 +196,13 @@ Ignore nonexistent files and arguments, never prompt.
 .B \-i
 Prompt before every removal.
 .TP
+.B \-\-inspect
+Prompt before every removal and show what it would move: the size on
+disk and, for a directory, how many files it holds, as rip2 does.
+A later
+.B \-f
+turns it off.
+.TP
 .B \-I
 Prompt once before removing more than three files, or when removing
 recursively.

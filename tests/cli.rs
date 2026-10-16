@@ -416,6 +416,38 @@ fn restore_takes_size_filters() {
 }
 
 #[test]
+fn put_inspect_shows_the_size_and_asks() {
+    let sb = Sandbox::new("put-inspect");
+    let dir = sb.work().join("proj");
+    fs::create_dir_all(dir.join("sub")).unwrap();
+    for f in ["a.txt", "b.txt", "sub/c.txt"] {
+        fs::write(dir.join(f), b"data").unwrap();
+    }
+    // A "no" keeps it, and the prompt names the file count.
+    let out = sb.run_with_stdin(&["put", "-r", "--inspect", "proj"], "n\n");
+    let err = stderr_of(&out);
+    assert!(err.contains("remove directory 'proj' ("), "{err}");
+    assert!(err.contains(", 3 files)? "), "{err}");
+    assert!(dir.exists());
+    // A "yes" trashes it; a plain file shows only its size.
+    let out = sb.run_with_stdin(&["put", "-r", "--inspect", "proj"], "y\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!dir.exists());
+    fs::write(sb.work().join("one.txt"), b"x").unwrap();
+    let out = sb.run_with_stdin(&["put", "--inspect", "one.txt"], "n\n");
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("'one.txt' (") && !err.contains("files)"),
+        "{err}"
+    );
+    assert!(sb.work().join("one.txt").exists());
+    // A later -f turns the prompt off, as it does for -i.
+    let out = sb.run_with_stdin(&["put", "--inspect", "-f", "one.txt"], "");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("one.txt").exists());
+}
+
+#[test]
 fn restore_sorts_the_numbered_table_by_size() {
     let sb = Sandbox::new("restore-sort-size");
     // The small file goes first, so date order would list it first.

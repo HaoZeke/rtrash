@@ -110,6 +110,7 @@ export extern "rtrash put" [
     -i  # prompt before every removal
     -I  # prompt once before removing more than three files,
     --interactive?: string@"nu-complete rtrash when"  # prompt according to WHEN: never, once (-I), or always (-i)
+    --inspect  # prompt before every removal, showing its size and,
     --recursive(-r)  # remove directories and their contents
     -R  # remove directories and their contents
     --dir(-d)  # remove empty directories
@@ -418,6 +419,7 @@ export extern "trash-put" [
     -i  # prompt before every removal
     -I  # prompt once before removing more than three files,
     --interactive?: string@"nu-complete rtrash when"  # prompt according to WHEN: never, once (-I), or always (-i)
+    --inspect  # prompt before every removal, showing its size and,
     --recursive(-r)  # remove directories and their contents
     -R  # remove directories and their contents
     --dir(-d)  # remove empty directories
