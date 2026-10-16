@@ -1796,11 +1796,22 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut matcher: Option<crate::budget::PathMatch> = None;
         let mut latest = false;
         let mut all = false;
+        let mut to: Option<PathBuf> = None;
         for arg in args {
             match arg.as_str() {
                 "-f" | "--force" => conflict = Conflict::Overwrite,
                 "--latest" => latest = true,
                 "--all" => all = true,
+                a if a.starts_with("--to=") => {
+                    let d = &a["--to=".len()..];
+                    if d.is_empty() {
+                        eprintln!("{prog}: --to needs a non-empty DIR");
+                        return 2;
+                    }
+                    let d = crate::util::arg_path(d);
+                    // A relative --to counts from here, as the shell would.
+                    to = Some(std::path::absolute(&d).unwrap_or(d));
+                }
                 a if crate::budget::PathMatch::parse(a).is_some() => {
                     match crate::budget::PathMatch::parse(a) {
                         Some(Ok(_)) if matcher.is_some() => {
@@ -1866,6 +1877,7 @@ Without PATH, print a numbered list and read an index from stdin.
       --glob=PATTERN  match items whose original path (PATTERN with a
                 separator) or file name matches a shell glob
       --regex=RE  match items whose original path matches RE
+      --to=DIR  restore into DIR, keeping each item's file name
       --latest  of several matches, restore the most recently deleted
       --all     of several matches, restore every one
       --plain   numbered selection instead of the browser
@@ -1910,10 +1922,17 @@ Without PATH, print a numbered list and read an index from stdin.
             eprintln!("{prog}: give PATH or a --name, --glob or --regex match, not both");
             return 2;
         }
+        if let Some(d) = &to {
+            if !d.is_dir() {
+                eprintln!("{prog}: --to: '{}' is not a directory", d.display());
+                return 2;
+            }
+        }
         let opts = RestoreOpts {
             conflict,
             json,
             dry_run,
+            to: to.clone(),
         };
         let items = match super::list_items() {
             Ok(i) => i,
@@ -1982,7 +2001,7 @@ Without PATH, print a numbered list and read an index from stdin.
             matches.reverse();
         }
         #[cfg(feature = "tui")]
-        if !plain && util::stdin_is_tty() {
+        if !plain && to.is_none() && util::stdin_is_tty() {
             let items: Vec<BinItem> = matches.into_iter().map(BinItem::new).collect();
             let refs: Vec<&BinItem> = items.iter().collect();
             return crate::restore_tui::run(
@@ -2096,6 +2115,8 @@ Without PATH, print a numbered list and read an index from stdin.
         conflict: Conflict,
         json: bool,
         dry_run: bool,
+        /// `--to=DIR`, absolute: restore there, keeping each file name.
+        to: Option<PathBuf>,
     }
 
     /// The first `STEM.N.EXT` (or `NAME.N`) next to `dest` that is free.
@@ -2156,31 +2177,43 @@ Without PATH, print a numbered list and read an index from stdin.
         let (mut failed, mut skipped) = (0usize, 0usize);
         for it in &items {
             let orig = original_of(it);
-            let taken = orig.symlink_metadata().is_ok();
+            let base = match (&o.to, orig.file_name()) {
+                (Some(dir), Some(name)) => dir.join(name),
+                (Some(_), None) => {
+                    eprintln!(
+                        "{prog}: cannot restore '{}' by name: no file name",
+                        orig.display()
+                    );
+                    failed += 1;
+                    continue;
+                }
+                (None, _) => orig.clone(),
+            };
+            let taken = base.symlink_metadata().is_ok();
             let dest = match (taken, o.conflict) {
                 (true, Conflict::Skip) => {
                     if o.dry_run {
-                        say(format!("would skip '{}': it exists", orig.display()));
+                        say(format!("would skip '{}': it exists", base.display()));
                     } else {
-                        eprintln!("{prog}: skipping '{}': it exists", orig.display());
+                        eprintln!("{prog}: skipping '{}': it exists", base.display());
                     }
                     skipped += 1;
                     continue;
                 }
                 (true, Conflict::Refuse) => {
                     if o.dry_run {
-                        say(format!("would fail: '{}' exists", orig.display()));
+                        say(format!("would fail: '{}' exists", base.display()));
                     } else {
                         eprintln!(
                             "{prog}: refusing to overwrite '{}' (use -f)",
-                            orig.display()
+                            base.display()
                         );
                     }
                     failed += 1;
                     continue;
                 }
-                (true, Conflict::Rename) => free_name(&orig),
-                _ => orig.clone(),
+                (true, Conflict::Rename) => free_name(&base),
+                _ => base,
             };
             if o.dry_run {
                 if Path::new(&it.id).symlink_metadata().is_err() {

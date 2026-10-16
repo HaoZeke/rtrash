@@ -462,6 +462,69 @@ fn restore_matchers_with_latest_and_all() {
     let _ = fs::remove_dir_all(&lad);
 }
 
+#[test]
+fn restore_to_a_directory_keeps_the_name() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let lad = local_app_data("to-dir");
+    let id = std::process::id();
+    let f = m.join(format!("to-dir-{id}.txt"));
+    let dir = m.join(format!("to-dir-dest-{id}"));
+    fs::create_dir_all(&dir).unwrap();
+    let there = dir.join(format!("to-dir-{id}.txt"));
+    fs::write(&f, b"old").unwrap();
+    let out = cmd(&lad).arg("put").arg(&f).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    fs::write(&there, b"live").unwrap();
+    let to = format!("--to={}", dir.display());
+    let run = |extra: &[&str]| {
+        cmd(&lad)
+            .arg("restore")
+            .arg(&to)
+            .args(extra)
+            .arg(&f)
+            .output()
+            .unwrap()
+    };
+    let bad = cmd(&lad)
+        .arg("restore")
+        .arg(format!("--to={}", dir.join("missing").display()))
+        .arg(&f)
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+    // The name is taken in DIR: refuse, then a rename dry run, then rename.
+    assert_eq!(run(&[]).status.code(), Some(1));
+    let out = run(&["--conflict=rename", "--dry-run", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(json.starts_with("{\"dry_run\":true,"), "{json}");
+    assert!(json.contains(&format!("to-dir-{id}.1.txt")), "{json}");
+    let out = run(&["--conflict=rename", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read(&there).unwrap(), b"live");
+    assert_eq!(
+        fs::read(dir.join(format!("to-dir-{id}.1.txt"))).unwrap(),
+        b"old"
+    );
+    assert!(!f.exists(), "--to restored to the original place");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&lad);
+}
+
 /// Odd but valid NTFS names through put, list, restore and a vanished
 /// Recycle Bin payload; no command may panic.
 #[test]
