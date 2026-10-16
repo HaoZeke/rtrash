@@ -92,6 +92,8 @@ directories appear as one `trash` row and are never printed by --print0.
                           and !negations as in .gitignore; - is stdin)
       --exclude-caches  leave out directories below PATH that hold a valid
                           CACHEDIR.TAG
+      --no-hidden       leave out hidden entries, those named with a
+                          leading dot (same as --exclude='.*')
       --gitignore       leave out what git ignores: .gitignore files,
                           .git/info/exclude and ~/.config/git/ignore, inside
                           git repositories
@@ -2807,6 +2809,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--all-dirs" => opts.all_dirs = true,
                 "--artefacts" => opts.artefacts_only = true,
                 "--exclude-caches" => filter.exclude_caches = true,
+                // gdu's --no-hidden: a dot name at any depth, in order
+                // with --exclude so a later !pattern can bring one back.
+                "--no-hidden" => filter.patterns.push(".*".to_string()),
                 "--gitignore" => filter.gitignore = true,
                 "--dirs" => only_dirs = true,
                 "--files" => only_files = true,

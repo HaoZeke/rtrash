@@ -128,6 +128,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l artefac
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l exclude -d 'leave out entries that match a gitignore-style pattern' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s X -l exclude-from -d 'read exclude patterns from a file' -r -F
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l exclude-caches -d 'leave out directories with a valid CACHEDIR.TAG'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-hidden -d 'leave out entries named with a leading dot'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l gitignore -d 'leave out what git ignores'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dirs -d 'list directories only'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l files -d 'list files only'

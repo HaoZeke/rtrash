@@ -1283,6 +1283,11 @@ that hold a
 .I CACHEDIR.TAG
 starting with the standard signature line.
 .TP
+.B \-\-no\-hidden
+Leave out hidden entries, those whose name starts with a dot, at any
+depth; the same as
+.BR \-\-exclude='.*' .
+.TP
 .B \-\-gitignore
 Leave out what git ignores: patterns from
 .I .gitignore

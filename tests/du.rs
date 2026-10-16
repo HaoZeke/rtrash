@@ -686,6 +686,25 @@ fn config_file_sets_du_defaults_and_options_win() {
 }
 
 #[test]
+fn no_hidden_leaves_dot_entries_out() {
+    let t = Tree::new("nohidden");
+    t.file("seen/a.bin", 100_000);
+    t.file(".cache/big.bin", 400_000);
+    t.file("seen/.dot.bin", 300_000);
+    let total = field(&t.json(&["--no-git"]), "apparent");
+
+    let j = t.json(&["--no-git", "--no-hidden"]);
+    assert_eq!(field(&j, "apparent"), total - 700_000, "{j}");
+    let files = paths_in(&j, "files");
+    assert!(files.contains(&s(&t.root.join("seen/a.bin"))), "{j}");
+    let dotted = |f: &String| f.contains(".cache") || f.contains(".dot.bin");
+    assert!(!files.iter().any(dotted), "{j}");
+    // A later negation brings one dot entry back, as with --exclude.
+    let j = t.json(&["--no-git", "--no-hidden", "--exclude=!.cache"]);
+    assert_eq!(field(&j, "apparent"), total - 300_000, "{j}");
+}
+
+#[test]
 fn exclude_caches_needs_a_valid_tag() {
     let t = Tree::new("cachedir");
     t.file("c/data.bin", 300_000);
