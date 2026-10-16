@@ -576,7 +576,7 @@ mod tests {
         std::fs::write(root.join("files/x"), "x").unwrap();
         std::fs::write(root.join("info/x.trashinfo"), "[Trash Info]\nPath=/x\n").unwrap();
         let dir = TrashDir::from_root(&root).unwrap();
-        crate::trash_total::store(&dir, 999_999, 99);
+        crate::trash_total::store(&dir, 999_999, 1);
         assert!(root.join("rtrash-total").exists());
         let sz = trashdir::entry_reclaim_bytes(&dir, "x");
         let e = Entry {
@@ -592,7 +592,7 @@ mod tests {
         assert!(!root.join("files/x").exists());
         assert_eq!(
             crate::trash_total::cached(&dir),
-            Some((999_999 - sz, 98)),
+            Some((999_999 - sz, 0)),
             "the total did not follow the removal"
         );
         let _ = std::fs::remove_dir_all(&root);

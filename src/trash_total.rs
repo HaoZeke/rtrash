@@ -10,6 +10,13 @@
 //! was current before them, under the trash lock. A change that cannot
 //! carry the total drops it with [`forget`], since the stamp alone cannot
 //! tell a change in the same tick of a coarse clock from none.
+//!
+//! Another tool can make such a change too. So a stamp less than two
+//! seconds old (the racy-git window) is trusted only when the number of
+//! records in `info/` still equals the stored item count. That costs one
+//! directory read and only right after a change; puts spaced further
+//! apart still answer from the file alone, and a burst of puts reads
+//! names instead of measuring the whole trash.
 
 use std::fs;
 use std::path::PathBuf;
@@ -60,10 +67,36 @@ fn parse(body: &str) -> Option<(u64, u64, u128)> {
     ))
 }
 
+fn now_ns() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos())
+}
+
+/// `.trashinfo` records in `info/`, by name only.
+fn records(dir: &TrashDir) -> Option<u64> {
+    let rd = fs::read_dir(dir.info()).ok()?;
+    Some(
+        rd.flatten()
+            .filter(|e| e.file_name().as_encoded_bytes().ends_with(b".trashinfo"))
+            .count() as u64,
+    )
+}
+
+/// Whether a total stored with stamp `s` and `items` records is current
+/// at time `now` (nanoseconds): the stamp must match, and a stamp from
+/// the last two seconds (or the future) must also match the record count.
+fn is_current(dir: &TrashDir, s: u128, items: u64, now: u128) -> bool {
+    if stamp(dir) != Some(s) {
+        return false;
+    }
+    now.saturating_sub(s) >= 2_000_000_000 || records(dir) == Some(items)
+}
+
 /// The stored bytes and item count, when they match the trash as it is.
 pub fn cached(dir: &TrashDir) -> Option<(u64, u64)> {
     let (bytes, items, s) = parse(&fs::read_to_string(path(dir)).ok()?)?;
-    (stamp(dir)? == s).then_some((bytes, items))
+    is_current(dir, s, items, now_ns()).then_some((bytes, items))
 }
 
 /// The stored bytes and item count with whether they are current: a
@@ -71,7 +104,7 @@ pub fn cached(dir: &TrashDir) -> Option<(u64, u64)> {
 /// small file and never walks the trash.
 pub fn stored(dir: &TrashDir) -> Option<(u64, u64, bool)> {
     let (bytes, items, s) = parse(&fs::read_to_string(path(dir)).ok()?)?;
-    Some((bytes, items, stamp(dir) == Some(s)))
+    Some((bytes, items, is_current(dir, s, items, now_ns())))
 }
 
 /// Store `bytes` and `items` as current. Best effort: a trash root this
@@ -170,11 +203,23 @@ mod tests {
         fs::create_dir_all(root.join("files")).unwrap();
         let dir = TrashDir::from_root(&root).unwrap();
         assert_eq!(cached(&dir), None);
-        store(&dir, 123, 4);
-        assert_eq!(cached(&dir), Some((123, 4)));
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        store(&dir, 123, 0);
+        assert_eq!(cached(&dir), Some((123, 0)));
+        // A new record either moves the info/ time or, in the same tick,
+        // changes the record count; stale both ways, however slow the run.
         fs::write(root.join("info/x.trashinfo"), "[Trash Info]\n").unwrap();
         assert_eq!(cached(&dir), None, "a new item left the total current");
+        // The racy rule, with the clock passed in so no step depends on
+        // how long the test takes.
+        let s = stamp(&dir).unwrap();
+        assert!(is_current(&dir, s, 1, s), "fresh stamp, count matches");
+        assert!(!is_current(&dir, s, 2, s), "fresh stamp, count differs");
+        assert!(!is_current(&dir, s, 2, s + 1_999_999_999), "still fresh");
+        assert!(
+            is_current(&dir, s, 2, s + 2_000_000_000),
+            "old stamp, file alone"
+        );
+        assert!(!is_current(&dir, s + 1, 1, s), "stamp differs");
         let _ = fs::remove_dir_all(&root);
     }
 }
