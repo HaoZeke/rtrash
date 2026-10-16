@@ -60,5 +60,8 @@ hooks = [
     "-c",
     "test -f Cargo.lock",
   ] },
+  { id = "rtrash-precheck", name = "rtrash precheck (completions, test dirs, clippy arg count)", entry = "python3", language = "system", pass_filenames = false, files = "^(src/|tests/|completions/|man/)", args = [
+    "scripts/precheck.py",
+  ] },
   { id = "cargo-toml-pyproject-version-lockstep", name = "Cargo.toml and pyproject.toml versions match", entry = "scripts/check-version-lockstep.sh", language = "system", pass_filenames = false, files = "^(Cargo\\.toml|pyproject\\.toml)$" },
 ]

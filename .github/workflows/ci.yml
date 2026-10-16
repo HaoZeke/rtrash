@@ -30,6 +30,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Precheck (same command agents run before a push)
+        run: python3 scripts/precheck.py
+
       - name: Format check
         run: cargo fmt --check
 
