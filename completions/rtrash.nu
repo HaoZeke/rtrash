@@ -213,6 +213,7 @@ export extern "rtrash du" [
     --sort: string  # rank by KEY: disk (default), apparent, items (files
     --count(-C)  # add an ITEMS column (each hard-linked file once)
     --show-mtime  # show the local modification time (YYYY-MM-DD HH:MM)
+    --bars  # draw each row share of its PATH total as a bar
     --show-relative-size  # add a SHARE column: each row's percent of its
     --reverse  # print each table in reverse, the top row last
     --summarize(-s)  # print only the totals, no rows (GNU du -s, gdu)

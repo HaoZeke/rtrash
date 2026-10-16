@@ -122,6 +122,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l sort -d
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s C -l count -d 'add an ITEMS column'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l show-mtime -d 'show the modification time in place of AGE'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l show-relative-size -d 'add each row as a percent of its PATH total'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l bars -d 'draw each row share as a bar'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l reverse -d 'print each table in reverse, the top row last'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s s -l summarize -d 'print only the totals, no rows'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l skip-total -d 'print the rows without the Total lines'

@@ -66,6 +66,8 @@ directories appear as one `trash` row and are never printed by --print0.
       --show-relative-size  add a SHARE column: each row's percent of its
                           PATH total (apparent size with --apparent, else
                           disk use); the JSON rows keep the byte counts
+      --bars            add a BAR column drawing that share in ten cells,
+                          as dust's bars
   -s, --summarize       print only the totals, no rows (GNU du -s, gdu)
       --skip-total      print the rows without the Total lines (dust)
       --reverse         print each table in reverse, the top row last
@@ -2401,6 +2403,10 @@ struct Columns<'a> {
     /// `--show-relative-size`: each row's share of its scan root, by
     /// apparent size when `apparent`, else by disk use.
     share: Option<(&'a [RootTotals], bool)>,
+    /// Whether the SHARE column shows; `share` also feeds the bars.
+    show_share: bool,
+    /// `--bars`: a BAR column of the same share, as dust draws.
+    bars: bool,
     /// `--reverse`: the smallest (or oldest) row first, so the largest
     /// ends at the bottom next to the prompt, as dust -r.
     reverse: bool,
@@ -2409,18 +2415,36 @@ struct Columns<'a> {
 /// `42.5%`: the part of the scan root that holds `it`, or `-` when no
 /// root holds it or the root is empty.
 fn share_of(it: &Item, roots: &[RootTotals], apparent: bool) -> String {
+    match root_part(it, roots, apparent) {
+        Some(part) => format!("{:.1}%", part * 100.0),
+        None => "-".into(),
+    }
+}
+
+/// The part (0 to 1) of the scan root that holds `it`, or None when no
+/// root holds it or the root is empty.
+fn root_part(it: &Item, roots: &[RootTotals], apparent: bool) -> Option<f64> {
     let root = roots
         .iter()
         .filter(|r| it.path.starts_with(&r.path))
-        .max_by_key(|r| r.path.as_os_str().len());
+        .max_by_key(|r| r.path.as_os_str().len())?;
     let pick = |a: u64, d: u64| if apparent { a } else { d };
-    match root.map(|r| pick(r.apparent, r.disk)) {
-        Some(total) if total > 0 => {
-            let part = pick(it.apparent, it.disk) as f64 * 100.0 / total as f64;
-            format!("{:.1}%", part.min(100.0))
-        }
-        _ => "-".into(),
+    let total = pick(root.apparent, root.disk);
+    if total == 0 {
+        return None;
     }
+    Some((pick(it.apparent, it.disk) as f64 / total as f64).min(1.0))
+}
+
+/// Cells of a `--bars` bar.
+const BAR_CELLS: usize = 10;
+
+/// A bar of [`BAR_CELLS`] cells, `#` for each tenth of `part` (rounded),
+/// or blank for no part.
+fn bar(part: Option<f64>) -> String {
+    let filled = part.map_or(0, |p| (p * BAR_CELLS as f64).round() as usize);
+    let filled = filled.min(BAR_CELLS);
+    format!("{}{}", "#".repeat(filled), " ".repeat(BAR_CELLS - filled))
 }
 
 fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
@@ -2428,6 +2452,8 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
         count,
         show_mtime,
         share,
+        show_share,
+        bars,
         reverse,
     } = cols;
     if items.is_empty() {
@@ -2463,8 +2489,15 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
         ("AGE", 4)
     };
     let shares = |v: &str| match share {
-        Some(_) => format!("{v:>6}  "),
-        None => String::new(),
+        Some(_) if show_share => format!("{v:>6}  "),
+        _ => String::new(),
+    };
+    let bars_of = |v: &str| {
+        if bars {
+            format!("{v:<BAR_CELLS$}  ")
+        } else {
+            String::new()
+        }
     };
     let when_of = |it: &Item| {
         if show_mtime {
@@ -2474,9 +2507,10 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
         }
     };
     println!(
-        "{:>10}  {:>10}  {}{}{}{:>when_width$}  {:<width$}  PATH",
+        "{:>10}  {:>10}  {}{}{}{}{:>when_width$}  {:<width$}  PATH",
         "DISK",
         "APPARENT",
+        bars_of("BAR"),
         shares("SHARE"),
         uniques("UNIQUE"),
         counts("ITEMS"),
@@ -2494,9 +2528,10 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
             path.push(std::path::MAIN_SEPARATOR);
         }
         println!(
-            "{:>10}  {:>10}  {}{}{}{:>when_width$}  {:<width$}  {}",
+            "{:>10}  {:>10}  {}{}{}{}{:>when_width$}  {:<width$}  {}",
             format_bytes(it.disk),
             format_bytes(it.apparent),
+            bars_of(&bar(share.and_then(|(r, a)| root_part(it, r, a)))),
             shares(&share.map_or(String::new(), |(r, a)| share_of(it, r, a))),
             uniques(&it.unique.map(format_bytes).unwrap_or_default()),
             counts(&it.items.to_string()),
@@ -2826,6 +2861,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut count = false;
     let mut show_mtime = false;
     let mut relative = false;
+    let mut bars = false;
     let mut reverse = false;
     let mut summarize = false;
     let mut skip_total = false;
@@ -3024,6 +3060,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "-C" | "--count" => count = true,
                 "--show-mtime" => show_mtime = true,
                 "--show-relative-size" => relative = true,
+                "--bars" => bars = true,
                 "--reverse" => reverse = true,
                 // GNU du -s and gdu --summarize: the totals, no rows.
                 "-s" | "--summarize" => summarize = true,
@@ -3084,6 +3121,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         i += 1;
     }
+    // The SHARE column and the bars weigh rows the same way.
+    let want_share = relative || bars;
     if summarize {
         // After the loop, so a later -n does not bring rows back.
         opts.top = 0;
@@ -3317,7 +3356,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 Columns {
                     count: false,
                     show_mtime,
-                    share: relative.then_some((&report.roots[..], apparent_share)),
+                    share: want_share.then_some((&report.roots[..], apparent_share)),
+                    show_share: relative,
+                    bars,
                     reverse,
                 },
             );
@@ -3482,7 +3523,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             let cols = Columns {
                 count,
                 show_mtime,
-                share: relative.then_some((&report.roots[..], apparent_share)),
+                share: want_share.then_some((&report.roots[..], apparent_share)),
+                show_share: relative,
+                bars,
                 reverse,
             };
             print_table(&opts.sort.title("directories"), &report.dirs, now, cols);
@@ -3571,6 +3614,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bars_fill_a_tenth_per_cell() {
+        assert_eq!(bar(Some(0.5)), "#####     ");
+        assert_eq!(bar(Some(1.0)), "##########");
+        assert_eq!(bar(Some(0.04)), "          ");
+        assert_eq!(bar(None), "          ");
+    }
 
     #[test]
     fn type_keys_take_the_last_extension_in_lowercase() {

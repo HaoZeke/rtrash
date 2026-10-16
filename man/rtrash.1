@@ -1184,6 +1184,15 @@ in place of the AGE column. The JSON rows keep
 .B mtime
 as seconds since the epoch.
 .TP
+.B \-\-bars
+Add a BAR column that draws each row's share of its
+.I PATH
+total in ten cells of
+.BR # ,
+as dust draws its bars; it weighs rows as
+.B \-\-show\-relative\-size
+does. JSON is unchanged.
+.TP
 .B \-\-show\-relative\-size
 Add a SHARE column: each row as a percent of the total of the
 .I PATH

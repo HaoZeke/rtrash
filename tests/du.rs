@@ -2241,3 +2241,30 @@ fn diff_reads_a_snapshot_whose_name_is_not_utf8() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn bars_draw_the_share_in_ten_cells() {
+    let t = Tree::new("durbars");
+    t.file("big/a.bin", 400_000);
+    t.file("small/b.bin", 100_000);
+    let out = t.du(&["--no-git", "--apparent", "--bars"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("BAR"), "{text}");
+    // Bars alone keep the SHARE column off.
+    assert!(!text.contains("SHARE"), "{text}");
+    let cells = |name: &str| {
+        let row = text.lines().find(|l| l.ends_with(name)).expect(name);
+        row.chars().filter(|&c| c == '#').count()
+    };
+    // 400k and 100k of about 500k apparent: near 80% and 20%, so 8 and 2
+    // cells, well clear of the half-cell rounding points.
+    assert_eq!(cells("a.bin"), 8, "{text}");
+    assert_eq!(cells("b.bin"), 2, "{text}");
+    let plain = String::from_utf8(t.du(&["--no-git"]).stdout).unwrap();
+    assert!(!plain.contains("BAR"), "{plain}");
+}
