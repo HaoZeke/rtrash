@@ -216,6 +216,8 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l al
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l glob -x -d 'match by shell pattern'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l regex -x -d 'match original paths by regex'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l to -x -a '(__fish_complete_directories)' -d 'restore into this directory'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l older-than -d 'only items older than AGE (DAYS, 2h, 1d12h)' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l newer-than -d 'only items within the last AGE' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l conflict -x -a 'refuse overwrite rename skip' -d 'when the destination exists'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l json -d 'print the result as JSON'
 
@@ -334,6 +336,8 @@ complete -c trash-restore -l all
 complete -c trash-restore -l glob -x
 complete -c trash-restore -l regex -x
 complete -c trash-restore -l to -x -a '(__fish_complete_directories)'
+complete -c trash-restore -l older-than -r
+complete -c trash-restore -l newer-than -r
 complete -c trash-restore -l conflict -x -a 'refuse overwrite rename skip'
 complete -c trash-restore -l json
 complete -c trash-restore -l help

@@ -40,6 +40,9 @@ the index prompt. --newest-first and --oldest-first set the order for both.
                     overwrite, rename (restore next to it as NAME.1.EXT)
                     or skip
       --to=DIR    restore into DIR, keeping each item's file name
+      --older-than=AGE  only items trashed more than AGE ago; AGE is DAYS
+                    or a duration such as 2h, 30m or 1d12h (as in list)
+      --newer-than=AGE  only items trashed within the last AGE
       --cwd-only  without PATH, only items trashed from under the current directory
       --directory=DIR  without PATH, only items trashed from under DIR
                     (which need not exist any more)
@@ -195,6 +198,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut sort: Option<Sort> = None;
     // Run as trash-restore, behave as trash-cli's command does.
     let trash_cli = prog == "trash-restore";
+    let mut age = crate::filters::AgeFilter::default();
     for arg in args {
         let mut set_matcher = |m: Matcher| {
             if matcher.is_some() {
@@ -206,6 +210,17 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         };
         match arg.as_str() {
             "-f" | "--force" | "--overwrite" => conflict = Conflict::Overwrite,
+            a if a.starts_with("--older-than=") || a.starts_with("--newer-than=") => {
+                let (name, value) = a.split_once('=').unwrap_or((a, ""));
+                match crate::filters::parse_age_secs(value) {
+                    Ok(d) if name == "--older-than" => age.older_than = Some(d),
+                    Ok(d) => age.newer_than = Some(d),
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
             a if a.starts_with("--sort=") => match Sort::parse(&a["--sort=".len()..]) {
                 Some(k) => sort = Some(k),
                 None => {
@@ -371,6 +386,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 plain,
                 newest_first,
                 sort,
+                age,
                 dry_run,
             },
         );
@@ -419,6 +435,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         // keeps trash-cli's current directory scope above.
         (None, None) => entries.iter().collect(),
     };
+    // --older-than and --newer-than, as list reads them; an item with no
+    // readable date has no age and stays out.
+    if age.is_set() {
+        let now = crate::util::now_epoch();
+        matches.retain(|e| age.keeps_at(e.date.is_some().then_some(e.epoch), now));
+    }
 
     let plan = Plan {
         to: to.as_deref(),

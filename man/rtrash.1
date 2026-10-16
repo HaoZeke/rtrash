@@ -1808,6 +1808,19 @@ Restore into the existing directory
 .I DIR
 instead of the original location, keeping each item's file name.
 .TP
+.BI \-\-older\-than= AGE
+Only items trashed more than
+.I AGE
+ago.
+.I AGE
+is a number of days or a duration such as 2h, 30m or 1d12h, as in
+.BR list .
+An item with no readable deletion date has no age and stays out.
+.TP
+.BI \-\-newer\-than= AGE
+Only items trashed within the last
+.IR AGE .
+.TP
 .B \-\-cwd\-only
 Without PATH, only items trashed from under the current directory.
 .TP

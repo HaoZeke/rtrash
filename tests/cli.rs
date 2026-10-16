@@ -369,6 +369,28 @@ fn forge_record(sb: &Sandbox, name: &str, to: &Path, body: &[u8]) {
 }
 
 #[test]
+fn restore_takes_age_filters() {
+    let sb = Sandbox::new("restore-age");
+    fs::write(sb.work().join("fresh.txt"), b"fresh").unwrap();
+    assert!(sb.run(&["put", "fresh.txt"]).status.success());
+    // An item trashed on 2026-01-01, months before now.
+    forge_record(&sb, "old.txt", &sb.work().join("old.txt"), b"old");
+
+    let out = sb.run(&["restore", "--older-than=30", "--all"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(fs::read(sb.work().join("old.txt")).unwrap(), b"old");
+    assert!(!sb.work().join("fresh.txt").exists());
+    // Nothing older is left; the fresh item stays put.
+    let out = sb.run(&["restore", "--older-than=30", "--all"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let out = sb.run(&["restore", "--newer-than=1h", "--all"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(fs::read(sb.work().join("fresh.txt")).unwrap(), b"fresh");
+    let out = sb.run(&["restore", "--older-than=soon"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+}
+
+#[test]
 fn restore_never_writes_to_the_trash_or_what_contains_it() {
     let sb = Sandbox::new("restore-into-trash");
     fs::write(sb.work().join("keep"), b"real").unwrap();

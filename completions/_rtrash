@@ -251,6 +251,8 @@ restore_opts=(
   '(-n --dry-run)'{-n,--dry-run}'[show what would be restored, change nothing]'
   '(--latest)--all[of several matches, restore every one]'
   '--to=[restore into this directory]:dir:_files -/'
+  '--older-than=[only items trashed more than AGE ago (DAYS, 2h, 1d12h)]:age:'
+  '--newer-than=[only items trashed within the last AGE]:age:'
   '--conflict=[when the destination exists]:policy:(refuse overwrite rename skip)'
   '--json[print the result as JSON]'
   '(- *)'--help'[display help and exit]'

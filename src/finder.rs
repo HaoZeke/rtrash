@@ -697,6 +697,8 @@ pub(crate) struct RestoreOpts<'a> {
     pub(crate) newest_first: Option<bool>,
     /// `--sort`: the numbered list order (date by default, path, or none).
     pub(crate) sort: Option<crate::restore::Sort>,
+    /// `--older-than` and `--newer-than`.
+    pub(crate) age: crate::filters::AgeFilter,
     /// `--dry-run`: say what each restore would do and move nothing.
     pub(crate) dry_run: bool,
 }
@@ -789,6 +791,11 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
         Ok(r) => r,
         Err(c) => return c,
     };
+    let now = crate::util::now_epoch();
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|e| o.age.keeps_at(Some(e.epoch), now))
+        .collect();
     // Without --to, only an item with a Put Back record has a place to go.
     // --directory keeps the items from under DIR, which may be gone.
     let placed: Vec<&crate::finder_shared::Entry> = rows

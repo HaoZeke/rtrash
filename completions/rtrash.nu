@@ -257,6 +257,8 @@ export extern "rtrash restore" [
     --force(-f)  # overwrite an existing file (same as --conflict=overwrite)
     --conflict: string@"nu-complete rtrash conflict"  # when the destination exists: refuse (default),
     --to: string  # restore into DIR, keeping each item's file name
+    --older-than: string  # only items trashed more than AGE ago (DAYS, 2h, 1d12h)
+    --newer-than: string  # only items trashed within the last AGE
     --cwd-only  # without PATH, only items trashed from under the current directory
     --directory: path  # without PATH, only items trashed from under DIR
     --plain  # force numbered line selection even on a TTY (no TUI)
@@ -478,6 +480,8 @@ export extern "trash-restore" [
     --force(-f)  # overwrite an existing file (same as --conflict=overwrite)
     --conflict: string@"nu-complete rtrash conflict"  # when the destination exists: refuse (default),
     --to: string  # restore into DIR, keeping each item's file name
+    --older-than: string  # only items trashed more than AGE ago (DAYS, 2h, 1d12h)
+    --newer-than: string  # only items trashed within the last AGE
     --cwd-only  # without PATH, only items trashed from under the current directory
     --directory: path  # without PATH, only items trashed from under DIR
     --plain  # force numbered line selection even on a TTY (no TUI)
