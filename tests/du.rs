@@ -889,6 +889,25 @@ fn regex_filters_match_the_whole_path() {
 }
 
 #[test]
+fn collapse_lists_a_directory_as_one_row() {
+    let t = Tree::new("du-collapse");
+    t.file("vendor/deep/big.bin", 200_000);
+    t.file("src/a.txt", 10_000);
+    let open = t.json(&["--no-git", "--all-dirs"]);
+    let dirs = paths_in(&open, "dirs");
+    assert!(dirs.contains(&s(&t.root.join("vendor/deep"))), "{open}");
+    let j = t.json(&["--no-git", "--all-dirs", "--collapse=vendor"]);
+    let dirs = paths_in(&j, "dirs");
+    let files = paths_in(&j, "files");
+    assert!(dirs.contains(&s(&t.root.join("vendor"))), "{j}");
+    assert!(!dirs.contains(&s(&t.root.join("vendor/deep"))), "{j}");
+    assert!(!files.iter().any(|f| f.ends_with("big.bin")), "{j}");
+    assert!(files.iter().any(|f| f.ends_with("a.txt")), "{j}");
+    assert!(j.contains("\"collapsed\""), "{j}");
+    assert_eq!(t.du(&["--collapse="]).status.code(), Some(2));
+}
+
+#[test]
 fn no_hidden_leaves_dot_entries_out() {
     let t = Tree::new("nohidden");
     t.file("seen/a.bin", 100_000);

@@ -1371,6 +1371,18 @@ the same as
 .B \-\-exclude='*.EXT'
 for each.
 .TP
+.BI \-\-collapse= NAME
+List each directory called
+.I NAME
+(or at the path
+.IR NAME )
+as one row tagged collapsed, and nothing below it on its own;
+its size still counts in full. Repeatable, as with
+.B dust \-\-collapse
+and
+.BR "gdu \-\-collapse\-path" .
+A scanned PATH itself stays open.
+.TP
 .BI \-\-exclude\-regex= RE
 Leave out every entry whose full path matches the regular expression
 .IR RE ;

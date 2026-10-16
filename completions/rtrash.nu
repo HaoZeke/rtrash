@@ -232,6 +232,7 @@ export extern "rtrash du" [
     --exclude-caches  # leave out directories below PATH that hold a valid
     --type: string  # count only files ending in one of EXTS, such as
     --exclude-type: string  # leave out files ending in one of EXTS
+    --collapse: string  # list each directory called NAME as one row
     --exclude-regex: string  # leave out entries whose path matches RE
     --include-regex: string  # count only files whose path matches RE
     --no-hidden  # leave out hidden entries, those named with a

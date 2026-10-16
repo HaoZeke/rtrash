@@ -140,6 +140,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l files0-
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l exclude-caches -d 'leave out directories with a valid CACHEDIR.TAG'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l type -d 'count only files with these extensions' -x
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l exclude-type -d 'leave out files with these extensions' -x
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l collapse -d 'list a directory as one row' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l exclude-regex -d 'leave out entries whose path matches RE' -x
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l include-regex -d 'count only files whose path matches RE' -x
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-hidden -d 'leave out entries named with a leading dot'

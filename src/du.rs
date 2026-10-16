@@ -98,6 +98,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           gitignore syntax: a name at any depth, or a path
                           relative to PATH when it has a '/'; `dir/` matches
                           directories only)
+      --collapse=NAME   list each directory called NAME (or at path NAME)
+                          as one row, nothing below it on its own
+                          (repeatable; dust --collapse, gdu --collapse-path)
       --exclude-regex=RE  leave out entries whose path matches RE
                           (repeatable; dust -X, gdu --ignore-dirs-pattern)
       --include-regex=RE  count only files whose path matches RE
@@ -192,6 +195,7 @@ pub const ARTEFACT_KINDS: &[&str] = &[
     "cmake-build",
     "cache",
     "trash",
+    "collapsed",
 ];
 
 /// Classify a directory as a regenerable build artefact or cache from its
@@ -334,6 +338,9 @@ pub struct ScanOpts {
     /// `--include-kernfs`: also walk kernel pseudo file systems (proc,
     /// sysfs, cgroup, ...) met below a scan root; skipped by default.
     pub include_kernfs: bool,
+    /// `--collapse`: directory names (or paths) listed as one row, with
+    /// nothing below them listed on its own.
+    pub collapse: Vec<String>,
 }
 
 impl Default for ScanOpts {
@@ -356,6 +363,7 @@ impl Default for ScanOpts {
             control: None,
             types: false,
             include_kernfs: false,
+            collapse: Vec::new(),
         }
     }
 }
@@ -1405,7 +1413,10 @@ fn walk_dir(
     {
         Some("trash")
     } else {
-        artefact_kind(&name, |c| markers.contains(&c))
+        artefact_kind(&name, |c| markers.contains(&c)).or_else(|| {
+            let named = |c: &String| *c == *name || Path::new(c) == path;
+            opts.collapse.iter().any(named).then_some("collapsed")
+        })
     };
     // Repository internals are never offered for deletion, and an artefact
     // is one row: nothing below either is listed on its own. A PATH that is
@@ -1562,7 +1573,7 @@ impl Node {
         if depth == 0 || !ctx.listable(depth, self.mtime) {
             return;
         }
-        if ctx.opts.artefacts_only && artefact.is_none() {
+        if ctx.opts.artefacts_only && matches!(artefact, None | Some("collapsed")) {
             return;
         }
         let own = ctx.key(self.apparent, self.disk, self.items, self.mtime);
@@ -2927,6 +2938,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 Ok(exts) => filter
                     .patterns
                     .extend(exts.iter().map(|e| format!("*.{e}"))),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--collapse", None) {
+            match v {
+                Ok("") => bail!("--collapse: empty name"),
+                Ok(v) => opts.collapse.push(v.trim_end_matches(['/', '\\']).into()),
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--exclude-regex", None) {
