@@ -98,6 +98,13 @@ fn trash_restore_scopes_to_the_current_directory() {
     fs::copy(env!("CARGO_BIN_EXE_rtrash"), &restore).unwrap();
     let out = Command::new(&restore).current_dir(&here).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    // --all says the same, as trash-cli does.
+    let all = Command::new(&restore)
+        .arg("--all")
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    let all_out = String::from_utf8_lossy(&all.stdout).into_owned();
     // Tidy the Recycle Bin item before the asserts.
     let _ = Command::new(env!("CARGO_BIN_EXE_rtrash"))
         .arg("restore")
@@ -110,6 +117,11 @@ fn trash_restore_scopes_to_the_current_directory() {
         "{stdout}"
     );
     assert!(stdout.contains("here"), "{stdout}");
+    assert_eq!(all.status.code(), Some(1), "{all_out}");
+    assert!(
+        all_out.starts_with("No files trashed from current dir ('"),
+        "{all_out}"
+    );
 }
 
 #[test]
