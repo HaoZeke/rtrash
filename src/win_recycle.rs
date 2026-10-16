@@ -2843,14 +2843,19 @@ registry), then the total and the free space on each (a warning under
         let mut dry_run = false;
         let mut force = false;
         let mut verbose = false;
-        let mut regex = false;
+        let mut kind = crate::filters::Match::Glob;
+        let mut bad_match: Option<String> = None;
         let mut json = false;
         let mut patterns: Vec<String> = Vec::new();
         let mut batch: Option<String> = None;
         let filters = parse_with_filters(prog, args, |arg| {
             match arg {
                 "-n" | "--dry-run" => dry_run = true,
-                "--regex" => regex = true,
+                "--regex" => kind = crate::filters::Match::Regex,
+                a if a.starts_with("--match=") => match crate::filters::Match::parse(&a[8..]) {
+                    Ok(k) => kind = k,
+                    Err(e) => bad_match = Some(e),
+                },
                 "--json" => json = true,
                 "-f" | "--force" => force = true,
                 a if a.starts_with("--batch=") => batch = Some(a["--batch=".len()..].to_string()),
@@ -2863,7 +2868,9 @@ Usage: {prog} [OPTION]... PATTERN...
 Permanently delete Recycle Bin items matching PATTERN (glob).
 
       --regex   PATTERNs are regular expressions searched in the original
-                   path (trashy's --match=regex)
+                   path (the same as --match=regex)
+      --match=KIND  how to read PATTERNs (trashy's -m): glob (default),
+                   regex, substring or exact (the whole original path)
       --older-than=AGE  only match items deleted more than AGE ago: DAYS,
                    or a duration such as 2h, 30m or 1d12h
       --newer-than=AGE  only match items deleted within the last AGE
@@ -2907,14 +2914,19 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
         }
         // The latest put is a scope of its own: with no PATTERN, take all.
         let scoped = batch.is_some() && patterns.is_empty();
+        if let Some(e) = bad_match {
+            eprintln!("{prog}: {e}");
+            return 2;
+        }
         if scoped {
-            patterns.push(if regex { "" } else { "*" }.into());
+            kind = crate::filters::Match::Glob;
+            patterns.push("*".into());
         }
         if patterns.is_empty() {
             eprintln!("{prog}: missing PATTERN");
             return 2;
         }
-        let pats = match crate::filters::Patterns::new(patterns, regex) {
+        let pats = match crate::filters::Patterns::new(patterns, kind) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("{prog}: {e}");

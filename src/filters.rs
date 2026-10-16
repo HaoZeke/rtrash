@@ -364,50 +364,86 @@ mod tests {
     }
 }
 
-/// The PATTERN operands of `rm`: shell globs on the original path, its
-/// basename or the name in the trash, or with `--regex` regular
-/// expressions searched in the original path (trashy's `--match=regex`).
+/// How `rm` reads its PATTERNs: trashy's `--match` kinds. Globs are the
+/// default here (trashy's default is regex).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Match {
+    /// Shell glob on the original path, its basename or the trash name.
+    #[default]
+    Glob,
+    /// Regular expression searched anywhere in the original path.
+    Regex,
+    /// Text found anywhere in the original path.
+    Substring,
+    /// The whole original path, character for character.
+    Exact,
+}
+
+impl Match {
+    pub fn parse(s: &str) -> Result<Match, String> {
+        match s {
+            "glob" => Ok(Match::Glob),
+            "regex" => Ok(Match::Regex),
+            "substring" => Ok(Match::Substring),
+            "exact" => Ok(Match::Exact),
+            _ => Err(format!(
+                "invalid --match '{s}' (use glob, regex, substring or exact)"
+            )),
+        }
+    }
+}
+
+/// The PATTERN operands of `rm`, read as `kind` says. `texts` keeps them
+/// as given; `regex` holds them compiled when `kind` is [`Match::Regex`].
 #[derive(Debug, Clone, Default)]
 pub struct Patterns {
-    pub globs: Vec<String>,
+    pub kind: Match,
+    pub texts: Vec<String>,
     pub regex: Vec<regex_lite::Regex>,
 }
 
 impl Patterns {
-    /// Globs as given, or with `regex` each one compiled.
-    pub fn new(pats: Vec<String>, regex: bool) -> Result<Patterns, String> {
-        if !regex {
-            return Ok(Patterns {
-                globs: pats,
-                regex: Vec::new(),
-            });
-        }
-        let regex = pats
-            .iter()
-            .map(|p| regex_lite::Regex::new(p).map_err(|e| format!("invalid regex '{p}': {e}")))
-            .collect::<Result<_, _>>()?;
-        Ok(Patterns {
-            globs: Vec::new(),
-            regex,
-        })
+    pub fn new(texts: Vec<String>, kind: Match) -> Result<Patterns, String> {
+        let regex = if kind == Match::Regex {
+            texts
+                .iter()
+                .map(|p| regex_lite::Regex::new(p).map_err(|e| format!("invalid regex '{p}': {e}")))
+                .collect::<Result<_, _>>()?
+        } else {
+            Vec::new()
+        };
+        Ok(Patterns { kind, texts, regex })
     }
 
-    /// A pattern that takes everything: `*` and friends, or a regex that
-    /// matches the empty string (such as `.*` or `^`).
+    /// A pattern that takes everything: `*` and friends, a regex that
+    /// matches the empty string (such as `.*` or `^`), or a substring
+    /// every path contains (empty, or a lone separator).
     pub fn is_mass(&self) -> bool {
-        let glob = |p: &String| ["*", "*.*", "**", "**/*"].contains(&p.as_str());
-        self.globs.iter().any(glob) || self.regex.iter().any(|r| r.is_match(""))
+        match self.kind {
+            Match::Glob => {
+                let all = ["*", "*.*", "**", "**/*"];
+                self.texts.iter().any(|p| all.contains(&p.as_str()))
+            }
+            Match::Regex => self.regex.iter().any(|r| r.is_match("")),
+            Match::Substring => self
+                .texts
+                .iter()
+                .any(|p| ["", "/", "\\"].contains(&p.as_str())),
+            Match::Exact => false,
+        }
     }
 
     pub fn hit(&self, full: &str, base: &str, name: &str) -> bool {
-        if !self.regex.is_empty() {
-            return self.regex.iter().any(|r| r.is_match(full));
+        match self.kind {
+            Match::Glob => self.texts.iter().any(|p| {
+                crate::util::fnmatch(p, full)
+                    || crate::util::fnmatch(p, base)
+                    || crate::util::fnmatch(p, name)
+            }),
+            Match::Regex => self.regex.iter().any(|r| r.is_match(full)),
+            Match::Substring => self.texts.iter().any(|p| full.contains(p.as_str())),
+            Match::Exact => self.texts.iter().any(|p| p == full),
         }
-        self.globs.iter().any(|p| {
-            crate::util::fnmatch(p, full)
-                || crate::util::fnmatch(p, base)
-                || crate::util::fnmatch(p, name)
-        })
     }
 }
 
@@ -441,19 +477,37 @@ impl RmSummary {
 
 #[cfg(test)]
 mod pattern_tests {
-    use super::Patterns;
+    use super::{Match, Patterns};
 
     #[test]
     fn regex_patterns_search_the_whole_path() {
-        let p = Patterns::new(vec![r"/old-[0-9]+/".into()], true).unwrap();
+        let p = Patterns::new(vec![r"/old-[0-9]+/".into()], Match::Regex).unwrap();
         assert!(p.hit("/home/u/old-42/a.txt", "a.txt", "a.txt"));
         assert!(!p.hit("/home/u/old-x/a.txt", "a.txt", "a.txt"));
         assert!(!p.is_mass());
-        assert!(Patterns::new(vec![".*".into()], true).unwrap().is_mass());
-        assert!(Patterns::new(vec!["(".into()], true).is_err());
-        let g = Patterns::new(vec!["*.o".into()], false).unwrap();
+        assert!(Patterns::new(vec![".*".into()], Match::Regex)
+            .unwrap()
+            .is_mass());
+        assert!(Patterns::new(vec!["(".into()], Match::Regex).is_err());
+        let g = Patterns::new(vec!["*.o".into()], Match::Glob).unwrap();
         assert!(g.hit("/x/a.o", "a.o", "a.o"));
         assert!(!g.is_mass());
+    }
+
+    #[test]
+    fn substring_and_exact_match_the_original_path() {
+        let sub = Patterns::new(vec!["old-pro".into()], Match::Substring).unwrap();
+        assert!(sub.hit("/home/u/old-project/a", "a", "a"));
+        assert!(!sub.hit("/home/u/new/a", "a", "a"));
+        assert!(Patterns::new(vec!["/".into()], Match::Substring)
+            .unwrap()
+            .is_mass());
+        let ex = Patterns::new(vec!["/home/u/a".into()], Match::Exact).unwrap();
+        assert!(ex.hit("/home/u/a", "a", "a"));
+        assert!(!ex.hit("/home/u/a2", "a2", "a2"));
+        assert!(!ex.hit("/x/a", "a", "a"));
+        assert_eq!(Match::parse("exact"), Ok(Match::Exact));
+        assert!(Match::parse("fuzzy").is_err());
     }
 
     #[test]

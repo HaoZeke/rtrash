@@ -592,6 +592,11 @@ pub fn rm(
     let (mut removed, mut bytes, mut status) = (0u64, 0u64, 0);
     let mut matched: Vec<String> = Vec::new();
     let regex = nfc_regexes(&patterns.regex);
+    // Substring and exact texts compare with the composed paths too.
+    let texts = crate::filters::Patterns {
+        texts: patterns.texts.iter().map(|t| nfc(t)).collect(),
+        ..patterns.clone()
+    };
     for e in &rows {
         let path_s = e.shown.to_string_lossy();
         let base = e
@@ -600,16 +605,18 @@ pub fn rm(
             .map(|b| b.to_string_lossy().into_owned())
             .unwrap_or_default();
         let name = nfc(&e.name);
-        let hit = if patterns.regex.is_empty() {
-            patterns.globs.iter().any(|p| {
+        let hit = match patterns.kind {
+            crate::filters::Match::Glob => patterns.texts.iter().any(|p| {
                 let p = nfc(p);
                 crate::util::fnmatch(&p, &path_s)
                     || crate::util::fnmatch(&p, &base)
                     || crate::util::fnmatch(&p, &name)
-            })
-        } else {
-            let path_s = nfc(&path_s);
-            regex.iter().any(|r| r.is_match(&path_s))
+            }),
+            crate::filters::Match::Regex => {
+                let path_s = nfc(&path_s);
+                regex.iter().any(|r| r.is_match(&path_s))
+            }
+            _ => texts.hit(&nfc(&path_s), &base, &name),
         };
         if !hit {
             continue;

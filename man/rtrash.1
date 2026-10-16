@@ -3270,6 +3270,26 @@ takes it. A regex that matches the empty path, such as
 counts as a mass pattern and needs
 .BR \-\-force .
 .TP
+.BR \-m ", " \-\-match =\fIKIND\fR
+How to read each
+.IR PATTERN ,
+as trashy's
+.B \-m
+does:
+.B glob
+(the default here),
+.B regex
+(the same as
+.BR \-\-regex ),
+.B substring
+(text anywhere in the original path; an empty one or a lone separator
+needs
+.BR \-\-force )
+or
+.B exact
+(the whole original path).
+Unlike trashy, the default stays glob.
+.TP
 .BI \-\-older\-than =AGE
 Only match items trashed more than
 .I AGE

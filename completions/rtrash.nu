@@ -322,6 +322,7 @@ export extern "rtrash rm" [
     --smaller-than: string  # only match items taking less than SIZE on disk
     --batch: string  # only items from one put run: an ID from `undo --list`, or `last`
     --regex  # PATTERNs are regular expressions on the original path
+    --match(-m): string  # how to read PATTERNs: glob, regex, substring or exact
     --dry-run(-n)  # list matches and reclaimable size; do not delete
     --force(-f)  # allow mass patterns that match everything (e.g. '*')
     --verbose(-v)  # print each permanently removed original path
@@ -538,6 +539,7 @@ export extern "trash-rm" [
     --dry-run(-n)  # list matches and reclaimable size; do not delete
     --batch: string  # only items from one put run: an ID from `undo --list`, or `last`
     --regex  # PATTERNs are regular expressions on the original path
+    --match(-m): string  # how to read PATTERNs: glob, regex, substring or exact
     --force(-f)  # allow mass patterns that match everything (e.g. '*')
     --verbose(-v)  # print each permanently removed original path
     --json  # emit a JSON summary (and matched originals array)

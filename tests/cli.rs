@@ -1351,6 +1351,36 @@ fn trash_rm_regex_matches_the_original_path() {
 }
 
 #[test]
+fn trash_rm_match_takes_substring_and_exact() {
+    let sb = Sandbox::new("rm-match-kinds");
+    for f in ["old-a.txt", "old-b.txt", "new.txt"] {
+        sb.touch(f);
+        assert!(sb.run(&["put", f]).status.success());
+    }
+    let out = sb.run(&["rm", "-m", "substring", "/old-a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    // The original path exactly as put recorded it.
+    let info = fs::read_to_string(sb.trash().join("info/old-b.txt.trashinfo")).unwrap();
+    let exact = info
+        .lines()
+        .find_map(|l| l.strip_prefix("Path="))
+        .unwrap()
+        .to_string();
+    let out = sb.run(&["rm", "--match=exact", &exact]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    // Exact needs the whole path: a bare name matches nothing.
+    let out = sb.run(&["rm", "--match=exact", "new.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), ["new.txt"]);
+    // A substring every path holds needs --force; a bad kind exits 2.
+    let mass = sb.run(&["rm", "-m", "substring", "/"]);
+    assert_eq!(mass.status.code(), Some(2), "{}", stderr_of(&mass));
+    let bad = sb.run(&["rm", "--match=fuzzy", "x"]);
+    assert_eq!(bad.status.code(), Some(2), "{}", stderr_of(&bad));
+    assert_eq!(trash_names(&sb), ["new.txt"]);
+}
+
+#[test]
 fn empty_dry_run_reports_space_for_tree() {
     let sb = Sandbox::new("empty-dry-du");
     let d = sb.work().join("big");

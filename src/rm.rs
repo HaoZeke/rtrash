@@ -8,8 +8,8 @@ use crate::trashdir::{self, TrashDir};
 const HELP: &str = "\
 Usage: {prog} [OPTION]... PATTERN...
 Permanently remove trashed items whose original path or basename matches
-a PATTERN (shell-style glob; quote globs from the shell; with --regex, a
-regular expression searched in the original path). Matching entries
+a PATTERN (shell-style glob; quote globs from the shell; --match picks
+another kind, as trashy's -m does). Matching entries
 are deleted from the trash (files/ + .trashinfo), not restored. An absolute
 PATTERN also matches with symlinks in its directory part resolved, the way
 put records original paths.
@@ -27,7 +27,10 @@ matching *trash* entries — not a synonym for put.
       --smaller-than=SIZE only match items taking less than SIZE on disk
                      (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
       --regex      PATTERNs are regular expressions searched in the
-                     original path (trashy's --match=regex)
+                     original path (the same as --match=regex)
+  -m, --match=KIND  how to read PATTERNs (trashy's -m): glob (default),
+                     regex, substring (text in the original path) or
+                     exact (the whole original path)
       --batch=ID   only items from one put run: an ID from `undo --list`,
                      or `last` for the latest; with no PATTERN, all of it
   -n, --dry-run    list matches and reclaimable size; do not delete
@@ -60,7 +63,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut dry_run = false;
     let mut home_only = false;
     let mut json = false;
-    let mut regex = false;
+    let mut kind = crate::filters::Match::Glob;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
@@ -88,7 +91,28 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "-n" | "--dry-run" => dry_run = true,
             "--home-only" => home_only = true,
             "--json" => json = true,
-            "--regex" => regex = true,
+            "--regex" => kind = crate::filters::Match::Regex,
+            "-m" | "--match" => {
+                i += 1;
+                let Some(v) = args.get(i) else {
+                    eprintln!("{prog}: {arg} requires a kind (glob, regex, substring, exact)");
+                    return 2;
+                };
+                match crate::filters::Match::parse(v) {
+                    Ok(k) => kind = k,
+                    Err(e) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                }
+            }
+            a if a.starts_with("--match=") => match crate::filters::Match::parse(&a[8..]) {
+                Ok(k) => kind = k,
+                Err(e) => {
+                    eprintln!("{prog}: {e}");
+                    return 2;
+                }
+            },
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -163,20 +187,24 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // A put run is a scope of its own: with no PATTERN, take all of it.
     let scoped = batch.is_some() && patterns.is_empty();
     if scoped {
-        patterns.push(if regex { "" } else { "*" }.into());
+        kind = crate::filters::Match::Glob;
+        patterns.push("*".into());
     }
     if patterns.is_empty() {
         eprintln!("{prog}: missing operand");
         eprintln!("Try '{prog} --help' for more information.");
         return 2;
     }
-    if !regex {
+    if matches!(
+        kind,
+        crate::filters::Match::Glob | crate::filters::Match::Exact
+    ) {
         // put records originals with their parent directory resolved, so
         // a path typed through a symlinked directory matches that way too.
         let resolved: Vec<String> = patterns.iter().filter_map(|p| resolve_pattern(p)).collect();
         patterns.extend(resolved);
     }
-    let pats = match crate::filters::Patterns::new(patterns.clone(), regex) {
+    let pats = match crate::filters::Patterns::new(patterns.clone(), kind) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{prog}: {e}");
