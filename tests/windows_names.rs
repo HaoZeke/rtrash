@@ -209,3 +209,48 @@ fn trash_restore_takes_a_range_pick() {
     );
     assert_eq!(back, [true, false, true]);
 }
+
+#[test]
+fn a_blank_pick_asks_for_an_index() {
+    let dir = std::env::temp_dir().join(format!("rtrash-names-blank-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let sub = dir.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    let names = ["one.txt", "two.txt"];
+    for n in names {
+        fs::write(sub.join(n), n).unwrap();
+        let put = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            .arg("put")
+            .arg(sub.join(n))
+            .output()
+            .unwrap();
+        assert!(
+            put.status.success(),
+            "{}",
+            String::from_utf8_lossy(&put.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    let scope = format!("--directory={}", sub.display());
+    let out = run_with(
+        std::path::Path::new(env!("CARGO_BIN_EXE_rtrash")),
+        &dir,
+        &["restore", &scope],
+        "\n",
+    );
+    let kept = names.iter().all(|n| !sub.join(n).exists());
+    for n in names {
+        let _ = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            .arg("restore")
+            .arg(sub.join(n))
+            .output();
+    }
+    let _ = fs::remove_dir_all(&dir);
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(1), "{said}");
+    assert!(
+        said.contains("2 matches; provide an index 0..1 on stdin"),
+        "{said}"
+    );
+    assert!(kept, "a blank answer restored something");
+}

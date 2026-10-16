@@ -2257,6 +2257,14 @@ Without PATH, print a numbered list and read an index from stdin.
             println!("No files were restored");
             return 0;
         }
+        if line.trim().is_empty() {
+            eprintln!(
+                "{prog}: {} matches; provide an index 0..{} on stdin",
+                matches.len(),
+                matches.len() - 1
+            );
+            return 1;
+        }
         // A pick like `0-2,4`, as on FreeDesktop.
         let picked = match crate::util::parse_selection(&line, matches.len()) {
             Ok(idx) => idx.into_iter().map(|i| matches[i].clone()).collect(),
