@@ -1793,9 +1793,28 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut target: Option<PathBuf> = None;
         let mut last_run = false;
         let mut dry_run = false;
+        let mut matcher: Option<crate::budget::PathMatch> = None;
+        let mut latest = false;
+        let mut all = false;
         for arg in args {
             match arg.as_str() {
                 "-f" | "--force" => conflict = Conflict::Overwrite,
+                "--latest" => latest = true,
+                "--all" => all = true,
+                a if crate::budget::PathMatch::parse(a).is_some() => {
+                    match crate::budget::PathMatch::parse(a) {
+                        Some(Ok(_)) if matcher.is_some() => {
+                            eprintln!("{prog}: give only one of --name, --glob and --regex");
+                            return 2;
+                        }
+                        Some(Ok(m)) => matcher = Some(m),
+                        Some(Err(e)) => {
+                            eprintln!("{prog}: {e}");
+                            return 2;
+                        }
+                        None => {}
+                    }
+                }
                 "-n" | "--dry-run" => {
                     dry_run = true;
                     plain = true;
@@ -1834,12 +1853,21 @@ Usage: {prog} [OPTION]... [PATH]
 Restore an item from the Windows Recycle Bin to its original location.
 
 With PATH, restore the item whose original path equals PATH.
+--name, --glob and --regex match many items at once. When several items
+match, --latest restores the most recently deleted one and --all restores
+every one, both without asking.
 Without PATH, print a numbered list and read an index from stdin.
 
   -f, --force   overwrite when the destination exists (best-effort)
       --conflict=POLICY  when the destination exists: refuse (default),
                 overwrite, rename (restore next to it as NAME.1.EXT)
                 or skip
+      --name=NAME  match items whose file name is NAME
+      --glob=PATTERN  match items whose original path (PATTERN with a
+                separator) or file name matches a shell glob
+      --regex=RE  match items whose original path matches RE
+      --latest  of several matches, restore the most recently deleted
+      --all     of several matches, restore every one
       --plain   numbered selection instead of the browser
   -n, --dry-run show where each chosen item would go and change nothing
       --json    print {{restored, failed, skipped}} as JSON on stdout;
@@ -1873,6 +1901,14 @@ Without PATH, print a numbered list and read an index from stdin.
                     target = Some(crate::util::arg_path(a));
                 }
             }
+        }
+        if latest && all {
+            eprintln!("{prog}: give --latest or --all, not both");
+            return 2;
+        }
+        if target.is_some() && matcher.is_some() {
+            eprintln!("{prog}: give PATH or a --name, --glob or --regex match, not both");
+            return 2;
         }
         let opts = RestoreOpts {
             conflict,
@@ -1919,16 +1955,29 @@ Without PATH, print a numbered list and read an index from stdin.
                 }
                 matched
             }
-            None => items,
+            None => match &matcher {
+                Some(m) => items
+                    .into_iter()
+                    .filter(|i| m.keeps(&original_of(i)))
+                    .collect(),
+                None => items,
+            },
         };
         if matches.is_empty() {
             eprintln!("{prog}: no trashed files match");
+            if json {
+                println!("{}", restore_json(&[], 0, 0, dry_run));
+            }
             return 1;
         }
-        if matches.len() == 1 {
+        matches.sort_by_key(|it| it.time_deleted);
+        if latest {
+            let newest = matches.pop().into_iter().collect();
+            return restore_one(prog, newest, &opts);
+        }
+        if all || matches.len() == 1 {
             return restore_one(prog, matches, &opts);
         }
-        matches.sort_by_key(|it| it.time_deleted);
         if newest_first {
             matches.reverse();
         }

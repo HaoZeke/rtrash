@@ -404,6 +404,64 @@ fn restore_conflict_policies_skip_rename_and_refuse() {
     let _ = fs::remove_dir_all(&lad);
 }
 
+#[test]
+fn restore_matchers_with_latest_and_all() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let lad = local_app_data("matchers");
+    let id = std::process::id();
+    let a = m.join(format!("match-a-{id}.log"));
+    let b = m.join(format!("match-b-{id}.log"));
+    for p in [&a, &b] {
+        fs::write(p, b"x").unwrap();
+        let out = cmd(&lad).arg("put").arg(p).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    let glob = format!("--glob=match-*-{id}.log");
+    let run = |args: &[&str]| cmd(&lad).arg("restore").args(args).output().unwrap();
+    assert_eq!(run(&["--latest", "--all", &glob]).status.code(), Some(2));
+    assert_eq!(
+        run(&["--name=x", "--regex=y"]).status.code(),
+        Some(2),
+        "two matchers"
+    );
+    let out = run(&["--dry-run", "--latest", &glob]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(said.matches("would restore").count(), 1, "{said}");
+    assert!(said.contains(&format!("match-b-{id}.log")), "{said}");
+    let out = run(&["--latest", &glob]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(b.exists() && !a.exists());
+    let out = run(&["--all", &format!("--name=match-a-{id}.log")]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(a.exists());
+    let out = run(&["--json", &glob]);
+    assert_eq!(out.status.code(), Some(1), "nothing left to match");
+    for p in [&a, &b] {
+        let _ = fs::remove_file(p);
+    }
+    let _ = fs::remove_dir_all(&lad);
+}
+
 /// Odd but valid NTFS names through put, list, restore and a vanished
 /// Recycle Bin payload; no command may panic.
 #[test]

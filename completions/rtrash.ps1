@@ -31,7 +31,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
         'put' = @('-f', '--force', '-v', '--verbose', '--dry-run', '--plain', '--json', '--in-use=', '--trash-dir=', '--home-only', '--help', '--version')
         'list' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--glob=', '--regex=', '--name=', '--cwd-only', '--size', '--format=', '--help', '--version')
         'empty' = @('-n', '--dry-run', '-v', '--verbose', '--older-than=', '--max-size=', '--prune=', '--until-free=', '--all', '--json', '--help', '--version')
-        'restore' = @('-f', '--force', '--conflict=', '-n', '--dry-run', '--json', '--plain', '--newest-first', '--oldest-first', '--batch=', '--no-space-check', '--help', '--version')
+        'restore' = @('-f', '--force', '--conflict=', '--name=', '--glob=', '--regex=', '--latest', '--all', '-n', '--dry-run', '--json', '--plain', '--newest-first', '--oldest-first', '--batch=', '--no-space-check', '--help', '--version')
         'status' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--help', '--version')
         'rm' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--batch=', '-n', '--dry-run', '-f', '--force', '-v', '--verbose', '--help')
     }
