@@ -2447,6 +2447,42 @@ fn list_last_keeps_the_tail_of_the_listing() {
 }
 
 #[test]
+fn directory_scopes_list_and_restore_to_a_gone_folder() {
+    let sb = Sandbox::new("directory");
+    let proj = sb.work().join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::write(proj.join("in.txt"), b"in").unwrap();
+    sb.touch("out.txt");
+    assert!(sb.run(&["put", "proj/in.txt", "out.txt"]).status.success());
+    fs::remove_dir(&proj).unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let dir = format!("--directory={}", proj.display());
+
+    let out = sb.run(&["list", &pin, &dir]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.contains("in.txt"), "{text}");
+    // A relative DIR counts from here.
+    let out = sb.run(&["list", &pin, "--directory=proj"]);
+    assert_eq!(stdout_of(&out).lines().count(), 1, "{}", stdout_of(&out));
+    assert_eq!(
+        sb.run(&["list", &pin, &dir, "--cwd-only"]).status.code(),
+        Some(2)
+    );
+
+    // restore: the one item from the gone folder restores, recreating it.
+    let out = sb.run(&["restore", &pin, &dir]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(fs::read(proj.join("in.txt")).unwrap(), b"in");
+    assert!(!sb.work().join("out.txt").exists());
+    assert_eq!(
+        sb.run(&["restore", &pin, "--directory="]).status.code(),
+        Some(2)
+    );
+}
+
+#[test]
 fn list_json_and_age_filters() {
     let sb = Sandbox::new("list-json");
     let pin = format!("--trash-dir={}", sb.trash().display());

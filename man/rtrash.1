@@ -619,6 +619,15 @@ Only items whose file name is
 .TP
 .B \-\-cwd\-only
 Only items that came from the current directory or below it.
+.TP
+.BI \-\-directory= DIR
+Only items that came from
+.I DIR
+or below it, as
+.B \-\-cwd\-only
+for another directory;
+.I DIR
+need not exist any more.
 Names and patterns compare in Unicode NFC, as restore does.
 A bare
 .I PATTERN
@@ -1795,6 +1804,14 @@ instead of the original location, keeping each item's file name.
 .TP
 .B \-\-cwd\-only
 Without PATH, only items trashed from under the current directory.
+.TP
+.BI \-\-directory= DIR
+Without PATH, only items trashed from under
+.IR DIR ,
+which need not exist any more.
+Not on the macOS Finder Trash without a
+.B \-\-trash\-dir
+pin.
 Run as
 .BR trash\-restore ,
 restore follows trash-cli: without PATH it offers only these items,

@@ -168,6 +168,7 @@ export extern "rtrash list" [
     --regex: string  # only items whose original path matches RE
     --name: string  # only items with this file name
     --cwd-only  # only items from the current directory or below
+    --directory: path  # only items from DIR or below (DIR need not exist)
     --format: string  # print each item through a template ({date} {path} {name} {size} ...)
     --json  # emit a JSON array (scripts; one object per item;
     --help  # display this help and exit
@@ -257,6 +258,7 @@ export extern "rtrash restore" [
     --conflict: string@"nu-complete rtrash conflict"  # when the destination exists: refuse (default),
     --to: string  # restore into DIR, keeping each item's file name
     --cwd-only  # without PATH, only items trashed from under the current directory
+    --directory: path  # without PATH, only items trashed from under DIR
     --plain  # force numbered line selection even on a TTY (no TUI)
     --no-space-check  # copy across devices even when the copy would leave
     --batch: string  # restore one whole put run (an undo --list id, or last)
@@ -465,6 +467,7 @@ export extern "trash-list" [
     --regex: string  # only items whose original path matches RE
     --name: string  # only items with this file name
     --cwd-only  # only items from the current directory or below
+    --directory: path  # only items from DIR or below (DIR need not exist)
     --format: string  # print each item through a template ({date} {path} {name} {size} ...)
     --json  # emit a JSON array (scripts; one object per item;
     --help  # display this help and exit
@@ -476,6 +479,7 @@ export extern "trash-restore" [
     --conflict: string@"nu-complete rtrash conflict"  # when the destination exists: refuse (default),
     --to: string  # restore into DIR, keeping each item's file name
     --cwd-only  # without PATH, only items trashed from under the current directory
+    --directory: path  # without PATH, only items trashed from under DIR
     --plain  # force numbered line selection even on a TTY (no TUI)
     --no-space-check  # copy across devices even when the copy would leave
     --batch: string  # restore one whole put run (an undo --list id, or last)

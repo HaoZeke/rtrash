@@ -21,7 +21,7 @@ _rtrash_empty_opts=(
 
 _rtrash_list_opts=(
   --home-only --trash-dir= --older-than= --newer-than= --json
-  --larger-than= --smaller-than= --size --sort= --reverse --last= --glob= --regex= --name= --cwd-only --format= --all-users --volumes --trash-dirs --help --version
+  --larger-than= --smaller-than= --size --sort= --reverse --last= --glob= --regex= --name= --cwd-only --directory= --format= --all-users --volumes --trash-dirs --help --version
 )
 
 _rtrash_trash_stats_opts=(
@@ -42,7 +42,7 @@ _rtrash_du_opts=(
 )
 
 _rtrash_restore_opts=(
-  -f --force --home-only --trash-dir= --cwd-only --plain --no-space-check
+  -f --force --home-only --trash-dir= --cwd-only --directory= --plain --no-space-check
   --newest-first --oldest-first --overwrite --sort= --name= --glob= --regex= --latest --all --batch=
   -n --dry-run --to= --conflict= --json --help --version
 )

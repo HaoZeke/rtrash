@@ -104,6 +104,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l glob 
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l regex -r -d 'only items whose original path matches RE'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l name -r -d 'only items with this file name'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l cwd-only -d 'only items from the current directory or below'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l directory -r -d 'only items from DIR or below'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l format -r -d 'print each item through a template'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l all-users -d 'list every readable user trash with an owner column'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l volumes -d 'print the mount points searched and exit'
@@ -199,6 +200,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s f 
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l home-only -d 'only the home trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l trash-dir -d 'only this trash directory' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l cwd-only -d 'only items trashed from under the current directory'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l directory -r -d 'only items trashed from under DIR'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l plain -d 'numbered selection even on a TTY'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l no-space-check -d 'copy across devices even when space or inodes run low'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l batch -r -d 'restore one whole put run'
@@ -297,6 +299,7 @@ complete -c trash-list -l glob -r
 complete -c trash-list -l regex -r
 complete -c trash-list -l name -r
 complete -c trash-list -l cwd-only
+complete -c trash-list -l directory -r
 complete -c trash-list -l format -r
 complete -c trash-list -l larger-than -r
 complete -c trash-list -l smaller-than -r
@@ -315,6 +318,7 @@ complete -c trash-restore -s f -l force
 complete -c trash-restore -l home-only
 complete -c trash-restore -l trash-dir -r
 complete -c trash-restore -l cwd-only
+complete -c trash-restore -l directory -r
 complete -c trash-restore -l plain
 complete -c trash-restore -l no-space-check
 complete -c trash-restore -l batch -r

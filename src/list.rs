@@ -33,6 +33,8 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
       --name=NAME       only items whose file name is NAME
       --cwd-only        only items that came from the current directory
                      or below it
+      --directory=DIR   only items that came from DIR or below it (DIR
+                     need not exist any more)
       --size            add each item's disk usage (payload plus its
                      .trashinfo, as status counts it)
       --sort=KEY        order by date (default), size, name (file name)
@@ -242,6 +244,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut size_filter = SizeFilter::default();
     let mut matcher: Option<crate::restore::Matcher> = None;
     let mut cwd_only = false;
+    let mut directory: Option<PathBuf> = None;
     let mut last: Option<usize> = None;
     let mut format: Option<Vec<FmtPart>> = None;
     let mut i = 0usize;
@@ -274,6 +277,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--size" => with_size = true,
             "--reverse" => reverse = true,
             "--cwd-only" => cwd_only = true,
+            a if a.starts_with("--directory=") => {
+                let d = &a["--directory=".len()..];
+                if d.is_empty() {
+                    eprintln!("{prog}: --directory needs a non-empty DIR");
+                    return 2;
+                }
+                let d = crate::util::arg_path(d);
+                directory = Some(std::path::absolute(&d).unwrap_or(d));
+            }
             a if a.starts_with("--last=") => match a["--last=".len()..].parse::<usize>() {
                 Ok(n) => last = Some(n),
                 Err(_) => {
@@ -392,7 +404,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: {e}");
         return 2;
     }
-    let cwd = if cwd_only {
+    if cwd_only && directory.is_some() {
+        eprintln!("{prog}: give --cwd-only or --directory, not both");
+        return 2;
+    }
+    let cwd = if let Some(d) = directory {
+        Some(d)
+    } else if cwd_only {
         match std::env::current_dir() {
             Ok(d) => Some(d),
             Err(e) => {

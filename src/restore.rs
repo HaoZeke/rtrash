@@ -41,6 +41,8 @@ the index prompt. --newest-first and --oldest-first set the order for both.
                     or skip
       --to=DIR    restore into DIR, keeping each item's file name
       --cwd-only  without PATH, only items trashed from under the current directory
+      --directory=DIR  without PATH, only items trashed from under DIR
+                    (which need not exist any more)
       --plain     force numbered line selection even on a TTY (no TUI)
       --no-space-check  copy across devices even when the copy would leave
                     the target under 5% of its bytes or inodes free, or
@@ -179,6 +181,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut conflict = Conflict::Refuse;
     let mut home_only = false;
     let mut cwd_only = false;
+    let mut directory: Option<PathBuf> = None;
     let mut plain = false;
     let mut newest_first: Option<bool> = None;
     let mut target: Option<PathBuf> = None;
@@ -275,6 +278,14 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
             "--home-only" => home_only = true,
             "--cwd-only" => cwd_only = true,
+            a if a.starts_with("--directory=") => {
+                let d = &a["--directory=".len()..];
+                if d.is_empty() {
+                    eprintln!("{prog}: --directory needs a non-empty DIR");
+                    return 2;
+                }
+                directory = Some(absolutize(&crate::util::arg_path(d)));
+            }
             "--plain" => plain = true,
             "--newest-first" => newest_first = Some(true),
             "--oldest-first" => newest_first = Some(false),
@@ -313,6 +324,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: give PATH or a --name, --glob or --regex match, not both");
         return 2;
     }
+    if cwd_only && directory.is_some() {
+        eprintln!("{prog}: give --cwd-only or --directory, not both");
+        return 2;
+    }
     if latest && all {
         eprintln!("{prog}: give --latest or --all, not both");
         return 2;
@@ -327,6 +342,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // macOS restores from the Finder Trash unless a pin or the setting
     // says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty()) {
+        if directory.is_some() {
+            eprintln!(
+                "{prog}: --directory does not apply to the Finder Trash; pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop"
+            );
+            return 2;
+        }
         return crate::finder::default_restore(
             prog,
             &crate::finder::RestoreOpts {
@@ -364,6 +385,18 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             entries.iter().filter(|e| e.original == abs).collect()
         }
         (None, Some(m)) => entries.iter().filter(|e| m.matches(e)).collect(),
+        // --directory scopes like --cwd-only, to a directory that may be gone.
+        (None, None) if directory.is_some() => {
+            let dir = directory.as_deref().unwrap_or(Path::new("/"));
+            let real = std::fs::canonicalize(dir).ok();
+            entries
+                .iter()
+                .filter(|e| {
+                    e.original.starts_with(dir)
+                        || real.as_ref().is_some_and(|r| e.original.starts_with(r))
+                })
+                .collect()
+        }
         (None, None) if cwd_only || trash_cli => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
             entries
