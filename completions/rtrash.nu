@@ -70,15 +70,24 @@ def "nu-complete rtrash trashed paths" [] {
     nu-complete rtrash trashed path
 }
 
-# Recycle Bin items by their path under the automount root, after
-# wsl restore; nothing for the other actions.
-def "nu-complete rtrash wsl items" [context: string] {
-    if not ($context | split row " " | any {|w| $w == "restore" }) {
-        return []
-    }
+# Recycle Bin items by their path under the automount root.
+def "nu-complete rtrash wsl paths" [] {
     try {
         ^rtrash wsl list "--format={path}\\0" | split row (char nul) | where $it != ""
     } catch { [] }
+}
+
+# The paths after wsl restore or rm; nothing for the other actions.
+def "nu-complete rtrash wsl items" [context: string] {
+    if not ($context | split row " " | any {|w| $w in ["restore" "rm"] }) {
+        return []
+    }
+    nu-complete rtrash wsl paths
+}
+
+# The file names of the Recycle Bin items, for wsl --name.
+def "nu-complete rtrash wsl names" [] {
+    nu-complete rtrash wsl paths | each {|p| $p | path basename }
 }
 
 def "nu-complete rtrash trashed names" [] {
@@ -349,7 +358,7 @@ export extern "rtrash wsl" [
     --format: string  # list: print each item through a template
     --glob: string  # items whose path (or name, without a slash) matches
     --regex: string  # items whose path matches
-    --name: string  # items with exactly this file name
+    --name: string@"nu-complete rtrash wsl names"  # items with exactly this file name
     --older-than: string  # empty: items deleted more than AGE ago
     --all  # empty: every item, without asking
     --dry-run(-n)  # rm, empty: print what would go, delete nothing

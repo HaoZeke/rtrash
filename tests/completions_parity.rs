@@ -362,7 +362,8 @@ fn bash_restore_completes_trashed_items() {
     assert!(rm.iter().any(|p| p.ends_with("/a\\ b.txt")), "{rm:?}");
 }
 
-/// bash completes `wsl restore` with the Recycle Bin items, read from
+/// bash completes `wsl restore` and `wsl rm` with the Recycle Bin items
+/// (and `--name=` with their file names), read from
 /// `rtrash wsl list --format`, against a made-up WSL drive tree.
 #[cfg(unix)]
 #[test]
@@ -418,6 +419,8 @@ fn bash_wsl_restore_completes_recycled_items() {
             .collect()
     };
     let items = run("rtrash wsl restore ''");
+    let rm = run("rtrash wsl rm ''");
+    let names = run("rtrash wsl rm --name=a");
     let actions = run("rtrash wsl ''");
     let _ = fs::remove_dir_all(&top);
     assert!(
@@ -425,6 +428,11 @@ fn bash_wsl_restore_completes_recycled_items() {
         "{items:?}"
     );
     assert!(!items.contains(&"restore".to_string()), "{items:?}");
+    assert!(
+        rm.iter().any(|p| p.ends_with("/c/Users/me/a\\ b.txt")),
+        "{rm:?}"
+    );
+    assert_eq!(names, ["a\\ b.txt"]);
     assert!(actions.contains(&"restore".to_string()), "{actions:?}");
 }
 

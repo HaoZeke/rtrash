@@ -22,7 +22,7 @@ function __rtrash_trashed
     command $lister --format="{$argv[1]}\0" 2>/dev/null | string split0
 end
 
-# Recycle Bin items by their path under the automount root, for wsl restore.
+# Recycle Bin items by their path under the automount root, for wsl restore and rm.
 function __rtrash_wsl_items
     command rtrash wsl list --format='{path}\0' 2>/dev/null | string split0
 end
@@ -157,14 +157,14 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l stacks 
 
 # wsl
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl; and not __fish_seen_subcommand_from list restore rm empty' -f -a 'list restore rm empty'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl; and __fish_seen_subcommand_from restore' -f -a '(__rtrash_wsl_items)'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl; and __fish_seen_subcommand_from restore rm' -f -a '(__rtrash_wsl_items)'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l older-than -x -d 'empty: items deleted more than AGE ago'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l all -d 'empty: every item, without asking'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l json -d 'list: print a JSON array'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l format -x -d 'list: print each item through a template'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l glob -x -d 'items whose path or name matches'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l regex -x -d 'items whose path matches'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l name -x -d 'items with exactly this file name'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l name -x -a '(__rtrash_wsl_items | string replace -r ".*/" "")' -d 'items with exactly this file name'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s n -l dry-run -d 'rm: print what would go'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s f -l force -d 'restore over an existing file'
 

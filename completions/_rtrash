@@ -190,7 +190,7 @@ wsl_opts=(
   '--format=[list: print each item through a template]:template:'
   '--glob=[items whose path or name matches]:pattern:'
   '--regex=[items whose path matches]:regex:'
-  '--name=[items with exactly this file name]:name:'
+  '--name=[items with exactly this file name]:recycled name:_rtrash_wsl_name'
   '(-n --dry-run)'{-n,--dry-run}'[rm, empty: print what would go]'
   '(-f --force)'{-f,--force}'[restore over an existing file]'
   '(- *)'--help'[display help and exit]'
@@ -280,16 +280,24 @@ rm_opts=(
   _wanted trashed expl "trashed $1" compadd -a items
 }
 
-# wsl restore: Recycle Bin items by their path under the automount root,
-# through compadd like _rtrash_trashed; files for the other actions.
+# wsl restore and rm: Recycle Bin items by their path under the automount
+# root, through compadd like _rtrash_trashed; files for the other actions.
 (( $+functions[_rtrash_wsl_item] )) || _rtrash_wsl_item() {
-  if [[ $line[1] != restore ]]; then
+  if [[ $line[1] != (restore|rm) ]]; then
     _files
     return
   fi
   local -a items expl
   items=(${(0)"$(_call_program wsl-items "rtrash wsl list --format='{path}\\0'" 2>/dev/null)"})
   _wanted wsl-items expl 'recycled path' compadd -a items
+}
+
+# wsl --name=: the file names of the Recycle Bin items.
+(( $+functions[_rtrash_wsl_name] )) || _rtrash_wsl_name() {
+  local -a items expl
+  items=(${(0)"$(_call_program wsl-items "rtrash wsl list --format='{path}\\0'" 2>/dev/null)"})
+  items=(${items:t})
+  _wanted wsl-names expl 'recycled name' compadd -a items
 }
 
 _rtrash_dispatch() {

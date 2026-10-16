@@ -138,19 +138,40 @@ _rtrash_complete_restore() {
   esac
 }
 
-# wsl: after the restore action, Recycle Bin items by their path under
-# the automount root, from `rtrash wsl list`; otherwise actions, options
+# Recycle Bin items whose path under the automount root (path) or file
+# name (name) starts with PREFIX, from `rtrash wsl list`.
+_rtrash_wsl_items() {
+  local field=$1 prefix=$2 p
+  while IFS= read -r -d '' p; do
+    [[ $field == name ]] && p=${p##*/}
+    [[ $p == "$prefix"* ]] && COMPREPLY+=("$(printf '%q' "$p")")
+  done < <(command rtrash wsl list --format='{path}\0' 2>/dev/null)
+}
+
+# wsl: file names after --name=; after restore or rm, Recycle Bin items
+# by their path under the automount root; otherwise actions, options
 # and files.
 _rtrash_complete_wsl() {
-  local cur="${COMP_WORDS[COMP_CWORD]}" i act= p
+  local cur="${COMP_WORDS[COMP_CWORD]}" i=$COMP_CWORD act=
+  COMPREPLY=()
+  # Readline splits --name=x at the '=' (COMP_WORDBREAKS).
+  if [[ $cur == = && ${COMP_WORDS[i - 1]} == --name ]]; then
+    _rtrash_wsl_items name ""
+    return
+  fi
+  if ((i > 1)) && [[ ${COMP_WORDS[i - 1]} == = && ${COMP_WORDS[i - 2]} == --name ]]; then
+    _rtrash_wsl_items name "$cur"
+    return
+  fi
+  if [[ $cur == --name=* ]]; then
+    _rtrash_wsl_items name "${cur#--name=}"
+    return
+  fi
   for ((i = 1; i < COMP_CWORD; i++)); do
     [[ ${COMP_WORDS[i - 1]} == wsl ]] && act=${COMP_WORDS[i]} && break
   done
-  if [[ $act == restore && $cur != -* ]]; then
-    COMPREPLY=()
-    while IFS= read -r -d '' p; do
-      [[ $p == "$cur"* ]] && COMPREPLY+=("$(printf '%q' "$p")")
-    done < <(command rtrash wsl list --format='{path}\0' 2>/dev/null)
+  if [[ ($act == restore || $act == rm) && $cur != -* ]]; then
+    _rtrash_wsl_items path "$cur"
     return
   fi
   _rtrash_complete_from _rtrash_wsl_opts

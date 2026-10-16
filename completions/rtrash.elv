@@ -43,7 +43,7 @@ fn trashed {|field|
   } catch { }
 }
 
-# Recycle Bin items by their path under the automount root, for wsl restore.
+# Recycle Bin items by their path under the automount root, for wsl restore and rm.
 fn wsl-items {
   try {
     rtrash wsl list '--format={path}\0' 2>$os:dev-null | from-terminated "\x00"
@@ -74,9 +74,11 @@ fn complete {|@words|
     }
   } elif (and (eq $sub restore) (str:has-prefix $cur --name=)) {
     set cands = [(trashed name | each {|n| put --name=$n })]
+  } elif (and (eq $sub wsl) (str:has-prefix $cur --name=)) {
+    set cands = [(wsl-items | each {|p| put --name=(path:base $p) })]
   } elif (str:has-prefix $cur -) {
     set cands = $opts[$sub]
-  } elif (and (eq $sub wsl) (has-value $words[1..-1] restore)) {
+  } elif (and (eq $sub wsl) (or (has-value $words[1..-1] restore) (has-value $words[1..-1] rm))) {
     set cands = [(wsl-items)]
   } elif (or (eq $sub restore) (eq $sub rm)) {
     set cands = [(trashed path)]

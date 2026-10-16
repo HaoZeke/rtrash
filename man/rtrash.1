@@ -2926,7 +2926,11 @@ PATH and the
 .B rm
 PATTERN with the original paths in the trash,
 .B wsl restore
-PATH with the Recycle Bin items from
+PATH and
+.B wsl rm
+PATH with the Recycle Bin items, and
+.B wsl \-\-name=
+with their file names, from
 .BR "rtrash wsl list \-\-format" ,
 and
 .B \-\-name=
