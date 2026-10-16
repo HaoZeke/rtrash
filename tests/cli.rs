@@ -45,6 +45,7 @@ impl Sandbox {
             .env("XDG_DATA_HOME", self.root.join("xdg"))
             .env("XDG_CONFIG_HOME", self.root.join(".config"))
             .env("HOME", &self.root)
+            .env_remove("RTRASH_NO_PERMANENT")
             .output()
             .expect("failed to run rtrash")
     }
@@ -6632,4 +6633,51 @@ fn list_show_trashpath_names_the_payload_under_files() {
     assert!(!plain.contains("trash: "), "{plain}");
     let fmt = sb.run(&["list", &pin, "--show-trashpath", "--format={name}"]);
     assert_eq!(fmt.status.code(), Some(2));
+}
+
+#[test]
+fn no_permanent_guard_refuses_rm_and_empty_but_not_dry_runs() {
+    let sb = Sandbox::new("no-permanent");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("keep.txt");
+    assert!(sb.run(&["put", "keep.txt"]).status.success());
+    let guarded = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .current_dir(sb.work())
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .env("RTRASH_NO_PERMANENT", "1")
+            .output()
+            .expect("run rtrash")
+    };
+    for args in [
+        &["rm", &pin, "keep.txt"][..],
+        &["rm", &pin, "-f", "*"],
+        &["empty", &pin, "--all"],
+    ] {
+        let out = guarded(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(stderr_of(&out).contains("RTRASH_NO_PERMANENT"), "{args:?}");
+    }
+    // Nothing went: the item is still listed, and still restorable.
+    let listed = stdout_of(&sb.run(&["list", &pin]));
+    assert!(listed.contains("keep.txt"), "{listed}");
+    // A dry run only looks, so the guard lets it through.
+    let dry = guarded(&["rm", &pin, "-n", "keep.txt"]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    // "0" leaves the guard off.
+    let off = Command::new(bin())
+        .args(["rm", &pin, "keep.txt"])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .env("RTRASH_NO_PERMANENT", "0")
+        .output()
+        .unwrap();
+    assert!(off.status.success(), "{}", stderr_of(&off));
+    let listed = stdout_of(&sb.run(&["list", &pin]));
+    assert!(!listed.contains("keep.txt"), "{listed}");
 }

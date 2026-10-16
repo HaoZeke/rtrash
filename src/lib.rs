@@ -52,6 +52,7 @@ pub mod holders;
 pub mod info;
 #[cfg(unix)]
 pub mod list;
+pub mod permanent_guard;
 #[cfg(unix)]
 pub mod put;
 #[cfg(all(unix, feature = "tui"))]

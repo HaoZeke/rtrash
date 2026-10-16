@@ -3588,6 +3588,26 @@ which takes only the oldest items needed.
 A put to the Finder Trash warns the same way.
 On Windows it names the Recycle Bin of the volume and counts bytes only.
 .TP
+.B RTRASH_NO_PERMANENT
+When set to anything but empty or
+.BR 0 ,
+.BR rm ,
+.BR empty ,
+.B trash\-rm
+and
+.B trash\-empty
+refuse to delete anything for good and exit 2, before they read the
+trash.
+Dry runs
+.RB ( \-n ,
+.BR \-\-dry\-run ),
+.B \-\-help
+and
+.B \-\-version
+still work, and so do put, list, restore and undo.
+Set it for agents and shared accounts, so that trash stays the only
+way to remove files and every trashed item stays recoverable.
+.TP
 .B RTRASH_MIN_FREE
 A size such as 10G that a put or restore copying across devices must
 leave free on the target file system, on top of 5% of its bytes and
