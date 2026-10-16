@@ -1069,13 +1069,14 @@ pub(crate) fn restore_one_to(
     let staged = staging_path(parent, &entry.name);
     if let Err(e) = trashdir::relocate(&src, &staged) {
         let err = format!("cannot restore '{}' to staging area: {e}", src.display());
+        // scratch: the staged copy; the payload is still in the trash.
         let _ = trashdir::remove_any_path(&staged);
         return Err(err);
     }
 
     if dest_exists {
         // Payload is durable under `staged`; only now remove the blocker.
-        if let Err(e) = trashdir::remove_any_path(dest) {
+        if let Err(e) = crate::permanent_guard::remove(dest) {
             let err = format!("cannot remove existing '{}': {e}", dest.display());
             return Err(unstage(err, &staged, &src));
         }

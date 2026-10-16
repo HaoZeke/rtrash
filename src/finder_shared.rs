@@ -653,7 +653,7 @@ pub fn rm(
             if !json {
                 println!("{}", crate::util::term_path(&e.shown));
             }
-        } else if let Err(err) = crate::trashdir::remove_any_path(&e.path()) {
+        } else if let Err(err) = crate::permanent_guard::remove(&e.path()) {
             crate::finder_total::uncarried(&e.trash);
             eprintln!("{prog}: cannot remove '{}': {err}", e.path().display());
             status = 1;

@@ -480,3 +480,50 @@ fn list_depth_shows_a_deleted_tree_on_windows() {
     assert_eq!(lines[row + 1..], want, "{text}");
     assert_eq!(bad.status.code(), Some(2));
 }
+
+/// Under `RTRASH_NO_PERMANENT` rm refuses before it starts, and a restore
+/// that would overwrite a file fails with both copies intact.
+#[test]
+fn no_permanent_guard_keeps_the_recycle_bin_on_windows() {
+    let dir = common::scratch_dir("names", "noperm");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("pg.txt");
+    fs::write(&file, "trashed").unwrap();
+    let rtrash = env!("CARGO_BIN_EXE_rtrash");
+    let put = Command::new(rtrash).arg("put").arg(&file).output().unwrap();
+    fs::write(&file, "newer").unwrap();
+    let guarded = |args: &[&str]| {
+        Command::new(rtrash)
+            .args(args)
+            .current_dir(&dir)
+            .env("RTRASH_NO_PERMANENT", "1")
+            .output()
+            .unwrap()
+    };
+    let path = file.to_str().unwrap();
+    let rm = guarded(&["rm", path]);
+    let over = guarded(&["restore", "-f", path]);
+    let kept = fs::read_to_string(&file).unwrap_or_default();
+    // Put the trashed copy back so the Recycle Bin is left as found.
+    let _ = fs::remove_file(&file);
+    let back = Command::new(rtrash)
+        .arg("restore")
+        .arg(&file)
+        .output()
+        .unwrap();
+    let restored = fs::read_to_string(&file).unwrap_or_default();
+    let _ = fs::remove_dir_all(&dir);
+    let text = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(put.status.success(), "{}", text(&put));
+    assert_eq!(rm.status.code(), Some(2), "{}", text(&rm));
+    assert!(text(&rm).contains("RTRASH_NO_PERMANENT"), "{}", text(&rm));
+    assert!(!over.status.success(), "{}", text(&over));
+    assert!(
+        text(&over).contains("RTRASH_NO_PERMANENT"),
+        "{}",
+        text(&over)
+    );
+    assert_eq!(kept, "newer");
+    assert!(back.status.success(), "{}", text(&back));
+    assert_eq!(restored, "trashed", "the guard lost the trashed copy");
+}

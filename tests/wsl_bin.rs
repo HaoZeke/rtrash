@@ -56,6 +56,20 @@ impl Fake {
             .output()
             .unwrap()
     }
+
+    /// `run` with `RTRASH_NO_PERMANENT=1`.
+    fn run_guarded(&self, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            .arg("wsl")
+            .args(args)
+            .env("RTRASH_WSL_OSRELEASE", self.top.join("osrelease"))
+            .env("RTRASH_WSL_CONF", self.top.join("wsl.conf"))
+            .env("RTRASH_WSL_SID", SID)
+            .env("RTRASH_NO_PERMANENT", "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    }
 }
 
 impl Drop for Fake {
@@ -288,4 +302,30 @@ fn wsl_empty_goes_by_age_and_guards_the_whole_bin() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!f.bin().join("$REF34GH.txt").exists());
+}
+
+#[test]
+fn wsl_rm_empty_and_overwrite_refuse_under_no_permanent() {
+    let f = Fake::new("noperm");
+    f.recycle("AB12CD.txt", r"C:\a.txt", b"old", 1_700_000_000);
+    let payload = f.bin().join("$RAB12CD.txt");
+    for args in [&["rm", "--name=a.txt"][..], &["empty", "--all"]] {
+        let out = f.run_guarded(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("RTRASH_NO_PERMANENT"), "{args:?}: {err}");
+        assert!(payload.exists(), "{args:?} deleted the item");
+    }
+    // A dry run still lists what would go.
+    let out = f.run_guarded(&["rm", "-n", "--name=a.txt"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("would remove"));
+    // restore -f over a file would delete that file for good.
+    let dest = f.root.join("c/a.txt");
+    fs::write(&dest, b"new").unwrap();
+    let out = f.run_guarded(&["restore", "-f", &dest.display().to_string()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("RTRASH_NO_PERMANENT"));
+    assert_eq!(fs::read(&dest).unwrap(), b"new");
+    assert!(payload.exists());
 }

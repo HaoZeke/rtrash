@@ -417,7 +417,7 @@ fn move_back_inner(src: &Path, dest: &Path, force: bool) -> Result<(), String> {
     crate::trashdir::relocate(src, &staged)
         .map_err(|e| format!("cannot stage '{}': {e}", src.display()))?;
     if dest.symlink_metadata().is_ok() {
-        if let Err(e) = crate::trashdir::remove_any_path(dest) {
+        if let Err(e) = crate::permanent_guard::remove(dest) {
             let _ = crate::trashdir::relocate_back(&staged, src);
             return Err(format!("cannot remove existing '{}': {e}", dest.display()));
         }
@@ -1092,7 +1092,7 @@ pub fn prune_after_put(prog: &str, moved: &[(PathBuf, String)], quiet: bool) {
         for i in picked {
             let (path, _, b) = &rows[i];
             let inodes = 1 + crate::trash_stats::count_inodes(path);
-            match crate::trashdir::remove_any_path(path) {
+            match crate::permanent_guard::remove(path) {
                 Ok(()) => {
                     crate::finder_total::carry(trash, (*b, inodes), false);
                     n += 1;
@@ -1137,7 +1137,7 @@ pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u
         let b = crate::fastdelete::disk_usage(&path);
         let inodes = 1 + crate::trash_stats::count_inodes(&path);
         if !dry_run {
-            if let Err(err) = crate::trashdir::remove_any_path(&path) {
+            if let Err(err) = crate::permanent_guard::remove(&path) {
                 crate::finder_total::uncarried(&e.trash);
                 eprintln!("{prog}: cannot remove '{}': {err}", path.display());
                 continue;
@@ -1186,7 +1186,7 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
             continue;
         }
         let inodes = 1 + crate::trash_stats::count_inodes(&path);
-        match crate::trashdir::remove_any_path(&path) {
+        match crate::permanent_guard::remove(&path) {
             Ok(()) => {
                 crate::finder_total::carry(&e.trash, (b, inodes), false);
                 removed += 1;

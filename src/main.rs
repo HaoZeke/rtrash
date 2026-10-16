@@ -103,11 +103,17 @@ fn main() {
         rest = &joined;
     }
 
+    // RTRASH_NO_PERMANENT stops the commands that delete for good before
+    // they start; under them every removal still passes its gate.
+    if let Some(code) = rtrash::permanent_guard::refuse_command(&argv0, rest) {
+        std::process::exit(code);
+    }
+
     let code = match argv0.as_str() {
-        "trash-empty" => guarded(&argv0, rest, empty::run),
+        "trash-empty" => empty::run(&argv0, rest),
         "trash-list" => list::run(&argv0, rest),
         "trash-restore" => restore::run(&argv0, rest),
-        "trash-rm" => guarded(&argv0, rest, rm::run),
+        "trash-rm" => rm::run(&argv0, rest),
         // trash-cli exits 74 (EX_IOERR) when a file could not be trashed.
         "trash-put" => match put::run(&argv0, rest) {
             1 => 74,
@@ -118,13 +124,13 @@ fn main() {
         // (`rtrash du --help`), so a hint points at the right help.
         _ => match rest.first().map(String::as_str) {
             Some("put") => put::run(&argv0, &rest[1..]),
-            Some("empty") => guarded(&format!("{argv0} empty"), &rest[1..], empty::run),
+            Some("empty") => empty::run(&format!("{argv0} empty"), &rest[1..]),
             Some("list") => list::run(&format!("{argv0} list"), &rest[1..]),
             Some("status") => status::run(&format!("{argv0} status"), &rest[1..]),
             Some("trash-stats") => trash_stats::run(&format!("{argv0} trash-stats"), &rest[1..]),
             Some("du") => du::run(&format!("{argv0} du"), &rest[1..]),
             Some("restore") => restore::run(&format!("{argv0} restore"), &rest[1..]),
-            Some("rm") => guarded(&format!("{argv0} rm"), &rest[1..], rm::run),
+            Some("rm") => rm::run(&format!("{argv0} rm"), &rest[1..]),
             Some("undo") => undo::run(&format!("{argv0} undo"), &rest[1..]),
             Some("who") => who::run(&format!("{argv0} who"), &rest[1..]),
             Some("reap") => reap::run(&format!("{argv0} reap"), &rest[1..]),
@@ -160,10 +166,4 @@ fn main() {
         },
     };
     std::process::exit(code);
-}
-
-/// Run a command that deletes for good, unless `RTRASH_NO_PERMANENT`
-/// refuses it (see [`rtrash::permanent_guard`]).
-fn guarded(prog: &str, args: &[String], run: fn(&str, &[String]) -> i32) -> i32 {
-    rtrash::permanent_guard::refuse_permanent(prog, args).unwrap_or_else(|| run(prog, args))
 }

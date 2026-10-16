@@ -50,6 +50,20 @@ impl Sandbox {
             .expect("failed to run rtrash")
     }
 
+    /// Like `run`, with `RTRASH_NO_PERMANENT=1`.
+    fn run_guarded(&self, args: &[&str]) -> Output {
+        Command::new(bin())
+            .args(args)
+            .current_dir(self.work())
+            .env("XDG_DATA_HOME", self.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", self.root.join(".config"))
+            .env("HOME", &self.root)
+            .env("RTRASH_NO_PERMANENT", "1")
+            .env_remove("RTRASH_MAX_SIZE")
+            .output()
+            .expect("failed to run rtrash")
+    }
+
     /// Like `run`, but feeds `stdin` to the child (interactive restore selection).
     fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Output {
         let mut child = Command::new(bin())
@@ -6680,4 +6694,96 @@ fn no_permanent_guard_refuses_rm_and_empty_but_not_dry_runs() {
     assert!(off.status.success(), "{}", stderr_of(&off));
     let listed = stdout_of(&sb.run(&["list", &pin]));
     assert!(!listed.contains("keep.txt"), "{listed}");
+}
+
+/// Under `RTRASH_NO_PERMANENT` the size cap after a put keeps every older
+/// item: the put itself still moves the file.
+#[test]
+fn no_permanent_guard_keeps_items_the_put_cap_would_drop() {
+    let sb = Sandbox::new("noperm-putcap");
+    trash_aged(&sb, "old1", 40_000, 20);
+    trash_aged(&sb, "old2", 40_000, 10);
+    fs::write(sb.work().join("fresh"), vec![b'y'; 150_000]).unwrap();
+    let out = Command::new(bin())
+        .args(["put", "fresh"])
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("HOME", &sb.root)
+        .env("RTRASH_MAX_SIZE", "100K")
+        .env("RTRASH_NO_PERMANENT", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(names_in_trash(&sb), ["fresh", "old1", "old2"]);
+    assert!(
+        stderr_of(&out).contains("RTRASH_NO_PERMANENT"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+/// A restore over an existing file would delete that file for good, so
+/// the guard refuses it and both copies stay.
+#[test]
+fn no_permanent_guard_refuses_a_restore_that_overwrites() {
+    let sb = Sandbox::new("noperm-restore");
+    fs::write(sb.work().join("pg.txt"), b"trashed").unwrap();
+    assert!(sb.run(&["put", "pg.txt"]).status.success());
+    fs::write(sb.work().join("pg.txt"), b"newer").unwrap();
+    let out = sb.run_guarded(&["restore", "--home-only", "-f", "pg.txt"]);
+    assert!(!out.status.success(), "{}", stdout_of(&out));
+    assert!(
+        stderr_of(&out).contains("RTRASH_NO_PERMANENT"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(fs::read(sb.work().join("pg.txt")).unwrap(), b"newer");
+    assert_eq!(names_in_trash(&sb), ["pg.txt"]);
+    // A restore with nothing in the way still works.
+    fs::remove_file(sb.work().join("pg.txt")).unwrap();
+    let out = sb.run_guarded(&["restore", "--home-only", "pg.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(fs::read(sb.work().join("pg.txt")).unwrap(), b"trashed");
+}
+
+/// reap deletes for good with `--permanent` and `--purge-trash`; the
+/// guard stops both, and a plain reap (to the trash) still runs.
+#[test]
+fn no_permanent_guard_refuses_reap_permanent_and_purge_trash() {
+    let sb = Sandbox::new("noperm-reap");
+    let dir = sb.work().join("scratch");
+    fs::create_dir_all(&dir).unwrap();
+    let old = dir.join("old.txt");
+    fs::write(&old, b"o").unwrap();
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    let times = fs::FileTimes::new()
+        .set_accessed(day_ago)
+        .set_modified(day_ago);
+    fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
+    let d = dir.to_str().unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let age = ["--older-than=1h", "--age-by=m"];
+    let permanent = [&["reap"][..], &age[..], &["--permanent", d][..]].concat();
+    let purge = [
+        &["reap"][..],
+        &age[..],
+        &["--when-below=100%", "--purge-trash", d][..],
+    ]
+    .concat();
+    for args in [&permanent, &purge] {
+        let out = sb.run_guarded(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr_of(&out));
+        assert!(stderr_of(&out).contains("RTRASH_NO_PERMANENT"), "{args:?}");
+        assert!(old.exists(), "{args:?} removed the file");
+    }
+    let to_trash = [&["reap"][..], &age[..], &[pin.as_str(), d][..]].concat();
+    let out = sb.run_guarded(&to_trash);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!old.exists());
+    assert_eq!(names_in_trash(&sb), ["old.txt"]);
 }

@@ -709,7 +709,7 @@ fn empty_one(
                 .map_or(0, |n| sizes.entry_bytes(&crate::util::str_from_os_ref(n))),
             _ => 0,
         };
-        match trashdir::remove_any_path(target) {
+        match crate::permanent_guard::remove(target) {
             Ok(()) => {
                 if info_path.is_some() {
                     gone.fetch_add(sz, Ordering::Relaxed);
@@ -821,6 +821,11 @@ fn full_empty_wipe(
 
     // A payload that cannot go stays, with its .trashinfo; the rest of the
     // trash still empties, and the failures are reported at the end.
+    if let Err(e) = crate::permanent_guard::gate() {
+        eprintln!("{prog}: {e}");
+        errors.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     let (wf, wi) = crate::fastdelete::wipe_two_parallel(&files_dir, &info_dir);
     let mut kept: Vec<String> = Vec::new();
     match wf {

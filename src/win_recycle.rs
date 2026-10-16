@@ -162,6 +162,7 @@ pub fn restore_payload(payload: &Path, dest: &Path) -> std::io::Result<()> {
     }
     if std::fs::rename(payload, dest).is_err() {
         // Most likely another volume: copy, then remove the payload.
+        // scratch: a move; the copy is whole first.
         copy_tree(payload, dest)?;
         let meta = std::fs::symlink_metadata(payload)?;
         if meta.is_dir() {
@@ -1831,6 +1832,10 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         if json {
             summary(&items);
         }
+        if let Err(e) = crate::permanent_guard::gate() {
+            eprintln!("{prog}: {e}");
+            return 1;
+        }
         match os_limited::purge_all(items) {
             Ok(()) => 0,
             Err(e) => {
@@ -1941,6 +1946,12 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         }
         let n = picked.len() as u64;
         let chosen: Vec<TrashItem> = picked.iter().map(|&i| all[i].clone()).collect();
+        if let Err(e) = crate::permanent_guard::gate() {
+            if !quiet {
+                eprintln!("{prog}: {e}");
+            }
+            return;
+        }
         match os_limited::purge_all(chosen) {
             Ok(()) if !quiet => eprintln!(
                 "{prog}: removed {} from the Recycle Bins to keep them under {} ({source})",
@@ -1997,6 +2008,10 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         }
         let n = chosen.len() as u64;
         if !dry_run && n > 0 {
+            if let Err(e) = crate::permanent_guard::gate() {
+                eprintln!("{prog}: {e}");
+                return (0, 0, 0);
+            }
             if let Err(e) = os_limited::purge_all(chosen) {
                 eprintln!("{prog}: cannot empty Recycle Bin: {}", err_msg(e));
                 return (0, 0, 0);
@@ -2538,7 +2553,8 @@ Without PATH, print a numbered list and read an index from stdin.
                         dest.display()
                     ));
                 }
-                super::remove_forcing(dest)
+                crate::permanent_guard::gate()
+                    .and_then(|()| super::remove_forcing(dest))
                     .map_err(|e| format!("cannot replace '{}': {e}", dest.display()))?;
             }
             super::restore_payload(Path::new(&self.item.id), dest)
@@ -2729,7 +2745,13 @@ Without PATH, print a numbered list and read an index from stdin.
         let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
         for (it, orig, dest) in plan {
             if o.conflict == Conflict::Overwrite && dest.symlink_metadata().is_ok() {
-                let _ = super::remove_forcing(&dest);
+                let gone =
+                    crate::permanent_guard::gate().and_then(|()| super::remove_forcing(&dest));
+                if let Err(e) = gone {
+                    eprintln!("{prog}: cannot replace '{}': {e}", dest.display());
+                    failed += 1;
+                    continue;
+                }
             }
             if let Err(e) = super::restore_payload(Path::new(&it.id), &dest) {
                 eprintln!("{prog}: cannot restore '{}': {e}", dest.display());
@@ -3036,6 +3058,9 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
         }
         let code = if dry_run {
             0
+        } else if let Err(e) = crate::permanent_guard::gate() {
+            eprintln!("{prog}: {e}");
+            1
         } else {
             match os_limited::purge_all(matched) {
                 Ok(()) => 0,
