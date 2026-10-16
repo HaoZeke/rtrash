@@ -2304,3 +2304,36 @@ fn tree_nests_rows_under_their_folders() {
     let json = t.du(&["--no-git", "--tree", "--json"]);
     assert_eq!(json.status.code(), Some(2));
 }
+
+#[test]
+fn no_unicode_draws_the_tree_in_ascii() {
+    let t = Tree::new("dutreeascii");
+    t.file("big/a.bin", 300_000);
+    t.file("big/inner/c.bin", 50_000);
+    t.file("small.bin", 100_000);
+    let args = [
+        "--no-git",
+        "--apparent",
+        "--no-hidden",
+        "--tree",
+        "--no-unicode",
+    ];
+    let out = t.du(&args);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    // The same order as with box lines: big/ holds 350k and more, then
+    // small.bin 100k; inside big/, a.bin (300k) before inner/ (50k).
+    for end in [
+        "|-- big/",
+        "|   |-- a.bin",
+        "|   `-- inner/",
+        "`-- small.bin",
+    ] {
+        assert!(text.lines().any(|l| l.ends_with(end)), "{end:?} in {text}");
+    }
+    assert!(text.is_ascii(), "{text}");
+}

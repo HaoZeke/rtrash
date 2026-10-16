@@ -72,6 +72,8 @@ directories appear as one `trash` row and are never printed by --print0.
                           below it (default 2) nested under their folders,
                           the --top largest of each folder first, as dust
                           draws them; plain table only
+      --no-unicode      draw --tree with ASCII lines (|--, `--), for
+                          consoles without UTF-8 (gdu --no-unicode)
   -s, --summarize       print only the totals, no rows (GNU du -s, gdu)
       --skip-total      print the rows without the Total lines (dust)
       --reverse         print each table in reverse, the top row last
@@ -2478,9 +2480,24 @@ fn tree_children(report: &Report, sort: SortKey, top: usize) -> HashMap<&Path, V
     kids
 }
 
+/// The lines `--tree` draws: a middle branch, the last branch, and the
+/// rails under a middle and a last branch.
+type TreeGlyphs = [&'static str; 4];
+
+/// Box lines, as dust draws its tree.
+const TREE_UNICODE: TreeGlyphs = [
+    "\u{251c}\u{2500} ",
+    "\u{2514}\u{2500} ",
+    "\u{2502}  ",
+    "   ",
+];
+
+/// `--no-unicode`: the same shape in ASCII, as `tree --charset=ascii`.
+const TREE_ASCII: TreeGlyphs = ["|-- ", "`-- ", "|   ", "    "];
+
 /// `--tree`: each PATH with its total, then the rows below it nested
-/// under their folders with `├─`, `└─` and `│` as dust draws them.
-fn tree_lines(report: &Report, sort: SortKey, top: usize) -> Vec<String> {
+/// under their folders, drawn with `glyphs`.
+fn tree_lines(report: &Report, sort: SortKey, top: usize, glyphs: &TreeGlyphs) -> Vec<String> {
     let kids = tree_children(report, sort, top);
     let mut out = Vec::new();
     for root in &report.roots {
@@ -2490,22 +2507,25 @@ fn tree_lines(report: &Report, sort: SortKey, top: usize) -> Vec<String> {
             format_bytes(root.apparent),
             root.path.display()
         ));
-        tree_level(&kids, &root.path, "", &mut out);
+        tree_level(&kids, &root.path, "", glyphs, &mut out);
     }
     out
 }
 
-fn tree_level(kids: &HashMap<&Path, Vec<&Item>>, dir: &Path, prefix: &str, out: &mut Vec<String>) {
+fn tree_level(
+    kids: &HashMap<&Path, Vec<&Item>>,
+    dir: &Path,
+    prefix: &str,
+    glyphs: &TreeGlyphs,
+    out: &mut Vec<String>,
+) {
     let Some(rows) = kids.get(dir) else {
         return;
     };
     let last = rows.len().saturating_sub(1);
     for (n, it) in rows.iter().enumerate() {
-        let (branch, more) = if n == last {
-            ("\u{2514}\u{2500} ", "   ")
-        } else {
-            ("\u{251c}\u{2500} ", "\u{2502}  ")
-        };
+        let [mid, end, rail, gap] = *glyphs;
+        let (branch, more) = if n == last { (end, gap) } else { (mid, rail) };
         let name = it.path.file_name().unwrap_or(it.path.as_os_str());
         let slash = if it.is_dir { "/" } else { "" };
         out.push(format!(
@@ -2515,7 +2535,8 @@ fn tree_level(kids: &HashMap<&Path, Vec<&Item>>, dir: &Path, prefix: &str, out: 
             name.to_string_lossy()
         ));
         if it.is_dir {
-            tree_level(kids, &it.path, &format!("{prefix}{more}"), out);
+            let prefix = format!("{prefix}{more}");
+            tree_level(kids, &it.path, &prefix, glyphs, out);
         }
     }
 }
@@ -2936,6 +2957,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut relative = false;
     let mut bars = false;
     let mut tree: Option<usize> = None;
+    let mut ascii = false;
     let mut reverse = false;
     let mut summarize = false;
     let mut skip_total = false;
@@ -3141,6 +3163,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--show-relative-size" => relative = true,
                 "--bars" => bars = true,
                 "--tree" => tree = Some(TREE_DEPTH),
+                "--no-unicode" => ascii = true,
                 "--reverse" => reverse = true,
                 // GNU du -s and gdu --summarize: the totals, no rows.
                 "-s" | "--summarize" => summarize = true,
@@ -3611,7 +3634,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         if opts.types {
             print_types(&opts.sort.title("file types"), &report.types, opts.top);
         } else if tree.is_some() {
-            for line in tree_lines(&report, opts.sort, tree_top) {
+            let glyphs = if ascii { &TREE_ASCII } else { &TREE_UNICODE };
+            for line in tree_lines(&report, opts.sort, tree_top, glyphs) {
                 println!("{line}");
             }
         } else {
