@@ -707,14 +707,12 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
     };
     // Without --to, only an item with a Put Back record has a place to go.
     // --directory keeps the items from under DIR, which may be gone.
-    let real = o.directory.and_then(|d| std::fs::canonicalize(d).ok());
     let placed: Vec<&crate::finder_shared::Entry> = rows
         .iter()
         .filter(|e| e.original.is_some() || o.to.is_some())
         .filter(|e| {
-            o.directory.is_none_or(|d| {
-                e.shown.starts_with(d) || real.as_ref().is_some_and(|r| e.shown.starts_with(r))
-            })
+            o.directory
+                .is_none_or(|d| crate::finder_shared::under(&e.shown, d))
         })
         .collect();
     let mut chosen: Vec<&crate::finder_shared::Entry> = if let Some(m) = o.matcher {

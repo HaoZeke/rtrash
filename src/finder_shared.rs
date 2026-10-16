@@ -100,6 +100,18 @@ pub fn same_path(a: &Path, b: &Path) -> bool {
     matches!((real(a), real(b)), (Some(x), Some(y)) if x == y)
 }
 
+/// Whether `path` is `dir` or below it. Either spelling may run through a
+/// symbolic link (/var against /private/var on macOS), so both sides also
+/// compare with their deepest existing folder resolved, component by
+/// component; a folder that is gone keeps its written tail.
+pub fn under(path: &Path, dir: &Path) -> bool {
+    if path.starts_with(dir) || nfc_path(path).starts_with(nfc_path(dir)) {
+        return true;
+    }
+    let real = |p: &Path| nfc_path(&crate::trashdir::resolve_existing(p));
+    real(path).starts_with(real(dir))
+}
+
 fn from_items(trash: &Path) -> std::io::Result<Vec<Entry>> {
     use std::os::unix::fs::MetadataExt;
     let items: Vec<Item> = match finder::items(trash) {
@@ -633,6 +645,22 @@ pub fn rm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn under_sees_through_a_linked_folder_on_either_side() {
+        let base = std::env::temp_dir().join(format!("rtrash-under-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("real/sub")).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(base.join("real"), &link).unwrap();
+        let real = std::fs::canonicalize(base.join("real")).unwrap();
+        // The record names the link, the scope the real folder, and back.
+        assert!(under(&link.join("sub/gone.txt"), &real.join("sub")));
+        assert!(under(&real.join("sub/gone.txt"), &link.join("sub")));
+        assert!(!under(&real.join("subway/x"), &link.join("sub")));
+        assert!(!under(&real.join("other.txt"), &link.join("sub")));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn log_lines_round_trip_odd_names() {
