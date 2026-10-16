@@ -1797,6 +1797,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut latest = false;
         let mut all = false;
         let mut to: Option<PathBuf> = None;
+        let mut sort: Option<TableSort> = None;
         for arg in args {
             match arg.as_str() {
                 "-f" | "--force" => conflict = Conflict::Overwrite,
@@ -1854,6 +1855,15 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                     return 2;
                 }
                 "--plain" | "--cwd-only" | "--home-only" => plain = true,
+                a if a.starts_with("--sort=") => match &a["--sort=".len()..] {
+                    "date" => sort = Some(TableSort::Date),
+                    "path" => sort = Some(TableSort::Path),
+                    "none" => sort = Some(TableSort::None),
+                    v => {
+                        eprintln!("{prog}: invalid --sort '{v}' (date, path or none)");
+                        return 2;
+                    }
+                },
                 "--newest-first" => newest_first = true,
                 "--oldest-first" => newest_first = false,
                 "--no-space-check" => crate::space::skip_check(true),
@@ -1884,6 +1894,8 @@ Without PATH, print a numbered list and read an index from stdin.
   -n, --dry-run show where each chosen item would go and change nothing
       --json    print {{restored, failed, skipped}} as JSON on stdout;
                 implies --plain, and the numbered list goes to stderr
+      --sort=ORDER  numbered list order: date (oldest first, default),
+                path (original path) or none (as read)
       --newest-first  list the most recently deleted item first
       --oldest-first  list the oldest deleted item first (default)
       --batch=last  restore every item the latest put moved, by the
@@ -1989,6 +2001,7 @@ Without PATH, print a numbered list and read an index from stdin.
             }
             return 1;
         }
+        let as_read = (sort == Some(TableSort::None)).then(|| matches.clone());
         matches.sort_by_key(|it| it.time_deleted);
         if latest {
             let newest = matches.pop().into_iter().collect();
@@ -1997,8 +2010,14 @@ Without PATH, print a numbered list and read an index from stdin.
         if all || matches.len() == 1 {
             return restore_one(prog, matches, &opts);
         }
-        if newest_first {
-            matches.reverse();
+        match sort {
+            Some(TableSort::Path) => matches.sort_by_key(original_of),
+            Some(TableSort::None) => matches = as_read.unwrap_or(matches),
+            Some(TableSort::Date) | None => {
+                if newest_first {
+                    matches.reverse();
+                }
+            }
         }
         #[cfg(feature = "tui")]
         if !plain && to.is_none() && util::stdin_is_tty() {
@@ -2109,6 +2128,15 @@ Without PATH, print a numbered list and read an index from stdin.
                 _ => return None,
             })
         }
+    }
+
+    /// `--sort`: the numbered list order, as trash-cli's trash-restore
+    /// takes it.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TableSort {
+        Date,
+        Path,
+        None,
     }
 
     struct RestoreOpts {

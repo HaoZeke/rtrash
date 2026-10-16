@@ -525,6 +525,65 @@ fn restore_to_a_directory_keeps_the_name() {
     let _ = fs::remove_dir_all(&lad);
 }
 
+#[test]
+fn restore_sort_orders_the_numbered_list() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let lad = local_app_data("sort");
+    let id = std::process::id();
+    // b goes first, so it is the oldest; a sorts first by path.
+    let b = m.join(format!("sort-b-{id}.txt"));
+    let a = m.join(format!("sort-a-{id}.txt"));
+    for p in [&b, &a] {
+        fs::write(p, b"x").unwrap();
+        let out = cmd(&lad).arg("put").arg(p).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    let glob = format!("--glob=sort-?-{id}.txt");
+    let pick = |extra: &[&str]| {
+        use std::io::Write;
+        let mut child = cmd(&lad)
+            .args(["restore", "--plain", "--dry-run", &glob])
+            .args(extra)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"0\n").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.lines()
+            .find(|l| l.starts_with("would restore"))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        pick(&[]).contains("sort-b-"),
+        "date order puts the oldest first"
+    );
+    assert!(pick(&["--sort=path"]).contains("sort-a-"), "path order");
+    assert!(pick(&["--sort=date", "--newest-first"]).contains("sort-a-"));
+    let bad = cmd(&lad).args(["restore", "--sort=size"]).output().unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+    for p in [&a, &b] {
+        let _ = cmd(&lad).arg("restore").arg(p).output();
+        let _ = fs::remove_file(p);
+    }
+    let _ = fs::remove_dir_all(&lad);
+}
+
 /// Odd but valid NTFS names through put, list, restore and a vanished
 /// Recycle Bin payload; no command may panic.
 #[test]
