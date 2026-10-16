@@ -163,6 +163,8 @@ du_opts=(
   '--exclude-caches[leave out directories with a valid CACHEDIR.TAG]'
   '--type=[count only files with these extensions]:extensions:'
   '--exclude-type=[leave out files with these extensions]:extensions:'
+  '*--exclude-regex=[leave out entries whose path matches RE]:regex:'
+  '*--include-regex=[count only files whose path matches RE]:regex:'
   '--no-hidden[leave out entries named with a leading dot]'
   '--gitignore[leave out what git ignores]'
   '--dirs[list directories only]'

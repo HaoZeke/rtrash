@@ -1371,6 +1371,20 @@ the same as
 .B \-\-exclude='*.EXT'
 for each.
 .TP
+.BI \-\-exclude\-regex= RE
+Leave out every entry whose full path matches the regular expression
+.IR RE ;
+repeatable. A left-out directory is not walked, as with
+.B dust \-X
+and
+.BR "gdu \-\-ignore\-dirs\-pattern" .
+.TP
+.BI \-\-include\-regex= RE
+Count only the files whose full path matches one of the given
+.IR RE ;
+directories are still walked, as with
+.BR "dust \-e" .
+.TP
 .B \-\-no\-hidden
 Leave out hidden entries, those whose name starts with a dot, at any
 depth; the same as

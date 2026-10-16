@@ -98,6 +98,10 @@ directories appear as one `trash` row and are never printed by --print0.
                           gitignore syntax: a name at any depth, or a path
                           relative to PATH when it has a '/'; `dir/` matches
                           directories only)
+      --exclude-regex=RE  leave out entries whose path matches RE
+                          (repeatable; dust -X, gdu --ignore-dirs-pattern)
+      --include-regex=RE  count only files whose path matches RE
+                          (repeatable; directories are still walked; dust -e)
   -X, --exclude-from=FILE  read patterns from FILE, one per line (# comments
                           and !negations as in .gitignore; - is stdin)
       --files-from=FILE  also scan the paths in FILE, one per line (- is
@@ -2924,6 +2928,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     .patterns
                     .extend(exts.iter().map(|e| format!("*.{e}"))),
                 Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--exclude-regex", None) {
+            match v.and_then(du_filter::path_regex) {
+                Ok(r) => filter.regex_out.push(r.as_str().into()),
+                Err(e) => bail!(format!("--exclude-regex: {e}")),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--include-regex", None) {
+            match v.and_then(du_filter::path_regex) {
+                Ok(r) => filter.regex_in.push(r.as_str().into()),
+                Err(e) => bail!(format!("--include-regex: {e}")),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--exclude", None) {
             match v {

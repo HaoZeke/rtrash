@@ -322,6 +322,11 @@ pub struct Spec {
     pub patterns: Vec<String>,
     pub exclude_caches: bool,
     pub gitignore: bool,
+    /// `--exclude-regex`: entries whose path matches one are left out.
+    pub regex_out: Vec<String>,
+    /// `--include-regex`: when given, files whose path matches none are
+    /// left out. Directories are still walked.
+    pub regex_in: Vec<String>,
     /// Directory that anchored patterns are relative to, when it is not
     /// the scanned PATH (the explorer rescans subdirectories).
     pub base: Option<PathBuf>,
@@ -329,7 +334,11 @@ pub struct Spec {
 
 impl Spec {
     pub fn is_active(&self) -> bool {
-        !self.patterns.is_empty() || self.exclude_caches || self.gitignore
+        !self.patterns.is_empty()
+            || self.exclude_caches
+            || self.gitignore
+            || !self.regex_out.is_empty()
+            || !self.regex_in.is_empty()
     }
 
     /// Patterns relative to `root`. An absolute pattern under `root` is
@@ -403,6 +412,18 @@ pub struct Filter {
     pub gitignore: bool,
     /// Ignore rules from the repository that encloses the scan root.
     pub root_chain: Option<Arc<Chain>>,
+    regex_out: Vec<regex_lite::Regex>,
+    regex_in: Vec<regex_lite::Regex>,
+}
+
+/// Compiles the `--exclude-regex` or `--include-regex` value `re`, for
+/// the parser to check once and the filters to build again.
+pub fn path_regex(re: &str) -> Result<regex_lite::Regex, String> {
+    regex_lite::Regex::new(re).map_err(|e| format!("invalid regex '{re}': {e}"))
+}
+
+fn compile(list: &[String]) -> Vec<regex_lite::Regex> {
+    list.iter().filter_map(|r| path_regex(r).ok()).collect()
 }
 
 impl Filter {
@@ -417,6 +438,8 @@ impl Filter {
             exclude_caches: spec.exclude_caches,
             gitignore: spec.gitignore,
             root_chain,
+            regex_out: compile(&spec.regex_out),
+            regex_in: compile(&spec.regex_in),
         }
     }
 
@@ -424,6 +447,17 @@ impl Filter {
     pub fn excluded(&self, chain: Option<&Chain>, dir: &Path, name: &[u8], is_dir: bool) -> bool {
         if !self.cli.is_empty() && self.cli.decide(dir, name, is_dir) == Some(true) {
             return true;
+        }
+        if !self.regex_out.is_empty() || (!is_dir && !self.regex_in.is_empty()) {
+            let full = dir.join(String::from_utf8_lossy(name).as_ref());
+            let full = full.to_string_lossy();
+            if self.regex_out.iter().any(|r| r.is_match(&full)) {
+                return true;
+            }
+            let kept = self.regex_in.iter().any(|r| r.is_match(&full));
+            if !is_dir && !self.regex_in.is_empty() && !kept {
+                return true;
+            }
         }
         match chain {
             Some(c) => c.decide(dir, name, is_dir) == Some(true),

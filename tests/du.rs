@@ -870,6 +870,25 @@ fn summarize_and_skip_total_split_rows_from_totals() {
 }
 
 #[test]
+fn regex_filters_match_the_whole_path() {
+    let t = Tree::new("du-regex-filters");
+    t.file("keep/a.log", 10_000);
+    t.file("keep/b.txt", 10_000);
+    t.file("skip/c.txt", 10_000);
+    let j = t.json(&["--no-git", "--exclude-regex=[/\\\\]skip([/\\\\]|$)"]);
+    let files = paths_in(&j, "files");
+    assert!(files.contains(&s(&t.root.join("keep/b.txt"))), "{j}");
+    assert!(!files.iter().any(|f| f.ends_with("c.txt")), "{j}");
+    // Only matching files count; directories are still walked.
+    let j = t.json(&["--no-git", "--include-regex=\\.txt$"]);
+    let files = paths_in(&j, "files");
+    assert!(files.contains(&s(&t.root.join("skip/c.txt"))), "{j}");
+    assert!(!files.iter().any(|f| f.ends_with("a.log")), "{j}");
+    let bad = t.du(&["--exclude-regex=("]);
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+#[test]
 fn no_hidden_leaves_dot_entries_out() {
     let t = Tree::new("nohidden");
     t.file("seen/a.bin", 100_000);
