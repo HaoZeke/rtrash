@@ -2337,3 +2337,28 @@ fn no_unicode_draws_the_tree_in_ascii() {
     }
     assert!(text.is_ascii(), "{text}");
 }
+
+#[test]
+fn age_filters_take_durations_and_gdu_names() {
+    let t = Tree::new("agedur");
+    let old = t.file("old/stale.bin", 300_000);
+    let new = t.file("new/fresh.bin", 200_000);
+    // Three hours back: clear of both the 2h and the 1h cut below.
+    let then = SystemTime::now() - Duration::from_secs(3 * 3600);
+    set_mtime(&old, then);
+    set_mtime(&t.root.join("old"), then);
+    for args in [["--older-than=2h"], ["--min-age=2h"]] {
+        let j = t.json(&args);
+        assert_eq!(paths_in(&j, "files"), [s(&old)], "{args:?} {j}");
+    }
+    for args in [["--newer-than=1h"], ["--max-age=1h"]] {
+        let j = t.json(&args);
+        assert_eq!(paths_in(&j, "files"), [s(&new)], "{args:?} {j}");
+    }
+    // 2h30m keeps the 3h file; a year and two months drops it.
+    let j = t.json(&["--min-age", "2h30m"]);
+    assert_eq!(paths_in(&j, "files"), [s(&old)], "{j}");
+    let j = t.json(&["--min-age=1y2mo"]);
+    assert!(paths_in(&j, "files").is_empty(), "{j}");
+    assert_eq!(t.du(&["--max-age=2x"]).status.code(), Some(2));
+}

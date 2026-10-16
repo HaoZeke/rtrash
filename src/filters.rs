@@ -139,7 +139,8 @@ impl SizeFilter {
 
 /// An age for `--older-than` and `--newer-than` in seconds: a bare
 /// number is days (`7`), otherwise one or more NUMBER UNIT pairs with
-/// units s, m (or min), h, d and w (`2h`, `30m`, `1d12h`).
+/// units s, m (or min), h, d, w, mo (30 days) and y (365 days), as gdu
+/// takes them (`2h`, `30m`, `1d12h`, `1y2mo`).
 pub fn parse_age_secs(s: &str) -> Result<i64, String> {
     let t = s.trim();
     let bad = || format!("invalid age '{s}' (want DAYS or a duration such as 2h, 30m or 1d12h)");
@@ -171,6 +172,8 @@ pub fn parse_age_secs(s: &str) -> Result<i64, String> {
             "h" => 3600,
             "d" => 86_400,
             "w" => 7 * 86_400,
+            "mo" => 30 * 86_400,
+            "y" => 365 * 86_400,
             _ => return Err(bad()),
         };
         total = n
@@ -271,6 +274,9 @@ mod tests {
         assert_eq!(parse_age_secs("90min"), Ok(5400));
         assert_eq!(parse_age_secs("1d12h"), Ok(129_600));
         assert_eq!(parse_age_secs("1w"), Ok(604_800));
+        // gdu --max-age units: 365 + 2 * 30 days.
+        assert_eq!(parse_age_secs("1y2mo"), Ok(36_720_000));
+        assert_eq!(parse_age_secs("2h30m"), Ok(9000));
         for bad in ["", "h", "-1", "2x", "1.5h", "2h-", "99999999999999999999"] {
             assert!(parse_age_secs(bad).is_err(), "{bad}");
         }

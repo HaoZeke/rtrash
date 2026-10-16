@@ -1488,15 +1488,21 @@ Show the directory table alone.
 .B \-\-files
 Show the file table alone.
 .TP
-.BI \-\-older\-than =DAYS
+.BI \-\-older\-than =AGE
 Only list entries whose newest modification is more than
-.I DAYS
-days old. A directory uses the newest file anywhere below it.
+.I AGE
+old. A directory uses the newest file anywhere below it.
+.I AGE
+is a number of days, or a duration such as 2h30m, 1w or 1y2mo
+(units s, m, h, d, w, mo for 30 days and y for 365).
+.B \-\-min\-age
+is the same option, as gdu names it.
 .TP
-.BI \-\-newer\-than =DAYS
+.BI \-\-newer\-than =AGE
 Only list entries modified within the last
-.I DAYS
-days.
+.IR AGE .
+.B \-\-max\-age
+is the same option, as gdu names it.
 .TP
 .BI \-\-since =DATE
 Only list entries modified at or after

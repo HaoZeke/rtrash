@@ -133,9 +133,13 @@ directories appear as one `trash` row and are never printed by --print0.
                           git repositories
       --dirs            list directories only
       --files           list files only
-      --older-than=DAYS only list entries whose newest modification is more
-                          than DAYS days old (directories use their whole tree)
-      --newer-than=DAYS only list entries modified within the last DAYS days
+      --older-than=AGE  only list entries whose newest modification is more
+                          than AGE old (directories use their whole tree);
+                          AGE is DAYS or a duration such as 2h30m, 1w or
+                          1y2mo (mo is 30 days, y 365)
+      --newer-than=AGE  only list entries modified within the last AGE
+      --min-age=AGE     the same as --older-than (gdu)
+      --max-age=AGE     the same as --newer-than (gdu)
       --since=DATE      only list entries modified at or after DATE
                           (YYYY-MM-DD, or YYYY-MM-DDTHH:MM[:SS]; local time)
       --until=DATE      only list entries whose newest modification is
@@ -2712,14 +2716,6 @@ pub fn pick_rows(report: &Report) -> Vec<crate::put_tui::PathRow> {
         .collect()
 }
 
-fn parse_days(s: &str) -> Result<i64, String> {
-    match s.parse::<i64>() {
-        Ok(d) if d >= 0 => Ok(d),
-        Ok(d) => Err(format!("DAYS must be >= 0 (got {d})")),
-        Err(_) => Err(format!("invalid DAYS '{s}'")),
-    }
-}
-
 /// Keep the stricter of two age cutoffs, so the age options combine
 /// in any order.
 fn tighten(cut: &mut Option<i64>, new: i64, pick: fn(i64, i64) -> i64) {
@@ -3121,22 +3117,18 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 }
                 Err(e) => bail!(e),
             }
-        } else if let Some(v) = take_value(args, &mut i, arg, "--older-than", None) {
-            match v.and_then(parse_days) {
-                Ok(d) => tighten(
-                    &mut opts.older_cutoff,
-                    now - d.saturating_mul(86_400),
-                    i64::min,
-                ),
+        } else if let Some(v) = take_value(args, &mut i, arg, "--older-than", None)
+            .or_else(|| take_value(args, &mut i, arg, "--min-age", None))
+        {
+            match v.and_then(crate::filters::parse_age_secs) {
+                Ok(secs) => tighten(&mut opts.older_cutoff, now - secs, i64::min),
                 Err(e) => bail!(e),
             }
-        } else if let Some(v) = take_value(args, &mut i, arg, "--newer-than", None) {
-            match v.and_then(parse_days) {
-                Ok(d) => tighten(
-                    &mut opts.newer_cutoff,
-                    now - d.saturating_mul(86_400),
-                    i64::max,
-                ),
+        } else if let Some(v) = take_value(args, &mut i, arg, "--newer-than", None)
+            .or_else(|| take_value(args, &mut i, arg, "--max-age", None))
+        {
+            match v.and_then(crate::filters::parse_age_secs) {
+                Ok(secs) => tighten(&mut opts.newer_cutoff, now - secs, i64::max),
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--since", None) {

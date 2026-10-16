@@ -243,7 +243,9 @@ export extern "rtrash du" [
     --dirs  # list directories only
     --files  # list files only
     --older-than: string  # only list entries whose newest modification is more
-    --newer-than: string  # only list entries modified within the last DAYS days
+    --newer-than: string  # only list entries modified within the last AGE
+    --min-age: string  # the same as --older-than (gdu)
+    --max-age: string  # the same as --newer-than (gdu)
     --since: string  # only list entries modified at or after DATE
     --until: string  # only list entries whose newest modification is
     --home-only  # consider only the home trash for the trash summary

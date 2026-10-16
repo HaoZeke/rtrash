@@ -150,8 +150,10 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-hidd
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l gitignore -d 'leave out what git ignores'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dirs -d 'list directories only'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l files -d 'list files only'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l older-than -d 'only entries untouched for more than DAYS days' -r
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l newer-than -d 'only entries modified within the last DAYS days' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l older-than -d 'only entries untouched for more than AGE (DAYS, 2h30m, 1y2mo)' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l newer-than -d 'only entries modified within the last AGE' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l min-age -d 'same as --older-than (gdu)' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l max-age -d 'same as --newer-than (gdu)' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l since -d 'only entries modified at or after DATE' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l until -d 'only entries last modified before DATE' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l home-only -d 'only the home trash in the trash summary'
