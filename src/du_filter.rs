@@ -358,6 +358,27 @@ impl Spec {
     }
 }
 
+/// The extensions of a `--type` or `--exclude-type` value such as
+/// `yaml,json` or `.iso`, each without its dot.
+pub fn extensions(list: &str, flag: &str) -> Result<Vec<String>, String> {
+    let exts: Vec<String> = list
+        .split(',')
+        .map(|e| e.trim().trim_start_matches('.').to_string())
+        .collect();
+    if exts.iter().any(|e| e.is_empty() || e.contains(['/', '\\'])) {
+        return Err(format!("{flag}: invalid extension list '{list}'"));
+    }
+    Ok(exts)
+}
+
+/// Patterns that leave out every file except those ending in one of
+/// `exts`, while keeping directories so their contents are still walked.
+pub fn keep_only(exts: &[String]) -> Vec<String> {
+    let mut out = vec!["*".to_string(), "!*/".to_string()];
+    out.extend(exts.iter().map(|e| format!("!*.{e}")));
+    out
+}
+
 /// Read `--exclude-from` lines (gitignore syntax; `-` is stdin).
 pub fn read_pattern_file(path: &Path) -> io::Result<Vec<String>> {
     let text = if path.as_os_str() == "-" {
@@ -503,6 +524,17 @@ pub fn has_cachedir_tag(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_lists_drop_dots_and_refuse_blanks() {
+        assert_eq!(
+            extensions("yaml, .json", "--type").unwrap(),
+            ["yaml", "json"]
+        );
+        assert!(extensions("iso,", "--type").is_err());
+        assert!(extensions("a/b", "--exclude-type").is_err());
+        assert_eq!(keep_only(&["iso".into()]), ["*", "!*/", "!*.iso"]);
+    }
 
     fn pat(s: &str) -> Pattern {
         Pattern::parse(s).unwrap()

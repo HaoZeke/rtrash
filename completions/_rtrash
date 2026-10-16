@@ -153,6 +153,8 @@ du_opts=(
   '*--exclude=[leave out entries that match a gitignore-style pattern]:pattern:'
   '*'{-X,--exclude-from=}'[read exclude patterns from a file]:file:_files'
   '--exclude-caches[leave out directories with a valid CACHEDIR.TAG]'
+  '--type=[count only files with these extensions]:extensions:'
+  '--exclude-type=[leave out files with these extensions]:extensions:'
   '--no-hidden[leave out entries named with a leading dot]'
   '--gitignore[leave out what git ignores]'
   '--dirs[list directories only]'

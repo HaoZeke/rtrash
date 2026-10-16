@@ -1297,6 +1297,21 @@ that hold a
 .I CACHEDIR.TAG
 starting with the standard signature line.
 .TP
+.BI \-\-type= EXTS
+Count only files whose name ends in one of the comma-separated
+extensions
+.IR EXTS ,
+such as
+.BR yaml,json ;
+directories are still walked. Exclude patterns still apply.
+.TP
+.BI \-\-exclude\-type= EXTS
+Leave out files whose name ends in one of
+.IR EXTS ,
+the same as
+.B \-\-exclude='*.EXT'
+for each.
+.TP
 .B \-\-no\-hidden
 Leave out hidden entries, those whose name starts with a dot, at any
 depth; the same as

@@ -742,6 +742,41 @@ fn show_mtime_swaps_age_for_a_date_column() {
 }
 
 #[test]
+fn type_filters_count_files_by_extension() {
+    let t = Tree::new("types");
+    t.file("a/disc.iso", 400_000);
+    t.file("a/b/notes.yaml", 30_000);
+    t.file("c/data.json", 20_000);
+    t.file("c/skip.bin", 100_000);
+
+    let j = t.json(&["--no-git", "--type=yaml,.json"]);
+    let files = paths_in(&j, "files");
+    assert!(files.contains(&s(&t.root.join("a/b/notes.yaml"))), "{j}");
+    assert!(files.contains(&s(&t.root.join("c/data.json"))), "{j}");
+    assert!(
+        !files
+            .iter()
+            .any(|f| f.ends_with(".iso") || f.ends_with(".bin")),
+        "{j}"
+    );
+    // A later --exclude still applies on top of --type.
+    let j = t.json(&["--no-git", "--type", "yaml,json", "--exclude=c/"]);
+    let files = paths_in(&j, "files");
+    assert!(!files.iter().any(|f| f.ends_with("data.json")), "{j}");
+
+    let j = t.json(&["--no-git", "--exclude-type=iso,bin"]);
+    let files = paths_in(&j, "files");
+    assert!(files.contains(&s(&t.root.join("c/data.json"))), "{j}");
+    assert!(
+        !files
+            .iter()
+            .any(|f| f.ends_with(".iso") || f.ends_with(".bin")),
+        "{j}"
+    );
+    assert_eq!(t.du(&["--type=,"]).status.code(), Some(2));
+}
+
+#[test]
 fn no_hidden_leaves_dot_entries_out() {
     let t = Tree::new("nohidden");
     t.file("seen/a.bin", 100_000);

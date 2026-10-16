@@ -98,6 +98,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           and !negations as in .gitignore; - is stdin)
       --exclude-caches  leave out directories below PATH that hold a valid
                           CACHEDIR.TAG
+      --type=EXTS       count only files ending in one of EXTS, such as
+                          yaml,json (directories are still walked)
+      --exclude-type=EXTS  leave out files ending in one of EXTS
       --no-hidden       leave out hidden entries, those named with a
                           leading dot (same as --exclude='.*')
       --gitignore       leave out what git ignores: .gitignore files,
@@ -2727,6 +2730,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut from_file: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
     let mut filter = du_filter::Spec::default();
+    // --type extensions: only files with one of these count.
+    let mut keep_types: Vec<String> = Vec::new();
     let mut count = false;
     let mut show_mtime = false;
     let mut relative = false;
@@ -2827,6 +2832,18 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 Ok((v, None)) => bail!(format!(
                     "invalid --sort '{v}' (use disk, apparent, items or mtime)"
                 )),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--type", None) {
+            match v.and_then(|v| du_filter::extensions(v, "--type")) {
+                Ok(exts) => keep_types.extend(exts),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--exclude-type", None) {
+            match v.and_then(|v| du_filter::extensions(v, "--exclude-type")) {
+                Ok(exts) => filter
+                    .patterns
+                    .extend(exts.iter().map(|e| format!("*.{e}"))),
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--exclude", None) {
@@ -2938,6 +2955,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
         i += 1;
+    }
+    if !keep_types.is_empty() {
+        // First, so every --exclude and --exclude-type still applies.
+        let mut keep = du_filter::keep_only(&keep_types);
+        keep.append(&mut filter.patterns);
+        filter.patterns = keep;
     }
     if filter.is_active() {
         if interactive {

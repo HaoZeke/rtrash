@@ -222,6 +222,8 @@ export extern "rtrash du" [
     --exclude: string  # leave out entries that match PATTERN (repeatable;
     --exclude-from(-X): string  # read patterns from FILE, one per line (# comments
     --exclude-caches  # leave out directories below PATH that hold a valid
+    --type: string  # count only files ending in one of EXTS, such as
+    --exclude-type: string  # leave out files ending in one of EXTS
     --no-hidden  # leave out hidden entries, those named with a
     --gitignore  # leave out what git ignores: .gitignore files,
     --dirs  # list directories only
