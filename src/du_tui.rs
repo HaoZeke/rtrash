@@ -1989,7 +1989,16 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             view.rows.len() + view.stash.len()
         )
     };
-    let tail = format!(" · {size} · {entries} · {} marked ", app.marked_count());
+    // Everything below this directory, as ncdu's Items count: each row,
+    // and for a directory also what it holds.
+    let below: u64 = view
+        .rows
+        .iter()
+        .map(|r| if r.is_dir { r.items + 1 } else { 1 })
+        .sum();
+    let items = crate::util::plural(below, "item", "items");
+    let marked = app.marked_count();
+    let tail = format!(" · {size} · {items} · {entries} · {marked} marked ");
     let room = (chunks[0].width as usize)
         .saturating_sub(2)
         .saturating_sub(tail.chars().count() + 1);
@@ -2668,6 +2677,7 @@ mod tests {
             .find(|l| l.contains(&tail))
             .unwrap_or_else(|| panic!("{text}"));
         assert!(title.contains(" entries · 0 marked"), "{title}");
+        assert!(title.contains(" items · "), "{title}");
         assert!(text.contains("big/"), "{text}");
         assert!(text.contains("d trash  u undo  r rescan"), "{text}");
     }
@@ -2741,9 +2751,14 @@ mod tests {
         fs::write(deep.join("f"), b"x").unwrap();
         a.go(deep.clone(), None);
         a.cache.get_mut(&deep).unwrap().partial = true;
-        let text = tui_term::render_text(60, 14, |f| ui(f, &mut a));
-        assert!(text.contains("(partial) · 1 entries · 0 marked"), "{text}");
+        // 70 columns: the item count widened the tail, and the path still
+        // gets the room that is left, cut from the left.
+        let text = tui_term::render_text(70, 14, |f| ui(f, &mut a));
+        let tail = "(partial) · 1 item · 1 entries · 0 marked";
+        assert!(text.contains(tail), "{text}");
         assert!(text.contains("…eeee"), "{text}");
+        let title = text.lines().find(|l| l.contains(tail)).unwrap();
+        assert!(title.chars().count() <= 70, "{title}");
     }
 
     #[test]
