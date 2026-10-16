@@ -1304,6 +1304,19 @@ On Unix, matching works on bytes: a pattern, ignore file or
 .B \-X
 file holding bytes that are not UTF-8 matches names with the same bytes.
 .TP
+.BI \-\-files\-from= FILE
+Also scan the paths listed in
+.IR FILE ,
+one per line;
+.B \-
+reads them from stdin. Blank lines are skipped. A list that names nothing
+is an error rather than a scan of the current directory.
+.TP
+.BI \-\-files0\-from= FILE
+The same with NUL-separated paths, as
+.B find \-print0
+writes them.
+.TP
 .BR \-X ", " \-\-exclude\-from=\fIFILE\fR
 Read patterns from
 .IR FILE ,

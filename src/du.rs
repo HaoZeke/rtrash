@@ -96,6 +96,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           directories only)
   -X, --exclude-from=FILE  read patterns from FILE, one per line (# comments
                           and !negations as in .gitignore; - is stdin)
+      --files-from=FILE  also scan the paths in FILE, one per line (- is
+                          stdin), as dust does
+      --files0-from=FILE  the same with NUL-separated paths (find -print0)
       --exclude-caches  leave out directories below PATH that hold a valid
                           CACHEDIR.TAG
       --type=EXTS       count only files ending in one of EXTS, such as
@@ -2668,6 +2671,47 @@ fn parse_count(s: &str, what: &str) -> Result<usize, String> {
 }
 
 /// Value of `--name=V` or of the next argument for `--name V` / `-n V`.
+/// The paths of a `--files-from` (one per line) or `--files0-from` (NUL
+/// separated) list, read from FILE or, for `-`, stdin. Blank entries are
+/// skipped; a line's trailing CR goes, so CRLF lists work.
+/// `--files-from=FILE` or `--files0-from=FILE` (true for the NUL form).
+type PathListArg<'a> = Option<(Result<&'a str, String>, bool)>;
+
+fn path_list_arg<'a>(args: &'a [String], i: &mut usize, arg: &'a str) -> PathListArg<'a> {
+    if let Some(v) = take_value(args, i, arg, "--files-from", None) {
+        return Some((v, false));
+    }
+    take_value(args, i, arg, "--files0-from", None).map(|v| (v, true))
+}
+
+fn read_path_list(src: &str, nul: bool) -> io::Result<Vec<PathBuf>> {
+    let mut bytes = Vec::new();
+    if src == "-" {
+        io::Read::read_to_end(&mut io::stdin(), &mut bytes)?;
+    } else {
+        bytes = fs::read(crate::util::arg_path(src))?;
+    }
+    let sep = if nul { b'\0' } else { b'\n' };
+    let mut out = Vec::new();
+    for mut part in bytes.split(|&b| b == sep) {
+        if !nul {
+            part = part.strip_suffix(b"\r").unwrap_or(part);
+        }
+        if part.is_empty() {
+            continue;
+        }
+        #[cfg(unix)]
+        let p = {
+            use std::os::unix::ffi::OsStrExt;
+            PathBuf::from(std::ffi::OsStr::from_bytes(part))
+        };
+        #[cfg(not(unix))]
+        let p = PathBuf::from(String::from_utf8_lossy(part).into_owned());
+        out.push(p);
+    }
+    Ok(out)
+}
+
 fn take_value<'a>(
     args: &'a [String],
     i: &mut usize,
@@ -2720,6 +2764,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     crate::du_interrupt::install(stop.clone());
     let mut opts = ScanOpts::default();
     let mut paths: Vec<PathBuf> = Vec::new();
+    // --files-from / --files0-from: an empty list scans nothing, not ".".
+    let mut listed = false;
     let mut json = false;
     let mut print0 = false;
     let mut stacks = false;
@@ -2869,6 +2915,19 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 Ok(v) => bail!(format!("--exclude: empty pattern '{v}'")),
                 Err(e) => bail!(e),
             }
+        } else if let Some((v, nul)) = path_list_arg(args, &mut i, arg) {
+            let v = match v {
+                Ok(v) => v,
+                Err(e) => bail!(e),
+            };
+            match read_path_list(v, nul) {
+                Ok(list) => paths.extend(list),
+                Err(e) => {
+                    eprintln!("{prog}: cannot read path list '{v}': {e}");
+                    return 1;
+                }
+            }
+            listed = true;
         } else if let Some(v) = take_value(args, &mut i, arg, "--exclude-from", Some("-X")) {
             match v.map(|v| (v, du_filter::read_pattern_file(&crate::util::arg_path(v)))) {
                 Ok((_, Ok(lines))) => filter.patterns.extend(lines),
@@ -3044,6 +3103,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 || opts.shared_once
                 || opts.types,
         );
+    }
+    if paths.is_empty() && listed {
+        eprintln!("{prog}: the path list names nothing to scan");
+        return 2;
     }
     if paths.is_empty() {
         paths.push(PathBuf::from("."));

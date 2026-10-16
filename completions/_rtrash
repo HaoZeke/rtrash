@@ -155,6 +155,8 @@ du_opts=(
   '--artefacts[list only regenerable build artefacts and caches]'
   '*--exclude=[leave out entries that match a gitignore-style pattern]:pattern:'
   '*'{-X,--exclude-from=}'[read exclude patterns from a file]:file:_files'
+  '*--files-from=[also scan the paths listed in a file]:file:_files'
+  '*--files0-from=[also scan the NUL-separated paths in a file]:file:_files'
   '--exclude-caches[leave out directories with a valid CACHEDIR.TAG]'
   '--type=[count only files with these extensions]:extensions:'
   '--exclude-type=[leave out files with these extensions]:extensions:'

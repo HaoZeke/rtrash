@@ -224,6 +224,8 @@ export extern "rtrash du" [
     --artefacts  # list only regenerable build artefacts and caches
     --exclude: string  # leave out entries that match PATTERN (repeatable;
     --exclude-from(-X): string  # read patterns from FILE, one per line (# comments
+    --files-from: string  # also scan the paths in FILE, one per line (- is
+    --files0-from: string  # the same with NUL-separated paths (find -print0)
     --exclude-caches  # leave out directories below PATH that hold a valid
     --type: string  # count only files ending in one of EXTS, such as
     --exclude-type: string  # leave out files ending in one of EXTS

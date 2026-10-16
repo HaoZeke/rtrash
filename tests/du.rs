@@ -793,6 +793,33 @@ fn include_kernfs_is_taken() {
 }
 
 #[test]
+fn files_from_scans_the_listed_paths() {
+    let t = Tree::new("files-from");
+    t.file("a/x.bin", 1_000);
+    t.file("b/y.bin", 2_000);
+    t.file("c/z.bin", 4_000);
+    // One per line, CRLF and blank lines allowed.
+    fs::write(t.root.join("list"), "a\r\n\nb\n").unwrap();
+    let j = t.json(&["--no-git", "--files-from=list"]);
+    let files = paths_in(&j, "files");
+    assert!(files.contains(&s(&t.root.join("a").join("x.bin"))), "{j}");
+    assert!(files.contains(&s(&t.root.join("b").join("y.bin"))), "{j}");
+    assert!(!files.iter().any(|f| f.ends_with("z.bin")), "{j}");
+
+    // NUL-separated, as find -print0 writes.
+    fs::write(t.root.join("list0"), "c\0").unwrap();
+    let j = t.json(&["--no-git", "--files0-from", "list0"]);
+    let files = paths_in(&j, "files");
+    assert!(files.iter().any(|f| f.ends_with("z.bin")), "{j}");
+    assert!(!files.iter().any(|f| f.ends_with("x.bin")), "{j}");
+
+    // A list that names nothing is an error, not a scan of ".".
+    fs::write(t.root.join("empty"), "\n").unwrap();
+    assert_eq!(t.du(&["--files-from=empty"]).status.code(), Some(2));
+    assert_eq!(t.du(&["--files-from=missing"]).status.code(), Some(1));
+}
+
+#[test]
 fn no_hidden_leaves_dot_entries_out() {
     let t = Tree::new("nohidden");
     t.file("seen/a.bin", 100_000);
