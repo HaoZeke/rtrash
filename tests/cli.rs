@@ -416,6 +416,36 @@ fn restore_takes_size_filters() {
 }
 
 #[test]
+fn list_depth_shows_a_trashed_tree() {
+    let sb = Sandbox::new("list-depth");
+    let dir = sb.work().join("proj");
+    fs::create_dir_all(dir.join("sub/deeper")).unwrap();
+    fs::write(dir.join("a.txt"), b"a").unwrap();
+    fs::write(dir.join("sub/c.txt"), b"c").unwrap();
+    fs::write(dir.join("sub/deeper/x.txt"), b"x").unwrap();
+    assert!(sb.run(&["put", "-r", "proj"]).status.success());
+
+    let out = sb.run(&["list", "--depth=2"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    let row = lines.iter().position(|l| l.ends_with("proj"));
+    let row = row.unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(
+        lines[row + 1..],
+        ["    a.txt", "    sub/", "      c.txt", "      deeper/"],
+        "{text}"
+    );
+    // Without --depth only the row shows.
+    let plain = stdout_of(&sb.run(&["list"]));
+    assert_eq!(plain.lines().count(), 1, "{plain}");
+    for bad in [&["list", "--depth=x"][..], &["list", "--depth=1", "--json"]] {
+        let out = sb.run(bad);
+        assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    }
+}
+
+#[test]
 fn put_inspect_shows_the_size_and_asks() {
     let sb = Sandbox::new("put-inspect");
     let dir = sb.work().join("proj");

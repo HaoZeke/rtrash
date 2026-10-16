@@ -700,6 +700,12 @@ On Windows the sizes are each item's size in the Recycle Bin.
 .B \-\-reverse
 Reverse the order.
 .TP
+.BI \-\-depth= N
+Under each trashed directory, show what it holds,
+.I N
+levels down, one name per line indented by level, directories with a
+trailing slash. Plain rows only; symlinks are not followed.
+.TP
 .BI \-\-last= N
 Print only the last
 .I N

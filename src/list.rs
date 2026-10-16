@@ -40,6 +40,8 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
       --sort=KEY        order by date (default), size, name (file name)
                      or path (original path); size implies --size
       --reverse         reverse the order
+      --depth=N         under each trashed directory, show what it holds,
+                     N levels down, indented (plain rows only)
       --last=N          only the last N rows of the listing (after --sort and
                      --reverse), like tail -n: the N newest by default
       --json            emit a JSON array (scripts; one object per item;
@@ -246,6 +248,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut cwd_only = false;
     let mut directory: Option<PathBuf> = None;
     let mut last: Option<usize> = None;
+    let mut depth = 0usize;
     let mut format: Option<Vec<FmtPart>> = None;
     let mut i = 0usize;
     while i < args.len() {
@@ -286,6 +289,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 let d = crate::util::arg_path(d);
                 directory = Some(std::path::absolute(&d).unwrap_or(d));
             }
+            a if a.starts_with("--depth=") => match a["--depth=".len()..].parse::<usize>() {
+                Ok(n) => depth = n,
+                Err(_) => {
+                    eprintln!(
+                        "{prog}: --depth needs a count of levels, not '{}'",
+                        &a["--depth=".len()..]
+                    );
+                    return 2;
+                }
+            },
             a if a.starts_with("--last=") => match a["--last=".len()..].parse::<usize>() {
                 Ok(n) => last = Some(n),
                 Err(_) => {
@@ -423,6 +436,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     };
     if json && format.is_some() {
         eprintln!("{prog}: give --json or --format, not both");
+        return 2;
+    }
+    if depth > 0 && (json || format.is_some()) {
+        eprintln!("{prog}: --depth works on plain rows, not --json or --format");
         return 2;
     }
     // --glob/--regex/--name and --cwd-only, on the original path and the
@@ -599,6 +616,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 ),
                 None => writeln!(out, "{date} {}", crate::util::term_path(&entry.original)),
             };
+            let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
+            let res = res.and_then(|()| write_tree(&mut out, &payload, depth));
             if res.is_err() {
                 return 0;
             }
@@ -606,6 +625,53 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let _ = out.flush();
     }
     0
+}
+
+/// `--depth=N`: what a trashed directory holds, N levels down, one entry
+/// per line indented by level, directories with a trailing separator and
+/// names in order. Symlinks are not followed; what cannot be read is left
+/// out. A plain file, or `depth` 0, prints nothing.
+fn write_tree(
+    out: &mut impl std::io::Write,
+    dir: &std::path::Path,
+    depth: usize,
+) -> std::io::Result<()> {
+    fn walk(
+        out: &mut impl std::io::Write,
+        dir: &std::path::Path,
+        level: usize,
+        depth: usize,
+    ) -> std::io::Result<()> {
+        let Ok(rd) = fs::read_dir(dir) else {
+            return Ok(());
+        };
+        let mut kids: Vec<(String, std::path::PathBuf, bool)> = rd
+            .flatten()
+            .map(|e| {
+                let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+                (
+                    e.file_name().to_string_lossy().into_owned(),
+                    e.path(),
+                    is_dir,
+                )
+            })
+            .collect();
+        kids.sort();
+        for (name, path, is_dir) in kids {
+            let slash = if is_dir { "/" } else { "" };
+            let indent = "  ".repeat(level);
+            writeln!(out, "    {indent}{}{slash}", crate::util::term_text(&name))?;
+            if is_dir && level + 1 < depth {
+                walk(out, &path, level + 1, depth)?;
+            }
+        }
+        Ok(())
+    }
+    let is_dir = fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir());
+    if depth == 0 || !is_dir {
+        return Ok(());
+    }
+    walk(out, dir, 0, depth)
 }
 
 /// What `list --sort` orders by.
