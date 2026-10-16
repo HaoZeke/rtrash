@@ -338,6 +338,36 @@ fn volume_trashes_join_list_restore_rm_and_status() {
 }
 
 #[test]
+fn restore_directory_scopes_the_finder_trash() {
+    let b = Box_::new("dir");
+    let sub = b.work().join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("in.txt"), "in").unwrap();
+    fs::write(b.work().join("out.txt"), "out").unwrap();
+    assert!(b.run(&["put", "sub/in.txt"], "").status.success());
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(b.run(&["put", "out.txt"], "").status.success());
+    let recs: Vec<Record> = [("in.txt", &sub), ("out.txt", &b.work())]
+        .iter()
+        .map(|(n, d)| Record {
+            name: n.to_string(),
+            code: *b"ptbL",
+            value: Value::Ustr(format!("{}/", d.to_string_lossy().trim_start_matches('/'))),
+        })
+        .collect();
+    fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
+
+    // Only the item from under sub/ is in scope.
+    let dir = format!("--directory={}", sub.display());
+    let o = b.run(&["restore", &dir, "--all"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(fs::read(sub.join("in.txt")).unwrap(), b"in");
+    assert!(!b.work().join("out.txt").exists());
+    let o = b.run(&["restore", &dir, "--all"], "");
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+}
+
+#[test]
 fn restore_matchers_work_on_the_finder_trash() {
     let b = Box_::new("match");
     for n in ["r1.log", "r2.log", "keep.txt"] {

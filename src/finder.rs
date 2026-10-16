@@ -680,6 +680,8 @@ pub(crate) struct RestoreOpts<'a> {
     pub(crate) target: Option<&'a Path>,
     /// `--name`, `--glob` or `--regex`, tested on the Put Back place.
     pub(crate) matcher: Option<&'a crate::restore::Matcher>,
+    /// `--directory=DIR`: only items whose Put Back place is under DIR.
+    pub(crate) directory: Option<&'a Path>,
     pub(crate) all: bool,
     pub(crate) latest: bool,
     /// `--to=DIR`: restore there, keeping each file name.
@@ -704,9 +706,16 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
         Err(c) => return c,
     };
     // Without --to, only an item with a Put Back record has a place to go.
+    // --directory keeps the items from under DIR, which may be gone.
+    let real = o.directory.and_then(|d| std::fs::canonicalize(d).ok());
     let placed: Vec<&crate::finder_shared::Entry> = rows
         .iter()
         .filter(|e| e.original.is_some() || o.to.is_some())
+        .filter(|e| {
+            o.directory.is_none_or(|d| {
+                e.shown.starts_with(d) || real.as_ref().is_some_and(|r| e.shown.starts_with(r))
+            })
+        })
         .collect();
     let mut chosen: Vec<&crate::finder_shared::Entry> = if let Some(m) = o.matcher {
         placed

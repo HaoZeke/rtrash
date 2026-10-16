@@ -342,17 +342,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // macOS restores from the Finder Trash unless a pin or the setting
     // says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty()) {
-        if directory.is_some() {
-            eprintln!(
-                "{prog}: --directory does not apply to the Finder Trash; pin --trash-dir or set RTRASH_MACOS_TRASH=freedesktop"
-            );
-            return 2;
-        }
         return crate::finder::default_restore(
             prog,
             &crate::finder::RestoreOpts {
                 target: target.as_deref(),
                 matcher: matcher.as_ref(),
+                directory: directory.as_deref(),
                 all,
                 latest,
                 to: to.as_deref(),
