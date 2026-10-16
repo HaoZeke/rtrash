@@ -701,6 +701,16 @@ pub(crate) struct RestoreOpts<'a> {
     pub(crate) dry_run: bool,
 }
 
+/// Nothing matched: say so, and with `--json` print the empty summary
+/// the FreeDesktop restore prints, so a script always gets one object.
+fn no_match(prog: &str, json: bool) -> i32 {
+    eprintln!("{prog}: no trashed files match");
+    if json {
+        println!("{{\"restored\":[],\"failed\":0,\"skipped\":0}}");
+    }
+    1
+}
+
 /// The numbered pick over `list` (oldest first): the restore browser on a
 /// terminal, else rows and an answer on stdin. `Err` carries the exit code.
 fn pick<'a>(
@@ -834,8 +844,7 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
             return 1;
         }
         if placed.is_empty() {
-            eprintln!("{prog}: no trashed files match");
-            return 1;
+            return no_match(prog, o.json);
         }
         match pick(prog, &placed, o) {
             Ok(v) => v,
@@ -843,8 +852,7 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
         }
     };
     if chosen.is_empty() {
-        eprintln!("{prog}: no trashed files match");
-        return 1;
+        return no_match(prog, o.json);
     }
     // Rows come oldest first, so the newest match is the last.
     if o.latest {

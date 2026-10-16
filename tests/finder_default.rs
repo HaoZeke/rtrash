@@ -558,6 +558,24 @@ fn finder_restore_orders_the_numbered_list() {
 }
 
 #[test]
+fn finder_restore_json_reports_an_empty_match() {
+    let b = Box_::new("jsonnone");
+    fs::write(b.work().join("kept.txt"), "kept").unwrap();
+    assert!(b.run(&["put", "kept.txt"], "").status.success());
+    b.put_back("kept.txt", &b.work().join("kept.txt"));
+
+    let o = b.run(&["restore", "--json", "--name=missing.txt"], "");
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert_eq!(
+        out(&o).trim(),
+        "{\"restored\":[],\"failed\":0,\"skipped\":0}",
+        "{}",
+        err(&o)
+    );
+    assert!(err(&o).contains("no trashed files match"), "{}", err(&o));
+}
+
+#[test]
 fn restore_matchers_work_on_the_finder_trash() {
     let b = Box_::new("match");
     for n in ["r1.log", "r2.log", "keep.txt"] {
