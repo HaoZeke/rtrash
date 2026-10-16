@@ -4,7 +4,7 @@ name: Build and Deploy Documentation
 
 on:
   push:
-    branches: [main, round27]
+    branches: [main, "round*"]
     paths:
       - "docs/**"
       - "README.md"

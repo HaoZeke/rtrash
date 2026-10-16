@@ -7,7 +7,7 @@ name: CI
 
 on:
   push:
-    branches: [main, round27]
+    branches: [main, "round*"]
   pull_request:
     branches: [main]
 
