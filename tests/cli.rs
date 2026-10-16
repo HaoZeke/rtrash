@@ -148,6 +148,42 @@ fn trash_names(sb: &Sandbox) -> Vec<String> {
     }
 }
 
+/// A reader that closes stdout early, as `| grep -q` does, ends rtrash
+/// quietly: no panic text, no abort, as coreutils behave.
+#[test]
+fn a_closed_stdout_pipe_ends_quietly() {
+    let sb = Sandbox::new("epipe");
+    for i in 0..50 {
+        sb.touch(&format!("f{i}.txt"));
+        assert!(sb.run(&["put", &format!("f{i}.txt")]).status.success());
+    }
+    for args in [&["list"][..], &["list", "--json"], &["status", "--json"]] {
+        let mut child = Command::new(bin())
+            .args(args)
+            .current_dir(sb.work())
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+            .env("HOME", &sb.root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Close the read end before rtrash writes anything.
+        drop(child.stdout.take());
+        let out = child.wait_with_output().unwrap();
+        let err = stderr_of(&out);
+        assert!(!err.contains("panicked"), "{args:?}: {err}");
+        assert!(!err.contains("Broken pipe"), "{args:?}: {err}");
+        // 0 when the output fitted before the close, 141 after it; never a
+        // signal (abort) or the panic status 101.
+        assert!(
+            matches!(out.status.code(), Some(0) | Some(141)),
+            "{args:?}: {:?} {err}",
+            out.status
+        );
+    }
+}
+
 #[test]
 fn put_moves_file_and_writes_info() {
     let sb = Sandbox::new("put-basic");

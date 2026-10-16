@@ -49,7 +49,34 @@ After cargo install, run:  rtrash setup
   -V, --version  output version information and exit
 ";
 
+/// A reader that closes early, as `| head` or `| grep -q` do, ends rtrash
+/// quietly, as it ends coreutils. print! and println! panic when stdout
+/// is a closed pipe; that panic exits without a message instead, with the
+/// status a shell gives a process killed by SIGPIPE (141) on Unix.
+/// SIGPIPE itself stays ignored, so a write to a child that quit early
+/// (git check-ignore) still fails softly.
+fn quiet_broken_pipe() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| info.payload().downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        // EPIPE on Unix; ERROR_NO_DATA and ERROR_BROKEN_PIPE on Windows.
+        let broken = ["os error 32)", "os error 232)", "os error 109)"]
+            .iter()
+            .any(|e| msg.contains(e));
+        if msg.starts_with("failed printing to std") && broken {
+            std::process::exit(if cfg!(unix) { 141 } else { 1 });
+        }
+        default(info);
+    }));
+}
+
 fn main() {
+    quiet_broken_pipe();
     // args() panics on a name that is not UTF-8; carry its bytes instead.
     let args: Vec<String> = std::env::args_os().map(rtrash::util::str_from_os).collect();
     let argv0 = std::path::Path::new(args.first().map(String::as_str).unwrap_or("rtrash"))
