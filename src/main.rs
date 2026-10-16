@@ -83,6 +83,14 @@ fn main() {
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| "rtrash".to_string());
+    // On Windows a copy named trash-put.exe runs as trash-put.
+    #[cfg(windows)]
+    let argv0 = match argv0.len().checked_sub(4) {
+        Some(n) if argv0.is_char_boundary(n) && argv0[n..].eq_ignore_ascii_case(".exe") => {
+            argv0[..n].to_string()
+        }
+        _ => argv0,
+    };
     let mut rest = &args[1..];
     // The trash-cli names take trash-cli's command line as well.
     let joined;
