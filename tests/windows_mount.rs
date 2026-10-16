@@ -584,6 +584,57 @@ fn restore_sort_orders_the_numbered_list() {
     let _ = fs::remove_dir_all(&lad);
 }
 
+#[test]
+fn restore_cwd_only_keeps_items_from_here() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let lad = local_app_data("cwd-only");
+    let id = std::process::id();
+    let here = m.join(format!("cwd-here-{id}"));
+    fs::create_dir_all(&here).unwrap();
+    let inside = here.join("in.txt");
+    let outside = m.join(format!("cwd-out-{id}.txt"));
+    for p in [&inside, &outside] {
+        fs::write(p, b"x").unwrap();
+        let out = cmd(&lad).arg("put").arg(p).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let out = cmd(&lad)
+        .args(["restore", "--cwd-only", "--all", "--dry-run"])
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(said.matches("would restore").count(), 1, "{said}");
+    assert!(said.contains("in.txt"), "{said}");
+    // A single match restores right away.
+    let out = cmd(&lad)
+        .args(["restore", "--cwd-only"])
+        .current_dir(&here)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(inside.exists() && !outside.exists());
+    let _ = cmd(&lad).arg("restore").arg(&outside).output();
+    let _ = fs::remove_file(&outside);
+    let _ = fs::remove_dir_all(&here);
+    let _ = fs::remove_dir_all(&lad);
+}
+
 /// Odd but valid NTFS names through put, list, restore and a vanished
 /// Recycle Bin payload; no command may panic.
 #[test]

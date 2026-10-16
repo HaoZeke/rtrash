@@ -1798,6 +1798,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut all = false;
         let mut to: Option<PathBuf> = None;
         let mut sort: Option<TableSort> = None;
+        let mut cwd_only = false;
         for arg in args {
             match arg.as_str() {
                 "-f" | "--force" => conflict = Conflict::Overwrite,
@@ -1854,7 +1855,11 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                     );
                     return 2;
                 }
-                "--plain" | "--cwd-only" | "--home-only" => plain = true,
+                "--cwd-only" => {
+                    cwd_only = true;
+                    plain = true;
+                }
+                "--plain" | "--home-only" => plain = true,
                 a if a.starts_with("--sort=") => match &a["--sort=".len()..] {
                     "date" => sort = Some(TableSort::Date),
                     "path" => sort = Some(TableSort::Path),
@@ -1894,6 +1899,8 @@ Without PATH, print a numbered list and read an index from stdin.
   -n, --dry-run show where each chosen item would go and change nothing
       --json    print {{restored, failed, skipped}} as JSON on stdout;
                 implies --plain, and the numbered list goes to stderr
+      --cwd-only  without PATH or a match, only items deleted from the
+                current directory or below (implies --plain)
       --sort=ORDER  numbered list order: date (oldest first, default),
                 path (original path) or none (as read)
       --newest-first  list the most recently deleted item first
@@ -1991,6 +1998,27 @@ Without PATH, print a numbered list and read an index from stdin.
                     .into_iter()
                     .filter(|i| m.keeps(&original_of(i)))
                     .collect(),
+                // Without PATH or a match, --cwd-only keeps the items that
+                // came from here or below, as on FreeDesktop.
+                // The directory as given and as resolved both count, since
+                // a volume mounted on a folder may resolve to its GUID path.
+                None if cwd_only => {
+                    let Ok(here) = std::env::current_dir() else {
+                        eprintln!("{prog}: cannot read the current directory");
+                        return 1;
+                    };
+                    let mut dirs = vec![std::path::absolute(&here).unwrap_or(here.clone())];
+                    if let Ok(c) = std::fs::canonicalize(&here) {
+                        dirs.push(strip_verbatim(&c));
+                    }
+                    items
+                        .into_iter()
+                        .filter(|i| {
+                            let o = original_of(i);
+                            dirs.iter().any(|d| o.starts_with(d))
+                        })
+                        .collect()
+                }
                 None => items,
             },
         };
