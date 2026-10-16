@@ -46,6 +46,22 @@ impl Sandbox {
             .env("XDG_CONFIG_HOME", self.root.join(".config"))
             .env("HOME", &self.root)
             .env_remove("RTRASH_NO_PERMANENT")
+            .env_remove("RTRASH_MAX_PERMANENT")
+            .output()
+            .expect("failed to run rtrash")
+    }
+
+    /// Like `run`, with `envs` set on top.
+    fn run_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
+        Command::new(bin())
+            .args(args)
+            .current_dir(self.work())
+            .env("XDG_DATA_HOME", self.root.join("xdg"))
+            .env("XDG_CONFIG_HOME", self.root.join(".config"))
+            .env("HOME", &self.root)
+            .env_remove("RTRASH_NO_PERMANENT")
+            .env_remove("RTRASH_MAX_PERMANENT")
+            .envs(envs.iter().copied())
             .output()
             .expect("failed to run rtrash")
     }
@@ -6786,4 +6802,52 @@ fn no_permanent_guard_refuses_reap_permanent_and_purge_trash() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!old.exists());
     assert_eq!(names_in_trash(&sb), ["old.txt"]);
+}
+
+/// `--max-count` and `RTRASH_MAX_PERMANENT` refuse an rm or empty that
+/// would delete more than N items, and then nothing goes.
+#[test]
+fn max_count_refuses_rm_and_empty_past_the_cap() {
+    let sb = Sandbox::new("maxcount");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    for n in ["mc-a", "mc-b", "mc-c"] {
+        sb.touch(n);
+        assert!(sb.run(&["put", n]).status.success());
+    }
+    let all = ["mc-a", "mc-b", "mc-c"];
+    let refused = |args: &[&str], envs: &[(&str, &str)], says: &str| {
+        let out = sb.run_env(args, envs);
+        assert_eq!(out.status.code(), Some(2), "{args:?} {envs:?}");
+        assert!(
+            stderr_of(&out).contains(says),
+            "{args:?}: {}",
+            stderr_of(&out)
+        );
+        assert_eq!(names_in_trash(&sb), all, "{args:?} deleted items");
+    };
+    let cap2 = [("RTRASH_MAX_PERMANENT", "2")];
+    refused(
+        &["rm", &pin, "--max-count=2", "mc-*"],
+        &[],
+        "3 items would be deleted",
+    );
+    refused(&["rm", &pin, "mc-*"], &cap2, "more than the cap of 2");
+    refused(&["empty", &pin, "--all"], &cap2, "more than the cap of 2");
+    refused(
+        &["rm", &pin, "mc-a"],
+        &[("RTRASH_MAX_PERMANENT", "lots")],
+        "RTRASH_MAX_PERMANENT",
+    );
+    refused(&["rm", &pin, "--max-count=x", "mc-a"], &[], "--max-count");
+    // A dry run only looks, so the cap lets it through.
+    let out = sb.run_env(&["rm", &pin, "-n", "mc-*"], &cap2);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    // Within the cap the run goes ahead, and --max-count wins over the variable.
+    let one = [("RTRASH_MAX_PERMANENT", "1")];
+    let out = sb.run_env(&["rm", &pin, "mc-a"], &one);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(names_in_trash(&sb), ["mc-b", "mc-c"]);
+    let out = sb.run_env(&["empty", &pin, "--all", "--max-count=2"], &one);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(names_in_trash(&sb).is_empty());
 }

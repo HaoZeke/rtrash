@@ -15,7 +15,7 @@ _rtrash_put_opts=(
 _rtrash_empty_opts=(
   -n --dry-run -v --verbose -f --force -i --interactive --all-users
   --trash-dir= --home-only --plain --older-than= --json
-  --max-size= --prune= --until-free= --dangling --all
+  --max-size= --max-count= --prune= --until-free= --dangling --all
   --help --version
 )
 
@@ -50,7 +50,7 @@ _rtrash_restore_opts=(
 
 _rtrash_rm_opts=(
   --trash-dir= --home-only -n --dry-run -f --force -v --verbose
-  --older-than= --newer-than= --larger-than= --smaller-than= --batch= --regex -m --match= --json
+  --older-than= --newer-than= --larger-than= --smaller-than= --batch= --max-count= --regex -m --match= --json
   --help --version
 )
 

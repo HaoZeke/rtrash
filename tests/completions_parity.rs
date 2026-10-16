@@ -698,16 +698,62 @@ fn powershell_script_is_embedded_and_completes() {
         .lines()
         .map(str::to_string)
         .collect();
-    assert_eq!(
-        got,
-        [
-            "--dangling",
-            // The restore table lists --larger-than= before --latest.
-            "--larger-than= --latest",
-            "keys",
-            "--dry-run --verbose --older-than= --max-size= --prune= --until-free= --all --json --help --version"
-        ]
-    );
+    // The expected words come from the script's own tables, in their
+    // order, so a new option in a table cannot leave this list behind.
+    let text = read("completions/rtrash.ps1");
+    let want = [
+        ps1_words(&text, Ps1Table::Subcommands, "k"),
+        ps1_words(&text, Ps1Table::Unix("empty"), "--da"),
+        ps1_words(&text, Ps1Table::Unix("restore"), "--la"),
+        ps1_words(&text, Ps1Table::Windows("empty"), "--"),
+    ];
+    // Each prefix picks something, so an empty table cannot pass.
+    assert!(want.iter().all(|w| !w.is_empty()), "{want:?}");
+    let want: Vec<String> = [&want[1], &want[2], &want[0], &want[3]]
+        .iter()
+        .map(|w| w.join(" "))
+        .collect();
+    assert_eq!(got, want);
+}
+
+/// Which list of the PowerShell script [`ps1_words`] reads.
+enum Ps1Table {
+    /// `$subs`, the subcommand names.
+    Subcommands,
+    /// The `$opts` row of a subcommand.
+    Unix(&'static str),
+    /// The `$winOpts` row of a subcommand.
+    Windows(&'static str),
+}
+
+/// The words of one list in the PowerShell script that start with
+/// `prefix`, in the script's order, as its completer offers them.
+fn ps1_words(script: &str, table: Ps1Table, prefix: &str) -> Vec<String> {
+    let unix = script
+        .split_once("$opts = @{")
+        .and_then(|(_, rest)| rest.split_once("$winOpts = @{"))
+        .expect("the $opts table")
+        .0;
+    let win = script
+        .split_once("$winOpts = @{")
+        .expect("the $winOpts table")
+        .1;
+    let (part, start) = match table {
+        Ps1Table::Subcommands => (script, "$subs = @(".to_string()),
+        Ps1Table::Unix(sub) => (unix, format!("'{sub}' = @(")),
+        Ps1Table::Windows(sub) => (win, format!("'{sub}' = @(")),
+    };
+    let line = part
+        .lines()
+        .map(str::trim_start)
+        .find(|l| l.starts_with(&start))
+        .unwrap_or_else(|| panic!("no PowerShell list {start}"));
+    line[start.len()..]
+        .trim_end_matches(')')
+        .split(", ")
+        .map(|w| w.trim_matches('\'').to_string())
+        .filter(|w| w.starts_with(prefix))
+        .collect()
 }
 
 /// The words of the `&SUB=[...]` line of the elvish script.
