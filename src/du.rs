@@ -68,6 +68,10 @@ directories appear as one `trash` row and are never printed by --print0.
                           disk use); the JSON rows keep the byte counts
       --bars            add a BAR column drawing that share in ten cells,
                           as dust's bars
+      --tree[=DEPTH]    print each PATH as a tree: the rows DEPTH levels
+                          below it (default 2) nested under their folders,
+                          the --top largest of each folder first, as dust
+                          draws them; plain table only
   -s, --summarize       print only the totals, no rows (GNU du -s, gdu)
       --skip-total      print the rows without the Total lines (dust)
       --reverse         print each table in reverse, the top row last
@@ -2447,6 +2451,75 @@ fn bar(part: Option<f64>) -> String {
     format!("{}{}", "#".repeat(filled), " ".repeat(BAR_CELLS - filled))
 }
 
+/// `--tree` without a depth: two levels below each PATH.
+const TREE_DEPTH: usize = 2;
+
+/// Rows a `--tree` scan keeps, so no folder of the tree loses a child to
+/// the flat top-N cut; each folder then shows its `--top` largest.
+const TREE_ROWS: usize = 1 << 20;
+
+/// The rows of `report` under each folder, ranked by `sort` (ties by
+/// path), at most `top` per folder.
+fn tree_children(report: &Report, sort: SortKey, top: usize) -> HashMap<&Path, Vec<&Item>> {
+    let mut kids: HashMap<&Path, Vec<&Item>> = HashMap::new();
+    for it in report.dirs.iter().chain(&report.files) {
+        if let Some(parent) = it.path.parent() {
+            kids.entry(parent).or_default().push(it);
+        }
+    }
+    for v in kids.values_mut() {
+        v.sort_by(|a, b| {
+            b.key(sort)
+                .cmp(&a.key(sort))
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        v.truncate(top);
+    }
+    kids
+}
+
+/// `--tree`: each PATH with its total, then the rows below it nested
+/// under their folders with `├─`, `└─` and `│` as dust draws them.
+fn tree_lines(report: &Report, sort: SortKey, top: usize) -> Vec<String> {
+    let kids = tree_children(report, sort, top);
+    let mut out = Vec::new();
+    for root in &report.roots {
+        out.push(format!(
+            "{:>10}  {:>10}  {}",
+            format_bytes(root.disk),
+            format_bytes(root.apparent),
+            root.path.display()
+        ));
+        tree_level(&kids, &root.path, "", &mut out);
+    }
+    out
+}
+
+fn tree_level(kids: &HashMap<&Path, Vec<&Item>>, dir: &Path, prefix: &str, out: &mut Vec<String>) {
+    let Some(rows) = kids.get(dir) else {
+        return;
+    };
+    let last = rows.len().saturating_sub(1);
+    for (n, it) in rows.iter().enumerate() {
+        let (branch, more) = if n == last {
+            ("\u{2514}\u{2500} ", "   ")
+        } else {
+            ("\u{251c}\u{2500} ", "\u{2502}  ")
+        };
+        let name = it.path.file_name().unwrap_or(it.path.as_os_str());
+        let slash = if it.is_dir { "/" } else { "" };
+        out.push(format!(
+            "{:>10}  {:>10}  {prefix}{branch}{}{slash}",
+            format_bytes(it.disk),
+            format_bytes(it.apparent),
+            name.to_string_lossy()
+        ));
+        if it.is_dir {
+            tree_level(kids, &it.path, &format!("{prefix}{more}"), out);
+        }
+    }
+}
+
 fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
     let Columns {
         count,
@@ -2862,6 +2935,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut show_mtime = false;
     let mut relative = false;
     let mut bars = false;
+    let mut tree: Option<usize> = None;
     let mut reverse = false;
     let mut summarize = false;
     let mut skip_total = false;
@@ -2923,6 +2997,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         } else if let Some(v) = take_value(args, &mut i, arg, "--max-depth", None) {
             match v.and_then(|v| parse_count(v, "depth")) {
                 Ok(n) => opts.max_depth = Some(n),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = arg.strip_prefix("--tree=") {
+            match parse_count(v, "depth") {
+                Ok(n) => tree = Some(n),
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = take_value(args, &mut i, arg, "--threads", None) {
@@ -3061,6 +3140,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--show-mtime" => show_mtime = true,
                 "--show-relative-size" => relative = true,
                 "--bars" => bars = true,
+                "--tree" => tree = Some(TREE_DEPTH),
                 "--reverse" => reverse = true,
                 // GNU du -s and gdu --summarize: the totals, no rows.
                 "-s" | "--summarize" => summarize = true,
@@ -3126,6 +3206,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if summarize {
         // After the loop, so a later -n does not bring rows back.
         opts.top = 0;
+    }
+    // The --top of each tree folder; the scan itself keeps every row.
+    let tree_top = opts.top;
+    if let Some(depth) = tree {
+        if json || print0 || summarize || opts.types {
+            eprintln!("{prog}: --tree prints the table; drop --json, --print0, -s or --types");
+            return 2;
+        }
+        opts.max_depth = Some(opts.max_depth.map_or(depth, |m| m.min(depth)));
+        opts.all_dirs = true;
+        opts.top = TREE_ROWS;
     }
     if summarize && skip_total {
         eprintln!("{prog}: give --summarize or --skip-total, not both");
@@ -3519,6 +3610,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let count = count || opts.sort == SortKey::Items;
         if opts.types {
             print_types(&opts.sort.title("file types"), &report.types, opts.top);
+        } else if tree.is_some() {
+            for line in tree_lines(&report, opts.sort, tree_top) {
+                println!("{line}");
+            }
         } else {
             let cols = Columns {
                 count,

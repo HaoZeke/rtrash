@@ -2268,3 +2268,39 @@ fn bars_draw_the_share_in_ten_cells() {
     let plain = String::from_utf8(t.du(&["--no-git"]).stdout).unwrap();
     assert!(!plain.contains("BAR"), "{plain}");
 }
+
+#[test]
+fn tree_nests_rows_under_their_folders() {
+    let t = Tree::new("dutree");
+    t.file("big/a.bin", 300_000);
+    t.file("big/inner/c.bin", 50_000);
+    t.file("small.bin", 100_000);
+    let args = ["--no-git", "--apparent", "--no-hidden", "--tree"];
+    let out = t.du(&args);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    let at = |end: &str| {
+        let found = text.lines().position(|l| l.ends_with(end));
+        found.unwrap_or_else(|| panic!("no row ending {end:?} in {text}"))
+    };
+    // Apparent sizes: big/ holds 350k and more, small.bin 100k; inside
+    // big/, a.bin (300k) outranks inner/ (50k plus its entry).
+    let rows = [
+        at("\u{251c}\u{2500} big/"),
+        at("\u{2502}  \u{251c}\u{2500} a.bin"),
+        at("\u{2502}  \u{2514}\u{2500} inner/"),
+        at("\u{2514}\u{2500} small.bin"),
+    ];
+    assert!(rows.windows(2).all(|w| w[0] < w[1]), "{rows:?} {text}");
+    // The default depth is 2, so c.bin (three levels down) is left out.
+    assert!(!text.contains("c.bin"), "{text}");
+    let deep = t.du(&["--no-git", "--apparent", "--no-hidden", "--tree=3"]);
+    let deep = String::from_utf8(deep.stdout).unwrap();
+    assert!(deep.contains("\u{2514}\u{2500} c.bin"), "{deep}");
+    let json = t.du(&["--no-git", "--tree", "--json"]);
+    assert_eq!(json.status.code(), Some(2));
+}

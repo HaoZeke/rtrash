@@ -1184,6 +1184,21 @@ in place of the AGE column. The JSON rows keep
 .B mtime
 as seconds since the epoch.
 .TP
+.BR \-\-tree [=\fIDEPTH\fR]
+Print each
+.I PATH
+with its total, then the rows down to
+.I DEPTH
+levels below it (default 2) nested under their folders, the
+.B \-\-top
+largest of each folder first, drawn with box lines as dust draws
+its tree. Only the plain table; it refuses
+.BR \-\-json ,
+.BR \-\-print0 ,
+.B \-s
+and
+.BR \-\-types .
+.TP
 .B \-\-bars
 Add a BAR column that draws each row's share of its
 .I PATH
