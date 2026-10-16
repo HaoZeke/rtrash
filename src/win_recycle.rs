@@ -963,6 +963,41 @@ mod os {
             .unwrap_or_else(|| it.original_path())
     }
 
+    /// `put --inspect`: ask before trashing `f`, naming its size and, for
+    /// a directory, its file count; true on y.
+    fn inspect_ok(prog: &str, f: &Path) -> bool {
+        let is_dir = std::fs::symlink_metadata(f).is_ok_and(|m| m.is_dir());
+        let size = crate::util::format_bytes(tree_bytes(f));
+        let (kind, what) = if is_dir {
+            let n = files_below(f);
+            let s = if n == 1 { "" } else { "s" };
+            ("directory", format!("{size}, {n} file{s}"))
+        } else {
+            ("file", size)
+        };
+        let shown = crate::util::term_path(f);
+        crate::util::confirm(&format!("{prog}: remove {kind} '{shown}' ({what})? "))
+    }
+
+    /// Files below `dir` (not directories), without following links.
+    fn files_below(dir: &Path) -> u64 {
+        let mut n = 0u64;
+        let mut todo = vec![dir.to_path_buf()];
+        while let Some(d) = todo.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                match e.file_type() {
+                    Ok(t) if t.is_dir() => todo.push(e.path()),
+                    Ok(_) => n += 1,
+                    Err(_) => {}
+                }
+            }
+        }
+        n
+    }
+
     fn item_size(it: &TrashItem) -> u64 {
         recycled_size(Path::new(&it.id))
     }
@@ -979,6 +1014,7 @@ mod os {
         let mut no_more_opts = false;
         let mut in_use: Option<String> = None;
         let mut dry_run = false;
+        let mut inspect = false;
         for arg in args {
             if no_more_opts || arg == "-" || !arg.starts_with('-') {
                 files.push(crate::util::arg_path(arg));
@@ -986,7 +1022,15 @@ mod os {
             }
             match arg.as_str() {
                 "--" => no_more_opts = true,
-                "-f" | "--force" => force = true,
+                // A later -f turns --inspect off, as on FreeDesktop.
+                "-f" | "--force" => {
+                    force = true;
+                    inspect = false;
+                }
+                "--inspect" => {
+                    force = false;
+                    inspect = true;
+                }
                 "-v" | "--verbose" => verbose = true,
                 "--plain" => plain = true,
                 "--json" => json = true,
@@ -1011,6 +1055,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
 
   -f, --force    ignore nonexistent files
   -v, --verbose  print each path and the Recycle Bin it went to
+      --inspect  ask before each item, showing its size and, for a
+                   directory, how many files it holds
       --dry-run  run every check (missing files, holders) and print
                    'would trash PATH' for each item that would move,
                    moving nothing
@@ -1038,6 +1084,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     if a.chars().all(|c| "rRfidv".contains(c) || c == '-') {
                         if a.contains('f') {
                             force = true;
+                            inspect = false;
                         }
                         if a.contains('v') {
                             verbose = true;
@@ -1101,6 +1148,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     }
                     eprintln!("{prog}: warning: '{}' is in use by {who}", f.display());
                 }
+            }
+            if inspect && !inspect_ok(prog, f) {
+                continue;
             }
             if dry_run {
                 println!("would trash '{}'", crate::util::term_path(&abs));

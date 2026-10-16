@@ -415,3 +415,36 @@ fn restore_sorts_by_size_on_windows() {
         "big {big_back}, small {small_back}"
     );
 }
+
+#[test]
+fn put_inspect_asks_with_the_size_on_windows() {
+    let name = format!("rtrash-names-inspect-{}", std::process::id());
+    let dir = std::env::temp_dir().join(name);
+    let _ = fs::remove_dir_all(&dir);
+    let proj = dir.join("proj");
+    fs::create_dir_all(proj.join("sub")).unwrap();
+    for f in ["a.txt", "b.txt", "sub/c.txt"] {
+        fs::write(proj.join(f), "data").unwrap();
+    }
+    let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
+    // A "no" keeps it, and the prompt names the file count.
+    let no = run_with(rtrash, &dir, &["put", "--inspect", "proj"], "n\n");
+    let err = String::from_utf8_lossy(&no.stderr).to_string();
+    let kept = proj.exists();
+    // A "yes" moves it to the Recycle Bin.
+    let yes = run_with(rtrash, &dir, &["put", "--inspect", "proj"], "y\n");
+    let gone = !proj.exists();
+    if gone {
+        let _ = Command::new(rtrash).arg("restore").arg(&proj).output();
+    }
+    let _ = fs::remove_dir_all(&dir);
+    assert!(err.contains("remove directory '"), "{err}");
+    assert!(err.contains(", 3 files)? "), "{err}");
+    assert!(kept, "{err}");
+    assert!(
+        yes.status.success(),
+        "{}",
+        String::from_utf8_lossy(&yes.stderr)
+    );
+    assert!(gone);
+}
