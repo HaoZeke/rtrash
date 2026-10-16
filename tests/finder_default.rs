@@ -596,7 +596,7 @@ fn finder_restore_takes_size_filters() {
         .collect();
     fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
 
-    let o = b.run(&["restore", "--larger-than=100k", "--all"], "");
+    let o = b.run(&["restore", "--larger-than", "100k", "--all"], "");
     assert!(o.status.success(), "{}", err(&o));
     assert!(b.work().join("big.bin").exists());
     assert!(!b.work().join("small.txt").exists());

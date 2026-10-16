@@ -185,6 +185,14 @@ fn by_batch(prog: &str, args: &[String]) -> Option<i32> {
 }
 
 fn run_inner(prog: &str, args: &[String]) -> i32 {
+    let joined = match crate::filters::join_spaced(args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{prog}: {e}");
+            return 2;
+        }
+    };
+    let args = &joined[..];
     if let Some(code) = by_batch(prog, args) {
         return code;
     }

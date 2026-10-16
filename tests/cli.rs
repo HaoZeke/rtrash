@@ -376,17 +376,20 @@ fn restore_takes_age_filters() {
     // An item trashed on 2026-01-01, months before now.
     forge_record(&sb, "old.txt", &sb.work().join("old.txt"), b"old");
 
-    let out = sb.run(&["restore", "--older-than=30", "--all"]);
+    // The space form reads as the = form, as list takes it.
+    let out = sb.run(&["restore", "--older-than", "30", "--all"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(fs::read(sb.work().join("old.txt")).unwrap(), b"old");
     assert!(!sb.work().join("fresh.txt").exists());
     // Nothing older is left; the fresh item stays put.
     let out = sb.run(&["restore", "--older-than=30", "--all"]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
-    let out = sb.run(&["restore", "--newer-than=1h", "--all"]);
+    let out = sb.run(&["restore", "--newer-than", "1h", "--all"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(fs::read(sb.work().join("fresh.txt")).unwrap(), b"fresh");
     let out = sb.run(&["restore", "--older-than=soon"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    let out = sb.run(&["restore", "--older-than"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
 }
 
@@ -397,7 +400,7 @@ fn restore_takes_size_filters() {
     fs::write(sb.work().join("small.txt"), b"s").unwrap();
     assert!(sb.run(&["put", "big.bin", "small.txt"]).status.success());
 
-    let out = sb.run(&["restore", "--larger-than=100k", "--all"]);
+    let out = sb.run(&["restore", "--larger-than", "100k", "--all"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(sb.work().join("big.bin").exists());
     assert!(!sb.work().join("small.txt").exists());

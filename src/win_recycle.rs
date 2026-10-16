@@ -1906,6 +1906,14 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
     }
 
     pub fn restore_run(prog: &str, args: &[String]) -> i32 {
+        let joined = match crate::filters::join_spaced(args) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("{prog}: {e}");
+                return 2;
+            }
+        };
+        let args = &joined[..];
         let mut conflict = Conflict::Refuse;
         let mut json = false;
         let mut plain = false;

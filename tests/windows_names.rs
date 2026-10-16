@@ -344,7 +344,7 @@ fn restore_takes_size_filters_on_windows() {
     let out = run_with(
         rtrash,
         &dir,
-        &["restore", &scope, "--smaller-than=100k", "--all"],
+        &["restore", &scope, "--smaller-than", "100k", "--all"],
         "",
     );
     let (big_back, small_back) = (big.exists(), small.exists());

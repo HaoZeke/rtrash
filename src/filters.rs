@@ -2,6 +2,36 @@
 //! `--older-than`/`--newer-than` on when an item was trashed, and
 //! `--larger-than`/`--smaller-than` on how much it takes on disk.
 
+/// The age and size flags restore reads in `--flag=VALUE` form.
+const SPACED: [&str; 4] = [
+    "--older-than",
+    "--newer-than",
+    "--larger-than",
+    "--smaller-than",
+];
+
+/// Join `--older-than 30` and the other [`SPACED`] flags given as two
+/// words into `--older-than=30`, as list takes them, so a parser that
+/// reads only the `=` form sees both. Words after `--` stay as they are.
+pub fn join_spaced(args: &[String]) -> Result<Vec<String>, String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            out.push(a.clone());
+            out.extend(it.cloned());
+            break;
+        }
+        if SPACED.contains(&a.as_str()) {
+            let v = it.next().ok_or_else(|| format!("{a} requires a value"))?;
+            out.push(format!("{a}={v}"));
+        } else {
+            out.push(a.clone());
+        }
+    }
+    Ok(out)
+}
+
 /// Parse a size such as `500M`, `10G`, `1.5GiB`, `64k` or `123` (bytes).
 /// Units are powers of 1024; a trailing `B` or `iB` is optional.
 pub fn parse_size(s: &str) -> Option<u64> {
@@ -206,6 +236,19 @@ impl AgeFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spaced_flags_join_their_value() {
+        let words = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let got = join_spaced(&words(&["--older-than", "30", "-f", "--larger-than", "1K"]));
+        assert_eq!(
+            got.unwrap(),
+            words(&["--older-than=30", "-f", "--larger-than=1K"])
+        );
+        let kept = join_spaced(&words(&["--", "--newer-than", "2"])).unwrap();
+        assert_eq!(kept, words(&["--", "--newer-than", "2"]));
+        assert!(join_spaced(&words(&["--smaller-than"])).is_err());
+    }
 
     #[test]
     fn ages_take_days_and_compound_durations() {
