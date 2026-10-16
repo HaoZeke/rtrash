@@ -2843,11 +2843,13 @@ registry), then the total and the free space on each (a warning under
         let mut dry_run = false;
         let mut force = false;
         let mut verbose = false;
+        let mut regex = false;
         let mut patterns: Vec<String> = Vec::new();
         let mut batch: Option<String> = None;
         let filters = parse_with_filters(prog, args, |arg| {
             match arg {
                 "-n" | "--dry-run" => dry_run = true,
+                "--regex" => regex = true,
                 "-f" | "--force" => force = true,
                 a if a.starts_with("--batch=") => batch = Some(a["--batch=".len()..].to_string()),
                 "-v" | "--verbose" => verbose = true,
@@ -2858,6 +2860,8 @@ registry), then the total and the free space on each (a warning under
 Usage: {prog} [OPTION]... PATTERN...
 Permanently delete Recycle Bin items matching PATTERN (glob).
 
+      --regex   PATTERNs are regular expressions searched in the original
+                   path (trashy's --match=regex)
       --older-than=AGE  only match items deleted more than AGE ago: DAYS,
                    or a duration such as 2h, 30m or 1d12h
       --newer-than=AGE  only match items deleted within the last AGE
@@ -2901,14 +2905,21 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
         // The latest put is a scope of its own: with no PATTERN, take all.
         let scoped = batch.is_some() && patterns.is_empty();
         if scoped {
-            patterns.push("*".into());
+            patterns.push(if regex { "" } else { "*" }.into());
         }
         if patterns.is_empty() {
             eprintln!("{prog}: missing PATTERN");
             return 2;
         }
-        if patterns.iter().any(|p| p == "*") && !force && !scoped {
-            eprintln!("{prog}: refusing pattern '*' without --force");
+        let pats = match crate::filters::Patterns::new(patterns, regex) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{prog}: {e}");
+                return 2;
+            }
+        };
+        if pats.is_mass() && !force && !scoped {
+            eprintln!("{prog}: refusing a pattern that matches everything without --force");
             return 2;
         }
         let items = match super::list_items() {
@@ -2935,9 +2946,7 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                     .file_name()
                     .map(|f| f.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                patterns
-                    .iter()
-                    .any(|p| util::fnmatch(p, &full) || util::fnmatch(p, &base))
+                pats.hit(&full, &base, &base)
             })
             .collect();
         // Size last: only the matches need their `$I` read.

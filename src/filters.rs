@@ -363,3 +363,68 @@ mod tests {
         assert_eq!(f.take(&["--size".to_string()], &mut 0), None);
     }
 }
+
+/// The PATTERN operands of `rm`: shell globs on the original path, its
+/// basename or the name in the trash, or with `--regex` regular
+/// expressions searched in the original path (trashy's `--match=regex`).
+#[derive(Debug, Clone, Default)]
+pub struct Patterns {
+    pub globs: Vec<String>,
+    pub regex: Vec<regex_lite::Regex>,
+}
+
+impl Patterns {
+    /// Globs as given, or with `regex` each one compiled.
+    pub fn new(pats: Vec<String>, regex: bool) -> Result<Patterns, String> {
+        if !regex {
+            return Ok(Patterns {
+                globs: pats,
+                regex: Vec::new(),
+            });
+        }
+        let regex = pats
+            .iter()
+            .map(|p| regex_lite::Regex::new(p).map_err(|e| format!("invalid regex '{p}': {e}")))
+            .collect::<Result<_, _>>()?;
+        Ok(Patterns {
+            globs: Vec::new(),
+            regex,
+        })
+    }
+
+    /// A pattern that takes everything: `*` and friends, or a regex that
+    /// matches the empty string (such as `.*` or `^`).
+    pub fn is_mass(&self) -> bool {
+        let glob = |p: &String| ["*", "*.*", "**", "**/*"].contains(&p.as_str());
+        self.globs.iter().any(glob) || self.regex.iter().any(|r| r.is_match(""))
+    }
+
+    pub fn hit(&self, full: &str, base: &str, name: &str) -> bool {
+        if !self.regex.is_empty() {
+            return self.regex.iter().any(|r| r.is_match(full));
+        }
+        self.globs.iter().any(|p| {
+            crate::util::fnmatch(p, full)
+                || crate::util::fnmatch(p, base)
+                || crate::util::fnmatch(p, name)
+        })
+    }
+}
+
+#[cfg(test)]
+mod pattern_tests {
+    use super::Patterns;
+
+    #[test]
+    fn regex_patterns_search_the_whole_path() {
+        let p = Patterns::new(vec![r"/old-[0-9]+/".into()], true).unwrap();
+        assert!(p.hit("/home/u/old-42/a.txt", "a.txt", "a.txt"));
+        assert!(!p.hit("/home/u/old-x/a.txt", "a.txt", "a.txt"));
+        assert!(!p.is_mass());
+        assert!(Patterns::new(vec![".*".into()], true).unwrap().is_mass());
+        assert!(Patterns::new(vec!["(".into()], true).is_err());
+        let g = Patterns::new(vec!["*.o".into()], false).unwrap();
+        assert!(g.hit("/x/a.o", "a.o", "a.o"));
+        assert!(!g.is_mass());
+    }
+}

@@ -1329,6 +1329,28 @@ fn trash_rm_refuses_star_without_force() {
 }
 
 #[test]
+fn trash_rm_regex_matches_the_original_path() {
+    let sb = Sandbox::new("rm-regex-paths");
+    for f in ["build-12.log", "build-x.log", "keep.txt"] {
+        sb.touch(f);
+        assert!(sb.run(&["put", f]).status.success());
+    }
+    let out = sb.run(&["rm", "--regex", r"/build-[0-9]+\.log$"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(left, ["build-x.log", "keep.txt"]);
+    // A regex that matches every path needs --force, a bad one exits 2.
+    let mass = sb.run(&["rm", "--regex", ".*"]);
+    assert_eq!(mass.status.code(), Some(2), "{}", stderr_of(&mass));
+    let bad = sb.run(&["rm", "--regex", "("]);
+    assert_eq!(bad.status.code(), Some(2), "{}", stderr_of(&bad));
+    left = trash_names(&sb);
+    left.sort();
+    assert_eq!(left, ["build-x.log", "keep.txt"]);
+}
+
+#[test]
 fn empty_dry_run_reports_space_for_tree() {
     let sb = Sandbox::new("empty-dry-du");
     let d = sb.work().join("big");

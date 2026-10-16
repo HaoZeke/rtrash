@@ -3259,6 +3259,17 @@ Only consider this trash directory (repeatable).
 .B \-\-home\-only
 Only the home trash (skip volume trash).
 .TP
+.B \-\-regex
+Each
+.I PATTERN
+is a regular expression searched anywhere in the original path, as
+trashy's
+.B \-\-match=regex
+takes it. A regex that matches the empty path, such as
+.BR .* ,
+counts as a mass pattern and needs
+.BR \-\-force .
+.TP
 .BI \-\-older\-than =AGE
 Only match items trashed more than
 .I AGE

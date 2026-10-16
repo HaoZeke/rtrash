@@ -545,7 +545,7 @@ pub fn stats(top: usize) -> Vec<crate::trash_stats::Stats> {
 /// place, its file name or the name in the trash matches a pattern.
 pub fn rm(
     prog: &str,
-    patterns: &[String],
+    patterns: &crate::filters::Patterns,
     batch: Option<&str>,
     dry_run: bool,
     verbose: bool,
@@ -591,12 +591,16 @@ pub fn rm(
             .map(|b| b.to_string_lossy().into_owned())
             .unwrap_or_default();
         let name = nfc(&e.name);
-        let hit = patterns.iter().any(|p| {
-            let p = nfc(p);
-            crate::util::fnmatch(&p, &path_s)
-                || crate::util::fnmatch(&p, &base)
-                || crate::util::fnmatch(&p, &name)
-        });
+        let hit = if patterns.regex.is_empty() {
+            patterns.globs.iter().any(|p| {
+                let p = nfc(p);
+                crate::util::fnmatch(&p, &path_s)
+                    || crate::util::fnmatch(&p, &base)
+                    || crate::util::fnmatch(&p, &name)
+            })
+        } else {
+            patterns.hit(&nfc(&path_s), &base, &name)
+        };
         if !hit {
             continue;
         }

@@ -77,6 +77,23 @@ listing, and the restore conflict policies (=--conflict=rename|skip=), which =re
 A read-only home trash fails put up front with one clear reason, since
 it has no fallback; trash-cli fails each item with a bare error.
 
+* trashy patterns
+
+trashy takes its patterns as plain arguments to =restore= and =empty=,
+read as regular expressions unless =-m= (=--match=) names another kind.
+In rtrash a flag names the kind:
+
+| trashy                          | rtrash                                |
+|---------------------------------+---------------------------------------|
+| ~trashy restore PATTERN~        | ~rtrash restore --regex=PATTERN~      |
+| ~trashy restore --match=glob P~ | ~rtrash restore --glob=P~             |
+| ~trashy empty PATTERN~          | ~rtrash rm --regex PATTERN~           |
+| ~trashy empty --match=glob P~   | ~rtrash rm P~ (globs are the default) |
+
+A regex for =rm= searches the whole original path, on the FreeDesktop,
+Finder and Windows trashes alike.
+One that matches every path (such as =.*=) needs =--force=, as =*= does.
+
 * macOS
 
 | Behaviour                              | rtrash                                          | Finder  |

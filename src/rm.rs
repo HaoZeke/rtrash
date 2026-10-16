@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 use crate::list;
 use crate::trashdir::{self, TrashDir};
-use crate::util::fnmatch;
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... PATTERN...
 Permanently remove trashed items whose original path or basename matches
-a PATTERN (shell-style glob; quote globs from the shell). Matching entries
+a PATTERN (shell-style glob; quote globs from the shell; with --regex, a
+regular expression searched in the original path). Matching entries
 are deleted from the trash (files/ + .trashinfo), not restored. An absolute
 PATTERN also matches with symlinks in its directory part resolved, the way
 put records original paths.
@@ -26,6 +26,8 @@ matching *trash* entries — not a synonym for put.
       --larger-than=SIZE  only match items taking more than SIZE on disk
       --smaller-than=SIZE only match items taking less than SIZE on disk
                      (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
+      --regex      PATTERNs are regular expressions searched in the
+                     original path (trashy's --match=regex)
       --batch=ID   only items from one put run: an ID from `undo --list`,
                      or `last` for the latest; with no PATTERN, all of it
   -n, --dry-run    list matches and reclaimable size; do not delete
@@ -40,6 +42,7 @@ Examples:
   {prog} -n '*.o'
   {prog} foo
   {prog} /home/you/old-project
+  {prog} --regex '/build-[0-9]+/'
   {prog} --batch=last
 ";
 
@@ -57,6 +60,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut dry_run = false;
     let mut home_only = false;
     let mut json = false;
+    let mut regex = false;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
@@ -84,6 +88,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "-n" | "--dry-run" => dry_run = true,
             "--home-only" => home_only = true,
             "--json" => json = true,
+            "--regex" => regex = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -158,21 +163,29 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // A put run is a scope of its own: with no PATTERN, take all of it.
     let scoped = batch.is_some() && patterns.is_empty();
     if scoped {
-        patterns.push("*".into());
+        patterns.push(if regex { "" } else { "*" }.into());
     }
     if patterns.is_empty() {
         eprintln!("{prog}: missing operand");
         eprintln!("Try '{prog} --help' for more information.");
         return 2;
     }
+    if !regex {
+        // put records originals with their parent directory resolved, so
+        // a path typed through a symlinked directory matches that way too.
+        let resolved: Vec<String> = patterns.iter().filter_map(|p| resolve_pattern(p)).collect();
+        patterns.extend(resolved);
+    }
+    let pats = match crate::filters::Patterns::new(patterns.clone(), regex) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{prog}: {e}");
+            return 2;
+        }
+    };
 
     // Refuse accidental host-wide permanent purge of the whole trash.
-    if !force
-        && !scoped
-        && patterns
-            .iter()
-            .any(|p| p == "*" || p == "*.*" || p == "**" || p == "**/*")
-    {
+    if !force && !scoped && pats.is_mass() {
         eprintln!(
             "{prog}: refusing mass pattern {:?} without --force (would permanently delete matching trash entries)",
             patterns
@@ -186,10 +199,6 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: no valid --trash-dir pins");
         return 2;
     }
-    // put records originals with their parent directory resolved, so a
-    // path typed through a symlinked directory matches in that form too.
-    let resolved: Vec<String> = patterns.iter().filter_map(|p| resolve_pattern(p)).collect();
-    patterns.extend(resolved);
     // macOS deletes from the Finder trashes unless a pin or the setting
     // says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty()) {
@@ -202,7 +211,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         };
         return crate::finder_shared::rm(
             prog,
-            &patterns,
+            &pats,
             batch.as_deref(),
             dry_run,
             verbose,
@@ -256,11 +265,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .file_name()
             .map(crate::util::str_from_os_ref)
             .unwrap_or_default();
-        let hit = patterns.iter().any(|pat| {
-            fnmatch(pat, path_s.as_ref())
-                || fnmatch(pat, base.as_str())
-                || fnmatch(pat, entry.name.as_str())
-        });
+        let hit = pats.hit(path_s.as_ref(), base.as_str(), entry.name.as_str());
         if !hit {
             continue;
         }

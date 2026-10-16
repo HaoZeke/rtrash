@@ -248,6 +248,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l newer-t
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l larger-than -d 'only match items over SIZE on disk' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l smaller-than -d 'only match items under SIZE on disk' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l batch -d 'only items from one put run (an ID or last)' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l regex -d 'PATTERNs are regular expressions on the original path'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s n -l dry-run -d 'list matches and reclaimable size; do not delete'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s f -l force -d 'allow mass patterns that match everything'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s v -l verbose -d 'print each permanently removed original path'
@@ -373,6 +374,7 @@ complete -c trash-rm -l newer-than -r
 complete -c trash-rm -l larger-than -r
 complete -c trash-rm -l smaller-than -r
 complete -c trash-rm -l batch -r
+complete -c trash-rm -l regex
 complete -c trash-rm -l json
 complete -c trash-rm -s n -l dry-run
 complete -c trash-rm -s f -l force
