@@ -820,6 +820,31 @@ fn files_from_scans_the_listed_paths() {
 }
 
 #[test]
+fn reverse_prints_the_top_row_last() {
+    let t = Tree::new("du-reverse");
+    t.file("big.bin", 300_000);
+    t.file("mid.bin", 200_000);
+    t.file("small.bin", 100_000);
+    let rows = |args: &[&str]| -> Vec<String> {
+        let out = t.du(args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.ends_with(".bin"))
+            .map(|l| l.rsplit(['/', '\\']).next().unwrap_or(l).to_string())
+            .collect()
+    };
+    let plain = rows(&["--no-git", "--apparent"]);
+    assert_eq!(plain, ["big.bin", "mid.bin", "small.bin"], "{plain:?}");
+    let rev = rows(&["--no-git", "--apparent", "--reverse"]);
+    assert_eq!(rev, ["small.bin", "mid.bin", "big.bin"], "{rev:?}");
+}
+
+#[test]
 fn no_hidden_leaves_dot_entries_out() {
     let t = Tree::new("nohidden");
     t.file("seen/a.bin", 100_000);

@@ -1191,6 +1191,14 @@ that holds it, by apparent size with
 .BR \-\-apparent ,
 else by disk use. The JSON rows keep the byte counts.
 .TP
+.B \-\-reverse
+Print each table in reverse, so the top row comes last, next to the
+prompt, as
+.B dust \-r
+does. JSON and
+.B \-\-print0
+keep the ranking order.
+.TP
 .B \-\-inodes
 Rank by inodes, the same as
 .BR \-\-sort=items :

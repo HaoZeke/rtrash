@@ -66,6 +66,8 @@ directories appear as one `trash` row and are never printed by --print0.
       --show-relative-size  add a SHARE column: each row's percent of its
                           PATH total (apparent size with --apparent, else
                           disk use); the JSON rows keep the byte counts
+      --reverse         print each table in reverse, the top row last
+                          (dust -r); JSON and --print0 keep the ranking
       --inodes          rank by inodes, as --sort=items: files and
                           directories, each hard-linked file once; the
                           total gives the inodes each PATH uses
@@ -2382,6 +2384,9 @@ struct Columns<'a> {
     /// `--show-relative-size`: each row's share of its scan root, by
     /// apparent size when `apparent`, else by disk use.
     share: Option<(&'a [RootTotals], bool)>,
+    /// `--reverse`: the smallest (or oldest) row first, so the largest
+    /// ends at the bottom next to the prompt, as dust -r.
+    reverse: bool,
 }
 
 /// `42.5%`: the part of the scan root that holds `it`, or `-` when no
@@ -2406,6 +2411,7 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
         count,
         show_mtime,
         share,
+        reverse,
     } = cols;
     if items.is_empty() {
         return;
@@ -2460,7 +2466,12 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
         when,
         "NOTE"
     );
-    for it in items {
+    let rows: Box<dyn Iterator<Item = &Item>> = if reverse {
+        Box::new(items.iter().rev())
+    } else {
+        Box::new(items.iter())
+    };
+    for it in rows {
         let mut path = crate::util::term_path(&it.path);
         if it.is_dir {
             path.push(std::path::MAIN_SEPARATOR);
@@ -2798,6 +2809,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut count = false;
     let mut show_mtime = false;
     let mut relative = false;
+    let mut reverse = false;
     let now = crate::util::now_epoch();
     // Defaults from the config file; the options below override them.
     let cfg = crate::config::get();
@@ -2977,6 +2989,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "-C" | "--count" => count = true,
                 "--show-mtime" => show_mtime = true,
                 "--show-relative-size" => relative = true,
+                "--reverse" => reverse = true,
                 "--inodes" => opts.sort = SortKey::Items,
                 "--all-dirs" => opts.all_dirs = true,
                 "--artefacts" => opts.artefacts_only = true,
@@ -3259,6 +3272,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     count: false,
                     show_mtime,
                     share: relative.then_some((&report.roots[..], apparent_share)),
+                    reverse,
                 },
             );
             for t in &report.roots {
@@ -3423,6 +3437,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 count,
                 show_mtime,
                 share: relative.then_some((&report.roots[..], apparent_share)),
+                reverse,
             };
             print_table(&opts.sort.title("directories"), &report.dirs, now, cols);
             print_table(&opts.sort.title("files"), &report.files, now, cols);
