@@ -123,6 +123,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s C -l co
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l show-mtime -d 'show the modification time in place of AGE'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l show-relative-size -d 'add each row as a percent of its PATH total'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l bars -d 'draw each row share as a bar'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l graph-style -x -a 'hash half-block eighth-block' -d 'characters the bars are drawn with'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l tree -d 'print each PATH as a tree, DEPTH levels down'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-unicode -d 'draw --tree with ASCII lines'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dirs-first -d 'in --tree, list folders before files'

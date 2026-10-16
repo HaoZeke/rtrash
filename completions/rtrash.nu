@@ -214,6 +214,7 @@ export extern "rtrash du" [
     --count(-C)  # add an ITEMS column (each hard-linked file once)
     --show-mtime  # show the local modification time (YYYY-MM-DD HH:MM)
     --bars  # draw each row share of its PATH total as a bar
+    --graph-style: string  # hash, half-block or eighth-block bars (implies --bars)
     --tree?: string  # print each PATH as a tree, DEPTH (default 2) levels down
     --no-unicode  # draw --tree with ASCII lines
     --dirs-first  # in --tree, list each folder's subfolders before its files

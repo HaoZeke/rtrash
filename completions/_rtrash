@@ -146,6 +146,7 @@ du_opts=(
   '--show-mtime[show the modification time in place of AGE]'
   '--show-relative-size[add each row as a percent of its PATH total]'
   '--bars[draw each row share as a bar]'
+  '--graph-style=[characters the bars are drawn with]:style:(hash half-block eighth-block)'
   '--tree=-[print each PATH as a tree, DEPTH levels down]:depth:'
   '--no-unicode[draw --tree with ASCII lines]'
   '--dirs-first[in --tree, list folders before files]'

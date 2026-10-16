@@ -68,6 +68,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           disk use); the JSON rows keep the byte counts
       --bars            add a BAR column drawing that share in ten cells,
                           as dust's bars
+      --graph-style=STYLE  draw the bars with hash (#, the default),
+                          half-block or eighth-block characters, as ncdu
+                          --graph-style; implies --bars
       --tree[=DEPTH]    print each PATH as a tree: the rows DEPTH levels
                           below it (default 2) nested under their folders,
                           the --top largest of each folder first, as dust
@@ -2419,6 +2422,8 @@ struct Columns<'a> {
     show_share: bool,
     /// `--bars`: a BAR column of the same share, as dust draws.
     bars: bool,
+    /// `--graph-style`: the characters the bars are drawn with.
+    graph: GraphStyle,
     /// `--reverse`: the smallest (or oldest) row first, so the largest
     /// ends at the bottom next to the prompt, as dust -r.
     reverse: bool,
@@ -2451,12 +2456,67 @@ fn root_part(it: &Item, roots: &[RootTotals], apparent: bool) -> Option<f64> {
 /// Cells of a `--bars` bar.
 const BAR_CELLS: usize = 10;
 
-/// A bar of [`BAR_CELLS`] cells, `#` for each tenth of `part` (rounded),
-/// or blank for no part.
-fn bar(part: Option<f64>) -> String {
-    let filled = part.map_or(0, |p| (p * BAR_CELLS as f64).round() as usize);
-    let filled = filled.min(BAR_CELLS);
-    format!("{}{}", "#".repeat(filled), " ".repeat(BAR_CELLS - filled))
+/// `--graph-style`: how a bar fills its cells, as ncdu names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum GraphStyle {
+    /// One `#` per tenth.
+    #[default]
+    Hash,
+    /// Full blocks, and a left half block for a half cell.
+    HalfBlock,
+    /// Full blocks, and a left block of one to seven eighths.
+    EighthBlock,
+}
+
+impl GraphStyle {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "hash" => Some(Self::Hash),
+            "half-block" => Some(Self::HalfBlock),
+            "eighth-block" => Some(Self::EighthBlock),
+            _ => None,
+        }
+    }
+
+    /// Steps in one cell.
+    fn steps(self) -> usize {
+        match self {
+            Self::Hash => 1,
+            Self::HalfBlock => 2,
+            Self::EighthBlock => 8,
+        }
+    }
+}
+
+/// Left blocks of one to seven eighths of a cell.
+const EIGHTHS: [char; 7] = [
+    '\u{258f}', '\u{258e}', '\u{258d}', '\u{258c}', '\u{258b}', '\u{258a}', '\u{2589}',
+];
+
+/// A bar of [`BAR_CELLS`] cells for `part` (rounded to the style's
+/// steps), padded with spaces; blank for no part.
+fn bar(part: Option<f64>, style: GraphStyle) -> String {
+    let steps = style.steps();
+    let total = BAR_CELLS * steps;
+    let filled = part.map_or(0, |p| (p * total as f64).round() as usize);
+    let filled = filled.min(total);
+    let (full, rest) = (filled / steps, filled % steps);
+    let mut out = match style {
+        GraphStyle::Hash => "#".repeat(full),
+        _ => "\u{2588}".repeat(full),
+    };
+    let mut cells = full;
+    if rest > 0 {
+        let eighths = if style == GraphStyle::HalfBlock {
+            4
+        } else {
+            rest
+        };
+        out.push(EIGHTHS[eighths - 1]);
+        cells += 1;
+    }
+    out.push_str(&" ".repeat(BAR_CELLS - cells));
+    out
 }
 
 /// `--tree` without a depth: two levels below each PATH.
@@ -2570,6 +2630,7 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
         share,
         show_share,
         bars,
+        graph,
         reverse,
     } = cols;
     if items.is_empty() {
@@ -2647,7 +2708,7 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
             "{:>10}  {:>10}  {}{}{}{}{:>when_width$}  {:<width$}  {}",
             format_bytes(it.disk),
             format_bytes(it.apparent),
-            bars_of(&bar(share.and_then(|(r, a)| root_part(it, r, a)))),
+            bars_of(&bar(share.and_then(|(r, a)| root_part(it, r, a)), graph)),
             shares(&share.map_or(String::new(), |(r, a)| share_of(it, r, a))),
             uniques(&it.unique.map(format_bytes).unwrap_or_default()),
             counts(&it.items.to_string()),
@@ -2970,6 +3031,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut show_mtime = false;
     let mut relative = false;
     let mut bars = false;
+    let mut graph = GraphStyle::default();
     let mut tree: Option<usize> = None;
     let mut ascii = false;
     let mut dirs_first = false;
@@ -3034,6 +3096,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         } else if let Some(v) = take_value(args, &mut i, arg, "--max-depth", None) {
             match v.and_then(|v| parse_count(v, "depth")) {
                 Ok(n) => opts.max_depth = Some(n),
+                Err(e) => bail!(e),
+            }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--graph-style", None) {
+            match v.map(GraphStyle::parse) {
+                Ok(Some(g)) => {
+                    graph = g;
+                    bars = true;
+                }
+                Ok(None) => bail!("--graph-style takes hash, half-block or eighth-block"),
                 Err(e) => bail!(e),
             }
         } else if let Some(v) = arg.strip_prefix("--tree=") {
@@ -3485,6 +3556,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     share: want_share.then_some((&report.roots[..], apparent_share)),
                     show_share: relative,
                     bars,
+                    graph,
                     reverse,
                 },
             );
@@ -3657,6 +3729,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 share: want_share.then_some((&report.roots[..], apparent_share)),
                 show_share: relative,
                 bars,
+                graph,
                 reverse,
             };
             print_table(&opts.sort.title("directories"), &report.dirs, now, cols);
@@ -3748,10 +3821,24 @@ mod tests {
 
     #[test]
     fn bars_fill_a_tenth_per_cell() {
-        assert_eq!(bar(Some(0.5)), "#####     ");
-        assert_eq!(bar(Some(1.0)), "##########");
-        assert_eq!(bar(Some(0.04)), "          ");
-        assert_eq!(bar(None), "          ");
+        assert_eq!(bar(Some(0.5), GraphStyle::Hash), "#####     ");
+        assert_eq!(bar(Some(1.0), GraphStyle::Hash), "##########");
+        assert_eq!(bar(Some(0.04), GraphStyle::Hash), "          ");
+        assert_eq!(bar(None, GraphStyle::Hash), "          ");
+    }
+
+    #[test]
+    fn graph_styles_split_a_cell_into_halves_or_eighths() {
+        // 0.55 of 10 cells: 5.5 cells.
+        let half = bar(Some(0.55), GraphStyle::HalfBlock);
+        assert_eq!(half, "\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{258c}    ");
+        // 0.4375 of 80 eighths is 35: four full cells and three eighths.
+        let eighth = bar(Some(0.4375), GraphStyle::EighthBlock);
+        assert_eq!(eighth, "\u{2588}\u{2588}\u{2588}\u{2588}\u{258d}     ");
+        // Whole cells need no partial block.
+        assert_eq!(bar(Some(0.3), GraphStyle::EighthBlock).chars().count(), 10);
+        assert_eq!(GraphStyle::parse("half-block"), Some(GraphStyle::HalfBlock));
+        assert_eq!(GraphStyle::parse("blocks"), None);
     }
 
     #[test]

@@ -2382,3 +2382,28 @@ fn dirs_first_puts_folders_ahead_in_the_tree() {
     let (file, dir, text) = rows(&["--dirs-first"]);
     assert!(dir < file, "{text}");
 }
+
+#[test]
+fn graph_style_draws_the_bars_in_blocks() {
+    let t = Tree::new("dugraph");
+    t.file("big/a.bin", 400_000);
+    t.file("small/b.bin", 100_000);
+    // --graph-style alone turns the bars on.
+    let args = ["--no-git", "--apparent", "--graph-style=half-block"];
+    let out = t.du(&args);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("BAR"), "{text}");
+    let row = text.lines().find(|l| l.ends_with("a.bin")).expect("a.bin");
+    // About 80% of the total: 16 half cells, so 7 or 8 full blocks
+    // whatever the folder entries add; the exact split is a unit test.
+    let full = row.chars().filter(|&c| c == '\u{2588}').count();
+    assert!((7..=8).contains(&full), "{row}");
+    assert!(!row.contains('#'), "{row}");
+    let bad = t.du(&["--no-git", "--graph-style=blocks"]);
+    assert_eq!(bad.status.code(), Some(2));
+}
