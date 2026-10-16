@@ -152,7 +152,8 @@ fn trash_restore_takes_path_as_a_scope() {
     assert_eq!(row.as_bytes().get(15), Some(&b' '), "{said}");
     assert!(row.ends_with("inner.txt"), "{said}");
     let asked = String::from_utf8_lossy(&blank.stderr).into_owned();
-    assert!(asked.contains("What file to restore [0..0]"), "{asked}");
+    // The answer comes from a pipe, so no prompt shows, as on FreeDesktop.
+    assert!(!asked.contains("What file to restore"), "{asked}");
     assert!(said.contains("No files were restored"), "{said}");
     assert!(kept, "a blank answer restored the item");
     assert!(

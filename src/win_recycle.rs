@@ -2245,7 +2245,10 @@ Without PATH, print a numbered list and read an index from stdin.
         } else {
             "What to restore"
         };
-        eprint!("{ask} [0..{}]: ", matches.len() - 1);
+        // A piped answer gets no prompt, as on FreeDesktop.
+        if util::stdin_is_tty() {
+            eprint!("{ask} [0..{}]: ", matches.len() - 1);
+        }
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).is_err() {
             return 1;
