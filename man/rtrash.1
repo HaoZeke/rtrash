@@ -688,6 +688,7 @@ Order rows by
 .B path
 (original path).
 Ties keep the date order.
+On Windows the sizes are each item's size in the Recycle Bin.
 .TP
 .B \-\-reverse
 Reverse the order.
@@ -705,9 +706,7 @@ would: the
 .I N
 most recently trashed items by default.
 Orphan payloads, listed last, count as rows.
-On Windows the listing runs oldest first, so it keeps the
-.I N
-most recently deleted items.
+Windows applies it the same way.
 On the macOS Finder Trash it needs a
 .B \-\-trash\-dir
 pin.

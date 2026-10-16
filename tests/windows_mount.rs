@@ -288,6 +288,39 @@ fn list_last_keeps_the_most_recently_deleted() {
     assert!(String::from_utf8_lossy(&out.stdout).is_empty());
     let out = cmd(&lad).args(["list", "--last=x"]).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
+    // --sort and --reverse order the rows before --last cuts them.
+    let rows = |extra: &[&str]| {
+        let out = cmd(&lad)
+            .args(["list", scope.as_str()])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let text = rows(&["--reverse"]);
+    let first = text.lines().next().unwrap_or_default();
+    assert!(first.contains("new.txt"), "{text}");
+    let text = rows(&["--reverse", "--last=1"]);
+    assert!(
+        text.contains("old.txt") && !text.contains("new.txt"),
+        "{text}"
+    );
+    // By name, new.txt sorts before old.txt.
+    let text = rows(&["--sort=name", "--last=1"]);
+    assert!(
+        text.contains("old.txt") && !text.contains("new.txt"),
+        "{text}"
+    );
+    let text = rows(&["--sort=path", "--reverse", "--last=1"]);
+    assert!(text.contains("new.txt"), "{text}");
+    assert_eq!(rows(&["--sort=size"]).lines().count(), 2);
+    let out = cmd(&lad).args(["list", "--sort=nope"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
     let _ = cmd(&lad)
         .args(["restore", scope.as_str(), "--all"])
         .output();

@@ -1224,6 +1224,15 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         }
     }
 
+    /// What Windows `list --sort` orders by, as on FreeDesktop.
+    #[derive(Clone, Copy)]
+    enum ListSort {
+        Date,
+        Size,
+        Name,
+        Path,
+    }
+
     /// The current directory as given and as resolved, for --cwd-only.
     /// Empty when the directory cannot be read.
     fn cwd_forms() -> Vec<PathBuf> {
@@ -1259,6 +1268,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut cwd_only = false;
         let mut directory: Option<PathBuf> = None;
         let mut last: Option<usize> = None;
+        let mut sort = ListSort::Date;
+        let mut reverse = false;
         let mut bad: Option<String> = None;
         let mut with_size = false;
         let mut format: Option<Vec<crate::listfmt::FmtPart>> = None;
@@ -1271,6 +1282,33 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 with_size = true;
                 None
             }
+            "--reverse" => {
+                reverse = true;
+                None
+            }
+            a if a.starts_with("--sort=") => match &a["--sort=".len()..] {
+                "date" | "time" => {
+                    sort = ListSort::Date;
+                    None
+                }
+                "size" => {
+                    sort = ListSort::Size;
+                    with_size = true;
+                    None
+                }
+                "name" => {
+                    sort = ListSort::Name;
+                    None
+                }
+                "path" => {
+                    sort = ListSort::Path;
+                    None
+                }
+                v => {
+                    bad = Some(format!("invalid --sort '{v}' (date, size, name or path)"));
+                    Some(2)
+                }
+            },
             a if a.starts_with("--directory=") => match directory_arg(&a["--directory=".len()..]) {
                 Ok(d) => {
                     directory = Some(d);
@@ -1338,7 +1376,11 @@ List items in the Windows Recycle Bin (system trash).
       --cwd-only only items that came from the current directory or below
       --directory=DIR  only items that came from DIR or below it (DIR
                    need not exist any more)
-      --last=N   only the last N rows, the N most recently deleted items
+      --sort=KEY order by date (default), size (largest first; implies
+                   --size), name (file name) or path (original path)
+      --reverse  reverse the order
+      --last=N   only the last N rows (after --sort and --reverse), like
+                   tail -n: the N most recently deleted by default
       --size     add each item's size in the Recycle Bin
       --format=TEMPLATE  print each item through TEMPLATE: {{date}} {{epoch}}
                    {{path}} {{name}} {{trash}} {{size}} (bytes); {{batch}} and
@@ -1393,6 +1435,18 @@ on Windows (there is no FreeDesktop layout here).
                     .collect();
                 let mut items = filters.apply(items, |it| it.time_deleted, item_size);
                 items.sort_by_key(|i| i.time_deleted);
+                // Other keys sort stably, so ties keep the date order.
+                match sort {
+                    ListSort::Date => {}
+                    ListSort::Size => items.sort_by_cached_key(|i| std::cmp::Reverse(item_size(i))),
+                    ListSort::Name => items.sort_by_cached_key(|i| {
+                        original_of(i).file_name().map(|n| n.to_os_string())
+                    }),
+                    ListSort::Path => items.sort_by_cached_key(original_of),
+                }
+                if reverse {
+                    items.reverse();
+                }
                 // --last keeps the tail of the listing, as tail -n would.
                 if let Some(n) = last {
                     let cut = items.len().saturating_sub(n);
