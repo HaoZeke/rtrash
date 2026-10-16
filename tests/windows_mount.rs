@@ -255,6 +255,38 @@ fn list_format_size_and_matchers_read_the_recycle_bin() {
 }
 
 #[test]
+fn list_show_trashpath_names_the_recycle_bin_file() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let name = format!("showtrash-{}.txt", common::epoch_secs());
+    let p = m.join(&name);
+    put(&p);
+    let glob = format!("--glob={name}");
+    let out = Command::new(bin())
+        .args(["list", &glob, "--show-trashpath"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let at = text.lines().find_map(|l| l.strip_prefix("  trash: "));
+    let at = Path::new(at.unwrap_or_else(|| panic!("{text}")));
+    // The payload is the $R file the Recycle Bin keeps the item in.
+    let file = at.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(file.starts_with("$R"), "{text}");
+    assert!(at.exists(), "{text}");
+    let fmt = Command::new(bin())
+        .args(["list", &glob, "--show-trashpath", "--format={name}"])
+        .output()
+        .unwrap();
+    assert_eq!(fmt.status.code(), Some(2));
+}
+
+#[test]
 fn list_last_keeps_the_most_recently_deleted() {
     let Some(m) = mounted() else {
         return;

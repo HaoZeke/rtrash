@@ -1240,3 +1240,20 @@ fn odd_names_survive_the_finder_trash() {
     ok(&o, "empty");
     assert!(o.status.success(), "{}", err(&o));
 }
+
+#[test]
+fn list_show_trashpath_names_the_item_in_the_finder_trash() {
+    let b = Box_::new("showtrash");
+    fs::write(b.work().join("seen.txt"), b"seen").unwrap();
+    let o = b.run(&["put", "seen.txt"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let o = b.run(&["list", "--show-trashpath"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let text = out(&o);
+    let at = text.lines().find_map(|l| l.strip_prefix("  trash: "));
+    let at = at.unwrap_or_else(|| panic!("{text}"));
+    assert!(at.ends_with(".Trash/seen.txt"), "{text}");
+    assert!(Path::new(at).exists(), "{text}");
+    let o = b.run(&["list", "--json", "--show-trashpath"], "");
+    assert!(out(&o).contains(".Trash/seen.txt\""), "{}", out(&o));
+}

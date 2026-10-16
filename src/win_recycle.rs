@@ -1364,6 +1364,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut reverse = false;
         let mut bad: Option<String> = None;
         let mut with_size = false;
+        let mut show_trash = false;
         let mut format: Option<Vec<crate::listfmt::FmtPart>> = None;
         let filters = parse_with_filters(prog, args, |arg| match arg {
             "--cwd-only" => {
@@ -1372,6 +1373,10 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             }
             "--size" => {
                 with_size = true;
+                None
+            }
+            "--show-trashpath" => {
+                show_trash = true;
                 None
             }
             "--reverse" => {
@@ -1489,6 +1494,8 @@ List items in the Windows Recycle Bin (system trash).
       --last=N   only the last N rows (after --sort and --reverse), like
                    tail -n: the N most recently deleted by default
       --size     add each item's size in the Recycle Bin
+      --show-trashpath  under each row, show the item's file in the
+                   Recycle Bin ($R...; not with --format)
       --format=TEMPLATE  print each item through TEMPLATE: {{date}} {{epoch}}
                    {{path}} {{name}} {{trash}} {{size}} (bytes); {{batch}} and
                    {{owner}} print nothing here; \\t \\n \\0 escapes
@@ -1526,6 +1533,10 @@ on Windows (there is no FreeDesktop layout here).
         }
         if depth > 0 && format.is_some() {
             eprintln!("{prog}: --depth works on plain rows, not --format");
+            return 2;
+        }
+        if show_trash && format.is_some() {
+            eprintln!("{prog}: --show-trashpath works on plain rows, not --format");
             return 2;
         }
         let cwd = match &directory {
@@ -1602,7 +1613,10 @@ on Windows (there is no FreeDesktop layout here).
                             platform::format_deletion_list_line(Some(&date), &original)
                         )
                     };
-                    let res = res.and_then(|()| write_tree(&mut out, Path::new(&it.id), depth));
+                    let payload = Path::new(&it.id);
+                    let res = res
+                        .and_then(|()| crate::listfmt::trash_line(&mut out, payload, show_trash))
+                        .and_then(|()| write_tree(&mut out, payload, depth));
                     if res.is_err() {
                         return 0;
                     }

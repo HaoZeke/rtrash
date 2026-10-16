@@ -58,6 +58,7 @@ list_opts=(
   '--smaller-than=[only items taking less than SIZE on disk]:size:'
   '--json[emit a JSON array]'
   '--size[add each item size]'
+  '--show-trashpath[show where each item sits in the trash]'
   '--sort=[row order]:key:(date size name path)'
   '--reverse[reverse the order]'
   '--last=[only the last N rows of the listing]:count:'

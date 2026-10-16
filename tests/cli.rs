@@ -6609,3 +6609,27 @@ fn next_trash_second_waits_for_a_later_second() {
     // It waits for the next tick only, not a fixed 1.1 s on top.
     assert!(started.elapsed() < std::time::Duration::from_millis(1500));
 }
+
+#[test]
+fn list_show_trashpath_names_the_payload_under_files() {
+    let sb = Sandbox::new("list-trashpath");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("shown.txt");
+    assert!(sb.run(&["put", "shown.txt"]).status.success());
+    let out = sb.run(&["list", &pin, "--show-trashpath"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    // One row, then the line naming its payload.
+    assert_eq!(lines.len(), 2, "{text}");
+    let at = lines[1].strip_prefix("  trash: ").expect("trash line");
+    assert!(at.ends_with("files/shown.txt"), "{text}");
+    assert!(Path::new(at).exists(), "{text}");
+    let json = stdout_of(&sb.run(&["list", &pin, "--json", "--show-trashpath"]));
+    assert!(json.contains("\"trash_path\":\""), "{json}");
+    assert!(json.contains("files/shown.txt\""), "{json}");
+    let plain = stdout_of(&sb.run(&["list", &pin]));
+    assert!(!plain.contains("trash: "), "{plain}");
+    let fmt = sb.run(&["list", &pin, "--show-trashpath", "--format={name}"]);
+    assert_eq!(fmt.status.code(), Some(2));
+}

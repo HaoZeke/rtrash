@@ -98,6 +98,7 @@ for sub in list status
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l json -d 'JSON output'
 end
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l size -d 'add each item size'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l show-trashpath -d 'show where each item sits in the trash'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l sort -x -a 'date size name path' -d 'row order'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l reverse -d 'reverse the order'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l last -x -d 'only the last N rows'
@@ -336,6 +337,7 @@ complete -c trash-list -l larger-than -r
 complete -c trash-list -l smaller-than -r
 complete -c trash-list -l json
 complete -c trash-list -l size
+complete -c trash-list -l show-trashpath
 complete -c trash-list -l sort -x -a 'date size name path'
 complete -c trash-list -l reverse
 complete -c trash-list -l last -x

@@ -162,6 +162,7 @@ export extern "rtrash list" [
     --larger-than: string  # only items taking more than SIZE on disk
     --smaller-than: string  # only items taking less than SIZE on disk
     --size  # add each item's disk usage (payload plus its
+    --show-trashpath  # show where each item sits in the trash
     --sort: string  # order by date (default), size, name (file name)
     --reverse  # reverse the order
     --last: int  # only the last N rows of the listing (after --sort and --reverse)
@@ -491,6 +492,7 @@ export extern "trash-list" [
     --larger-than: string  # only items taking more than SIZE on disk
     --smaller-than: string  # only items taking less than SIZE on disk
     --size  # add each item's disk usage (payload plus its
+    --show-trashpath  # show where each item sits in the trash
     --sort: string  # order by date (default), size, name (file name)
     --reverse  # reverse the order
     --last: int  # only the last N rows of the listing (after --sort and --reverse)

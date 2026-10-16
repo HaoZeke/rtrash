@@ -605,6 +605,8 @@ pub struct ListShape<'a> {
     pub last: Option<usize>,
     /// `--depth=N`: the tree under each trashed folder, N levels down.
     pub depth: usize,
+    /// `--show-trashpath`: where each item sits in the Finder Trash.
+    pub show_trash: bool,
 }
 
 pub fn default_list(
@@ -619,6 +621,7 @@ pub fn default_list(
         format,
         last,
         depth,
+        show_trash,
     } = shape;
     if let Some(what) = refused {
         return finder_only(prog, what);
@@ -642,8 +645,14 @@ pub fn default_list(
                 let orig = e.original.as_ref().map_or("null".to_string(), |o| {
                     format!("\"{}\"", json_escape(&o.to_string_lossy()))
                 });
+                let at = if show_trash {
+                    let p = json_escape(&e.path().to_string_lossy());
+                    format!(",\"trash_path\":\"{p}\"")
+                } else {
+                    String::new()
+                };
                 format!(
-                    "{{\"date\":\"{}\",\"name\":\"{}\",\"trash\":\"{}\",\"original\":{orig}}}",
+                    "{{\"date\":\"{}\",\"name\":\"{}\",\"trash\":\"{}\",\"original\":{orig}{at}}}",
                     e.date,
                     json_escape(&e.name),
                     json_escape(&e.trash.to_string_lossy())
@@ -683,6 +692,7 @@ pub fn default_list(
     for e in &rows {
         let date = e.date.replacen('T', " ", 1);
         let res = writeln!(out, "{date} {}", crate::util::term_path(&e.shown))
+            .and_then(|()| crate::listfmt::trash_line(&mut out, &e.path(), show_trash))
             .and_then(|()| crate::list::write_tree(&mut out, &e.path(), depth));
         if res.is_err() {
             return 0;

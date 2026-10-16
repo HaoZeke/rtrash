@@ -143,3 +143,16 @@ pub fn render_format(parts: &[FmtPart], r: &FmtRow) -> Vec<u8> {
     }
     out
 }
+
+/// `--show-trashpath`: the line under a row that names where the item
+/// sits in the trash; nothing when `show` is off.
+pub(crate) fn trash_line(
+    out: &mut impl std::io::Write,
+    payload: &std::path::Path,
+    show: bool,
+) -> std::io::Result<()> {
+    if !show {
+        return Ok(());
+    }
+    writeln!(out, "  trash: {}", crate::util::term_path(payload))
+}

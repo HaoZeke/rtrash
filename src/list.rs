@@ -37,6 +37,9 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
                      need not exist any more)
       --size            add each item's disk usage (payload plus its
                      .trashinfo, as status counts it)
+      --show-trashpath  under each row, show where the item sits in the
+                     trash (\"trash_path\" in --json; not with --format),
+                     as gtrash find --show-trashpath
       --sort=KEY        order by date (default), size, name (file name)
                      or path (original path); size implies --size
       --reverse         reverse the order
@@ -232,6 +235,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     // Defaults from the config file; options override them.
     let cfg = crate::config::get();
     let mut with_size = cfg.bool("list", "size").unwrap_or(false);
+    let mut show_trash = false;
     let mut sort = SortKey::Date;
     if let Some(s) = cfg.str("list", "sort") {
         match SortKey::parse(s) {
@@ -278,6 +282,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             "--volumes" => volumes = true,
             "--trash-dirs" => show_dirs = true,
             "--size" => with_size = true,
+            "--show-trashpath" => show_trash = true,
             "--reverse" => reverse = true,
             "--cwd-only" => cwd_only = true,
             a if a.starts_with("--directory=") => {
@@ -438,6 +443,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: give --json or --format, not both");
         return 2;
     }
+    if show_trash && format.is_some() {
+        eprintln!("{prog}: --show-trashpath works on plain rows and --json, not --format");
+        return 2;
+    }
     if depth > 0 && (json || format.is_some()) {
         eprintln!("{prog}: --depth works on plain rows, not --json or --format");
         return 2;
@@ -472,6 +481,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             format: format.as_deref(),
             last,
             depth,
+            show_trash,
         };
         return crate::finder::default_list(prog, shape, refused, filter, &keep);
     }
@@ -588,6 +598,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 if let Some(owners) = &owners {
                     body.push_str(&format!(",\"owner\":\"{}\"", json_escape(&owners[k])));
                 }
+                if show_trash {
+                    let payload = crate::util::join_name(&e.dir.files(), &e.name);
+                    let payload = json_escape(&payload.to_string_lossy());
+                    body.push_str(&format!(",\"trash_path\":\"{payload}\""));
+                }
                 format!("  {body}}}")
             })
             .collect();
@@ -615,6 +630,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 None => writeln!(out, "{date} {}", crate::util::term_path(&entry.original)),
             };
             let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
+            let res = res.and_then(|()| crate::listfmt::trash_line(&mut out, &payload, show_trash));
             let res = res.and_then(|()| write_tree(&mut out, &payload, depth));
             if res.is_err() {
                 return 0;

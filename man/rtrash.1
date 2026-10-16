@@ -673,6 +673,22 @@ The
 .B \-\-json
 field names are stable: new releases only add fields.
 .TP
+.B \-\-show\-trashpath
+Under each row, print a line
+.RI "\(lq  trash: " PATH \(rq
+that names where the item sits in the trash: the payload under
+.I files/
+on FreeDesktop trashes, the item in the Finder Trash, or its
+.I $R
+file in the Windows Recycle Bin, as gtrash
+.B find \-\-show\-trashpath
+shows it.
+.B \-\-json
+adds the same path as
+.BR trash_path ;
+.B \-\-format
+refuses it.
+.TP
 .B \-\-size
 Add a column with each item's disk usage: the payload plus its
 .IR .trashinfo ,
