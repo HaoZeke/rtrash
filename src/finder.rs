@@ -730,6 +730,10 @@ fn pick<'a>(
             crate::util::term_path(&e.shown)
         );
     }
+    // trash-cli's prompt, only for someone typing at a terminal.
+    if o.path_scope && crate::util::stdin_is_tty() {
+        eprint!("What file to restore [0..{}]: ", list.len() - 1);
+    }
     let mut line = String::new();
     let read = std::io::stdin().read_line(&mut line);
     if read.is_ok() && line.trim().is_empty() && o.path_scope {
@@ -802,6 +806,11 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
             matched
         }
     } else if o.all {
+        if placed.is_empty() && o.cwd_note {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            println!("No files trashed from current dir ('{}')", cwd.display());
+            return 1;
+        }
         placed.clone()
     } else {
         if placed.is_empty() && o.cwd_note {

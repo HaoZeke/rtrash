@@ -430,6 +430,15 @@ fn trash_restore_scopes_the_finder_trash_to_the_cwd() {
         out(&o)
     );
     assert!(!there.exists());
+    // --all says the same, as trash-cli does.
+    let o = b.run_as(&tr, &["--all"], "");
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(
+        out(&o).starts_with("No files trashed from current dir ('"),
+        "{}",
+        out(&o)
+    );
+    assert!(!there.exists());
     // rtrash restore keeps every item in scope.
     let o = b.run(&["restore", "--all"], "");
     assert!(o.status.success(), "{}", err(&o));
@@ -486,6 +495,8 @@ fn finder_trash_restore_asks_on_a_scope() {
     let o = b.run_as(&tr, &["sub"], "\n");
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));
     assert!(out(&o).contains("No files were restored"), "{}", out(&o));
+    // A piped answer gets no prompt, as on FreeDesktop and Windows.
+    assert!(!err(&o).contains("What file to restore"), "{}", err(&o));
     let row = out(&o)
         .lines()
         .find(|l| l.starts_with("   0 "))
