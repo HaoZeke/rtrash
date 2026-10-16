@@ -1920,6 +1920,8 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut sort: Option<TableSort> = None;
         let mut cwd_only = false;
         let mut directory: Option<PathBuf> = None;
+        // Run as trash-restore, scope to the current directory as trash-cli does.
+        let trash_cli = prog == "trash-restore";
         for arg in args {
             match arg.as_str() {
                 "-f" | "--force" => conflict = Conflict::Overwrite,
@@ -2139,7 +2141,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 // came from here or below, as on FreeDesktop.
                 // The directory as given and as resolved both count, since
                 // a volume mounted on a folder may resolve to its GUID path.
-                None if cwd_only || directory.is_some() => {
+                None if cwd_only || trash_cli || directory.is_some() => {
                     let dirs = match &directory {
                         Some(d) => dir_forms(d),
                         None => cwd_forms(),
@@ -2159,6 +2161,11 @@ Without PATH, print a numbered list and read an index from stdin.
                 None => items,
             },
         };
+        if matches.is_empty() && trash_cli && target.is_none() && matcher.is_none() {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            println!("No files trashed from current dir ('{}')", cwd.display());
+            return 1;
+        }
         if matches.is_empty() {
             eprintln!("{prog}: no trashed files match");
             if json {

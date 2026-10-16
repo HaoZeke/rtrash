@@ -53,3 +53,41 @@ fn trash_cli_names_match_in_any_case() {
     );
     assert!(help.contains("Usage: trash-list"), "{help}");
 }
+
+#[test]
+fn trash_restore_scopes_to_the_current_directory() {
+    let dir = std::env::temp_dir().join(format!("rtrash-names-cwd-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let (here, away) = (dir.join("here"), dir.join("away"));
+    fs::create_dir_all(&here).unwrap();
+    fs::create_dir_all(&away).unwrap();
+    // An item trashed from elsewhere stays out of the current directory scope.
+    let gone = away.join("elsewhere.txt");
+    fs::write(&gone, "x").unwrap();
+    let put = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        .arg("put")
+        .arg(&gone)
+        .output()
+        .unwrap();
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let restore = dir.join("trash-restore.exe");
+    fs::copy(env!("CARGO_BIN_EXE_rtrash"), &restore).unwrap();
+    let out = Command::new(&restore).current_dir(&here).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Tidy the Recycle Bin item before the asserts.
+    let _ = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        .arg("restore")
+        .arg(&gone)
+        .output();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(
+        stdout.starts_with("No files trashed from current dir ('"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("here"), "{stdout}");
+}
