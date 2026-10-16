@@ -5,11 +5,15 @@ Each check mirrors a mistake that cost a CI round (see the agent rule table
 in AGENTS.md). Run from the repo root:
 
     python3 scripts/precheck.py            # whole tree
+    python3 scripts/precheck.py --no-fmt   # skip the cargo fmt step
     python3 scripts/precheck.py --base origin/main   # also diff-aware checks
+
+When cargo fmt works (a toolchain with rustfmt), it also runs
+`cargo fmt --all --check`, which formats in memory and builds nothing.
 
 Exit 1 on any error. Warnings print but do not fail.
 """
-import re, subprocess, sys
+import re, shutil, subprocess, sys
 from pathlib import Path
 from collections import defaultdict
 
@@ -269,11 +273,31 @@ def check_removed_literals(base):
                                 "update the assert or the example (tests/windows_mount.rs runs only in CI)")
 
 
+def check_rustfmt():
+    """`cargo fmt --check` when a toolchain is there; three rounds in a row
+    (170-172) needed a format-only amend after CI."""
+    cargo = shutil.which("cargo")
+    ok = cargo and subprocess.run([cargo, "fmt", "--version"], cwd=ROOT,
+                                  capture_output=True).returncode == 0
+    if not ok:
+        warnings.append("cargo fmt not available; rustfmt check skipped (CI still runs it)")
+        return
+    r = subprocess.run([cargo, "fmt", "--all", "--check"], cwd=ROOT,
+                       capture_output=True, text=True, timeout=600)
+    if r.returncode != 0:
+        files = sorted(set(re.findall(r"(?m)^Diff in (.+?):\d+:", r.stdout)))
+        where = ", ".join(str(Path(f).relative_to(ROOT)) if f.startswith(str(ROOT)) else f
+                          for f in files) or (r.stderr.strip() or "see cargo fmt --check")
+        errors.append(f"cargo fmt --check failed; run `cargo fmt` (unformatted: {where})")
+
+
 def main():
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps()
     check_fn_params()
     check_long_lines(base); check_removed_literals(base)
+    if "--no-fmt" not in sys.argv:
+        check_rustfmt()
     for w in warnings:
         print("warning:", w)
     for e in errors:
