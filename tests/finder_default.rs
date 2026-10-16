@@ -368,6 +368,40 @@ fn restore_directory_scopes_the_finder_trash() {
 }
 
 #[test]
+fn restore_cwd_only_scopes_the_finder_trash() {
+    let b = Box_::new("cwd");
+    let away = b.root.join("away");
+    fs::create_dir_all(&away).unwrap();
+    fs::write(b.work().join("here.txt"), "here").unwrap();
+    fs::write(away.join("there.txt"), "there").unwrap();
+    assert!(b.run(&["put", "here.txt"], "").status.success());
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let there = away.join("there.txt");
+    assert!(b
+        .run(&["put", &there.to_string_lossy()], "")
+        .status
+        .success());
+    // Put Back records keep the path as written (/var on macOS), while the
+    // current directory reads as /private/var there.
+    let recs: Vec<Record> = [("here.txt", b.work()), ("there.txt", away.clone())]
+        .iter()
+        .map(|(n, d)| Record {
+            name: n.to_string(),
+            code: *b"ptbL",
+            value: Value::Ustr(format!("{}/", d.to_string_lossy().trim_start_matches('/'))),
+        })
+        .collect();
+    fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
+
+    let o = b.run(&["restore", "--cwd-only", "--all"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(fs::read(b.work().join("here.txt")).unwrap(), b"here");
+    assert!(!there.exists());
+    let o = b.run(&["restore", "--cwd-only", "--all"], "");
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+}
+
+#[test]
 fn restore_matchers_work_on_the_finder_trash() {
     let b = Box_::new("match");
     for n in ["r1.log", "r2.log", "keep.txt"] {

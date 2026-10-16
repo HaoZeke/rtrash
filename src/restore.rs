@@ -342,12 +342,23 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // macOS restores from the Finder Trash unless a pin or the setting
     // says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty()) {
+        // --cwd-only is --directory on the current directory.
+        let scope = match (&directory, cwd_only) {
+            (None, true) => match std::env::current_dir() {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    eprintln!("{prog}: cannot read the current directory: {e}");
+                    return 2;
+                }
+            },
+            _ => directory.clone(),
+        };
         return crate::finder::default_restore(
             prog,
             &crate::finder::RestoreOpts {
                 target: target.as_deref(),
                 matcher: matcher.as_ref(),
-                directory: directory.as_deref(),
+                directory: scope.as_deref(),
                 all,
                 latest,
                 to: to.as_deref(),
