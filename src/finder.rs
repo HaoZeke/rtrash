@@ -597,15 +597,29 @@ fn read_all(prog: &str) -> Result<Vec<crate::finder_shared::Entry>, i32> {
 /// `list` on the Finder trashes: `DATE ORIGINAL` rows, oldest first, as
 /// the FreeDesktop listing prints them (`--json` too). `last` keeps only
 /// the newest rows, as tail -n would.
+/// How `list` prints the Finder Trash rows.
+pub struct ListShape<'a> {
+    pub json: bool,
+    pub format: Option<&'a [crate::list::FmtPart]>,
+    /// `--last=N`: only the last N rows.
+    pub last: Option<usize>,
+    /// `--depth=N`: the tree under each trashed folder, N levels down.
+    pub depth: usize,
+}
+
 pub fn default_list(
     prog: &str,
-    json: bool,
-    format: Option<&[crate::list::FmtPart]>,
+    shape: ListShape<'_>,
     refused: Option<&str>,
     filter: crate::finder_shared::Filter,
-    last: Option<usize>,
     keep: &dyn Fn(&Path, &str) -> bool,
 ) -> i32 {
+    let ListShape {
+        json,
+        format,
+        last,
+        depth,
+    } = shape;
     if let Some(what) = refused {
         return finder_only(prog, what);
     }
@@ -664,13 +678,17 @@ pub fn default_list(
         let _ = out.flush();
         return 0;
     }
+    use std::io::Write;
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     for e in &rows {
-        println!(
-            "{} {}",
-            e.date.replacen('T', " ", 1),
-            crate::util::term_path(&e.shown)
-        );
+        let date = e.date.replacen('T', " ", 1);
+        let res = writeln!(out, "{date} {}", crate::util::term_path(&e.shown))
+            .and_then(|()| crate::list::write_tree(&mut out, &e.path(), depth));
+        if res.is_err() {
+            return 0;
+        }
     }
+    let _ = out.flush();
     0
 }
 

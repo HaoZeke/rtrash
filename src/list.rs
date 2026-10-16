@@ -467,15 +467,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             },
             size: size_filter,
         };
-        return crate::finder::default_list(
-            prog,
+        let shape = crate::finder::ListShape {
             json,
-            format.as_deref(),
-            refused,
-            filter,
+            format: format.as_deref(),
             last,
-            &keep,
-        );
+            depth,
+        };
+        return crate::finder::default_list(prog, shape, refused, filter, &keep);
     }
     if all_users && (home_only || !trash_dirs.is_empty()) {
         eprintln!("{prog}: --all-users takes no --home-only or --trash-dir");
@@ -631,7 +629,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
 /// per line indented by level, directories with a trailing separator and
 /// names in order. Symlinks are not followed; what cannot be read is left
 /// out. A plain file, or `depth` 0, prints nothing.
-fn write_tree(
+pub(crate) fn write_tree(
     out: &mut impl std::io::Write,
     dir: &std::path::Path,
     depth: usize,

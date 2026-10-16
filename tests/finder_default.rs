@@ -95,6 +95,30 @@ fn err(o: &Output) -> String {
 }
 
 #[test]
+fn list_depth_shows_a_tree_in_the_finder_trash() {
+    let b = Box_::new("listdepth");
+    let dir = b.work().join("proj");
+    fs::create_dir_all(dir.join("sub").join("deeper")).unwrap();
+    fs::write(dir.join("a.txt"), b"a").unwrap();
+    fs::write(dir.join("sub/c.txt"), b"c").unwrap();
+    fs::write(dir.join("sub/deeper/x.txt"), b"x").unwrap();
+    let o = b.run(&["put", "-r", "proj"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    b.put_back("proj", &dir);
+
+    let o = b.run(&["list", "--depth=2"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let text = out(&o);
+    let lines: Vec<&str> = text.lines().collect();
+    let row = lines.iter().position(|l| l.ends_with("proj"));
+    let row = row.unwrap_or_else(|| panic!("{text}"));
+    let want = ["    a.txt", "    sub/", "      c.txt", "      deeper/"];
+    assert_eq!(lines[row + 1..], want, "{text}");
+    let o = b.run(&["list", "--depth=1", "--json"], "");
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+}
+
+#[test]
 fn plain_commands_use_the_finder_trash() {
     let b = Box_::new("plain");
     let f = b.work().join("a b.txt");
