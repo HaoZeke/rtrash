@@ -606,6 +606,39 @@ fn finder_restore_takes_size_filters() {
 }
 
 #[test]
+fn finder_restore_sorts_by_size() {
+    let b = Box_::new("sortsize");
+    fs::write(b.work().join("small.txt"), b"s").unwrap();
+    assert!(b.run(&["put", "small.txt"], "").status.success());
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    fs::write(b.work().join("big.bin"), vec![7u8; 1 << 20]).unwrap();
+    assert!(b.run(&["put", "big.bin"], "").status.success());
+    let recs: Vec<Record> = ["small.txt", "big.bin"]
+        .iter()
+        .map(|n| Record {
+            name: n.to_string(),
+            code: *b"ptbL",
+            value: Value::Ustr(format!(
+                "{}/",
+                b.work().to_string_lossy().trim_start_matches('/')
+            )),
+        })
+        .collect();
+    fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
+
+    // Date order lists small.txt first; size order puts big.bin at 0.
+    let o = b.run(&["restore", "--plain", "--sort=size"], "0\n");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(
+        out(&o).lines().next().unwrap_or("").ends_with("big.bin"),
+        "{}",
+        out(&o)
+    );
+    assert!(b.work().join("big.bin").exists());
+    assert!(!b.work().join("small.txt").exists());
+}
+
+#[test]
 fn restore_matchers_work_on_the_finder_trash() {
     let b = Box_::new("match");
     for n in ["r1.log", "r2.log", "keep.txt"] {

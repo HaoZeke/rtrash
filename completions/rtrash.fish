@@ -206,7 +206,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l no
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l batch -r -d 'restore one whole put run'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l newest-first -d 'list the most recently trashed item first'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l overwrite -d 'same as --force'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l sort -d 'numbered table order' -x -a 'date path none'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l sort -d 'numbered table order' -x -a 'date size path none'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l oldest-first -d 'list the oldest trashed item first'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l name -x -a '(__rtrash_trashed name)' -d 'match by file name or trash name'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -f -a '(__rtrash_trashed path)'
@@ -328,7 +328,7 @@ complete -c trash-restore -l no-space-check
 complete -c trash-restore -l batch -r
 complete -c trash-restore -l newest-first
 complete -c trash-restore -l overwrite
-complete -c trash-restore -l sort -x -a 'date path none'
+complete -c trash-restore -l sort -x -a 'date size path none'
 complete -c trash-restore -l oldest-first
 complete -c trash-restore -l name -x -a '(__rtrash_trashed name)'
 complete -c trash-restore -f -a '(__rtrash_trashed path)'

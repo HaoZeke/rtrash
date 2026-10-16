@@ -371,3 +371,47 @@ fn restore_takes_size_filters_on_windows() {
         String::from_utf8_lossy(&bad.stderr)
     );
 }
+
+#[test]
+fn restore_sorts_by_size_on_windows() {
+    let dir = std::env::temp_dir().join(format!("rtrash-names-sortsize-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let (big, small) = (dir.join("big.bin"), dir.join("small.txt"));
+    fs::write(&small, "s").unwrap();
+    fs::write(&big, vec![7u8; 1 << 20]).unwrap();
+    let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
+    // The small file goes first, so date order would list it at 0.
+    for f in [&small, &big] {
+        let put = Command::new(rtrash).arg("put").arg(f).output().unwrap();
+        assert!(
+            put.status.success(),
+            "{}",
+            String::from_utf8_lossy(&put.stderr)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    let scope = format!("--directory={}", dir.display());
+    let out = run_with(
+        rtrash,
+        &dir,
+        &["restore", &scope, "--plain", "--sort=size"],
+        "0\n",
+    );
+    let (big_back, small_back) = (big.exists(), small.exists());
+    for f in [&big, &small] {
+        if !f.exists() {
+            let _ = Command::new(rtrash).arg("restore").arg(f).output();
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        big_back && !small_back,
+        "big {big_back}, small {small_back}"
+    );
+}

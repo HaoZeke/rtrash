@@ -742,6 +742,10 @@ fn pick<'a>(
     let mut list = list.to_vec();
     match o.sort {
         Some(crate::restore::Sort::Path) => list.sort_by(|a, b| a.shown.cmp(&b.shown)),
+        // Largest first; the rows come oldest first, so ties keep that.
+        Some(crate::restore::Sort::Size) => {
+            list.sort_by_cached_key(|e| std::cmp::Reverse(crate::fastdelete::disk_usage(&e.path())))
+        }
         Some(crate::restore::Sort::None) => {}
         Some(crate::restore::Sort::Date) | None => {
             list.sort_by(|a, b| a.epoch.cmp(&b.epoch).then_with(|| a.name.cmp(&b.name)));

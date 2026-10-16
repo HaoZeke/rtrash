@@ -35,7 +35,8 @@ the index prompt. --newest-first and --oldest-first set the order for both.
   -f, --force     overwrite an existing file (same as --conflict=overwrite)
       --overwrite  same as --force (trash-cli spelling)
       --sort=ORDER  numbered table order: date (oldest first, default),
-                    path (original path) or none (as read)
+                    size (largest first), path (original path) or none
+                    (as read)
       --conflict=POLICY  when the destination exists: refuse (default),
                     overwrite, rename (restore next to it as NAME.1.EXT)
                     or skip
@@ -77,6 +78,8 @@ the index prompt. --newest-first and --oldest-first set the order for both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sort {
     Date,
+    /// Largest first, as `list --sort=size`; ties keep the date order.
+    Size,
     Path,
     None,
 }
@@ -85,6 +88,7 @@ impl Sort {
     fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "date" => Sort::Date,
+            "size" => Sort::Size,
             "path" => Sort::Path,
             "none" => Sort::None,
             _ => return None,
@@ -241,7 +245,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 Some(k) => sort = Some(k),
                 None => {
                     eprintln!(
-                        "{prog}: invalid --sort '{}' (date, path or none)",
+                        "{prog}: invalid --sort '{}' (date, size, path or none)",
                         &a["--sort=".len()..]
                     );
                     return 2;
@@ -521,6 +525,22 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let _ = plain;
     match sort {
         Some(Sort::Path) => matches.sort_by(|a, b| a.original.cmp(&b.original)),
+        Some(Sort::Size) => {
+            order_entries(&mut matches, false);
+            let caches: Vec<_> = dirs.iter().map(trashdir::DirSizes::load).collect();
+            matches.sort_by_cached_key(|e| {
+                std::cmp::Reverse(
+                    caches
+                        .iter()
+                        .zip(&dirs)
+                        .find(|(_, d)| d.root == e.dir.root)
+                        .map_or(0, |(c, _)| c.entry_bytes(&e.name)),
+                )
+            });
+            for c in caches {
+                c.write_back();
+            }
+        }
         Some(Sort::None) => {}
         Some(Sort::Date) | None => order_entries(&mut matches, newest_first.unwrap_or(false)),
     }

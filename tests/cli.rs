@@ -413,6 +413,29 @@ fn restore_takes_size_filters() {
 }
 
 #[test]
+fn restore_sorts_the_numbered_table_by_size() {
+    let sb = Sandbox::new("restore-sort-size");
+    // The small file goes first, so date order would list it first.
+    fs::write(sb.work().join("small.txt"), b"s").unwrap();
+    assert!(sb.run(&["put", "small.txt"]).status.success());
+    fs::write(sb.work().join("big.bin"), vec![7u8; 1 << 20]).unwrap();
+    assert!(sb.run(&["put", "big.bin"]).status.success());
+
+    let out = sb.run_with_stdin(&["restore", "--plain", "--sort=size"], "0\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let first = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    assert!(first.ends_with("big.bin"), "{first}");
+    assert!(sb.work().join("big.bin").exists());
+    assert!(!sb.work().join("small.txt").exists());
+    let out = sb.run(&["restore", "--sort=bulk"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+}
+
+#[test]
 fn restore_never_writes_to_the_trash_or_what_contains_it() {
     let sb = Sandbox::new("restore-into-trash");
     fs::write(sb.work().join("keep"), b"real").unwrap();

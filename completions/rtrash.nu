@@ -268,7 +268,7 @@ export extern "rtrash restore" [
     --batch: string  # restore one whole put run (an undo --list id, or last)
     --newest-first  # list the most recently trashed item first
     --overwrite  # same as --force (trash-cli spelling)
-    --sort: string  # numbered table order: date, path or none
+    --sort: string  # numbered table order: date, size, path or none
     --oldest-first  # list the oldest trashed item first
     --name: string@"nu-complete rtrash trashed names"  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original
@@ -493,7 +493,7 @@ export extern "trash-restore" [
     --batch: string  # restore one whole put run (an undo --list id, or last)
     --newest-first  # list the most recently trashed item first
     --overwrite  # same as --force (trash-cli spelling)
-    --sort: string  # numbered table order: date, path or none
+    --sort: string  # numbered table order: date, size, path or none
     --oldest-first  # list the oldest trashed item first
     --name: string@"nu-complete rtrash trashed names"  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original

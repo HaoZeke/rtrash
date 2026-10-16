@@ -2020,10 +2020,11 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 "--plain" | "--home-only" => plain = true,
                 a if a.starts_with("--sort=") => match &a["--sort=".len()..] {
                     "date" => sort = Some(TableSort::Date),
+                    "size" => sort = Some(TableSort::Size),
                     "path" => sort = Some(TableSort::Path),
                     "none" => sort = Some(TableSort::None),
                     v => {
-                        eprintln!("{prog}: invalid --sort '{v}' (date, path or none)");
+                        eprintln!("{prog}: invalid --sort '{v}' (date, size, path or none)");
                         return 2;
                     }
                 },
@@ -2067,7 +2068,8 @@ Without PATH, print a numbered list and read an index from stdin.
       --directory=DIR  as --cwd-only, for items deleted from under DIR;
                 DIR need not exist any more (implies --plain)
       --sort=ORDER  numbered list order: date (oldest first, default),
-                path (original path) or none (as read)
+                size (largest first), path (original path) or none
+                (as read)
       --newest-first  list the most recently deleted item first
       --oldest-first  list the oldest deleted item first (default)
       --batch=last  restore every item the latest put moved, by the
@@ -2238,6 +2240,10 @@ Without PATH, print a numbered list and read an index from stdin.
         }
         match sort {
             Some(TableSort::Path) => matches.sort_by_key(original_of),
+            // Largest first; matches are oldest first, so ties keep that.
+            Some(TableSort::Size) => {
+                matches.sort_by_cached_key(|i| std::cmp::Reverse(item_size(i)));
+            }
             Some(TableSort::None) => matches = as_read.unwrap_or(matches),
             Some(TableSort::Date) | None => {
                 if newest_first {
@@ -2397,6 +2403,7 @@ Without PATH, print a numbered list and read an index from stdin.
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum TableSort {
         Date,
+        Size,
         Path,
         None,
     }
