@@ -35,3 +35,21 @@ fn trash_cli_names_run_without_their_exe_suffix() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn trash_cli_names_match_in_any_case() {
+    let dir = std::env::temp_dir().join(format!("rtrash-names-case-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let list = dir.join("TRASH-LIST.exe");
+    fs::copy(env!("CARGO_BIN_EXE_rtrash"), &list).unwrap();
+    let out = Command::new(&list).arg("--help").output().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(help.contains("Usage: trash-list"), "{help}");
+}

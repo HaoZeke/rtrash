@@ -83,13 +83,14 @@ fn main() {
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_else(|| "rtrash".to_string());
-    // On Windows a copy named trash-put.exe runs as trash-put.
+    // On Windows a copy named trash-put.exe runs as trash-put. Names
+    // there ignore case, so TRASH-PUT.exe runs as trash-put too.
     #[cfg(windows)]
     let argv0 = match argv0.len().checked_sub(4) {
         Some(n) if argv0.is_char_boundary(n) && argv0[n..].eq_ignore_ascii_case(".exe") => {
-            argv0[..n].to_string()
+            argv0[..n].to_ascii_lowercase()
         }
-        _ => argv0,
+        _ => argv0.to_ascii_lowercase(),
     };
     let mut rest = &args[1..];
     // The trash-cli names take trash-cli's command line as well.
