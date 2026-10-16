@@ -216,6 +216,7 @@ export extern "rtrash du" [
     --bars  # draw each row share of its PATH total as a bar
     --tree?: string  # print each PATH as a tree, DEPTH (default 2) levels down
     --no-unicode  # draw --tree with ASCII lines
+    --dirs-first  # in --tree, list each folder's subfolders before its files
     --show-relative-size  # add a SHARE column: each row's percent of its
     --reverse  # print each table in reverse, the top row last
     --summarize(-s)  # print only the totals, no rows (GNU du -s, gdu)

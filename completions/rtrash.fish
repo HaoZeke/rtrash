@@ -125,6 +125,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l show-re
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l bars -d 'draw each row share as a bar'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l tree -d 'print each PATH as a tree, DEPTH levels down'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-unicode -d 'draw --tree with ASCII lines'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dirs-first -d 'in --tree, list folders before files'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l reverse -d 'print each table in reverse, the top row last'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s s -l summarize -d 'print only the totals, no rows'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l skip-total -d 'print the rows without the Total lines'

@@ -2362,3 +2362,23 @@ fn age_filters_take_durations_and_gdu_names() {
     assert!(paths_in(&j, "files").is_empty(), "{j}");
     assert_eq!(t.du(&["--max-age=2x"]).status.code(), Some(2));
 }
+
+#[test]
+fn dirs_first_puts_folders_ahead_in_the_tree() {
+    let t = Tree::new("dutreedirs");
+    t.file("huge.bin", 300_000);
+    t.file("sub/x.bin", 100_000);
+    let base = ["--no-git", "--apparent", "--no-hidden", "--tree"];
+    let rows = |extra: &[&str]| {
+        let out = t.du(&[&base[..], extra].concat());
+        assert!(out.status.success(), "{out:?}");
+        let text = String::from_utf8(out.stdout).unwrap();
+        let at = |end: &str| text.lines().position(|l| l.ends_with(end));
+        (at("huge.bin").unwrap(), at("sub/").unwrap(), text.clone())
+    };
+    // By size, huge.bin (300k) outranks sub/ (100k plus its entry).
+    let (file, dir, text) = rows(&[]);
+    assert!(file < dir, "{text}");
+    let (file, dir, text) = rows(&["--dirs-first"]);
+    assert!(dir < file, "{text}");
+}

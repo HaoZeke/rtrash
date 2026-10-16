@@ -72,6 +72,8 @@ directories appear as one `trash` row and are never printed by --print0.
                           below it (default 2) nested under their folders,
                           the --top largest of each folder first, as dust
                           draws them; plain table only
+      --dirs-first      in --tree, list each folder's subfolders before its
+                          files (ncdu --group-directories-first)
       --no-unicode      draw --tree with ASCII lines (|--, `--), for
                           consoles without UTF-8 (gdu --no-unicode)
   -s, --summarize       print only the totals, no rows (GNU du -s, gdu)
@@ -2465,8 +2467,14 @@ const TREE_DEPTH: usize = 2;
 const TREE_ROWS: usize = 1 << 20;
 
 /// The rows of `report` under each folder, ranked by `sort` (ties by
-/// path), at most `top` per folder.
-fn tree_children(report: &Report, sort: SortKey, top: usize) -> HashMap<&Path, Vec<&Item>> {
+/// path), at most `top` per folder. With `dirs_first`, the folders kept
+/// then move ahead of the files, each group in rank order.
+fn tree_children(
+    report: &Report,
+    sort: SortKey,
+    top: usize,
+    dirs_first: bool,
+) -> HashMap<&Path, Vec<&Item>> {
     let mut kids: HashMap<&Path, Vec<&Item>> = HashMap::new();
     for it in report.dirs.iter().chain(&report.files) {
         if let Some(parent) = it.path.parent() {
@@ -2480,6 +2488,10 @@ fn tree_children(report: &Report, sort: SortKey, top: usize) -> HashMap<&Path, V
                 .then_with(|| a.path.cmp(&b.path))
         });
         v.truncate(top);
+        if dirs_first {
+            // A stable sort keeps the rank order inside each group.
+            v.sort_by_key(|it| !it.is_dir);
+        }
     }
     kids
 }
@@ -2501,8 +2513,14 @@ const TREE_ASCII: TreeGlyphs = ["|-- ", "`-- ", "|   ", "    "];
 
 /// `--tree`: each PATH with its total, then the rows below it nested
 /// under their folders, drawn with `glyphs`.
-fn tree_lines(report: &Report, sort: SortKey, top: usize, glyphs: &TreeGlyphs) -> Vec<String> {
-    let kids = tree_children(report, sort, top);
+fn tree_lines(
+    report: &Report,
+    sort: SortKey,
+    top: usize,
+    dirs_first: bool,
+    glyphs: &TreeGlyphs,
+) -> Vec<String> {
+    let kids = tree_children(report, sort, top, dirs_first);
     let mut out = Vec::new();
     for root in &report.roots {
         out.push(format!(
@@ -2954,6 +2972,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut bars = false;
     let mut tree: Option<usize> = None;
     let mut ascii = false;
+    let mut dirs_first = false;
     let mut reverse = false;
     let mut summarize = false;
     let mut skip_total = false;
@@ -3156,6 +3175,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--bars" => bars = true,
                 "--tree" => tree = Some(TREE_DEPTH),
                 "--no-unicode" => ascii = true,
+                "--dirs-first" => dirs_first = true,
                 "--reverse" => reverse = true,
                 // GNU du -s and gdu --summarize: the totals, no rows.
                 "-s" | "--summarize" => summarize = true,
@@ -3627,7 +3647,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             print_types(&opts.sort.title("file types"), &report.types, opts.top);
         } else if tree.is_some() {
             let glyphs = if ascii { &TREE_ASCII } else { &TREE_UNICODE };
-            for line in tree_lines(&report, opts.sort, tree_top, glyphs) {
+            for line in tree_lines(&report, opts.sort, tree_top, dirs_first, glyphs) {
                 println!("{line}");
             }
         } else {
