@@ -963,6 +963,47 @@ mod os {
             .unwrap_or_else(|| it.original_path())
     }
 
+    /// `list --depth=N`: what a deleted folder's `$R` payload holds, N
+    /// levels down, indented by level, folders with a trailing `\`, names
+    /// in order; links are not followed. A file or depth 0 prints nothing.
+    fn write_tree(out: &mut impl std::io::Write, dir: &Path, depth: usize) -> std::io::Result<()> {
+        let is_dir = std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir());
+        if depth == 0 || !is_dir {
+            return Ok(());
+        }
+        write_tree_below(out, dir, 0, depth)
+    }
+
+    /// The rest of [`write_tree`], from `level` down.
+    fn write_tree_below(
+        out: &mut impl std::io::Write,
+        dir: &Path,
+        level: usize,
+        depth: usize,
+    ) -> std::io::Result<()> {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return Ok(());
+        };
+        let mut kids: Vec<(String, PathBuf, bool)> = rd
+            .flatten()
+            .map(|e| {
+                let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+                let name = e.file_name().to_string_lossy().into_owned();
+                (name, e.path(), is_dir)
+            })
+            .collect();
+        kids.sort();
+        for (name, path, is_dir) in kids {
+            let slash = if is_dir { "\\" } else { "" };
+            let indent = "  ".repeat(level);
+            writeln!(out, "    {indent}{name}{slash}")?;
+            if is_dir && level + 1 < depth {
+                write_tree_below(out, &path, level + 1, depth)?;
+            }
+        }
+        Ok(())
+    }
+
     /// `put --inspect`: ask before trashing `f`, naming its size and, for
     /// a directory, its file count; true on y.
     fn inspect_ok(prog: &str, f: &Path) -> bool {
@@ -1318,6 +1359,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut cwd_only = false;
         let mut directory: Option<PathBuf> = None;
         let mut last: Option<usize> = None;
+        let mut depth = 0usize;
         let mut sort = ListSort::Date;
         let mut reverse = false;
         let mut bad: Option<String> = None;
@@ -1366,6 +1408,19 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 }
                 Err(e) => {
                     bad = Some(e);
+                    Some(2)
+                }
+            },
+            a if a.starts_with("--depth=") => match a["--depth=".len()..].parse::<usize>() {
+                Ok(n) => {
+                    depth = n;
+                    None
+                }
+                Err(_) => {
+                    bad = Some(format!(
+                        "--depth needs a count of levels, not '{}'",
+                        &a["--depth=".len()..]
+                    ));
                     Some(2)
                 }
             },
@@ -1429,6 +1484,8 @@ List items in the Windows Recycle Bin (system trash).
       --sort=KEY order by date (default), size (largest first; implies
                    --size), name (file name) or path (original path)
       --reverse  reverse the order
+      --depth=N  under each deleted folder, show what it holds, N levels
+                   down, indented (not with --format)
       --last=N   only the last N rows (after --sort and --reverse), like
                    tail -n: the N most recently deleted by default
       --size     add each item's size in the Recycle Bin
@@ -1465,6 +1522,10 @@ on Windows (there is no FreeDesktop layout here).
         };
         if cwd_only && directory.is_some() {
             eprintln!("{prog}: give --cwd-only or --directory, not both");
+            return 2;
+        }
+        if depth > 0 && format.is_some() {
+            eprintln!("{prog}: --depth works on plain rows, not --format");
             return 2;
         }
         let cwd = match &directory {
@@ -1541,6 +1602,7 @@ on Windows (there is no FreeDesktop layout here).
                             platform::format_deletion_list_line(Some(&date), &original)
                         )
                     };
+                    let res = res.and_then(|()| write_tree(&mut out, Path::new(&it.id), depth));
                     if res.is_err() {
                         return 0;
                     }

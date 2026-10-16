@@ -448,3 +448,34 @@ fn put_inspect_asks_with_the_size_on_windows() {
     );
     assert!(gone);
 }
+
+#[test]
+fn list_depth_shows_a_deleted_tree_on_windows() {
+    let name = format!("rtrash-names-depth-{}", std::process::id());
+    let dir = std::env::temp_dir().join(name);
+    let _ = fs::remove_dir_all(&dir);
+    let proj = dir.join("proj");
+    fs::create_dir_all(proj.join("sub").join("deeper")).unwrap();
+    fs::write(proj.join("a.txt"), "a").unwrap();
+    fs::write(proj.join("sub").join("c.txt"), "c").unwrap();
+    fs::write(proj.join("sub").join("deeper").join("x.txt"), "x").unwrap();
+    let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
+    let put = Command::new(rtrash).arg("put").arg(&proj).output().unwrap();
+    let scope = format!("--directory={}", dir.display());
+    let out = run_with(rtrash, &dir, &["list", &scope, "--depth=2"], "");
+    let bad = run_with(rtrash, &dir, &["list", "--depth=x"], "");
+    let _ = Command::new(rtrash).arg("restore").arg(&proj).output();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let lines: Vec<&str> = text.lines().collect();
+    let row = lines.iter().position(|l| l.ends_with("proj"));
+    let row = row.unwrap_or_else(|| panic!("{text}"));
+    let want = ["    a.txt", "    sub\\", "      c.txt", "      deeper\\"];
+    assert_eq!(lines[row + 1..], want, "{text}");
+    assert_eq!(bad.status.code(), Some(2));
+}
