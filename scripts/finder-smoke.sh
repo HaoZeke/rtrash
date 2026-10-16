@@ -9,6 +9,9 @@
 # so the list checks retry for a few seconds. Exits non-zero at the first
 # failing step, naming it.
 set -euo pipefail
+# grep -q stops reading at the first match, and rtrash then exits 141 on
+# the closed pipe, which pipefail counts as a failure; read it all instead.
+has() { grep "$@" >/dev/null; }
 
 # Absolute, so the steps after `cd /` still find it.
 rt=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
@@ -35,7 +38,7 @@ fail() {
 }
 listed() { # PATH: wait until list shows PATH
   for _ in $(seq 20); do
-    "$rt" list | grep -qF -- "$1" && return 0
+    "$rt" list | has -F -- "$1" && return 0
     sleep 0.5
   done
   return 1
@@ -45,7 +48,7 @@ echo payload > "$f"
 "$rt" put "$f" || fail "plain put"
 [[ ! -e $f ]] || fail "plain put left the file"
 listed "$f" || fail "plain list does not show the Put Back path"
-"$rt" list --json | grep -qF '"original"' || fail "list --json"
+"$rt" list --json | has -F '"original"' || fail "list --json"
 "$rt" restore "$f" || fail "plain restore"
 [[ $(cat "$f") == payload ]] || fail "restore content"
 echo "ok   plain put, list and restore"
@@ -63,7 +66,7 @@ g="$work/via finder.txt"
 echo finder > "$g"
 "$rt" finder put "$g" || fail "finder put"
 for _ in $(seq 20); do
-  "$rt" finder list | grep -qF -- "$g" && break
+  "$rt" finder list | has -F -- "$g" && break
   sleep 0.5
 done
 "$rt" finder restore "$g" || fail "finder restore"
@@ -73,10 +76,10 @@ echo "ok   finder put, list and restore"
 i="$work/undo me.txt"
 echo undo > "$i"
 "$rt" put "$i" || fail "put for undo"
-"$rt" status --json | grep -q '"finder":true' || fail "status on the Finder Trash"
-"$rt" trash-stats --json | grep -qF '.Trash' || fail "trash-stats on the Finder Trash"
-"$rt" trash-stats --history --json | grep -qF '"event":"put"' || fail "trash-stats --history on the Finder Trash"
-"$rt" trash-stats --total --json | grep -qF '.Trash' || fail "trash-stats --total on the Finder Trash"
+"$rt" status --json | has '"finder":true' || fail "status on the Finder Trash"
+"$rt" trash-stats --json | has -F '.Trash' || fail "trash-stats on the Finder Trash"
+"$rt" trash-stats --history --json | has -F '"event":"put"' || fail "trash-stats --history on the Finder Trash"
+"$rt" trash-stats --total --json | has -F '.Trash' || fail "trash-stats --total on the Finder Trash"
 # The carried home total against a full walk; a bytes difference is
 # logged (Finder may still be writing), an items one fails.
 sleep 2
@@ -98,7 +101,7 @@ echo "ok   undo, status and trash-stats (with --total and --history)"
 
 "$rt" put "$i" || fail "put for rm"
 "$rt" rm "undo me.txt" || fail "rm on the Finder Trash"
-"$rt" list | grep -qF -- "$i" && fail "rm left the item listed"
+"$rt" list | has -F -- "$i" && fail "rm left the item listed"
 echo "ok   rm"
 
 # A name with a newline through the real Finder. Finder may refuse it
@@ -170,7 +173,7 @@ if [[ -n ${RTRASH_SMOKE_VOLUME:-} ]]; then
   listed "$big" || fail "the dry run purged the item"
   out=$("$rt" empty --until-free="$want" 2>&1)
   grep -q "emptied 1 item" <<<"$out" || fail "empty --until-free: $out"
-  "$rt" list | grep -qF -- "$big" && fail "empty --until-free left the item"
+  "$rt" list | has -F -- "$big" && fail "empty --until-free left the item"
   echo "ok   reap --purge-trash and empty --until-free on the volume"
 fi
 
@@ -178,7 +181,7 @@ fi
 h="$work/fdo.txt"
 echo fdo > "$h"
 RTRASH_MACOS_TRASH=freedesktop "$rt" put "$h" || fail "freedesktop put"
-RTRASH_MACOS_TRASH=freedesktop "$rt" list | grep -qF -- "$h" || fail "freedesktop list"
+RTRASH_MACOS_TRASH=freedesktop "$rt" list | has -F -- "$h" || fail "freedesktop list"
 RTRASH_MACOS_TRASH=freedesktop "$rt" restore "$h" || fail "freedesktop restore"
 echo "ok   RTRASH_MACOS_TRASH=freedesktop"
 

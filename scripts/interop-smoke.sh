@@ -14,6 +14,9 @@
 # Everything happens in a scratch XDG_DATA_HOME, so the real trash stays
 # untouched. RTRASH_INTEROP_NO_GIO=1 leaves gio out. Exits non-zero when any pairing fails.
 set -euo pipefail
+# grep -q stops reading at the first match, and rtrash then exits 141 on
+# the closed pipe, which pipefail counts as a failure; read it all instead.
+has() { grep "$@" >/dev/null; }
 # In the C or POSIX locale GLib escapes non-ASCII bytes when it decodes a
 # trash:// URI, so gio restores 'é' as a literal '\xc3\xa9'.
 export LANG=C.UTF-8 LC_ALL=C.UTF-8 G_FILENAME_ENCODING=UTF-8
@@ -234,15 +237,15 @@ for t in "${restorers[@]}"; do
   "$rtrash" put -r "$scratch/w/$t dir" "$scratch/w/$t keep 100%.txt" "$scratch/w/$t drop 100%.txt" >/dev/null
   if tool_rm "$t" "$scratch/w/$t drop 100%.txt" >/dev/null 2>&1 \
     && [[ $(count) -eq 2 ]] \
-    && ! "$rtrash" list --home-only | grep -qF "drop 100%" \
-    && ! "$rtrash" list --home-only | grep -qF "????"; then
+    && ! "$rtrash" list --home-only | has -F "drop 100%" \
+    && ! "$rtrash" list --home-only | has -F "????"; then
     echo "ok   $t rm of an rtrash item"
   else
     echo "FAIL $t rm of an rtrash item"
     fail=1
   fi
   if tool_empty "$t" >/dev/null 2>&1 && [[ $(count) -eq 0 ]] \
-    && "$rtrash" status --home-only --json | grep -q '"items":0'; then
+    && "$rtrash" status --home-only --json | has '"items":0'; then
     echo "ok   $t empty of rtrash items"
   else
     echo "FAIL $t empty of rtrash items"
