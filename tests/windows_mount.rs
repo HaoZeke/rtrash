@@ -265,8 +265,8 @@ fn list_last_keeps_the_most_recently_deleted() {
         fs::write(&p, b"x").unwrap();
         let out = cmd(&lad).arg("put").arg(&p).output().unwrap();
         assert!(out.status.success());
-        // Keep the two deletion times apart on a coarse clock.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Deletion times are whole seconds; keep the two puts a second apart.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
     }
     let scope = format!("--directory={}", dir.display());
     let out = cmd(&lad)
