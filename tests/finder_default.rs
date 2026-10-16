@@ -174,8 +174,7 @@ fn list_last_keeps_the_newest_finder_items() {
     for n in ["old.txt", "new.txt"] {
         fs::write(b.work().join(n), b"x").unwrap();
         assert!(b.run(&["put", n], "").status.success());
-        // Keep the two trash dates a second apart.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        common::next_trash_second();
     }
     let o = b.run(&["list", "--last=1"], "");
     assert!(o.status.success(), "{}", err(&o));
@@ -375,7 +374,7 @@ fn restore_directory_scopes_the_finder_trash() {
     fs::write(sub.join("in.txt"), "in").unwrap();
     fs::write(b.work().join("out.txt"), "out").unwrap();
     assert!(b.run(&["put", "sub/in.txt"], "").status.success());
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    common::next_trash_second();
     assert!(b.run(&["put", "out.txt"], "").status.success());
     let recs: Vec<Record> = [("in.txt", &sub), ("out.txt", &b.work())]
         .iter()
@@ -405,7 +404,7 @@ fn restore_cwd_only_scopes_the_finder_trash() {
     fs::write(b.work().join("here.txt"), "here").unwrap();
     fs::write(away.join("there.txt"), "there").unwrap();
     assert!(b.run(&["put", "here.txt"], "").status.success());
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    common::next_trash_second();
     let there = away.join("there.txt");
     assert!(b
         .run(&["put", &there.to_string_lossy()], "")
@@ -499,7 +498,7 @@ fn finder_trash_restore_asks_on_a_scope() {
     for n in ["a.txt", "b.txt"] {
         fs::write(sub.join(n), n).unwrap();
         assert!(b.run(&["put", &format!("sub/{n}")], "").status.success());
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        common::next_trash_second();
     }
     let recs: Vec<Record> = ["a.txt", "b.txt"]
         .iter()
@@ -544,7 +543,7 @@ fn finder_restore_orders_the_numbered_list() {
     for n in names {
         fs::write(b.work().join(n), n).unwrap();
         assert!(b.run(&["put", n], "").status.success());
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        common::next_trash_second();
     }
     let recs: Vec<Record> = names
         .iter()
@@ -635,7 +634,7 @@ fn finder_restore_sorts_by_size() {
     let b = Box_::new("sortsize");
     fs::write(b.work().join("small.txt"), b"s").unwrap();
     assert!(b.run(&["put", "small.txt"], "").status.success());
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    common::next_trash_second();
     fs::write(b.work().join("big.bin"), vec![7u8; 1 << 20]).unwrap();
     assert!(b.run(&["put", "big.bin"], "").status.success());
     let recs: Vec<Record> = ["small.txt", "big.bin"]
@@ -669,7 +668,7 @@ fn restore_matchers_work_on_the_finder_trash() {
     for n in ["r1.log", "r2.log", "keep.txt"] {
         fs::write(b.work().join(n), n).unwrap();
         assert!(b.run(&["put", n], "").status.success());
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        common::next_trash_second();
     }
     // Finder writes one .DS_Store with every Put Back record.
     let recs: Vec<Record> = ["r1.log", "r2.log", "keep.txt"]

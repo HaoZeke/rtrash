@@ -177,6 +177,21 @@ def check_pid_paths():
             warnings.append(f"tests/{path.name}: process::id() count fell to {n}; lower PID_PATHS in scripts/precheck.py")
 
 
+# A sleep of a second or more in tests/ is a guess at the whole-second
+# trash clock; common::next_trash_second waits for the real tick.
+LONG_SLEEP = re.compile(r"sleep\(\s*(?:std::time::)?Duration::from_(?:secs|millis\((\d[\d_]*)\))")
+
+
+def check_long_sleeps():
+    for path in sorted((ROOT / "tests").glob("*.rs")):
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            for m in LONG_SLEEP.finditer(line):
+                ms = m.group(1)
+                if ms is None or int(ms.replace("_", "")) >= 1000:
+                    errors.append(f"tests/{path.name}:{i}: a sleep of a second or more; trash times are "
+                                  "whole seconds, so call common::next_trash_second() between puts")
+
+
 def strip_comments(s):
     s = re.sub(r'"(?:\\.|[^"\\])*"', '""', s)
     return re.sub(r"//[^\n]*", "", s)
@@ -256,7 +271,8 @@ def check_removed_literals(base):
 
 def main():
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
-    check_completions(); check_test_tags(); check_pid_paths(); check_fn_params()
+    check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps()
+    check_fn_params()
     check_long_lines(base); check_removed_literals(base)
     for w in warnings:
         print("warning:", w)

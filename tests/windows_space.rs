@@ -5,6 +5,8 @@
 //! warns when the volume of the Recycle Bin it used is low.
 #![cfg(windows)]
 
+mod common;
+
 use std::process::Command;
 
 fn bin() -> &'static str {
@@ -128,7 +130,7 @@ fn reap_purge_trash_dry_run_lists_the_drive_recycle_bin_oldest_first() {
         .collect();
     for (i, name) in names.iter().enumerate() {
         if i > 0 {
-            std::thread::sleep(std::time::Duration::from_millis(1100));
+            common::next_trash_second();
         }
         let p = base.join(name);
         fs::write(&p, name).unwrap();

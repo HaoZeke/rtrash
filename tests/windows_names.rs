@@ -2,6 +2,8 @@
 //! trash-list.exe or trash-put.exe runs as that command.
 #![cfg(windows)]
 
+mod common;
+
 use std::fs;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -196,8 +198,7 @@ fn trash_restore_takes_a_range_pick() {
             "{}",
             String::from_utf8_lossy(&put.stderr)
         );
-        // Deletion times on Windows are whole seconds.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        common::next_trash_second();
     }
     let restore = dir.join("trash-restore.exe");
     fs::copy(env!("CARGO_BIN_EXE_rtrash"), &restore).unwrap();
@@ -241,7 +242,7 @@ fn a_blank_pick_asks_for_an_index() {
             "{}",
             String::from_utf8_lossy(&put.stderr)
         );
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        common::next_trash_second();
     }
     let scope = format!("--directory={}", sub.display());
     let out = run_with(
@@ -389,7 +390,7 @@ fn restore_sorts_by_size_on_windows() {
             "{}",
             String::from_utf8_lossy(&put.stderr)
         );
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        common::next_trash_second();
     }
     let scope = format!("--directory={}", dir.display());
     let out = run_with(

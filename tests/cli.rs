@@ -4555,7 +4555,7 @@ fn reap_purge_trash_counts_the_inodes_each_item_frees() {
     put.args(["put", "-r", tree.to_str().unwrap()]);
     env(&mut put);
     assert!(put.output().unwrap().status.success());
-    std::thread::sleep(std::time::Duration::from_millis(1100));
+    common::next_trash_second();
     let mut put = Command::new(bin());
     put.args(["put", single.to_str().unwrap()]);
     env(&mut put);
@@ -6598,4 +6598,14 @@ fn put_dry_run_checks_and_moves_nothing() {
     assert!(stderr_of(&out).contains("missing"));
     assert!(sb.work().join("a").exists());
     assert!(!sb.trash().join("files/a").exists());
+}
+
+#[test]
+fn next_trash_second_waits_for_a_later_second() {
+    let before = common::epoch_secs();
+    let started = std::time::Instant::now();
+    common::next_trash_second();
+    assert!(common::epoch_secs() > before);
+    // It waits for the next tick only, not a fixed 1.1 s on top.
+    assert!(started.elapsed() < std::time::Duration::from_millis(1500));
 }

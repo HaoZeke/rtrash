@@ -6,6 +6,8 @@
 
 #![cfg(windows)]
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -265,8 +267,7 @@ fn list_last_keeps_the_most_recently_deleted() {
         fs::write(&p, b"x").unwrap();
         let out = cmd(&lad).arg("put").arg(&p).output().unwrap();
         assert!(out.status.success());
-        // Deletion times are whole seconds; keep the two puts a second apart.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        common::next_trash_second();
     }
     let scope = format!("--directory={}", dir.display());
     let out = cmd(&lad)
@@ -497,7 +498,7 @@ fn restore_matchers_with_latest_and_all() {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        common::next_trash_second();
     }
     let glob = format!("--glob=match-*-{id}.log");
     let run = |args: &[&str]| cmd(&lad).arg("restore").args(args).output().unwrap();
@@ -619,7 +620,7 @@ fn restore_sort_orders_the_numbered_list() {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        common::next_trash_second();
     }
     let glob = format!("--glob=sort-?-{id}.txt");
     let pick = |extra: &[&str]| {
