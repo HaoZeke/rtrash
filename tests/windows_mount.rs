@@ -276,11 +276,21 @@ fn restore_of_one_txt_keeps_its_extension() {
     );
     assert!(said.starts_with("would restore '"), "{said}");
     assert!(!f.exists(), "a dry run restored the file");
-    let out = cmd(&lad).arg("restore").arg(&f).output().unwrap();
+    let out = cmd(&lad)
+        .args(["restore", "--json"])
+        .arg(&f)
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(json.starts_with("{\"restored\":[{\"original\":"), "{json}");
+    assert!(
+        json.trim_end().ends_with("\"failed\":0,\"skipped\":0}"),
+        "{json}"
     );
     assert!(f.exists(), "restored without its extension");
     assert!(!f.with_extension("").exists());
@@ -331,6 +341,66 @@ fn restore_batch_last_brings_back_the_latest_put() {
     for p in [&a, &b] {
         fs::remove_file(p).unwrap();
     }
+    let _ = fs::remove_dir_all(&lad);
+}
+
+#[test]
+fn restore_conflict_policies_skip_rename_and_refuse() {
+    let Some(m) = mounted() else {
+        return;
+    };
+    let lad = local_app_data("conflict");
+    let f = m.join(format!("conflict-{}.txt", std::process::id()));
+    let renamed = f.with_extension("1.txt");
+    fs::write(&f, b"old").unwrap();
+    let out = cmd(&lad).arg("put").arg(&f).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    fs::write(&f, b"live").unwrap();
+    let run = |extra: &[&str]| {
+        cmd(&lad)
+            .arg("restore")
+            .args(extra)
+            .arg(&f)
+            .output()
+            .unwrap()
+    };
+    // Refuse is the default: exit 1, the live file stays.
+    let out = run(&["--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(json.contains("\"failed\":1"), "{json}");
+    assert_eq!(fs::read(&f).unwrap(), b"live");
+    let out = run(&["--conflict=skip", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("\"skipped\":1"));
+    let out = run(&["--conflict=rename", "--dry-run", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(json.starts_with("{\"dry_run\":true,"), "{json}");
+    assert!(!renamed.exists(), "a dry run renamed");
+    let out = run(&["--conflict=rename"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read(&f).unwrap(), b"live");
+    assert_eq!(fs::read(&renamed).unwrap(), b"old");
+    assert_eq!(run(&["--conflict=nope"]).status.code(), Some(2));
+    let _ = fs::remove_file(&f);
+    let _ = fs::remove_file(&renamed);
     let _ = fs::remove_dir_all(&lad);
 }
 

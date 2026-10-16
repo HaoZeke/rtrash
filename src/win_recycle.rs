@@ -1786,7 +1786,8 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
     }
 
     pub fn restore_run(prog: &str, args: &[String]) -> i32 {
-        let mut force = false;
+        let mut conflict = Conflict::Refuse;
+        let mut json = false;
         let mut plain = false;
         let mut newest_first = false;
         let mut target: Option<PathBuf> = None;
@@ -1794,10 +1795,26 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut dry_run = false;
         for arg in args {
             match arg.as_str() {
-                "-f" | "--force" => force = true,
+                "-f" | "--force" => conflict = Conflict::Overwrite,
                 "-n" | "--dry-run" => {
                     dry_run = true;
                     plain = true;
+                }
+                "--json" => {
+                    json = true;
+                    plain = true;
+                }
+                a if a.starts_with("--conflict=") => {
+                    let v = &a["--conflict=".len()..];
+                    match Conflict::parse(v) {
+                        Some(c) => conflict = c,
+                        None => {
+                            eprintln!(
+                                "{prog}: invalid --conflict '{v}' (refuse, overwrite, rename or skip)"
+                            );
+                            return 2;
+                        }
+                    }
                 }
                 "--batch=last" => last_run = true,
                 a if a.starts_with("--batch=") => {
@@ -1820,8 +1837,13 @@ With PATH, restore the item whose original path equals PATH.
 Without PATH, print a numbered list and read an index from stdin.
 
   -f, --force   overwrite when the destination exists (best-effort)
+      --conflict=POLICY  when the destination exists: refuse (default),
+                overwrite, rename (restore next to it as NAME.1.EXT)
+                or skip
       --plain   numbered selection instead of the browser
   -n, --dry-run show where each chosen item would go and change nothing
+      --json    print {{restored, failed, skipped}} as JSON on stdout;
+                implies --plain, and the numbered list goes to stderr
       --newest-first  list the most recently deleted item first
       --oldest-first  list the oldest deleted item first (default)
       --batch=last  restore every item the latest put moved, by the
@@ -1852,6 +1874,11 @@ Without PATH, print a numbered list and read an index from stdin.
                 }
             }
         }
+        let opts = RestoreOpts {
+            conflict,
+            json,
+            dry_run,
+        };
         let items = match super::list_items() {
             Ok(i) => i,
             Err(e) => {
@@ -1865,7 +1892,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 return 2;
             }
             return match last_put_items(prog, &items) {
-                Ok(run) => restore_one(prog, run, force, dry_run),
+                Ok(run) => restore_one(prog, run, &opts),
                 Err(c) => c,
             };
         }
@@ -1881,6 +1908,9 @@ Without PATH, print a numbered list and read an index from stdin.
                     .collect();
                 if matched.is_empty() {
                     eprintln!("{prog}: no trashed files match");
+                    if json {
+                        println!("{}", restore_json(&[], 0, 0, dry_run));
+                    }
                     if std::env::var_os("RTRASH_DEBUG").is_some() {
                         eprintln!("{prog}:   wanted '{}'", want.display());
                         explain_no_match(prog, &items, i64::MIN);
@@ -1896,7 +1926,7 @@ Without PATH, print a numbered list and read an index from stdin.
             return 1;
         }
         if matches.len() == 1 {
-            return restore_one(prog, matches, force, dry_run);
+            return restore_one(prog, matches, &opts);
         }
         matches.sort_by_key(|it| it.time_deleted);
         if newest_first {
@@ -1906,16 +1936,27 @@ Without PATH, print a numbered list and read an index from stdin.
         if !plain && util::stdin_is_tty() {
             let items: Vec<BinItem> = matches.into_iter().map(BinItem::new).collect();
             let refs: Vec<&BinItem> = items.iter().collect();
-            return crate::restore_tui::run(prog, refs, force, newest_first);
+            return crate::restore_tui::run(
+                prog,
+                refs,
+                conflict == Conflict::Overwrite,
+                newest_first,
+            );
         }
         let _ = plain;
         // Numbered pick.
         for (i, it) in matches.iter().enumerate() {
             let date = platform::epoch_to_iso_utc(it.time_deleted);
-            println!(
+            let row = format!(
                 "  {i} {}",
                 platform::format_deletion_list_line(Some(&date), &original_of(it))
             );
+            // Keep stdout for the JSON summary.
+            if json {
+                eprintln!("{row}");
+            } else {
+                println!("{row}");
+            }
         }
         eprint!("What to restore [0..{}]: ", matches.len() - 1);
         let mut line = String::new();
@@ -1931,7 +1972,7 @@ Without PATH, print a numbered list and read an index from stdin.
             return 1;
         }
         let item = matches.into_iter().nth(idx).unwrap();
-        restore_one(prog, vec![item], force, dry_run)
+        restore_one(prog, vec![item], &opts)
     }
 
     /// A Recycle Bin item as the restore browser sees it.
@@ -1981,68 +2022,183 @@ Without PATH, print a numbered list and read an index from stdin.
         }
     }
 
-    fn restore_one(prog: &str, items: Vec<TrashItem>, force: bool, dry_run: bool) -> i32 {
-        if dry_run {
-            return dry_restore(&items, force);
+    /// When a restore finds its destination taken, as on FreeDesktop.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Conflict {
+        Refuse,
+        Overwrite,
+        Rename,
+        Skip,
+    }
+
+    impl Conflict {
+        fn parse(s: &str) -> Option<Self> {
+            Some(match s {
+                "refuse" => Conflict::Refuse,
+                "overwrite" => Conflict::Overwrite,
+                "rename" => Conflict::Rename,
+                "skip" => Conflict::Skip,
+                _ => return None,
+            })
         }
-        for it in &items {
-            let dest = original_of(it);
-            if dest.exists() && !force {
-                eprintln!(
-                    "{prog}: refusing to overwrite '{}' (use -f)",
-                    dest.display()
-                );
-                return 1;
-            }
-            if dest.exists() && force {
-                let _ = super::remove_forcing(&dest);
-            }
-        }
-        let pairs: Vec<(PathBuf, PathBuf, u64)> = items
+    }
+
+    struct RestoreOpts {
+        conflict: Conflict,
+        json: bool,
+        dry_run: bool,
+    }
+
+    /// The first `STEM.N.EXT` (or `NAME.N`) next to `dest` that is free.
+    fn free_name(dest: &Path) -> PathBuf {
+        let parent = dest.parent().unwrap_or(Path::new(""));
+        let stem = dest.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = dest.extension().map(|e| e.to_string_lossy());
+        (1u64..)
+            .map(|n| {
+                let name = match &ext {
+                    Some(x) => format!("{stem}.{n}.{x}"),
+                    None => format!("{stem}.{n}"),
+                };
+                parent.join(name)
+            })
+            .find(|p| p.symlink_metadata().is_err())
+            .unwrap_or_else(|| dest.to_path_buf())
+    }
+
+    /// `{restored, failed, skipped}` as the FreeDesktop restore prints it,
+    /// with `"dry_run":true` first for a dry run.
+    fn restore_json(
+        done: &[(PathBuf, PathBuf)],
+        failed: usize,
+        skipped: usize,
+        dry: bool,
+    ) -> String {
+        let rows: Vec<String> = done
             .iter()
-            .map(|it| (PathBuf::from(&it.id), original_of(it), item_size(it)))
+            .map(|(orig, dest)| {
+                format!(
+                    "{{\"original\":\"{}\",\"restored_to\":\"{}\"}}",
+                    util::json_escape(&orig.to_string_lossy()),
+                    util::json_escape(&dest.to_string_lossy())
+                )
+            })
+            .collect();
+        let head = if dry { "\"dry_run\":true," } else { "" };
+        format!(
+            "{{{head}\"restored\":[{}],\"failed\":{failed},\"skipped\":{skipped}}}",
+            rows.join(",")
+        )
+    }
+
+    /// Restore `items` under `o`: each taken destination is refused,
+    /// overwritten, renamed or skipped by itself, as on FreeDesktop. A dry
+    /// run says what each would do and moves nothing.
+    fn restore_one(prog: &str, items: Vec<TrashItem>, o: &RestoreOpts) -> i32 {
+        // A line for the user: stderr when stdout carries the JSON.
+        let say = |line: String| {
+            if o.json {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
+        };
+        let mut plan: Vec<(&TrashItem, PathBuf, PathBuf)> = Vec::new();
+        let (mut failed, mut skipped) = (0usize, 0usize);
+        for it in &items {
+            let orig = original_of(it);
+            let taken = orig.symlink_metadata().is_ok();
+            let dest = match (taken, o.conflict) {
+                (true, Conflict::Skip) => {
+                    if o.dry_run {
+                        say(format!("would skip '{}': it exists", orig.display()));
+                    } else {
+                        eprintln!("{prog}: skipping '{}': it exists", orig.display());
+                    }
+                    skipped += 1;
+                    continue;
+                }
+                (true, Conflict::Refuse) => {
+                    if o.dry_run {
+                        say(format!("would fail: '{}' exists", orig.display()));
+                    } else {
+                        eprintln!(
+                            "{prog}: refusing to overwrite '{}' (use -f)",
+                            orig.display()
+                        );
+                    }
+                    failed += 1;
+                    continue;
+                }
+                (true, Conflict::Rename) => free_name(&orig),
+                _ => orig.clone(),
+            };
+            if o.dry_run {
+                if Path::new(&it.id).symlink_metadata().is_err() {
+                    say(format!(
+                        "would fail: the payload of '{}' is gone",
+                        orig.display()
+                    ));
+                    failed += 1;
+                    continue;
+                }
+                if dest == orig {
+                    say(format!("would restore '{}'", orig.display()));
+                } else {
+                    say(format!(
+                        "would restore '{}' as '{}'",
+                        orig.display(),
+                        dest.display()
+                    ));
+                }
+            }
+            plan.push((it, orig, dest));
+        }
+        if o.dry_run {
+            let done: Vec<(PathBuf, PathBuf)> = plan
+                .into_iter()
+                .map(|(_, orig, dest)| (orig, dest))
+                .collect();
+            if o.json {
+                println!("{}", restore_json(&done, failed, skipped, true));
+            }
+            return i32::from(failed > 0);
+        }
+        let pairs: Vec<(PathBuf, PathBuf, u64)> = plan
+            .iter()
+            .map(|(it, _, dest)| (PathBuf::from(&it.id), dest.clone(), item_size(it)))
             .collect();
         for (dest, need) in super::cross_volume_needs(&pairs, super::bin_root_of) {
             if let Err(e) = crate::space::guard_bytes(need, &dest) {
                 eprintln!("{prog}: cannot restore: {e}");
+                if o.json {
+                    println!("{}", restore_json(&[], failed + plan.len(), skipped, false));
+                }
                 return 1;
             }
         }
-        let mut status = 0;
-        for it in &items {
-            let dest = original_of(it);
+        let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for (it, orig, dest) in plan {
+            if o.conflict == Conflict::Overwrite && dest.symlink_metadata().is_ok() {
+                let _ = super::remove_forcing(&dest);
+            }
             if let Err(e) = super::restore_payload(Path::new(&it.id), &dest) {
                 eprintln!("{prog}: cannot restore '{}': {e}", dest.display());
-                status = 1;
+                failed += 1;
             } else if dest.symlink_metadata().is_err() {
                 eprintln!(
                     "{prog}: restored '{}' but nothing is there now",
                     dest.display()
                 );
-                status = 1;
-            }
-        }
-        status
-    }
-
-    /// What restoring `items` would do, as the FreeDesktop dry run says
-    /// it: would restore, or would fail when the original location is
-    /// taken without -f or the payload is gone. Nothing moves.
-    fn dry_restore(items: &[TrashItem], force: bool) -> i32 {
-        let mut status = 0;
-        for it in items {
-            let dest = original_of(it);
-            if Path::new(&it.id).symlink_metadata().is_err() {
-                println!("would fail: the payload of '{}' is gone", dest.display());
-                status = 1;
-            } else if dest.symlink_metadata().is_ok() && !force {
-                println!("would fail: '{}' exists", dest.display());
-                status = 1;
+                failed += 1;
             } else {
-                println!("would restore '{}'", dest.display());
+                done.push((orig, dest));
             }
         }
-        status
+        if o.json {
+            println!("{}", restore_json(&done, failed, skipped, false));
+        }
+        i32::from(failed > 0)
     }
 
     pub fn status_run(prog: &str, args: &[String]) -> i32 {
