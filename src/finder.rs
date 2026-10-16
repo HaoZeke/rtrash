@@ -695,6 +695,8 @@ pub(crate) struct RestoreOpts<'a> {
     pub(crate) json: bool,
     pub(crate) plain: bool,
     pub(crate) newest_first: Option<bool>,
+    /// `--sort`: the numbered list order (date by default, path, or none).
+    pub(crate) sort: Option<crate::restore::Sort>,
     /// `--dry-run`: say what each restore would do and move nothing.
     pub(crate) dry_run: bool,
 }
@@ -720,7 +722,20 @@ fn pick<'a>(
             newest,
         ));
     }
-    let _ = (o.plain, o.newest_first);
+    let _ = o.plain;
+    // The numbered list order, as on FreeDesktop: by date, oldest first
+    // unless --newest-first; by path; or as read with --sort=none.
+    let mut list = list.to_vec();
+    match o.sort {
+        Some(crate::restore::Sort::Path) => list.sort_by(|a, b| a.shown.cmp(&b.shown)),
+        Some(crate::restore::Sort::None) => {}
+        Some(crate::restore::Sort::Date) | None => {
+            list.sort_by(|a, b| a.epoch.cmp(&b.epoch).then_with(|| a.name.cmp(&b.name)));
+            if o.newest_first.unwrap_or(false) {
+                list.reverse();
+            }
+        }
+    }
     // trash-cli separates the columns with one space.
     let gap = if o.path_scope { " " } else { "  " };
     for (k, e) in list.iter().enumerate() {

@@ -69,7 +69,7 @@ the index prompt. --newest-first and --oldest-first set the order for both.
 
 /// The `--sort` orders of trash-cli's trash-restore.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Sort {
+pub(crate) enum Sort {
     Date,
     Path,
     None,
@@ -370,6 +370,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 json,
                 plain,
                 newest_first,
+                sort,
                 dry_run,
             },
         );

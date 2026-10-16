@@ -512,6 +512,52 @@ fn finder_trash_restore_asks_on_a_scope() {
 }
 
 #[test]
+fn finder_restore_orders_the_numbered_list() {
+    let b = Box_::new("order");
+    // Trashed oldest first: z, a, m.
+    let names = ["z.txt", "a.txt", "m.txt"];
+    for n in names {
+        fs::write(b.work().join(n), n).unwrap();
+        assert!(b.run(&["put", n], "").status.success());
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    let recs: Vec<Record> = names
+        .iter()
+        .map(|n| Record {
+            name: n.to_string(),
+            code: *b"ptbL",
+            value: Value::Ustr(format!(
+                "{}/",
+                b.work().to_string_lossy().trim_start_matches('/')
+            )),
+        })
+        .collect();
+    fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
+
+    // --newest-first puts m.txt, the last trashed, at 0.
+    let o = b.run(&["restore", "--plain", "--newest-first"], "0\n");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(
+        out(&o).lines().next().unwrap_or("").ends_with("m.txt"),
+        "{}",
+        out(&o)
+    );
+    assert!(b.work().join("m.txt").exists());
+    // --sort=path puts a.txt before z.txt.
+    let o = b.run(&["restore", "--plain", "--sort=path"], "0\n");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(b.work().join("a.txt").exists());
+    assert!(!b.work().join("z.txt").exists());
+    // The default stays oldest first.
+    let o = b.run(&["restore", "--plain"], "\n");
+    assert!(
+        out(&o).lines().next().unwrap_or("").ends_with("z.txt"),
+        "{}",
+        out(&o)
+    );
+}
+
+#[test]
 fn restore_matchers_work_on_the_finder_trash() {
     let b = Box_::new("match");
     for n in ["r1.log", "r2.log", "keep.txt"] {
