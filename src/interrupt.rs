@@ -8,6 +8,12 @@
 //! [`abortable`] stops at the first Ctrl-C, and its usual error path removes
 //! the part copied.
 //!
+//! A caller with no terminal Ctrl-C, such as the explorer, whose raw
+//! mode reads Ctrl-C as a key, runs its puts inside [`watched`] instead.
+//! There a [`Watch`] stop flag ends an [`abortable`] copy on that thread
+//! the way a Ctrl-C would, and the copy counts its bytes into the watch
+//! for a progress line.
+//!
 //! A [`Critical`] section (taking a trash name, writing its record and
 //! moving the payload) never ends halfway: a Ctrl-C inside it waits until
 //! the record and the payload agree, then acts. That holds for every
@@ -15,9 +21,10 @@
 //! Ctrl-C inside a section quits as soon as the section ends. A process
 //! that ignores SIGINT (`nohup`) keeps ignoring it.
 
+use std::cell::{Cell, RefCell};
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::SeqCst};
+use std::sync::{Arc, Mutex};
 
 /// Ctrl-C presses seen by the handler.
 static PRESSES: AtomicU32 = AtomicU32::new(0);
@@ -29,6 +36,24 @@ static ABORTABLE: AtomicU32 = AtomicU32::new(0);
 static DEFERRED: AtomicBool = AtomicBool::new(false);
 /// [`stop_then_quit`] was called: a first press outside a section stops.
 static STOP_FIRST: AtomicBool = AtomicBool::new(false);
+
+/// A stop flag and a byte count that the copies of one thread answer to;
+/// see [`watched`].
+#[derive(Debug, Clone, Default)]
+pub struct Watch {
+    /// Set by the caller: the copy in hand stops at its next check and
+    /// removes what it copied.
+    pub stop: Arc<AtomicBool>,
+    /// Bytes copied so far; the caller resets it between items.
+    pub copied: Arc<AtomicU64>,
+}
+
+thread_local! {
+    /// The [`Watch`] the copies of this thread answer to, if any.
+    static WATCH: RefCell<Option<Watch>> = const { RefCell::new(None) };
+    /// [`abortable`] scopes open on this thread.
+    static ABORTABLE_HERE: Cell<u32> = const { Cell::new(0) };
+}
 
 /// The SIGINT disposition before ours, while ours is in place, and
 /// whether a section put ours in place (and takes it out again).
@@ -133,14 +158,48 @@ pub fn requested() -> bool {
     PRESSES.load(SeqCst) > 0
 }
 
-/// An error once Ctrl-C was pressed inside [`abortable`], for a long copy
-/// to check between files and chunks.
+/// An error once Ctrl-C was pressed inside [`abortable`], or the
+/// [`Watch`] of this thread was told to stop there, for a long copy to
+/// check between files and chunks.
 pub fn check() -> io::Result<()> {
     if ABORTABLE.load(SeqCst) > 0 && requested() {
         Err(io::Error::other("stopped by Ctrl-C"))
+    } else if watch_stopped() {
+        Err(io::Error::other("stopped; the original stays in place"))
     } else {
         Ok(())
     }
+}
+
+/// Whether this thread is inside [`abortable`] and its [`Watch`] says stop.
+fn watch_stopped() -> bool {
+    ABORTABLE_HERE.with(Cell::get) > 0
+        && WATCH.with(|w| w.borrow().as_ref().is_some_and(|w| w.stop.load(SeqCst)))
+}
+
+/// Run `f` with the copies of this thread answering to `watch`: inside
+/// [`abortable`], [`check`] fails once `watch.stop` is set, and each
+/// chunk copied adds to `watch.copied`. The watch around the call, if
+/// any, comes back afterwards.
+pub fn watched<T>(watch: &Watch, f: impl FnOnce() -> T) -> T {
+    struct Outer(Option<Watch>);
+    impl Drop for Outer {
+        fn drop(&mut self) {
+            let outer = self.0.take();
+            WATCH.with(|w| *w.borrow_mut() = outer);
+        }
+    }
+    let _outer = Outer(WATCH.with(|w| w.borrow_mut().replace(watch.clone())));
+    f()
+}
+
+/// Count `n` bytes a copy wrote against the [`Watch`] of this thread.
+pub fn copied(n: u64) {
+    WATCH.with(|w| {
+        if let Some(w) = w.borrow().as_ref() {
+            w.copied.fetch_add(n, SeqCst);
+        }
+    });
 }
 
 /// Run `f`, a copy whose error path removes what it copied, so that
@@ -151,9 +210,11 @@ pub fn abortable<T>(f: impl FnOnce() -> T) -> T {
     impl Drop for Scope {
         fn drop(&mut self) {
             ABORTABLE.fetch_sub(1, SeqCst);
+            ABORTABLE_HERE.with(|n| n.set(n.get() - 1));
         }
     }
     ABORTABLE.fetch_add(1, SeqCst);
+    ABORTABLE_HERE.with(|n| n.set(n.get() + 1));
     let _scope = Scope;
     f()
 }
@@ -246,5 +307,38 @@ mod tests {
         assert!(!quits_at_section_end(1, true));
         assert!(quits_at_section_end(2, true));
         assert!(quits_at_section_end(1, false));
+    }
+
+    #[test]
+    fn a_watch_stops_only_abortable_copies_on_its_own_thread() {
+        let w = Watch::default();
+        w.stop.store(true, SeqCst);
+        watched(&w, || {
+            // Outside a copy whose error path cleans up, nothing stops.
+            assert!(check().is_ok());
+            let err = abortable(check).unwrap_err();
+            assert!(err.to_string().contains("original stays"), "{err}");
+            // Another thread answers to its own watch, here none.
+            let other = std::thread::spawn(|| abortable(check).is_ok());
+            assert!(other.join().unwrap());
+        });
+        // Once the watched call is over, the watch no longer applies.
+        assert!(abortable(check).is_ok());
+    }
+
+    #[test]
+    fn a_watch_counts_bytes_and_the_outer_one_comes_back() {
+        let (outer, inner) = (Watch::default(), Watch::default());
+        copied(5);
+        watched(&outer, || {
+            copied(10);
+            watched(&inner, || copied(7));
+            copied(1);
+        });
+        assert_eq!(outer.copied.load(SeqCst), 11);
+        assert_eq!(inner.copied.load(SeqCst), 7);
+        // A stop on the inner watch ends nothing under the outer one.
+        inner.stop.store(true, SeqCst);
+        watched(&outer, || assert!(abortable(check).is_ok()));
     }
 }

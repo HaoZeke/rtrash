@@ -2464,7 +2464,7 @@ fn copy_file_data(src: &Path, dst: &Path, meta: &fs::Metadata) -> io::Result<()>
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn copy_file_data(src: &Path, dst: &Path, _meta: &fs::Metadata) -> io::Result<()> {
-    fs::copy(src, dst).map(|_| ())
+    fs::copy(src, dst).map(crate::interrupt::copied)
 }
 
 /// Bytes from `from` into `to`, keeping a reflink or holes on Linux.
@@ -2474,6 +2474,7 @@ fn copy_opened(from: &mut fs::File, to: &mut fs::File, len: u64, blocks: u64) ->
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         if unsafe { libc::ioctl(to.as_raw_fd(), libc::FICLONE, from.as_raw_fd()) } == 0 {
+            crate::interrupt::copied(len);
             return Ok(());
         }
         if blocks.saturating_mul(512) < len {
@@ -2487,18 +2488,22 @@ fn copy_opened(from: &mut fs::File, to: &mut fs::File, len: u64, blocks: u64) ->
             io::Seek::rewind(from)?;
         }
     }
-    // In chunks, so a Ctrl-C ends a long copy inside `abortable`.
+    // In chunks, so a Ctrl-C or a watch ends a long copy inside
+    // `abortable`, and a progress line moves within one file.
     const CHUNK: u64 = 64 << 20;
     loop {
         crate::interrupt::check()?;
-        if io::copy(&mut io::Read::take(&mut *from, CHUNK), to)? == 0 {
-            return Ok(());
+        match io::copy(&mut io::Read::take(&mut *from, CHUNK), to)? {
+            0 => return Ok(()),
+            n => crate::interrupt::copied(n),
         }
     }
 }
 
 /// Copy the data runs SEEK_DATA and SEEK_HOLE report, leave the holes
 /// unwritten and set the length, so a mostly empty disk image stays small.
+/// The bytes count as they go, so a sparse copy that fails and starts
+/// over counts its first part twice; only a progress line reads them.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn copy_sparse(from: &fs::File, to: &fs::File, len: u64) -> io::Result<()> {
     use std::os::unix::fs::FileExt;
@@ -2530,6 +2535,7 @@ fn copy_sparse(from: &fs::File, to: &fs::File, len: u64) -> io::Result<()> {
                 break; // the file shrank under us
             }
             to.write_all_at(&buf[..n], at)?;
+            crate::interrupt::copied(n as u64);
             at += n as u64;
         }
         pos = hole.max(data + 1);
@@ -3588,6 +3594,72 @@ proc /proc proc rw 0 0
         let err = copy_recursive(&sock, &root.join("out"), &meta).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
         assert!(!root.join("out").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_copy_counts_its_bytes_into_the_watch() {
+        let root = std::env::temp_dir().join(format!("rtrash-copybytes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a"), vec![1u8; 9000]).unwrap();
+        fs::write(src.join("sub/b"), vec![2u8; 30_000]).unwrap();
+        std::os::unix::fs::symlink("a", src.join("link")).unwrap();
+        let meta = fs::symlink_metadata(&src).unwrap();
+        let w = crate::interrupt::Watch::default();
+        crate::interrupt::watched(&w, || copy_recursive(&src, &root.join("dst"), &meta)).unwrap();
+        // File bytes only: directories and the link add nothing.
+        assert_eq!(w.copied.load(std::sync::atomic::Ordering::SeqCst), 39_000);
+        assert_eq!(fs::read(root.join("dst/sub/b")).unwrap().len(), 30_000);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The explorer stops a put across devices partway through: the copy
+    /// ends at its next check, the part copied and the record go, and the
+    /// original stays whole. A file and a directory each, with the stop
+    /// set before the first chunk and before the first entry.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stopped_watch_ends_a_put_across_devices_and_keeps_the_original() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir().join(format!("rtrash-watchstop-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("d/sub")).unwrap();
+        fs::write(root.join("f"), vec![3u8; 100_000]).unwrap();
+        fs::write(root.join("d/sub/x"), vec![4u8; 5000]).unwrap();
+        let shm = Path::new("/dev/shm");
+        let dev = fs::metadata(&root).unwrap().dev();
+        if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
+            let _ = fs::remove_dir_all(&root);
+            eprintln!("no second file system here; skipping");
+            return;
+        }
+        let td = TrashDir {
+            root: shm.join(format!("rtrash-watchstop-{}", std::process::id())),
+            topdir: None,
+        };
+        let _ = fs::remove_dir_all(&td.root);
+        td.ensure().unwrap();
+        let w = crate::interrupt::Watch::default();
+        w.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        for item in [root.join("f"), root.join("d")] {
+            let meta = fs::symlink_metadata(&item).unwrap();
+            let err =
+                crate::interrupt::watched(&w, || trash_move_locked(&item, &meta, &td)).unwrap_err();
+            assert!(err.to_string().contains("original stays"), "{err}");
+            assert_eq!(fs::read_dir(td.files()).unwrap().count(), 0, "{err}");
+            assert_eq!(fs::read_dir(td.info()).unwrap().count(), 0, "{err}");
+        }
+        assert_eq!(fs::read(root.join("f")).unwrap().len(), 100_000);
+        assert_eq!(fs::read(root.join("d/sub/x")).unwrap().len(), 5000);
+        // Without the stop, the same put goes through.
+        w.stop.store(false, std::sync::atomic::Ordering::SeqCst);
+        let meta = fs::symlink_metadata(root.join("d")).unwrap();
+        crate::interrupt::watched(&w, || trash_move_locked(&root.join("d"), &meta, &td)).unwrap();
+        assert!(!root.join("d").exists());
+        assert_eq!(w.copied.load(std::sync::atomic::Ordering::SeqCst), 5000);
+        let _ = fs::remove_dir_all(&td.root);
         let _ = fs::remove_dir_all(&root);
     }
 

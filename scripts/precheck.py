@@ -411,6 +411,24 @@ def check_libc_const_args():
                                       "which is *const; pass `&x` (clippy::unnecessary_mut_passed)")
 
 
+# Calls that write file bytes in the cross-device copy (round 230).
+COPY_WRITE = re.compile(r"\bio::copy\(|\.write_all_at\(|\bfs::copy\(")
+
+
+def check_copy_progress():
+    """Each write in the trashdir copy counts its bytes with
+    `interrupt::copied` on the same line or the two after, so the
+    explorer's progress line sees every copy path."""
+    path = ROOT / "src" / "trashdir.rs"
+    text = rust_code(path.read_text(encoding="utf-8"))
+    cut = re.search(r"#\[cfg\(test\)\]\s*mod tests\b", text)
+    lines = text[:cut.start() if cut else len(text)].split("\n")
+    for k, line in enumerate(lines):
+        if COPY_WRITE.search(line) and not any("interrupt::copied" in l for l in lines[k:k + 3]):
+            errors.append(f"src/trashdir.rs:{k + 1}: a copy write without interrupt::copied after it; "
+                          "count the bytes so the explorer's progress line moves")
+
+
 def check_fn_params(limit=7):
     """clippy::too_many_arguments fires above 7 parameters (self excluded)."""
     sig = re.compile(r"\bfn\s+(\w+)\s*(<[^>{]*>)?\s*\(")
@@ -1057,7 +1075,7 @@ def main():
     check_rust_code(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_key_reads()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
-    check_musl_aliases(); check_libc_const_args()
+    check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
     for w in warnings:
