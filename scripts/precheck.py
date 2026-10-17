@@ -395,6 +395,71 @@ def check_permanent_gate():
                           "remove_record, or update the entry and its reason")
 
 
+SEAM_READ = re.compile(r'\b(?:var|var_os)\s*\(\s*"(RTRASH_TEST_\w*)"')
+SEAM_CONST = re.compile(r'\b(?:const|static)\s+\w+\s*:[^=;]*=\s*"(RTRASH_TEST_\w*)"')
+SCOPE = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:mod\s+\w+\s*\{|impl\b[^;]*\{\s*$)")
+DEBUG_CFG = re.compile(r"#\[cfg\((?:all\()?(?:[^\]]*,\s*)?debug_assertions\b")
+
+
+def drop_comments(line):
+    """A line without its `//` comment, string literals kept."""
+    return re.sub(r'"(?:\\.|[^"\\])*"|//.*', lambda m: m.group(0) if m.group(0)[0] == '"' else "", line)
+
+
+def item_attrs(lines, k):
+    """The `#[...]` attributes right above line k, past doc comments."""
+    attrs, j = [], k - 1
+    while j >= 0 and lines[j].strip().startswith(("#[", "///", "//")):
+        if lines[j].strip().startswith("#["):
+            attrs.append(lines[j].strip())
+        j -= 1
+    return attrs
+
+
+def check_test_seams():
+    """Every read of an RTRASH_TEST_* variable outside the tests is debug-only:
+    its fn (or a mod or impl around it) has #[cfg(debug_assertions)], or
+    cfg!(debug_assertions) appears in the fn at or before the read (round
+    195; RTRASH_TEST_BIN_DIR points status --fix at any folder)."""
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        code = [drop_comments(l) for l in lines]
+        test_lines, stack, scope_at = test_mod_lines(lines), [], []
+        for k, line in enumerate(code):
+            if stack and line.rstrip() == stack[-1][0] + "}":
+                stack.pop()
+            gated = any(DEBUG_CFG.search(a) for a in item_attrs(lines, k))
+            here = list(stack)
+            m, sc = ANY_FN.match(line), SCOPE.match(line)
+            if m or sc:
+                item = ((m or sc).group(1), "fn" if m else "scope", k, gated)
+                here.append(item)
+                if not (m and line.rstrip().endswith((";", "}"))):
+                    stack.append(item)
+            scope_at.append(here)
+        text = "\n".join(code)
+        found = [(m.start(), m.group(1), "read") for m in SEAM_READ.finditer(text)]
+        found += [(m.start(), m.group(1), "const") for m in SEAM_CONST.finditer(text)]
+        for at, name, kind in sorted(found):
+            k = text.count("\n", 0, at)
+            if k in test_lines:
+                continue
+            if kind == "const":
+                errors.append(f"{rel}:{k + 1}: {name} is named through a const; read a test seam "
+                              "by its literal name so precheck can see its debug gate")
+                continue
+            scopes = scope_at[k]
+            if any(g for _, _, _, g in scopes):
+                continue
+            fns = [start for _, kind_, start, _ in scopes if kind_ == "fn"]
+            if fns and any("cfg!(debug_assertions)" in l for l in code[fns[-1]:k + 1]):
+                continue
+            errors.append(f"{rel}:{k + 1}: {name} is read without a debug gate; put "
+                          "`cfg!(debug_assertions)` before it in the fn or `#[cfg(debug_assertions)]` "
+                          "on the fn, so a release build never honours it")
+
+
 OS_TRASH = re.compile(r"\btrash::(\{[^}]*\b)?delete(_all)?\b")
 
 
@@ -596,7 +661,7 @@ def check_rustfmt():
 def main():
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps()
-    check_fn_params(); check_permanent_gate(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned()
     check_long_lines(base); check_removed_literals(base)
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
