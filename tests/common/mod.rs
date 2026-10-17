@@ -13,12 +13,18 @@
 //! `assert_refused_unchanged`. It takes the snapshot itself, just before
 //! the command runs, so a stale baseline cannot hide a change (round
 //! 181c compared against a listing taken several calls earlier).
+//!
+//! Every test that runs rtrash builds the command with `rtrash(home)`,
+//! which pins the home, data and config folders to `home`, keeps macOS
+//! off the Finder Trash, and clears the guard variables a developer may
+//! have set. A test that must reach the real trash calls `rtrash_real`
+//! and names why.
 #![allow(dead_code)]
 
 use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -151,4 +157,48 @@ pub fn assert_refused_unchanged(
     }
     assert_eq!(state(watch), before, "{label:?} changed {watch:?}: {err}");
     out
+}
+
+/// The rtrash binary under test.
+pub fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_rtrash")
+}
+
+/// rtrash with every trash and config lookup pinned under `home`:
+/// `HOME` and `USERPROFILE` are `home`, `XDG_DATA_HOME` is `home/xdg`
+/// (so the home trash is `home/xdg/Trash`), `XDG_CONFIG_HOME` is
+/// `home/.config`, `RTRASH_MACOS_TRASH` is `freedesktop` (plain commands
+/// on macOS would otherwise go to the Finder Trash), and the guard and
+/// config variables are cleared. Set anything else on the result; a later
+/// `.env` wins.
+pub fn rtrash(home: &Path) -> Command {
+    let mut c = Command::new(bin());
+    c.env("HOME", home)
+        .env("USERPROFILE", home)
+        .env("XDG_DATA_HOME", home.join("xdg"))
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("RTRASH_MACOS_TRASH", "freedesktop")
+        .env_remove("RTRASH_NO_PERMANENT")
+        .env_remove("RTRASH_MAX_PERMANENT")
+        .env_remove("RTRASH_ALLOW_ROOTS")
+        .env_remove("RTRASH_CONFIG");
+    c
+}
+
+/// Why a test runs rtrash without the `rtrash` pin.
+#[derive(Debug, Clone, Copy)]
+pub enum Real {
+    /// The Finder Trash tests, which pick it with `RTRASH_MACOS_TRASH`.
+    Finder,
+    /// The Windows tests that need the system Recycle Bin.
+    RecycleBin,
+    /// Output that reads no trash and no config (help, man, completions).
+    NoTrash,
+}
+
+/// rtrash with the caller's environment, for a test that must reach the
+/// real trash or must see the environment as is; `why` names the reason.
+pub fn rtrash_real(why: Real) -> Command {
+    let _ = why;
+    Command::new(bin())
 }

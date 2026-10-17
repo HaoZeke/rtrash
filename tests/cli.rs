@@ -39,30 +39,18 @@ impl Sandbox {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(bin())
+        common::rtrash(&self.root)
             .args(args)
             .current_dir(self.work())
-            .env("XDG_DATA_HOME", self.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", self.root.join(".config"))
-            .env("HOME", &self.root)
-            .env_remove("RTRASH_NO_PERMANENT")
-            .env_remove("RTRASH_MAX_PERMANENT")
-            .env_remove("RTRASH_ALLOW_ROOTS")
             .output()
             .expect("failed to run rtrash")
     }
 
     /// Like `run`, with `envs` set on top.
     fn run_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
-        Command::new(bin())
+        common::rtrash(&self.root)
             .args(args)
             .current_dir(self.work())
-            .env("XDG_DATA_HOME", self.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", self.root.join(".config"))
-            .env("HOME", &self.root)
-            .env_remove("RTRASH_NO_PERMANENT")
-            .env_remove("RTRASH_MAX_PERMANENT")
-            .env_remove("RTRASH_ALLOW_ROOTS")
             .envs(envs.iter().copied())
             .output()
             .expect("failed to run rtrash")
@@ -70,12 +58,9 @@ impl Sandbox {
 
     /// Like `run`, with `RTRASH_NO_PERMANENT=1`.
     fn run_guarded(&self, args: &[&str]) -> Output {
-        Command::new(bin())
+        common::rtrash(&self.root)
             .args(args)
             .current_dir(self.work())
-            .env("XDG_DATA_HOME", self.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", self.root.join(".config"))
-            .env("HOME", &self.root)
             .env("RTRASH_NO_PERMANENT", "1")
             .env_remove("RTRASH_MAX_SIZE")
             .output()
@@ -84,12 +69,9 @@ impl Sandbox {
 
     /// Like `run`, but feeds `stdin` to the child (interactive restore selection).
     fn run_with_stdin(&self, args: &[&str], stdin: &str) -> Output {
-        let mut child = Command::new(bin())
+        let mut child = common::rtrash(&self.root)
             .args(args)
             .current_dir(self.work())
-            .env("XDG_DATA_HOME", self.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", self.root.join(".config"))
-            .env("HOME", &self.root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -110,14 +92,11 @@ impl Sandbox {
     fn run_within(&self, secs: u64, args: &[&str]) -> Output {
         let out_path = self.root.join("run-within.out");
         let err_path = self.root.join("run-within.err");
-        let mut cmd = Command::new(bin());
+        let mut cmd = common::rtrash(&self.root);
         cap_memory(&mut cmd);
         let mut child = cmd
             .args(args)
             .current_dir(self.work())
-            .env("XDG_DATA_HOME", self.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", self.root.join(".config"))
-            .env("HOME", &self.root)
             .stdin(Stdio::null())
             .stdout(fs::File::create(&out_path).unwrap())
             .stderr(fs::File::create(&err_path).unwrap())
@@ -192,12 +171,9 @@ fn a_closed_stdout_pipe_ends_quietly() {
         assert!(sb.run(&["put", &format!("f{i}.txt")]).status.success());
     }
     for args in [&["list"][..], &["list", "--json"], &["status", "--json"]] {
-        let mut child = Command::new(bin())
+        let mut child = common::rtrash(&sb.root)
             .args(args)
             .current_dir(sb.work())
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -754,11 +730,10 @@ fn put_json_reports_trashed_and_failed() {
 
 /// Run rtrash in `cwd` with the trash under `data_home`.
 fn run_in(cwd: &Path, data_home: &Path, args: &[&str]) -> Output {
-    Command::new(bin())
+    common::rtrash(data_home)
         .args(args)
         .current_dir(cwd)
         .env("XDG_DATA_HOME", data_home)
-        .env("HOME", data_home)
         .output()
         .expect("failed to run rtrash")
 }
@@ -1970,11 +1945,9 @@ fn restore_cwd_only_skips_items_outside_cwd() {
     fs::write(&outer, b"outer").unwrap();
     assert!(sb.run(&["put", "local.txt"]).status.success());
     // Absolute path so original is outside work/.
-    assert!(Command::new(bin())
+    assert!(common::rtrash(&sb.root)
         .args(["put", outer.to_str().unwrap()])
         .current_dir(sb.work())
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("HOME", &sb.root)
         .status()
         .unwrap()
         .success());
@@ -2418,7 +2391,7 @@ fn directory_put_writes_directorysizes_empty_prunes() {
 
 #[test]
 fn completions_stdout_matches_embedded_markers() {
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::NoTrash)
         .args(["completions", "bash"])
         .output()
         .unwrap();
@@ -2427,14 +2400,14 @@ fn completions_stdout_matches_embedded_markers() {
     assert!(s.contains("complete -F _rtrash_main rtrash"));
     assert!(s.contains("--home-only"));
 
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::NoTrash)
         .args(["completions", "zsh"])
         .output()
         .unwrap();
     assert!(out.status.success());
     assert!(stdout_of(&out).contains("#compdef"));
 
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::NoTrash)
         .args(["completions", "fish"])
         .output()
         .unwrap();
@@ -2448,7 +2421,10 @@ fn completions_stdout_matches_embedded_markers() {
 
 #[test]
 fn man_subcommand_prints_page() {
-    let out = Command::new(bin()).args(["man"]).output().unwrap();
+    let out = common::rtrash_real(common::Real::NoTrash)
+        .args(["man"])
+        .output()
+        .unwrap();
     assert!(out.status.success());
     let s = stdout_of(&out);
     assert!(s.contains(".TH RTRASH 1"));
@@ -2465,7 +2441,7 @@ fn setup_prefix_keeps_a_name_that_is_not_utf8() {
     let prefix = top.join(std::ffi::OsStr::from_bytes(b"p\xe9"));
     let mut arg = b"--prefix=".to_vec();
     arg.extend_from_slice(prefix.as_os_str().as_bytes());
-    let out = Command::new(bin())
+    let out = common::rtrash(&common::scratch_dir("setup-home", "bytes"))
         .arg("setup")
         .arg(std::ffi::OsStr::from_bytes(&arg))
         .arg("-f")
@@ -2488,7 +2464,7 @@ fn setup_installs_under_prefix() {
     ));
     let _ = fs::remove_dir_all(&prefix);
     let prefix_s = prefix.display().to_string();
-    let out = Command::new(bin())
+    let out = common::rtrash(&common::scratch_dir("setup-home", "prefix"))
         .args(["setup", &format!("--prefix={prefix_s}"), "-f", "-v"])
         .output()
         .unwrap();
@@ -2534,7 +2510,10 @@ fn setup_installs_under_prefix() {
 
 #[test]
 fn help_mentions_setup() {
-    let out = Command::new(bin()).args(["--help"]).output().unwrap();
+    let out = common::rtrash_real(common::Real::NoTrash)
+        .args(["--help"])
+        .output()
+        .unwrap();
     assert!(out.status.success());
     let s = stdout_of(&out);
     assert!(s.contains("setup"));
@@ -3067,11 +3046,9 @@ fn put_prunes_to_rtrash_max_size_but_keeps_its_own_items() {
     trash_aged(&sb, "old1", 40_000, 20);
     trash_aged(&sb, "old2", 40_000, 10);
     fs::write(sb.work().join("fresh"), vec![b'y'; 150_000]).unwrap();
-    let out = Command::new(bin())
+    let out = common::rtrash(&sb.root)
         .args(["put", "fresh"])
         .current_dir(sb.work())
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("HOME", &sb.root)
         .env("RTRASH_MAX_SIZE", "100K")
         .output()
         .unwrap();
@@ -3252,12 +3229,9 @@ fn environment_beats_the_config_file() {
     write_config(&sb, "[policy]\nmax_size = \"10K\"\n");
     fs::write(sb.work().join("fresh"), vec![b'y'; 50_000]).unwrap();
     // An empty RTRASH_MAX_SIZE turns the budget off.
-    let out = Command::new(bin())
+    let out = common::rtrash(&sb.root)
         .args(["put", "fresh"])
         .current_dir(sb.work())
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-        .env("HOME", &sb.root)
         .env("RTRASH_MAX_SIZE", "")
         .output()
         .unwrap();
@@ -3268,11 +3242,9 @@ fn environment_beats_the_config_file() {
     let other = sb.root.join("other.toml");
     fs::write(&other, "[list]\nsort = \"bogus\"\n").unwrap();
     let run = |cfg: &Path, args: &[&str]| {
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(args)
             .current_dir(sb.work())
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("HOME", &sb.root)
             .env("RTRASH_CONFIG", cfg)
             .output()
             .unwrap()
@@ -3324,12 +3296,9 @@ fn environment_beats_the_config_file() {
 /// Linux only: macOS file systems refuse names that are not UTF-8.
 #[cfg(target_os = "linux")]
 fn run_os(sb: &Sandbox, args: &[&std::ffi::OsStr]) -> Output {
-    Command::new(bin())
+    common::rtrash(&sb.root)
         .args(args)
         .current_dir(sb.work())
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-        .env("HOME", &sb.root)
         .output()
         .expect("failed to run rtrash")
 }
@@ -3637,12 +3606,9 @@ fn copies_across_devices_keep_posix_acls() {
     };
     let pin = format!("--trash-dir={}", other.display());
     let run = |args: &[&str]| {
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(args)
             .current_dir(sb.work())
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .output()
             .unwrap()
     };
@@ -3736,12 +3702,9 @@ fn copies_across_volumes_keep_macos_acls() {
     };
     let pin = format!("--trash-dir={}", other.display());
     let run = |args: &[&str]| {
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(args)
             .current_dir(sb.work())
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .output()
             .unwrap()
     };
@@ -3803,12 +3766,9 @@ fn put_across_devices_keeps_the_target_from_filling() {
     };
     fs::write(sb.work().join("big"), vec![b'x'; 4096]).unwrap();
     let pin = format!("--trash-dir={}", other.display());
-    let out = Command::new(bin())
+    let out = common::rtrash(&sb.root)
         .args(["put", &pin, "big"])
         .current_dir(sb.work())
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-        .env("HOME", &sb.root)
         .env("RTRASH_MIN_FREE", "1000000T")
         .output()
         .unwrap();
@@ -3822,12 +3782,9 @@ fn put_across_devices_keeps_the_target_from_filling() {
     assert_eq!(fs::read_dir(other.join("files")).unwrap().count(), 0);
     assert_eq!(fs::read_dir(other.join("info")).unwrap().count(), 0);
 
-    let out = Command::new(bin())
+    let out = common::rtrash(&sb.root)
         .args(["put", "--no-space-check", &pin, "big"])
         .current_dir(sb.work())
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-        .env("HOME", &sb.root)
         .env("RTRASH_MIN_FREE", "1000000T")
         .output()
         .unwrap();
@@ -3884,7 +3841,7 @@ impl Holder {
         // Wait until the shell has opened the file and become sleep.
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(5) {
-            let out = Command::new(bin())
+            let out = common::rtrash_real(common::Real::NoTrash)
                 .args(["who", "--json"])
                 .arg(path)
                 .output()
@@ -3949,12 +3906,9 @@ fn put_warns_about_an_open_file_and_refuses_it_on_request() {
         "{err}"
     );
     assert!(held.exists());
-    let out = Command::new(bin())
+    let out = common::rtrash(&sb.root)
         .args(["put", &pin, "held.log"])
         .current_dir(sb.work())
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-        .env("HOME", &sb.root)
         .env("RTRASH_IN_USE", "refuse")
         .output()
         .unwrap();
@@ -4123,11 +4077,8 @@ fn reap_watch_reaps_on_each_pass_and_needs_when_below() {
         "--permanent",
         tmp_arg,
     ];
-    let out = Command::new(bin())
+    let out = common::rtrash(&sb.root)
         .args(args)
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-        .env("HOME", &sb.root)
         .env("RTRASH_TEST_WATCH_ROUNDS", "2")
         .output()
         .unwrap();
@@ -4136,7 +4087,7 @@ fn reap_watch_reaps_on_each_pass_and_needs_when_below() {
     // While space is fine, ticks after the first skip the full pass after
     // one statfs per file system.
     let fresh = stale_file(&tmp, "new-old.txt");
-    let out = Command::new(bin())
+    let out = common::rtrash(&sb.root)
         .args([
             "reap",
             "--watch=1s",
@@ -4146,9 +4097,6 @@ fn reap_watch_reaps_on_each_pass_and_needs_when_below() {
             "-v",
             tmp_arg,
         ])
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-        .env("HOME", &sb.root)
         .env("RTRASH_TEST_WATCH_ROUNDS", "3")
         .output()
         .unwrap();
@@ -4392,11 +4340,8 @@ fn put_warns_when_the_trash_grows_past_the_warn_size() {
     let sb = Sandbox::new("put-warn");
     let put = |name: &str, limit: &str| {
         let f = write_at(&sb.root, &format!("work/{name}"), "some bytes");
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(["put", f.to_str().unwrap()])
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .env("RTRASH_WARN_SIZE", limit)
             .output()
             .unwrap()
@@ -4427,15 +4372,7 @@ fn put_warns_when_the_trash_grows_past_the_warn_size() {
 #[test]
 fn trash_stats_summarizes_each_trash_as_text_and_json() {
     let sb = Sandbox::new("trash-stats");
-    let run = |args: &[&str]| {
-        Command::new(bin())
-            .args(args)
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
-            .output()
-            .unwrap()
-    };
+    let run = |args: &[&str]| common::rtrash(&sb.root).args(args).output().unwrap();
     let small = write_at(&sb.root, "work/small.txt", "s");
     let big = write_at(&sb.root, "work/big.bin", &"b".repeat(200_000));
     let tree = write_at(&sb.root, "work/tree/a/b.txt", "t");
@@ -4530,10 +4467,8 @@ fn reap_when_below_stops_once_the_measured_space_is_back() {
         ];
         args.extend(extra.iter().map(|s| s.to_string()));
         args.push(tmp.to_str().unwrap().into());
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(&args)
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("HOME", &sb.root)
             .env("RTRASH_TEST_FS", &spec)
             .output()
             .unwrap()
@@ -4579,19 +4514,12 @@ fn reap_purge_trash_counts_the_inodes_each_item_frees() {
         write_at(&tree, &format!("f{i}"), "x");
     }
     let single = write_at(&sb.root, "work/single.txt", "s");
-    let env = |c: &mut Command| {
-        c.env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root);
-    };
-    let mut put = Command::new(bin());
+    let mut put = common::rtrash(&sb.root);
     put.args(["put", "-r", tree.to_str().unwrap()]);
-    env(&mut put);
     assert!(put.output().unwrap().status.success());
     common::next_trash_second();
-    let mut put = Command::new(bin());
+    let mut put = common::rtrash(&sb.root);
     put.args(["put", single.to_str().unwrap()]);
-    env(&mut put);
     assert!(put.output().unwrap().status.success());
     let info = sb.root.join("xdg/Trash/info");
     assert_eq!(fs::read_dir(&info).unwrap().count(), 2);
@@ -4599,7 +4527,7 @@ fn reap_purge_trash_counts_the_inodes_each_item_frees() {
     let n0 = count_entries(&sb.root);
     let pct = (1000 - n0 + 5).div_ceil(10);
     let spec = format!("{}:1000:{}", u64::MAX / 2, sb.root.display());
-    let mut reap = Command::new(bin());
+    let mut reap = common::rtrash(&sb.root);
     reap.args([
         "reap",
         &format!("--when-below=inodes={pct}%"),
@@ -4608,7 +4536,6 @@ fn reap_purge_trash_counts_the_inodes_each_item_frees() {
         tmp.to_str().unwrap(),
     ])
     .env("RTRASH_TEST_FS", &spec);
-    env(&mut reap);
     let out = reap.output().unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
@@ -4628,11 +4555,8 @@ fn reap_purge_trash_counts_the_inodes_each_item_frees() {
 fn put_keeps_a_running_trash_total_that_matches_a_full_count() {
     let sb = Sandbox::new("trash-total");
     let run = |args: &[&str]| {
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(args)
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .env_remove("RTRASH_WARN_SIZE")
             .env_remove("RTRASH_MAX_SIZE")
             .output()
@@ -4690,11 +4614,8 @@ fn put_keeps_a_running_trash_total_that_matches_a_full_count() {
 fn rm_carries_the_total_and_trash_stats_total_reads_it() {
     let sb = Sandbox::new("total-rm");
     let run = |args: &[&str]| {
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(args)
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .env_remove("RTRASH_WARN_SIZE")
             .env_remove("RTRASH_MAX_SIZE")
             .output()
@@ -4743,11 +4664,8 @@ fn rm_carries_the_total_and_trash_stats_total_reads_it() {
 fn restore_carries_a_total_stored_while_it_ran() {
     let sb = Sandbox::new("total-restore-midway");
     let run = |args: &[&str], midway: Option<&str>| {
-        let mut c = Command::new(bin());
+        let mut c = common::rtrash(&sb.root);
         c.args(args)
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .env_remove("RTRASH_WARN_SIZE")
             .env_remove("RTRASH_MAX_SIZE");
         if let Some(m) = midway {
@@ -4796,11 +4714,8 @@ fn restore_carries_a_total_stored_while_it_ran() {
 fn trash_stats_exit_low_flags_a_full_file_system() {
     let sb = Sandbox::new("total-exit-low");
     let run = |args: &[&str], total: u64| {
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(args)
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .env("RTRASH_TEST_FS", format!("{total}:{}", sb.root.display()))
             .env_remove("RTRASH_WARN_SIZE")
             .env_remove("RTRASH_MAX_SIZE")
@@ -4840,11 +4755,8 @@ fn trash_stats_exit_low_flags_a_full_file_system() {
 fn empty_until_free_removes_the_oldest_until_there_is_room() {
     let sb = Sandbox::new("until-free");
     let run = |args: &[&str], total: u64| {
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(args)
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .env("RTRASH_TEST_FS", format!("{total}:{}", sb.root.display()))
             .env_remove("RTRASH_WARN_SIZE")
             .env_remove("RTRASH_MAX_SIZE")
@@ -4936,11 +4848,8 @@ fn empty_until_free_removes_the_oldest_until_there_is_room() {
 fn empty_dangling_carries_the_total() {
     let sb = Sandbox::new("total-dangling");
     let run = |args: &[&str]| {
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(args)
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .env_remove("RTRASH_WARN_SIZE")
             .env_remove("RTRASH_MAX_SIZE")
             .output()
@@ -4994,11 +4903,8 @@ fn empty_dangling_carries_the_total() {
 fn empty_restore_and_prune_keep_the_running_trash_total_current() {
     let sb = Sandbox::new("trash-total-keep");
     let run = |args: &[&str]| {
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(args)
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .env_remove("RTRASH_WARN_SIZE")
             .env_remove("RTRASH_MAX_SIZE")
             .output()
@@ -5092,11 +4998,9 @@ fn status_warns_from_the_test_file_system_and_stops_once_it_is_freed() {
         if json {
             args.push("--json");
         }
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(&args)
             .env("XDG_DATA_HOME", &xdg)
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .env("RTRASH_TEST_FS", format!("1000000:{}", xdg.display()))
             .output()
             .unwrap()
@@ -5394,11 +5298,9 @@ fn reap_timer_status_reports_what_the_service_manager_says() {
         std::env::var("PATH").unwrap_or_default()
     );
     let run = |args: &[&str]| {
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(args)
             .current_dir(sb.work())
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .env("PATH", &path)
             .output()
             .unwrap()
@@ -5481,15 +5383,12 @@ fn fake_service_tool(sb: &Sandbox) -> PathBuf {
 }
 
 fn reap_cmd(sb: &Sandbox, args: &[&str]) -> Output {
-    let mut c = Command::new(bin());
+    let mut c = common::rtrash(&sb.root);
     #[cfg(unix)]
     c.env("RTRASH_TEST_SERVICE_TOOL", fake_service_tool(sb));
     c.args(args)
         .current_dir(sb.work())
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
         .env("XDG_CACHE_HOME", sb.root.join(".cache"))
-        .env("HOME", &sb.root)
         .env("TMPDIR", sb.root.join("tmp"))
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("CARGO_HOME")
@@ -5794,7 +5693,7 @@ fn reap_profiles_take_torch_partials_and_compile_caches() {
     fs::create_dir_all(&compiled).unwrap();
     age_tree(&inductor);
     age_tree(&compiled);
-    let out = Command::new(bin())
+    let out = common::rtrash(&sb.root)
         .args([
             "reap",
             "-n",
@@ -5806,9 +5705,6 @@ fn reap_profiles_take_torch_partials_and_compile_caches() {
             "-p",
             "vllm",
         ])
-        .env("HOME", &sb.root)
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
         .env("TMPDIR", &tmp)
         .env_remove("TORCH_HOME")
         .env_remove("VLLM_CACHE_ROOT")
@@ -5838,7 +5734,7 @@ fn reap_profiles_take_triton_and_jax_caches() {
     let fresh = triton.join("fresh");
     fs::create_dir_all(&fresh).unwrap();
     let compiled = stale_file(&jax, "jit_f-abc123-cache");
-    let out = Command::new(bin())
+    let out = common::rtrash(&sb.root)
         .args([
             "reap",
             "-n",
@@ -5850,9 +5746,6 @@ fn reap_profiles_take_triton_and_jax_caches() {
             "-p",
             "jax",
         ])
-        .env("HOME", &sb.root)
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
         .env_remove("TRITON_CACHE_DIR")
         .env_remove("JAX_COMPILATION_CACHE_DIR")
         .output()
@@ -6079,7 +5972,7 @@ fn reap_roots_find_cargo_targets_outside_home_to_the_set_depth() {
     write_at(&ws, "a/b/c/d/e/p2/target/.rustc_info.json", "{}");
     age_tree(&ws);
     let run = |extra: &[&str], env_roots: Option<&Path>| {
-        let mut c = Command::new(bin());
+        let mut c = common::rtrash(&home);
         c.args([
             "reap",
             "-p",
@@ -6090,9 +5983,6 @@ fn reap_roots_find_cargo_targets_outside_home_to_the_set_depth() {
             "--json",
         ])
         .args(extra)
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("XDG_DATA_HOME", home.join("xdg"))
         .env("TMPDIR", home.join("tmp"))
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("RTRASH_REAP_ROOTS");
@@ -6202,12 +6092,9 @@ fn history_counts_stay_right_when_every_change_shares_a_clock_tick() {
     let sb = Sandbox::new("coarse-tick");
     // About eleven days a tick: the whole test runs in one.
     let run = |args: &[&str]| {
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(args)
             .current_dir(sb.work())
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .env("RTRASH_TEST_STAMP_TICK", "1000000000000000")
             .output()
             .unwrap()
@@ -6261,12 +6148,9 @@ fn history_counts_stay_right_when_every_change_shares_a_clock_tick() {
     let e = file("e");
     assert!(run(&["put", e.to_str().unwrap()]).status.success());
     assert_eq!(last_items(), 2, "put e");
-    let out = Command::new(bin())
+    let out = common::rtrash(&sb.root)
         .args(["empty", "--home-only", "--all"])
         .current_dir(sb.work())
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-        .env("HOME", &sb.root)
         .env("RTRASH_TEST_STAMP_TICK", "1000000000000000")
         .env("RTRASH_TEST_FAIL_DELETE", "e")
         .output()
@@ -6413,11 +6297,8 @@ fn put_verbose_names_the_trash_directory() {
 fn put_warns_when_the_trash_file_system_is_low() {
     let sb = Sandbox::new("put-low");
     let f = write_at(&sb.root, "work/big.bin", &"b".repeat(90_000));
-    let out = Command::new(bin())
+    let out = common::rtrash(&sb.root)
         .args(["put", "--home-only", f.to_str().unwrap()])
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-        .env("HOME", &sb.root)
         .env_remove("RTRASH_WARN_SIZE")
         .env_remove("RTRASH_MAX_SIZE")
         .env("RTRASH_TEST_FS", format!("100000:{}", sb.root.display()))
@@ -6674,12 +6555,9 @@ fn no_permanent_guard_refuses_rm_and_empty_but_not_dry_runs() {
     sb.touch("keep.txt");
     assert!(sb.run(&["put", "keep.txt"]).status.success());
     let guarded = |args: &[&str]| {
-        Command::new(bin())
+        common::rtrash(&sb.root)
             .args(args)
             .current_dir(sb.work())
-            .env("XDG_DATA_HOME", sb.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-            .env("HOME", &sb.root)
             .env("RTRASH_NO_PERMANENT", "1")
             .output()
             .expect("run rtrash")
@@ -6700,12 +6578,9 @@ fn no_permanent_guard_refuses_rm_and_empty_but_not_dry_runs() {
     let dry = guarded(&["rm", &pin, "-n", "keep.txt"]);
     assert!(dry.status.success(), "{}", stderr_of(&dry));
     // "0" leaves the guard off.
-    let off = Command::new(bin())
+    let off = common::rtrash(&sb.root)
         .args(["rm", &pin, "keep.txt"])
         .current_dir(sb.work())
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
-        .env("HOME", &sb.root)
         .env("RTRASH_NO_PERMANENT", "0")
         .output()
         .unwrap();
@@ -6722,11 +6597,9 @@ fn no_permanent_guard_keeps_items_the_put_cap_would_drop() {
     trash_aged(&sb, "old1", 40_000, 20);
     trash_aged(&sb, "old2", 40_000, 10);
     fs::write(sb.work().join("fresh"), vec![b'y'; 150_000]).unwrap();
-    let out = Command::new(bin())
+    let out = common::rtrash(&sb.root)
         .args(["put", "fresh"])
         .current_dir(sb.work())
-        .env("XDG_DATA_HOME", sb.root.join("xdg"))
-        .env("HOME", &sb.root)
         .env("RTRASH_MAX_SIZE", "100K")
         .env("RTRASH_NO_PERMANENT", "1")
         .output()

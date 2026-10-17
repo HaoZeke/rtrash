@@ -462,6 +462,45 @@ def check_refusal_helpers():
                               "use common::OUTSIDE or common::outside_lines")
 
 
+# Unpinned rtrash runs still left per test file, not yet on common::rtrash.
+# The count may only go down: lower it (or drop the file) as callers move.
+UNPINNED_LEFT = {
+    "tests/completions_parity.rs": 6,
+    "tests/du.rs": 7,
+    "tests/finder_default.rs": 7,
+    "tests/odd_names.rs": 1,
+    "tests/reflink_fs.rs": 1,
+    "tests/trash_hostile.rs": 1,
+    "tests/tui_logic.rs": 1,
+    "tests/windows_completions.rs": 6,
+    "tests/windows_mount.rs": 15,
+    "tests/windows_names.rs": 23,
+    "tests/windows_process.rs": 1,
+    "tests/windows_space.rs": 29,
+    "tests/wsl_bin.rs": 4,
+}
+UNPINNED = re.compile(r'Command::new\(\s*(?:bin\(\)|env!\("CARGO_BIN_EXE_rtrash"\)|rtrash)\s*\)')
+
+
+def check_rtrash_pinned():
+    """A test runs rtrash through common::rtrash(home), which pins HOME, the
+    XDG folders and the macOS trash choice, or common::rtrash_real(why). A
+    bare Command::new of the binary reaches the developer's own trash (on
+    macOS the Finder Trash). Files not yet moved over have a fixed allowance."""
+    for path in sorted((ROOT / "tests").glob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        hits = [n for n, l in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+                if not l.lstrip().startswith("//") for _ in UNPINNED.findall(l)]
+        allowed = UNPINNED_LEFT.get(rel, 0)
+        if len(hits) > allowed:
+            where = ", ".join(str(n) for n in hits)
+            errors.append(f"{rel}: {len(hits)} bare Command::new of rtrash (allowed {allowed}; lines {where}); "
+                          "use common::rtrash(home), or common::rtrash_real(Real::...) for the real trash")
+        elif len(hits) < allowed:
+            errors.append(f"{rel}: {len(hits)} bare Command::new of rtrash, fewer than the {allowed} "
+                          "UNPINNED_LEFT allows; lower it in scripts/precheck.py")
+
+
 def check_rustfmt():
     """`cargo fmt --check` when a toolchain is there; three rounds in a row
     (170-172) needed a format-only amend after CI."""
@@ -483,7 +522,7 @@ def check_rustfmt():
 def main():
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps()
-    check_fn_params(); check_permanent_gate(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers()
+    check_fn_params(); check_permanent_gate(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned()
     check_long_lines(base); check_removed_literals(base)
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
