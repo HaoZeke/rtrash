@@ -171,6 +171,7 @@ directories appear as one `trash` row and are never printed by --print0.
       --dupes           list groups of files with the same contents (size,
                           then edge hash, then full hash); hard links count
                           once, reflinks free nothing; the oldest file stays
+                          (online-only cloud files are never read)
       --trash-dupes     trash every copy but the kept one in each group
       --clone-dupes     replace every copy but the kept one with a reflink
                           clone of it, keeping its mode, owner and times
@@ -1973,7 +1974,14 @@ fn dupes_out(
             include_kernfs: opts.include_kernfs,
         },
     );
-    let groups = crate::du_dupes::find(files);
+    let (groups, cloud) = crate::du_dupes::find(files);
+    // On stderr, so --json and --print0 stay as they were.
+    if cloud > 0 {
+        eprintln!(
+            "{prog}: did not read {}; hashing would download the data from the cloud",
+            crate::util::plural(cloud, "online-only file", "online-only files")
+        );
+    }
     if json {
         println!("{}", crate::du_dupes::to_json(&groups));
         return 0;

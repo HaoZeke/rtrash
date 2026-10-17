@@ -1822,6 +1822,18 @@ then by a full hash.
 Hard links to one inode count once; shared reflink extents free nothing.
 The oldest file in each group is kept (ties go to the shortest path).
 Trash directories are skipped.
+Cloud placeholders are never read, since reading one downloads it:
+on Windows a file marked
+.B FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+(a OneDrive online-only file),
+.B FILE_ATTRIBUTE_OFFLINE
+or, in the directory listing,
+.BR FILE_ATTRIBUTE_RECALL_ON_OPEN ;
+on macOS a file whose flags carry
+.B SF_DATALESS
+(an iCloud Drive file not yet on the Mac).
+Such a file leaves its size group, and a line on standard error counts
+the ones that shared a size with another file.
 With \fB\-\-json\fR, each group has \fIsize\fR, \fIreclaim\fR, \fIkeep\fR,
 \fIkeep_links\fR, \fIextras\fR and \fIextra_links\fR; \fItotal\fR sums them.
 With \fB\-\-print0\fR, the extras and their links are printed.

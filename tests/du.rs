@@ -2625,6 +2625,57 @@ fn dupes_find_copies_and_trash_all_but_one() {
     assert!(after.contains(r#""total":{"groups":0,"#), "{after}");
 }
 
+/// `--dupes` never reads a file whose data a read would fetch, and says
+/// how many it left. The Cloud Files bit (RECALL_ON_DATA_ACCESS, set on
+/// OneDrive online-only files) is kernel-only, so this sets OFFLINE, the
+/// hierarchical storage bit that user code may set and that means the
+/// same to the walk.
+#[cfg(windows)]
+#[test]
+fn dupes_leave_offline_files_unread_on_windows() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_OFFLINE, INVALID_FILE_ATTRIBUTES,
+    };
+    let t = Tree::new("dupes-offline");
+    t.file("a.bin", 50_000);
+    t.file("b.bin", 50_000);
+    let off = t.file("c.bin", 50_000);
+    let wide: Vec<u16> = off.as_os_str().encode_wide().chain([0]).collect();
+    // SAFETY: `wide` is a NUL-terminated path that outlives both calls.
+    let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    assert_ne!(attrs, INVALID_FILE_ATTRIBUTES);
+    // SAFETY: as above.
+    let set = unsafe { SetFileAttributesW(wide.as_ptr(), attrs | FILE_ATTRIBUTE_OFFLINE) };
+    assert_ne!(set, 0, "{}", std::io::Error::last_os_error());
+    let out = t.du(&["--dupes", "--json", "--min-size=1k"]);
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    );
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stdout.contains(r#""total":{"groups":1,"extras":1,"#),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("c.bin"), "{stdout}");
+    assert!(
+        stderr.contains("did not read 1 online-only file; hashing would download"),
+        "{stderr}"
+    );
+    // Without the bit the third copy is read and joins the group.
+    // SAFETY: as above.
+    assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), attrs) }, 0);
+    let out = t.du(&["--dupes", "--json", "--min-size=1k"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        stdout.contains(r#""total":{"groups":1,"extras":2,"#),
+        "{stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("did not read"), "{stderr}");
+}
+
 #[test]
 fn link_dupes_turns_copies_into_hard_links_of_the_kept_file() {
     let t = Tree::new("dupes-link");

@@ -11,6 +11,11 @@
 //! In each group the oldest file (by modification time, then the shortest
 //! path) is the one to keep; the others are the extras that `--print0`
 //! lists and `--trash-dupes` moves to the trash.
+//!
+//! A cloud placeholder (a OneDrive online-only file on Windows, an iCloud
+//! dataless file on macOS) keeps its full size but not its data, and
+//! reading it downloads it. Such files are never read: they leave their
+//! size group, and [`find`] counts them.
 
 use std::collections::HashMap;
 use std::fs;
@@ -37,6 +42,49 @@ pub struct File {
     /// Other names of the same inode under the scanned paths: removing
     /// the file frees its space only once they go too.
     pub links: Vec<PathBuf>,
+    /// Windows: the directory listing marked the file as a placeholder
+    /// whose data a read would fetch (`cloud_attributes`). macOS asks
+    /// its flags in [`find`], for the files it would read.
+    pub cloud: bool,
+}
+
+/// Windows attributes of a file whose data is not on the local disk.
+/// `RECALL_ON_DATA_ACCESS` is what the Cloud Files API (OneDrive and the
+/// like) sets on an online-only file, and only the kernel can set it;
+/// `OFFLINE` marks data moved away by hierarchical storage. Both mean a
+/// read fetches the data. `RECALL_ON_OPEN` counts only in a directory
+/// listing (`enumerated`): elsewhere the same bit means extended
+/// attributes.
+#[cfg(any(windows, test))]
+fn cloud_attributes(attrs: u32, enumerated: bool) -> bool {
+    const OFFLINE: u32 = 0x1000;
+    const RECALL_ON_OPEN: u32 = 0x4_0000;
+    const RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
+    let mut bits = OFFLINE | RECALL_ON_DATA_ACCESS;
+    if enumerated {
+        bits |= RECALL_ON_OPEN;
+    }
+    attrs & bits != 0
+}
+
+/// macOS `st_flags` of a dataless file: iCloud Drive keeps the name and
+/// size but fetches the data on first read. Only the system sets it.
+#[cfg(any(target_os = "macos", test))]
+fn dataless_flags(flags: u32) -> bool {
+    const SF_DATALESS: u32 = 0x4000_0000;
+    flags & SF_DATALESS != 0
+}
+
+/// Whether reading `f` would download it.
+fn placeholder(f: &File) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        if fs::symlink_metadata(&f.path).is_ok_and(|m| dataless_flags(m.st_flags())) {
+            return true;
+        }
+    }
+    f.cloud
 }
 
 /// One set of files with the same contents.
@@ -89,7 +137,15 @@ pub fn walk(roots: &[PathBuf], opts: Opts) -> Vec<File> {
                 return Vec::new();
             };
             if st.is_file() {
-                return file_of(r, &st, opts).into_iter().collect();
+                let f = file_of(r, &st, opts);
+                #[cfg(windows)]
+                let f = f.map(|mut f| {
+                    use std::os::windows::fs::MetadataExt;
+                    f.cloud = fs::symlink_metadata(r)
+                        .is_ok_and(|m| cloud_attributes(m.file_attributes(), false));
+                    f
+                });
+                return f.into_iter().collect();
             }
             if !st.is_dir() {
                 return Vec::new();
@@ -108,6 +164,7 @@ fn file_of(path: &Path, st: &du_fs::Stat, opts: Opts) -> Option<File> {
         ino: st.ino,
         mtime: st.mtime,
         links: Vec::new(),
+        cloud: false,
     })
 }
 
@@ -126,7 +183,17 @@ fn walk_dir(dir: &Path, root_dev: u64, opts: Opts, home: Option<(u64, u64)>) -> 
             }
         } else if t.is_file() {
             if let Ok(st) = du_fs::lstat(&p) {
-                files.extend(file_of(&p, &st, opts));
+                let f = file_of(&p, &st, opts);
+                // The listing has the attributes already, at no cost.
+                #[cfg(windows)]
+                let f = f.map(|mut f| {
+                    use std::os::windows::fs::MetadataExt;
+                    f.cloud = e
+                        .metadata()
+                        .is_ok_and(|m| cloud_attributes(m.file_attributes(), true));
+                    f
+                });
+                files.extend(f);
             }
         }
     }
@@ -248,14 +315,25 @@ fn freed(f: &File) -> u64 {
     f.disk
 }
 
-/// The groups of duplicate files among `files`, largest reclaim first.
-pub fn find(files: Vec<File>) -> Vec<Group> {
+/// The groups of duplicate files among `files`, largest reclaim first,
+/// and how many cloud placeholders of a shared size were left unread.
+pub fn find(files: Vec<File>) -> (Vec<Group>, u64) {
     let files = one_per_inode(files);
     let mut by_size: HashMap<u64, Vec<File>> = HashMap::new();
     for f in files {
         by_size.entry(f.size).or_default().push(f);
     }
-    let same_size: Vec<Vec<File>> = by_size.into_values().filter(|v| v.len() > 1).collect();
+    let mut cloud = 0u64;
+    let same_size: Vec<Vec<File>> = by_size
+        .into_values()
+        .filter(|v| v.len() > 1)
+        .map(|v| {
+            let (skip, read): (Vec<File>, Vec<File>) = v.into_par_iter().partition(placeholder);
+            cloud += skip.len() as u64;
+            read
+        })
+        .filter(|v| v.len() > 1)
+        .collect();
     let same_edges = regroup(same_size, edges);
     // A file no longer than both edges is already read in full.
     let (small, big): (Vec<_>, Vec<_>) = same_edges
@@ -289,7 +367,7 @@ pub fn find(files: Vec<File>) -> Vec<Group> {
             .then(b.size.cmp(&a.size))
             .then_with(|| a.keep.path.cmp(&b.keep.path))
     });
-    groups
+    (groups, cloud)
 }
 
 fn json_str(p: &Path) -> String {
@@ -717,7 +795,8 @@ mod tests {
             one_file_system: false,
             include_kernfs: false,
         };
-        let groups = find(walk(std::slice::from_ref(&t), opts));
+        let (groups, cloud) = find(walk(std::slice::from_ref(&t), opts));
+        assert_eq!(cloud, 0);
         assert_eq!(groups.len(), 2, "{groups:?}");
         let big_g = groups.iter().find(|g| g.size == 20_000).unwrap();
         assert_eq!(big_g.extras.len(), 1, "{big_g:?}");
@@ -730,6 +809,72 @@ mod tests {
         assert_eq!(small.extras.len(), 1);
         let j = to_json(&groups);
         assert!(j.contains(r#""total":{"groups":2,"extras":2,"#), "{j}");
+        let _ = fs::remove_dir_all(&t);
+    }
+
+    /// The attribute and flag bits that mean a read downloads the data,
+    /// and the neighbours that do not. RECALL_ON_DATA_ACCESS and
+    /// SF_DATALESS can only be set by the system, so their walks cannot
+    /// be tested; the Windows OFFLINE walk is in tests/du.rs.
+    #[test]
+    fn placeholder_bits_are_the_recall_and_dataless_ones() {
+        for (attrs, enumerated, cloud) in [
+            (0x40_0000, false, true), // RECALL_ON_DATA_ACCESS
+            (0x40_0420, true, true),  // the same with REPARSE_POINT and ARCHIVE
+            (0x1000, false, true),    // OFFLINE
+            (0x4_0000, true, true),   // RECALL_ON_OPEN, from a listing
+            (0x4_0000, false, false), // the same bit elsewhere: EA
+            (0x8_0000, true, false),  // PINNED
+            (0x10_0000, true, false), // UNPINNED alone: the data is here
+            (0x620, true, false),     // SPARSE, REPARSE_POINT, ARCHIVE
+            (0, true, false),
+        ] {
+            assert_eq!(
+                cloud_attributes(attrs, enumerated),
+                cloud,
+                "{attrs:#x} {enumerated}"
+            );
+        }
+        assert!(dataless_flags(0x4000_0000));
+        assert!(dataless_flags(0x4000_8020));
+        for flags in [0, 0x20, 0x8000, 0x8000_0000] {
+            assert!(!dataless_flags(flags), "{flags:#x}");
+        }
+    }
+
+    /// A placeholder leaves its size group unread and is counted; a
+    /// group left with one file goes, and a placeholder of a size no
+    /// other file has is not counted, since it would not be read.
+    #[test]
+    fn find_leaves_placeholders_unread_and_counts_them() {
+        let t = tree("cloud");
+        let same = vec![5u8; 9000];
+        for name in ["a.bin", "b.bin", "c.bin"] {
+            fs::write(t.join(name), &same).unwrap();
+        }
+        fs::write(t.join("a/d.bin"), vec![6u8; 7000]).unwrap();
+        fs::write(t.join("a/e.bin"), vec![6u8; 7000]).unwrap();
+        fs::write(t.join("a/b/alone.bin"), vec![7u8; 333]).unwrap();
+        let opts = Opts {
+            min_size: 1,
+            one_file_system: false,
+            include_kernfs: false,
+        };
+        let mut files = walk(std::slice::from_ref(&t), opts);
+        assert!(files.iter().all(|f| !f.cloud), "{files:?}");
+        for f in &mut files {
+            let name = f.path.file_name().unwrap().to_string_lossy();
+            f.cloud = ["c.bin", "e.bin", "alone.bin"].contains(&name.as_ref());
+        }
+        let (groups, cloud) = find(files);
+        assert_eq!(cloud, 2, "{groups:?}");
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        let mut names: Vec<_> = std::iter::once(&groups[0].keep)
+            .chain(&groups[0].extras)
+            .map(|f| f.path.file_name().unwrap().to_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a.bin", "b.bin"]);
         let _ = fs::remove_dir_all(&t);
     }
 }
