@@ -227,6 +227,8 @@ struct App {
     filter: String,
     /// Whether `.` hides names that start with a dot, in every view.
     hide_dots: bool,
+    /// What each row shows of its share of the view (`%` cycles it).
+    share: Share,
     /// Paths `p` prints on stdout once the explorer has closed.
     print_on_exit: Vec<PathBuf>,
     /// Text `y` sends to the terminal clipboard on the next draw.
@@ -637,6 +639,7 @@ impl App {
             info: Vec::new(),
             filter: String::new(),
             hide_dots: false,
+            share: Share::Bar,
             print_on_exit: Vec::new(),
             clipboard: None,
             hand_off: None,
@@ -1394,6 +1397,13 @@ impl App {
         self.hide_dots || !self.filter.is_empty()
     }
 
+    /// Show the next of bar, percent, both and neither on the rows, as
+    /// ncdu's `g` does.
+    fn cycle_share(&mut self) {
+        self.share = self.share.next();
+        self.status = format!("rows show {} · % changes it", self.share.label());
+    }
+
     /// Hide names that start with a dot, or show them again.
     fn toggle_dots(&mut self) {
         self.hide_dots = !self.hide_dots;
@@ -1664,6 +1674,7 @@ impl App {
                         KeyCode::Char('v') => return self.view_file(),
                         KeyCode::Char('o') => return self.open_row(),
                         KeyCode::Char('.') => return self.toggle_dots(),
+                        KeyCode::Char('%') => return self.cycle_share(),
                         _ => {}
                     }
                 }
@@ -1926,6 +1937,71 @@ fn fit_left(s: &str, max: usize) -> String {
     format!("…{keep}")
 }
 
+/// How a row shows its share of the view's total: ncdu's graph,
+/// percentage, both, or neither (its `g` key; here `%`, as `g` jumps to
+/// the first row).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Share {
+    Bar,
+    Percent,
+    Both,
+    Neither,
+}
+
+impl Share {
+    fn next(self) -> Share {
+        match self {
+            Share::Bar => Share::Percent,
+            Share::Percent => Share::Both,
+            Share::Both => Share::Neither,
+            Share::Neither => Share::Bar,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Share::Bar => "the share bar",
+            Share::Percent => "the share in percent",
+            Share::Both => "the share in percent and as a bar",
+            Share::Neither => "no share",
+        }
+    }
+
+    /// The share columns of a row, each with the space after it: a
+    /// six-cell percent such as ` 12.5%`, then a bar in brackets. With
+    /// `blank` (a size still coming), the same width of spaces.
+    fn cols(self, part: u64, whole: u64, blank: bool) -> String {
+        let mut out = String::new();
+        if matches!(self, Share::Percent | Share::Both) {
+            if blank {
+                out.push_str(&" ".repeat(7));
+            } else {
+                out.push_str(&format!("{} ", percent(part, whole)));
+            }
+        }
+        if matches!(self, Share::Bar | Share::Both) {
+            let cells = if blank {
+                " ".repeat(10)
+            } else {
+                bar(part, whole, 10)
+            };
+            out.push_str(&format!("[{cells}] "));
+        }
+        out
+    }
+}
+
+/// `part` of `whole` in six cells, one decimal: `  0.0%` up to `100.0%`.
+/// An empty view gives `  0.0%`.
+fn percent(part: u64, whole: u64) -> String {
+    let pct = if whole == 0 {
+        0.0
+    } else {
+        (part as f64 * 100.0 / whole as f64).min(100.0)
+    };
+    format!("{pct:>5.1}%")
+}
+
 /// Bar of `width` cells for `part` of `whole`.
 fn bar(part: u64, whole: u64, width: usize) -> String {
     let filled = if whole == 0 {
@@ -1946,6 +2022,7 @@ fn row_text(it: &Item, marked: bool, whole: u64, sort: SortKey) -> String {
         pending: false,
         whole_path: false,
         unread: &[],
+        share: Share::Bar,
     };
     row_text_in(it, marked, &ctx)
 }
@@ -1964,6 +2041,8 @@ struct RowCtx<'a> {
     /// The view's unreadable entries, for the `unreadable` and
     /// `incomplete` badges.
     unread: &'a du::Unread,
+    /// What each row shows of its share of `whole`.
+    share: Share,
 }
 
 /// [`row_text`] with the view's [`RowCtx`].
@@ -1975,6 +2054,7 @@ fn row_text_in(it: &Item, marked: bool, ctx: &RowCtx) -> String {
         pending,
         whole_path,
         unread,
+        share,
     } = ctx;
     let name = if whole_path {
         it.path.to_string_lossy()
@@ -1983,7 +2063,7 @@ fn row_text_in(it: &Item, marked: bool, ctx: &RowCtx) -> String {
     };
     if pending && it.is_dir {
         let mark = if marked { "[x]" } else { "[ ]" };
-        return format!("{mark} {:>10} [{}] {name}/", "…", " ".repeat(10));
+        return format!("{mark} {:>10} {}{name}/", "…", share.cols(0, 0, true));
     }
     let mark = if marked { "[x]" } else { "[ ]" };
     let risky = it.git.as_ref().is_some_and(|(s, _)| s.is_risky());
@@ -2019,9 +2099,9 @@ fn row_text_in(it: &Item, marked: bool, ctx: &RowCtx) -> String {
         format!("  [{}]", badges.join(" "))
     };
     format!(
-        "{mark}{warn}{:>10} [{}] {name}{slash}{badges}",
+        "{mark}{warn}{:>10} {}{name}{slash}{badges}",
         format_bytes(key_of(it, apparent)),
-        bar(key_of(it, apparent), whole, 10)
+        share.cols(key_of(it, apparent), whole, false)
     )
 }
 
@@ -2086,6 +2166,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         pending: view.scanning,
         whole_path: is_top_of_roots(&app.cur),
         unread: &view.unread,
+        share: app.share,
     };
     let items: Vec<ListItem> = view
         .rows
@@ -2257,6 +2338,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 },
                 "v — show the cursor file in $PAGER · o — open the row with its default program",
                 ". — hide names that start with a dot, or show them again",
+                "% — show each row's share as a bar, in percent, both, or neither",
                 "/ — show only rows whose name matches (a part, or a glob with * ? [); Esc clears",
                 "! — git work at risk (dirty, unpushed or unknown)",
             ],
@@ -2815,6 +2897,77 @@ mod tests {
     }
 
     #[test]
+    fn rows_show_the_share_as_bar_percent_both_or_neither() {
+        let it = Item {
+            path: PathBuf::from("/x/half"),
+            is_dir: true,
+            apparent: 0,
+            disk: 512,
+            mtime: 0,
+            items: 1,
+            artefact: None,
+            repos: Vec::new(),
+            git: None,
+            unique: None,
+        };
+        let text = |share: Share, pending: bool| {
+            let ctx = RowCtx {
+                whole: 1024,
+                sort: SortKey::Disk,
+                apparent: false,
+                pending,
+                whole_path: false,
+                unread: &[],
+                share,
+            };
+            row_text_in(&it, false, &ctx)
+        };
+        let size = format_bytes(512);
+        assert!(text(Share::Bar, false).ends_with(&format!("{size} [#####     ] half/")));
+        assert!(text(Share::Percent, false).ends_with(&format!("{size}  50.0% half/")));
+        assert!(text(Share::Both, false).ends_with(&format!("{size}  50.0% [#####     ] half/")));
+        assert!(text(Share::Neither, false).ends_with(&format!("{size} half/")));
+        // A size still coming keeps the columns where they will be.
+        for share in [Share::Bar, Share::Percent, Share::Both, Share::Neither] {
+            let (done, coming) = (text(share, false), text(share, true));
+            assert_eq!(
+                done.chars().count(),
+                coming.chars().count(),
+                "{done:?} {coming:?}"
+            );
+            assert!(!coming.contains('%') && !coming.contains('#'), "{coming:?}");
+        }
+        assert_eq!(percent(0, 0), "  0.0%");
+        assert_eq!(percent(5, 1000), "  0.5%");
+        assert_eq!(percent(1, 3), " 33.3%");
+        assert_eq!(percent(1024, 1024), "100.0%");
+        assert_eq!(percent(u64::MAX, 1), "100.0%");
+    }
+
+    #[test]
+    fn percent_key_cycles_the_share_columns() {
+        let t = tree("share");
+        let mut a = app(&t);
+        a.keys = Keymap::builtin();
+        let rows = |a: &mut App| tui_term::render_text(100, 14, |f| ui(f, a));
+        assert!(rows(&mut a).contains("] big/"));
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            a.on_key(KeyCode::Char('%'), KeyModifiers::SHIFT);
+            assert!(a.status.starts_with("rows show "), "{}", a.status);
+            let text = rows(&mut a);
+            let percent = text.contains("% big/") || text.contains("% [");
+            seen.push((percent, text.contains("] big/")));
+        }
+        // Percent, both, neither, then the bar again.
+        assert_eq!(
+            seen,
+            [(true, false), (true, true), (false, false), (false, true)]
+        );
+        assert_eq!(a.share, Share::Bar);
+    }
+
+    #[test]
     fn row_badges_carry_the_read_marks() {
         let it = |path: &str, is_dir: bool| Item {
             path: PathBuf::from(path),
@@ -2836,6 +2989,7 @@ mod tests {
                 pending: false,
                 whole_path: false,
                 unread,
+                share: Share::Bar,
             };
             row_text_in(row, false, &ctx)
         };
