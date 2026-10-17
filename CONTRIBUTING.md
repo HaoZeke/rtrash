@@ -61,7 +61,7 @@ prek install
 prek run -a
 ```
 
-Hooks include trailing whitespace, yaml/toml checks, `check-added-large-files` (1 MB), codespell, and a Cargo/pyproject version lockstep check. CI re-runs prek and [large-file-auditor](https://github.com/HaoZeke/large-file-auditor).
+Hooks include trailing whitespace, yaml/toml checks, `check-added-large-files` (1 MB), codespell, and a Cargo/pyproject version lockstep check. `prek install` also adds a commit-msg hook that refuses a conventional-commit subject (`feat(du): ...`); subjects here are plain sentences, such as `Read zstd-compressed ncdu exports in du -f and du diff`. CI re-runs prek and [large-file-auditor](https://github.com/HaoZeke/large-file-auditor).
 
 ## Link check (lychee)
 

@@ -19,6 +19,7 @@ needs no build and finishes in under a second. CI runs the same script.
 | Every read of an `RTRASH_TEST_*` variable in `src` is debug-only: `cfg!(debug_assertions)` before it in its function, or `#[cfg(debug_assertions)]` on the function or a module around it; a seam is read by its literal name, never through a const | precheck test-seam check | round 195: `RTRASH_TEST_BIN_DIR` points `status --fix` at any folder |
 | Code under `cfg(windows)` or `cfg(target_os = "macos")` compiles before a push | `scripts/cross-clippy.sh` | round 112 |
 | Code is rustfmt-clean before a push, and lines stay within 100 columns | precheck runs `cargo fmt --all --check` when a toolchain is there (no build); line-width warning otherwise | rounds 101b, 102d, 143b, 170-172 |
+| A commit subject is a plain sentence that starts with a capital, with no `type(scope):` prefix | precheck subject check under `--base`; the prek commit-msg hook (`precheck.py --commit-msg`) | round 209: `feat(du): ...` reworded before it reached main |
 | macOS and Windows behaviour is proven on CI before main moves: push the round to a `round*` branch, wait for green, then fast-forward main | push triggers on `main` and `round*` in every workflow | 37 of 43 red mains failed off Linux |
 
 Judgment calls no check can make:

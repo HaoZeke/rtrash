@@ -1,0 +1,1 @@
+`scripts/precheck.py --base origin/main` now fails on a commit after that base whose subject carries a conventional-commit prefix such as `feat(du):`, and `prek install` adds a commit-msg hook that runs the same check through `precheck.py --commit-msg`. Subjects in this repository are plain sentences.

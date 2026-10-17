@@ -4,6 +4,10 @@
 # Run all: `prek run -a`
 
 minimum_prek_version = "0.3.0"
+# `prek install` also sets up the commit-msg hook below. The other hooks
+# stay out of that stage, where they would check the message file.
+default_install_hook_types = ["pre-commit", "commit-msg"]
+default_stages = ["pre-commit", "pre-push", "manual"]
 
 exclude = """(?x)(
     ^\\.venv/|
@@ -62,6 +66,9 @@ hooks = [
   ] },
   { id = "rtrash-precheck", name = "rtrash precheck (completions, test dirs, clippy arg count)", entry = "python3", language = "system", pass_filenames = false, files = "^(src/|tests/|completions/|man/)", args = [
     "scripts/precheck.py",
+  ] },
+  { id = "plain-commit-subject", name = "commit subject is a plain sentence, not type(scope):", entry = "python3 scripts/precheck.py --commit-msg", language = "system", stages = [
+    "commit-msg",
   ] },
   { id = "cargo-toml-pyproject-version-lockstep", name = "Cargo.toml and pyproject.toml versions match", entry = "scripts/check-version-lockstep.sh", language = "system", pass_filenames = false, files = "^(Cargo\\.toml|pyproject\\.toml)$" },
 ]

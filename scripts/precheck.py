@@ -7,6 +7,7 @@ in AGENTS.md). Run from the repo root:
     python3 scripts/precheck.py            # whole tree
     python3 scripts/precheck.py --no-fmt   # skip the cargo fmt step
     python3 scripts/precheck.py --base origin/main   # also diff-aware checks
+    python3 scripts/precheck.py --commit-msg FILE    # the commit-msg hook only
 
 When cargo fmt works (a toolchain with rustfmt), it also runs
 `cargo fmt --all --check`, which formats in memory and builds nothing.
@@ -259,6 +260,45 @@ def check_long_lines(base):
             f = line[6:]
         elif line.startswith("+") and len(line) - 1 > 100:
             warnings.append(f"{f}: added line of {len(line) - 1} columns; rustfmt will rewrap it")
+
+
+# A conventional-commit prefix: `feat(du): ...`, `fix: ...`, `ci!: ...`.
+# Subjects here are plain sentences that start with a capital (round 209).
+TYPED_SUBJECT = re.compile(r"^[a-z][a-z0-9-]*(?:\([^)]*\))?!?:\s")
+
+
+def subject_error(subject):
+    if TYPED_SUBJECT.match(subject):
+        return (f"commit subject '{subject}' starts with a type prefix; write a plain "
+                "sentence instead, as in 'Read zstd-compressed ncdu exports in du -f'")
+    return None
+
+
+def check_commit_subjects(base):
+    """Every commit after BASE has a plain-sentence subject."""
+    if not base:
+        return
+    log = subprocess.run(["git", "log", "--no-merges", "--format=%s", f"{base}..HEAD"],
+                         cwd=ROOT, capture_output=True, text=True)
+    if log.returncode != 0:
+        warnings.append(f"git log {base}..HEAD failed; commit subjects not checked")
+        return
+    for subject in log.stdout.splitlines():
+        e = subject_error(subject)
+        if e:
+            errors.append(e)
+
+
+def commit_msg_hook(path):
+    """`--commit-msg FILE`, the prek commit-msg hook: check the subject of
+    the message git is about to commit, skipping its comment lines."""
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
+    lines = (l for l in text.splitlines() if not l.startswith("#"))
+    e = subject_error(next((l for l in lines if l.strip()), ""))
+    if e:
+        print("error:", e)
+        return 1
+    return 0
 
 
 def check_removed_literals(base):
@@ -670,10 +710,12 @@ def check_rustfmt():
 
 
 def main():
+    if "--commit-msg" in sys.argv:
+        return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned()
-    check_long_lines(base); check_removed_literals(base)
+    check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
     for w in warnings:
