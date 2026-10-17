@@ -236,16 +236,109 @@ def check_tight_elapsed():
                               f"can exceed; assert the behaviour, or keep a hang guard of {HANG_GUARD_MS} ms or more")
 
 
-def strip_comments(s):
-    s = re.sub(r'"(?:\\.|[^"\\])*"', '""', s)
-    return re.sub(r"//[^\n]*", "", s)
+IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+RAW_OPEN = re.compile(r'(#*)"')
+
+
+def rust_code(s, strings=False):
+    """Rust source with its comments gone and its char literals written
+    as `' '`. String literals become `""` unless `strings` keeps them.
+    Every newline stays, so line numbers hold. One pass, left to right:
+    a '"' char literal, a lifetime, a raw string and a nested block
+    comment each end where Rust ends them (round 221; the regexes this
+    replaces lost step after a '"' and blanked code as string)."""
+    out, i, n = [], 0, len(s)
+    lines_in = lambda t: "\n" * t.count("\n")
+    while i < n:
+        c = s[i]
+        if c == "/" and s.startswith("//", i):
+            j = s.find("\n", i)
+            i = n if j < 0 else j
+        elif c == "/" and s.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if s.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif s.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            out.append(" " + lines_in(s[i:j]))
+            i = j
+        elif c == '"':
+            j = i + 1
+            while j < n and s[j] != '"':
+                j += 2 if s[j] == "\\" else 1
+            j = min(j + 1, n)
+            out.append(s[i:j] if strings else '""' + lines_in(s[i:j]))
+            i = j
+        elif c == "'":
+            if s.startswith("\\", i + 1):
+                j = s.find("'", i + 3)  # past the escaped char, so '\'' ends right
+                j = n if j < 0 else j + 1
+            elif i + 2 < n and s[i + 2] == "'" and s[i + 1] != "\n":
+                j = i + 3
+            else:
+                out.append(c)  # a lifetime or a loop label
+                i += 1
+                continue
+            out.append("' '")
+            i = j
+        elif c == "_" or c.isalpha():
+            m = IDENT.match(s, i)
+            if not m:  # a non-ASCII letter: not an identifier start Rust cares about here
+                out.append(c)
+                i += 1
+                continue
+            word, j = m.group(0), m.end()
+            raw = RAW_OPEN.match(s, j) if word in ("r", "br", "cr") else None
+            if raw:
+                close = '"' + raw.group(1)
+                k = s.find(close, raw.end())
+                k = n if k < 0 else k + len(close)
+                out.append(s[i:k] if strings else word + '""' + lines_in(s[i:k]))
+                i = k
+            else:
+                out.append(word)  # b"..", c"..", b'.' go on as a string or char
+                i = j
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+# Known cases the shared blanker must get right; check_rust_code runs them
+# before any rule that reads its output.
+RUST_CODE_CASES = [
+    ("let q = '\"'; let v = \"x\"; fn after() {}",
+     "let q = ' '; let v = \"\"; fn after() {}"),
+    ("w.replace('\"', \"\\\\\\\"\")\nfn after() {}",  # src/reap_timer.rs hid launchd_plist
+     "w.replace(' ', \"\")\nfn after() {}"),
+    ("s.replace('\\'', r\"'\\''\"); fn after() {}", "s.replace(' ', r\"\"); fn after() {}"),
+    ("x.push('\\\\'); fn after() {}", "x.push(' '); fn after() {}"),
+    ("b'\"' => out.push(b'\"'), b\"a\\\"b\" fn after", "b' ' => out.push(b' '), b\"\" fn after"),
+    ("fn f<'a>(x: &'a str) -> &'a str { 'outer: loop {} }",
+     "fn f<'a>(x: &'a str) -> &'a str { 'outer: loop {} }"),
+    ("r#\"a \" // b\"# fn after", "r\"\" fn after"),
+    ("a /* x /* y */ z */ b // c\nfn after", "a   b \nfn after"),
+    ("\"one\ntwo\" fn after", "\"\"\n fn after"),
+    ("'\\u{1F600}' fn after", "' ' fn after"),
+]
+
+
+def check_rust_code():
+    for src, want in RUST_CODE_CASES:
+        got = rust_code(src)
+        if got != want:
+            errors.append(f"scripts/precheck.py: rust_code({src!r}) gave {got!r}, not {want!r}; "
+                          "the source blanker the checks share is broken")
 
 
 def check_fn_params(limit=7):
     """clippy::too_many_arguments fires above 7 parameters (self excluded)."""
     sig = re.compile(r"\bfn\s+(\w+)\s*(<[^>{]*>)?\s*\(")
     for path in sorted((ROOT / "src").rglob("*.rs")) + sorted((ROOT / "tests").glob("*.rs")):
-        text = strip_comments(path.read_text(encoding="utf-8"))
+        text = rust_code(path.read_text(encoding="utf-8"))
         for m in sig.finditer(text):
             depth, i, start = 1, m.end(), m.end()
             while depth and i < len(text):
@@ -435,12 +528,13 @@ def check_permanent_gate():
         if path.name == "permanent_guard.rs":
             continue
         rel = path.relative_to(ROOT / "src").as_posix()
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = path.read_text(encoding="utf-8")
+        lines, codes = text.splitlines(), rust_code(text).splitlines()
         test_lines, stack = test_mod_lines(lines), []
         for k, line in enumerate(lines):
             if stack and line.rstrip() == stack[-1][0] + "}":
                 stack.pop()
-            code = strip_comments(line)
+            code = codes[k] if k < len(codes) else ""
             m = ANY_FN.match(code)
             fn = m.group(2) if m else (stack[-1][1] if stack else "<top>")
             if m:
@@ -476,11 +570,6 @@ SCOPE = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:mod\s+\w+\s*\{|impl\b[^;]
 DEBUG_CFG = re.compile(r"#\[cfg\((?:all\()?(?:[^\]]*,\s*)?debug_assertions\b")
 
 
-def drop_comments(line):
-    """A line without its `//` comment, string literals kept."""
-    return re.sub(r'"(?:\\.|[^"\\])*"|//.*', lambda m: m.group(0) if m.group(0)[0] == '"' else "", line)
-
-
 def item_attrs(lines, k):
     """The `#[...]` attributes right above line k, past doc comments."""
     attrs, j = [], k - 1
@@ -498,8 +587,10 @@ def check_test_seams():
     195; RTRASH_TEST_BIN_DIR points status --fix at any folder)."""
     for path in sorted((ROOT / "src").rglob("*.rs")):
         rel = path.relative_to(ROOT)
-        lines = path.read_text(encoding="utf-8").splitlines()
-        code = [drop_comments(l) for l in lines]
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        code = rust_code(text, strings=True).splitlines()
+        code += [""] * (len(lines) - len(code))
         test_lines, stack, scope_at = test_mod_lines(lines), [], []
         for k, line in enumerate(code):
             if stack and line.rstrip() == stack[-1][0] + "}":
@@ -545,20 +636,12 @@ def check_os_trash_scoped():
     for path in sorted((ROOT / "src").rglob("*.rs")):
         if path.name == "allow_roots.rs":
             continue
-        for k, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
-            if OS_TRASH.search(strip_comments(line)):
+        for k, line in enumerate(rust_code(path.read_text(encoding="utf-8")).splitlines()):
+            if OS_TRASH.search(line):
                 errors.append(f"{path.relative_to(ROOT)}:{k + 1}: trash::delete outside allow_roots; "
                               "call crate::allow_roots::trash_delete so the scope is checked")
 
 ITEM_FN = re.compile(r"^(\s{0,4})(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)")
-
-
-def blank_strings(s):
-    """strip_comments that keeps every newline, so line numbers hold."""
-    keep = lambda m: '""' + "\n" * m.group(0).count("\n")
-    s = re.sub(r'\br(#*)"[\s\S]*?"\1', keep, s)  # raw strings have no escapes
-    s = re.sub(r'"(?:\\[\s\S]|[^"\\])*"', keep, s)
-    return re.sub(r"//[^\n]*", "", s)
 
 
 def test_fns(text, raw):
@@ -613,7 +696,7 @@ def check_cfg_helpers():
     targets, and cross-clippy -D warnings fails there (181b: outside_lines)."""
     for path in sorted((ROOT / "tests").glob("*.rs")):
         raw = path.read_text(encoding="utf-8")
-        lines, fns = test_fns(blank_strings(raw), raw)
+        lines, fns = test_fns(rust_code(raw), raw)
         owner = {}
         for i, f in enumerate(fns):
             for n in range(f["start"], f["end"] + 1):
@@ -670,7 +753,7 @@ def check_refusal_helpers():
     for path in sorted((ROOT / "tests").glob("*.rs")):
         rel = path.relative_to(ROOT)
         raw = path.read_text(encoding="utf-8")
-        text = blank_strings(raw)
+        text = rust_code(raw)
         for m in re.finditer(r"(?m)^[ \t]*(?:let\s+(\w*unchanged\w*)\s*=\s*(?:move\s*)?\||fn\s+(\w*unchanged\w*)\b)", text):
             name = m.group(1) or m.group(2)
             line = text.count("\n", 0, m.start()) + 1
@@ -712,9 +795,7 @@ def check_du_rows():
     bound = re.compile(r"\blet\s+(\w+)\s*=\s*[^;|]*?\.lines\(\)\s*\.find\(")
     for path in sorted((ROOT / "tests").glob("*.rs")):
         rel = path.relative_to(ROOT).as_posix()
-        # Char literals first: a '"' would start a string for blank_strings.
-        raw = re.sub(r"'(?:\\.|[^'\\\n])'", "' '", path.read_text(encoding="utf-8"))
-        text = blank_strings(raw)
+        text = rust_code(path.read_text(encoding="utf-8"))
         line_of = lambda k: text.count("\n", 0, k) + 1
         for m in re.finditer(r"\.split_whitespace\(\)", text):
             if ".join(" in method_chain(text, m.end()):
@@ -738,7 +819,7 @@ def check_record_sections():
     starts = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?fn\s+\w+")
     for path in sorted((ROOT / "src").rglob("*.rs")):
         rel = path.relative_to(ROOT).as_posix()
-        text = blank_strings(path.read_text(encoding="utf-8"))
+        text = rust_code(path.read_text(encoding="utf-8"))
         cuts = [m.start() for m in starts.finditer(text)] + [len(text)]
         for a, b in zip(cuts, cuts[1:]):
             body = text[a:b]
@@ -796,7 +877,7 @@ def main():
     if "--commit-msg" in sys.argv:
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
-    check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
+    check_rust_code(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_du_rows(); check_record_sections()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
     if "--no-fmt" not in sys.argv:
