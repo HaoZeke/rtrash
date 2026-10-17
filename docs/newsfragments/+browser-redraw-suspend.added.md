@@ -1,0 +1,2 @@
+In the `du -i` explorer and the restore, empty and put browsers, Ctrl-L now draws the screen again and Ctrl-Z suspends rtrash, as in dua 2.44. Before it stops, the terminal leaves raw mode and the alternate screen, so the shell works as usual; `fg` brings the browser back in raw mode and redraws it.
+Windows has no job control, so there Ctrl-Z is a no-op, and so it is in a process started with SIGTSTP ignored, as under `nohup`.

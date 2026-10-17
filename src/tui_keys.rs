@@ -35,6 +35,8 @@ pub fn core_help_lines() -> &'static [&'static str] {
         "  ?            toggle this help",
         "  q / Esc      quit (in browse mode)",
         "  Ctrl-c       quit",
+        "  Ctrl-l       redraw the screen",
+        "  Ctrl-z       suspend; fg comes back (nothing on Windows)",
     ]
 }
 

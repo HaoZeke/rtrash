@@ -639,6 +639,9 @@ impl Keymap {
                 a.doc()
             ));
         }
+        lines.push(String::new());
+        lines.push("Every browser".into());
+        lines.extend(crate::tui_term::shared_key_help().map(String::from));
         lines
     }
 }

@@ -40,19 +40,116 @@ pub fn leave(terminal: &mut Term) {
 /// `None` when no key came in time, or for an event that is not a press
 /// (a release, a resize, a mouse event); the caller redraws either way.
 /// Every browser reads keys here and nowhere else, so a key that means
-/// the same in all of them is handled once.
+/// the same in all of them is handled once: a [`SharedKey`] is acted on
+/// here and never reaches the browser.
 pub fn next_key(
     terminal: &mut Term,
     tick: std::time::Duration,
 ) -> io::Result<Option<(KeyCode, KeyModifiers)>> {
-    let _ = terminal;
     if !event::poll(tick)? {
         return Ok(None);
     }
-    match event::read()? {
-        Event::Key(key) if key.kind == KeyEventKind::Press => Ok(Some((key.code, key.modifiers))),
-        _ => Ok(None),
+    let key = match event::read()? {
+        Event::Key(key) if key.kind == KeyEventKind::Press => key,
+        _ => return Ok(None),
+    };
+    match shared_key(key.code, key.modifiers) {
+        Some(SharedKey::Redraw) => {
+            terminal.clear()?;
+            Ok(None)
+        }
+        Some(SharedKey::Suspend) => {
+            suspend(terminal)?;
+            Ok(None)
+        }
+        None => Ok(Some((key.code, key.modifiers))),
     }
+}
+
+/// A key every browser treats the same, in every mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedKey {
+    /// Ctrl-L: draw the whole screen again, as after other output
+    /// scribbled over it.
+    Redraw,
+    /// Ctrl-Z: hand the terminal back to the shell and stop until `fg`.
+    /// Windows has no job control, so there the key is taken and does
+    /// nothing.
+    Suspend,
+}
+
+/// The [`SharedKey`] that `code` with `mods` is, if any: Ctrl-L or
+/// Ctrl-Z, with or without Shift, and no other modifier.
+pub fn shared_key(code: KeyCode, mods: KeyModifiers) -> Option<SharedKey> {
+    if mods.difference(KeyModifiers::SHIFT) != KeyModifiers::CONTROL {
+        return None;
+    }
+    match code {
+        KeyCode::Char('l' | 'L') => Some(SharedKey::Redraw),
+        KeyCode::Char('z' | 'Z') => Some(SharedKey::Suspend),
+        _ => None,
+    }
+}
+
+/// The help lines for the [`SharedKey`]s, under the keymap in every
+/// browser's help.
+pub fn shared_key_help() -> [&'static str; 2] {
+    [
+        "  ctrl-l           redraw the screen",
+        if cfg!(windows) {
+            "  ctrl-z           nothing on Windows, which has no job control"
+        } else {
+            "  ctrl-z           suspend to the shell; fg comes back"
+        },
+    ]
+}
+
+/// Stop as the terminal's own suspend key would, once the screen is the
+/// shell's again, and take the screen back when a SIGCONT resumes this
+/// process. Started with SIGTSTP ignored (no job control, as under
+/// nohup), it does nothing, since nothing would ever resume it.
+#[cfg(unix)]
+fn suspend(terminal: &mut Term) -> io::Result<()> {
+    if tstp_ignored() {
+        return Ok(());
+    }
+    leave(terminal);
+    // SAFETY: plain signal calls on zeroed sigsets this fn owns. SIGTSTP
+    // is blocked in this thread while it goes to the process group (the
+    // shell's job) and to this thread, so whichever thread takes it, this
+    // one stops when the mask comes back, before it resumes the screen.
+    unsafe {
+        let mut tstp: libc::sigset_t = std::mem::zeroed();
+        let mut old: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut tstp);
+        libc::sigaddset(&mut tstp, libc::SIGTSTP);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &tstp, &mut old);
+        libc::kill(0, libc::SIGTSTP);
+        libc::pthread_kill(libc::pthread_self(), libc::SIGTSTP);
+        libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+    }
+    hold_stderr();
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()
+}
+
+/// Whether SIGTSTP is ignored, so a stop would never come.
+#[cfg(unix)]
+fn tstp_ignored() -> bool {
+    // SAFETY: sigaction with no new action only reads the current one.
+    unsafe {
+        let mut now: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGTSTP, std::ptr::null(), &mut now) == 0
+            && now.sa_sigaction == libc::SIG_IGN
+    }
+}
+
+/// No job control here: the key is taken so no browser sees a stray
+/// Ctrl-Z, and the screen stays.
+#[cfg(not(unix))]
+fn suspend(_terminal: &mut Term) -> io::Result<()> {
+    Ok(())
 }
 
 /// The shell a browser opens: `$SHELL`, else `/bin/sh`; on Windows
@@ -395,6 +492,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn suspend_stays_put_when_sigtstp_is_ignored() {
+        // SAFETY: swaps the SIGTSTP disposition and puts the old one back.
+        let old = unsafe { libc::signal(libc::SIGTSTP, libc::SIG_IGN) };
+        let ignored = tstp_ignored();
+        // SAFETY: as above.
+        unsafe { libc::signal(libc::SIGTSTP, libc::SIG_DFL) };
+        let default = tstp_ignored();
+        // SAFETY: as above.
+        unsafe { libc::signal(libc::SIGTSTP, old) };
+        assert!(ignored, "SIG_IGN reads as ignored");
+        assert!(!default, "SIG_DFL does not");
+    }
+
+    #[test]
     fn held_stderr_comes_back_after_release() {
         hold_fd2();
         let msg = b"rtrash: written while a browser ran\n";
@@ -410,6 +521,33 @@ mod tests {
 #[cfg(test)]
 mod shell_tests {
     use super::*;
+
+    #[test]
+    fn ctrl_l_and_ctrl_z_are_shared_keys_and_nothing_else_is() {
+        let ctrl = KeyModifiers::CONTROL;
+        let shift = KeyModifiers::SHIFT;
+        for (code, mods, want) in [
+            (KeyCode::Char('l'), ctrl, Some(SharedKey::Redraw)),
+            (KeyCode::Char('L'), ctrl | shift, Some(SharedKey::Redraw)),
+            (KeyCode::Char('z'), ctrl, Some(SharedKey::Suspend)),
+            (KeyCode::Char('Z'), ctrl | shift, Some(SharedKey::Suspend)),
+            // Plain l opens a directory in the explorer; it stays a key.
+            (KeyCode::Char('l'), KeyModifiers::NONE, None),
+            (KeyCode::Char('z'), KeyModifiers::NONE, None),
+            (KeyCode::Char('l'), ctrl | KeyModifiers::ALT, None),
+            (KeyCode::Char('c'), ctrl, None),
+        ] {
+            assert_eq!(shared_key(code, mods), want, "{code:?} {mods:?}");
+        }
+        let help = shared_key_help();
+        assert!(help[0].contains("ctrl-l") && help[0].contains("redraw"));
+        assert!(help[1].contains("ctrl-z"));
+        assert_eq!(help[1].contains("Windows"), cfg!(windows), "{}", help[1]);
+        // Every browser's help shows them under the keymap.
+        let lines = crate::tui_binds::Keymap::builtin().help_lines();
+        assert!(lines.iter().any(|l| l == "Every browser"), "{lines:?}");
+        assert!(lines.iter().any(|l| l == help[1]), "{lines:?}");
+    }
 
     #[test]
     fn the_pager_comes_from_the_environment_split_at_spaces() {

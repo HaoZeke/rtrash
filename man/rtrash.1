@@ -2162,6 +2162,12 @@ or
 The explorer leaves the screen while the shell runs, and Ctrl-C there
 stops only the programs the shell runs.
 Once the shell exits, the explorer comes back and rescans the directory.
+In the explorer and every other browser, Ctrl-L draws the screen again
+and Ctrl-Z suspends rtrash: the terminal goes back to the shell first,
+and
+.B fg
+brings the browser back.
+Windows has no job control, so Ctrl-Z does nothing there.
 .B v
 shows the cursor file in
 .B $PAGER

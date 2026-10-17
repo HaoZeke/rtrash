@@ -3324,3 +3324,206 @@ fn snapshots_keep_the_unreadable_count_and_diff_reports_its_change() {
         text(&diff_json)
     );
 }
+
+/// The parent side of a pty, and everything read from it so far.
+#[cfg(all(target_os = "linux", feature = "tui"))]
+struct Pty {
+    master: File,
+    out: Vec<u8>,
+}
+
+#[cfg(all(target_os = "linux", feature = "tui"))]
+impl Pty {
+    /// Read what is there without waiting (the master is non-blocking).
+    fn drain(&mut self) {
+        use std::io::Read;
+        let mut buf = [0u8; 8192];
+        while let Ok(n) = self.master.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            self.out.extend_from_slice(&buf[..n]);
+        }
+    }
+
+    fn saw(&self, from: usize, pat: &[u8]) -> bool {
+        self.out
+            .get(from..)
+            .is_some_and(|tail| tail.windows(pat.len()).any(|w| w == pat))
+    }
+
+    /// Wait until `pat` shows up past byte `from`, with a hang guard.
+    fn wait_for(&mut self, from: usize, pat: &[u8]) {
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            self.drain();
+            if self.saw(from, pat) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "no {:?} in {:?}",
+                String::from_utf8_lossy(pat),
+                String::from_utf8_lossy(&self.out)
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn send(&mut self, bytes: &[u8]) {
+        use std::io::Write;
+        self.master.write_all(bytes).unwrap();
+    }
+
+    /// Whether the pty is in canonical (cooked) mode; raw mode clears it.
+    /// tcgetattr on the master reads the line discipline both ends share.
+    fn canonical(&self) -> bool {
+        use std::os::fd::AsRawFd;
+        // SAFETY: a zeroed termios that tcgetattr fills.
+        let mut tio: libc::termios = unsafe { std::mem::zeroed() };
+        // SAFETY: tcgetattr on the master fd this struct owns.
+        assert_eq!(
+            unsafe { libc::tcgetattr(self.master.as_raw_fd(), &mut tio) },
+            0
+        );
+        tio.c_lflag & libc::ICANON != 0
+    }
+}
+
+/// Ctrl-L redraws the explorer and Ctrl-Z suspends it, as in dua 2.44.
+/// Before it stops, the terminal is out of raw mode and off the alternate
+/// screen; a SIGCONT brings both back, and Ctrl-C then quits. The
+/// explorer runs on a pty in a process group of its own with SIGTSTP at
+/// its default, as a shell with job control runs a job, so it can stop.
+#[cfg(all(target_os = "linux", feature = "tui"))]
+#[test]
+fn explorer_redraws_on_ctrl_l_and_suspends_on_ctrl_z() {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::process::CommandExt;
+
+    let t = Tree::new("explorer-suspend");
+    t.file("d/a.bin", 4096);
+    let (master, slave) = {
+        let (mut m, mut s) = (0, 0);
+        let ws = libc::winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: openpty writes the two fds; no name buffer, no termios.
+        let rc = unsafe {
+            libc::openpty(
+                &mut m,
+                &mut s,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &ws,
+            )
+        };
+        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+        // SAFETY: both fds are new and owned here alone.
+        unsafe { (File::from_raw_fd(m), File::from_raw_fd(s)) }
+    };
+    // SAFETY: fcntl on the master fd this test owns.
+    unsafe {
+        let fl = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
+        libc::fcntl(master.as_raw_fd(), libc::F_SETFL, fl | libc::O_NONBLOCK);
+    }
+    let mut cmd = common::rtrash(&t.root);
+    cmd.args(["du", "--no-git", "-i"])
+        .arg(t.root.join("d"))
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave.try_clone().unwrap());
+    // SAFETY: setpgid and signal are async-signal-safe and touch no
+    // memory of the parent, as a hook run between fork and exec must.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::signal(libc::SIGTSTP, libc::SIG_DFL);
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().unwrap();
+    drop(slave);
+    let pid = child.id() as libc::pid_t;
+    // Resume and kill the explorer if an assert below fails.
+    struct Reap(libc::pid_t, bool);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            if self.1 {
+                // SAFETY: plain kill(2) calls on the child's pid.
+                unsafe {
+                    libc::kill(self.0, libc::SIGCONT);
+                    libc::kill(self.0, libc::SIGKILL);
+                }
+            }
+        }
+    }
+    let mut reap = Reap(pid, true);
+    let mut pty = Pty {
+        master,
+        out: Vec::new(),
+    };
+    let enter_alt: &[u8] = b"\x1b[?1049h";
+    let leave_alt: &[u8] = b"\x1b[?1049l";
+    pty.wait_for(0, enter_alt);
+    pty.wait_for(0, b"a.bin");
+    assert!(!pty.canonical(), "the explorer runs in raw mode");
+
+    // Ctrl-L clears the screen and draws it again.
+    let at = pty.out.len();
+    pty.send(b"\x0c");
+    pty.wait_for(at, b"\x1b[2J");
+    pty.wait_for(at, b"a.bin");
+
+    // Ctrl-Z: the screen goes back to the shell, then the explorer stops.
+    let at = pty.out.len();
+    pty.send(b"\x1a");
+    let until = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let mut status = 0;
+        // SAFETY: waitpid on our own child; WNOHANG keeps it from blocking.
+        let got = unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED | libc::WNOHANG) };
+        if got == pid {
+            assert!(libc::WIFSTOPPED(status), "status {status:#x}");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "the explorer did not stop on Ctrl-Z"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    pty.drain();
+    assert!(pty.saw(at, leave_alt), "left the alternate screen first");
+    assert!(pty.canonical(), "raw mode is off while stopped");
+
+    // SIGCONT, as `fg` sends: raw mode and the alternate screen come back.
+    let at = pty.out.len();
+    // SAFETY: plain kill(2) on the child's pid.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGCONT) }, 0);
+    pty.wait_for(at, enter_alt);
+    pty.wait_for(at, b"a.bin");
+    assert!(!pty.canonical(), "raw mode is back after SIGCONT");
+
+    pty.send(b"\x03");
+    let until = std::time::Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        pty.drain();
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "the explorer did not quit on Ctrl-C"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    reap.1 = false;
+    assert!(status.success(), "{status:?}");
+    fs::remove_dir_all(&t.root).unwrap();
+}
