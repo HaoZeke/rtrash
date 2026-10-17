@@ -6854,37 +6854,6 @@ fn max_count_refuses_rm_and_empty_past_the_cap() {
     assert!(names_in_trash(&sb).is_empty());
 }
 
-/// The lines of `out`'s stderr that name a path outside the scope.
-#[cfg(target_os = "linux")]
-fn outside_lines(out: &Output) -> usize {
-    stderr_of(out)
-        .lines()
-        .filter(|l| l.ends_with("is outside RTRASH_ALLOW_ROOTS"))
-        .count()
-}
-
-/// Runs `args` under `envs`, expects a scope refusal (exit 2 and
-/// `outside_paths` lines naming a path outside the scope), and checks the
-/// trash listing is the same just after the call as just before it.
-#[cfg(target_os = "linux")]
-fn assert_refused_unchanged(
-    sb: &Sandbox,
-    args: &[&str],
-    envs: &[(&str, &str)],
-    outside_paths: usize,
-) {
-    let before = names_in_trash(sb);
-    let out = sb.run_env(args, envs);
-    assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr_of(&out));
-    assert_eq!(
-        outside_lines(&out),
-        outside_paths,
-        "{args:?}: {}",
-        stderr_of(&out)
-    );
-    assert_eq!(names_in_trash(sb), before, "{args:?} changed the trash");
-}
-
 /// `RTRASH_ALLOW_ROOTS` keeps put, restore and rm to the listed folders,
 /// sees through a symlinked folder that leads out, refuses empty, and on
 /// a refusal changes nothing.
@@ -6904,8 +6873,12 @@ fn allow_roots_keeps_put_restore_and_rm_inside() {
     assert!(sb.run(&["put", "ar-out/ar-c"]).status.success());
     let scope_s = inside.display().to_string();
     let scope = [("RTRASH_ALLOW_ROOTS", scope_s.as_str())];
+    // A refusal leaves info/ and files/ as they were just before it.
+    let (info, files) = (sb.trash().join("info"), sb.trash().join("files"));
+    let watch = [info.as_path(), files.as_path()];
     let refused = |args: &[&str], outside_paths: usize| {
-        assert_refused_unchanged(&sb, args, &scope, outside_paths)
+        let lines = [(common::OUTSIDE, outside_paths)];
+        common::assert_refused_unchanged(&args, &watch, 2, &lines, || sb.run_env(args, &scope))
     };
     // One outside operand refuses the whole put, so ar-a stays too.
     refused(&["put", "ar-in/ar-a", "ar-out/ar-d"], 1);
@@ -6916,10 +6889,8 @@ fn allow_roots_keeps_put_restore_and_rm_inside() {
     }
     refused(&["rm", &pin, "ar-c"], 1);
     refused(&["restore", "--home-only", "--name=ar-c"], 1);
-    let base = names_in_trash(&sb);
-    let out = sb.run_env(&["empty", &pin, "--all"], &scope);
-    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
-    assert_eq!(names_in_trash(&sb), base, "empty ran");
+    let empty = ["empty", pin.as_str(), "--all"];
+    common::assert_refused_unchanged(&empty, &watch, 2, &[], || sb.run_env(&empty, &scope));
     // A dry run only looks, so it goes through.
     assert!(sb
         .run_env(&["empty", &pin, "-n", "--all"], &scope)
@@ -6944,7 +6915,10 @@ fn allow_roots_keeps_put_restore_and_rm_inside() {
     assert_eq!(names_in_trash(&sb).len(), after_put.len() - 2);
     // A root that does not exist allows nothing.
     let gone = [("RTRASH_ALLOW_ROOTS", "/nonexistent-ar-root")];
-    assert_refused_unchanged(&sb, &["put", "ar-out/ar-d"], &gone, 1);
+    let put_d = ["put", "ar-out/ar-d"];
+    common::assert_refused_unchanged(&put_d, &watch, 2, &[(common::OUTSIDE, 1)], || {
+        sb.run_env(&put_d, &gone)
+    });
     // Unset or empty, the scope is off.
     let out = sb.run_env(&["put", "ar-out/ar-d"], &[("RTRASH_ALLOW_ROOTS", "")]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -7020,18 +6994,11 @@ fn status_check_reports_and_fix_removes_only_broken_records() {
     );
 
     // Each of these leaves info/ and files/ as they were just before it.
+    let watch = [info.as_path(), files.as_path()];
     let unchanged = |args: &[&str], envs: &[(&str, &str)], code: i32| {
-        let (info_before, files_before) = (info_names(&sb), names_in_trash(&sb));
-        let out = sb.run_env(args, envs);
-        assert_eq!(
-            out.status.code(),
-            Some(code),
-            "{args:?} {envs:?}: {}",
-            stderr_of(&out)
-        );
-        assert_eq!(info_names(&sb), info_before, "{args:?} {envs:?}");
-        assert_eq!(names_in_trash(&sb), files_before, "{args:?} {envs:?}");
-        out
+        common::assert_refused_unchanged(&(args, envs), &watch, code, &[], || {
+            sb.run_env(args, envs)
+        })
     };
     let fix = ["status", pin.as_str(), "--check", "--fix"];
     let dry = ["status", pin.as_str(), "--check", "--fix", "-n"];
@@ -7056,11 +7023,7 @@ fn status_check_reports_and_fix_removes_only_broken_records() {
     );
     // The bad record names no origin, so a scope refuses the whole fix.
     let out = unchanged(&fix, &[("RTRASH_ALLOW_ROOTS", work.as_str())], 2);
-    let outside = stderr_of(&out)
-        .lines()
-        .filter(|l| l.ends_with("is outside RTRASH_ALLOW_ROOTS"))
-        .count();
-    assert_eq!(outside, 1, "{}", stderr_of(&out));
+    assert_eq!(common::outside_lines(&out), 1, "{}", stderr_of(&out));
     unchanged(&["status", pin.as_str(), "--fix"], &[], 2);
 
     let out = sb.run(&fix);

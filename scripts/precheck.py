@@ -433,6 +433,35 @@ def check_cfg_helpers():
                           "and is dead code elsewhere (cross-clippy fails); give it the same cfg")
 
 
+def check_refusal_helpers():
+    """A test that expects a refusal to change nothing goes through
+    common::assert_refused_unchanged, which snapshots just before the call
+    (181c compared against a stale listing). Flag a hand-rolled copy: a fn
+    or closure named *unchanged* that does not call it, or the scope
+    refusal text spelled out instead of common::OUTSIDE."""
+    for path in sorted((ROOT / "tests").glob("*.rs")):
+        rel = path.relative_to(ROOT)
+        raw = path.read_text(encoding="utf-8")
+        text = blank_strings(raw)
+        for m in re.finditer(r"(?m)^[ \t]*(?:let\s+(\w*unchanged\w*)\s*=\s*(?:move\s*)?\||fn\s+(\w*unchanged\w*)\b)", text):
+            name = m.group(1) or m.group(2)
+            line = text.count("\n", 0, m.start()) + 1
+            open_at = text.find("{", m.end())
+            depth, k = 0, open_at
+            while 0 <= k < len(text):
+                depth += {"{": 1, "}": -1}.get(text[k], 0)
+                if depth == 0:
+                    break
+                k += 1
+            if "common::assert_refused_unchanged(" not in text[open_at:k]:
+                errors.append(f"{rel}:{line}: {name} compares before and after by hand; "
+                              "call common::assert_refused_unchanged, which takes the snapshot itself")
+        for n, l in enumerate(raw.splitlines(), 1):
+            if '"is outside RTRASH_ALLOW_ROOTS"' in l and not l.lstrip().startswith("//"):
+                errors.append(f"{rel}:{n}: spells out the scope refusal text; "
+                              "use common::OUTSIDE or common::outside_lines")
+
+
 def check_rustfmt():
     """`cargo fmt --check` when a toolchain is there; three rounds in a row
     (170-172) needed a format-only amend after CI."""
@@ -454,7 +483,7 @@ def check_rustfmt():
 def main():
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps()
-    check_fn_params(); check_permanent_gate(); check_os_trash_scoped(); check_cfg_helpers()
+    check_fn_params(); check_permanent_gate(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers()
     check_long_lines(base); check_removed_literals(base)
     if "--no-fmt" not in sys.argv:
         check_rustfmt()

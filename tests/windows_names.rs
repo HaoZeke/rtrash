@@ -653,22 +653,16 @@ fn allow_roots_scopes_the_recycle_bin_on_windows() {
     let after = listed(&run(&dry, None));
     let _ = fs::remove_dir_all(&dir);
     let text = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
-    let outside_lines = |o: &Output| {
-        text(o)
-            .lines()
-            .filter(|l| l.ends_with("is outside RTRASH_ALLOW_ROOTS"))
-            .count()
-    };
     assert!(put_in.status.success(), "{}", text(&put_in));
     assert_eq!(put_out.status.code(), Some(2), "{}", text(&put_out));
-    assert_eq!(outside_lines(&put_out), 1, "{}", text(&put_out));
+    assert_eq!(common::outside_lines(&put_out), 1, "{}", text(&put_out));
     assert!(stray_kept, "a refused put moved the file");
     assert!(back.status.success(), "{}", text(&back));
     assert!(restored, "the scoped restore did not bring the file back");
     assert!(again.status.success(), "{}", text(&again));
     assert_eq!(before, 1, "the put did not leave one item");
     assert_eq!(refused.status.code(), Some(2), "{}", text(&refused));
-    assert_eq!(outside_lines(&refused), 1, "{}", text(&refused));
+    assert_eq!(common::outside_lines(&refused), 1, "{}", text(&refused));
     assert_eq!(still, before, "a refused rm purged the item");
     assert!(done.status.success(), "{}", text(&done));
     assert_eq!(after, 0);

@@ -1381,24 +1381,17 @@ fn allow_roots_keeps_finder_put_restore_and_rm_inside() {
     // The scope names the root as the temp dir spells it, not resolved.
     let scope_s = inside.display().to_string();
     let scope = [("RTRASH_ALLOW_ROOTS", scope_s.as_str())];
-    let in_trash = || fs::read_dir(b.finder()).map_or(0, |d| d.count());
-    let outside_lines = |o: &Output| {
-        err(o)
-            .lines()
-            .filter(|l| l.ends_with("is outside RTRASH_ALLOW_ROOTS"))
-            .count()
-    };
     // A refusal names one outside path and leaves the trash as it was
     // just before the call.
-    let assert_refused_unchanged = |args: &[&str]| {
-        let before = in_trash();
-        let o = b.run_env(args, &scope);
-        assert_eq!(o.status.code(), Some(2), "{args:?}: {}", err(&o));
-        assert_eq!(outside_lines(&o), 1, "{args:?}: {}", err(&o));
-        assert_eq!(in_trash(), before, "{args:?} changed the trash");
+    let finder = b.finder();
+    let refused = |args: &[&str]| {
+        let lines = [(common::OUTSIDE, 1)];
+        common::assert_refused_unchanged(&args, &[finder.as_path()], 2, &lines, || {
+            b.run_env(args, &scope)
+        });
     };
-    assert_refused_unchanged(&["put", "fa-in/fa-a", "fa-out/fa-b"]);
-    assert_refused_unchanged(&["put", "fa-in/fa-link/fa-b"]);
+    refused(&["put", "fa-in/fa-a", "fa-out/fa-b"]);
+    refused(&["put", "fa-in/fa-link/fa-b"]);
     let o = b.run_env(&["put", "fa-in/fa-a"], &scope);
     assert!(o.status.success(), "{}", err(&o));
     assert!(b.finder().join("fa-a").exists());
@@ -1414,7 +1407,7 @@ fn allow_roots_keeps_finder_put_restore_and_rm_inside() {
         (&["rm", "fa-c"][..], "fa-c"),
         (&["restore", &to_out, "fa-a"][..], "fa-a"),
     ] {
-        assert_refused_unchanged(args);
+        refused(args);
         assert!(b.finder().join(item).exists(), "{args:?}");
     }
     let o = b.run_env(&["empty", "--all"], &scope);

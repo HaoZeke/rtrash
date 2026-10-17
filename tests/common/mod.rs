@@ -8,9 +8,17 @@
 //!
 //! Every test that needs two trash puts to get different deletion times
 //! calls `next_trash_second` between them, in place of a fixed sleep.
+//!
+//! Every test that expects a command to refuse and change nothing calls
+//! `assert_refused_unchanged`. It takes the snapshot itself, just before
+//! the command runs, so a stale baseline cannot hide a change (round
+//! 181c compared against a listing taken several calls earlier).
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::fmt::Debug;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Output;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -47,4 +55,100 @@ pub fn next_trash_second() {
     while epoch_secs() <= start {
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// The end of each stderr line naming a path outside `RTRASH_ALLOW_ROOTS`.
+pub const OUTSIDE: &str = "is outside RTRASH_ALLOW_ROOTS";
+
+/// The stderr of `out`, lossy.
+pub fn stderr_text(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// How many stderr lines of `out` end with `suffix`.
+pub fn lines_ending(out: &Output, suffix: &str) -> usize {
+    stderr_text(out)
+        .lines()
+        .filter(|l| l.ends_with(suffix))
+        .count()
+}
+
+/// How many stderr lines of `out` name a path outside the scope.
+pub fn outside_lines(out: &Output) -> usize {
+    lines_ending(out, OUTSIDE)
+}
+
+/// One path in a `state` snapshot.
+#[derive(Debug, PartialEq)]
+pub enum Node {
+    Missing,
+    Dir,
+    File(Vec<u8>),
+    Link(PathBuf),
+    Other,
+    Unreadable(String),
+}
+
+/// Every path under each of `watch` (a folder or a file), with its kind
+/// and, for files, its bytes; a symlink keeps its target and is not
+/// followed. Sorted, so two snapshots compare equal when nothing changed.
+pub fn state(watch: &[&Path]) -> Vec<(PathBuf, Node)> {
+    fn walk(p: &Path, out: &mut Vec<(PathBuf, Node)>) {
+        let node = match fs::symlink_metadata(p) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Node::Missing,
+            Err(e) => Node::Unreadable(e.kind().to_string()),
+            Ok(m) if m.file_type().is_symlink() => Node::Link(fs::read_link(p).unwrap_or_default()),
+            Ok(m) if m.is_file() => match fs::read(p) {
+                Ok(b) => Node::File(b),
+                Err(e) => Node::Unreadable(e.kind().to_string()),
+            },
+            Ok(m) if m.is_dir() => match fs::read_dir(p) {
+                Ok(rd) => {
+                    out.push((p.to_path_buf(), Node::Dir));
+                    let mut kids: Vec<PathBuf> =
+                        rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+                    kids.sort();
+                    for k in kids {
+                        walk(&k, out);
+                    }
+                    return;
+                }
+                Err(e) => Node::Unreadable(e.kind().to_string()),
+            },
+            Ok(_) => Node::Other,
+        };
+        out.push((p.to_path_buf(), node));
+    }
+    let mut out = Vec::new();
+    for p in watch {
+        walk(p, &mut out);
+    }
+    out
+}
+
+/// Snapshots `watch`, runs `run` right after, and asserts it exited with
+/// `code`, that for each `(suffix, n)` in `lines` exactly `n` stderr lines
+/// end with `suffix`, and that `watch` is the same as just before the
+/// call. Returns the output for any further checks. `label` names the
+/// call in failure messages.
+pub fn assert_refused_unchanged(
+    label: &dyn Debug,
+    watch: &[&Path],
+    code: i32,
+    lines: &[(&str, usize)],
+    run: impl FnOnce() -> Output,
+) -> Output {
+    let before = state(watch);
+    let out = run();
+    let err = stderr_text(&out);
+    assert_eq!(out.status.code(), Some(code), "{label:?}: {err}");
+    for (suffix, n) in lines {
+        assert_eq!(
+            lines_ending(&out, suffix),
+            *n,
+            "{label:?} {suffix:?}: {err}"
+        );
+    }
+    assert_eq!(state(watch), before, "{label:?} changed {watch:?}: {err}");
+    out
 }

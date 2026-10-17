@@ -368,23 +368,16 @@ fn wsl_restore_keeps_to_the_allowed_roots() {
     };
     // A refusal exits 2, names each outside path on its own line, and
     // leaves the bin and both destinations as they were just before.
-    let assert_refused_unchanged = |args: &[&str], roots: &Path| {
-        let before = bin_names();
-        let out = f.run_scoped(args, roots);
-        let err = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
-        let outside_lines = err
-            .lines()
-            .filter(|l| l.ends_with("is outside RTRASH_ALLOW_ROOTS"))
-            .count();
-        assert_eq!(outside_lines, 1, "{args:?}: {err}");
-        assert_eq!(bin_names(), before, "{args:?} changed the bin");
-        assert_eq!(fs::read(&b).unwrap(), b"keep", "{args:?}");
+    let bin = f.bin();
+    let refused = |args: &[&str], roots: &Path| {
+        let lines = [(common::OUTSIDE, 1)];
+        let watch = [bin.as_path(), a.as_path(), b.as_path()];
+        common::assert_refused_unchanged(&args, &watch, 2, &lines, || f.run_scoped(args, roots));
     };
     assert_eq!(bin_names().len(), 4);
     // b.txt is outside: nothing is restored, a.txt included, and -f
     // leaves the file at b.txt alone.
-    assert_refused_unchanged(&["restore", "-f", &a_s, &b_s], &inside);
+    refused(&["restore", "-f", &a_s, &b_s], &inside);
     assert!(!a.exists());
     // Inside the root, a.txt comes back.
     let out = f.run_scoped(&["restore", &a_s], &inside);
@@ -397,5 +390,5 @@ fn wsl_restore_keeps_to_the_allowed_roots() {
     assert_eq!(bin_names(), ["$IEF34GH.txt", "$REF34GH.txt"]);
     // A root that does not exist allows nothing.
     let gone = f.top.join("no-such-root");
-    assert_refused_unchanged(&["restore", "-f", &b_s], &gone);
+    refused(&["restore", "-f", &b_s], &gone);
 }
