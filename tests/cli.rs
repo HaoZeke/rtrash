@@ -6270,6 +6270,93 @@ fn empty_dangling_removes_only_records_without_a_payload() {
     );
 }
 
+/// `empty --dangling` keeps the limits `status --check --fix` keeps for
+/// the same records: `RTRASH_NO_PERMANENT`, `RTRASH_MAX_PERMANENT` (and
+/// `--max-count`) and `RTRASH_ALLOW_ROOTS` each refuse the run whole with
+/// exit 2, the same lines as the fix and nothing removed; a dry run
+/// still lists; within the limits the records go and the item stays.
+#[test]
+fn empty_dangling_keeps_the_limits_status_fix_keeps() {
+    let sb = Sandbox::new("dangling-limits");
+    sb.touch("dl-keep");
+    assert!(sb.run(&["put", "dl-keep"]).status.success());
+    let (info, files) = (sb.trash().join("info"), sb.trash().join("files"));
+    let work = sb.work().display().to_string();
+    let record = |name: &str, origin: &str| {
+        fs::write(
+            info.join(format!("{name}.trashinfo")),
+            format!("[Trash Info]\nPath={origin}\nDeletionDate=2026-01-02T03:04:05\n"),
+        )
+        .unwrap();
+    };
+    record("dl-in", &format!("{work}/dl-in"));
+    record("dl-out", "/rtrash-elsewhere/dl-out");
+    let watch = [info.as_path(), files.as_path()];
+    let empty = ["empty", "--home-only", "--dangling"];
+    let fix = ["status", "--home-only", "--check", "--fix"];
+    // Each line without its `PROG: ` head, so the two commands compare.
+    let tail = |out: &Output| -> Vec<String> {
+        stderr_of(out)
+            .lines()
+            .map(|l| l.split_once(": ").map_or(l, |(_, t)| t).to_string())
+            .collect()
+    };
+    let refusals: [(&[(&str, &str)], &str); 3] = [
+        (
+            &[("RTRASH_NO_PERMANENT", "1")],
+            "put, list and restore still work",
+        ),
+        (
+            &[("RTRASH_MAX_PERMANENT", "1")],
+            "nothing was deleted, and -n lists them",
+        ),
+        (
+            &[("RTRASH_ALLOW_ROOTS", work.as_str())],
+            "nothing was changed",
+        ),
+    ];
+    for (envs, last) in refusals {
+        let label = (&empty, envs);
+        let out = common::assert_refused_unchanged(&label, &watch, 2, &[(last, 1)], || {
+            sb.run_env(&empty, envs)
+        });
+        let same = common::assert_refused_unchanged(&(&fix, envs), &watch, 2, &[(last, 1)], || {
+            sb.run_env(&fix, envs)
+        });
+        assert_eq!(tail(&out), tail(&same), "{envs:?}");
+    }
+    let out = common::assert_refused_unchanged(&"scope", &watch, 2, &[], || {
+        sb.run_env(&empty, &[("RTRASH_ALLOW_ROOTS", work.as_str())])
+    });
+    assert_eq!(common::outside_lines(&out), 1, "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("rtrash-elsewhere"),
+        "{}",
+        stderr_of(&out)
+    );
+    let capped = ["empty", "--home-only", "--dangling", "--max-count=1"];
+    common::assert_refused_unchanged(&capped, &watch, 2, &[("-n lists them", 1)], || {
+        sb.run(&capped)
+    });
+    let dry = ["empty", "--home-only", "--dangling", "-n"];
+    let out = common::assert_refused_unchanged(&dry, &watch, 0, &[], || {
+        sb.run_env(&dry, &[("RTRASH_NO_PERMANENT", "1")])
+    });
+    assert_eq!(stdout_of(&out).lines().count(), 2, "{}", stdout_of(&out));
+
+    // Within the limits: the record outside the root is gone by hand, and
+    // the one left fits both the root and a cap of 1.
+    fs::remove_file(info.join("dl-out.trashinfo")).unwrap();
+    let envs = [
+        ("RTRASH_ALLOW_ROOTS", work.as_str()),
+        ("RTRASH_MAX_PERMANENT", "1"),
+    ];
+    let out = sb.run_env(&empty, &envs);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(!info.join("dl-in.trashinfo").exists());
+    assert!(info.join("dl-keep.trashinfo").exists() && files.join("dl-keep").exists());
+}
+
 /// `put -v` names the trash directory each item went to.
 #[cfg(unix)]
 #[test]

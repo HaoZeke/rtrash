@@ -488,6 +488,18 @@ it lists the records instead, and with
 .BR \-\-json
 it prints
 .RI { dry_run ", " removed ", " dangling }.
+The limits are those of
+.BR "status \-\-check \-\-fix" :
+.B RTRASH_NO_PERMANENT
+refuses it,
+.B RTRASH_MAX_PERMANENT
+or
+.B \-\-max\-count
+caps it before the first removal, and with
+.B RTRASH_ALLOW_ROOTS
+set each record must name a path under a root, while one whose origin
+cannot be read refuses the run.
+A refused run removes nothing and exits 2.
 .TP
 .B \-\-json
 Emit a JSON summary on stdout
@@ -3821,6 +3833,10 @@ and
 and
 .BR "wsl empty" ,
 which cannot keep to a scope, exit 2; dry runs still work.
+.B "empty \-\-dangling"
+keeps to it, as
+.B "status \-\-check \-\-fix"
+does: each record must name a path under a root.
 Each command checks every path first and exits 2, changing nothing,
 when one is outside.
 The

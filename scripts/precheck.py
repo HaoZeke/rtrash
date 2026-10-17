@@ -294,8 +294,6 @@ BATCH = "a batch the caller counted up front with permanent_guard::gate_many"
 PERMANENT_ALLOW = {
     ("du_dupes.rs", "clone_file"): (2, OWN + ": the clone target it just created"),
     ("du_dupes.rs", "link_one"): (2, OWN + ": the .rtrash-link temp beside the duplicate"),
-    ("empty.rs", "empty_dangling"): (1, "dangling records name no payload; empty is refused "
-                                        "whole under RTRASH_NO_PERMANENT"),
     ("empty.rs", "empty_one"): (1, RECORD),
     ("empty.rs", "full_empty_wipe"): (1, BATCH),
     ("empty.rs", "prune_directorysizes"): (1, OWN),

@@ -186,10 +186,13 @@ pub fn refuse_outside_or_unplaced(prog: &str, items: &[(PathBuf, Option<PathBuf>
 }
 
 /// The exit code for a command that cannot be scoped while the scope is
-/// set: `empty`, `reap`, and wsl `rm` and `empty`. Dry runs and help pass.
+/// set: `empty`, `reap`, and wsl `rm` and `empty`. Dry runs and help pass,
+/// and so does `empty --dangling`, which checks each record's origin
+/// against the roots itself, as `status --check --fix` does.
 pub fn refuse_unscoped(prog: &str, cmd: &str, args: &[String]) -> Option<i32> {
     let unscoped = match cmd {
-        "empty" | "reap" => true,
+        "empty" => !args.iter().any(|a| a == "--dangling"),
+        "reap" => true,
         "wsl" => matches!(args.first().map(String::as_str), Some("rm" | "empty")),
         _ => false,
     };

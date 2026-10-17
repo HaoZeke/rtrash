@@ -25,7 +25,7 @@
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::trashdir::{self, TrashDir};
 
@@ -78,6 +78,27 @@ impl Problem {
     }
 }
 
+/// The original path the regular-file record `record` in `dir` names,
+/// with the record as parsed, or why it cannot serve a restore: it cannot
+/// be read, has no `Path=`, or its `Path=` climbs out of its volume. The
+/// same reasons make a record bad in [`scan`], and an `empty --dangling`
+/// under `RTRASH_ALLOW_ROOTS` takes an error as an unknown origin.
+pub fn record_origin(
+    dir: &TrashDir,
+    record: &Path,
+) -> Result<(PathBuf, crate::info::TrashInfo), String> {
+    let body = crate::info::read_bounded(record, crate::info::RECORD_CAP)
+        .map_err(|e| format!("cannot be read ({e})"))?;
+    let parsed = crate::info::parse_bytes(&body);
+    if parsed.path.as_os_str().is_empty() {
+        return Err("no Path line".to_string());
+    }
+    let origin = dir
+        .resolve_original_checked(&parsed.path)
+        .map_err(|e| e.to_string())?;
+    Ok((origin, parsed))
+}
+
 /// The problems in `dir`: records in name order, then orphans.
 pub fn scan(dir: &TrashDir) -> Vec<Problem> {
     let mut names: Vec<std::ffi::OsString> = std::fs::read_dir(dir.info())
@@ -120,27 +141,10 @@ pub fn scan(dir: &TrashDir) -> Vec<Problem> {
         }
         let payload = dir.files().join(OsStr::from_bytes(stem));
         let has_payload = payload.symlink_metadata().is_ok();
-        let body = match crate::info::read_bounded(&record, crate::info::RECORD_CAP) {
-            Ok(b) => b,
-            Err(e) => {
-                let why = format!("cannot be read ({e})");
-                out.push(Problem::BadRecord { record, why });
-                continue;
-            }
-        };
-        let parsed = crate::info::parse_bytes(&body);
-        if parsed.path.as_os_str().is_empty() {
-            let why = "no Path line".to_string();
-            out.push(Problem::BadRecord { record, why });
-            continue;
-        }
-        let origin = match dir.resolve_original_checked(&parsed.path) {
+        let (origin, parsed) = match record_origin(dir, &record) {
             Ok(o) => o,
-            Err(e) => {
-                out.push(Problem::BadRecord {
-                    record,
-                    why: e.to_string(),
-                });
+            Err(why) => {
+                out.push(Problem::BadRecord { record, why });
                 continue;
             }
         };

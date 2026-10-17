@@ -52,7 +52,9 @@ permanent delete). Use --plain to skip the TUI.
                      --json lists each short file system
       --dangling   remove only the .trashinfo records whose payload is gone
                      (they list as items that cannot be restored); takes
-                     no DAYS or --max-size
+                     no DAYS or --max-size; the limits of status --fix
+                     apply (RTRASH_NO_PERMANENT, RTRASH_MAX_PERMANENT
+                     or --max-count, RTRASH_ALLOW_ROOTS)
       --json       emit a JSON summary on stdout ({dry_run, removed, bytes, days,
                      older_than_secs, max_size})
       --trash-dir=PATH  empty only this trash directory (repeatable);
@@ -112,11 +114,41 @@ fn dangling_records(dir: &TrashDir) -> Vec<std::ffi::OsString> {
 }
 
 /// `empty --dangling`: remove the records that name no payload, under
-/// each trash's lock, and nothing else.
+/// each trash's lock, and nothing else. The limits are those of
+/// `status --check --fix`, checked before the first removal so a refused
+/// run removes nothing (exit 2): with `RTRASH_ALLOW_ROOTS` set each
+/// record must name a path under a root (one whose origin cannot be read
+/// refuses the run), then `RTRASH_MAX_PERMANENT` or `--max-count` caps
+/// the count. Each removal goes through
+/// [`crate::permanent_guard::remove_record`], so `RTRASH_NO_PERMANENT`
+/// refuses it there too. A dry run checks none of them, as `-n` there.
 fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
+    let found: Vec<Vec<std::ffi::OsString>> = dirs.iter().map(dangling_records).collect();
+    let count = found.iter().map(|f| f.len() as u64).sum::<u64>();
+    if !opts.dry_run && count > 0 {
+        if crate::allow_roots::roots().is_some() {
+            let scoped: Vec<(PathBuf, Option<PathBuf>)> = dirs
+                .iter()
+                .zip(&found)
+                .flat_map(|(dir, names)| {
+                    names.iter().map(move |fname| {
+                        let record = dir.info().join(fname);
+                        let origin = crate::trash_check::record_origin(dir, &record).ok();
+                        (record, origin.map(|(o, _)| o))
+                    })
+                })
+                .collect();
+            if let Some(code) = crate::allow_roots::refuse_outside_or_unplaced(prog, &scoped) {
+                return code;
+            }
+        }
+        if let Some(code) = crate::permanent_guard::check_count(prog, count) {
+            return code;
+        }
+    }
     let mut removed = 0u64;
     let mut status = 0;
-    for dir in dirs {
+    for (dir, checked) in dirs.iter().zip(&found) {
         let _lock = match trashdir::TrashLock::acquire(&dir.root) {
             Ok(l) => l,
             Err(e) => {
@@ -130,8 +162,11 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
         let mut total = (!opts.dry_run)
             .then(|| crate::trash_total::cached(dir))
             .flatten();
-        for fname in dangling_records(dir) {
-            let path = dir.info().join(&fname);
+        // Read again under the lock: a record whose payload came back
+        // since stays, and only records counted above can go.
+        let now = dangling_records(dir);
+        for fname in now.iter().filter(|f| checked.contains(*f)) {
+            let path = dir.info().join(fname);
             if opts.dry_run {
                 if !opts.json {
                     println!("would remove {}", crate::util::term_path(&path));
@@ -143,7 +178,7 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
                 use std::os::unix::fs::MetadataExt;
                 m.blocks().saturating_mul(512)
             });
-            match trashdir::remove_record(&path) {
+            match crate::permanent_guard::remove_record(&path) {
                 Ok(()) => {
                     if opts.verbose && !opts.json {
                         println!("removed {}", crate::util::term_path(&path));
