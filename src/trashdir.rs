@@ -1056,9 +1056,8 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
     let _ = sync_dir(&trash.info());
 
     let dest = join_name(&trash.files(), &name);
-    // Ok(true) when the payload is a copy and the original still exists.
     let moved = match rename_noreplace(abs, &dest) {
-        Ok(()) => Ok(false),
+        Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             // A directory inside that this user can't empty would stop the
             // removal halfway; refuse before copying, as a rename would.
@@ -1066,38 +1065,28 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
             tree_removable(abs, meta)
                 .and_then(|()| crate::space::guard_copy(abs, meta, &trash.files()))
                 .and_then(|()| {
-                    // A Ctrl-C stops the copy; the error path below
-                    // removes the part copied and the record.
-                    crate::interrupt::abortable(|| copy_recursive(abs, &dest, meta))
+                    // A Ctrl-C stops the copy, which then takes back what
+                    // it made; the error path below removes the record.
+                    crate::interrupt::abortable(|| move_by_copy(abs, &dest, meta))
                 })
-                .map(|()| true)
         }
         Err(e) => Err(e),
     };
-    let copied = match moved {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = fs::remove_file(join_info(&trash.info(), &name));
-            make_tree_writable(&dest);
-            // scratch: a partial copy; the original is still in place.
-            let _ = remove_any_path(&dest);
-            return Err(e);
-        }
-    };
-    if copied {
-        // The copy is whole. If the original then can't go (a read-only
-        // directory inside it), part of it may already be gone, so the
-        // trash entry stays: dropping it would lose those files.
-        // scratch: the original, now whole in the trash.
-        if let Err(e) = remove_any(abs, meta) {
+    if let Err(e) = moved {
+        if let Some(left) = source_left(&e) {
+            // The copy is whole and part of the original may be gone, so
+            // the trash entry stays: dropping it would lose those files.
             return Err(io::Error::new(
                 e.kind(),
                 format!(
-                    "copied into the trash as '{}', but removing the original failed: {e}",
-                    crate::util::show_name(&name)
+                    "copied into the trash as '{}', but removing the original failed: {}",
+                    crate::util::show_name(&name),
+                    left.err
                 ),
             ));
         }
+        let _ = fs::remove_file(join_info(&trash.info(), &name));
+        return Err(e);
     }
     Ok(name)
 }
@@ -1973,11 +1962,71 @@ fn relocate_with(src: &Path, dest: &Path, check_space: bool) -> io::Result<()> {
                 let parent = dest.parent().filter(|p| !p.as_os_str().is_empty());
                 crate::space::guard_copy(src, &meta, parent.unwrap_or(Path::new(".")))?;
             }
-            // scratch: a move; the copy is whole first.
-            copy_recursive(src, dest, &meta).and_then(|_| remove_any(src, &meta))
+            move_by_copy(src, dest, &meta)
         }
         Err(e) => Err(e),
     }
+}
+
+/// The error of a [`move_by_copy`] that failed after its copy was whole:
+/// the copy at `dest` is complete, and part of the source may be gone.
+#[derive(Debug)]
+pub struct SourceLeft {
+    pub dest: PathBuf,
+    pub err: io::Error,
+}
+
+impl std::fmt::Display for SourceLeft {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the copy at '{}' is whole, but removing the source failed: {}",
+            self.dest.display(),
+            self.err
+        )
+    }
+}
+
+impl std::error::Error for SourceLeft {}
+
+/// The [`SourceLeft`] inside `e`, when there is one: the copy is whole,
+/// so the caller must keep it.
+pub fn source_left(e: &io::Error) -> Option<&SourceLeft> {
+    e.get_ref()?.downcast_ref::<SourceLeft>()
+}
+
+/// Move `src` to `dest` by copying it there and then removing it, the one
+/// place that does both (put into a trash on another device, restore out
+/// of one). The move completes or changes as little as it can:
+///
+/// - a copy that fails or is stopped takes back what it made at `dest`,
+///   so the source stays whole and nothing new is left behind;
+/// - once the copy is whole the source goes. A removal that fails partway
+///   keeps the copy and returns a [`SourceLeft`]: part of the source may
+///   be gone, and dropping the copy then would lose it (trash-cli #429).
+///
+/// Callers ask [`tree_removable`] first, so that removal rarely fails.
+fn move_by_copy(src: &Path, dest: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    // Only what this copy made is taken back, never a path that was there.
+    let fresh = dest.symlink_metadata().is_err();
+    if let Err(e) = copy_recursive(src, dest, meta) {
+        if fresh && e.kind() != io::ErrorKind::AlreadyExists {
+            make_tree_writable(dest);
+            // scratch: the part copied; the source is still whole.
+            let _ = remove_any_path(dest);
+        }
+        return Err(e);
+    }
+    // scratch: a move; the copy is whole first.
+    remove_any(src, meta).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            SourceLeft {
+                dest: dest.to_path_buf(),
+                err,
+            },
+        )
+    })
 }
 
 /// Cross-device fallback, shared by put (EXDEV into trash) and restore
@@ -3640,6 +3689,60 @@ proc /proc proc rw 0 0
             }
         }
         fs::set_permissions(root.join("p"), fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn move_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("rtrash-mbc-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/sub")).unwrap();
+        fs::write(root.join("src/a"), b"first").unwrap();
+        fs::write(root.join("src/sub/b"), b"second").unwrap();
+        root
+    }
+
+    /// A copy that fails partway takes back what it made, and the source
+    /// stays whole; a path already at the destination is never touched.
+    #[test]
+    fn a_move_by_copy_that_fails_takes_back_its_partial_copy() {
+        let root = move_root("partial");
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        let _l = std::os::unix::net::UnixListener::bind(src.join("sub/s")).unwrap();
+        let meta = fs::symlink_metadata(&src).unwrap();
+        let err = move_by_copy(&src, &dest, &meta).unwrap_err();
+        assert!(source_left(&err).is_none(), "{err}");
+        assert!(dest.symlink_metadata().is_err(), "the partial copy went");
+        assert_eq!(fs::read(src.join("a")).unwrap(), b"first");
+        assert_eq!(fs::read(src.join("sub/b")).unwrap(), b"second");
+
+        fs::write(&dest, b"theirs").unwrap();
+        let err = move_by_copy(&src, &dest, &meta).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+        assert_eq!(fs::read(&dest).unwrap(), b"theirs");
+        assert_eq!(fs::read(src.join("sub/b")).unwrap(), b"second");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// trash-cli #429: once the copy is whole, a removal of the source
+    /// that fails partway keeps the copy, and the error says so.
+    #[test]
+    fn a_move_by_copy_keeps_a_whole_copy_when_the_source_cannot_all_go() {
+        let root = move_root("left");
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        let stuck = OsStr::new("stuck-in-a-move-by-copy");
+        fs::write(src.join("sub").join(stuck), b"third").unwrap();
+        crate::fastdelete::refuse_in_tests(stuck);
+        let meta = fs::symlink_metadata(&src).unwrap();
+        let err = move_by_copy(&src, &dest, &meta).unwrap_err();
+        let left = source_left(&err).expect("the copy is whole");
+        assert_eq!(left.dest, dest);
+        assert_eq!(fs::read(dest.join("a")).unwrap(), b"first");
+        assert_eq!(fs::read(dest.join("sub/b")).unwrap(), b"second");
+        assert_eq!(fs::read(dest.join("sub").join(stuck)).unwrap(), b"third");
+        assert!(
+            src.join("sub").join(stuck).exists(),
+            "the refused entry stays in the source"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

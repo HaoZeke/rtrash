@@ -630,8 +630,7 @@ PERMANENT_ALLOW = {
     ("fastdelete.rs", "wipe_pair"): (1, PRIMITIVE),
     ("finder_total.rs", "prune_stale"): (1, OWN),
     ("reap_timer.rs", "remove"): (1, OWN + ": the timer unit files it installed"),
-    ("restore.rs", "restore_one_to"): (2, "the staged copy it made, and the record of the "
-                                          "restored item"),
+    ("restore.rs", "restore_one_to"): (1, "the record of the restored item"),
     ("retention.rs", "remove_entry"): (1, RECORD),
     ("rm.rs", "run_inner"): (1, RECORD),
     ("setup.rs", "link_multicall"): (1, OWN),
@@ -639,12 +638,11 @@ PERMANENT_ALLOW = {
     ("trash_total.rs", "forget"): (1, OWN),
     ("trashdir.rs", "atomic_write"): (1, OWN),
     ("trashdir.rs", "directorysizes_rewrite"): (1, OWN),
-    ("trashdir.rs", "relocate_with"): (1, MOVE),
     ("trashdir.rs", "remove_any"): (2, PRIMITIVE + ", and the move's source removal"),
     ("trashdir.rs", "remove_any_path"): (1, PRIMITIVE),
     ("trashdir.rs", "remove_record"): (1, PRIMITIVE),
-    ("trashdir.rs", "trash_move_locked"): (3, "a put undoing its own half-made copy and record, "
-                                              "and a move's source"),
+    ("trashdir.rs", "move_by_copy"): (2, MOVE + "; and the part it copied, when the copy fails"),
+    ("trashdir.rs", "trash_move_locked"): (1, "a put undoing its own record when the move fails"),
     ("tui_term.rs", "tempfile_unlinked"): (1, OWN),
     ("win_recycle.rs", "empty_run"): (1, BATCH),
     ("win_recycle.rs", "prune_after_put"): (1, BATCH),
@@ -1012,27 +1010,41 @@ def check_dot_operands():
 
 
 def check_copy_then_remove():
-    """A move across devices copies the tree with copy_recursive and then
-    removes the original with remove_any. The fn that does both asks
-    tree_removable first, so a tree this user cannot wholly remove is
-    refused before the copy starts, not left half removed after it
-    (trash-cli #427, round 225)."""
-    starts = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?fn\s+\w+")
+    """A move across devices copies the tree and then removes the
+    original. Only trashdir::move_by_copy does both (copy_recursive, then
+    remove_any): it takes back a partial copy, and it keeps a whole copy
+    when the removal fails partway (trash-cli #429, round 234). Every fn
+    that calls it asks tree_removable first, so a tree this user cannot
+    wholly remove is refused before the copy starts, not left half removed
+    after it (trash-cli #427, round 225)."""
+    starts = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)")
+    callers = 0
     for path in sorted((ROOT / "src").rglob("*.rs")):
         rel = path.relative_to(ROOT).as_posix()
         text = rust_code(path.read_text(encoding="utf-8"))
-        cuts = [m.start() for m in starts.finditer(text)] + [len(text)]
-        for a, b in zip(cuts, cuts[1:]):
-            body = text[a:b]
-            copy = body.find("copy_recursive(")
-            if copy < 0 or "remove_any(" not in body:
+        skip = test_mod_lines(text.splitlines())
+        found = list(starts.finditer(text))
+        cuts = [m.start() for m in found] + [len(text)]
+        for m, a, b in zip(found, cuts, cuts[1:]):
+            line = text.count("\n", 0, a) + 1
+            if line - 1 in skip or m.group(1) == "move_by_copy":
                 continue
+            body = text[a:b]
+            if "copy_recursive(" in body and "remove_any(" in body:
+                errors.append(f"{rel}:{line}: {m.group(1)} copies with copy_recursive and removes the "
+                              "original with remove_any; call trashdir::move_by_copy instead, which "
+                              "takes back a partial copy and keeps a whole one")
+            move = body.find("move_by_copy(")
+            if move < 0:
+                continue
+            callers += 1
             check = body.find("tree_removable(")
-            if check < 0 or check > copy:
-                line = text.count("\n", 0, a) + 1
-                errors.append(f"{rel}:{line}: copies with copy_recursive and removes the original with remove_any "
-                              "without tree_removable before the copy; check that the whole tree can go first")
-
+            if check < 0 or check > move:
+                errors.append(f"{rel}:{line}: {m.group(1)} calls move_by_copy without tree_removable "
+                              "before it; check that the whole tree can go first")
+    if not callers:
+        errors.append("precheck copy-then-remove check found no caller of move_by_copy; "
+                      "the rule no longer matches src and needs updating")
 
 
 def check_volume_trash_owner():

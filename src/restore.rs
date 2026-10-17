@@ -1123,11 +1123,20 @@ pub(crate) fn restore_one_to(
     // On failure the live dest (if any) is left intact. A Ctrl-C stops a
     // copy across file systems, and the staged part goes.
     let staged = staging_path(parent, &entry.name);
+    // A move across file systems takes back a partial copy itself. When
+    // its copy was whole but the payload could not all go, the copy is
+    // the item: keep it and restore it, and say what stays in the trash.
+    let mut left = None;
     if let Err(e) = crate::interrupt::abortable(|| trashdir::relocate(&src, &staged)) {
-        let err = format!("cannot restore '{}' to staging area: {e}", src.display());
-        // scratch: the staged copy; the payload is still in the trash.
-        let _ = trashdir::remove_any_path(&staged);
-        return Err(err);
+        match trashdir::source_left(&e) {
+            Some(l) => left = Some(l.err.to_string()),
+            None => {
+                return Err(format!(
+                    "cannot restore '{}' to staging area: {e}",
+                    src.display()
+                ))
+            }
+        }
     }
 
     if dest_exists {
@@ -1178,7 +1187,10 @@ pub(crate) fn restore_one_to(
         };
         match fs::remove_file(&info_path) {
             Ok(()) => {
-                if let (Some((b, n)), Some(sz), true) = (total, size, _lock.is_some()) {
+                // What is left of a payload that could not all go keeps
+                // its bytes in the trash, so the total is measured again.
+                let exact = _lock.is_some() && left.is_none();
+                if let (Some((b, n)), Some(sz), true) = (total, size, exact) {
                     crate::trash_total::store(
                         &entry.dir,
                         b.saturating_sub(sz),
@@ -1193,6 +1205,14 @@ pub(crate) fn restore_one_to(
         crate::trash_total::touched(&entry.dir);
     }
     trashdir::directorysizes_remove(&entry.dir, &entry.name);
+    if let Some(e) = left {
+        warnings.push(format!(
+            "restored '{}' whole, but removing it from the trash failed partway: {e}; \
+             what is left stays in the trash as '{}' with no record",
+            dest.display(),
+            src.display()
+        ));
+    }
     Ok(Restored {
         dest: dest.to_path_buf(),
         warnings,

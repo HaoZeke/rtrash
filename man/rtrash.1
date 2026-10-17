@@ -194,8 +194,10 @@ where allowed, times, extended attributes (with the access control
 list, which macOS keeps apart), named pipes, and hard links
 inside the tree. Within one btrfs file system it clones instead.
 A tree with a directory this user can't empty is refused before anything
-moves. Sockets can't be copied, so trashing one there fails. Restore
-follows the same rules.
+moves. Sockets can't be copied, so trashing one there fails. A copy that
+fails partway is removed again, and the original stays whole. When the
+copy is whole but the original can't all go, the copy stays, since part
+of the original may already be gone. Restore follows the same rules.
 .TP
 .BR \-f ", " \-\-force
 Ignore nonexistent files and arguments, never prompt.

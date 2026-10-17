@@ -1001,6 +1001,14 @@ fn cstring_path(path: &Path) -> io::Result<CString> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }
 
+/// Make every later removal refuse entries named `name`, as it would an
+/// item no ordinary user can make undeletable. Tests elsewhere in the
+/// crate use it to fail a removal partway.
+#[cfg(test)]
+pub(crate) fn refuse_in_tests(name: &OsStr) {
+    tests::FAIL.lock().unwrap().push(name.to_os_string());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1009,7 +1017,7 @@ mod tests {
 
     /// Entry names [`remove_entry`] refuses, to stand in for an item no
     /// ordinary user can make undeletable.
-    static FAIL: std::sync::Mutex<Vec<OsString>> = std::sync::Mutex::new(Vec::new());
+    pub(super) static FAIL: std::sync::Mutex<Vec<OsString>> = std::sync::Mutex::new(Vec::new());
 
     pub(super) fn fails(name: &OsStr) -> bool {
         FAIL.lock().unwrap().iter().any(|n| n == name)

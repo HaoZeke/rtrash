@@ -414,14 +414,25 @@ fn move_back_inner(src: &Path, dest: &Path, force: bool) -> Result<(), String> {
         .parent()
         .ok_or_else(|| format!("cannot restore to '{}': no parent", dest.display()))?;
     fs::create_dir_all(parent).map_err(|e| format!("cannot create '{}': {e}", parent.display()))?;
+    // A move across file systems whose copy was whole keeps that copy
+    // even when the item could not all leave the trash; say where it is.
+    let failed = |e: std::io::Error, to: &Path, what: &str| match crate::trashdir::source_left(&e) {
+        Some(l) => format!(
+            "'{}' is copied whole to '{}', but removing it from the trash failed partway: {}",
+            src.display(),
+            to.display(),
+            l.err
+        ),
+        None => format!("{what}: {e}"),
+    };
     if !force {
         return crate::trashdir::relocate(src, dest)
-            .map_err(|e| format!("cannot restore to '{}': {e}", dest.display()));
+            .map_err(|e| failed(e, dest, &format!("cannot restore to '{}'", dest.display())));
     }
     let name = dest.file_name().unwrap_or_default().to_string_lossy();
     let staged = parent.join(format!(".rtrash-restore-{}-{name}", std::process::id()));
     crate::trashdir::relocate(src, &staged)
-        .map_err(|e| format!("cannot stage '{}': {e}", src.display()))?;
+        .map_err(|e| failed(e, &staged, &format!("cannot stage '{}'", src.display())))?;
     if dest.symlink_metadata().is_ok() {
         if let Err(e) = crate::permanent_guard::remove(dest) {
             let _ = crate::trashdir::relocate_back(&staged, src);
