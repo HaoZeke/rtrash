@@ -3297,12 +3297,23 @@ proc /proc proc rw 0 0
     /// A short symlink prefix hides a long directory. Measuring the path as
     /// written would keep using `mkdir` after the resolved path is past the
     /// limit, which is the macOS "File name too long" failure.
+    ///
+    /// Long names fill the hidden part to a few hundred bytes short of the
+    /// limit, so the copy crosses it within some hundred levels. With one
+    /// 180-byte name, the chain took about 2000 levels on Linux, each copied
+    /// by a path call that walks every level above it: 4 to 8 seconds.
     #[test]
     fn copy_through_a_symlink_prefix_past_the_resolved_limit() {
         let base = std::env::temp_dir().join(format!("rtrash-resolv-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
-        let hidden = base.join("h").join("L".repeat(180));
+        let limit = libc::PATH_MAX as usize;
+        // Stop when one more name would leave less than 300 bytes of room
+        // for `/src` and the first levels copied by path.
+        let mut hidden = resolve_existing(&base).join("h");
+        while hidden.as_os_str().len() + 201 + 300 < limit {
+            hidden.push("L".repeat(200));
+        }
         fs::create_dir_all(&hidden).unwrap();
         let short = base.join("s");
         std::os::unix::fs::symlink(&hidden, &short).unwrap();
@@ -3314,7 +3325,6 @@ proc /proc proc rw 0 0
             resolved >= literal + 100,
             "resolved {resolved} literal {literal}"
         );
-        let limit = libc::PATH_MAX as usize;
         // Deep enough that the resolved path is past the limit, while the
         // path as written is still under it.
         let depth = (limit - resolved) / 2 + 2;
@@ -3324,6 +3334,10 @@ proc /proc proc rw 0 0
             "literal {literal_at_depth} is already past PATH_MAX"
         );
         assert!(resolved + depth * 2 >= limit);
+        // Some levels go by path and the rest by descriptor, and the
+        // chain stays short.
+        assert!(resolved + PATH_HEADROOM + 8 < limit, "resolved {resolved}");
+        assert!(depth < 400, "depth {depth}");
         deep_chain(&src, depth);
         let meta = fs::symlink_metadata(&src).unwrap();
         let dst = short.join("dst");
