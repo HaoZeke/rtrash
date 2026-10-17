@@ -212,6 +212,30 @@ def check_clock_waits():
                               "common::next_trash_second(), which also waits on the file system's clock")
 
 
+# An assert that a test finished within a few seconds of wall time fails
+# on a loaded runner: next_trash_second_waits_for_a_later_second asserted
+# under 1.5 s and a busy macOS runner went past it (round 215). Assert the
+# behaviour instead (count the polls through a seam), and keep a time
+# bound only as a hang guard of HANG_GUARD_MS or more.
+HANG_GUARD_MS = 5000
+TIGHT_ELAPSED = re.compile(
+    r"\bassert!\([^;]*?\belapsed\(\)(?:\.as_(secs|millis)\(\))?\s*<=?\s*"
+    r"(?:(?:std::time::)?Duration::from_(secs|millis)\(\s*(\d[\d_]*)\s*\)|(\d[\d_]*)\b)")
+
+
+def check_tight_elapsed():
+    for path in sorted((ROOT / "tests").glob("*.rs")):
+        text = path.read_text(encoding="utf-8")
+        for m in TIGHT_ELAPSED.finditer(text):
+            unit = m.group(2) or m.group(1) or "secs"
+            n = int((m.group(3) or m.group(4)).replace("_", ""))
+            ms = n * 1000 if unit == "secs" else n
+            if ms < HANG_GUARD_MS:
+                line = text.count("\n", 0, text.index("elapsed()", m.start())) + 1
+                errors.append(f"tests/{path.name}:{line}: asserts elapsed() under {ms} ms, which a loaded runner "
+                              f"can exceed; assert the behaviour, or keep a hang guard of {HANG_GUARD_MS} ms or more")
+
+
 def strip_comments(s):
     s = re.sub(r'"(?:\\.|[^"\\])*"', '""', s)
     return re.sub(r"//[^\n]*", "", s)
@@ -713,7 +737,7 @@ def main():
     if "--commit-msg" in sys.argv:
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
-    check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits()
+    check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
     if "--no-fmt" not in sys.argv:

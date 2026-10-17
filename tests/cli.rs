@@ -7039,14 +7039,29 @@ fn put_dry_run_checks_and_moves_nothing() {
 #[test]
 fn next_trash_second_waits_for_a_later_second() {
     let before = common::epoch_secs();
-    let started = std::time::Instant::now();
-    common::next_trash_second();
+    assert!(common::next_trash_second() > before);
     assert!(common::epoch_secs() > before);
     // A file changed now carries a later second too, whatever the lag of
     // the clock the file system stamps it with.
     assert!(common::fs_clock_secs() > before);
-    // It waits for the next tick only, not a fixed 1.1 s on top.
-    assert!(started.elapsed() < std::time::Duration::from_millis(1500));
+
+    // It waits for the next tick only, with no fixed wait on top: on a
+    // clock that reaches second 8 at its third reading, it naps twice
+    // and returns 8. Counting naps, not wall time, holds on a loaded
+    // runner: a 1.5 s bound on the elapsed time failed on a busy macOS
+    // runner in round 215.
+    let readings = [7, 7, 8, 9];
+    let mut next = readings.iter().copied();
+    let mut naps = 0;
+    let got = common::wait_for_later_second(7, || next.next().unwrap(), || naps += 1);
+    assert_eq!((got, naps), (8, 2));
+    // A clock that never moves ends in a panic, not an endless loop.
+    let mut stuck = 0;
+    let gave_up = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        common::wait_for_later_second(7, || 7, || stuck += 1)
+    }));
+    assert!(gave_up.is_err());
+    assert_eq!(stuck, common::SECOND_POLLS);
 }
 
 #[test]

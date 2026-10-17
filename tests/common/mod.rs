@@ -86,13 +86,36 @@ pub fn fs_clock_secs() -> u64 {
 /// second before, tied with the previous put
 /// (`list_last_keeps_the_newest_finder_items`, round 208). The file
 /// system's clock never runs ahead of the system clock, so once it has
-/// passed `start`, both have.
-pub fn next_trash_second() {
-    let start = epoch_secs();
-    while fs_clock_secs() <= start {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+/// passed `start`, both have. It returns the file system's later second.
+pub fn next_trash_second() -> u64 {
+    wait_for_later_second(epoch_secs(), fs_clock_secs, || {
+        std::thread::sleep(Duration::from_millis(20))
+    })
 }
+
+/// Read `clock` until it shows a second after `start` and return that
+/// reading, calling `nap` between readings and not after the last one.
+/// It counts readings rather than wall time, so a loaded runner cannot
+/// make it fail early. It panics after `SECOND_POLLS` readings instead
+/// of spinning forever on a clock that never moves.
+pub fn wait_for_later_second(
+    start: u64,
+    mut clock: impl FnMut() -> u64,
+    mut nap: impl FnMut(),
+) -> u64 {
+    for _ in 0..SECOND_POLLS {
+        let now = clock();
+        if now > start {
+            return now;
+        }
+        nap();
+    }
+    panic!("the clock stayed at second {start} for {SECOND_POLLS} readings");
+}
+
+/// Readings [`wait_for_later_second`] takes before it gives up: at 20 ms
+/// a nap, 10 s or more of waiting on a tick that comes within a second.
+pub const SECOND_POLLS: usize = 500;
 
 /// The end of each stderr line naming a path outside `RTRASH_ALLOW_ROOTS`.
 pub const OUTSIDE: &str = "is outside RTRASH_ALLOW_ROOTS";
