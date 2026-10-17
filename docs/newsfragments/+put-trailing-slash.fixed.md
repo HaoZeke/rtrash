@@ -1,0 +1,1 @@
+`put` now refuses `link/` when link is a symlink to a directory, and leaves both the link and the directory's files in place. That operand names the directory, while the move would take the link. Give `link` to trash the link itself. `d/` and `d//` trash `d` with a record that names `d`, and `f/` on a file is an error that keeps the file (trash-cli #434).

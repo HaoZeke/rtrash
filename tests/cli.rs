@@ -945,6 +945,121 @@ fn put_refuses_dot_operands_however_they_are_spelled() {
     assert_eq!(names_in(&sb.trash().join("files")), Vec::<String>::new());
 }
 
+/// `d/` and `d//` trash d, with a record that names d, as `d` does, and
+/// `f/` on a file is an error that leaves the file, `-f` included
+/// (trash-cli #434).
+#[test]
+fn put_with_a_trailing_slash_trashes_the_directory_it_names() {
+    let sb = Sandbox::new("put-trailing-slash");
+    for d in ["d1", "d2"] {
+        fs::create_dir(sb.work().join(d)).unwrap();
+        sb.touch(&format!("{d}/f"));
+    }
+    let out = sb.run(&["put", "-r", "d1/", "d2//"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(names_in_trash(&sb), ["d1", "d2"]);
+    let work = sb.work().display().to_string();
+    for d in ["d1", "d2"] {
+        let record = sb.trash().join(format!("info/{d}.trashinfo"));
+        let info = fs::read_to_string(record).unwrap();
+        assert!(info.contains(&format!("Path={work}/{d}\n")), "{info}");
+        assert!(sb.trash().join(format!("files/{d}/f")).exists());
+    }
+    sb.touch("f");
+    for args in [&["put", "f/"][..], &["put", "-f", "f/"][..]] {
+        let out = sb.run(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let err = stderr_of(&out);
+        assert!(err.contains("cannot remove 'f/'"), "{args:?}: {err}");
+    }
+    assert!(sb.work().join("f").exists());
+}
+
+/// `link/`, where link points to a directory, names that directory while
+/// the move would take the link, so put refuses it and leaves the link and
+/// the directory's files alone. `link` then trashes the link only
+/// (trash-cli #434).
+#[test]
+fn put_refuses_a_symlink_named_with_a_trailing_slash() {
+    let sb = Sandbox::new("put-link-slash");
+    fs::create_dir(sb.work().join("target")).unwrap();
+    sb.touch("target/f");
+    let link = sb.work().join("link");
+    std::os::unix::fs::symlink("target", &link).unwrap();
+    for args in [
+        &["put", "link/"][..],
+        &["put", "-rf", "link/"][..],
+        &["put", "-d", "link//"][..],
+    ] {
+        let out = sb.run(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr_of(&out));
+        let err = stderr_of(&out);
+        assert!(
+            err.contains("it is a symlink to a directory"),
+            "{args:?}: {err}"
+        );
+    }
+    assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+    assert!(sb.work().join("target/f").exists());
+    assert_eq!(names_in(&sb.trash().join("files")), Vec::<String>::new());
+
+    let out = sb.run(&["put", "link"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(link.symlink_metadata().is_err());
+    assert!(sb.work().join("target/f").exists());
+    assert_eq!(names_in_trash(&sb), ["link"]);
+}
+
+/// A trailing slash does not change put's answer. In a parent that does
+/// not allow deleting, `p/d1/` and `p/d2` get the same exit code and the
+/// same fate, and so do the read-only directories `ro1/` and `ro2`. Each
+/// file ends up where it was or in the trash (trash-cli #434 lost them).
+#[test]
+fn put_gives_the_same_answer_with_or_without_a_trailing_slash() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new("put-slash-perms");
+    let (w, files) = (sb.work(), sb.trash().join("files"));
+    for d in ["p/d1", "p/d2", "ro1", "ro2"] {
+        fs::create_dir_all(w.join(d)).unwrap();
+        sb.touch(&format!("{d}/f"));
+    }
+    let chmod = |p: &Path, m: u32| {
+        if p.exists() {
+            fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+        }
+    };
+    for d in ["p", "ro1", "ro2"] {
+        chmod(&w.join(d), 0o555);
+    }
+    for (slash, bare, a, b) in [("p/d1/", "p/d2", "d1", "d2"), ("ro1/", "ro2", "ro1", "ro2")] {
+        let one = sb.run(&["put", "-r", slash]);
+        let two = sb.run(&["put", "-r", bare]);
+        let why = format!("{}{}", stderr_of(&one), stderr_of(&two));
+        assert_eq!(
+            one.status.code(),
+            two.status.code(),
+            "{slash} {bare}: {why}"
+        );
+        let gone = |d: &str| !w.join(d).exists();
+        let dir = slash.trim_end_matches('/');
+        assert_eq!(gone(dir), gone(bare), "{slash} {bare}: {why}");
+        for (orig, name) in [(dir, a), (bare, b)] {
+            let kept = w.join(orig).join("f").exists();
+            let trashed = files.join(name).join("f").exists();
+            assert!(
+                kept != trashed,
+                "{orig}: kept {kept}, trashed {trashed}: {why}"
+            );
+        }
+    }
+    for d in [w.join("p"), w.join("ro1"), w.join("ro2")] {
+        chmod(&d, 0o755);
+    }
+    for d in ["ro1", "ro2"] {
+        chmod(&files.join(d), 0o755);
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn put_skips_safe_rm_paths_and_refuses_home() {

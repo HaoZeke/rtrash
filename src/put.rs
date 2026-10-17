@@ -662,6 +662,19 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         }
     };
 
+    // `link/` names the directory the link points to, while the move
+    // below takes the link: refuse rather than pick one of the two.
+    if meta.is_dir() && crate::safety::typed_last(path).1 {
+        let bare: PathBuf = path.components().collect();
+        if fs::symlink_metadata(bare).is_ok_and(|m| m.file_type().is_symlink()) {
+            eprintln!(
+                "{prog}: cannot remove '{name}': it is a symlink to a directory; \
+                 give it without the trailing slash to trash the link"
+            );
+            return Err(1);
+        }
+    }
+
     if meta.is_dir() && !opts.recursive {
         if !opts.empty_dirs {
             eprintln!("{prog}: cannot remove '{name}': Is a directory");

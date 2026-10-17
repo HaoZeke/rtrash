@@ -15,6 +15,7 @@
 # both tools must refuse a volume record that leads out of its volume.
 # With trash-cli too, rtrash status --check --fix must clear the records
 # a trash-put killed mid-way leaves (trash-cli #414).
+# rtrash put must treat d/ as d and refuse ./ and link/ (trash-cli #434).
 # Tools that are missing get skipped with a note; rtrash must be there.
 # gio needs a session bus and gvfsd, so the script starts both in
 # dbus-run-session when gio is on PATH and no gvfsd runs yet.
@@ -355,6 +356,30 @@ if have trash-list; then
     fail=1
   fi
   rm -rf -- "$tl"
+
+  # trash-cli #434: a trailing slash must not change what put does.
+  # rtrash put -r d/ trashes d, and trash-list lists it as d; ./ and
+  # link/ (link points to a directory) are refused and lose nothing.
+  tl=$scratch/tl-slash
+  sw=$scratch/w/slash
+  mkdir -p "$sw/d" "$sw/target"
+  sw=$(cd "$sw" && pwd -P)  # put records the resolved path
+  printf 'x\n' > "$sw/d/f"
+  printf 'y\n' > "$sw/target/g"
+  ln -s target "$sw/link"
+  code=0; "$rtrash" put -r --trash-dir="$tl" "$sw/d/" >/dev/null 2>&1 || code=$?
+  dot=0; (cd "$sw" && "$rtrash" put -rf --trash-dir="$tl" ./ >/dev/null 2>&1) || dot=$?
+  lnk=0; "$rtrash" put -rf --trash-dir="$tl" "$sw/link/" >/dev/null 2>&1 || lnk=$?
+  rows=$(trash-list --trash-dir="$tl" 2>&1 || echo "exit $?")
+  if [[ $code == 0 && $dot == 1 && $lnk == 1 && $rows == *" $sw/d" && $rows != *$'\n'* \
+    && -f $tl/files/d/f && -L $sw/link && -f $sw/target/g ]]; then
+    echo "ok   put d/ trashes d, and ./ and link/ are refused (trash-cli #434)"
+  else
+    echo "FAIL put with a trailing slash (put $code, ./ $dot, link/ $lnk)"
+    printf '%s\n' "$rows" | sed 's/^/  | /'
+    fail=1
+  fi
+  rm -rf -- "$tl" "$sw"
 
   # Odd names in rows, as trash-cli 0.26.9 prints them: as is in a pipe,
   # with a byte that is not UTF-8 as \xNN, and in GNU ls's shell-escape
