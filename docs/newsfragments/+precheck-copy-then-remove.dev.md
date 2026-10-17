@@ -1,0 +1,1 @@
+Precheck now flags a function that copies a tree across devices and then removes the original, unless it calls `tree_removable` before the copy. A tree that cannot wholly go is then refused before anything moves. AGENTS.md now lists this rule and round 224's dot-operand rule.
