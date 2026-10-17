@@ -284,8 +284,14 @@ fn is_trash(it: &Item) -> bool {
     it.artefact == Some("trash")
 }
 
-/// Scan `dir` one level deep: every child directory and file with its
-/// total, git state and artefact kind.
+/// Whether `it` is a symlink row: shown with `@`, never entered, and
+/// trashed as the link alone.
+fn is_link(it: &Item) -> bool {
+    it.artefact == Some(du::LINK)
+}
+
+/// Scan `dir` one level deep: every child directory, file and symlink
+/// with its total, git state and artefact kind.
 fn scan_view(dir: &Path, opts: &ScanOpts, git: bool, sorting: Sorting) -> io::Result<View> {
     let o = ScanOpts {
         top: usize::MAX,
@@ -297,6 +303,7 @@ fn scan_view(dir: &Path, opts: &ScanOpts, git: bool, sorting: Sorting) -> io::Re
         artefacts_only: false,
         older_cutoff: None,
         newer_cutoff: None,
+        list_links: true,
         ..opts.clone()
     };
     let mut report = du::scan(&[dir.to_path_buf()], &o)?;
@@ -352,7 +359,7 @@ fn quick_view(dir: &Path) -> io::Result<View> {
             disk: if is_dir { 0 } else { disk },
             mtime,
             items: u64::from(!is_dir),
-            artefact: None,
+            artefact: m.file_type().is_symlink().then_some(du::LINK),
             repos: Vec::new(),
             git: None,
             unique: None,
@@ -1751,11 +1758,22 @@ fn info_lines(it: &Item, whole: u64, pending: bool, now: i64) -> Vec<String> {
         path.push(std::path::MAIN_SEPARATOR);
     }
     out.push(format!("path      {path}"));
-    let kind = if it.is_dir { "directory" } else { "file" };
-    out.push(match it.artefact {
+    let kind = if it.is_dir {
+        "directory"
+    } else if is_link(it) {
+        "symbolic link"
+    } else {
+        "file"
+    };
+    out.push(match it.artefact.filter(|_| !is_link(it)) {
         Some(a) => format!("kind      {kind}, {a}"),
         None => format!("kind      {kind}"),
     });
+    if is_link(it) {
+        if let Ok(to) = std::fs::read_link(&it.path) {
+            out.push(format!("target    {}", crate::util::term_path(&to)));
+        }
+    }
     if pending {
         out.push("disk use  … (scan running)".into());
     } else {
@@ -1969,10 +1987,17 @@ fn row_text_in(it: &Item, marked: bool, ctx: &RowCtx) -> String {
     }
     let mark = if marked { "[x]" } else { "[ ]" };
     let risky = it.git.as_ref().is_some_and(|(s, _)| s.is_risky());
-    let warn = if risky { "!" } else { " " };
+    // ncdu's flag column: `@` for a symlink, unless git has a warning.
+    let warn = if risky {
+        "!"
+    } else if is_link(it) {
+        "@"
+    } else {
+        " "
+    };
     let slash = if it.is_dir { "/" } else { "" };
     let mut badges = Vec::new();
-    if let Some(a) = it.artefact {
+    if let Some(a) = it.artefact.filter(|_| !is_link(it)) {
         badges.push(a.to_string());
     }
     // The same marks, in the same place, as the table's NOTE column.
@@ -2688,6 +2713,61 @@ mod tests {
         assert_eq!(names(&a), ["inner", "side"]);
         assert_eq!(a.view().disk, big_before);
         assert_eq!(a.cache[&t.0.join("w")].disk, top_before);
+    }
+
+    /// A symlink is an `@` row of its own size, as in ncdu: never
+    /// entered, and trashed as the link alone. Unix only, as above.
+    #[cfg(unix)]
+    #[test]
+    fn links_are_at_rows_that_stay_closed_and_trash_alone() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let t = tree("links");
+        let w = t.0.join("w");
+        symlink("big", w.join("to-big")).unwrap();
+        symlink("file", w.join("to-file")).unwrap();
+        symlink("nowhere", w.join("dangling")).unwrap();
+        let quick = quick_view(&w).unwrap();
+        let mut a = app(&t);
+        for name in ["to-big", "to-file", "dangling"] {
+            let row = |v: &[Item]| v.iter().find(|r| r.path == w.join(name)).cloned();
+            let q = row(&quick.rows).expect(name);
+            let it = row(a.rows()).expect(name);
+            let m = fs::symlink_metadata(w.join(name)).unwrap();
+            for r in [&q, &it] {
+                assert!(is_link(r) && !r.is_dir, "{name}: {r:?}");
+                assert_eq!((r.apparent, r.disk), (m.len(), m.blocks() * 512));
+            }
+            let s = row_text(&it, false, a.view().disk, SortKey::Disk);
+            assert!(s.starts_with("[ ]@"), "{s}");
+            assert!(s.ends_with(&format!(" {name}")), "{s}");
+        }
+        let at = a.rows().iter().position(|r| r.path == w.join("to-big"));
+        let at = at.unwrap();
+        let info = info_lines(&a.rows()[at], a.view().disk, false, 0);
+        assert!(
+            info.contains(&"kind      symbolic link".to_string()),
+            "{info:?}"
+        );
+        assert!(info.contains(&"target    big".to_string()), "{info:?}");
+        a.select(at);
+        a.open();
+        assert_eq!(a.cur, w);
+        assert_eq!(a.status, "not a directory");
+        a.ask_delete();
+        assert_eq!(a.mode, Mode::Confirm);
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(
+            fs::symlink_metadata(w.join("to-big")).is_err(),
+            "{}",
+            a.status
+        );
+        assert!(w.join("big/inner/blob").is_file());
+        let kept = fs::symlink_metadata(t.0.join("Trash/files/to-big")).unwrap();
+        assert!(kept.file_type().is_symlink());
+        assert!(!names(&a).contains(&"to-big".to_string()));
+        a.on_key(KeyCode::Char('u'), KeyModifiers::NONE);
+        let back = fs::symlink_metadata(w.join("to-big")).unwrap();
+        assert!(back.file_type().is_symlink(), "{}", a.status);
     }
 
     #[test]

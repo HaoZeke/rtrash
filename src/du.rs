@@ -371,7 +371,13 @@ pub struct ScanOpts {
     /// `--collapse`: directory names (or paths) listed as one row, with
     /// nothing below them listed on its own.
     pub collapse: Vec<String>,
+    /// List symlinks (not followed) as file rows of their own size,
+    /// tagged [`LINK`]. The explorer sets it; other listings do not.
+    pub list_links: bool,
 }
+
+/// The tag of a symlink row listed under [`ScanOpts::list_links`].
+pub const LINK: &str = "symlink";
 
 impl Default for ScanOpts {
     fn default() -> Self {
@@ -394,6 +400,7 @@ impl Default for ScanOpts {
             types: false,
             include_kernfs: false,
             collapse: Vec::new(),
+            list_links: false,
         }
     }
 }
@@ -1019,6 +1026,7 @@ struct FileCandidate {
     disk: u64,
     unique: u64,
     mtime: i64,
+    link: bool,
 }
 
 /// Open and walk one directory. `parent` and `name` locate it relative to
@@ -1286,8 +1294,9 @@ fn stat_entries(
         if opts.types {
             add_type(&mut types, name.to_bytes(), a, d);
         }
+        let link = opts.list_links && m.is_symlink();
         if list_files
-            && m.is_file()
+            && (m.is_file() || link)
             && ctx.top_files.wants(ctx.key(a, d, 1, m.mtime))
             && ctx.listable(depth + 1, m.mtime)
         {
@@ -1297,6 +1306,7 @@ fn stat_entries(
                 disk: d,
                 unique: u,
                 mtime: m.mtime,
+                link,
             });
         }
     }
@@ -1484,7 +1494,7 @@ fn walk_dir(
                 disk: c.disk,
                 mtime: c.mtime,
                 items: 1,
-                artefact: None,
+                artefact: c.link.then_some(LINK),
                 repos: Vec::new(),
                 git: None,
                 unique: opts.unique.then_some(c.unique),
@@ -4195,6 +4205,55 @@ mod tests {
         let j = report_json_with(&r, &none, Some(0), Some(&targets));
         assert_eq!(j.matches("\"target\":").count(), 2, "{j}");
         assert!(!report_json(&r, &none).contains("\"target\""));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Without -L a symlink counts its own size either way; only
+    /// `list_links` (the explorer) lists it, as a row tagged [`LINK`].
+    #[cfg(unix)]
+    #[test]
+    fn links_are_rows_only_when_the_scan_lists_links() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        let base = std::env::temp_dir().join(format!("rtrash-du-links-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("dir")).unwrap();
+        let base = fs::canonicalize(&base).unwrap();
+        fs::write(base.join("big.bin"), vec![1u8; 100_000]).unwrap();
+        symlink("big.bin", base.join("file-link")).unwrap();
+        symlink("dir", base.join("dir-link")).unwrap();
+        let opts = ScanOpts {
+            all_dirs: true,
+            top: 50,
+            ..ScanOpts::default()
+        };
+        let plain = scan(std::slice::from_ref(&base), &opts).unwrap();
+        let links = ScanOpts {
+            list_links: true,
+            ..opts
+        };
+        let listed = scan(std::slice::from_ref(&base), &links).unwrap();
+        assert!(
+            plain.files.iter().all(|f| f.artefact.is_none()),
+            "{:?}",
+            plain.files
+        );
+        assert_eq!(plain.files.len(), 1, "{:?}", plain.files);
+        assert_eq!(plain.roots[0].disk, listed.roots[0].disk);
+        assert_eq!(plain.roots[0].files, listed.roots[0].files);
+        let mut rows: Vec<_> = listed
+            .files
+            .iter()
+            .filter(|f| f.artefact == Some(LINK))
+            .collect();
+        rows.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(rows.len(), 2, "{:?}", listed.files);
+        for (row, name) in rows.iter().zip(["dir-link", "file-link"]) {
+            let m = fs::symlink_metadata(base.join(name)).unwrap();
+            assert_eq!(row.path, base.join(name));
+            assert!(!row.is_dir);
+            assert_eq!(row.apparent, m.len());
+            assert_eq!(row.disk, m.blocks() * 512);
+        }
         let _ = fs::remove_dir_all(&base);
     }
 

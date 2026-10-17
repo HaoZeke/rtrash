@@ -2020,6 +2020,15 @@ a directory at a time, in the
 .B \-\-sort
 order (largest first by default), with a size bar per row.
 Right, l or Enter opens a directory; left, h or Backspace goes up.
+A symlink is a row of its own size marked
+.B @
+in the flag column, as in ncdu; it never opens, and
+.B d
+trashes the link, not what it points to.
+The info panel names its target.
+The table and
+.B \-\-json
+still count links without listing them.
 .B d
 moves the cursor row (or the marked rows) to the trash after a
 confirmation,
