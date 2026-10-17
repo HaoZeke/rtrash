@@ -877,6 +877,13 @@ and
 On macOS the Finder Trash keeps no records, so pin
 .B \-\-trash\-dir
 to check a FreeDesktop trash there.
+.B list
+leaves out a record it cannot read or whose path climbs out of its
+volume, and after its rows it says on stderr how many, naming
+.BR "rtrash status \-\-check" ;
+its rows on stdout are the same as without them, and
+.B trash\-list
+says nothing more.
 .TP
 .B \-\-fix
 With

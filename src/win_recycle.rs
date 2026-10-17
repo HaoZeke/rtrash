@@ -286,13 +286,7 @@ pub fn scan_bin_dir_counted(dir: &Path) -> BinScan {
 /// Bin entries could not be listed; None when there are none. stdout is
 /// left as it was, so scripts reading the rows see no change.
 pub fn unlisted_hint(prog: &str, skipped: u64) -> Option<String> {
-    (skipped > 0).then(|| {
-        format!(
-            "{prog}: {} could not be listed; `rtrash status --check` shows {}",
-            crate::util::plural(skipped, "Recycle Bin entry", "Recycle Bin entries"),
-            if skipped == 1 { "it" } else { "them" }
-        )
-    })
+    crate::util::unlisted_hint(prog, skipped, "Recycle Bin entry", "Recycle Bin entries")
 }
 
 /// The largest `$I` record: a version 2 header and a path of 32767

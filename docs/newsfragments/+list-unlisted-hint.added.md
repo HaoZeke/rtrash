@@ -1,0 +1,1 @@
+`rtrash list` now says on stderr how many trash records it could not show: a record it cannot read, such as a folder by that name or one past the size cap, or one whose relative `Path=` climbs out of its volume. The line names `rtrash status --check`, which lists each one, the same as the Windows hint. The rows on stdout do not change, and `trash-list` prints nothing new.

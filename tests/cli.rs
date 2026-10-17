@@ -2055,6 +2055,104 @@ fn multicall_names_dispatch() {
     assert!(trash_names(&sb).is_empty());
 }
 
+/// Records `list` leaves out (one that is not a regular file, one past
+/// the record cap, one whose `Path=` climbs out of its volume) add one
+/// stderr hint naming `status --check` after the same stdout; trash-list
+/// stays as it was, and a clean trash gets no hint.
+#[test]
+fn list_hints_once_at_records_it_leaves_out() {
+    let sb = Sandbox::new("list-unlisted");
+    let uid = unsafe { libc::getuid() };
+    let vol = sb.root.join("vol");
+    let trash_root = vol.join(format!(".Trash-{uid}"));
+    fs::create_dir_all(trash_root.join("files")).unwrap();
+    fs::create_dir_all(trash_root.join("info")).unwrap();
+    fs::write(trash_root.join("files/ok.txt"), b"payload").unwrap();
+    fs::write(
+        trash_root.join("info/ok.txt.trashinfo"),
+        "[Trash Info]\nPath=docs/ok.txt\nDeletionDate=2026-01-02T03:04:05\n",
+    )
+    .unwrap();
+    let pin = format!("--trash-dir={}", trash_root.display());
+    let bindir = sb.root.join("bin");
+    fs::create_dir_all(&bindir).unwrap();
+    std::os::unix::fs::symlink(bin(), bindir.join("trash-list")).unwrap();
+    let trash_list = || {
+        Command::new(bindir.join("trash-list"))
+            .arg(&pin)
+            .current_dir(sb.work())
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("HOME", &sb.root)
+            .output()
+            .unwrap()
+    };
+    let clean = sb.run(&["list", &pin]);
+    assert!(clean.status.success(), "{}", stderr_of(&clean));
+    assert!(
+        stdout_of(&clean).contains("docs/ok.txt"),
+        "{}",
+        stdout_of(&clean)
+    );
+    assert_eq!(stderr_of(&clean), "", "a clean trash gets no hint");
+    let clean_cli = trash_list();
+
+    let info = trash_root.join("info");
+    let bad = info.join("bad.txt.trashinfo");
+    fs::create_dir(&bad).unwrap();
+    let big = info.join("big.txt.trashinfo");
+    fs::write(&big, vec![b'x'; (1 << 20) + 1]).unwrap();
+    let out_of_volume = info.join("up.txt.trashinfo");
+    fs::write(
+        &out_of_volume,
+        "[Trash Info]\nPath=../../up.txt\nDeletionDate=2026-01-02T03:04:05\n",
+    )
+    .unwrap();
+
+    let out = sb.run(&["list", &pin]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(
+        out.stdout, clean.stdout,
+        "stdout is the same as for the clean trash"
+    );
+    let hint = "rtrash list: 3 trash records could not be listed; \
+                `rtrash status --check` shows them";
+    assert_eq!(
+        stderr_of(&out),
+        format!("{hint}\n"),
+        "exactly one hint line"
+    );
+    let out = sb.run(&["list", "--json", &pin]);
+    assert_eq!(
+        common::lines_ending(&out, "shows them"),
+        1,
+        "{}",
+        stderr_of(&out)
+    );
+
+    let cli = trash_list();
+    assert_eq!(cli.status.code(), clean_cli.status.code());
+    assert_eq!(
+        cli.stdout, clean_cli.stdout,
+        "trash-list stdout is unchanged"
+    );
+    assert_eq!(cli.stderr, clean_cli.stderr, "trash-list says nothing more");
+
+    // The hint's command names each record it counted.
+    let check = sb.run(&["status", "--check", &pin]);
+    let report = format!("{}{}", stdout_of(&check), stderr_of(&check));
+    for record in [&bad, &big, &out_of_volume] {
+        let name = record.file_name().unwrap().to_string_lossy();
+        assert!(report.contains(&*name), "{name} missing from: {report}");
+    }
+
+    fs::remove_dir(&bad).unwrap();
+    fs::remove_file(&big).unwrap();
+    fs::remove_file(&out_of_volume).unwrap();
+    let out = sb.run(&["list", &pin]);
+    assert_eq!(out.stdout, clean.stdout);
+    assert_eq!(stderr_of(&out), "", "no hint once the trash is clean");
+}
+
 #[test]
 fn trash_cli_command_lines_work_under_the_trash_names() {
     let sb = Sandbox::new("trash-cli-lines");

@@ -311,6 +311,19 @@ pub fn confirm(prompt: &str) -> bool {
 }
 
 /// `1 item`, `2 items`: a count with its noun in the right number.
+/// The stderr line `list` prints after its rows when `skipped` entries,
+/// called `one` or `many`, could not be listed; None when there are
+/// none. `rtrash status --check` names each one, on Unix and on Windows.
+pub fn unlisted_hint(prog: &str, skipped: u64, one: &str, many: &str) -> Option<String> {
+    (skipped > 0).then(|| {
+        format!(
+            "{prog}: {} could not be listed; `rtrash status --check` shows {}",
+            plural(skipped, one, many),
+            if skipped == 1 { "it" } else { "them" }
+        )
+    })
+}
+
 pub fn plural(n: u64, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
@@ -653,6 +666,28 @@ pub fn parse_selection(line: &str, len: usize) -> Result<Vec<usize>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unlisted_hint_counts_and_names_status_check() {
+        assert_eq!(
+            super::unlisted_hint("rtrash list", 0, "trash record", "trash records"),
+            None
+        );
+        assert_eq!(
+            super::unlisted_hint("rtrash list", 1, "trash record", "trash records").as_deref(),
+            Some(
+                "rtrash list: 1 trash record could not be listed; \
+                 `rtrash status --check` shows it"
+            )
+        );
+        assert_eq!(
+            super::unlisted_hint("rtrash list", 3, "trash record", "trash records").as_deref(),
+            Some(
+                "rtrash list: 3 trash records could not be listed; \
+                 `rtrash status --check` shows them"
+            )
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -78,35 +78,36 @@ impl Entry {
 }
 
 pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
+    collect_counted(dirs).0
+}
+
+/// [`collect`], and how many `NAME.trashinfo` records it left out: one
+/// that cannot be read (over the record cap, or not a regular file), or
+/// whose relative `Path=` climbs out of its volume with `..`. `status
+/// --check` names each of them. Other names in `info/` are not records
+/// and do not count.
+pub fn collect_counted(dirs: &[TrashDir]) -> (Vec<Entry>, u64) {
     use rayon::prelude::*;
     let mut out = Vec::new();
+    let mut skipped = 0u64;
     for dir in dirs {
         let Ok(entries) = fs::read_dir(dir.info()) else {
             continue;
         };
         let paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-        // One read per item: spread a big trash over the rayon pool.
-        out.par_extend(paths.into_par_iter().filter_map(|path| {
-            let fname = crate::util::str_from_os_ref(path.file_name()?);
-            let name = crate::util::trash_item_name(&fname)?;
-            let content = info::read_bounded(&path, info::RECORD_CAP).ok()?;
-            let parsed = info::parse_bytes(&content);
-            let epoch = parsed
-                .deletion_date
-                .as_deref()
-                .and_then(info::parse_local_to_epoch)
-                .unwrap_or(0);
-            // Skip hostile/corrupt relative Path= that escape the volume topdir.
-            let original = dir.resolve_original_checked(&parsed.path).ok()?;
-            Some(Entry {
-                original,
-                date: parsed.deletion_date,
-                epoch,
-                name: name.to_string(),
-                dir: dir.clone(),
-                batch: parsed.batch,
+        // One read per item: spread a big trash over the rayon pool. A
+        // record left out is Some(None); a name that is not one, None.
+        let read: Vec<Option<Entry>> = paths
+            .into_par_iter()
+            .filter_map(|path| {
+                let fname = crate::util::str_from_os_ref(path.file_name()?);
+                let name = crate::util::trash_item_name(&fname)?;
+                Some(read_entry(dir, &path, name))
             })
-        }));
+            .collect();
+        let left = read.iter().filter(|e| e.is_none()).count() as u64;
+        skipped = skipped.saturating_add(left);
+        out.extend(read.into_iter().flatten());
     }
     out.sort_by(|a, b| {
         a.epoch
@@ -114,7 +115,29 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
             .then_with(|| a.original.cmp(&b.original))
             .then_with(|| a.name.cmp(&b.name))
     });
-    out
+    (out, skipped)
+}
+
+/// The entry the record at `path` (for the payload `name`) gives, or None
+/// when it cannot be read or its `Path=` does not resolve in `dir`.
+fn read_entry(dir: &TrashDir, path: &std::path::Path, name: &str) -> Option<Entry> {
+    let content = info::read_bounded(path, info::RECORD_CAP).ok()?;
+    let parsed = info::parse_bytes(&content);
+    let epoch = parsed
+        .deletion_date
+        .as_deref()
+        .and_then(info::parse_local_to_epoch)
+        .unwrap_or(0);
+    // Skip hostile/corrupt relative Path= that escape the volume topdir.
+    let original = dir.resolve_original_checked(&parsed.path).ok()?;
+    Some(Entry {
+        original,
+        date: parsed.deletion_date,
+        epoch,
+        name: name.to_string(),
+        dir: dir.clone(),
+        batch: parsed.batch,
+    })
 }
 
 /// Payloads in `files/` with no `.trashinfo` (left by a crash or another
@@ -512,7 +535,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         return 0;
     }
-    let mut entries = filter_age_secs(collect(&dirs), older_than, newer_than);
+    let (collected, skipped) = collect_counted(&dirs);
+    let mut entries = filter_age_secs(collected, older_than, newer_than);
     entries.retain(|e| keep(&e.original, &e.name));
     // Orphans have no date, so only an unfiltered listing shows them; they
     // come last, after every recorded item.
@@ -637,6 +661,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
         let _ = out.flush();
+    }
+    // After the rows, on stderr, so stdout is the same with or without
+    // it. The trash-list name keeps trash-cli's output and says nothing.
+    let hint = crate::util::unlisted_hint(prog, skipped, "trash record", "trash records");
+    if let Some(hint) = hint.filter(|_| prog != "trash-list") {
+        eprintln!("{hint}");
     }
     0
 }
