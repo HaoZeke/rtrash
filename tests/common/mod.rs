@@ -28,6 +28,10 @@
 //! test that must reach the real trash calls `rtrash_real` and names why.
 //! Round 231 went red on Windows when a parallel test's put filled the
 //! real bin that another test's du summary read.
+//!
+//! Every test that compares two `du --json` outputs compares them through
+//! `du_scan`, which cuts off the live trash summary: it counts the trash
+//! as it is at that moment, not the scan.
 #![allow(dead_code)]
 
 use std::fmt::Debug;
@@ -285,6 +289,18 @@ pub fn rtrash(home: &Path) -> Command {
 /// it skips a real bin.
 pub fn test_bin(home: &Path) -> PathBuf {
     home.join("$Recycle.Bin")
+}
+
+/// A `du --json` output with the live trash summary (the last field,
+/// `"trash"`) cut off, for comparing the scans of two runs: the summary
+/// counts the trash as it is at that moment, which a parallel test can
+/// change. Output with no summary, such as `--print0`, comes back whole.
+pub fn du_scan(stdout: impl AsRef<[u8]>) -> String {
+    let s = String::from_utf8_lossy(stdout.as_ref());
+    match s.rfind(",\"trash\":") {
+        Some(at) => s[..at].to_string(),
+        None => s.into_owned(),
+    }
 }
 
 /// Why a test runs rtrash without the `rtrash` pin.

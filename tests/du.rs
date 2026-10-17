@@ -1733,7 +1733,7 @@ fn wide_directory_split_keeps_rows_and_counts() {
     // Any thread count gives the same answer.
     for n in ["1", "3"] {
         let k = t.json(&["--no-git", "-n", "2", "--files", "--threads", n]);
-        assert_eq!(k, j, "--threads {n}");
+        assert_eq!(common::du_scan(&k), common::du_scan(&j), "--threads {n}");
     }
 }
 
@@ -1754,12 +1754,10 @@ fn size_ties_list_the_smallest_names() {
         .map(|p| s(&t.root.join(p)))
         .collect();
     assert_eq!(paths_in(&j, "files"), want, "{j}");
-    // The trash summary reads the system Recycle Bin on Windows, which
-    // other processes change while this runs; compare the scan alone.
-    let scan = |j: &str| j[..j.find("\"trash\":").unwrap_or(j.len())].to_string();
+    // Compare the scans; the trash summary is not part of them.
     for n in ["1", "2", "5"] {
         let k = t.json(&["--no-git", "-n", "4", "--files", "--threads", n]);
-        assert_eq!(scan(&k), scan(&j), "--threads {n}");
+        assert_eq!(common::du_scan(&k), common::du_scan(&j), "--threads {n}");
     }
 }
 
@@ -3304,7 +3302,7 @@ fn block_size_variables_set_the_text_units() {
             .du_env(&["--no-git", "--files", flag], &[("BLOCK_SIZE", "K")])
             .stdout;
         assert!(!bare.is_empty(), "{flag}");
-        assert_eq!(bare, env, "{flag}");
+        assert_eq!(common::du_scan(&bare), common::du_scan(&env), "{flag}");
     }
     // The `si` config key comes after the variables.
     fs::create_dir_all(t.root.join(".cfg/rtrash")).unwrap();

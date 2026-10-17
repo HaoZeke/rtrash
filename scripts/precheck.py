@@ -1086,6 +1086,39 @@ def check_bin_seam():
                           "a test under common::rtrash would reach the system Recycle Bin")
 
 
+def check_du_json_compares():
+    """A test compares two du --json outputs through common::du_scan, which
+    cuts off the live trash summary: it counts the trash at that moment,
+    and round 231 went red on Windows when a parallel put changed it
+    between two runs. Flag a name bound to du --json output (Tree::json,
+    a run whose arguments hold "--json", or one that uses the variable of
+    a loop over a list holding "--json") that an assert_eq!/assert_ne!
+    compares whole. A value a free function takes from the output (a
+    field, the listed paths) is not the whole output."""
+    for path in sorted((ROOT / "tests").glob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        text = rust_code(path.read_text(encoding="utf-8"), strings=True)
+        line_of = lambda k: text.count("\n", 0, k) + 1
+        loop_vars = set(re.findall(r'\bfor\s+(\w+)\s+in\s+\[[^\]]*"--json"', text))
+        run = re.compile(r"\.(?:du|du_env)\s*\(|\.output\s*\(")
+        for m in re.finditer(r"\blet\s+(?:mut\s+)?(\w+)\s*=\s*([^;]*);", text):
+            name, rhs = m.group(1), m.group(2)
+            # A free function around the run (paths_in, field) takes a part.
+            if re.match(r"\s*&?(?!common::rtrash|String::from_utf8)[A-Za-z_][\w:]*\s*\(", rhs):
+                continue
+            from_loop = run.search(rhs) and any(re.search(rf"\b{v}\b", rhs) for v in loop_vars)
+            if not (re.search(r"\.json\s*\(", rhs) or (run.search(rhs) and '"--json"' in rhs) or from_loop):
+                continue
+            end = re.compile(r"\n(?:#\[|fn |pub fn )").search(text, m.end())
+            scope = text[m.end():end.start() if end else len(text)]
+            whole = re.compile(rf"assert_(?:eq|ne)!\(\s*(?:{name}\s*,|[^;]*?,\s*{name}\s*[,)])")
+            hit = whole.search(scope)
+            if hit:
+                errors.append(f"{rel}:{line_of(m.end() + hit.start())}: compares the du --json output "
+                              f"`{name}` whole; compare common::du_scan of both, which leaves out "
+                              "the live trash summary")
+
+
 def check_rustfmt():
     """`cargo fmt --check` when a toolchain is there; three rounds in a row
     (170-172) needed a format-only amend after CI."""
@@ -1109,7 +1142,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_key_reads()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_key_reads()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
