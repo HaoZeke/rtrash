@@ -1425,6 +1425,22 @@ fn open_dir_nofollow(path: &Path) -> io::Result<OwnedFd> {
     }
 }
 
+/// A directory opened through any symlinks on the way, for a parent
+/// whose own path may be a link (a symlinked trash folder).
+fn open_dir(path: &Path) -> io::Result<OwnedFd> {
+    let c = path_cstr(path)?;
+    let fd = unsafe {
+        libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 fn openat_dir(dirfd: RawFd, name: &CStr) -> io::Result<OwnedFd> {
     let fd = unsafe {
         libc::openat(
@@ -1546,13 +1562,133 @@ fn restore_parent(
     Ok(())
 }
 
-/// Ok when every directory under `path` lets this user remove entries.
-/// The walk keeps its own stack: a chain of any depth stays off the thread
-/// stack, and paths past `PATH_MAX` are reached by descriptor.
+/// What a cross-device move must know of an entry before it unlinks it:
+/// its mode, its owner, and whether a file flag pins it in place.
+#[derive(Clone, Copy, Debug)]
+struct Node {
+    mode: libc::mode_t,
+    uid: libc::uid_t,
+    pinned: bool,
+}
+
+impl Node {
+    fn of(st: &libc::stat, pinned: bool) -> Node {
+        Node {
+            mode: st.st_mode,
+            uid: st.st_uid,
+            pinned,
+        }
+    }
+}
+
+/// Why this user could not unlink `entry` from the directory `dir`, past
+/// the write and search permission an `access` check already covers, or
+/// `None` when nothing stands in the way. An immutable or append-only
+/// flag stops root too; the sticky bit does not.
+fn unlink_blocker(dir: Node, entry: Node, euid: libc::uid_t) -> Option<&'static str> {
+    if dir.pinned {
+        return Some("its directory is immutable or append-only");
+    }
+    if entry.pinned {
+        return Some("it is immutable or append-only");
+    }
+    let sticky = dir.mode & libc::S_ISVTX != 0;
+    if sticky && euid != 0 && entry.uid != euid && dir.uid != euid {
+        return Some("another user owns it in a sticky directory");
+    }
+    None
+}
+
+/// Whether the entry `name` in `dirfd` (`st`, not followed) is immutable
+/// or append-only. Linux reads the statx attributes by syscall, since the
+/// libc crate has no statx wrapper on every musl; the struct is 256
+/// bytes, with `stx_attributes` the u64 at offset 8. A kernel without
+/// statx answers no.
+#[cfg(target_os = "linux")]
+fn pinned_at(dirfd: RawFd, name: &CStr, _st: &libc::stat) -> bool {
+    const STATX_TYPE: libc::c_uint = 0x1;
+    const IMMUTABLE_OR_APPEND: u64 = 0x10 | 0x20;
+    let mut buf = [0u64; 32];
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_statx,
+            dirfd,
+            name.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+            STATX_TYPE,
+            buf.as_mut_ptr(),
+        )
+    };
+    rc == 0 && buf[1] & IMMUTABLE_OR_APPEND != 0
+}
+
+/// Whether `st` carries a user or system immutable or append-only flag.
+#[cfg(target_os = "macos")]
+fn pinned_at(_dirfd: RawFd, _name: &CStr, st: &libc::stat) -> bool {
+    let flags = libc::UF_IMMUTABLE | libc::UF_APPEND | libc::SF_IMMUTABLE | libc::SF_APPEND;
+    st.st_flags & flags != 0
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn pinned_at(_dirfd: RawFd, _name: &CStr, _st: &libc::stat) -> bool {
+    false
+}
+
+/// A permission error for the entry `name` that `why` stops.
+fn blocked(name: &OsStr, why: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "cannot remove '{}': {why}",
+            crate::util::term_text(&name.to_string_lossy())
+        ),
+    )
+}
+
+/// The [`Node`] of `path` once this user may unlink it from its
+/// directory: the directory lets it write and search, and
+/// [`unlink_blocker`] finds nothing. Checked before a copy, since a
+/// rename across devices fails with EXDEV before any permission check
+/// and the copy would then leave a whole original behind, or a half one.
+fn entry_removable(path: &Path) -> io::Result<Node> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent_c = path_cstr(parent)?;
+    if unsafe { libc::access(parent_c.as_ptr(), libc::W_OK | libc::X_OK) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let dir = open_dir(parent)?;
+    let dirfd = dir.as_raw_fd();
+    let mut dst: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(dirfd, &mut dst) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let dir_node = Node::of(&dst, pinned_at(dirfd, c".", &dst));
+    let name_c = name_cstr(name)?;
+    let st = fstatat_nofollow(dirfd, &name_c)?;
+    let node = Node::of(&st, pinned_at(dirfd, &name_c, &st));
+    if let Some(why) = unlink_blocker(dir_node, node, unsafe { libc::geteuid() }) {
+        return Err(blocked(name, why));
+    }
+    Ok(node)
+}
+
+/// Ok when this user may unlink `path` from its directory and every
+/// entry under it, as a copy across devices must before it starts: each
+/// directory lets it write and search, and [`unlink_blocker`] passes each
+/// entry. The walk keeps its own stack: a chain of any depth stays off
+/// the thread stack, and paths past `PATH_MAX` are reached by descriptor.
 fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    let item = entry_removable(path)?;
     if !meta.is_dir() {
         return Ok(());
     }
+    let euid = unsafe { libc::geteuid() };
     let c = path_cstr(path)?;
     if unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) } != 0 {
         return Err(io::Error::last_os_error());
@@ -1565,6 +1701,8 @@ fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
         id: (0, 0),
         entries,
     }];
+    // The node of each frame's directory, in step with `stack`.
+    let mut nodes = vec![item];
     // Frames below `lo` have their descriptors closed; the root never does.
     let mut lo = 1usize;
     loop {
@@ -1574,6 +1712,7 @@ fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
                 return Ok(());
             }
             let done = stack.pop().expect("child frame");
+            nodes.pop();
             let parent = top - 1;
             restore_parent(&mut stack, parent, walk_fd(&done), &mut lo)?;
             continue;
@@ -1581,6 +1720,10 @@ fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
         let dirfd = walk_fd(&stack[top]);
         let name_c = name_cstr(&name)?;
         let st = fstatat_nofollow(dirfd, &name_c)?;
+        let node = Node::of(&st, pinned_at(dirfd, &name_c, &st));
+        if let Some(why) = unlink_blocker(nodes[top], node, euid) {
+            return Err(blocked(&name, why));
+        }
         // A symlink is not a directory, even when its target is one.
         if !is_type(&st, libc::S_IFDIR) {
             continue;
@@ -1600,6 +1743,7 @@ fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
             id: (0, 0),
             entries,
         });
+        nodes.push(node);
         trim_walk(&mut stack, &mut lo)?;
     }
 }
@@ -3172,6 +3316,59 @@ proc /proc proc rw 0 0
             fs::metadata(root.join("t/ro")).unwrap().mode() & 0o700,
             0o700
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unlink_blocker_reads_the_sticky_bit_and_the_file_flags() {
+        let node = |mode: libc::mode_t, uid: libc::uid_t, pinned: bool| Node { mode, uid, pinned };
+        let (me, other) = (1000, 2000);
+        let plain = node(0o40755, me, false);
+        let sticky_mine = node(0o41777, me, false);
+        let sticky_theirs = node(0o41777, other, false);
+        let theirs = node(0o100644, other, false);
+        let mine = node(0o100644, me, false);
+        assert_eq!(unlink_blocker(plain, theirs, me), None);
+        assert_eq!(unlink_blocker(sticky_mine, theirs, me), None);
+        assert_eq!(unlink_blocker(sticky_theirs, mine, me), None);
+        assert!(unlink_blocker(sticky_theirs, theirs, me).is_some());
+        assert_eq!(
+            unlink_blocker(sticky_theirs, theirs, 0),
+            None,
+            "root passes the sticky bit"
+        );
+        let flagged = node(0o100644, me, true);
+        assert!(
+            unlink_blocker(plain, flagged, 0).is_some(),
+            "a flag binds root too"
+        );
+        assert!(unlink_blocker(node(0o40755, me, true), mine, me).is_some());
+    }
+
+    #[test]
+    fn tree_removable_spots_a_parent_that_does_not_allow_deleting() {
+        let root = std::env::temp_dir().join(format!("rtrash-ro-parent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("p/d")).unwrap();
+        fs::write(root.join("p/d/f"), "x").unwrap();
+        fs::write(root.join("p/x"), "x").unwrap();
+        let (d, x) = (root.join("p/d"), root.join("p/x"));
+        assert!(tree_removable(&d, &fs::symlink_metadata(&d).unwrap()).is_ok());
+        assert!(tree_removable(&x, &fs::symlink_metadata(&x).unwrap()).is_ok());
+        fs::set_permissions(root.join("p"), fs::Permissions::from_mode(0o555)).unwrap();
+        // Root may write anywhere, so only an ordinary user sees the refusal.
+        if unsafe { libc::geteuid() } != 0 {
+            for item in [&d, &x] {
+                let err = tree_removable(item, &fs::symlink_metadata(item).unwrap()).unwrap_err();
+                assert_eq!(
+                    err.kind(),
+                    io::ErrorKind::PermissionDenied,
+                    "{}",
+                    item.display()
+                );
+            }
+        }
+        fs::set_permissions(root.join("p"), fs::Permissions::from_mode(0o755)).unwrap();
         let _ = fs::remove_dir_all(&root);
     }
 

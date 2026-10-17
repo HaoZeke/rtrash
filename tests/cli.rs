@@ -4206,6 +4206,118 @@ fn other_device_dir(near: &Path, tag: &str) -> Option<PathBuf> {
     None
 }
 
+/// Run `args` as root: directly when the tests already run as root, else
+/// through `sudo -n`. False when that can't run or the command fails.
+#[cfg(target_os = "linux")]
+fn as_root(args: &[&str]) -> bool {
+    let mut cmd = if unsafe { libc::geteuid() } == 0 {
+        Command::new(args[0])
+    } else {
+        let mut c = Command::new("sudo");
+        c.arg("-n").arg(args[0]);
+        c
+    };
+    cmd.args(&args[1..])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// trash-cli #427: a put to another file system copies, then removes the
+/// original, so a tree it cannot wholly remove ends up half gone. rtrash
+/// refuses before it copies: a read-only directory deep inside, a parent
+/// that does not allow deleting (for a directory and for a file), and
+/// another user's file in another user's sticky directory. Each stays
+/// whole and the trash stays empty. Root may remove all of these, so the
+/// test needs an ordinary user; the sticky case also needs `sudo -n`.
+#[cfg(target_os = "linux")]
+#[test]
+fn put_across_devices_refuses_what_it_could_only_half_remove() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new("xdev-unremovable");
+    let Some(other) = other_device_dir(&sb.root, "unremovable") else {
+        eprintln!("no second file system here; skipping");
+        return;
+    };
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("root may remove every case here; skipping");
+        let _ = fs::remove_dir_all(&other);
+        return;
+    }
+    let w = sb.work();
+    let chmod = |p: &Path, m: u32| fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+    fs::create_dir_all(w.join("deep/a/ro")).unwrap();
+    fs::write(w.join("deep/a/ro/f"), b"x").unwrap();
+    chmod(&w.join("deep/a/ro"), 0o555);
+    fs::create_dir_all(w.join("p/d")).unwrap();
+    fs::write(w.join("p/d/f"), b"x").unwrap();
+    fs::write(w.join("p/x"), b"x").unwrap();
+    chmod(&w.join("p"), 0o555);
+    let mut cases = vec![("deep", "deep/a/ro/f"), ("p/d", "p/d/f"), ("p/x", "p/x")];
+    fs::create_dir_all(w.join("st/s")).unwrap();
+    fs::write(w.join("st/s/g"), b"x").unwrap();
+    chmod(&w.join("st/s"), 0o1777);
+    let (s, g) = (w.join("st/s"), w.join("st/s/g"));
+    let sticky = as_root(&["chown", "65534", s.to_str().unwrap(), g.to_str().unwrap()]);
+    if sticky {
+        cases.push(("st", "st/s/g"));
+    } else {
+        eprintln!("sudo -n chown failed; sticky case skipped");
+    }
+    let pin = format!("--trash-dir={}", other.display());
+    for (op, keep) in cases {
+        let out = sb.run(&["put", "-r", &pin, op]);
+        assert_eq!(out.status.code(), Some(1), "{op}: {}", stderr_of(&out));
+        assert!(w.join(keep).exists(), "{op}: {keep} is gone");
+        assert_eq!(names_in(&other.join("files")), Vec::<String>::new(), "{op}");
+        assert_eq!(names_in(&other.join("info")), Vec::<String>::new(), "{op}");
+    }
+    chmod(&w.join("deep/a/ro"), 0o755);
+    chmod(&w.join("p"), 0o755);
+    if sticky {
+        as_root(&["rm", "-rf", s.to_str().unwrap()]);
+    }
+    let _ = fs::remove_dir_all(&other);
+}
+
+/// An immutable or append-only file (chattr +i or +a) cannot be unlinked,
+/// by root either, so a put across devices refuses its tree before it
+/// copies (trash-cli #427). Each case needs chattr as root (directly or
+/// through `sudo -n`) and a file system that keeps the flag; it is
+/// skipped otherwise.
+#[cfg(target_os = "linux")]
+#[test]
+fn put_across_devices_refuses_a_tree_with_an_immutable_file() {
+    let sb = Sandbox::new("xdev-immutable");
+    let Some(other) = other_device_dir(&sb.root, "immutable") else {
+        eprintln!("no second file system here; skipping");
+        return;
+    };
+    let w = sb.work();
+    let pin = format!("--trash-dir={}", other.display());
+    for (set, unset, dir) in [("+i", "-i", "imm"), ("+a", "-a", "app")] {
+        fs::create_dir_all(w.join(dir)).unwrap();
+        let f = w.join(dir).join("f");
+        fs::write(&f, b"x").unwrap();
+        let path = f.to_str().unwrap();
+        if !as_root(&["chattr", set, path]) {
+            eprintln!("chattr {set} failed here; {dir} case skipped");
+            continue;
+        }
+        let out = sb.run(&["put", "-r", &pin, dir]);
+        as_root(&["chattr", unset, path]);
+        assert_eq!(out.status.code(), Some(1), "{dir}: {}", stderr_of(&out));
+        let err = stderr_of(&out);
+        assert!(err.contains("immutable or append-only"), "{dir}: {err}");
+        assert!(f.exists(), "{dir}: f is gone");
+        assert_eq!(
+            names_in(&other.join("files")),
+            Vec::<String>::new(),
+            "{dir}"
+        );
+    }
+    let _ = fs::remove_dir_all(&other);
+}
+
 /// An xattr of `p`, or `None` when it has none or the call fails.
 #[cfg(target_os = "linux")]
 fn xattr(p: &Path, name: &str) -> Option<Vec<u8>> {
