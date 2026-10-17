@@ -273,40 +273,126 @@ def check_removed_literals(base):
                                 "update the assert or the example (tests/windows_mount.rs runs only in CI)")
 
 
-REMOVAL = re.compile(r"\b(remove_any_path|remove_path|remove_any|remove_forcing|wipe_two_parallel|"
-                     r"wipe_children_parallel|wipe_children_except|purge_all|remove_dir_all)\s*\(")
+REMOVAL = re.compile(r"(?<!permanent_guard::)\b(remove_any_path|remove_path|remove_any|remove_forcing|"
+                     r"wipe_two_parallel|wipe_children_parallel|wipe_children_except|purge_all|"
+                     r"remove_dir_all|remove_dir|remove_file|remove_record)\s*\(")
+ANY_FN = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?"
+                    r"(?:extern\s+\"[^\"]*\"\s+)?fn\s+(\w+)")
+
+# Every call to a removal primitive outside permanent_guard, by (file under
+# src, enclosing fn): how many calls the fn makes and why it may skip
+# permanent_guard::{remove, remove_record}. A new call, in a new fn or in
+# a listed one, fails until it goes through the guard or the entry is
+# updated with its reason (round 194: two Windows restores hand-rolled
+# gate() plus remove_forcing).
+PRIMITIVE = "the removal primitive itself, which permanent_guard calls"
+RECORD = ("the record of an item whose payload permanent_guard::remove just took: "
+          "the item counts once against the cap")
+OWN = "a file rtrash wrote itself (cache, temp or link), not user data"
+MOVE = "a move: the source goes only after the whole copy is in place"
+BATCH = "a batch the caller counted up front with permanent_guard::gate_many"
+PERMANENT_ALLOW = {
+    ("du_dupes.rs", "clone_file"): (2, OWN + ": the clone target it just created"),
+    ("du_dupes.rs", "link_one"): (2, OWN + ": the .rtrash-link temp beside the duplicate"),
+    ("empty.rs", "empty_dangling"): (1, "dangling records name no payload; empty is refused "
+                                        "whole under RTRASH_NO_PERMANENT"),
+    ("empty.rs", "empty_one"): (1, RECORD),
+    ("empty.rs", "full_empty_wipe"): (1, BATCH),
+    ("empty.rs", "prune_directorysizes"): (1, OWN),
+    ("empty_tui.rs", "permanently_remove_entries"): (1, RECORD),
+    ("fastdelete.rs", "remove_dir_tree"): (2, PRIMITIVE),
+    ("fastdelete.rs", "remove_path"): (2, PRIMITIVE),
+    ("fastdelete.rs", "wipe_children_parallel"): (1, PRIMITIVE),
+    ("fastdelete.rs", "wipe_two_parallel"): (2, PRIMITIVE),
+    ("finder_total.rs", "prune_stale"): (1, OWN),
+    ("reap.rs", "remove"): (2, "Windows reap: gate() then std removal, which differs from "
+                               "remove_forcing (no read-only retry), so moving it is a change"),
+    ("reap_timer.rs", "remove"): (1, OWN + ": the timer unit files it installed"),
+    ("restore.rs", "restore_one_to"): (2, "the staged copy it made, and the record of the "
+                                          "restored item"),
+    ("retention.rs", "remove_entry"): (1, RECORD),
+    ("rm.rs", "run_inner"): (1, RECORD),
+    ("setup.rs", "link_multicall"): (1, OWN),
+    ("setup.rs", "run_setup"): (2, OWN),
+    ("trash_total.rs", "forget"): (1, OWN),
+    ("trashdir.rs", "atomic_write"): (1, OWN),
+    ("trashdir.rs", "directorysizes_remove"): (1, OWN),
+    ("trashdir.rs", "relocate_with"): (1, MOVE),
+    ("trashdir.rs", "remove_any"): (2, PRIMITIVE + ", and the move's source removal"),
+    ("trashdir.rs", "remove_any_path"): (1, PRIMITIVE),
+    ("trashdir.rs", "remove_record"): (1, PRIMITIVE),
+    ("trashdir.rs", "trash_move_locked"): (3, "a put undoing its own half-made copy and record, "
+                                              "and a move's source"),
+    ("trashdir.rs", "write_back_with"): (1, OWN),
+    ("tui_term.rs", "tempfile_unlinked"): (1, OWN),
+    ("win_recycle.rs", "empty_run"): (1, BATCH),
+    ("win_recycle.rs", "prune_after_put"): (1, BATCH),
+    ("win_recycle.rs", "purge_oldest_on"): (1, BATCH),
+    ("win_recycle.rs", "remove_retry"): (3, PRIMITIVE + " (under remove_forcing)"),
+    ("win_recycle.rs", "restore_payload"): (3, MOVE + "; then the $I record of the restored item"),
+    ("win_recycle.rs", "rm_run"): (1, BATCH),
+    ("wsl_bin.rs", "remove_entry"): (1, RECORD),
+}
 
 
-def check_permanent_gate(reach=8):
-    """Every removal outside the primitives passes permanent_guard, or says why it is scratch."""
-    skip = {"fastdelete.rs", "permanent_guard.rs"}
+def test_mod_lines(lines):
+    """Line numbers inside `#[cfg(test)] mod x { ... }` blocks."""
+    test_lines, k = set(), 0
+    while k < len(lines):
+        m = re.match(r"(\s*)(pub )?mod \w+ \{", lines[k + 1]) if k + 1 < len(lines) else None
+        if lines[k].strip() == "#[cfg(test)]" and m:
+            close = m.group(1) + "}"
+            j = k + 1
+            while j < len(lines) and lines[j].rstrip() != close:
+                j += 1
+            test_lines.update(range(k, j + 1))
+            k = j
+        k += 1
+    return test_lines
+
+
+def check_permanent_gate():
+    """Outside permanent_guard, a removal primitive is called only through
+    permanent_guard::{remove, remove_record} or from a fn PERMANENT_ALLOW
+    names, with its count and reason."""
+    seen, first = {}, {}
     for path in sorted((ROOT / "src").rglob("*.rs")):
-        if path.name in skip:
+        if path.name == "permanent_guard.rs":
             continue
+        rel = path.relative_to(ROOT / "src").as_posix()
         lines = path.read_text(encoding="utf-8").splitlines()
-        test_lines, k = set(), 0
-        while k < len(lines):
-            m = re.match(r"(\s*)(pub )?mod \w+ \{", lines[k + 1]) if k + 1 < len(lines) else None
-            if lines[k].strip() == "#[cfg(test)]" and m:
-                close = m.group(1) + "}"
-                j = k + 1
-                while j < len(lines) and lines[j].rstrip() != close:
-                    j += 1
-                test_lines.update(range(k, j + 1))
-                k = j
-            k += 1
+        test_lines, stack = test_mod_lines(lines), []
         for k, line in enumerate(lines):
+            if stack and line.rstrip() == stack[-1][0] + "}":
+                stack.pop()
+            code = strip_comments(line)
+            m = ANY_FN.match(code)
+            fn = m.group(2) if m else (stack[-1][1] if stack else "<top>")
+            if m:
+                code = code[m.end():]  # the name defined is not a call; a one-line body is
+                if not code.rstrip().endswith((";", "}")):
+                    stack.append((m.group(1), fn))
             if k in test_lines:
                 continue
-            code = strip_comments(line)
-            if not REMOVAL.search(code) or re.search(r"\bfn\s+\w+\s*[(<]", code):
-                continue
-            near = "\n".join(lines[max(0, k - reach):k + 1])
-            if "permanent_guard::" in near or "// scratch:" in near:
-                continue
-            rel = path.relative_to(ROOT)
-            errors.append(f"{rel}:{k + 1}: a removal that skips permanent_guard; route user data "
-                          "through permanent_guard::remove or gate(), or add a `// scratch:` reason")
+            n = len(REMOVAL.findall(code))
+            if n:
+                key = (rel, fn)
+                seen[key] = seen.get(key, 0) + n
+                first.setdefault(key, k + 1)
+    for key in sorted(set(seen) | set(PERMANENT_ALLOW)):
+        got, (want, _) = seen.get(key, 0), PERMANENT_ALLOW.get(key, (0, ""))
+        if got == want:
+            continue
+        rel, fn = key
+        where = f"src/{rel}:{first[key]}" if key in first else f"src/{rel}"
+        if want == 0:
+            errors.append(f"{where}: {fn} calls a removal primitive that skips permanent_guard; "
+                          "call permanent_guard::remove or remove_record, or list it in "
+                          "PERMANENT_ALLOW with a reason")
+        else:
+            errors.append(f"{where}: {fn} makes {got} removal primitive call(s), PERMANENT_ALLOW "
+                          f"lists {want}; route a new one through permanent_guard::remove or "
+                          "remove_record, or update the entry and its reason")
 
 
 OS_TRASH = re.compile(r"\btrash::(\{[^}]*\b)?delete(_all)?\b")

@@ -562,6 +562,71 @@ fn no_permanent_guard_keeps_the_recycle_bin_on_windows() {
     assert_eq!(restored, "trashed", "the guard lost the trashed copy");
 }
 
+/// A restore that overwrites removes the file in the way through
+/// permanent_guard::remove: the cap and the guard each refuse it with
+/// exit 1 and one line, leaving the folder and the trashed copy, and
+/// within the cap the trashed copy replaces the file.
+#[test]
+fn guard_and_cap_refuse_a_recycle_bin_restore_overwrite() {
+    let dir = common::scratch_dir("names", "overwrite");
+    let file = dir.join("ow.txt");
+    fs::write(&file, "trashed").unwrap();
+    let put = common::rtrash_real(common::Real::RecycleBin)
+        .arg("put")
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(put.status.success(), "{}", common::stderr_text(&put));
+    fs::write(&file, "newer").unwrap();
+    let path = file.to_str().unwrap();
+    let restore = |flag: &str, var: &str, value: &str| {
+        let mut c = common::rtrash_real(common::Real::RecycleBin);
+        c.args(["restore", flag, path])
+            .current_dir(&dir)
+            .env_remove("RTRASH_NO_PERMANENT")
+            .env_remove("RTRASH_MAX_PERMANENT")
+            .env_remove("RTRASH_ALLOW_ROOTS")
+            .env(var, value);
+        c.output().unwrap()
+    };
+    let refusals = [
+        (
+            "--conflict=overwrite",
+            "RTRASH_MAX_PERMANENT",
+            "0",
+            "RTRASH_MAX_PERMANENT or --max-count caps this run at 0 permanent deletions",
+        ),
+        (
+            "-f",
+            "RTRASH_NO_PERMANENT",
+            "1",
+            "RTRASH_NO_PERMANENT is set, so permanent deletion is refused",
+        ),
+    ];
+    for (flag, var, value, why) in refusals {
+        let out = common::assert_refused_unchanged(
+            &(flag, var),
+            &[dir.as_path()],
+            1,
+            &[(why, 1)],
+            || restore(flag, var, value),
+        );
+        let replace = common::stderr_text(&out)
+            .lines()
+            .filter(|l| l.contains("cannot replace '"))
+            .count();
+        assert_eq!(replace, 1, "{flag} {var}: {}", common::stderr_text(&out));
+    }
+    let done = restore("-f", "RTRASH_MAX_PERMANENT", "1");
+    let restored = fs::read_to_string(&file).unwrap_or_default();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(done.status.success(), "{}", common::stderr_text(&done));
+    assert_eq!(
+        restored, "trashed",
+        "the overwrite did not restore the copy"
+    );
+}
+
 /// The cap on permanent deletions counts Recycle Bin matches first, so an
 /// rm past it purges nothing. The PATTERN names files only (no folder),
 /// so a short 8.3 %TEMP% and the long path the bin records both match.

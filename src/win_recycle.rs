@@ -2786,8 +2786,7 @@ Without PATH, print a numbered list and read an index from stdin.
                         dest.display()
                     ));
                 }
-                crate::permanent_guard::gate()
-                    .and_then(|()| super::remove_forcing(dest))
+                crate::permanent_guard::remove(dest)
                     .map_err(|e| format!("cannot replace '{}': {e}", dest.display()))?;
             }
             super::restore_payload(Path::new(&self.item.id), dest)
@@ -2983,8 +2982,7 @@ Without PATH, print a numbered list and read an index from stdin.
         let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
         for (it, orig, dest) in plan {
             if o.conflict == Conflict::Overwrite && dest.symlink_metadata().is_ok() {
-                let gone =
-                    crate::permanent_guard::gate().and_then(|()| super::remove_forcing(&dest));
+                let gone = crate::permanent_guard::remove(&dest);
                 if let Err(e) = gone {
                     eprintln!("{prog}: cannot replace '{}': {e}", dest.display());
                     failed += 1;

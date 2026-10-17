@@ -15,6 +15,7 @@ needs no build and finishes in under a second. CI runs the same script.
 | No function takes more than 7 parameters; group options in a struct | precheck arg count, clippy `-D warnings` | round 155 |
 | Completion tests for pwsh, elvish, fish and nu run, not skip, before a push | `RTRASH_REQUIRE_SHELLS=1` on the agent; pwsh is required on CI | round 143c |
 | A changed message or newly valid value is updated in every test, including `src/` unit tests and `tests/windows_mount.rs` | precheck removed-literal warning (partial); judgment | rounds 144b, 154 |
+| A permanent removal outside `permanent_guard` calls `permanent_guard::remove` or `remove_record`; any other call of a removal primitive sits in a function `PERMANENT_ALLOW` lists with its count and reason | precheck permanent-route check | round 194: two Windows restores hand-rolled `gate()` plus `remove_forcing` |
 | Code under `cfg(windows)` or `cfg(target_os = "macos")` compiles before a push | `scripts/cross-clippy.sh` | round 112 |
 | Code is rustfmt-clean before a push, and lines stay within 100 columns | precheck runs `cargo fmt --all --check` when a toolchain is there (no build); line-width warning otherwise | rounds 101b, 102d, 143b, 170-172 |
 | macOS and Windows behaviour is proven on CI before main moves: push the round to a `round*` branch, wait for green, then fast-forward main | push triggers on `main` and `round*` in every workflow | 37 of 43 red mains failed off Linux |

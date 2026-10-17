@@ -927,8 +927,7 @@ mod plat {
     }
 
     pub fn remove(p: &Path) -> std::io::Result<()> {
-        crate::permanent_guard::gate()?;
-        crate::fastdelete::remove_path(p)
+        crate::permanent_guard::remove(p)
     }
 
     pub fn trash(prog: &str, p: &Path, dest: &Dest) -> Result<(), ()> {

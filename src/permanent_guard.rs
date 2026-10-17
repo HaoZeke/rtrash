@@ -19,9 +19,10 @@
 //! ([`check_count`]); the gate counts every removal it lets through and
 //! refuses the rest once a run reaches the cap, which covers the paths
 //! that cannot count first (the size cap after a put, reap).
-//! `scripts/precheck.py` fails a call to a removal primitive that names
-//! neither this module nor a `// scratch:` reason, so a new delete path
-//! cannot skip the gate unnoticed.
+//! `scripts/precheck.py` fails a call to a removal primitive outside this
+//! module unless it goes through [`remove`] or `remove_record`, or its
+//! function is in the script's `PERMANENT_ALLOW` list with a call count
+//! and a reason, so a new delete path cannot skip the gate unnoticed.
 
 use std::ffi::OsStr;
 use std::io;
