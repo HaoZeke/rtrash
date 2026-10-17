@@ -197,9 +197,16 @@ pub fn run(prog: &str, dirs: &[TrashDir], fix: bool, dry_run: bool) -> i32 {
             return code;
         }
     }
+    // The first Ctrl-C stops after the record in hand and a second quits.
+    if acting {
+        crate::interrupt::stop_then_quit();
+    }
     let mut removed = 0u64;
     let mut failed = 0u64;
     for (dir, problems) in &found {
+        if crate::interrupt::requested() {
+            break;
+        }
         let _lock = match (acting && problems.iter().any(|p| p.fix_target().is_some()))
             .then(|| trashdir::TrashLock::acquire(&dir.root))
         {
@@ -211,6 +218,9 @@ pub fn run(prog: &str, dirs: &[TrashDir], fix: bool, dry_run: bool) -> i32 {
             l => l,
         };
         for p in problems {
+            if crate::interrupt::requested() {
+                break;
+            }
             println!("{}", p.line());
             let Some(record) = p.fix_target() else {
                 continue;
@@ -234,9 +244,18 @@ pub fn run(prog: &str, dirs: &[TrashDir], fix: bool, dry_run: bool) -> i32 {
                     failed += 1;
                 }
             }
+            crate::interrupt::test_seam("after-item");
         }
     }
     let plural = crate::util::plural;
+    if acting && crate::interrupt::requested() {
+        let left = fixable.saturating_sub(removed + failed);
+        eprintln!(
+            "{prog}: stopped by Ctrl-C: {} removed, {left} not reached",
+            plural(removed, "record", "records")
+        );
+        return 130;
+    }
     if acting {
         eprintln!(
             "{prog}: removed {}; {} left to review",

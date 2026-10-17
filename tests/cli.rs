@@ -7819,3 +7819,62 @@ fn restore_stops_after_the_entry_in_hand_at_the_first_ctrl_c() {
     let records: Vec<String> = left.iter().map(|n| format!("{n}.trashinfo")).collect();
     assert_eq!(names_in(&sb.trash().join("info")), records);
 }
+
+/// A first Ctrl-C during `rm` stops after the entry in hand: its payload
+/// and its record go together, and every entry not reached keeps both.
+#[test]
+fn rm_stops_after_the_entry_in_hand_at_the_first_ctrl_c() {
+    let sb = Sandbox::new("rm-ctrl-c");
+    for n in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(sb.work().join(n), n).unwrap();
+    }
+    let put = sb.run(&["put", "a.txt", "b.txt", "c.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let out = sb.run_env(&["rm", "*.txt"], &[("RTRASH_TEST_SIGINT", "after-item:1")]);
+    let said = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(130), "{said}");
+    assert!(
+        said.contains("stopped by Ctrl-C: 1 removed, 2 not reached"),
+        "{said}"
+    );
+    let left = names_in(&sb.trash().join("files"));
+    assert_eq!(left.len(), 2, "{left:?}");
+    let records: Vec<String> = left.iter().map(|n| format!("{n}.trashinfo")).collect();
+    assert_eq!(names_in(&sb.trash().join("info")), records);
+}
+
+/// A first Ctrl-C during `status --check --fix` stops after the record in
+/// hand and says how many it did not reach.
+#[test]
+fn status_fix_stops_after_the_record_in_hand_at_the_first_ctrl_c() {
+    let sb = Sandbox::new("status-fix-ctrl-c");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("sf-a");
+    assert!(sb.run(&["put", "sf-a"]).status.success());
+    let work = sb.work().display().to_string();
+    let info = sb.trash().join("info");
+    for name in ["sf-x", "sf-y", "sf-z"] {
+        fs::write(
+            info.join(format!("{name}.trashinfo")),
+            format!("[Trash Info]\nPath={work}/{name}\nDeletionDate=2026-01-02T03:04:05\n"),
+        )
+        .unwrap();
+    }
+    let out = sb.run_env(
+        &["status", pin.as_str(), "--check", "--fix"],
+        &[("RTRASH_TEST_SIGINT", "after-item:1")],
+    );
+    let said = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(130), "{said}");
+    assert!(
+        said.contains("stopped by Ctrl-C: 1 record removed, 2 not reached"),
+        "{said}"
+    );
+    assert_eq!(lines_starting(&out, "removed "), 1, "{}", stdout_of(&out));
+    let records = names_in(&info);
+    assert_eq!(records.len(), 3, "{records:?}");
+    assert!(
+        records.contains(&"sf-a.trashinfo".to_string()),
+        "{records:?}"
+    );
+}

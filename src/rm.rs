@@ -295,23 +295,21 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     };
 
+    let wanted = |entry: &list::Entry| -> bool {
+        let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
+        let base = entry
+            .original
+            .file_name()
+            .map(crate::util::str_from_os_ref)
+            .unwrap_or_default();
+        pats.hit(path_s.as_ref(), base.as_str(), entry.name.as_str()) && size.keeps(size_of(entry))
+    };
+
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
     // they came from, so a refused rm deletes nothing.
     let scoped_roots = crate::allow_roots::roots().is_some();
     if !dry_run && (crate::permanent_guard::cap().is_some() || scoped_roots) {
-        let hits: Vec<&list::Entry> = entries
-            .iter()
-            .filter(|entry| {
-                let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
-                let base = entry
-                    .original
-                    .file_name()
-                    .map(crate::util::str_from_os_ref)
-                    .unwrap_or_default();
-                pats.hit(path_s.as_ref(), base.as_str(), entry.name.as_str())
-                    && size.keeps(size_of(entry))
-            })
-            .collect();
+        let hits: Vec<&list::Entry> = entries.iter().filter(|e| wanted(e)).collect();
         let origins: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
         if let Some(code) = crate::allow_roots::refuse_outside(prog, &origins) {
             return code;
@@ -321,7 +319,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     }
 
-    for entry in &entries {
+    // The first Ctrl-C stops after the entry in hand and a second quits.
+    if !dry_run {
+        crate::interrupt::stop_then_quit();
+    }
+    let mut not_reached: Option<usize> = None;
+    for (k, entry) in entries.iter().enumerate() {
+        if crate::interrupt::requested() {
+            not_reached = Some(entries[k..].iter().filter(|e| wanted(e)).count());
+            break;
+        }
         let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
         let base = entry
             .original
@@ -363,6 +370,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             status = 1;
             continue;
         }
+        // The payload is gone: its record goes too before a Ctrl-C acts.
+        let section = crate::interrupt::critical();
         // A total current before this item stays current after it: the
         // item's size and its one count come off. The total leaves out
         // orphans (payloads without a .trashinfo), so removing one leaves
@@ -397,10 +406,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
         matched_paths.push(entry.original.to_string_lossy().into_owned());
         removed += 1;
+        drop(section);
+        crate::interrupt::test_seam("after-item");
     }
 
     for s in sizes {
         s.write_back();
+    }
+    if let Some(left) = not_reached {
+        eprintln!("{prog}: stopped by Ctrl-C: {removed} removed, {left} not reached");
+        status = 130;
     }
     if json {
         let sum = crate::filters::RmSummary {

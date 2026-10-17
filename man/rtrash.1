@@ -4244,9 +4244,11 @@ A second Ctrl-C ends the process at once.
 .IP
 Also
 .BR put " (and " trash\-put ),
-.B restore
+.BR restore ,
+.BR undo ,
+.BR rm " (and " trash\-rm )
 and
-.B undo
+.B status \-\-check \-\-fix
 stopped by Ctrl-C: the item in hand finishes, the rest are not reached,
 and a line on stderr counts both; JSON output still prints.
 A copy to another file system stops at once and its part copied goes,
