@@ -295,9 +295,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     };
 
-    // A cap counts the matches first, so a refused rm deletes nothing.
-    if !dry_run && crate::permanent_guard::cap().is_some() {
-        let n = entries
+    // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
+    // they came from, so a refused rm deletes nothing.
+    let scoped_roots = crate::allow_roots::roots().is_some();
+    if !dry_run && (crate::permanent_guard::cap().is_some() || scoped_roots) {
+        let hits: Vec<&list::Entry> = entries
             .iter()
             .filter(|entry| {
                 let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
@@ -309,8 +311,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 pats.hit(path_s.as_ref(), base.as_str(), entry.name.as_str())
                     && size.keeps(size_of(entry))
             })
-            .count();
-        if let Some(code) = crate::permanent_guard::check_count(prog, n as u64) {
+            .collect();
+        let origins: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
+        if let Some(code) = crate::allow_roots::refuse_outside(prog, &origins) {
+            return code;
+        }
+        if let Some(code) = crate::permanent_guard::check_count(prog, hits.len() as u64) {
             return code;
         }
     }

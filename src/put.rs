@@ -320,6 +320,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     }
 
+    // RTRASH_ALLOW_ROOTS: every operand in scope, or nothing moves.
+    if let Some(code) = crate::allow_roots::refuse_outside(prog, &files) {
+        return code;
+    }
+
     let _ = SCAN_ROOTS.set(files.clone());
     let mut status = 0;
     let mut trashed = Vec::new();
@@ -603,6 +608,10 @@ fn describe(meta: &fs::Metadata, path: &Path) -> &'static str {
 /// file under `-f`, or a declined prompt).
 pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Trashed>, i32> {
     let name = path.as_os_str().to_string_lossy();
+    if let Err(e) = crate::allow_roots::check(path) {
+        eprintln!("{prog}: cannot trash: {e}");
+        return Err(2);
+    }
 
     if opts.preserve_root && path == Path::new("/") {
         eprintln!("{prog}: it is dangerous to operate recursively on '/'");

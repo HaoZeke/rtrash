@@ -8,6 +8,7 @@
 //! The binary is a thin multi-call dispatcher over these backends; PyO3 wraps the
 //! FreeDesktop path when the `python` feature is enabled (Unix).
 
+pub mod allow_roots;
 pub mod listfmt;
 pub mod platform;
 pub mod util;

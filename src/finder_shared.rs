@@ -410,6 +410,13 @@ pub fn undo(
         }
         return 1;
     };
+    // RTRASH_ALLOW_ROOTS: every destination in scope, or nothing moves.
+    if !dry_run {
+        let dests: Vec<PathBuf> = items.iter().map(|l| l.original.clone()).collect();
+        if let Some(code) = crate::allow_roots::refuse_outside(prog, &dests) {
+            return code;
+        }
+    }
     let (mut restored, mut failed, mut skipped) = (Vec::new(), 0usize, 0usize);
     for l in items {
         let exists = l.original.symlink_metadata().is_ok();
@@ -646,8 +653,17 @@ pub fn rm(
         }
     };
     let hits: Vec<&Entry> = rows.iter().filter(|e| hit(e)).collect();
-    // A cap counts the matches first, so a refused rm deletes nothing.
+    // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
+    // they came from (an item with no Put Back place counts as outside),
+    // so a refused rm deletes nothing.
     if !dry_run {
+        let origins: Vec<(PathBuf, Option<PathBuf>)> = hits
+            .iter()
+            .map(|e| (e.path(), e.original.clone()))
+            .collect();
+        if let Some(code) = crate::allow_roots::refuse_outside_or_unplaced(prog, &origins) {
+            return code;
+        }
         if let Some(code) = crate::permanent_guard::check_count(prog, hits.len() as u64) {
             return code;
         }

@@ -673,6 +673,9 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     };
 
+    if let Some(code) = plan.refuse_outside(prog, &chosen) {
+        return code;
+    }
     let mut done: Vec<(&list::Entry, PathBuf)> = Vec::new();
     let mut failed = 0usize;
     let mut skipped = 0usize;
@@ -711,6 +714,24 @@ pub(crate) enum Outcome {
 }
 
 impl Plan<'_> {
+    /// The exit code when a destination of `entries` lies outside
+    /// RTRASH_ALLOW_ROOTS, after naming it; None when all are inside or
+    /// this is a dry run. A renamed copy lands beside its destination, in
+    /// the same folder, so the destination decides.
+    pub(crate) fn refuse_outside(&self, prog: &str, entries: &[&list::Entry]) -> Option<i32> {
+        if self.dry_run {
+            return None;
+        }
+        let dests: Vec<PathBuf> = entries
+            .iter()
+            .map(|e| match (self.to, e.original.file_name()) {
+                (Some(dir), Some(name)) => dir.join(name),
+                _ => e.original.clone(),
+            })
+            .collect();
+        crate::allow_roots::refuse_outside(prog, &dests)
+    }
+
     pub(crate) fn apply(&self, prog: &str, e: &list::Entry) -> Outcome {
         let dest = match (self.to, e.original.file_name()) {
             // A relative --to counts from here, as the shell would.
@@ -1019,6 +1040,9 @@ pub(crate) fn restore_one_to(
     dest: &Path,
     force: bool,
 ) -> Result<Restored, String> {
+    if let Err(e) = crate::allow_roots::check(dest) {
+        return Err(format!("cannot restore: {e}"));
+    }
     // The home trash records absolute paths only; a relative or empty
     // Path= would restore below whatever directory restore runs in.
     if !dest.is_absolute() {

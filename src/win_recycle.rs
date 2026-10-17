@@ -157,6 +157,7 @@ pub fn index_file_for(payload: &Path) -> Option<PathBuf> {
 /// after the display name, which loses a known extension, so rtrash moves
 /// the payload itself. Another volume gets a copy, then the payload goes.
 pub fn restore_payload(payload: &Path, dest: &Path) -> std::io::Result<()> {
+    crate::allow_roots::check(dest)?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1153,6 +1154,10 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             eprintln!("{prog}: missing operand");
             eprintln!("Try '{prog} --help' for more information.");
             return 2;
+        }
+        // RTRASH_ALLOW_ROOTS: every operand in scope, or nothing moves.
+        if let Some(code) = crate::allow_roots::refuse_outside(prog, &files) {
+            return code;
         }
         let in_use = in_use.unwrap_or_else(|| in_use_default(prog));
         let snap =
@@ -2764,6 +2769,11 @@ Without PATH, print a numbered list and read an index from stdin.
             }
             return i32::from(failed > 0);
         }
+        // RTRASH_ALLOW_ROOTS: every destination in scope, or nothing moves.
+        let dests: Vec<PathBuf> = plan.iter().map(|(_, _, dest)| dest.clone()).collect();
+        if let Some(code) = crate::allow_roots::refuse_outside(prog, &dests) {
+            return code;
+        }
         let pairs: Vec<(PathBuf, PathBuf, u64)> = plan
             .iter()
             .map(|(it, _, dest)| (PathBuf::from(&it.id), dest.clone(), item_size(it)))
@@ -3100,6 +3110,11 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             (sum, names)
         });
         if !dry_run {
+            // RTRASH_ALLOW_ROOTS: rm deletes only items trashed from there.
+            let origins: Vec<PathBuf> = matched.iter().map(original_of).collect();
+            if let Some(code) = crate::allow_roots::refuse_outside(prog, &origins) {
+                return code;
+            }
             if let Some(code) = crate::permanent_guard::check_count(prog, matched.len() as u64) {
                 return code;
             }

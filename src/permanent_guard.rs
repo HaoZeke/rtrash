@@ -187,6 +187,9 @@ pub fn refuse_command(argv0: &str, rest: &[String]) -> Option<i32> {
             (format!("{argv0} {cmd}"), cmd.as_str(), &rest[1..])
         }
     };
+    if let Some(code) = crate::allow_roots::refuse_unscoped(&prog, cmd, args) {
+        return Some(code);
+    }
     if !deletes_for_good(cmd, args) {
         return None;
     }

@@ -3639,6 +3639,32 @@ way.
 Set it for agents and shared accounts, so that trash stays the only
 way to remove files and every trashed item stays recoverable.
 .TP
+.B RTRASH_ALLOW_ROOTS
+A path list (separated by
+.B :
+on Unix and
+.B ;
+on Windows) that scopes rtrash to those folders, for agents and
+sandboxes.
+put trashes only paths under a root, restore and undo write only under
+one, and rm deletes only trashed items whose original path was under
+one.
+.BR empty ,
+.B reap
+and
+.B wsl rm
+and
+.BR "wsl empty" ,
+which cannot keep to a scope, exit 2; dry runs still work.
+Each command checks every path first and exits 2, changing nothing,
+when one is outside.
+Paths compare on disk: roots and the folders above each path are
+resolved, so a symlinked folder that leads out of a root does not
+count as inside it, and on Windows short 8.3 names and letter case do
+not matter.
+A root that does not exist is ignored, so a list of missing roots
+allows nothing.
+.TP
 .B RTRASH_MAX_PERMANENT
 A whole number
 .I N

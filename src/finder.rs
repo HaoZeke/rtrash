@@ -329,6 +329,11 @@ fn restore(prog: &str, args: &[String]) -> i32 {
             }
         }
     }
+    // RTRASH_ALLOW_ROOTS: every destination in scope, or nothing moves.
+    let dests: Vec<PathBuf> = chosen.iter().filter_map(|i| i.original.clone()).collect();
+    if let Some(code) = crate::allow_roots::refuse_outside(prog, &dests) {
+        return code;
+    }
     let mut done: Vec<(&Item, PathBuf)> = Vec::new();
     let mut skipped = 0usize;
     for item in chosen {
@@ -390,6 +395,7 @@ fn restore(prog: &str, args: &[String]) -> i32 {
 /// Move `src` to `dest`, creating the parent. With `force`, an existing
 /// `dest` goes only after the item sits staged beside it.
 pub(crate) fn move_back(src: &Path, dest: &Path, force: bool) -> Result<(), String> {
+    crate::allow_roots::check(dest).map_err(|e| format!("cannot restore: {e}"))?;
     // Carry the trash's total: the item's size leaves with it, and a
     // failure, which may leave part of it behind, measures the trash.
     let trash = src.parent().unwrap_or(src).to_path_buf();
@@ -925,6 +931,25 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
             println!("{line}");
         }
     };
+    // The destination of an item, as the loop below works it out.
+    let dest_of = |e: &crate::finder_shared::Entry| {
+        let to_dir = o.to.map(|d| {
+            let d = if d.is_absolute() {
+                d.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(d)
+            };
+            d.join(e.shown.file_name().unwrap_or_default())
+        });
+        to_dir.or_else(|| e.original.clone())
+    };
+    // RTRASH_ALLOW_ROOTS: every destination in scope, or nothing moves.
+    if !o.dry_run {
+        let dests: Vec<PathBuf> = chosen.iter().filter_map(|e| dest_of(e)).collect();
+        if let Some(code) = crate::allow_roots::refuse_outside(prog, &dests) {
+            return code;
+        }
+    }
     let (mut done, mut failed, mut skipped) = (Vec::new(), 0usize, 0usize);
     for e in chosen {
         let to_dir = o.to.map(|d| {

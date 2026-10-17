@@ -585,3 +585,91 @@ fn max_count_refuses_a_recycle_bin_rm_past_the_cap() {
     assert!(done.status.success(), "{}", text(&done));
     assert_eq!(after, 0);
 }
+
+/// `RTRASH_ALLOW_ROOTS` on the Recycle Bin. The root and the paths may
+/// differ in letter case and in the short 8.3 %TEMP% against the long path
+/// the bin records, and still compare equal; a path outside is refused
+/// with nothing moved, and rm purges only items trashed from inside.
+#[test]
+fn allow_roots_scopes_the_recycle_bin_on_windows() {
+    let dir = common::scratch_dir("names", "allowroots");
+    let tag = dir.file_name().unwrap().to_string_lossy().into_owned();
+    let (inside, outside) = (dir.join("in"), dir.join("out"));
+    fs::create_dir_all(&inside).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let long = fs::canonicalize(&inside).unwrap();
+    let long = long.to_string_lossy();
+    let long = long.trim_start_matches(r"\\?\").to_string();
+    let file = inside.join(format!("{tag}-x.txt"));
+    let stray = outside.join(format!("{tag}-y.txt"));
+    fs::write(&file, "x").unwrap();
+    fs::write(&stray, "y").unwrap();
+    let rtrash = env!("CARGO_BIN_EXE_rtrash");
+    let run = |args: &[&std::ffi::OsStr], root: Option<&str>| {
+        let mut c = Command::new(rtrash);
+        c.args(args).current_dir(&dir);
+        match root {
+            Some(v) => c.env("RTRASH_ALLOW_ROOTS", v),
+            None => c.env_remove("RTRASH_ALLOW_ROOTS"),
+        };
+        c.output().unwrap()
+    };
+    let os = |s: &str| std::ffi::OsString::from(s);
+    let upper = inside.to_string_lossy().to_uppercase();
+    let in_form = inside.to_string_lossy().into_owned();
+    // The root upper-cased, in whatever form temp_dir gave.
+    let put_in = run(
+        &[os("put").as_os_str(), file.as_os_str()],
+        Some(upper.as_str()),
+    );
+    let put_out = run(
+        &[os("put").as_os_str(), stray.as_os_str()],
+        Some(in_form.as_str()),
+    );
+    let stray_kept = stray.exists();
+    // The root long, the destination as temp_dir spells it.
+    let back = run(
+        &[os("restore").as_os_str(), file.as_os_str()],
+        Some(long.as_str()),
+    );
+    let restored = file.exists();
+    // Trash it unscoped, then rm it scoped to the other folder and to its own.
+    let again = run(&[os("put").as_os_str(), file.as_os_str()], None);
+    let pattern = os(&format!("{tag}-x.txt"));
+    let listed = |o: &Output| {
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| l.contains(&tag))
+            .count()
+    };
+    let (rm_s, dry_s) = (os("rm"), os("-n"));
+    let dry = [rm_s.as_os_str(), dry_s.as_os_str(), pattern.as_os_str()];
+    let rm = [rm_s.as_os_str(), pattern.as_os_str()];
+    let (out_root, low_root) = (outside.to_string_lossy().into_owned(), long.to_lowercase());
+    let before = listed(&run(&dry, None));
+    let refused = run(&rm, Some(out_root.as_str()));
+    let still = listed(&run(&dry, None));
+    let done = run(&rm, Some(low_root.as_str()));
+    let after = listed(&run(&dry, None));
+    let _ = fs::remove_dir_all(&dir);
+    let text = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    let outside_lines = |o: &Output| {
+        text(o)
+            .lines()
+            .filter(|l| l.ends_with("is outside RTRASH_ALLOW_ROOTS"))
+            .count()
+    };
+    assert!(put_in.status.success(), "{}", text(&put_in));
+    assert_eq!(put_out.status.code(), Some(2), "{}", text(&put_out));
+    assert_eq!(outside_lines(&put_out), 1, "{}", text(&put_out));
+    assert!(stray_kept, "a refused put moved the file");
+    assert!(back.status.success(), "{}", text(&back));
+    assert!(restored, "the scoped restore did not bring the file back");
+    assert!(again.status.success(), "{}", text(&again));
+    assert_eq!(before, 1, "the put did not leave one item");
+    assert_eq!(refused.status.code(), Some(2), "{}", text(&refused));
+    assert_eq!(outside_lines(&refused), 1, "{}", text(&refused));
+    assert_eq!(still, before, "a refused rm purged the item");
+    assert!(done.status.success(), "{}", text(&done));
+    assert_eq!(after, 0);
+}

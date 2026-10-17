@@ -47,6 +47,7 @@ impl Sandbox {
             .env("HOME", &self.root)
             .env_remove("RTRASH_NO_PERMANENT")
             .env_remove("RTRASH_MAX_PERMANENT")
+            .env_remove("RTRASH_ALLOW_ROOTS")
             .output()
             .expect("failed to run rtrash")
     }
@@ -61,6 +62,7 @@ impl Sandbox {
             .env("HOME", &self.root)
             .env_remove("RTRASH_NO_PERMANENT")
             .env_remove("RTRASH_MAX_PERMANENT")
+            .env_remove("RTRASH_ALLOW_ROOTS")
             .envs(envs.iter().copied())
             .output()
             .expect("failed to run rtrash")
@@ -6850,4 +6852,100 @@ fn max_count_refuses_rm_and_empty_past_the_cap() {
     let out = sb.run_env(&["empty", &pin, "--all", "--max-count=2"], &one);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(names_in_trash(&sb).is_empty());
+}
+
+/// The lines of `out`'s stderr that name a path outside the scope.
+#[cfg(target_os = "linux")]
+fn outside_lines(out: &Output) -> usize {
+    stderr_of(out)
+        .lines()
+        .filter(|l| l.ends_with("is outside RTRASH_ALLOW_ROOTS"))
+        .count()
+}
+
+/// Runs `args` under `envs`, expects a scope refusal (exit 2 and
+/// `outside_paths` lines naming a path outside the scope), and checks the
+/// trash listing is the same just after the call as just before it.
+#[cfg(target_os = "linux")]
+fn assert_refused_unchanged(
+    sb: &Sandbox,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    outside_paths: usize,
+) {
+    let before = names_in_trash(sb);
+    let out = sb.run_env(args, envs);
+    assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr_of(&out));
+    assert_eq!(
+        outside_lines(&out),
+        outside_paths,
+        "{args:?}: {}",
+        stderr_of(&out)
+    );
+    assert_eq!(names_in_trash(sb), before, "{args:?} changed the trash");
+}
+
+/// `RTRASH_ALLOW_ROOTS` keeps put, restore and rm to the listed folders,
+/// sees through a symlinked folder that leads out, refuses empty, and on
+/// a refusal changes nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn allow_roots_keeps_put_restore_and_rm_inside() {
+    let sb = Sandbox::new("allowroots");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let (inside, outside) = (sb.work().join("ar-in"), sb.work().join("ar-out"));
+    fs::create_dir_all(&inside).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, inside.join("ar-link")).unwrap();
+    for f in ["ar-in/ar-a", "ar-in/ar-b", "ar-out/ar-c", "ar-out/ar-d"] {
+        sb.touch(f);
+    }
+    // ar-c goes to the trash unscoped, so rm and restore meet an outside item.
+    assert!(sb.run(&["put", "ar-out/ar-c"]).status.success());
+    let scope_s = inside.display().to_string();
+    let scope = [("RTRASH_ALLOW_ROOTS", scope_s.as_str())];
+    let refused = |args: &[&str], outside_paths: usize| {
+        assert_refused_unchanged(&sb, args, &scope, outside_paths)
+    };
+    // One outside operand refuses the whole put, so ar-a stays too.
+    refused(&["put", "ar-in/ar-a", "ar-out/ar-d"], 1);
+    // The symlinked folder resolves outside, so this path is not inside.
+    refused(&["put", "ar-in/ar-link/ar-d"], 1);
+    for f in ["ar-in/ar-a", "ar-out/ar-d"] {
+        assert!(sb.work().join(f).exists(), "{f} moved");
+    }
+    refused(&["rm", &pin, "ar-c"], 1);
+    refused(&["restore", "--home-only", "--name=ar-c"], 1);
+    let base = names_in_trash(&sb);
+    let out = sb.run_env(&["empty", &pin, "--all"], &scope);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert_eq!(names_in_trash(&sb), base, "empty ran");
+    // A dry run only looks, so it goes through.
+    assert!(sb
+        .run_env(&["empty", &pin, "-n", "--all"], &scope)
+        .status
+        .success());
+
+    // Inside the root everything works, the link itself included.
+    let out = sb.run_env(
+        &["put", "ar-in/ar-a", "ar-in/ar-b", "ar-in/ar-link"],
+        &scope,
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(names_in_trash(&sb), ["ar-a", "ar-b", "ar-c", "ar-link"]);
+    let to_out = format!("--to={}", outside.display());
+    refused(&["restore", "--home-only", &to_out, "--name=ar-a"], 1);
+    let after_put = names_in_trash(&sb);
+    let out = sb.run_env(&["restore", "--home-only", "--name=ar-a"], &scope);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(inside.join("ar-a").exists());
+    let out = sb.run_env(&["rm", &pin, "ar-b"], &scope);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(names_in_trash(&sb).len(), after_put.len() - 2);
+    // A root that does not exist allows nothing.
+    let gone = [("RTRASH_ALLOW_ROOTS", "/nonexistent-ar-root")];
+    assert_refused_unchanged(&sb, &["put", "ar-out/ar-d"], &gone, 1);
+    // Unset or empty, the scope is off.
+    let out = sb.run_env(&["put", "ar-out/ar-d"], &[("RTRASH_ALLOW_ROOTS", "")]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
 }

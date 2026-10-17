@@ -233,6 +233,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         quiet: json,
         dry_run: false,
     };
+    if let Some(code) = plan.refuse_outside(prog, &batch.entries) {
+        return code;
+    }
     let mut restored: Vec<(&list::Entry, PathBuf)> = Vec::new();
     let (mut failed, mut skipped) = (0usize, 0usize);
     for e in &batch.entries {

@@ -81,6 +81,7 @@ impl Box_ {
             .env("RTRASH_OSASCRIPT", self.root.join("osascript"))
             .env("XDG_STATE_HOME", self.root.join("state"))
             .env_remove("RTRASH_MAX_PERMANENT")
+            .env_remove("RTRASH_ALLOW_ROOTS")
             .envs(envs.iter().copied())
             .stdin(Stdio::null())
             .output()
@@ -1361,4 +1362,66 @@ fn max_count_refuses_finder_rm_and_empty_past_the_cap() {
     let o = b.run_env(&["empty", "--all"], &cap2);
     assert!(o.status.success(), "{}", err(&o));
     assert!(!b.finder().join("fc-b").exists() && !b.finder().join("fc-c").exists());
+}
+
+/// `RTRASH_ALLOW_ROOTS` on the Finder Trash: put keeps to the roots
+/// through the unresolved temp dir (on macOS /var leads to /private/var)
+/// and refuses a symlinked folder that leads out; rm refuses an item with
+/// no Put Back place; restore --to keeps inside; empty refuses.
+#[test]
+fn allow_roots_keeps_finder_put_restore_and_rm_inside() {
+    let b = Box_::new("allowroots");
+    let (inside, outside) = (b.work().join("fa-in"), b.work().join("fa-out"));
+    fs::create_dir_all(&inside).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, inside.join("fa-link")).unwrap();
+    for f in ["fa-in/fa-a", "fa-out/fa-b"] {
+        fs::write(b.work().join(f), f).unwrap();
+    }
+    // The scope names the root as the temp dir spells it, not resolved.
+    let scope_s = inside.display().to_string();
+    let scope = [("RTRASH_ALLOW_ROOTS", scope_s.as_str())];
+    let in_trash = || fs::read_dir(b.finder()).map_or(0, |d| d.count());
+    let outside_lines = |o: &Output| {
+        err(o)
+            .lines()
+            .filter(|l| l.ends_with("is outside RTRASH_ALLOW_ROOTS"))
+            .count()
+    };
+    // A refusal names one outside path and leaves the trash as it was
+    // just before the call.
+    let assert_refused_unchanged = |args: &[&str]| {
+        let before = in_trash();
+        let o = b.run_env(args, &scope);
+        assert_eq!(o.status.code(), Some(2), "{args:?}: {}", err(&o));
+        assert_eq!(outside_lines(&o), 1, "{args:?}: {}", err(&o));
+        assert_eq!(in_trash(), before, "{args:?} changed the trash");
+    };
+    assert_refused_unchanged(&["put", "fa-in/fa-a", "fa-out/fa-b"]);
+    assert_refused_unchanged(&["put", "fa-in/fa-link/fa-b"]);
+    let o = b.run_env(&["put", "fa-in/fa-a"], &scope);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(b.finder().join("fa-a").exists());
+    // fa-b goes in unscoped, so the put log records an origin outside;
+    // fa-c lands in the trash by hand, so it has no origin at all and
+    // counts as outside. fa-a came from inside, so only --to refuses it.
+    let o = b.run_env(&["put", "fa-out/fa-b"], &[]);
+    assert!(o.status.success(), "{}", err(&o));
+    fs::write(b.finder().join("fa-c"), "fa-c").unwrap();
+    let to_out = format!("--to={}", outside.display());
+    for (args, item) in [
+        (&["rm", "fa-b"][..], "fa-b"),
+        (&["rm", "fa-c"][..], "fa-c"),
+        (&["restore", &to_out, "fa-a"][..], "fa-a"),
+    ] {
+        assert_refused_unchanged(args);
+        assert!(b.finder().join(item).exists(), "{args:?}");
+    }
+    let o = b.run_env(&["empty", "--all"], &scope);
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+    assert!(b.finder().join("fa-a").exists());
+    let to_in = format!("--to={}", inside.display());
+    let o = b.run_env(&["restore", &to_in, "fa-a"], &scope);
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(inside.join("fa-a").exists() && !b.finder().join("fa-a").exists());
 }
