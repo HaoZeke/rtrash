@@ -376,8 +376,9 @@ fn record_names_and_paths_stay_inside_their_trash() {
         let Ok(p) = volume.resolve_original_checked(&recorded) else {
             continue;
         };
+        // Absolute or not, what a volume trash restores stays inside it.
+        assert!(p.starts_with("/mnt/v"), "{recorded:?} -> {p:?}");
         if !recorded.is_absolute() {
-            assert!(p.starts_with("/mnt/v"), "{recorded:?} -> {p:?}");
             assert!(
                 !p.components().any(|c| c == Component::ParentDir),
                 "{recorded:?} -> {p:?}"

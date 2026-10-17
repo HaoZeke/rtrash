@@ -260,6 +260,14 @@ jobs:
           tar -xzf "$RUNNER_TEMP/ncdu.tar.gz" -C "$RUNNER_TEMP" ncdu
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
+      # trash-cli checks a volume trash's Path= only on a real mount
+      # other than /, so the volume escape check gets a small tmpfs.
+      - name: Mount a scratch volume
+        run: |
+          mkdir -p "$RUNNER_TEMP/rtv/vol"
+          sudo mount -t tmpfs -o "size=8m,uid=$(id -u),gid=$(id -g),mode=0755" tmpfs "$RUNNER_TEMP/rtv/vol"
+          echo "RTRASH_INTEROP_VOLUME=$RUNNER_TEMP/rtv/vol" >> "$GITHUB_ENV"
+
       - name: Cross-restore every pairing
         env:
           LANG: C.UTF-8

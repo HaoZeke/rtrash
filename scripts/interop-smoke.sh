@@ -10,6 +10,9 @@
 # since `gio trash --empty` also empties every volume trash it finds. File names carry a space, a '%' and Unicode.
 # With ncdu 2.7 or later on PATH, `rtrash du -f` must read its `ncdu -c`
 # export as it reads the plain one.
+# With trash-cli, rtrash's trash-list must print trash-cli's rows, odd
+# names included, and with RTRASH_INTEROP_VOLUME naming a mount point
+# both tools must refuse a volume record that leads out of its volume.
 # Tools that are missing get skipped with a note; rtrash must be there.
 # gio needs a session bus and gvfsd, so the script starts both in
 # dbus-run-session when gio is on PATH and no gvfsd runs yet.
@@ -55,6 +58,7 @@ else
   echo "note: gio or gvfsd missing; gio pairings skipped"
 fi
 echo "putters: ${putters[*]}; restorers: ${restorers[*]}"
+have trash-list && echo "trash-cli: $(trash-list --version 2>&1)"
 
 put() { # TOOL PATH
   case $1 in
@@ -323,8 +327,102 @@ if have trash-list; then
     fi
   done
   rm -rf -- "$tl"
+
+  # Odd names in rows, as trash-cli 0.26.9 prints them: as is in a pipe,
+  # with a byte that is not UTF-8 as \xNN, and in GNU ls's shell-escape
+  # quoting on a terminal (through script(1)). Each name gets a trash of
+  # its own, so no sorting is needed when a newline splits its row.
+  tl=$scratch/tl-odd
+  base=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$scratch/w/odd/")
+  modes=(pipe)
+  if have script; then
+    modes+=(tty)
+  else
+    echo "note: script missing; trash-list terminal quoting check skipped"
+  fi
+  for enc in plain-1.txt 'a%20b' "it's" 'new%0Aline' 'tab%09here' 'esc%1B%5B31m' 'del%7F' 'nel%C2%85%C3%A9' 'bad%FF'; do
+    rm -rf -- "$tl"
+    mkdir -p "$tl/files" "$tl/info"
+    printf 'x\n' > "$tl/files/item"
+    printf '[Trash Info]\nPath=%s%s\nDeletionDate=2026-01-02T03:04:05\n' "$base" "$enc" > "$tl/info/item.trashinfo"
+    for mode in "${modes[@]}"; do
+      for args in "" "--files"; do
+        if [[ $mode == pipe ]]; then
+          # shellcheck disable=SC2086
+          want=$( { trash-list --trash-dir="$tl" $args 2>&1 || echo "exit $?"; } | od -c)
+          # shellcheck disable=SC2086
+          got=$( { "$scratch/bin/trash-list" --trash-dir="$tl" $args 2>&1 || echo "exit $?"; } | od -c)
+        else
+          want=$( { script -qec "trash-list --trash-dir='$tl' $args" /dev/null </dev/null 2>&1 || echo "exit $?"; } | tr -d '\r' | od -c)
+          got=$( { script -qec "'$scratch/bin/trash-list' --trash-dir='$tl' $args" /dev/null </dev/null 2>&1 || echo "exit $?"; } | tr -d '\r' | od -c)
+        fi
+        if [[ $want == "$got" ]]; then
+          echo "ok   trash-list $mode ${args:-(plain)} row for '$enc' matches trash-cli"
+        else
+          echo "FAIL trash-list $mode ${args:-(plain)} row for '$enc' differs from trash-cli"
+          echo "  trash-cli:"
+          printf '%s\n' "$want" | sed 's/^/  | /'
+          echo "  rtrash:"
+          printf '%s\n' "$got" | sed 's/^/  | /'
+          fail=1
+        fi
+      done
+    done
+  done
+  rm -rf -- "$tl"
 else
   echo "note: trash-list missing; trash-list row check skipped"
+fi
+
+# trash-cli 0.26.9 restores nothing from a volume trash whose record
+# leads out of its volume: an absolute Path= elsewhere, or a relative
+# one that climbs out with `..`. rtrash refuses the same two, and both
+# restore the record that stays inside. trash-cli finds the volume of
+# a --trash-dir by its mount point, so this needs a real mount other
+# than /: RTRASH_INTEROP_VOLUME names one (CI mounts a tmpfs there)
+# whose parent directory the user can write.
+vol=${RTRASH_INTEROP_VOLUME:-}
+if [[ -z $vol ]] || ! have trash-restore || ! mountpoint -q "$vol"; then
+  echo "note: RTRASH_INTEROP_VOLUME unset or not a mount point, or trash-restore missing; volume escape check skipped"
+else
+  vt=$vol/.Trash-$(id -u)
+  outside=$(dirname "$vol")
+  abs_t=$outside/rtrash-interop-abs.txt
+  climb_t=$outside/rtrash-interop-climb.txt
+  ok_t=$vol/rtrash-interop-ok.txt
+  for tool in trash-cli rtrash; do
+    rm -rf -- "$vt" "$abs_t" "$climb_t" "$ok_t"
+    mkdir -p "$vt/files" "$vt/info"
+    for rec in "ok|rtrash-interop-ok.txt" "abs|$abs_t" "climb|../rtrash-interop-climb.txt"; do
+      printf 'payload\n' > "$vt/files/${rec%%|*}"
+      printf '[Trash Info]\nPath=%s\nDeletionDate=2026-01-02T03:04:05\n' "${rec#*|}" > "$vt/info/${rec%%|*}.trashinfo"
+    done
+    for case in "abs|$abs_t" "climb|$climb_t" "ok|$ok_t"; do
+      name=${case%%|*}
+      target=${case#*|}
+      if [[ $tool == trash-cli ]]; then
+        log=$(printf '0\n' | trash-restore --trash-dir="$vt" "$target" 2>&1 || true)
+      else
+        log=$("$rtrash" restore --trash-dir="$vt" "$target" </dev/null 2>&1 || true)
+      fi
+      if [[ $name == ok ]]; then
+        if [[ -f $target && ! -e $vt/files/ok ]]; then
+          echo "ok   $tool restores the record inside its volume"
+        else
+          echo "FAIL $tool did not restore the record inside its volume"
+          printf '%s\n' "$log" | sed 's/^/  | /'
+          fail=1
+        fi
+      elif [[ ! -e $target && -f $vt/files/$name ]]; then
+        echo "ok   $tool refuses the $name Path= that leads out of its volume"
+      else
+        echo "FAIL $tool restored the $name Path= that leads out of its volume"
+        printf '%s\n' "$log" | sed 's/^/  | /'
+        fail=1
+      fi
+    done
+  done
+  rm -rf -- "$vt" "$abs_t" "$climb_t" "$ok_t"
 fi
 
 # ncdu 2.7 and later compress a JSON export with -c. One scan exported
