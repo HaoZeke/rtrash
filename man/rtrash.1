@@ -2097,8 +2097,10 @@ and
 .B r
 wait for it.
 .B q
-lets the row in hand finish, then quits; the rows not yet started stay
-in place.
+or Ctrl-C stops the delete, then quits: a row partway through a copy to
+another file system goes back whole, its part copied removed, and stays
+in place with the rows not yet started.
+For such a row, the status line also shows the bytes copied so far.
 Marks also survive a rescan
 .RB ( r ,
 or a background scan finishing), take the sizes it found, and drop

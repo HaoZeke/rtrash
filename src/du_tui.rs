@@ -10,8 +10,10 @@
 //!
 //! A delete runs in the background too, as in dua 2.45: its rows go to
 //! the trash one at a time on a thread of their own, each leaves the
-//! views as it goes, and the status line counts the rows and bytes left.
-//! Quitting waits for the row in hand and leaves the rest.
+//! views as it goes, and the status line counts the rows and bytes left,
+//! and the bytes copied of a row that crosses file systems. Quitting
+//! stops the delete: a copy in progress ends and its part copied goes,
+//! so that row stays whole where it was, with the rows not yet started.
 //!
 //! Given several directories (`du -i a b`, as `dua i a b`), the explorer
 //! opens on a view of its own above them, one row per directory, kept in
@@ -20,7 +22,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
@@ -127,31 +129,48 @@ type Trashed = (Item, Option<bin::Ticket>);
 /// own (inline in tests) and come back one at a time through `rx`.
 struct Deleting {
     rx: mpsc::Receiver<Trashed>,
-    /// Asks the thread to stop before its next row.
-    stop: Arc<AtomicBool>,
-    /// Rows not yet done; none of them can be opened meanwhile.
-    pending: Vec<PathBuf>,
+    /// The stop flag and the bytes copied of the row in hand.
+    watch: Watch,
+    /// Rows not yet done, in order, with their apparent sizes; none of
+    /// them can be opened meanwhile. The first is the row in hand.
+    pending: Vec<(PathBuf, u64)>,
     total: usize,
     /// Disk use of the rows not yet done.
     left: u64,
     group: UndoGroup,
     failed: usize,
+    /// Rows done and bytes copied when the status line last showed them.
+    shown: (usize, u64),
+}
+
+/// What a delete thread answers to: `stop` ends it, inside a copy across
+/// file systems too, and `copied` counts the bytes of the row in hand.
+#[derive(Clone, Default)]
+struct Watch {
+    stop: Arc<AtomicBool>,
+    copied: Arc<AtomicU64>,
 }
 
 /// Trash `items` one at a time and send each with its ticket, until all
-/// are done, `stop` is set, or nobody listens any more.
+/// are done, `watch.stop` is set, or nobody listens any more. A row the
+/// stop ended partway is not sent: its copy was undone, so it stays.
 fn trash_rows(
     prog: &str,
     items: Vec<Item>,
     pin: Option<&PathBuf>,
-    stop: &AtomicBool,
+    watch: &Watch,
     tx: &mpsc::Sender<Trashed>,
 ) {
     for item in items {
-        if stop.load(Ordering::Relaxed) {
+        if watch.stop.load(Ordering::Relaxed) {
             return;
         }
-        let done = bin::trash(prog, &item.path, pin);
+        let done = bin::trash(prog, &item.path, pin, watch);
+        // Before the send, so the count never shows against the next row.
+        watch.copied.store(0, Ordering::Relaxed);
+        if done.is_none() && watch.stop.load(Ordering::Relaxed) {
+            return;
+        }
         if tx.send((item, done)).is_err() {
             return;
         }
@@ -169,7 +188,14 @@ mod bin {
     /// What a delete left behind, enough to undo it.
     pub type Ticket = put::Trashed;
 
-    pub fn trash(prog: &str, path: &Path, pin: Option<&PathBuf>) -> Option<Ticket> {
+    /// Trash `path`. A copy across file systems counts its bytes into
+    /// `watch` and ends, undone, once `watch.stop` is set.
+    pub fn trash(
+        prog: &str,
+        path: &Path,
+        pin: Option<&PathBuf>,
+        watch: &super::Watch,
+    ) -> Option<Ticket> {
         let opts = put::Opts {
             recursive: true,
             force: true,
@@ -177,7 +203,13 @@ mod bin {
             trash_pin: pin.cloned(),
             ..put::Opts::default()
         };
-        put::put_one(prog, path, &opts).ok().flatten()
+        let scoped = crate::interrupt::Watch {
+            stop: watch.stop.clone(),
+            copied: watch.copied.clone(),
+        };
+        crate::interrupt::watched(&scoped, || put::put_one(prog, path, &opts))
+            .ok()
+            .flatten()
     }
 
     pub fn untrash(t: &Ticket) -> bool {
@@ -203,7 +235,13 @@ mod bin {
     /// The original path; undo restores the newest Recycle Bin item from it.
     pub type Ticket = PathBuf;
 
-    pub fn trash(_prog: &str, path: &Path, _pin: Option<&PathBuf>) -> Option<Ticket> {
+    /// The Recycle Bin call cannot stop partway, so `watch` waits for it.
+    pub fn trash(
+        _prog: &str,
+        path: &Path,
+        _pin: Option<&PathBuf>,
+        _watch: &super::Watch,
+    ) -> Option<Ticket> {
         crate::allow_roots::trash_delete(path)
             .ok()
             .map(|()| path.to_path_buf())
@@ -1318,18 +1356,19 @@ impl App {
         self.sel.clear();
         self.away.clear();
         let (tx, rx) = mpsc::channel();
-        let stop = Arc::new(AtomicBool::new(false));
+        let watch = Watch::default();
         self.deleting = Some(Deleting {
             rx,
-            stop: stop.clone(),
-            pending: t.iter().map(|i| i.path.clone()).collect(),
+            watch: watch.clone(),
+            pending: t.iter().map(|i| (i.path.clone(), i.apparent)).collect(),
             total: t.len(),
             left: t.iter().map(|i| i.disk).sum(),
             group: Vec::new(),
             failed: 0,
+            shown: (0, 0),
         });
         let (prog, pin) = (self.prog.clone(), self.trash_pin.clone());
-        let work = move || trash_rows(&prog, t, pin.as_ref(), &stop, &tx);
+        let work = move || trash_rows(&prog, t, pin.as_ref(), &watch, &tx);
         if self.background {
             std::thread::spawn(work);
             self.show_delete_progress();
@@ -1342,7 +1381,10 @@ impl App {
     /// The queued row `dir` is, or lies under, while a delete runs.
     fn being_trashed(&self, dir: &Path) -> Option<PathBuf> {
         let d = self.deleting.as_ref()?;
-        d.pending.iter().find(|p| dir.starts_with(p)).cloned()
+        d.pending
+            .iter()
+            .find(|(p, _)| dir.starts_with(p))
+            .map(|(p, _)| p.clone())
     }
 
     /// Take in every row the delete has done since the last call: each
@@ -1363,7 +1405,7 @@ impl App {
         };
         let any = !came.is_empty();
         for (item, done) in came {
-            d.pending.retain(|p| *p != item.path);
+            d.pending.retain(|(p, _)| *p != item.path);
             d.left = d.left.saturating_sub(item.disk);
             match done {
                 Some(ticket) => {
@@ -1379,13 +1421,20 @@ impl App {
         }
         if finished {
             self.finish_delete(d);
-        } else {
-            self.deleting = Some(d);
-            if any {
-                self.show_delete_progress();
-            }
+            return true;
         }
-        any || finished
+        // A new row done or a new chunk copied moves the status line;
+        // otherwise a refusal shown meanwhile stays readable.
+        let now = (
+            d.group.len() + d.failed,
+            d.watch.copied.load(Ordering::Relaxed),
+        );
+        let moved = now != d.shown;
+        self.deleting = Some(d);
+        if moved {
+            self.show_delete_progress();
+        }
+        any || moved
     }
 
     /// The trashed `it` leaves its view, and the views above it shrink;
@@ -1421,25 +1470,41 @@ impl App {
 
     /// The status line while a delete runs.
     fn show_delete_progress(&mut self) {
-        let Some(d) = &self.deleting else {
+        let Some(d) = &mut self.deleting else {
             return;
         };
         let done = d.group.len() + d.failed;
-        self.status = if d.stop.load(Ordering::Relaxed) {
-            format!("stopping after the row in hand: {done} of {} done", d.total)
+        let copied = d.watch.copied.load(Ordering::Relaxed);
+        d.shown = (done, copied);
+        // The row in hand is copying across file systems.
+        let copying = match d.pending.first() {
+            Some((path, size)) if copied > 0 => format!(
+                "; copying {}: {} of {}",
+                crate::util::term_path(Path::new(path.file_name().unwrap_or_default())),
+                format_bytes(copied),
+                format_bytes(*size)
+            ),
+            _ => String::new(),
+        };
+        self.status = if d.watch.stop.load(Ordering::Relaxed) {
+            format!(
+                "stopping: {done} of {} done; a copy in progress is undone",
+                d.total
+            )
         } else {
             format!(
-                "trashing: {done} of {} done, {} left · q waits for the row in hand",
+                "trashing: {done} of {} done, {} left{copying} · q stops",
                 d.total,
                 format_bytes(d.left)
             )
         };
     }
 
-    /// Ask the running delete to stop before its next row (on quit).
+    /// Ask the running delete to stop (on quit): the thread starts no
+    /// new row, and a copy in progress ends and removes its part copied.
     fn stop_delete(&mut self) {
         if let Some(d) = &self.deleting {
-            d.stop.store(true, Ordering::Relaxed);
+            d.watch.stop.store(true, Ordering::Relaxed);
         }
         self.show_delete_progress();
     }
@@ -1450,6 +1515,10 @@ impl App {
         let left = d.pending.len();
         if n > 0 {
             self.undo.push(d.group);
+        }
+        if n == 0 && d.failed == 0 && left > 0 {
+            self.status = format!("stopped; nothing trashed, {left} left in place");
+            return;
         }
         let stopped = if left > 0 {
             format!(", {left} left in place")
@@ -2568,8 +2637,8 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
             None => {}
         }
         if app.quit && app.deleting.is_some() {
-            // A row half moved across devices must not be cut off: stop
-            // after the one in hand, and quit once it is done.
+            // A row partway across devices goes back whole first: stop,
+            // and quit once the thread has cleaned up and ended.
             app.stop_delete();
         } else if app.quit {
             // Let running scans wind down instead of walking on unseen.
@@ -2727,11 +2796,7 @@ mod tests {
             "{}",
             a.status
         );
-        assert!(
-            a.status.contains("q waits for the row in hand"),
-            "{}",
-            a.status
-        );
+        assert!(a.status.ends_with(" · q stops"), "{}", a.status);
         // A queued row cannot be opened, and d, u and r wait.
         a.select(0);
         a.open();
@@ -2761,17 +2826,109 @@ mod tests {
         let a = app(&t);
         let items: Vec<Item> = a.rows().to_vec();
         let (tx, rx) = mpsc::channel();
-        let stop = AtomicBool::new(true);
-        trash_rows("rtrash", items.clone(), a.trash_pin.as_ref(), &stop, &tx);
+        let watch = Watch::default();
+        watch.stop.store(true, Ordering::Relaxed);
+        trash_rows("rtrash", items.clone(), a.trash_pin.as_ref(), &watch, &tx);
         assert!(rx.try_recv().is_err(), "a stop set first trashes no row");
         assert!(t.0.join("w/big").exists() && t.0.join("w/file").exists());
-        stop.store(false, Ordering::Relaxed);
-        trash_rows("rtrash", items, a.trash_pin.as_ref(), &stop, &tx);
+        watch.stop.store(false, Ordering::Relaxed);
+        trash_rows("rtrash", items, a.trash_pin.as_ref(), &watch, &tx);
         drop(tx);
         let sent: Vec<Trashed> = rx.iter().collect();
         assert_eq!(sent.len(), 3);
         assert!(sent.iter().all(|(_, ticket)| ticket.is_some()));
         assert!(!t.0.join("w/big").exists() && !t.0.join("w/file").exists());
+    }
+
+    /// A delete whose thread is held still: the test plays the thread,
+    /// moving `watch.copied` and ending it by dropping the sender.
+    fn held_delete(a: &mut App, row: &Item) -> (mpsc::Sender<Trashed>, Watch) {
+        let (tx, rx) = mpsc::channel();
+        let watch = Watch::default();
+        a.deleting = Some(Deleting {
+            rx,
+            watch: watch.clone(),
+            pending: vec![(row.path.clone(), row.apparent)],
+            total: 1,
+            left: row.disk,
+            group: Vec::new(),
+            failed: 0,
+            shown: (0, 0),
+        });
+        (tx, watch)
+    }
+
+    #[test]
+    fn the_status_line_counts_the_bytes_copied_of_the_row_in_hand() {
+        let t = tree("copyline");
+        let mut a = app(&t);
+        let big = a.rows()[0].clone();
+        let (tx, watch) = held_delete(&mut a, &big);
+        watch.copied.store(100_000, Ordering::Relaxed);
+        a.poll_delete();
+        let line = format!(
+            "; copying big: {} of {} · q stops",
+            format_bytes(100_000),
+            format_bytes(big.apparent)
+        );
+        assert!(a.status.ends_with(&line), "{}", a.status);
+        // With nothing new, a refusal stays readable.
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        a.poll_delete();
+        assert!(a.status.contains("a delete is running"), "{}", a.status);
+        watch.copied.store(200_000, Ordering::Relaxed);
+        a.poll_delete();
+        assert!(
+            a.status
+                .contains(&format!("copying big: {} of", format_bytes(200_000))),
+            "{}",
+            a.status
+        );
+        a.stop_delete();
+        assert!(watch.stop.load(Ordering::Relaxed));
+        assert_eq!(
+            a.status,
+            "stopping: 0 of 1 done; a copy in progress is undone"
+        );
+        // The thread undid the copy and ended without sending the row.
+        drop(tx);
+        a.poll_delete();
+        assert!(a.deleting.is_none());
+        assert_eq!(a.status, "stopped; nothing trashed, 1 left in place");
+        assert_eq!(names(&a), ["big", "file", "small"]);
+        a.on_key(KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(a.status, "nothing to undo");
+    }
+
+    /// The explorer's own trash call, stopped inside a copy to another
+    /// file system: nothing reaches the trash and the row stays whole.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_trash_stopped_mid_copy_leaves_the_row_whole() {
+        use std::os::unix::fs::MetadataExt;
+        let t = tree("midcopy");
+        let shm = Path::new("/dev/shm");
+        let dev = fs::metadata(&t.0).unwrap().dev();
+        if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
+            eprintln!("no second file system here; skipping");
+            return;
+        }
+        let pin = shm.join(format!("rtrash-dutui-midcopy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&pin);
+        let watch = Watch::default();
+        watch.stop.store(true, Ordering::Relaxed);
+        let big = t.0.join("w/big");
+        assert!(bin::trash("rtrash", &big, Some(&pin), &watch).is_none());
+        assert_eq!(fs::read(big.join("inner/blob")).unwrap().len(), 200_000);
+        assert_eq!(fs::read(big.join("side")).unwrap().len(), 30_000);
+        let in_trash = fs::read_dir(pin.join("files")).map_or(0, |d| d.count());
+        assert_eq!(in_trash, 0);
+        // Unstopped, the same call copies it and counts the bytes.
+        watch.stop.store(false, Ordering::Relaxed);
+        assert!(bin::trash("rtrash", &big, Some(&pin), &watch).is_some());
+        assert!(!big.exists());
+        assert_eq!(watch.copied.load(Ordering::Relaxed), 230_000);
+        let _ = fs::remove_dir_all(&pin);
     }
 
     #[cfg(unix)]

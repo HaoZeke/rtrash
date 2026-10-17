@@ -1,3 +1,3 @@
 The `du -i` explorer now trashes in the background, as dua 2.45 does. The status line counts the rows done and the bytes left, and each row leaves the list as it goes, so the explorer stays usable during a large delete.
-A delete in progress keeps queued directories closed. `d`, `u` and `r` wait for it. On `q`, the explorer lets the row in hand finish and then quits; rows not yet started stay in place.
+A delete in progress keeps queued directories closed. `d`, `u` and `r` wait for it. For a row that crosses file systems, the status line also shows the bytes copied so far. On `q` or Ctrl-C, the explorer stops the delete and then quits. A row partway through its copy goes back whole, with the part copied removed, and stays in place with the rows not yet started.
 The explorer used to crash when you trashed the directory on screen through a mark from a view above. It now shows the parent instead.
