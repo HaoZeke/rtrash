@@ -932,10 +932,18 @@ to check a FreeDesktop trash there.
 leaves out a record it cannot read, one with no
 .B Path=
 line, as trash\-cli's trash\-list does, and one in a volume trash whose
-path climbs out of its volume or is an absolute path outside it, and
-after its rows it says on stderr how many, naming
-.BR "rtrash status \-\-check" ;
-its rows on stdout are the same as without them.
+path climbs out of its volume or is an absolute path outside it.
+After its rows it prints on stderr one line per trash that has such
+records or names in
+.B info/
+that are not
+.B .trashinfo
+records (a
+.BR .DS_Store ,
+say): the trash, how many of each, and
+.BR "rtrash status \-\-check" ,
+which names them.
+Its rows on stdout are the same as without them.
 .B trash\-list
 first prints trash-cli's own stderr line for each record trash-cli
 reports, in path order:
@@ -946,8 +954,8 @@ and
 .RB \(oq "[Errno N] TEXT: 'FILE'" \(cq
 for one it cannot open (a directory, a dangling symlink, no read
 permission).
-Its count after the rows then covers only the rest, which trash-cli
-would list: an empty
+It then counts only the records trash-cli would list, and no stray
+name, since trash-cli mentions none: an empty
 .BR Path= ,
 a path that leads out of its volume, a record over 1 MiB, a FIFO or a
 device.

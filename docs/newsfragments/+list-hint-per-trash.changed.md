@@ -1,0 +1,1 @@
+`rtrash list` now prints one stderr line per trash with records it left out, naming the trash, in place of one total for all of them (trash-cli #428). The line also counts names in `info/` that are not records, such as a `.DS_Store`. The trash-list name still leaves such names unmentioned, as trash-cli 0.26.9.29 does.

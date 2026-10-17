@@ -303,6 +303,8 @@ if have trash-list; then
   # directory and a dangling symlink where a record should be. Both
   # tools print the same lines (rtrash adds no hint for them) and the
   # same rows; trash-cli's go in directory order, so both get sorted.
+  # A .DS_Store in info/ is no record: trash-cli says nothing of it, and
+  # neither does rtrash under the trash-list name.
   tl=$scratch/tl-bad
   mkdir -p "$tl/files" "$tl/info"
   printf 'ok\n' > "$tl/files/ok"
@@ -310,6 +312,7 @@ if have trash-list; then
   printf '[Trash Info]\nDeletionDate=2026-01-02T03:04:05\n' > "$tl/info/no path.trashinfo"
   mkdir "$tl/info/dir.trashinfo"
   ln -s "$scratch/nowhere" "$tl/info/dangling.trashinfo"
+  printf 'Bud1' > "$tl/info/.DS_Store"
   for stream in stdout stderr; do
     if [[ $stream == stdout ]]; then
       want=$( { trash-list --trash-dir="$tl" 2>/dev/null || echo "exit $?"; } | LC_ALL=C sort)

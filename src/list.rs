@@ -85,18 +85,28 @@ impl Entry {
 /// left out; one with no `Path=` stays, with an empty original (or the
 /// volume top), for rm, restore, empty and the totals as before.
 pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
-    collect_with(dirs, Pathless::Keep).0
+    collect_with(dirs, Pathless::Keep).entries
 }
 
 /// What `list` shows, and the `NAME.trashinfo` records it left out, in
 /// path order: those [`collect`] leaves out, and also one with no `Path=`
 /// (or an empty one), which names no original. trash-cli's trash-list
 /// leaves that one out too. `status --check` names each of them. Other
-/// names in `info/` are not records and do not count.
-pub fn collect_counted(dirs: &[TrashDir]) -> (Vec<Entry>, Vec<Unlisted>) {
-    let (entries, mut left) = collect_with(dirs, Pathless::Skip);
-    left.sort_by(|a, b| a.record.cmp(&b.record));
-    (entries, left)
+/// names in `info/` are not records; [`Listing::strays`] counts them.
+pub fn collect_counted(dirs: &[TrashDir]) -> Listing {
+    let mut listing = collect_with(dirs, Pathless::Skip);
+    listing.left.sort_by(|a, b| a.record.cmp(&b.record));
+    listing
+}
+
+/// The items of some trashes, and what of them could not be listed.
+pub struct Listing {
+    pub entries: Vec<Entry>,
+    pub left: Vec<Unlisted>,
+    /// For each trash, in the order given: the names in its `info/` that
+    /// are not `NAME.trashinfo` (a `.DS_Store`, a temporary file), which
+    /// `status --check` reports as stray.
+    pub strays: Vec<u64>,
 }
 
 /// A record `list` leaves out, and the line trash-cli's trash-list prints
@@ -107,6 +117,8 @@ pub fn collect_counted(dirs: &[TrashDir]) -> (Vec<Entry>, Vec<Unlisted>) {
 /// over the size cap) or hangs on them (a FIFO), so they get no line.
 pub struct Unlisted {
     pub record: PathBuf,
+    /// The root of the trash the record is in.
+    pub root: PathBuf,
     pub trash_cli: Option<String>,
 }
 
@@ -117,15 +129,23 @@ enum Pathless {
     Skip,
 }
 
-fn collect_with(dirs: &[TrashDir], pathless: Pathless) -> (Vec<Entry>, Vec<Unlisted>) {
+fn collect_with(dirs: &[TrashDir], pathless: Pathless) -> Listing {
     use rayon::prelude::*;
     let mut out = Vec::new();
     let mut left = Vec::new();
+    let mut strays = Vec::with_capacity(dirs.len());
     for dir in dirs {
         let Ok(entries) = fs::read_dir(dir.info()) else {
+            strays.push(0);
             continue;
         };
         let paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        let records = |p: &PathBuf| {
+            p.file_name().is_some_and(|f| {
+                crate::util::trash_item_name(&crate::util::str_from_os_ref(f)).is_some()
+            })
+        };
+        strays.push(paths.iter().filter(|p| !records(p)).count() as u64);
         // One read per item: spread a big trash over the rayon pool. A
         // name that is not a record gives None.
         let read: Vec<Result<Entry, Unlisted>> = paths
@@ -136,6 +156,7 @@ fn collect_with(dirs: &[TrashDir], pathless: Pathless) -> (Vec<Entry>, Vec<Unlis
                 Some(
                     read_entry(dir, &path, name, pathless).map_err(|trash_cli| Unlisted {
                         record: path.clone(),
+                        root: dir.root.clone(),
                         trash_cli,
                     }),
                 )
@@ -154,7 +175,11 @@ fn collect_with(dirs: &[TrashDir], pathless: Pathless) -> (Vec<Entry>, Vec<Unlis
             .then_with(|| a.original.cmp(&b.original))
             .then_with(|| a.name.cmp(&b.name))
     });
-    (out, left)
+    Listing {
+        entries: out,
+        left,
+        strays,
+    }
 }
 
 /// The entry the record at `path` (for the payload `name`) gives. It is
@@ -765,17 +790,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         return 0;
     }
-    let (collected, left) = collect_counted(&dirs);
+    let Listing {
+        entries: collected,
+        left,
+        strays,
+    } = collect_counted(&dirs);
     // The trash-list name prints trash-cli's own line for each record
-    // trash-cli reports, and the hint counts only the rest; rtrash list
+    // trash-cli reports, and its hints count only the rest; rtrash list
     // counts them all.
-    let mut skipped = left.len() as u64;
-    if prog == "trash-list" {
+    let trash_cli = prog == "trash-list";
+    if trash_cli {
         for line in left.iter().filter_map(|u| u.trash_cli.as_deref()) {
             eprintln!("{}", crate::util::err_text(line));
-            skipped -= 1;
         }
     }
+    let hints = folder_hints(prog, &dirs, &left, &strays, trash_cli);
     let mut unsized_rows = 0usize;
     let mut entries = filter_age_secs(collected, older_than, newer_than);
     entries.retain(|e| keep(&e.original, &e.name));
@@ -941,13 +970,65 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let _ = out.flush();
     }
     // After the rows, on stderr, so stdout is the same with or without
-    // it. trash-list prints it too, as on Windows, for what trash-cli
+    // them. trash-list prints them too, as on Windows, for what trash-cli
     // itself would list or not report.
-    let hint = crate::util::unlisted_hint(prog, skipped, "trash record", "trash records");
-    if let Some(hint) = hint {
+    for hint in hints {
+        let hint = crate::util::err_text(&hint);
         eprintln!("{hint}");
     }
     i32::from(unsized_rows > 0)
+}
+
+/// One stderr line per trash with something `list` could not show, in the
+/// order of `dirs` (trash-cli #428 proposes one line per trash folder in
+/// place of a line per file). Under the trash-list name, a record with a
+/// line of trash-cli's own and the names that are not records are left
+/// out, since trash-cli 0.26.9.29 says nothing more about either.
+fn folder_hints(
+    prog: &str,
+    dirs: &[TrashDir],
+    left: &[Unlisted],
+    strays: &[u64],
+    trash_cli: bool,
+) -> Vec<String> {
+    dirs.iter()
+        .zip(strays)
+        .filter_map(|(dir, &strays)| {
+            let records = left
+                .iter()
+                .filter(|u| u.root == dir.root && !(trash_cli && u.trash_cli.is_some()))
+                .count() as u64;
+            let strays = if trash_cli { 0 } else { strays };
+            folder_hint(prog, &dir.root, records, strays)
+        })
+        .collect()
+}
+
+/// The line [`folder_hints`] prints for the trash at `root`: `records`
+/// records it left out and `strays` names in `info/` that are not
+/// records, all of which `rtrash status --check` names. None when both
+/// are 0.
+fn folder_hint(prog: &str, root: &std::path::Path, records: u64, strays: u64) -> Option<String> {
+    let records_part = (records > 0).then(|| {
+        format!(
+            "{} could not be listed",
+            crate::util::plural(records, "trash record", "trash records")
+        )
+    });
+    let strays_part = (strays > 0).then(|| match strays {
+        1 => "1 name in info/ is not a trash record".to_string(),
+        n => format!("{n} names in info/ are not trash records"),
+    });
+    let what = match (records_part, strays_part) {
+        (Some(r), Some(s)) => format!("{r}, and {s}"),
+        (Some(one), None) | (None, Some(one)) => one,
+        (None, None) => return None,
+    };
+    let it = if records + strays == 1 { "it" } else { "them" };
+    Some(format!(
+        "{prog}: {}: {what}; `rtrash status --check` shows {it}",
+        root.display()
+    ))
 }
 
 /// The size trash-cli's `trash-list --size` shows for a payload: its
@@ -1107,7 +1188,12 @@ mod tests {
         let mut all: Vec<String> = collect(&dirs).into_iter().map(|e| e.name).collect();
         all.sort();
         assert_eq!(all, ["empty.txt", "good.txt", "none.txt"]);
-        let (listed, left) = collect_counted(&dirs);
+        let Listing {
+            entries: listed,
+            left,
+            strays,
+        } = collect_counted(&dirs);
+        assert_eq!(strays, [0]);
         let skipped = left.len() as u64;
         // trash-cli reports the record with no Path line, and lists the
         // one with an empty Path= as its volume.

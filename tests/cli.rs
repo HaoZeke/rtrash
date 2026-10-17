@@ -2297,12 +2297,11 @@ fn list_hints_once_at_records_it_leaves_out() {
         out.stdout, clean.stdout,
         "stdout is the same as for the clean trash"
     );
-    let hint = "rtrash list: 3 trash records could not be listed; \
-                `rtrash status --check` shows them";
-    assert_eq!(
-        stderr_of(&out),
-        format!("{hint}\n"),
-        "exactly one hint line"
+    assert_hint(
+        &stderr_of(&out),
+        "rtrash list",
+        &trash_root,
+        "3 trash records could not be listed; `rtrash status --check` shows them",
     );
     let out = sb.run(&["list", "--json", &pin]);
     assert_eq!(
@@ -2327,10 +2326,11 @@ fn list_hints_once_at_records_it_leaves_out() {
         lines[0].ends_with(&format!(": '{}'", bad.display())),
         "{err}"
     );
-    assert_eq!(
+    assert_hint(
         lines[1],
-        "trash-list: 2 trash records could not be listed; \
-         `rtrash status --check` shows them"
+        "trash-list",
+        &trash_root,
+        "2 trash records could not be listed; `rtrash status --check` shows them",
     );
 
     // The hint's command names each record it counted.
@@ -2402,9 +2402,12 @@ fn list_leaves_out_a_record_with_no_path_and_counts_it() {
         out.stdout, clean.stdout,
         "the record is left out of the rows"
     );
-    let hint = "rtrash list: 1 trash record could not be listed; \
-                `rtrash status --check` shows it";
-    assert_eq!(stderr_of(&out), format!("{hint}\n"));
+    assert_hint(
+        &stderr_of(&out),
+        "rtrash list",
+        &t,
+        "1 trash record could not be listed; `rtrash status --check` shows it",
+    );
     let cli = trash_list();
     assert_eq!(cli.status.code(), clean_cli.status.code());
     assert_eq!(cli.stdout, clean_cli.stdout, "trash-cli leaves it out too");
@@ -2499,19 +2502,127 @@ fn trash_list_prints_trash_cli_lines_and_hints_the_rest() {
         lines[2],
         format!("Parse Error: {}: Unable to parse Path.", nopath.display())
     );
-    assert_eq!(
+    assert_hint(
         lines[3],
-        "trash-list: 2 trash records could not be listed; \
-         `rtrash status --check` shows them"
+        "trash-list",
+        &t,
+        "2 trash records could not be listed; `rtrash status --check` shows them",
     );
 
     let out = sb.run(&["list", &pin]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(out.stdout, clean.stdout);
+    assert_hint(
+        &stderr_of(&out),
+        "rtrash list",
+        &t,
+        "5 trash records could not be listed; `rtrash status --check` shows them",
+    );
+}
+
+/// `text` is the one line `list` prints for the trash at `root`:
+/// `PROG: ROOT: WHAT`. The root may be printed resolved (a volume trash's
+/// top), so only its last component is matched.
+fn assert_hint(text: &str, prog: &str, root: &Path, what: &str) {
+    let line = text.strip_suffix('\n').unwrap_or(text);
+    assert!(!line.contains('\n'), "exactly one hint line: {text:?}");
+    let leaf = root.file_name().unwrap().to_string_lossy();
+    assert!(
+        line.starts_with(&format!("{prog}: /")) && line.ends_with(&format!("{leaf}: {what}")),
+        "{text:?}"
+    );
+}
+
+/// trash-cli #428: one line per trash folder that has records `list`
+/// left out or names in `info/` that are not records, after the rows and
+/// in the order of the trashes, and nothing for a clean trash. Under the
+/// trash-list name a name that is not a record gets no line, as in
+/// trash-cli 0.26.9.29.
+#[test]
+fn list_prints_one_hint_line_per_trash_folder_with_broken_records() {
+    let sb = Sandbox::new("list-folder-hints");
+    let make = |name: &str| {
+        let t = sb.root.join(name);
+        fs::create_dir_all(t.join("files")).unwrap();
+        fs::create_dir_all(t.join("info")).unwrap();
+        fs::write(t.join("files/ok.txt"), b"x").unwrap();
+        fs::write(
+            t.join("info/ok.txt.trashinfo"),
+            "[Trash Info]\nPath=/tmp/ok.txt\nDeletionDate=2026-01-02T03:04:05\n",
+        )
+        .unwrap();
+        t
+    };
+    let (a, b, c) = (make("trash-a"), make("trash-b"), make("trash-c"));
+    let pins: Vec<String> = [&a, &b, &c]
+        .iter()
+        .map(|t| format!("--trash-dir={}", t.display()))
+        .collect();
+    let mut args = vec!["list"];
+    args.extend(pins.iter().map(String::as_str));
+    let clean = sb.run(&args);
+    assert!(clean.status.success(), "{}", stderr_of(&clean));
+    assert_eq!(stderr_of(&clean), "", "clean trashes get no line");
+
+    // a: two records with no Path= line; c: a .DS_Store and one such record.
+    for (t, name) in [(&a, "p1"), (&a, "p2"), (&c, "p3")] {
+        let record = t.join("info").join(format!("{name}.trashinfo"));
+        fs::write(record, "[Trash Info]\nDeletionDate=2026-01-02T03:04:05\n").unwrap();
+    }
+    fs::write(c.join("info/.DS_Store"), b"Bud1").unwrap();
+    let out = sb.run(&args);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(out.stdout, clean.stdout, "the rows stay the same");
+    let err = stderr_of(&out);
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(lines.len(), 2, "one line per folder with problems: {err}");
+    assert_hint(
+        lines[0],
+        "rtrash list",
+        &a,
+        "2 trash records could not be listed; `rtrash status --check` shows them",
+    );
+    assert_hint(
+        lines[1],
+        "rtrash list",
+        &c,
+        "1 trash record could not be listed, and 1 name in info/ is not a trash record; \
+         `rtrash status --check` shows them",
+    );
+
+    // Only the stray name left: its own line, and none under trash-list.
+    fs::remove_file(c.join("info/p3.trashinfo")).unwrap();
+    for name in ["p1", "p2"] {
+        fs::remove_file(a.join("info").join(format!("{name}.trashinfo"))).unwrap();
+    }
+    let out = sb.run(&args);
+    assert_hint(
+        &stderr_of(&out),
+        "rtrash list",
+        &c,
+        "1 name in info/ is not a trash record; `rtrash status --check` shows it",
+    );
+    let check = sb.run(&["status", "--check", &pins[2]]);
+    let report = format!("{}{}", stdout_of(&check), stderr_of(&check));
+    assert!(
+        report.contains("stray:") && report.contains(".DS_Store"),
+        "{report}"
+    );
+    let bindir = sb.root.join("bin");
+    fs::create_dir_all(&bindir).unwrap();
+    std::os::unix::fs::symlink(bin(), bindir.join("trash-list")).unwrap();
+    let cli = Command::new(bindir.join("trash-list"))
+        .args(&pins)
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("HOME", &sb.root)
+        .output()
+        .unwrap();
+    assert!(cli.status.success(), "{}", stderr_of(&cli));
     assert_eq!(
-        stderr_of(&out),
-        "rtrash list: 5 trash records could not be listed; \
-         `rtrash status --check` shows them\n"
+        stderr_of(&cli),
+        "",
+        "trash-cli says nothing of a stray name"
     );
 }
 

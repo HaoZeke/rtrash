@@ -1208,7 +1208,8 @@ pub(crate) fn restore_one_to(
     if let Some(e) = left {
         warnings.push(format!(
             "restored '{}' whole, but removing it from the trash failed partway: {e}; \
-             what is left stays in the trash as '{}' with no record",
+             what is left stays in the trash as '{}' with no record, an orphan that \
+             list shows, `rtrash status --check` reports and rm by its name deletes",
             dest.display(),
             src.display()
         ));
