@@ -241,19 +241,42 @@ fn dev_of_deepest_existing(path: &Path) -> Option<u64> {
     }
 }
 
-/// Mount point of `path`: longest prefix among non-pseudo mounts (btrfs-safe when
-/// many subvolumes share one `st_dev`). Falls back to an `st_dev` parent walk only
-/// when `/proc/self/mounts` is unreadable.
-pub fn mount_top_of_path(path: &Path) -> PathBuf {
-    let mounts = mount_points();
-    if mounts.is_empty() {
-        let dev = dev_of(path).or_else(|| dev_of_deepest_existing(path));
-        return match dev {
-            Some(d) => mount_top_of_by_dev(path, d),
-            None => PathBuf::from("/"),
-        };
+/// The volume `path` is on, for a trash beside it: on Linux the deepest
+/// mount point above it among every mount (btrfs-safe when many
+/// subvolumes share one `st_dev`), or `None` when that mount is of a type
+/// discovery skips; see [`volume_top_from_table`]. Elsewhere, or with no
+/// volume discovery, an `st_dev` parent walk.
+pub fn volume_top_of_path(path: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        if crate::platform::volume_trash_discovery() {
+            return match fs::read_to_string("/proc/self/mounts") {
+                Ok(table) => volume_top_from_table(path, &table),
+                Err(_) => Some(PathBuf::from("/")),
+            };
+        }
     }
-    longest_mount_prefix(path, &mounts)
+    let dev = dev_of(path).or_else(|| dev_of_deepest_existing(path));
+    Some(match dev {
+        Some(d) => mount_top_of_by_dev(path, d),
+        None => PathBuf::from("/"),
+    })
+}
+
+/// The volume `path` is on, from a `/proc/self/mounts`-style table: the
+/// deepest mount point above it, whatever its type, or `None` when the
+/// mount in view there is one [`is_pseudo_fs`] skips. Such a mount must
+/// not hand its files to the trash of the mount around it, which is
+/// another device (a document portal under `/run/user/$uid`, say); `None`
+/// sends them to the home trash.
+pub fn volume_top_from_table(path: &Path, content: &str) -> Option<PathBuf> {
+    let table = mount_table(content);
+    let mounts: Vec<PathBuf> = table.iter().map(|(m, _)| m.clone()).collect();
+    let top = longest_mount_prefix(path, &mounts);
+    match table.iter().find(|(m, _)| *m == top) {
+        Some((_, fstype)) if is_pseudo_fs(fstype) => None,
+        _ => Some(top),
+    }
 }
 
 /// Pure helper: longest mount-point prefix of `path` from a mount list.
@@ -511,7 +534,7 @@ pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
         return Ok(home);
     }
 
-    if let Some(td) = select_on_volume(&mount_top_of_path(abs), uid()) {
+    if let Some(td) = volume_top_of_path(abs).and_then(|top| select_on_volume(&top, uid())) {
         return Ok(td);
     }
     ensure_home(&home)?;
@@ -836,7 +859,7 @@ pub fn unescape_mount(s: &str) -> PathBuf {
 ///
 /// - **Linux:** `/proc/self/mounts` (including `/`).
 /// - **macOS experimental / other non-Linux Unix:** empty list so [`all`] stays
-///   home-only; [`mount_top_of_path`] still falls back to an `st_dev` parent walk
+///   home-only; [`volume_top_of_path`] still falls back to an `st_dev` parent walk
 ///   when put needs a mount top on non-experimental builds.
 pub fn mount_points() -> Vec<PathBuf> {
     if !crate::platform::volume_trash_discovery() {
@@ -856,26 +879,36 @@ pub fn mount_points() -> Vec<PathBuf> {
     }
 }
 
-/// Parse an fstab/mounts-style table into non-pseudo mount points (testable).
-pub fn mount_points_from_table(content: &str) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
+/// Each mount point in an fstab/mounts-style table once, in table order,
+/// with the type of the mount in view there: a later mount on the same
+/// point hides the earlier one. Nothing is filtered out.
+fn mount_table(content: &str) -> Vec<(PathBuf, String)> {
+    let mut out: Vec<(PathBuf, String)> = Vec::new();
     for line in content.lines() {
         let mut fields = line.split_whitespace();
         let _dev = fields.next();
         let (Some(mp), Some(fstype)) = (fields.next(), fields.next()) else {
             continue;
         };
-        if is_pseudo_fs(fstype) {
-            continue;
-        }
         let mp = unescape_mount(mp);
-        if !seen.insert(mp.clone()) {
-            continue;
+        match out.iter_mut().find(|(m, _)| *m == mp) {
+            Some(slot) => slot.1 = fstype.to_string(),
+            None => out.push((mp, fstype.to_string())),
         }
-        out.push(mp);
     }
-    if !seen.contains(Path::new("/")) {
+    out
+}
+
+/// Parse an fstab/mounts-style table into non-pseudo mount points (testable).
+/// A mount point whose mount in view is a pseudo file system is left out,
+/// even when an earlier mount there was not.
+pub fn mount_points_from_table(content: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = mount_table(content)
+        .into_iter()
+        .filter(|(_, fstype)| !is_pseudo_fs(fstype))
+        .map(|(m, _)| m)
+        .collect();
+    if !out.iter().any(|m| m == Path::new("/")) {
         out.insert(0, PathBuf::from("/"));
     }
     out
@@ -3078,6 +3111,35 @@ mod tests {
             longest_mount_prefix(Path::new("/opt/x"), &mounts),
             Path::new("/")
         );
+    }
+
+    #[test]
+    fn a_file_on_a_skipped_mount_gets_no_volume_trash_around_it() {
+        let table = "\
+/dev/sda1 / ext4 rw 0 0
+tmpfs /run/user/1000 tmpfs rw 0 0
+portal /run/user/1000/doc fuse.portal rw 0 0
+/dev/sdb1 /mnt/x ext4 rw 0 0
+/dev/loop0 /mnt/x squashfs ro 0 0
+/dev/loop1 /mnt/y squashfs ro 0 0
+/dev/sdc1 /mnt/y ext4 rw 0 0
+";
+        let top = |p: &str| volume_top_from_table(Path::new(p), table);
+        // The portal is another device than the tmpfs around it, so its
+        // files go to the home trash, not to /run/user/1000/.Trash-$uid.
+        assert_eq!(top("/run/user/1000/doc/abc/f"), None);
+        assert_eq!(
+            top("/run/user/1000/f"),
+            Some(PathBuf::from("/run/user/1000"))
+        );
+        // The last mount on a point is the one in view.
+        assert_eq!(top("/mnt/x/f"), None);
+        assert_eq!(top("/mnt/y/f"), Some(PathBuf::from("/mnt/y")));
+        assert_eq!(top("/opt/f"), Some(PathBuf::from("/")));
+        let listed = mount_points_from_table(table);
+        assert!(!listed.iter().any(|m| m == Path::new("/mnt/x")));
+        assert!(listed.iter().any(|m| m == Path::new("/mnt/y")));
+        assert!(!listed.iter().any(|m| m == Path::new("/run/user/1000/doc")));
     }
 
     #[test]
