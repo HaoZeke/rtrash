@@ -315,7 +315,10 @@ fn shared_trash_problem(meta: &fs::Metadata) -> Option<&'static str> {
 /// Why a per-user volume trash (`$top/.Trash/$uid` or `$top/.Trash-$uid`)
 /// that exists must not be used by `uid`, or `None` when it can. Only the
 /// owner's own real directory will do: a directory another user made
-/// there first, or a symlink, would hand them whatever gets trashed.
+/// there first, or a symlink, would hand them whatever gets trashed. One
+/// that group or others can write to is refused too, since anyone with
+/// write access could swap its `files/` or `info/` for a symlink of their
+/// own (trash-cli #433).
 fn user_trash_problem(meta: &fs::Metadata, uid: u32) -> Option<&'static str> {
     if meta.file_type().is_symlink() {
         Some("is a symbolic link")
@@ -323,6 +326,8 @@ fn user_trash_problem(meta: &fs::Metadata, uid: u32) -> Option<&'static str> {
         Some("is not a directory")
     } else if meta.uid() != uid {
         Some("belongs to another user")
+    } else if meta.permissions().mode() & 0o022 != 0 {
+        Some("is writable by other users")
     } else {
         None
     }
@@ -2926,6 +2931,84 @@ mod tests {
         };
         td.resolve_original_checked(Path::new("../../../etc/passwd"))
             .is_err()
+    }
+
+    #[test]
+    fn a_volume_trash_other_users_can_write_to_is_refused() {
+        let top = std::env::temp_dir().join(format!("rtrash-volmode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&top);
+        fs::create_dir_all(&top).unwrap();
+        let me = uid();
+        let own = top.join(format!(".Trash-{me}"));
+        fs::create_dir_all(own.join("files")).unwrap();
+        fs::create_dir_all(own.join("info")).unwrap();
+        fs::write(own.join("files/kept"), b"kept").unwrap();
+        for mode in [0o777, 0o770, 0o702] {
+            fs::set_permissions(&own, fs::Permissions::from_mode(mode)).unwrap();
+            let meta = fs::symlink_metadata(&own).unwrap();
+            assert_eq!(
+                user_trash_problem(&meta, me),
+                Some("is writable by other users"),
+                "mode {mode:o}"
+            );
+            // Neither listed nor put into: put falls back past it.
+            assert!(volume_trashes_of(&top, me).is_empty(), "mode {mode:o}");
+            assert!(select_on_volume(&top, me).is_none(), "mode {mode:o}");
+        }
+        // Readable by others is fine; only write access lets them plant.
+        for mode in [0o700, 0o750, 0o755] {
+            fs::set_permissions(&own, fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(
+                volume_trashes_of(&top, me),
+                std::slice::from_ref(&own),
+                "mode {mode:o}"
+            );
+        }
+        assert_eq!(fs::read(own.join("files/kept")).unwrap(), b"kept");
+        fs::remove_dir_all(&top).unwrap();
+    }
+
+    #[test]
+    fn a_volume_trash_another_uid_owns_is_skipped() {
+        // A real other owner needs chown: root does it directly, anyone
+        // else through passwordless sudo, as on CI.
+        let top = std::env::temp_dir().join(format!("rtrash-volowner-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&top);
+        fs::create_dir_all(&top).unwrap();
+        let me = uid();
+        let theirs = top.join(format!(".Trash-{me}"));
+        fs::create_dir(&theirs).unwrap();
+        let mut chown = if me == 0 {
+            std::process::Command::new("chown")
+        } else {
+            let mut c = std::process::Command::new("sudo");
+            c.arg("-n").arg("chown");
+            c
+        };
+        let owned = chown
+            .arg("65534")
+            .arg(&theirs)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !owned {
+            eprintln!("note: chown to uid 65534 unavailable; foreign owner check skipped");
+            let _ = fs::remove_dir_all(&top);
+            return;
+        }
+        let meta = fs::symlink_metadata(&theirs).unwrap();
+        assert_eq!(meta.uid(), 65534);
+        assert_eq!(
+            user_trash_problem(&meta, me),
+            Some("belongs to another user")
+        );
+        assert!(volume_trashes_of(&top, me).is_empty());
+        assert!(select_on_volume(&top, me).is_none());
+        // It refuses before it makes anything inside.
+        assert!(!theirs.join("files").exists());
+        // Empty, so this user can remove it from its own top directory.
+        fs::remove_dir(&theirs).unwrap();
+        fs::remove_dir_all(&top).unwrap();
     }
 
     /// A volume trash takes an absolute Path= only inside its volume, as

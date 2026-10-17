@@ -476,6 +476,51 @@ else
     done
   done
   rm -rf -- "$vt" "$abs_t" "$climb_t" "$ok_t"
+
+  # trash-cli #433: a `.Trash-$uid` that is a symlink, that other users
+  # can write to, or that another user owns is skipped by list and put.
+  # list reads every mount and only reports, so the real trash stays
+  # untouched; put falls back to the scratch home trash.
+  bait=$scratch/planted
+  put_t=$vol/rtrash-interop-planted.txt
+  for how in symlink writable foreign; do
+    rm -rf -- "$bait" "$vt" "$put_t"
+    case $how in
+      symlink) rec=$bait; mkdir -p "$bait"; ln -s "$bait" "$vt" ;;
+      *) rec=$vt ;;
+    esac
+    mkdir -p "$rec/files" "$rec/info"
+    printf 'payload\n' > "$rec/files/planted"
+    printf '[Trash Info]\nPath=rtrash-interop-planted-rec\nDeletionDate=2026-01-02T03:04:05\n' \
+      > "$rec/info/planted.trashinfo"
+    case $how in
+      writable) chmod 0777 "$vt" ;;
+      foreign)
+        if ! sudo -n chown -R 65534 "$vt" 2>/dev/null; then
+          echo "note: sudo -n chown unavailable; foreign-owner .Trash-\$uid check skipped"
+          rm -rf -- "$vt"
+          continue
+        fi ;;
+    esac
+    printf 'mine\n' > "$put_t"
+    list_out=$("$rtrash" list 2>"$scratch/planted.err" || true)
+    put_log=$("$rtrash" put "$put_t" 2>&1 || true)
+    if [[ $list_out != *planted-rec* ]] && grep -qF "skipping '$vt'" "$scratch/planted.err" \
+      && [[ ! -e $put_t && -f $trash/files/rtrash-interop-planted.txt ]] \
+      && [[ $(ls -A "$rec/files") == planted ]]; then
+      echo "ok   rtrash list and put skip a planted .Trash-\$uid ($how; trash-cli #433)"
+    else
+      echo "FAIL rtrash used a planted .Trash-\$uid ($how; trash-cli #433)"
+      sed 's/^/  | /' "$scratch/planted.err"
+      printf '%s\n' "$list_out" "$put_log" | sed 's/^/  | /'
+      fail=1
+    fi
+    rm -f -- "$trash/files/rtrash-interop-planted.txt" "$trash/info/rtrash-interop-planted.txt.trashinfo"
+    if [[ $how == foreign ]]; then
+      sudo -n rm -rf -- "$vt"
+    fi
+    rm -rf -- "$bait" "$vt" "$put_t" "$scratch/planted.err"
+  done
 fi
 
 # trash-cli 0.26.9's trash-put refuses a trash whose files/ or info/ is
