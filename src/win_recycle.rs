@@ -420,7 +420,10 @@ pub fn check_bin_dir(dir: &Path) -> Vec<BinProblem> {
 /// A payload a bad record named stays, as an orphan. Exit 0 when nothing
 /// is found or every removal went through; 1 when a check or a preview
 /// finds problems, or a removal failed; 2 when a guard refuses the fix.
-pub fn check_bins(prog: &str, dirs: &[PathBuf], fix: bool, dry_run: bool) -> i32 {
+/// With the code come the folders of `dirs` a record was removed from,
+/// for the `fix` history line; a check, a dry run or a refused fix
+/// gives none.
+pub fn check_bins(prog: &str, dirs: &[PathBuf], fix: bool, dry_run: bool) -> (i32, Vec<PathBuf>) {
     let found: Vec<BinProblem> = dirs
         .iter()
         .map(PathBuf::as_path)
@@ -441,13 +444,14 @@ pub fn check_bins(prog: &str, dirs: &[PathBuf], fix: bool, dry_run: bool) -> i32
             })
             .collect();
         if let Some(code) = crate::allow_roots::refuse_outside_or_unplaced(prog, &scoped) {
-            return code;
+            return (code, Vec::new());
         }
         if let Some(code) = crate::permanent_guard::check_count(prog, fixable) {
-            return code;
+            return (code, Vec::new());
         }
     }
     let (mut removed, mut failed) = (0u64, 0u64);
+    let mut fixed: Vec<PathBuf> = Vec::new();
     for p in &found {
         println!("{}", p.line());
         let Some(record) = p.fix_target().filter(|_| fix) else {
@@ -461,6 +465,10 @@ pub fn check_bins(prog: &str, dirs: &[PathBuf], fix: bool, dry_run: bool) -> i32
             Ok(()) => {
                 println!("removed {}", crate::util::term_path(record));
                 removed += 1;
+                let dir = dirs.iter().find(|d| record.parent() == Some(d.as_path()));
+                if let Some(d) = dir.filter(|d| !fixed.contains(*d)) {
+                    fixed.push(d.clone());
+                }
             }
             Err(e) => {
                 eprintln!(
@@ -485,7 +493,32 @@ pub fn check_bins(prog: &str, dirs: &[PathBuf], fix: bool, dry_run: bool) -> i32
             plural(fixable, "record", "records")
         );
     }
-    i32::from(failed > 0 || (!acting && total > 0))
+    (i32::from(failed > 0 || (!acting && total > 0)), fixed)
+}
+
+/// The volume root of a Recycle Bin folder laid out as
+/// `ROOT\$Recycle.Bin\SID`, whose history file [`crate::trash_history`]
+/// keeps; None for a folder not laid out so, such as a bare test folder.
+pub fn bin_dir_root(dir: &Path) -> Option<PathBuf> {
+    let bin = dir.parent()?;
+    let named = bin
+        .file_name()?
+        .to_str()?
+        .eq_ignore_ascii_case("$Recycle.Bin");
+    named.then_some(bin.parent()?.to_path_buf())
+}
+
+/// The volume roots of the Recycle Bin folders `dirs`, each once, in
+/// order: the histories a `status --fix` that removed records from those
+/// folders appends to.
+pub fn bin_dir_roots(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for root in dirs.iter().filter_map(|d| bin_dir_root(d.as_path())) {
+        if !out.contains(&root) {
+            out.push(root);
+        }
+    }
+    out
 }
 
 /// Windows: the current user's SID as text (`S-1-5-21-…`).
@@ -3149,7 +3182,9 @@ registry), then the total and the free space on each (a warning under
                 eprintln!("{prog}: cannot read the user's SID");
                 return 1;
             };
-            return super::check_bins(prog, &dirs, fix, dry_run);
+            let (code, fixed) = super::check_bins(prog, &dirs, fix, dry_run);
+            crate::trash_history::log_fixed(&fixed);
+            return code;
         }
         if filters.is_set() {
             return filtered_status(prog, &filters, json);
@@ -4364,8 +4399,10 @@ mod tests {
         let fixable = found.iter().filter(|p| p.fix_target().is_some()).count();
         assert_eq!(fixable, 3);
         let dirs = [dir.clone()];
-        assert_eq!(check_bins("t", &dirs, false, false), 1);
-        assert_eq!(check_bins("t", &dirs, true, true), 1);
+        // A check and a dry run remove nothing, so they name no folder
+        // for the history.
+        assert_eq!(check_bins("t", &dirs, false, false), (1, Vec::new()));
+        assert_eq!(check_bins("t", &dirs, true, true), (1, Vec::new()));
         assert_eq!(check_bin_dir(&dir), found);
         // The guards are the integration tests' business; a set one here
         // would refuse the fix.
@@ -4377,7 +4414,9 @@ mod tests {
         .iter()
         .any(|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()));
         if !guarded {
-            assert_eq!(check_bins("t", &dirs, true, false), 0);
+            assert_eq!(check_bins("t", &dirs, true, false), (0, vec![dir.clone()]));
+            // Nothing is left to fix, so a second fix names no folder.
+            assert_eq!(check_bins("t", &dirs, true, false).1, Vec::<PathBuf>::new());
             let orphan = |name: &str| BinProblem::Orphan {
                 payload: dir.join(name),
             };
@@ -4395,6 +4434,29 @@ mod tests {
             assert!(dir.join("$IAAAAAA.txt").exists() && dir.join("desktop.ini").exists());
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bin_dir_roots_name_each_volume_once_and_skip_bare_folders() {
+        let p = |s: &str| PathBuf::from(s);
+        assert_eq!(
+            bin_dir_root(&p("vol/$Recycle.Bin/S-1-5-21-1")),
+            Some(p("vol"))
+        );
+        assert_eq!(
+            bin_dir_root(&p("vol/$RECYCLE.BIN/S-1-5-21-1")),
+            Some(p("vol"))
+        );
+        assert_eq!(bin_dir_root(&p("vol/bin")), None);
+        assert_eq!(bin_dir_root(&p("S-1-5-21-1")), None);
+        let dirs = [
+            p("a/$Recycle.Bin/S-1"),
+            p("bare"),
+            p("b/$Recycle.Bin/S-1"),
+            p("a/$Recycle.Bin/S-1"),
+        ];
+        assert_eq!(bin_dir_roots(&dirs), [p("a"), p("b")]);
+        assert!(bin_dir_roots(&[]).is_empty());
     }
 
     #[cfg(unix)]

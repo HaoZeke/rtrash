@@ -23,9 +23,9 @@ directories under files/ and info/), orphans (payloads without a
       --home-only       only the home trash ($XDG_DATA_HOME/Trash)
       --trash-dir=PATH  only this trash directory (repeatable)
       --history         also show each trash's history: its size and items
-                        after each put, restore, rm, empty, reap
-                        and purge that changed it, with the change
-                        from the line before and a trend bar
+                        after each put, restore, rm, empty, reap,
+                        status --fix and purge that changed it, with
+                        the change from the line before and a trend bar
       --since=AGE       with --history, only the lines from the last AGE
                         (90m, 12h, 7d, 2w; a bare number is days)
       --total           only the size and item count of each trash, from

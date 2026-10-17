@@ -6930,6 +6930,59 @@ fn status_check_reports_and_fix_removes_only_broken_records() {
     );
 }
 
+/// `status --check --fix` appends one `fix` line to the trash history
+/// once it removed a record. A check, a dry run and a fix with nothing
+/// left to remove append none, and undo still brings back the put run
+/// the fix left alone.
+#[test]
+fn status_fix_appends_one_fix_line_to_the_trash_history() {
+    let sb = Sandbox::new("trashcheck-history");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("fx-a");
+    assert!(sb.run(&["put", "fx-a"]).status.success());
+    let work = sb.work().display().to_string();
+    fs::write(
+        sb.trash().join("info").join("fx-gone.trashinfo"),
+        format!("[Trash Info]\nPath={work}/fx-gone\nDeletionDate=2026-01-02T03:04:05\n"),
+    )
+    .unwrap();
+    let hist = sb.trash().join("rtrash-history");
+    let lines = || -> Vec<String> {
+        let body = fs::read_to_string(&hist).unwrap_or_default();
+        body.lines().map(String::from).collect()
+    };
+    let events = || -> Vec<String> {
+        let all = lines();
+        all.iter()
+            .map(|l| l.split(' ').nth(1).unwrap_or("").to_string())
+            .collect()
+    };
+    assert_eq!(events(), ["put"]);
+    let watch = [hist.as_path()];
+    let check = ["status", pin.as_str(), "--check"];
+    let fix = ["status", pin.as_str(), "--check", "--fix"];
+    let dry = ["status", pin.as_str(), "--check", "--fix", "-n"];
+    common::assert_refused_unchanged(&check, &watch, 1, &[], || sb.run(&check));
+    common::assert_refused_unchanged(&dry, &watch, 1, &[], || sb.run(&dry));
+    common::assert_refused_unchanged(&fix, &watch, 2, &[], || {
+        sb.run_env(&fix, &[("RTRASH_NO_PERMANENT", "1")])
+    });
+
+    let out = sb.run(&fix);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert_eq!(lines_starting(&out, "removed "), 1, "{}", stdout_of(&out));
+    assert_eq!(events(), ["put", "fix"], "{:?}", lines());
+    // The fix line counts the one item left, fx-a.
+    let all = lines();
+    assert!(all[1].ends_with(" 1"), "{all:?}");
+    common::assert_refused_unchanged(&fix, &watch, 0, &[], || sb.run(&fix));
+
+    let out = sb.run(&["undo", &pin]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(sb.work().join("fx-a").exists(), "{}", stderr_of(&out));
+    assert_eq!(lines()[..2], all[..], "{:?}", lines());
+}
+
 /// A folder and a link named like records are stray, never records:
 /// `status --check` reports both and `--fix`, `--fix -n` and
 /// `empty --dangling` leave the folder, its file, the link and the

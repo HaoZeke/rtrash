@@ -1,0 +1,1 @@
+`status --check --fix` now adds a `fix` line to the trash history when it removes records. The line goes to `rtrash-history` in each trash it changed; on Windows it goes to the history of each volume whose Recycle Bin it changed. A check, a dry run (`-n`) or a refused fix adds no line. `trash-stats --history` shows the new lines.

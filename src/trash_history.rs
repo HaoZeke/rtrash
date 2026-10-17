@@ -9,6 +9,10 @@ use std::path::Path;
 /// Past this size a history keeps only its newer half.
 pub const CAP: u64 = 64 * 1024;
 
+/// The event a `status --check --fix` that removed records logs, on Unix
+/// and on Windows alike.
+pub const FIX_EVENT: &str = "fix";
+
 /// One line of a history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Point {
@@ -117,6 +121,23 @@ pub fn log_bins(event: &str, before: &BinSnapshot) {
         }
         if let Some(p) = bin_path(&root) {
             append(&p, event, bytes, items);
+        }
+    }
+}
+
+/// Windows: after `status --fix`, append a [`FIX_EVENT`] line, with the
+/// counts `SHQueryRecycleBinW` reports now, for the volume of each
+/// Recycle Bin folder in `fixed` (the folders it removed records from).
+/// No snapshot is taken first: a check or a dry run passes none, so a
+/// plain status costs no query.
+#[cfg(windows)]
+pub fn log_fixed(fixed: &[std::path::PathBuf]) {
+    for root in crate::win_recycle::bin_dir_roots(fixed) {
+        let Some((items, bytes)) = crate::win_recycle::query_bin(&root) else {
+            continue;
+        };
+        if let Some(p) = bin_path(&root) {
+            append(&p, FIX_EVENT, bytes, items);
         }
     }
 }

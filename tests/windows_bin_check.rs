@@ -213,3 +213,78 @@ fn list_counts_the_bin_entries_it_skips_and_points_at_status_check() {
         .count();
     assert_eq!(hints, 0, "{err}");
 }
+
+/// `status --check --fix` appends one `fix` line to the history of the
+/// volume whose Recycle Bin folder it removed records from. A check, a
+/// dry run and a fix with nothing left to remove append none, and undo,
+/// which needs the FreeDesktop trash, refuses and leaves the history
+/// alone. The fake bin is laid out as `VOL\$Recycle.Bin\SID`, so its
+/// history is the one for VOL, under a private `%LOCALAPPDATA%`.
+#[test]
+fn status_fix_appends_one_fix_line_to_the_bin_history() {
+    let home = common::scratch_dir("bincheck", "history");
+    let bin = home.join("vol").join("$Recycle.Bin").join("S-1-5-21-0");
+    let (work, local) = (home.join("work"), home.join("local"));
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    let body = rtrash::win_recycle::encode_recycle_i_v2(
+        &work.join("fx-gone.txt"),
+        1,
+        rtrash::win_recycle::FILETIME_UNIX_EPOCH,
+    );
+    fs::write(bin.join("$IFXGONE.txt"), body).unwrap();
+    fs::write(bin.join("$IFXBAD.txt"), b"junk").unwrap();
+    fs::write(bin.join("$RFXBAD.txt"), b"bad").unwrap();
+    let history = local.join("rtrash").join("history");
+    let lines = || -> Vec<String> {
+        let Ok(rd) = fs::read_dir(&history) else {
+            return Vec::new();
+        };
+        let mut files: Vec<_> = rd.map(|e| e.unwrap().path()).collect();
+        files.sort();
+        files
+            .iter()
+            .flat_map(|f| {
+                let body = fs::read_to_string(f).unwrap();
+                body.lines().map(String::from).collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    let run = |args: &[&str]| {
+        common::rtrash(&home)
+            .env("RTRASH_TEST_BIN_DIR", &bin)
+            .env("LOCALAPPDATA", &local)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let watch = [bin.as_path(), history.as_path()];
+    common::assert_refused_unchanged(&"check", &watch, 1, &[], || run(&["status", "--check"]));
+    let dry = common::assert_refused_unchanged(&"dry run", &watch, 1, &[], || {
+        run(&["status", "--check", "--fix", "-n"])
+    });
+    assert_eq!(lines_starting(&dry, "would remove "), 2);
+    assert!(lines().is_empty(), "{:?}", lines());
+
+    let out = run(&["status", "--check", "--fix"]);
+    let err = common::stderr_text(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert_eq!(lines_starting(&out, "removed "), 2, "{err}");
+    let got = lines();
+    assert_eq!(got.len(), 1, "{got:?}");
+    let fields: Vec<&str> = got[0].split(' ').collect();
+    assert_eq!(fields.len(), 4, "{got:?}");
+    assert_eq!(fields[1], "fix", "{got:?}");
+    for n in [fields[0], fields[2], fields[3]] {
+        assert!(n.parse::<u64>().is_ok(), "{got:?}");
+    }
+
+    // Nothing is left to remove, so this fix logs nothing; undo refuses.
+    common::assert_refused_unchanged(&"second fix", &watch, 0, &[], || {
+        run(&["status", "--check", "--fix"])
+    });
+    let undo = "undo needs the FreeDesktop trash; on Windows, use restore";
+    common::assert_refused_unchanged(&"undo", &watch, 1, &[(undo, 1)], || run(&["undo"]));
+    assert_eq!(lines(), got);
+    let _ = fs::remove_dir_all(&home);
+}

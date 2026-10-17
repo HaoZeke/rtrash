@@ -1080,7 +1080,9 @@ to see both what the trash holds and whether emptying it is urgent.
 Also show each trash's history: after every put, restore, rm, empty and reap that
 changed a trash (purge when
 .B reap \-\-purge\-trash
-emptied items), rtrash appends the time, the command, and the trash's
+emptied items, fix when
+.B status \-\-check \-\-fix
+removed records), rtrash appends the time, the command, and the trash's
 size and item count to
 .I rtrash\-history
 in its root, keeping the newer half once the file passes 64 KiB.
@@ -1105,7 +1107,9 @@ Recycle Bin changed to
 .IR vol\- SERIAL .txt
 for a volume mounted on a folder) instead, with the counts
 .B SHQueryRecycleBinW
-reports.
+reports; a fix line goes to each volume whose Recycle Bin folder
+.B status \-\-check \-\-fix
+removed records from.
 With
 .BR \-\-history ,
 a drive whose Recycle Bin is empty is still listed when it has a
@@ -3923,7 +3927,7 @@ trusted only while
 .B info/
 is unchanged since it was written),
 .B rtrash\-history
-(a line per put, restore, rm, empty, reap or purge that changed the trash, for
+(a line per put, restore, rm, empty, reap, fix or purge that changed the trash, for
 .BR "trash\-stats \-\-history" ),
 and optional lock file.
 Cache sizes count allocated blocks as

@@ -144,7 +144,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             eprintln!("{prog}: no valid --trash-dir pins");
             return 2;
         }
-        return crate::trash_check::run(prog, &dirs, fix, dry_run);
+        let code = crate::trash_check::run(prog, &dirs, fix, dry_run);
+        // Only a trash --fix removed a record from is touched, so a check,
+        // a dry run or a refused fix adds no history line.
+        crate::trash_total::log_touched(crate::trash_history::FIX_EVENT);
+        return code;
     }
     // macOS sums up the Finder Trash unless a pin or the setting says
     // otherwise.
