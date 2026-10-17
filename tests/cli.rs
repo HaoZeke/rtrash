@@ -1327,6 +1327,52 @@ fn trash_dir_pin_rejects_non_trash_layout() {
     assert_eq!(fs::read(fake.join("files/secret")).unwrap(), b"do-not-wipe");
 }
 
+/// put refuses a trash whose `files/` or `info/` is a symbolic link, as
+/// trash-cli 0.26.9 does, and the item stays where it was: the home trash
+/// and a pinned one alike. The folder the link points at gets nothing.
+#[test]
+fn put_refuses_a_trash_with_a_symlinked_files_or_info_dir() {
+    let sb = Sandbox::new("put-linked-sub");
+    let elsewhere = sb.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let pinned = sb.root.join("pinned");
+    for (sub, pin) in [
+        ("files", false),
+        ("info", false),
+        ("files", true),
+        ("info", true),
+    ] {
+        let trash = if pin { pinned.clone() } else { sb.trash() };
+        let _ = fs::remove_dir_all(&trash);
+        fs::create_dir_all(&trash).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, trash.join(sub)).unwrap();
+        sb.touch("a.txt");
+        let pin_arg = format!("--trash-dir={}", trash.display());
+        let mut args = vec!["put"];
+        if pin {
+            args.push(&pin_arg);
+        }
+        args.push("a.txt");
+        let out = sb.run(&args);
+        assert!(
+            !out.status.success(),
+            "{sub} pin={pin}: {}",
+            stdout_of(&out)
+        );
+        assert!(
+            stderr_of(&out).contains("is a symbolic link"),
+            "{sub} pin={pin}: {}",
+            stderr_of(&out)
+        );
+        assert!(sb.work().join("a.txt").is_file(), "{sub} pin={pin}");
+        assert_eq!(
+            fs::read_dir(&elsewhere).unwrap().count(),
+            0,
+            "{sub} pin={pin}"
+        );
+    }
+}
+
 #[test]
 fn trash_rm_refuses_star_without_force() {
     let sb = Sandbox::new("rm-star");

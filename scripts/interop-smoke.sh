@@ -425,6 +425,38 @@ else
   rm -rf -- "$vt" "$abs_t" "$climb_t" "$ok_t"
 fi
 
+# trash-cli 0.26.9's trash-put refuses a trash whose files/ or info/ is
+# a symbolic link and exits 74; rtrash under the trash-put name does the
+# same. The file stays, and the folder the link points at stays empty.
+if have trash-put; then
+  mkdir -p "$scratch/bin"
+  ln -sf "$rtrash" "$scratch/bin/trash-put"
+  lt=$scratch/linked
+  for sub in files info; do
+    for tool in trash-cli rtrash; do
+      rm -rf -- "$lt"
+      mkdir -p "$lt/T" "$lt/elsewhere"
+      ln -s "$lt/elsewhere" "$lt/T/$sub"
+      printf 'keep\n' > "$lt/a.txt"
+      if [[ $tool == trash-cli ]]; then
+        code=0; trash-put --trash-dir="$lt/T" "$lt/a.txt" 2>/dev/null || code=$?
+      else
+        code=0; "$scratch/bin/trash-put" --trash-dir="$lt/T" "$lt/a.txt" 2>/dev/null || code=$?
+      fi
+      if [[ $code == 74 && -f $lt/a.txt && -z $(ls -A "$lt/elsewhere") ]]; then
+        echo "ok   $tool trash-put refuses a trash whose $sub/ is a symlink"
+      else
+        echo "FAIL $tool trash-put with a symlinked $sub/ (exit $code)"
+        ls -lA "$lt" "$lt/elsewhere" | sed 's/^/  | /'
+        fail=1
+      fi
+    done
+  done
+  rm -rf -- "$lt"
+else
+  echo "note: trash-put missing; symlinked trash folder check skipped"
+fi
+
 # ncdu 2.7 and later compress a JSON export with -c. One scan exported
 # both ways must list the same in `rtrash du -f` and diff clean in
 # `du diff`; the compressed file must start with the zstd magic.

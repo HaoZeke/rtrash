@@ -4164,6 +4164,20 @@ or
 folder refuses writes, put fails each item with
 .I the home trash is not writable
 and names the folder, before moving anything.
+A trash whose
+.I files
+or
+.I info
+folder is a symbolic link takes nothing, as in trash-cli 0.26.9: a
+per-user volume trash like that gets the warning and the fallback, and
+the home trash or a
+.B \-\-trash\-dir
+pin fails each item with
+.IR "is a symbolic link" ,
+so nothing lands where the link points.
+A write error other than a name clash (no permission, a full disk, a
+read-only file system) ends that item at once; put tries the next name
+only when the name is taken.
 .SH EXIT STATUS
 .TP
 .B 0

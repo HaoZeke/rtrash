@@ -57,7 +57,22 @@ impl TrashDir {
         self.root.join("info")
     }
 
+    /// Make `files/` and `info/` (mode 0700) when missing. Either one
+    /// that is a symbolic link is refused, as trash-cli 0.26.9 refuses
+    /// it: a put through it would land wherever the link points, and a
+    /// `--trash-dir` pin of such a trash is refused by list and empty.
     pub fn ensure(&self) -> io::Result<()> {
+        for d in [self.files(), self.info()] {
+            if fs::symlink_metadata(&d).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "'{}' is a symbolic link; a trash takes only a real folder there",
+                        d.display()
+                    ),
+                ));
+            }
+        }
         let mut b = fs::DirBuilder::new();
         b.recursive(true).mode(0o700);
         b.create(self.files())?;
@@ -3340,6 +3355,76 @@ proc /proc proc rw 0 0
             None,
             "file payloads must not use directorysizes"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A trash whose `files/` or `info/` is a symbolic link takes
+    /// nothing, as in trash-cli 0.26.9: put fails before it moves the
+    /// item, and the folder the link points at stays empty. On a volume
+    /// such a trash is skipped, so the item goes to the fallback.
+    #[test]
+    fn a_symlinked_files_or_info_dir_takes_nothing() {
+        let root = std::env::temp_dir().join(format!("rtrash-linkedsub-{}", std::process::id()));
+        for sub in ["files", "info"] {
+            let _ = fs::remove_dir_all(&root);
+            let elsewhere = root.join("elsewhere");
+            fs::create_dir_all(&elsewhere).unwrap();
+            let td = TrashDir {
+                root: root.join("Trash"),
+                topdir: None,
+            };
+            fs::create_dir_all(&td.root).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, td.root.join(sub)).unwrap();
+            let err = td.ensure().unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{sub}");
+            assert!(err.to_string().contains("is a symbolic link"), "{err}");
+            // It refuses before it makes the other folder.
+            assert_eq!(fs::read_dir(&td.root).unwrap().count(), 1, "{sub}");
+            assert!(ensure_home(&td).is_err(), "{sub}");
+            let item = root.join("item.txt");
+            fs::write(&item, b"keep").unwrap();
+            let meta = fs::symlink_metadata(&item).unwrap();
+            assert!(trash_move(&item, &meta, &td).is_err(), "{sub}");
+            assert!(item.is_file(), "{sub}");
+            assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{sub}");
+            // A volume trash like that is not used; the caller falls back.
+            let top = root.join("vol");
+            let vt = top.join(format!(".Trash-{}", uid()));
+            fs::create_dir_all(&vt).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, vt.join(sub)).unwrap();
+            assert!(select_on_volume(&top, uid()).is_none(), "{sub}");
+            assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{sub}");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A write error other than a name clash ends the put at once, as
+    /// trash-cli 0.26.9 stops on EACCES, EPERM, ENOSPC, EDQUOT and EROFS:
+    /// only `AlreadyExists` tries the next name. A read-only `info/`
+    /// stands in for the rest, which a test cannot cause on demand.
+    #[test]
+    fn a_write_error_ends_the_put_without_trying_more_names() {
+        // Root may write anywhere, so the mode would not refuse it.
+        if uid() == 0 {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("rtrash-infoeacces-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let td = TrashDir {
+            root: root.join("Trash"),
+            topdir: None,
+        };
+        td.ensure().unwrap();
+        let item = root.join("item.txt");
+        fs::write(&item, b"keep").unwrap();
+        fs::set_permissions(td.info(), fs::Permissions::from_mode(0o500)).unwrap();
+        let meta = fs::symlink_metadata(&item).unwrap();
+        let err = trash_move_locked(&item, &meta, &td).unwrap_err();
+        fs::set_permissions(td.info(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        assert!(item.is_file());
+        assert_eq!(fs::read_dir(td.info()).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(td.files()).unwrap().count(), 0);
         let _ = fs::remove_dir_all(&root);
     }
 
