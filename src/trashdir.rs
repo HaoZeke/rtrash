@@ -902,6 +902,8 @@ pub fn abs_nofollow(path: &Path) -> io::Result<PathBuf> {
 pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
     trash.ensure()?;
     let name = {
+        // A Ctrl-C here waits until the record, payload and total agree.
+        let _critical = crate::interrupt::critical();
         let _lock = TrashLock::acquire(&trash.root)?;
         let before = crate::trash_total::cached(trash);
         let name = trash_move_locked(abs, meta, trash)?;
@@ -924,6 +926,10 @@ pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Resu
 /// Write the `directorysizes` line for the trashed directory `name`.
 /// Best effort: a cache that cannot be written is rebuilt by `status`.
 pub fn record_dir_size(trash: &TrashDir, name: &str) {
+    // A run asked to stop skips the walk; `status` rebuilds the line.
+    if crate::interrupt::requested() {
+        return;
+    }
     let dest = join_name(&trash.files(), name);
     let size = crate::fastdelete::disk_usage(&dest);
     let Ok(mtime) = info_mtime_secs(&join_info(&trash.info(), name)) else {
@@ -931,6 +937,7 @@ pub fn record_dir_size(trash: &TrashDir, name: &str) {
     };
     let inodes = crate::trash_inodes::tree_inodes(&dest);
     if let Ok(_lock) = TrashLock::acquire(&trash.root) {
+        let _critical = crate::interrupt::critical();
         let _ = directorysizes_upsert(trash, name, size, mtime);
         crate::trash_inodes::record(trash, name, inodes);
     }
@@ -938,6 +945,9 @@ pub fn record_dir_size(trash: &TrashDir, name: &str) {
 
 /// Inner put path (caller holds the trash-root lock). Exposed for tests.
 pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
+    // From the name taken to the payload moved, or both undone: a Ctrl-C
+    // never leaves a half-written record or a payload without one.
+    let _critical = crate::interrupt::critical();
     // Keep the bytes of a name that is not UTF-8, as other tools do, so
     // two such names never fold into one replacement-character name.
     let base = crate::util::str_from_os_ref(abs.file_name().unwrap_or_default());
@@ -975,7 +985,10 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
             .create_new(true)
             .open(&info_path)
         {
-            Ok(f) => break (name, f),
+            Ok(f) => {
+                crate::interrupt::test_seam("in-record");
+                break (name, f);
+            }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 attempt += 1;
                 if attempt > 10_000 {
@@ -1005,7 +1018,12 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
             // A copy that would fill the trash's file system is refused too.
             tree_removable(abs, meta)
                 .and_then(|()| crate::space::guard_copy(abs, meta, &trash.files()))
-                .and_then(|()| copy_recursive(abs, &dest, meta).map(|()| true))
+                .and_then(|()| {
+                    // A Ctrl-C stops the copy; the error path below
+                    // removes the part copied and the record.
+                    crate::interrupt::abortable(|| copy_recursive(abs, &dest, meta))
+                })
+                .map(|()| true)
         }
         Err(e) => Err(e),
     };
@@ -1830,6 +1848,7 @@ fn copy_dir_iter(
     loop {
         let top = stack.len() - 1;
         if let Some(name) = stack[top].entries.pop() {
+            crate::interrupt::check()?;
             copy_one_entry(&ends, links, &mut stack, &mut lo, &name)?;
             continue;
         }
@@ -2277,8 +2296,14 @@ fn copy_opened(from: &mut fs::File, to: &mut fs::File, len: u64, blocks: u64) ->
             io::Seek::rewind(from)?;
         }
     }
-    io::copy(from, to)?;
-    Ok(())
+    // In chunks, so a Ctrl-C ends a long copy inside `abortable`.
+    const CHUNK: u64 = 64 << 20;
+    loop {
+        crate::interrupt::check()?;
+        if io::copy(&mut io::Read::take(&mut *from, CHUNK), to)? == 0 {
+            return Ok(());
+        }
+    }
 }
 
 /// Copy the data runs SEEK_DATA and SEEK_HOLE report, leave the holes
@@ -2291,6 +2316,7 @@ fn copy_sparse(from: &fs::File, to: &fs::File, len: u64) -> io::Result<()> {
     let mut buf = vec![0u8; 1 << 20];
     let mut pos: u64 = 0;
     while pos < len {
+        crate::interrupt::check()?;
         let data = unsafe { libc::lseek(fd_in, pos as libc::off_t, libc::SEEK_DATA) };
         if data < 0 {
             let e = io::Error::last_os_error();

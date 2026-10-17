@@ -731,6 +731,24 @@ def check_du_rows():
                               "take it with common::du_row, which masks the AGE cell")
 
 
+def check_record_sections():
+    """A fn that reserves a .trashinfo (create_new on a join_info path)
+    opens interrupt::critical() too, so a Ctrl-C between the record and
+    the payload waits until both are whole (round 220)."""
+    starts = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?fn\s+\w+")
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        text = blank_strings(path.read_text(encoding="utf-8"))
+        cuts = [m.start() for m in starts.finditer(text)] + [len(text)]
+        for a, b in zip(cuts, cuts[1:]):
+            body = text[a:b]
+            if "create_new(true)" in body and "join_info(" in body \
+                    and "interrupt::critical()" not in body:
+                line = text.count("\n", 0, a) + 1
+                errors.append(f"{rel}:{line}: reserves a trash record outside interrupt::critical(); "
+                              "open the section first so Ctrl-C cannot split the record from its payload")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -779,7 +797,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_du_rows()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_du_rows(); check_record_sections()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
     if "--no-fmt" not in sys.argv:
         check_rustfmt()

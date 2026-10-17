@@ -326,10 +326,20 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     }
 
     let _ = SCAN_ROOTS.set(files.clone());
+    // The first Ctrl-C stops after the item in hand and a second quits.
+    // Not with prompts: a press at a question would wait unseen.
+    if opts.interactive == Interactive::Never {
+        crate::interrupt::stop_then_quit();
+    }
     let mut status = 0;
     let mut trashed = Vec::new();
     let mut failed = 0usize;
+    let mut reached = 0usize;
     for file in &files {
+        if crate::interrupt::requested() {
+            break;
+        }
+        reached += 1;
         match put_one(prog, file, &opts) {
             Ok(Some(t)) => trashed.push(t),
             Ok(None) => {}
@@ -338,6 +348,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 status = status.max(code);
             }
         }
+        crate::interrupt::test_seam("after-item");
+    }
+    let stopped = crate::interrupt::requested();
+    if stopped {
+        eprintln!(
+            "{prog}: stopped by Ctrl-C: {} trashed, {} not reached",
+            trashed.len(),
+            files.len() - reached
+        );
+        status = 130;
     }
     if json {
         println!("{}", summary_json(&trashed, failed));
@@ -352,7 +372,9 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .iter()
             .map(|t| (t.trash_dir.clone(), t.name.clone()))
             .collect();
-        crate::finder::prune_after_put(prog, &moved, opts.quiet || json);
+        if !stopped {
+            crate::finder::prune_after_put(prog, &moved, opts.quiet || json);
+        }
         // A put into a Finder trash frees nothing on that disk either.
         if !(opts.quiet || json) {
             warn_big_finder_trash(prog, &trashed);
@@ -361,7 +383,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     }
     // The Finder Trash keeps no .trashinfo; its own branch above warns
     // from the Finder total.
-    if !trashed.is_empty() && !crate::finder::is_default(opts.trash_pin.is_some()) {
+    // A run stopped by Ctrl-C prunes nothing: it was asked to end.
+    if !trashed.is_empty() && !stopped && !crate::finder::is_default(opts.trash_pin.is_some()) {
         prune_after_put(prog, &trashed, opts.quiet || json);
         if !(opts.quiet || json) {
             warn_big_trash(prog, &trashed);

@@ -679,13 +679,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut done: Vec<(&list::Entry, PathBuf)> = Vec::new();
     let mut failed = 0usize;
     let mut skipped = 0usize;
-    for e in chosen {
-        match plan.apply(prog, e) {
-            Outcome::Restored(dest) => done.push((e, dest)),
-            Outcome::Skipped => skipped += 1,
-            Outcome::Failed => failed += 1,
-        }
-    }
+    let left = plan.each(prog, &chosen, |e, outcome| match outcome {
+        Outcome::Restored(dest) => done.push((e, dest)),
+        Outcome::Skipped => skipped += 1,
+        Outcome::Failed => failed += 1,
+    });
     if json {
         let body = restored_json(&done, failed, skipped);
         if dry_run {
@@ -693,6 +691,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         } else {
             println!("{body}");
         }
+    }
+    if let Some(left) = left {
+        eprintln!(
+            "{prog}: stopped by Ctrl-C: {} restored, {left} not reached",
+            done.len()
+        );
+        return 130;
     }
     i32::from(failed > 0)
 }
@@ -730,6 +735,29 @@ impl Plan<'_> {
             })
             .collect();
         crate::allow_roots::refuse_outside(prog, &dests)
+    }
+
+    /// Apply the plan to each of `entries` in turn, handing every outcome
+    /// to `seen`. The first Ctrl-C stops the run after the entry in hand
+    /// and a second one quits; returns how many entries it did not reach
+    /// when Ctrl-C stopped it.
+    pub(crate) fn each<'e>(
+        &self,
+        prog: &str,
+        entries: &[&'e list::Entry],
+        mut seen: impl FnMut(&'e list::Entry, Outcome),
+    ) -> Option<usize> {
+        if !self.dry_run {
+            crate::interrupt::stop_then_quit();
+        }
+        for (i, e) in entries.iter().enumerate() {
+            if crate::interrupt::requested() {
+                return Some(entries.len() - i);
+            }
+            seen(e, self.apply(prog, e));
+            crate::interrupt::test_seam("after-item");
+        }
+        crate::interrupt::requested().then_some(0)
     }
 
     pub(crate) fn apply(&self, prog: &str, e: &list::Entry) -> Outcome {
@@ -1088,10 +1116,14 @@ pub(crate) fn restore_one_to(
     let size = crate::trash_total::cached(&entry.dir)
         .map(|_| trashdir::DirSizes::load(&entry.dir).entry_bytes(&entry.name));
 
+    // From here to the record removed, a Ctrl-C waits for the end, so the
+    // payload is either back in the trash or restored with no record.
+    let _critical = crate::interrupt::critical();
     // Stage into the destination directory first, then swap over any blocker.
-    // On failure the live dest (if any) is left intact.
+    // On failure the live dest (if any) is left intact. A Ctrl-C stops a
+    // copy across file systems, and the staged part goes.
     let staged = staging_path(parent, &entry.name);
-    if let Err(e) = trashdir::relocate(&src, &staged) {
+    if let Err(e) = crate::interrupt::abortable(|| trashdir::relocate(&src, &staged)) {
         let err = format!("cannot restore '{}' to staging area: {e}", src.display());
         // scratch: the staged copy; the payload is still in the trash.
         let _ = trashdir::remove_any_path(&staged);

@@ -52,6 +52,8 @@ pub mod holders;
 #[cfg(unix)]
 pub mod info;
 #[cfg(unix)]
+pub mod interrupt;
+#[cfg(unix)]
 pub mod list;
 pub mod permanent_guard;
 #[cfg(unix)]

@@ -4241,6 +4241,24 @@ and
 .B \-\-stacks
 print nothing, since a partial list would pass for a whole one.
 A second Ctrl-C ends the process at once.
+.IP
+Also
+.BR put " (and " trash\-put ),
+.B restore
+and
+.B undo
+stopped by Ctrl-C: the item in hand finishes, the rest are not reached,
+and a line on stderr counts both; JSON output still prints.
+A copy to another file system stops at once and its part copied goes,
+so that item stays where it was.
+A second Ctrl-C quits at once, except while rtrash writes a trash
+record and moves its payload: then it quits as soon as both are whole,
+so no half-written record and no payload without one is left.
+With
+.B \-i
+or
+.BR \-I ,
+put keeps the usual Ctrl-C, which ends the run at a question.
 .PP
 Put mode mirrors common
 .BR rm (1)

@@ -7710,3 +7710,112 @@ fn status_fix_and_empty_dangling_leave_non_file_records_alone() {
     let link = fs::symlink_metadata(info.join("s.trashinfo")).unwrap();
     assert!(link.file_type().is_symlink());
 }
+
+/// Names in `dir`, sorted, for checking what a stopped run left.
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// The first Ctrl-C stops a put after the item in hand: that item is in
+/// the trash with its whole record, the rest stay where they were, and the
+/// run exits 130 as an interrupted command does.
+#[test]
+fn put_stops_after_the_item_in_hand_at_the_first_ctrl_c() {
+    let sb = Sandbox::new("put-ctrl-c");
+    for n in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(sb.work().join(n), n).unwrap();
+    }
+    let args = ["put", "a.txt", "b.txt", "c.txt"];
+    let out = sb.run_env(&args, &[("RTRASH_TEST_SIGINT", "after-item:1")]);
+    let said = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(130), "{said}");
+    assert!(
+        said.contains("stopped by Ctrl-C: 1 trashed, 2 not reached"),
+        "{said}"
+    );
+    assert_eq!(names_in(&sb.work()), ["b.txt", "c.txt"]);
+    assert_eq!(names_in(&sb.trash().join("files")), ["a.txt"]);
+    let info = fs::read_to_string(sb.trash().join("info/a.txt.trashinfo")).unwrap();
+    let path = format!("Path={}\n", sb.work().join("a.txt").display());
+    assert!(
+        info.starts_with("[Trash Info]\n") && info.contains(&path),
+        "{info}"
+    );
+    assert!(info.contains("DeletionDate="), "{info}");
+}
+
+/// A Ctrl-C after put has taken a trash name waits until the record and
+/// the payload are both whole. A first press then stops the run; a second
+/// one ends the process by SIGINT. Either way the next item stays and no
+/// half-written record or lone payload is left.
+#[test]
+fn ctrl_c_inside_a_record_waits_until_the_pair_is_whole() {
+    use std::os::unix::process::ExitStatusExt;
+    for (presses, tag) in [(1, "put-ctrl-c-once"), (2, "put-ctrl-c-twice")] {
+        let sb = Sandbox::new(tag);
+        fs::write(sb.work().join("a.txt"), b"first").unwrap();
+        fs::write(sb.work().join("b.txt"), b"second").unwrap();
+        let seam = format!("in-record:{presses}");
+        let out = sb.run_env(
+            &["put", "a.txt", "b.txt"],
+            &[("RTRASH_TEST_SIGINT", seam.as_str())],
+        );
+        let said = stderr_of(&out);
+        if presses == 1 {
+            assert_eq!(out.status.code(), Some(130), "{said}");
+            assert!(said.contains("1 trashed, 1 not reached"), "{said}");
+        } else {
+            assert_eq!(out.status.signal(), Some(libc::SIGINT), "{said}");
+        }
+        assert_eq!(names_in(&sb.work()), ["b.txt"], "{presses}");
+        assert_eq!(names_in(&sb.trash().join("files")), ["a.txt"], "{presses}");
+        assert_eq!(
+            names_in(&sb.trash().join("info")),
+            ["a.txt.trashinfo"],
+            "{presses}"
+        );
+        let info = fs::read_to_string(sb.trash().join("info/a.txt.trashinfo")).unwrap();
+        assert!(
+            info.contains("Path=") && info.contains("DeletionDate="),
+            "{presses}: {info}"
+        );
+        assert_eq!(fs::read(sb.trash().join("files/a.txt")).unwrap(), b"first");
+    }
+}
+
+/// The first Ctrl-C stops a restore after the entry in hand: that entry
+/// is back without its record, the others stay in the trash with theirs.
+#[test]
+fn restore_stops_after_the_entry_in_hand_at_the_first_ctrl_c() {
+    let sb = Sandbox::new("restore-ctrl-c");
+    for n in ["a.txt", "b.txt", "c.txt"] {
+        fs::write(sb.work().join(n), n).unwrap();
+    }
+    let put = sb.run(&["put", "a.txt", "b.txt", "c.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let out = sb.run_env(
+        &["restore", "--all"],
+        &[("RTRASH_TEST_SIGINT", "after-item:1")],
+    );
+    let said = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(130), "{said}");
+    assert!(
+        said.contains("stopped by Ctrl-C: 1 restored, 2 not reached"),
+        "{said}"
+    );
+    let back = names_in(&sb.work());
+    assert_eq!(back.len(), 1, "{back:?}");
+    let left = names_in(&sb.trash().join("files"));
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(!left.contains(&back[0]), "{back:?} {left:?}");
+    let records: Vec<String> = left.iter().map(|n| format!("{n}.trashinfo")).collect();
+    assert_eq!(names_in(&sb.trash().join("info")), records);
+}

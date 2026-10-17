@@ -246,16 +246,23 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     }
     let mut restored: Vec<(&list::Entry, PathBuf)> = Vec::new();
     let (mut failed, mut skipped) = (0usize, 0usize);
-    for e in &batch.entries {
-        match plan.apply(prog, e) {
-            Outcome::Restored(dest) => restored.push((*e, dest)),
-            Outcome::Skipped => skipped += 1,
-            Outcome::Failed => failed += 1,
-        }
-    }
+    let left = plan.each(prog, &batch.entries, |e, outcome| match outcome {
+        Outcome::Restored(dest) => restored.push((e, dest)),
+        Outcome::Skipped => skipped += 1,
+        Outcome::Failed => failed += 1,
+    });
     if json {
         println!("{}", batch_json(&batch.id, &restored, failed, skipped));
-    } else if failed > 0 || skipped > 0 {
+    }
+    if let Some(left) = left {
+        eprintln!(
+            "{prog}: stopped by Ctrl-C: run {}: {} restored, {left} not reached",
+            batch.id,
+            restored.len()
+        );
+        return 130;
+    }
+    if !json && (failed > 0 || skipped > 0) {
         eprintln!(
             "{prog}: run {}: {} restored, {failed} failed, {skipped} skipped",
             batch.id,
