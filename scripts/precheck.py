@@ -196,6 +196,21 @@ def check_long_sleeps():
                                   "whole seconds, so call common::next_trash_second() between puts")
 
 
+# A loop on the system clock in tests/ waits for the wrong clock: a
+# Finder item's date is its change time, stamped by the file system's
+# clock, which trails the system clock (round 208). common::next_trash_second
+# waits on both.
+CLOCK_WAIT = re.compile(r"\bwhile\b[^{]*(?:epoch_secs\(\)|SystemTime::now\(\))")
+
+
+def check_clock_waits():
+    for path in sorted((ROOT / "tests").glob("*.rs")):
+        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if CLOCK_WAIT.search(line):
+                errors.append(f"tests/{path.name}:{i}: a loop that waits on the system clock; call "
+                              "common::next_trash_second(), which also waits on the file system's clock")
+
+
 def strip_comments(s):
     s = re.sub(r'"(?:\\.|[^"\\])*"', '""', s)
     return re.sub(r"//[^\n]*", "", s)
@@ -656,7 +671,7 @@ def check_rustfmt():
 
 def main():
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
-    check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps()
+    check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned()
     check_long_lines(base); check_removed_literals(base)
     if "--no-fmt" not in sys.argv:

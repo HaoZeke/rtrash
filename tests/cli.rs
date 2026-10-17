@@ -7042,6 +7042,9 @@ fn next_trash_second_waits_for_a_later_second() {
     let started = std::time::Instant::now();
     common::next_trash_second();
     assert!(common::epoch_secs() > before);
+    // A file changed now carries a later second too, whatever the lag of
+    // the clock the file system stamps it with.
+    assert!(common::fs_clock_secs() > before);
     // It waits for the next tick only, not a fixed 1.1 s on top.
     assert!(started.elapsed() < std::time::Duration::from_millis(1500));
 }

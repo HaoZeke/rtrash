@@ -7,7 +7,9 @@
 //! each call unique whatever tag it gets.
 //!
 //! Every test that needs two trash puts to get different deletion times
-//! calls `next_trash_second` between them, in place of a fixed sleep.
+//! calls `next_trash_second` between them, in place of a fixed sleep or a
+//! loop of its own on the system clock; it waits on the file system's
+//! clock too, which trails the system clock.
 //!
 //! Every test that expects a command to refuse and change nothing calls
 //! `assert_refused_unchanged`. It takes the snapshot itself, just before
@@ -48,17 +50,46 @@ pub fn epoch_secs() -> u64 {
         .as_secs()
 }
 
-/// Wait until the system clock reaches a later whole second, so a trash
-/// put after this call gets a later deletion time than any put before it.
+/// Whole seconds on the clock the file system stamps a change with: the
+/// modification time of a probe file written just now.
+///
+/// That clock trails the system clock. Linux stamps files from its coarse
+/// clock, one tick (a few ms) behind, so a file written just after the
+/// system clock reaches a second can still carry the second before; on
+/// the box every one of 40 such writes did, by up to 5 ms. Windows stamps
+/// files from its coarse system time as well.
+pub fn fs_clock_secs() -> u64 {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let probe = std::env::temp_dir().join(format!("rtrash-clock-{}-{n}", std::process::id()));
+    fs::write(&probe, b"x").unwrap();
+    let modified = fs::metadata(&probe).and_then(|m| m.modified());
+    let _ = fs::remove_file(&probe);
+    modified
+        .unwrap()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// Wait until both the system clock and the file system's clock reach a
+/// later whole second, so a trash put after this call gets a later
+/// deletion time than any put before it.
 ///
 /// The Recycle Bin, the Finder Trash and a trashinfo `DeletionDate` all
 /// keep whole seconds. Two puts in one second tie, and the order then
 /// falls back to the name, which a test that sorts by date does not
-/// expect. Linux test runs rarely hit the tie; slower Windows and macOS
-/// runners do (commit 9708b71).
+/// expect (commit 9708b71). A trashinfo date comes from the system
+/// clock, but a Finder item's date is its change time in the trash,
+/// stamped by the file system's clock (see [`fs_clock_secs`]). Waiting on
+/// the system clock alone let a put just after the tick land in the
+/// second before, tied with the previous put
+/// (`list_last_keeps_the_newest_finder_items`, round 208). The file
+/// system's clock never runs ahead of the system clock, so once it has
+/// passed `start`, both have.
 pub fn next_trash_second() {
     let start = epoch_secs();
-    while epoch_secs() <= start {
+    while fs_clock_secs() <= start {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
