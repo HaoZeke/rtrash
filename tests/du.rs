@@ -547,6 +547,66 @@ fn sort_by_mtime_lists_where_the_newest_change_is() {
     );
 }
 
+/// A snapshot cut off partway (as a full disk left one before du -o
+/// wrote through a temporary) or edited by hand is refused by du -f and
+/// du diff with the reason, instead of read as if whole. du -o itself
+/// leaves no temporary behind.
+#[test]
+fn a_cut_off_or_edited_snapshot_is_refused_by_list_and_diff() {
+    let t = Tree::new("snap-cut");
+    t.file("a/x", 10_000);
+    t.file("b/y", 20_000);
+    let out = t.du(&["--no-git", "-o", "s.snap", "a", "b"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let left: Vec<String> = fs::read_dir(&t.root)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".s.snap"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    let whole = fs::read(t.root.join("s.snap")).unwrap();
+    let text = String::from_utf8(whole.clone()).unwrap();
+    assert_eq!(text.lines().nth(1), Some("checksum crc32"), "{text}");
+    assert!(text.lines().last().unwrap().starts_with("end "), "{text}");
+    assert!(t.du(&["-f", "s.snap"]).status.success());
+    // Cut inside the last record before the end.
+    let cut = text.rfind("\nend ").unwrap() - 3;
+    fs::write(t.root.join("cut.snap"), &whole[..cut]).unwrap();
+    let err = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    for args in [
+        &["-f", "cut.snap"][..],
+        &["diff", "cut.snap", "s.snap"][..],
+        &["diff", "cut.snap"][..],
+    ] {
+        let o = t.du(args);
+        assert_eq!(o.status.code(), Some(1), "{args:?}: {}", err(&o));
+        assert!(
+            err(&o).contains("cannot read snapshot 'cut.snap'") && err(&o).contains("cut off"),
+            "{args:?}: {}",
+            err(&o)
+        );
+    }
+    // Roots a and b hold no subdirectory, so this snapshot has root
+    // records and no dir record: edit the first root's disk total.
+    let edited = text.replacen("\nroot ", "\nroot 1", 1);
+    assert_ne!(edited, text);
+    fs::write(t.root.join("edited.snap"), edited).unwrap();
+    let o = t.du(&["-f", "edited.snap"]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("checksum mismatch"), "{}", err(&o));
+    // A damaged checksum name must not turn the check off.
+    let renamed = text.replacen("checksum crc32", "checksum crc31", 1);
+    assert_ne!(renamed, text);
+    fs::write(t.root.join("renamed.snap"), renamed).unwrap();
+    let o = t.du(&["-f", "renamed.snap"]);
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("unknown checksum 'crc31'"), "{}", err(&o));
+}
+
 #[test]
 fn snapshots_cannot_rank_by_items() {
     let t = Tree::new("snap-items");

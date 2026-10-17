@@ -6,6 +6,7 @@
 //!
 //! ```text
 //! # rtrash du snapshot 1
+//! checksum crc32
 //! created 1791650000
 //! max_depth -
 //! one_file_system 0
@@ -13,6 +14,7 @@
 //! unread REASON PATH
 //! root DISK APPARENT FILES DIRS PATH
 //! dir DISK APPARENT MTIME ARTEFACT PATH
+//! end LINES CRC32
 //! ```
 //!
 //! Fields are space-separated; PATH comes last, percent-encoded (spaces,
@@ -24,6 +26,18 @@
 //! the count unknown, not 0. The magic line stays at version 1, since a
 //! reader skips records it does not know, so an older rtrash still reads
 //! a newer snapshot (without the count).
+//!
+//! `checksum crc32` says the snapshot ends with an `end` record: LINES
+//! counts the lines before it, the magic line too, and CRC32 (8 hex
+//! digits) is the CRC-32 of their bytes. A reader refuses such a snapshot
+//! when the record is missing or does not match, so a file cut off or
+//! edited by hand is never read as if whole. CRC-32 catches accidents,
+//! not forgery: whoever can edit the file can recompute it. A snapshot
+//! from before the record still loads, and every reader refuses a known
+//! record with the wrong number of fields, and a file with no `root` or
+//! `dir` record at all. A `checksum` line naming any other sum is
+//! refused, so one damaged byte there cannot turn the check off, and an
+//! `end` record is checked wherever it appears.
 
 use std::collections::HashMap;
 use std::fs;
@@ -34,6 +48,70 @@ use crate::du::{self, Item, Report, RootTotals, ScanOpts, SortKey};
 use crate::util::{format_bytes, json_escape, url_decode, url_encode};
 
 const MAGIC: &str = "# rtrash du snapshot 1";
+
+/// The CRC-32 (IEEE, as zlib and gzip use) table, one entry per byte.
+const CRC_TABLE: [u32; 256] = {
+    let mut t = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
+            k += 1;
+        }
+        t[i] = c;
+        i += 1;
+    }
+    t
+};
+
+/// A running CRC-32 over the bytes of a snapshot.
+#[derive(Debug, Clone, Copy)]
+struct Crc32(u32);
+
+impl Crc32 {
+    fn new() -> Self {
+        Crc32(!0)
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        let mut c = self.0;
+        for &b in bytes {
+            c = CRC_TABLE[((c ^ u32::from(b)) & 0xff) as usize] ^ (c >> 8);
+        }
+        self.0 = c;
+    }
+
+    fn value(self) -> u32 {
+        !self.0
+    }
+}
+
+/// A writer that sums and counts the lines it passes on, for the `end`
+/// record.
+struct Summed<W> {
+    w: W,
+    crc: Crc32,
+    lines: u64,
+}
+
+impl<W: Write> Write for Summed<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.w.write(buf)?;
+        self.crc.update(&buf[..n]);
+        self.lines += buf[..n].iter().filter(|&&b| b == b'\n').count() as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.w.flush()
+    }
+}
 
 const DIFF_HELP: &str = "\
 Usage: {prog} diff [OPTION]... OLD [NEW]
@@ -101,8 +179,14 @@ pub fn snapshot_opts(mut opts: ScanOpts) -> ScanOpts {
 }
 
 /// Write `report` (scanned with [`snapshot_opts`]) as a snapshot.
-pub fn write(report: &Report, opts: &ScanOpts, created: i64, mut w: impl Write) -> io::Result<()> {
+pub fn write(report: &Report, opts: &ScanOpts, created: i64, w: impl Write) -> io::Result<()> {
+    let mut w = Summed {
+        w,
+        crc: Crc32::new(),
+        lines: 0,
+    };
     writeln!(w, "{MAGIC}")?;
+    writeln!(w, "checksum crc32")?;
     writeln!(w, "created {created}")?;
     match opts.max_depth {
         Some(d) => writeln!(w, "max_depth {d}")?,
@@ -135,6 +219,8 @@ pub fn write(report: &Report, opts: &ScanOpts, created: i64, mut w: impl Write) 
             enc(&d.path)
         )?;
     }
+    let Summed { mut w, crc, lines } = w;
+    writeln!(w, "end {lines} {:08x}", crc.value())?;
     w.flush()
 }
 
@@ -233,35 +319,142 @@ fn artefact_static(name: &str) -> Option<&'static str> {
         .or(Some("artefact"))
 }
 
-/// Parse a snapshot.
-pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
-    let mut snap = Snapshot::default();
-    let mut lines = r.lines();
-    match lines.next() {
-        Some(Ok(l)) if l.trim_end() == MAGIC => {}
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                concat!(
-                    "neither an rtrash du snapshot (write one with du -o FILE) ",
-                    "nor an ncdu export (JSON, zstd-compressed JSON or binary)",
-                ),
-            ))
-        }
+fn not_a_snapshot() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        concat!(
+            "neither an rtrash du snapshot (write one with du -o FILE) ",
+            "nor an ncdu export (JSON, zstd-compressed JSON or binary)",
+        ),
+    )
+}
+
+/// The fields each known record has; one with more or fewer was cut off
+/// or edited.
+fn fields_of(kind: &str) -> Option<usize> {
+    match kind {
+        "created" | "max_depth" | "one_file_system" | "unreadable" | "checksum" => Some(2),
+        "unread" => Some(3),
+        "root" | "dir" => Some(6),
+        "end" => Some(3),
+        _ => None,
     }
-    for (i, line) in lines.enumerate() {
-        let n = i + 2;
-        let line = line?;
-        if line.is_empty() || line.starts_with('#') {
+}
+
+/// Check the `end` record on line `n` against the `n - 1` lines before
+/// it and their CRC-32.
+fn check_end(n: usize, f: &[&str], crc: Crc32) -> io::Result<()> {
+    let lines: usize = f[1]
+        .parse()
+        .map_err(|_| bad(n, "bad line count in the end record"))?;
+    let sum = u32::from_str_radix(f[2], 16)
+        .ok()
+        .filter(|_| f[2].len() == 8)
+        .ok_or_else(|| bad(n, "bad checksum in the end record"))?;
+    if lines != n - 1 {
+        return Err(bad(
+            n,
+            &format!(
+                "the end record counts {lines} lines before it, the file has {}: {}",
+                n - 1,
+                "lines were lost or added since it was written"
+            ),
+        ));
+    }
+    if sum != crc.value() {
+        return Err(bad(
+            n,
+            &format!(
+                "checksum mismatch (recorded {sum:08x}, read {:08x}): {}",
+                crc.value(),
+                "the snapshot was damaged or edited since it was written"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Parse a snapshot.
+pub fn parse(mut r: impl BufRead) -> io::Result<Snapshot> {
+    let mut snap = Snapshot::default();
+    let mut crc = Crc32::new();
+    let mut buf = Vec::new();
+    let mut n = 0usize;
+    // `checksum crc32` was read: the snapshot must end with a matching
+    // `end` record.
+    let mut sealed = false;
+    let mut ended = false;
+    let mut records = 0usize;
+    loop {
+        buf.clear();
+        if r.read_until(b'\n', &mut buf)? == 0 {
+            break;
+        }
+        n += 1;
+        let mut text = &buf[..];
+        text = text.strip_suffix(b"\n").unwrap_or(text);
+        text = text.strip_suffix(b"\r").unwrap_or(text);
+        if ended {
+            if text.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            return Err(bad(n, "data after the end record"));
+        }
+        let line = std::str::from_utf8(text).map_err(|_| {
+            if n == 1 {
+                not_a_snapshot()
+            } else {
+                bad(n, "not text")
+            }
+        })?;
+        if n == 1 {
+            if line.trim_end() != MAGIC {
+                return Err(not_a_snapshot());
+            }
+            crc.update(&buf);
             continue;
         }
         let f: Vec<&str> = line.split(' ').collect();
+        if !line.is_empty() && !line.starts_with('#') {
+            if let Some(want) = fields_of(f[0]).filter(|&k| k != f.len()) {
+                return Err(bad(
+                    n,
+                    &format!(
+                        "a {} record has {want} fields, this one {}: {}",
+                        f[0],
+                        f.len(),
+                        "the snapshot was cut off or edited"
+                    ),
+                ));
+            }
+        }
+        if f[0] == "end" {
+            check_end(n, &f, crc)?;
+            ended = true;
+            continue;
+        }
+        crc.update(&buf);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         let num = |k: usize| -> io::Result<u64> {
             f.get(k)
                 .and_then(|s| s.parse().ok())
                 .ok_or_else(|| bad(n, "bad number"))
         };
         match f[0] {
+            // Any other name is refused rather than read unchecked: one
+            // damaged byte in this line must not turn the check off.
+            "checksum" if f[1] == "crc32" => sealed = true,
+            "checksum" => {
+                return Err(bad(
+                    n,
+                    &format!(
+                        "unknown checksum '{}': {}",
+                        f[1], "the snapshot was damaged, or written by a newer rtrash"
+                    ),
+                ))
+            }
             "created" => snap.created = num(1)? as i64,
             "max_depth" => {
                 snap.max_depth = match f.get(1) {
@@ -271,33 +464,56 @@ pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
             }
             "one_file_system" => snap.one_file_system = num(1)? != 0,
             "unreadable" => snap.unreadable = Some(num(1)?),
-            "unread" if f.len() == 3 => snap.unread.push((
+            "unread" => snap.unread.push((
                 bytes_path(url_decode(f[2])),
                 String::from_utf8_lossy(&url_decode(f[1])).into_owned(),
             )),
-            "root" if f.len() == 6 => snap.roots.push(RootTotals {
-                path: bytes_path(url_decode(f[5])),
-                disk: num(1)?,
-                apparent: num(2)?,
-                files: num(3)?,
-                dirs: num(4)?,
-                ..RootTotals::default()
-            }),
-            "dir" if f.len() == 6 => snap.dirs.push(Item {
-                path: bytes_path(url_decode(f[5])),
-                is_dir: true,
-                disk: num(1)?,
-                apparent: num(2)?,
-                mtime: f[3].parse().map_err(|_| bad(n, "bad mtime"))?,
-                items: 0,
-                artefact: artefact_static(f[4]),
-                repos: Vec::new(),
-                git: None,
-                unique: None,
-            }),
+            "root" => {
+                records += 1;
+                snap.roots.push(RootTotals {
+                    path: bytes_path(url_decode(f[5])),
+                    disk: num(1)?,
+                    apparent: num(2)?,
+                    files: num(3)?,
+                    dirs: num(4)?,
+                    ..RootTotals::default()
+                });
+            }
+            "dir" => {
+                records += 1;
+                snap.dirs.push(Item {
+                    path: bytes_path(url_decode(f[5])),
+                    is_dir: true,
+                    disk: num(1)?,
+                    apparent: num(2)?,
+                    mtime: f[3].parse().map_err(|_| bad(n, "bad mtime"))?,
+                    items: 0,
+                    artefact: artefact_static(f[4]),
+                    repos: Vec::new(),
+                    git: None,
+                    unique: None,
+                });
+            }
             // Records from a newer writer: skip, so old readers keep working.
             _ => {}
         }
+    }
+    if n == 0 {
+        return Err(not_a_snapshot());
+    }
+    if sealed && !ended {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "the snapshot is cut off after line {n}: it has a checksum line but no end record"
+            ),
+        ));
+    }
+    if records == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the snapshot has no root or dir record: it is empty or cut off",
+        ));
     }
     Ok(snap)
 }
@@ -854,6 +1070,118 @@ mod tests {
         let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o640);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn crc32_matches_the_zlib_check_value() {
+        let mut c = Crc32::new();
+        c.update(b"1234");
+        c.update(b"56789");
+        assert_eq!(c.value(), 0xcbf4_3926);
+        assert_eq!(Crc32::new().value(), 0);
+    }
+
+    #[test]
+    fn a_snapshot_ends_with_its_line_count_and_crc32() {
+        let mut buf = Vec::new();
+        write(
+            &small_report(),
+            &snapshot_opts(ScanOpts::default()),
+            9,
+            &mut buf,
+        )
+        .unwrap();
+        // The CRC-32 here is zlib.crc32 of the eight lines above the end.
+        let want = "# rtrash du snapshot 1\nchecksum crc32\ncreated 9\nmax_depth -\n\
+                    one_file_system 0\nunreadable 0\nroot 512 256 1 1 /w\n\
+                    dir 512 256 7 - /w/x\nend 8 71f04092\n";
+        assert_eq!(String::from_utf8(buf.clone()).unwrap(), want);
+        assert_eq!(parse(&buf[..]).unwrap().dirs.len(), 1);
+        // Blank lines after the end are harmless.
+        buf.extend_from_slice(b"\n\n");
+        assert!(parse(&buf[..]).is_ok());
+    }
+
+    #[test]
+    fn a_cut_off_or_edited_snapshot_is_refused() {
+        let mut buf = Vec::new();
+        write(
+            &small_report(),
+            &snapshot_opts(ScanOpts::default()),
+            9,
+            &mut buf,
+        )
+        .unwrap();
+        // Every cut but the last newline: inside the header, between
+        // records, inside a record and inside the end record.
+        for cut in 0..buf.len() - 1 {
+            assert!(
+                parse(&buf[..cut]).is_err(),
+                "a cut at {cut} read as whole: {:?}",
+                String::from_utf8_lossy(&buf[..cut])
+            );
+        }
+        let text = String::from_utf8(buf).unwrap();
+        let err = |t: &str| parse(t.as_bytes()).unwrap_err().to_string();
+        let edited = text.replace("dir 512 256", "dir 612 256");
+        assert!(
+            err(&edited).contains("checksum mismatch"),
+            "{}",
+            err(&edited)
+        );
+        let dropped = text.replace("root 512 256 1 1 /w\n", "");
+        assert!(
+            err(&dropped).contains("lines were lost"),
+            "{}",
+            err(&dropped)
+        );
+        let after = format!("{text}dir 1 1 0 - /w/y\n");
+        assert!(
+            err(&after).contains("data after the end"),
+            "{}",
+            err(&after)
+        );
+        let no_end = text.replace("end 8 71f04092\n", "");
+        assert!(err(&no_end).contains("cut off"), "{}", err(&no_end));
+        // The header is checked too: the magic line, the checksum name,
+        // and the checksum line itself, whose loss the end record counts.
+        let magic = text.replace("snapshot 1\n", "snapshot 2\n");
+        assert!(
+            err(&magic).contains("neither an rtrash du snapshot"),
+            "{}",
+            err(&magic)
+        );
+        let renamed = text.replace("checksum crc32", "checksum crc64");
+        assert!(
+            err(&renamed).contains("unknown checksum 'crc64'"),
+            "{}",
+            err(&renamed)
+        );
+        let unsealed = text.replace("checksum crc32\n", "");
+        assert!(
+            err(&unsealed).contains("lines were lost"),
+            "{}",
+            err(&unsealed)
+        );
+        for edit in [&magic, &renamed, &unsealed, &edited, &dropped] {
+            assert_ne!(edit, &text);
+        }
+    }
+
+    #[test]
+    fn old_snapshots_load_but_cut_records_and_empty_files_do_not() {
+        let old = b"# rtrash du snapshot 1\ncreated 5\nroot 2 2 1 1 /x\ndir 1 1 0 - /x\n";
+        assert_eq!(parse(&old[..]).unwrap().dirs.len(), 1);
+        // Cut inside a record: one field short.
+        let e = parse(&old[..old.len() - 4]).unwrap_err().to_string();
+        assert!(e.contains("a dir record has 6 fields, this one 5"), "{e}");
+        // Cut before the first record.
+        let e = parse(&b"# rtrash du snapshot 1\ncreated 5\n"[..]).unwrap_err();
+        assert!(e.to_string().contains("no root or dir record"), "{e}");
+        // A checksum this reader cannot check is refused, not skipped.
+        let newer = b"# rtrash du snapshot 1\nchecksum sha256\ndir 1 1 0 - /x\nend 3 ab\n";
+        let e = parse(&newer[..]).unwrap_err().to_string();
+        assert!(e.contains("line 2: unknown checksum 'sha256'"), "{e}");
     }
 
     #[test]

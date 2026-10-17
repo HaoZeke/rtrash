@@ -1970,6 +1970,17 @@ A
 .I FILE
 that is not a regular file (a pipe, a device or a symbolic link) is
 written in place.
+A snapshot ends with a record of its line count and the CRC-32 of the
+lines above it.
+.B du \-f
+and
+.B du diff
+refuse a snapshot whose end record is missing or does not match, naming
+the line, so a file cut off or edited by hand is never read as if whole.
+CRC-32 catches accidents, not forgery.
+A snapshot that names a checksum other than crc32 is refused.
+A snapshot from an older rtrash has no such record and still loads; one
+with a record cut short, or with no directory at all, is refused too.
 .TP
 .B \-\-devices
 List every mounted file system instead of scanning: size, use, free space,
