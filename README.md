@@ -316,7 +316,8 @@ In JSON they carry `"orphan": true`; an age filter leaves them out.
 | Flag | Meaning |
 |------|---------|
 | `--json` | JSON array of `{deletion_date, original, name, trash_dir, batch}` (plus `size` in bytes with `--size`) |
-| `--size` | Add each item's disk usage (payload plus `.trashinfo`, as `status` counts it) |
+| `--size` | Add each item's disk usage (payload plus `.trashinfo`, as `status` counts it). As `trash-list`, trash-cli's `SIZE PATH` rows: the payload's size in bytes in place of the date |
+| `--files` | `trash-list` only, as trash-cli's hidden option: add ` -> FILE`, the item in the trash, to each row |
 | `--sort=date\|size\|name\|path` | Row order; `size` lists the largest first and implies `--size` |
 | `--reverse` | Reverse the order |
 | `--older-than=DAYS` | Only items trashed more than DAYS days ago (same cutoff as `empty DAYS`) |

@@ -2221,6 +2221,107 @@ fn list_leaves_out_a_record_with_no_path_and_counts_it() {
     );
 }
 
+/// Under the trash-list name, `--size` and trash-cli's hidden `--files`
+/// keep trash-cli's rows: the payload's `st_size` in bytes in place of
+/// the date (a directory's own size, 0 for a dangling link), and
+/// ` -> FILE` naming the item in the trash. `rtrash list` keeps its own
+/// rows and takes no `--files`.
+#[test]
+fn trash_list_size_and_files_keep_trash_cli_rows() {
+    let sb = Sandbox::new("trash-list-size-files");
+    let t = sb.trash();
+    let files = t.join("files");
+    fs::create_dir_all(&files).unwrap();
+    fs::create_dir_all(t.join("info")).unwrap();
+    let w = sb.work();
+    let record = |name: &str, second: u32| {
+        fs::write(
+            t.join(format!("info/{name}.trashinfo")),
+            format!(
+                "[Trash Info]\nPath={}\nDeletionDate=2026-01-02T03:04:0{second}\n",
+                w.join(name).display()
+            ),
+        )
+        .unwrap();
+    };
+    fs::write(files.join("a.txt"), b"hello\n").unwrap();
+    record("a.txt", 1);
+    fs::create_dir_all(files.join("d/sub")).unwrap();
+    fs::write(files.join("d/sub/big"), vec![0u8; 5000]).unwrap();
+    record("d", 2);
+    std::os::unix::fs::symlink(sb.root.join("nowhere"), files.join("dl")).unwrap();
+    record("dl", 3);
+    std::os::unix::fs::symlink("a.txt", files.join("gl")).unwrap();
+    record("gl", 4);
+    let dir_size = fs::metadata(files.join("d")).unwrap().len();
+
+    let pin = format!("--trash-dir={}", t.display());
+    let bindir = sb.root.join("bin");
+    fs::create_dir_all(&bindir).unwrap();
+    std::os::unix::fs::symlink(bin(), bindir.join("trash-list")).unwrap();
+    let trash_list = |args: &[&str]| {
+        Command::new(bindir.join("trash-list"))
+            .arg(&pin)
+            .args(args)
+            .current_dir(&w)
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("HOME", &sb.root)
+            .output()
+            .unwrap()
+    };
+    let (wd, fd) = (w.display(), files.display());
+    let sizes = format!("6 {wd}/a.txt\n{dir_size} {wd}/d\n0 {wd}/dl\n6 {wd}/gl\n");
+    let out = trash_list(&["--size"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out), sizes);
+    assert_eq!(stderr_of(&out), "");
+    let dated: Vec<String> = ["a.txt", "d", "dl", "gl"]
+        .iter()
+        .zip(1..)
+        .map(|(n, s)| format!("2026-01-02 03:04:0{s} {wd}/{n} -> {fd}/{n}\n"))
+        .collect();
+    let out = trash_list(&["--files"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out), dated.concat());
+    let both: String = sizes
+        .lines()
+        .zip(["a.txt", "d", "dl", "gl"])
+        .map(|(l, n)| format!("{l} -> {fd}/{n}\n"))
+        .collect();
+    let out = trash_list(&["--size", "--files"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out), both);
+
+    // --files is a plain-row shape; JSON keeps its byte size field.
+    let out = trash_list(&["--files", "--json"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr_of(&out).contains("--files works on plain rows"));
+    let out = trash_list(&["--size", "--json"]);
+    assert!(stdout_of(&out).contains("\"size\":"), "{}", stdout_of(&out));
+    // rtrash list keeps its date and disk usage column, and no --files.
+    let out = sb.run(&["list", &pin, "--size"]);
+    let first = stdout_of(&out).lines().next().unwrap_or("").to_string();
+    assert!(first.starts_with("2026-01-02 03:04:01 "), "{first}");
+    assert!(first.ends_with(&format!("{wd}/a.txt")), "{first}");
+    let out = sb.run(&["list", &pin, "--files"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr_of(&out).contains("unrecognized option '--files'"));
+
+    // A record whose payload is gone: trash-cli's --size stops with a
+    // traceback; trash-list names it, lists the rest and exits 1.
+    record("gone", 5);
+    let out = trash_list(&["--size"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout_of(&out), sizes);
+    let err = stderr_of(&out);
+    let want = format!("trash-list: cannot read the size of {fd}/gone: ");
+    assert!(err.starts_with(&want) && err.lines().count() == 1, "{err}");
+    let out = trash_list(&["--files"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let gone = format!("2026-01-02 03:04:05 {wd}/gone -> {fd}/gone\n");
+    assert_eq!(stdout_of(&out), dated.concat() + &gone);
+}
+
 #[test]
 fn trash_cli_command_lines_work_under_the_trash_names() {
     let sb = Sandbox::new("trash-cli-lines");

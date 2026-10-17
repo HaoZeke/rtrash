@@ -54,6 +54,8 @@ Linked as =trash-put=, =trash-list=, =trash-empty=, =trash-restore= and
 | =trash-list --volumes=             | same                                               |
 | =trash-list --trash-dirs=          | same                                               |
 | =trash-list --all-users=           | same rows; =rtrash list= adds an owner column      |
+| =trash-list --size=                | same =SIZE PATH= rows, size in bytes               |
+| =trash-list --files=               | same =DATE PATH -> FILE= rows                      |
 | =trash-empty DAYS=, =-f=           | same; DAYS also takes an age such as =2h=          |
 | =trash-empty -i=                   | same prompt, then empties                          |
 | =trash-empty --all-users=          | same                                               |

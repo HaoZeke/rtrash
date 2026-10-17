@@ -36,7 +36,10 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
       --directory=DIR   only items that came from DIR or below it (DIR
                      need not exist any more)
       --size            add each item's disk usage (payload plus its
-                     .trashinfo, as status counts it)
+                     .trashinfo, as status counts it); as trash-list,
+                     trash-cli's row: the payload's size in bytes in
+                     place of the date. trash-cli's hidden --files works
+                     there too and adds ' -> FILE', the item in the trash
       --show-trashpath  under each row, show where the item sits in the
                      trash (\"trash_path\" in --json; not with --format),
                      as gtrash find --show-trashpath
@@ -283,6 +286,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let cfg = crate::config::get();
     let mut with_size = cfg.bool("list", "size").unwrap_or(false);
     let mut show_trash = false;
+    // trash-cli's trash-list shapes: --size (bytes in place of the date)
+    // and its hidden --files (` -> FILE`, the payload in the trash).
+    let mut size_flag = false;
+    let mut show_files = false;
     let mut sort = SortKey::Date;
     if let Some(s) = cfg.str("list", "sort") {
         match SortKey::parse(s) {
@@ -328,7 +335,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             },
             "--volumes" => volumes = true,
             "--trash-dirs" => show_dirs = true,
-            "--size" => with_size = true,
+            "--size" => {
+                with_size = true;
+                size_flag = true;
+            }
+            "--files" if prog == "trash-list" => show_files = true,
             "--show-trashpath" => show_trash = true,
             "--reverse" => reverse = true,
             "--cwd-only" => cwd_only = true,
@@ -494,6 +505,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: --show-trashpath works on plain rows and --json, not --format");
         return 2;
     }
+    // Under the trash-list name, plain rows keep trash-cli's shape.
+    let cli_rows = prog == "trash-list" && !json && format.is_none();
+    if show_files && !cli_rows {
+        eprintln!("{prog}: --files works on plain rows, not --json or --format");
+        return 2;
+    }
+    // Those rows show no disk usage, so only --sort=size needs it.
+    if cli_rows {
+        with_size = false;
+    }
     if depth > 0 && (json || format.is_some()) {
         eprintln!("{prog}: --depth works on plain rows, not --json or --format");
         return 2;
@@ -513,6 +534,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if crate::finder::is_default(!trash_dirs.is_empty() || all_users) {
         let refused = if volumes || show_dirs {
             Some("--volumes or --trash-dirs")
+        } else if show_files {
+            Some("--files")
         } else {
             None
         };
@@ -560,6 +583,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 0;
     }
     let (collected, skipped) = collect_counted(&dirs);
+    let mut unsized_rows = 0usize;
     let mut entries = filter_age_secs(collected, older_than, newer_than);
     entries.retain(|e| keep(&e.original, &e.name));
     // Orphans have no date, so only an unfiltered listing shows them; they
@@ -659,6 +683,43 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         } else {
             println!("[\n{}\n]", items.join(",\n"));
         }
+    } else if cli_rows {
+        use std::io::Write;
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        for entry in &rows {
+            let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
+            let attr = if size_flag {
+                match trash_cli_size(&payload) {
+                    Ok(n) => n.to_string(),
+                    Err(e) => {
+                        // trash-cli stops with a traceback here; say which
+                        // payload and go on with the rest.
+                        let _ = out.flush();
+                        eprintln!(
+                            "{prog}: cannot read the size of {}: {e}",
+                            crate::util::err_path(&payload)
+                        );
+                        unsized_rows += 1;
+                        continue;
+                    }
+                }
+            } else {
+                let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
+                crate::util::term_text(date).replacen('T', " ", 1)
+            };
+            let mut line = format!("{attr} {}", crate::util::term_path(&entry.original));
+            if show_files {
+                line.push_str(" -> ");
+                line.push_str(&crate::util::term_path(&payload));
+            }
+            let res = writeln!(out, "{line}");
+            let res = res.and_then(|()| crate::listfmt::trash_line(&mut out, &payload, show_trash));
+            let res = res.and_then(|()| write_tree(&mut out, &payload, depth));
+            if res.is_err() {
+                return 0;
+            }
+        }
+        let _ = out.flush();
     } else {
         use std::io::Write;
         let mut out = std::io::BufWriter::new(std::io::stdout().lock());
@@ -692,7 +753,18 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if let Some(hint) = hint.filter(|_| prog != "trash-list") {
         eprintln!("{hint}");
     }
-    0
+    i32::from(unsized_rows > 0)
+}
+
+/// The size trash-cli's `trash-list --size` shows for a payload: its
+/// `st_size` through a symlink, so a directory gives its own entry size,
+/// not what it holds, and a symlink whose target is gone gives 0.
+fn trash_cli_size(payload: &std::path::Path) -> std::io::Result<u64> {
+    match fs::metadata(payload) {
+        Ok(m) => Ok(m.len()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && payload.is_symlink() => Ok(0),
+        Err(e) => Err(e),
+    }
 }
 
 /// `--depth=N`: what a trashed directory holds, N levels down, one entry
@@ -851,6 +923,25 @@ mod tests {
             .filter(|p| matches!(p, crate::trash_check::Problem::BadRecord { .. }))
             .count();
         assert_eq!(bad as u64, skipped, "{flagged:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn trash_cli_size_reads_the_entry_through_a_link() {
+        let root = std::env::temp_dir().join(format!("rtrash-tl-size-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("d/sub")).unwrap();
+        fs::write(root.join("a"), b"hello\n").unwrap();
+        fs::write(root.join("d/sub/big"), vec![0u8; 5000]).unwrap();
+        std::os::unix::fs::symlink("a", root.join("good")).unwrap();
+        std::os::unix::fs::symlink("nowhere", root.join("dangling")).unwrap();
+        assert_eq!(trash_cli_size(&root.join("a")).unwrap(), 6);
+        assert_eq!(trash_cli_size(&root.join("good")).unwrap(), 6);
+        assert_eq!(trash_cli_size(&root.join("dangling")).unwrap(), 0);
+        let own = fs::metadata(root.join("d")).unwrap().len();
+        assert_eq!(trash_cli_size(&root.join("d")).unwrap(), own);
+        let gone = trash_cli_size(&root.join("gone")).unwrap_err();
+        assert_eq!(gone.kind(), std::io::ErrorKind::NotFound);
         let _ = fs::remove_dir_all(&root);
     }
 

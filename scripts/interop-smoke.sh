@@ -253,6 +253,46 @@ for t in "${restorers[@]}"; do
   fi
 done
 
+# trash-cli's trash-list and rtrash's read one pinned trash and print the
+# same rows, plain and with --size and trash-cli's hidden --files: a file,
+# a directory (its own size), a dangling link (0) and a link to a file.
+# trash-cli lists in directory order, so both sides get sorted.
+if have trash-list; then
+  tl=$scratch/tl
+  mkdir -p "$tl/files/d" "$tl/info" "$scratch/bin"
+  ln -sf "$rtrash" "$scratch/bin/trash-list"
+  printf 'hello\n' > "$tl/files/a 100%.txt"
+  head -c 5000 /dev/zero > "$tl/files/d/big"
+  ln -s "$scratch/nowhere" "$tl/files/dl"
+  ln -s "a 100%.txt" "$tl/files/gl"
+  n=0
+  for f in "a 100%.txt" d dl gl; do
+    n=$((n + 1))
+    enc=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$scratch/w/from/$f")
+    printf '[Trash Info]\nPath=%s\nDeletionDate=2026-01-02T03:04:0%s\n' "$enc" "$n" > "$tl/info/$f.trashinfo"
+  done
+  for args in "" "--size" "--files" "--size --files"; do
+    # $args splits on purpose: it carries zero, one or two options.
+    # shellcheck disable=SC2086
+    want=$( { trash-list --trash-dir="$tl" $args 2>&1 || echo "exit $?"; } | LC_ALL=C sort)
+    # shellcheck disable=SC2086
+    got=$( { "$scratch/bin/trash-list" --trash-dir="$tl" $args 2>&1 || echo "exit $?"; } | LC_ALL=C sort)
+    if [[ $want == "$got" ]]; then
+      echo "ok   trash-list ${args:-(plain)} rows match trash-cli"
+    else
+      echo "FAIL trash-list ${args:-(plain)} rows differ from trash-cli"
+      echo "  trash-cli:"
+      printf '%s\n' "$want" | sed 's/^/  | /'
+      echo "  rtrash:"
+      printf '%s\n' "$got" | sed 's/^/  | /'
+      fail=1
+    fi
+  done
+  rm -rf -- "$tl"
+else
+  echo "note: trash-list missing; trash-list row check skipped"
+fi
+
 # Nothing may stay behind in the trash after every restore.
 left=$(find "$trash/files" "$trash/info" -mindepth 1 2>/dev/null | wc -l)
 if [[ $left -ne 0 ]]; then

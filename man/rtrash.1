@@ -718,6 +718,26 @@ counts it.
 Directory sizes come from
 .I directorysizes
 when valid, and walked sizes go back into it.
+Under the
+.B trash\-list
+name, plain rows keep trash-cli's shape instead:
+.RB \(oq "SIZE ORIGINAL-PATH" \(cq,
+where SIZE is the payload's size in bytes in place of the date
+(a directory's own entry size, not what it holds; 0 for a symlink whose
+target is gone).
+trash-cli's hidden
+.B \-\-files
+works there too and adds
+.RB \(oq " -> FILE" \(cq,
+the item in the trash, to each row, with or without
+.BR \-\-size ;
+it refuses
+.B \-\-json
+and
+.BR \-\-format .
+A payload whose size cannot be read is named on stderr and left out, and
+.B trash\-list
+then exits 1.
 .TP
 .BI \-\-sort= KEY
 Order rows by
