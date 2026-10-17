@@ -930,6 +930,20 @@ mod plat {
         crate::permanent_guard::remove(p)
     }
 
+    /// From here the first Ctrl-C stops the run after the entry in hand,
+    /// and a second one quits.
+    pub fn stop_then_quit() {
+        crate::interrupt::stop_then_quit();
+    }
+    /// Whether Ctrl-C asked the run to stop.
+    pub fn stopped() -> bool {
+        crate::interrupt::requested()
+    }
+    /// The test seam after each entry reaped; see [`crate::interrupt::test_seam`].
+    pub fn after_entry() {
+        crate::interrupt::test_seam("after-item");
+    }
+
     pub fn trash(prog: &str, p: &Path, dest: &Dest) -> Result<(), ()> {
         let opts = crate::put::Opts {
             force: true,
@@ -1033,6 +1047,13 @@ mod plat {
     pub fn remove(p: &Path) -> std::io::Result<()> {
         crate::permanent_guard::remove(p)
     }
+
+    /// Ctrl-C keeps its usual meaning on Windows.
+    pub fn stop_then_quit() {}
+    pub fn stopped() -> bool {
+        false
+    }
+    pub fn after_entry() {}
 
     pub fn trash(prog: &str, p: &Path, dest: &Dest) -> Result<(), ()> {
         let _ = (dest.home_only, &dest.trash_pin);
@@ -1276,11 +1297,26 @@ fn watch(prog: &str, args: &[String], i: usize) -> i32 {
         if code == 2 {
             return code;
         }
+        if plat::stopped() {
+            return 130;
+        }
         done += 1;
         if rounds.is_some_and(|r| done >= r) {
             return code;
         }
-        std::thread::sleep(std::time::Duration::from_secs(every as u64));
+        // In short steps, so a Ctrl-C between passes ends the watch soon
+        // rather than after the whole interval.
+        let wake = std::time::Instant::now() + std::time::Duration::from_secs(every as u64);
+        while !plat::stopped() {
+            let left = wake.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            std::thread::sleep(left.min(std::time::Duration::from_millis(200)));
+        }
+        if plat::stopped() {
+            return 130;
+        }
     }
 }
 
@@ -1649,6 +1685,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     }
 
+    // The first Ctrl-C stops after the entry in hand (a --purge-trash
+    // item too) and a second quits. reap asks no questions.
+    if !dry_run {
+        plat::stop_then_quit();
+    }
+
     // --when-below: keep only entries on file systems under the target,
     // with what each must free, and stop here when none is.
     let mut needs: Vec<(u64, (u64, u64))> = Vec::new();
@@ -1822,8 +1864,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // on the same disk does not take every entry.
     let mut credit: std::collections::HashMap<u64, (u64, u64)> = std::collections::HashMap::new();
     let mut reaped_idx: Vec<usize> = Vec::new();
+    let mut not_reached = 0usize;
     for (i, o) in outcomes.iter_mut().enumerate() {
         if o.skip.is_some() {
+            continue;
+        }
+        if !dry_run && plat::stopped() {
+            not_reached += 1;
             continue;
         }
         if let Some(t) = target {
@@ -1854,10 +1901,17 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 c.0 = c.0.saturating_add(o.bytes);
                 c.1 = c.1.saturating_add(o.inodes);
             }
+            plat::after_entry();
         }
         reaped_idx.push(i);
     }
     let reaped: Vec<&Outcome> = reaped_idx.iter().map(|&i| &outcomes[i]).collect();
+    let stop_note = (!dry_run && plat::stopped()).then(|| {
+        format!(
+            "{prog}: stopped by Ctrl-C: {} reaped, {not_reached} not reached",
+            reaped.len()
+        )
+    });
     // Per group: entries reaped, their bytes, entries kept.
     let totals: Vec<(usize, u64, usize)> = (0..groups.len())
         .map(|gi| {
@@ -1932,6 +1986,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 String::new()
             }
         );
+        if let Some(note) = &stop_note {
+            eprintln!("{note}");
+            return 130;
+        }
         return status;
     }
     for o in &reaped {
@@ -1994,6 +2052,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             crate::util::format_bytes(u),
             crate::util::format_bytes(shared_once)
         );
+    }
+    if let Some(note) = &stop_note {
+        eprintln!("{note}");
+        return 130;
     }
     status
 }

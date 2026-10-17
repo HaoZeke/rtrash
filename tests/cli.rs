@@ -5780,6 +5780,44 @@ fn reap_trashes_stale_entries_and_keeps_held_fresh_and_live_lock_ones() {
     assert!(fresh.exists());
 }
 
+/// A first Ctrl-C during `reap` stops after the entry in hand. The entry
+/// it trashed has its record, and the entries not reached stay where
+/// they were.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn reap_stops_after_the_entry_in_hand_at_the_first_ctrl_c() {
+    let sb = Sandbox::new("reap-ctrl-c");
+    let tmp = sb.root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let names = ["s1.txt", "s2.txt", "s3.txt"];
+    for n in names {
+        stale_file(&tmp, n);
+    }
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let tmp_arg = tmp.to_str().unwrap();
+    let out = sb.run_env(
+        &["reap", "--older-than=1h", "--age-by=m", &pin, tmp_arg],
+        &[("RTRASH_TEST_SIGINT", "after-item:1")],
+    );
+    let said = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(130), "{said}");
+    assert!(
+        said.contains("stopped by Ctrl-C: 1 reaped, 2 not reached"),
+        "{said}"
+    );
+    let left: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|n| tmp.join(n).exists())
+        .collect();
+    assert_eq!(left.len(), 2, "{left:?}");
+    let trashed = trash_names(&sb);
+    assert_eq!(trashed.len(), 1, "{trashed:?}");
+    assert!(!left.contains(&trashed[0].as_str()), "{trashed:?} {left:?}");
+    let record = format!("{}.trashinfo", trashed[0]);
+    assert_eq!(names_in(&sb.trash().join("info")), [record]);
+}
+
 #[cfg(unix)]
 #[test]
 fn reap_refuses_home_and_rejects_bad_ages() {
