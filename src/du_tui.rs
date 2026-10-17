@@ -258,6 +258,16 @@ fn key_of(it: &Item, apparent: bool) -> u64 {
     }
 }
 
+/// What a row counts toward the view's items, as the title's total
+/// does: a file or link is one, and a directory is itself and all below.
+fn row_items(it: &Item) -> u64 {
+    if it.is_dir {
+        it.items.saturating_add(1)
+    } else {
+        1
+    }
+}
+
 /// Rows in the order of `s`: largest, most items or newest change first,
 /// or by name from A; `reverse` flips it.
 fn sort_rows(rows: &mut [Item], s: Sorting) {
@@ -2029,7 +2039,8 @@ fn row_text(it: &Item, marked: bool, whole: u64, sort: SortKey) -> String {
 
 /// What every row of one view shares when it is drawn.
 struct RowCtx<'a> {
-    /// The view's total, the bar's full width.
+    /// The view's total, the bar's full width: its bytes, or its items
+    /// ([`row_items`] summed) when `sort` is by items.
     whole: u64,
     sort: SortKey,
     /// Apparent sizes instead of disk use.
@@ -2098,10 +2109,15 @@ fn row_text_in(it: &Item, marked: bool, ctx: &RowCtx) -> String {
     } else {
         format!("  [{}]", badges.join(" "))
     };
+    let part = if sort == SortKey::Items {
+        row_items(it)
+    } else {
+        key_of(it, apparent)
+    };
     format!(
         "{mark}{warn}{:>10} {}{name}{slash}{badges}",
         format_bytes(key_of(it, apparent)),
-        share.cols(key_of(it, apparent), whole, false)
+        share.cols(part, whole, false)
     )
 }
 
@@ -2142,11 +2158,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     };
     // Everything below this directory, as ncdu's Items count: each row,
     // and for a directory also what it holds.
-    let below: u64 = view
-        .rows
-        .iter()
-        .map(|r| if r.is_dir { r.items + 1 } else { 1 })
-        .sum();
+    let below: u64 = view.rows.iter().map(row_items).sum();
     let items = crate::util::plural(below, "item", "items");
     let marked = app.marked_count();
     let tail = format!(" · {size} · {items} · {entries} · {marked} marked ");
@@ -2160,7 +2172,8 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     };
     let title = format!(" {}{tail}", fit_left(&place, room));
     let ctx = RowCtx {
-        whole,
+        // By items, the share columns measure items, as gdu's bars do.
+        whole: if sort == SortKey::Items { below } else { whole },
         sort,
         apparent,
         pending: view.scanning,
@@ -2942,6 +2955,93 @@ mod tests {
         assert_eq!(percent(1, 3), " 33.3%");
         assert_eq!(percent(1024, 1024), "100.0%");
         assert_eq!(percent(u64::MAX, 1), "100.0%");
+    }
+
+    /// By items the share columns measure items, not bytes: the directory
+    /// that holds most entries gets the longest bar even when it is the
+    /// smaller one, and the percents add up to the title's item total.
+    #[test]
+    fn by_items_the_share_columns_count_items() {
+        let row = |name: &str, is_dir: bool, disk: u64, items: u64| Item {
+            path: PathBuf::from("/x").join(name),
+            is_dir,
+            apparent: disk,
+            disk,
+            mtime: 0,
+            items,
+            artefact: None,
+            repos: Vec::new(),
+            git: None,
+            unique: None,
+        };
+        // 7 + 2 + 1 = 10 items: many small files, one big folder, a file.
+        let many = row("many", true, 100, 6);
+        let big = row("big", true, 900, 1);
+        let file = row("f.bin", false, 24, 1);
+        let text = |it: &Item, sort: SortKey, whole: u64| {
+            let ctx = RowCtx {
+                whole,
+                sort,
+                apparent: false,
+                pending: false,
+                whole_path: false,
+                unread: &[],
+                share: Share::Both,
+            };
+            row_text_in(it, false, &ctx)
+        };
+        let by_items = |it: &Item| text(it, SortKey::Items, 10);
+        assert!(
+            by_items(&many).contains(" 70.0% [#######   ] many/"),
+            "{}",
+            by_items(&many)
+        );
+        assert!(
+            by_items(&big).contains(" 20.0% [##        ] big/"),
+            "{}",
+            by_items(&big)
+        );
+        assert!(
+            by_items(&file).contains(" 10.0% [#         ] f.bin"),
+            "{}",
+            by_items(&file)
+        );
+        // The size column still shows bytes, and by size the bars do too.
+        assert!(
+            by_items(&big).contains(&format_bytes(900)),
+            "{}",
+            by_items(&big)
+        );
+        let by_disk = text(&big, SortKey::Disk, 1024);
+        assert!(by_disk.contains(" 87.9% [#########"), "{by_disk}");
+        assert_eq!(row_items(&big), 2);
+        assert_eq!(row_items(&file), 1);
+    }
+
+    #[test]
+    fn items_order_draws_item_bars_on_screen() {
+        let t = tree("itembars");
+        let mut a = app(&t);
+        a.keys = Keymap::builtin();
+        let screen = |a: &mut App| tui_term::render_text(100, 14, |f| ui(f, a));
+        let drawn = |screen: &str, part: &dyn Fn(&Item) -> u64, whole: u64, a: &App| {
+            for it in &a.view().rows {
+                let name = it.path.file_name().unwrap().to_string_lossy();
+                let want = format!("[{}] {name}", bar(part(it), whole, 10));
+                assert!(screen.contains(&want), "{want:?} in {screen}");
+            }
+        };
+        // By disk use, each bar is the row's bytes of the view's.
+        let by_size = screen(&mut a);
+        drawn(&by_size, &|it: &Item| it.disk, a.view().disk, &a);
+        a.on_key(KeyCode::Char('C'), KeyModifiers::SHIFT);
+        assert_eq!(a.sorting.label(), "items");
+        // By items, the row's items of the title's total.
+        let by_items = screen(&mut a);
+        let total: u64 = a.view().rows.iter().map(row_items).sum();
+        drawn(&by_items, &row_items, total, &a);
+        // The tree's big folder holds most bytes but not all the items.
+        assert_ne!(by_size, by_items);
     }
 
     #[test]

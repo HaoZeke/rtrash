@@ -1,0 +1,1 @@
+Sorted by items (`C`), the `rtrash du -i` explorer now measures each row's share bar and percent by item count instead of size, as gdu does. A row's items are its files and folders, itself included, out of the item total in the title. The size column still shows bytes, and the other orders measure sizes as before.
