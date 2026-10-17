@@ -7878,3 +7878,80 @@ fn status_fix_stops_after_the_record_in_hand_at_the_first_ctrl_c() {
         "{records:?}"
     );
 }
+
+/// Trash `names` from the work dir in one put.
+fn put_names(sb: &Sandbox, names: &[String]) {
+    for n in names {
+        fs::write(sb.work().join(n), n).unwrap();
+    }
+    let mut args = vec!["put"];
+    args.extend(names.iter().map(String::as_str));
+    let out = sb.run(&args);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+}
+
+/// Each of `names` has both its payload and its record in the trash, or
+/// neither. Returns how many are gone.
+fn pairs_whole(sb: &Sandbox, names: &[String]) -> usize {
+    let (files, info) = (sb.trash().join("files"), sb.trash().join("info"));
+    let mut gone = 0;
+    for n in names {
+        let payload = files.join(n).exists();
+        let record = info.join(format!("{n}.trashinfo")).exists();
+        assert_eq!(payload, record, "{n}: payload {payload}, record {record}");
+        gone += usize::from(!payload);
+    }
+    gone
+}
+
+/// A first Ctrl-C during a full `empty` stops the wipe before the next
+/// payload. The payloads not reached keep their records, and no record
+/// is left whose payload is gone.
+#[test]
+fn empty_stops_at_the_first_ctrl_c_and_leaves_no_half_pair() {
+    let sb = Sandbox::new("empty-ctrl-c");
+    let names: Vec<String> = (0..40).map(|i| format!("w{i}.txt")).collect();
+    put_names(&sb, &names);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = sb.run_env(
+        &["empty", pin.as_str()],
+        &[("RTRASH_TEST_SIGINT", "after-item:1")],
+    );
+    let said = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(130), "{said}");
+    assert!(said.contains("stopped by Ctrl-C: "), "{said}");
+    assert!(said.contains("the rest stay in the trash"), "{said}");
+    assert!(pairs_whole(&sb, &names) >= 1, "{said}");
+}
+
+/// The same for `empty DAYS`, which removes item by item in parallel.
+#[test]
+fn empty_days_stops_at_the_first_ctrl_c_and_leaves_no_half_pair() {
+    let sb = Sandbox::new("empty-days-ctrl-c");
+    let names: Vec<String> = (0..40).map(|i| format!("d{i}.txt")).collect();
+    put_names(&sb, &names);
+    for n in &names {
+        let at = sb.trash().join(format!("info/{n}.trashinfo"));
+        let body = fs::read_to_string(&at).unwrap();
+        let old: Vec<String> = body
+            .lines()
+            .map(|l| {
+                if l.starts_with("DeletionDate=") {
+                    "DeletionDate=2001-01-01T00:00:00".to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect();
+        fs::write(&at, old.join("\n")).unwrap();
+    }
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = sb.run_env(
+        &["empty", pin.as_str(), "5"],
+        &[("RTRASH_TEST_SIGINT", "after-item:1")],
+    );
+    let said = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(130), "{said}");
+    assert!(said.contains("stopped by Ctrl-C: "), "{said}");
+    assert!(pairs_whole(&sb, &names) >= 1, "{said}");
+}

@@ -149,6 +149,10 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
         kept[c.root].1 += 1;
     }
     for i in plan_freeing(&items, p.max, p.policy, p.free_inodes) {
+        // After a Ctrl-C in a run that stops on it, the rest stay.
+        if !p.dry_run && crate::interrupt::requested() {
+            break;
+        }
         let c = &items[i];
         let dir = &dirs[c.root];
         let shown = crate::util::join_name(&dir.files(), &c.name);
@@ -227,6 +231,8 @@ fn tree_inodes(path: &std::path::Path) -> u64 {
 
 fn remove_entry(dir: &TrashDir, name: &str) -> io::Result<()> {
     crate::permanent_guard::remove(&crate::util::join_name(&dir.files(), name))?;
+    // The payload is gone: its record goes too before a Ctrl-C acts.
+    let _section = crate::interrupt::critical();
     match fs::remove_file(crate::util::join_info(&dir.info(), name)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),

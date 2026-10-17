@@ -511,6 +511,8 @@ fn confirm_whole(prog: &str, total: usize) -> bool {
 fn remove_entry(it: &BinEntry) -> std::io::Result<()> {
     std::fs::symlink_metadata(&it.payload)?;
     crate::permanent_guard::remove(&it.payload)?;
+    // The payload is gone: its $I record goes too before a Ctrl-C acts.
+    let _section = crate::interrupt::critical();
     if let Some(index) = crate::win_recycle::index_file_for(&it.payload) {
         match std::fs::remove_file(&index) {
             Ok(()) => {}

@@ -506,7 +506,15 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             return code;
         }
     }
+    // The first Ctrl-C stops after the items in hand and a second quits.
+    // Only now: a press at a question above keeps its usual meaning.
+    if !opts.dry_run {
+        crate::interrupt::stop_then_quit();
+    }
     for dir in dirs.iter().filter(|_| age_pass) {
+        if crate::interrupt::requested() {
+            break;
+        }
         // Exclusive lock for this trash root so put cannot interleave a half pair.
         let _lock = match trashdir::TrashLock::acquire(&dir.root) {
             Ok(l) => l,
@@ -587,6 +595,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     }
     let failures = failures.into_inner().unwrap_or_else(|p| p.into_inner());
     eprint!("{}", failure_report(prog, &failures));
+    if !opts.dry_run && crate::interrupt::requested() {
+        eprintln!("{prog}: stopped by Ctrl-C: {n} removed; the rest stay in the trash");
+        return 130;
+    }
     if errors.load(Ordering::Relaxed) > 0 {
         1
     } else {
@@ -706,8 +718,8 @@ fn empty_one(
             let before = errors.load(Ordering::Relaxed);
             full_empty_wipe(prog, dir, opts, removed, errors, failures);
             // An empty that took everything leaves a known total; one that
-            // failed somewhere leaves it stale for the next reader.
-            if errors.load(Ordering::Relaxed) == before {
+            // failed somewhere or stopped leaves it stale for the next reader.
+            if errors.load(Ordering::Relaxed) == before && !crate::interrupt::requested() {
                 crate::trash_total::store(dir, 0, 0);
             } else {
                 crate::trash_total::forget(dir);
@@ -809,6 +821,10 @@ fn empty_one(
             removed.fetch_add(1, Ordering::Relaxed);
             return;
         }
+        // After a Ctrl-C, the items not started stay with their records.
+        if crate::interrupt::requested() {
+            return;
+        }
         let sz = match (&total, info_path) {
             (Some(_), Some(_)) => target
                 .file_name()
@@ -822,12 +838,17 @@ fn empty_one(
                     gone_items.fetch_add(1, Ordering::Relaxed);
                 }
                 if let Some(ip) = info_path {
+                    // The payload is gone: its record goes too before a
+                    // Ctrl-C acts.
+                    let section = crate::interrupt::critical();
                     match fs::remove_file(ip) {
                         Ok(()) => {}
                         // A concurrent empty may have won the race.
                         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                         Err(e) => fail(failures, errors, ip.clone(), &e),
                     }
+                    drop(section);
+                    crate::interrupt::test_seam("after-item");
                 }
                 if opts.verbose {
                     println!("removed {}", crate::util::term_path(display));
@@ -841,7 +862,13 @@ fn empty_one(
     if opts.dry_run {
         sizes.write_back_locked();
     } else {
-        prune_directorysizes(dir, &kept_names);
+        if crate::interrupt::requested() {
+            // Stopped: the victims not reached are not in kept_names, so
+            // keep every line whose payload is still there instead.
+            trashdir::DirSizes::load(dir).write_back_locked();
+        } else {
+            prune_directorysizes(dir, &kept_names);
+        }
         if let Some((b, n)) = total {
             crate::trash_total::store(
                 dir,
@@ -940,6 +967,10 @@ fn full_empty_wipe(
         Ok(w) => {
             // Top-level `files/` children ≈ trashed items (incl. orphans).
             removed.fetch_add(w.removed, Ordering::Relaxed);
+            // A Ctrl-C left these with their records.
+            for name in &w.not_reached {
+                kept.push(crate::util::str_from_os_ref(name));
+            }
             for (name, e) in w.failed {
                 kept.push(crate::util::str_from_os_ref(&name));
                 fail(failures, errors, files_dir.join(&name), &e);

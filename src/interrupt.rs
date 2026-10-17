@@ -1,5 +1,5 @@
-//! Ctrl-C during a put, restore, undo, rm or `status --fix`, and around
-//! every trash record.
+//! Ctrl-C during a put, restore, undo, rm, empty or `status --fix`, and
+//! around every trash record.
 //!
 //! A batch command calls [`stop_then_quit`]: the first Ctrl-C asks the run
 //! to stop once the item in hand is done, and the next one quits at once,
@@ -116,7 +116,7 @@ fn state() -> std::sync::MutexGuard<'static, Installed> {
     STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// For a batch run (put, restore, undo, rm, status --fix): the first
+/// For a batch run (put, restore, undo, rm, empty, status --fix): the first
 /// Ctrl-C stops it after the item in hand, and a second one quits.
 /// Stays for the process.
 pub fn stop_then_quit() {

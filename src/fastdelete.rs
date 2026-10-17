@@ -828,6 +828,9 @@ pub struct Wipe {
     /// Top-level children left behind, each with the first error under it
     /// (the error names the path where it happened).
     pub failed: Vec<(OsString, io::Error)>,
+    /// Top-level children a stop left untouched (a Ctrl-C during
+    /// [`wipe_two_parallel`]); they keep their records.
+    pub not_reached: Vec<OsString>,
 }
 
 /// Wipe every top-level child of `dir` in parallel. Missing `dir` is success.
@@ -846,8 +849,14 @@ fn test_fails(name: &OsStr) -> bool {
 
 /// [`wipe_children_parallel`], leaving the children `keep` names.
 pub fn wipe_children_except(dir: &Path, keep: impl Fn(&OsStr) -> bool + Sync) -> io::Result<Wipe> {
+    wipe_children_with(dir, keep, || false, |_| {})
+}
+
+/// `dir` opened as a directory, never through a symlink posing as files/
+/// or info/ (full-empty footgun). `None` when `dir` is missing.
+fn open_dir_nofollow(dir: &Path) -> io::Result<Option<OwnedFd>> {
     let dir_c = cstring_path(dir)?;
-    // Never follow a symlink posing as files/ or info/ (full-empty footgun).
+    // SAFETY: open(2) on a NUL-terminated path; the fd is owned below.
     let fd = unsafe {
         libc::open(
             dir_c.as_ptr(),
@@ -857,33 +866,56 @@ pub fn wipe_children_except(dir: &Path, keep: impl Fn(&OsStr) -> bool + Sync) ->
     if fd < 0 {
         let e = io::Error::last_os_error();
         if e.kind() == io::ErrorKind::NotFound {
-            return Ok(Wipe::default());
+            return Ok(None);
         }
         return Err(e);
     }
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: a fresh fd that nothing else owns.
+    Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }))
+}
+
+/// [`wipe_children_except`] that asks `stop` before each child, leaving
+/// the children not started in [`Wipe::not_reached`], and calls `gone`
+/// with the name of each child once it is removed.
+fn wipe_children_with(
+    dir: &Path,
+    keep: impl Fn(&OsStr) -> bool + Sync,
+    stop: impl Fn() -> bool + Sync,
+    gone: impl Fn(&OsStr) + Sync,
+) -> io::Result<Wipe> {
+    let Some(fd) = open_dir_nofollow(dir)? else {
+        return Ok(Wipe::default());
+    };
     let entries: Vec<DirEnt> = read_dirfd_entries(fd.as_raw_fd())?
         .into_iter()
         .filter(|e| !keep(&e.name))
         .collect();
     // Always parallelise top-level wipe (full empty of files/ or info/).
-    let results: Vec<io::Result<()>> = entries
+    let results: Vec<Option<io::Result<()>>> = entries
         .par_iter()
         .map(|e| {
+            if stop() {
+                return None;
+            }
             if test_fails(&e.name) {
-                return Err(io::Error::new(
+                return Some(Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     "refused by RTRASH_TEST_FAIL_DELETE",
-                ));
+                )));
             }
-            remove_entry(fd.as_raw_fd(), dir, e, 0)
+            let r = remove_entry(fd.as_raw_fd(), dir, e, 0);
+            if r.is_ok() {
+                gone(&e.name);
+            }
+            Some(r)
         })
         .collect();
     let mut out = Wipe::default();
     for (e, r) in entries.into_iter().zip(results) {
         match r {
-            Ok(()) => out.removed += 1,
-            Err(err) => out.failed.push((e.name, err)),
+            Some(Ok(())) => out.removed += 1,
+            Some(Err(err)) => out.failed.push((e.name, err)),
+            None => out.not_reached.push(e.name),
         }
     }
     Ok(out)
@@ -892,8 +924,58 @@ pub fn wipe_children_except(dir: &Path, keep: impl Fn(&OsStr) -> bool + Sync) ->
 /// Wipe `files/`, then `info/` except the `.trashinfo` of each payload that
 /// stayed behind, so a payload that could not go keeps its record instead
 /// of turning into an orphan. Both roots are always tried.
+///
+/// The first Ctrl-C stops the wipe before the next payload; see
+/// [`wipe_pair`].
 pub fn wipe_two_parallel(files: &Path, info: &Path) -> (io::Result<Wipe>, io::Result<Wipe>) {
-    let ra = wipe_children_parallel(files);
+    wipe_pair(files, info, crate::interrupt::requested)
+}
+
+/// [`wipe_two_parallel`], asking `stop` before each payload. Each
+/// payload's record goes right after it, in an
+/// [`crate::interrupt::critical`] section, so a Ctrl-C never leaves a
+/// record whose payload is gone. Once `stop` says so, the payloads not
+/// started keep their records, and the rest of `info/` (strays, records
+/// without a payload) stays as it was.
+fn wipe_pair(
+    files: &Path,
+    info: &Path,
+    stop: impl Fn() -> bool + Sync,
+) -> (io::Result<Wipe>, io::Result<Wipe>) {
+    let info_fd = open_dir_nofollow(info);
+    let records = std::sync::atomic::AtomicU64::new(0);
+    let ra = wipe_children_with(
+        files,
+        |_| false,
+        stop,
+        |name| {
+            let Ok(Some(fd)) = &info_fd else {
+                return;
+            };
+            let mut rec = name.to_os_string();
+            rec.push(".trashinfo");
+            let Ok(rec_c) = CString::new(rec.as_bytes()) else {
+                return;
+            };
+            let section = crate::interrupt::critical();
+            // SAFETY: unlinkat(2) on a NUL-terminated name in an open dir. A
+            // record that will not go is left to the info/ pass below, which
+            // reports it.
+            if unsafe { libc::unlinkat(fd.as_raw_fd(), rec_c.as_ptr(), 0) } == 0 {
+                records.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            drop(section);
+            crate::interrupt::test_seam("after-item");
+        },
+    );
+    let taken = records.load(std::sync::atomic::Ordering::Relaxed);
+    if matches!(&ra, Ok(w) if !w.not_reached.is_empty()) {
+        let rb = Wipe {
+            removed: taken,
+            ..Wipe::default()
+        };
+        return (ra, Ok(rb));
+    }
     let kept: std::collections::HashSet<OsString> = match &ra {
         Ok(w) => w
             .failed
@@ -907,7 +989,10 @@ pub fn wipe_two_parallel(files: &Path, info: &Path) -> (io::Result<Wipe>, io::Re
         // files/ unreadable: keep every record.
         Err(_) => return (ra, Ok(Wipe::default())),
     };
-    let rb = wipe_children_except(info, |n| kept.contains(n));
+    let rb = wipe_children_except(info, |n| kept.contains(n)).map(|mut w| {
+        w.removed += taken;
+        w
+    });
     (ra, rb)
 }
 
@@ -1297,6 +1382,37 @@ mod tests {
         assert_eq!(wb.unwrap().removed, 20);
         assert!(fs::read_dir(&a).unwrap().next().is_none());
         assert!(fs::read_dir(&b).unwrap().next().is_none());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A wipe stopped partway leaves each payload it did not reach with
+    /// its record, takes the record of each payload it removed, and leaves
+    /// the rest of info/ alone.
+    #[test]
+    fn a_stopped_wipe_keeps_every_record_whose_payload_stays() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let root = tmp_root("stop");
+        let (files, info) = (root.join("files"), root.join("info"));
+        fs::create_dir_all(&files).unwrap();
+        fs::create_dir_all(&info).unwrap();
+        for i in 0..64 {
+            fs::write(files.join(format!("p{i}")), b"x").unwrap();
+            fs::write(info.join(format!("p{i}.trashinfo")), b"x").unwrap();
+        }
+        fs::write(info.join("stray.txt"), b"x").unwrap();
+        // The first three payloads asked about go; every later one stays.
+        let asked = AtomicU64::new(0);
+        let (wf, wi) = wipe_pair(&files, &info, || asked.fetch_add(1, Ordering::SeqCst) >= 3);
+        let (wf, wi) = (wf.unwrap(), wi.unwrap());
+        assert_eq!(wf.removed, 3);
+        assert_eq!(wf.not_reached.len(), 61);
+        assert_eq!(wi.removed, 3);
+        for i in 0..64 {
+            let payload = files.join(format!("p{i}")).exists();
+            let record = info.join(format!("p{i}.trashinfo")).exists();
+            assert_eq!(payload, record, "p{i}: payload {payload}, record {record}");
+        }
+        assert!(info.join("stray.txt").exists());
         let _ = fs::remove_dir_all(&root);
     }
 

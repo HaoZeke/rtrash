@@ -76,6 +76,8 @@ pub fn permanently_remove_entries(
             succeeded.push(false);
             continue;
         }
+        // The payload is gone: its record goes too before a Ctrl-C acts.
+        let _section = crate::interrupt::critical();
         if let Err(e) = std::fs::remove_file(&info_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 eprintln!("{prog}: cannot remove '{}': {e}", info_path.display());

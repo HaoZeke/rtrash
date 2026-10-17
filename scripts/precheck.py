@@ -473,7 +473,7 @@ PERMANENT_ALLOW = {
     ("fastdelete.rs", "remove_dir_tree"): (2, PRIMITIVE),
     ("fastdelete.rs", "remove_path"): (2, PRIMITIVE),
     ("fastdelete.rs", "wipe_children_parallel"): (1, PRIMITIVE),
-    ("fastdelete.rs", "wipe_two_parallel"): (2, PRIMITIVE),
+    ("fastdelete.rs", "wipe_pair"): (1, PRIMITIVE),
     ("finder_total.rs", "prune_stale"): (1, OWN),
     ("reap_timer.rs", "remove"): (1, OWN + ": the timer unit files it installed"),
     ("restore.rs", "restore_one_to"): (2, "the staged copy it made, and the record of the "
