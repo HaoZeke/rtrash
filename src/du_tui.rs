@@ -8,6 +8,11 @@
 //! and the full view replaces it when the scan finishes. You can move,
 //! open other directories and go back meanwhile.
 //!
+//! A delete runs in the background too, as in dua 2.45: its rows go to
+//! the trash one at a time on a thread of their own, each leaves the
+//! views as it goes, and the status line counts the rows and bytes left.
+//! Quitting waits for the row in hand and leaves the rest.
+//!
 //! Given several directories (`du -i a b`, as `dua i a b`), the explorer
 //! opens on a view of its own above them, one row per directory, kept in
 //! the cache under the empty path, which names no directory.
@@ -15,7 +20,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
@@ -114,6 +119,44 @@ impl Sorting {
 
 /// Rows trashed by one delete, with what is needed to put them back.
 type UndoGroup = Vec<(bin::Ticket, Item)>;
+
+/// One row a delete got to: its ticket, or `None` when it stayed.
+type Trashed = (Item, Option<bin::Ticket>);
+
+/// A delete in progress: the rows go to the trash on a thread of their
+/// own (inline in tests) and come back one at a time through `rx`.
+struct Deleting {
+    rx: mpsc::Receiver<Trashed>,
+    /// Asks the thread to stop before its next row.
+    stop: Arc<AtomicBool>,
+    /// Rows not yet done; none of them can be opened meanwhile.
+    pending: Vec<PathBuf>,
+    total: usize,
+    /// Disk use of the rows not yet done.
+    left: u64,
+    group: UndoGroup,
+    failed: usize,
+}
+
+/// Trash `items` one at a time and send each with its ticket, until all
+/// are done, `stop` is set, or nobody listens any more.
+fn trash_rows(
+    prog: &str,
+    items: Vec<Item>,
+    pin: Option<&PathBuf>,
+    stop: &AtomicBool,
+    tx: &mpsc::Sender<Trashed>,
+) {
+    for item in items {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let done = bin::trash(prog, &item.path, pin);
+        if tx.send((item, done)).is_err() {
+            return;
+        }
+    }
+}
 
 /// Trash and untrash for the browser: the FreeDesktop trash on Unix, the
 /// Recycle Bin on Windows.
@@ -217,6 +260,8 @@ struct App {
     /// Scan in the background (the terminal session); tests scan inline.
     background: bool,
     jobs: HashMap<PathBuf, Job>,
+    /// The delete in progress, if any (one at a time).
+    deleting: Option<Deleting>,
     /// The current row order (`s`, `n`, `C` and `M` change it).
     sorting: Sorting,
     /// The size `s` sorts by and rows show: apparent under `--apparent`.
@@ -676,6 +721,7 @@ impl App {
             read_only: false,
             background: false,
             jobs: HashMap::new(),
+            deleting: None,
         }
     }
 
@@ -886,6 +932,10 @@ impl App {
 
     /// Switch to `dir`, scanning it when it has no cached view.
     fn go(&mut self, dir: PathBuf, cursor_on: Option<&Path>) {
+        if let Some(gone) = self.being_trashed(&dir) {
+            self.status = format!("'{}' is being trashed", crate::util::term_path(&gone));
+            return;
+        }
         // The filter belongs to the view it was typed in.
         if !self.filter.is_empty() {
             self.filter.clear();
@@ -961,6 +1011,10 @@ impl App {
 
     /// Rescan the current directory and carry the size change up the chain.
     fn refresh(&mut self) {
+        if self.deleting.is_some() {
+            self.status = "a delete is running; rescan once it is done".into();
+            return;
+        }
         let cur = self.cur.clone();
         if self.jobs.contains_key(&cur) {
             self.status = "still scanning this directory".into();
@@ -1197,6 +1251,10 @@ impl App {
             self.status = "read-only (--no-delete): nothing gets trashed".into();
             return;
         }
+        if self.deleting.is_some() {
+            self.status = "a delete is running; wait for it to finish".into();
+            return;
+        }
         if self.view().scanning {
             self.status = "still scanning; trash rows once the sizes are in".into();
             return;
@@ -1234,8 +1292,15 @@ impl App {
         };
     }
 
+    /// Start trashing the confirmed rows. In the terminal session they go
+    /// on a thread of their own while the explorer keeps drawing; tests
+    /// trash them inline. [`App::poll_delete`] takes in each one.
     fn delete(&mut self) {
         self.mode = Mode::Browse;
+        if self.deleting.is_some() {
+            self.status = "a delete is running; wait for it to finish".into();
+            return;
+        }
         let t = self.targets();
         // RTRASH_ALLOW_ROOTS: every row is checked before the first one
         // goes, so a refused delete trashes nothing.
@@ -1250,21 +1315,94 @@ impl App {
                 return;
             }
         }
-        let mut group: UndoGroup = Vec::new();
-        let mut failed = 0usize;
-        for item in t {
-            match bin::trash(&self.prog, &item.path, self.trash_pin.as_ref()) {
-                Some(done) => group.push((done, item)),
-                None => failed += 1,
+        self.sel.clear();
+        self.away.clear();
+        let (tx, rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.deleting = Some(Deleting {
+            rx,
+            stop: stop.clone(),
+            pending: t.iter().map(|i| i.path.clone()).collect(),
+            total: t.len(),
+            left: t.iter().map(|i| i.disk).sum(),
+            group: Vec::new(),
+            failed: 0,
+        });
+        let (prog, pin) = (self.prog.clone(), self.trash_pin.clone());
+        let work = move || trash_rows(&prog, t, pin.as_ref(), &stop, &tx);
+        if self.background {
+            std::thread::spawn(work);
+            self.show_delete_progress();
+        } else {
+            work();
+            self.poll_delete();
+        }
+    }
+
+    /// The queued row `dir` is, or lies under, while a delete runs.
+    fn being_trashed(&self, dir: &Path) -> Option<PathBuf> {
+        let d = self.deleting.as_ref()?;
+        d.pending.iter().find(|p| dir.starts_with(p)).cloned()
+    }
+
+    /// Take in every row the delete has done since the last call: each
+    /// trashed row leaves its view and shrinks the views above. Once the
+    /// thread is done, the rows become one undo step. Returns whether
+    /// anything came in.
+    fn poll_delete(&mut self) -> bool {
+        let Some(mut d) = self.deleting.take() else {
+            return false;
+        };
+        let mut came = Vec::new();
+        let finished = loop {
+            match d.rx.try_recv() {
+                Ok(t) => came.push(t),
+                Err(mpsc::TryRecvError::Empty) => break false,
+                Err(mpsc::TryRecvError::Disconnected) => break true,
+            }
+        };
+        let any = !came.is_empty();
+        for (item, done) in came {
+            d.pending.retain(|p| *p != item.path);
+            d.left = d.left.saturating_sub(item.disk);
+            match done {
+                Some(ticket) => {
+                    self.drop_row(&item);
+                    d.group.push((ticket, item));
+                }
+                None => d.failed += 1,
             }
         }
-        let gone: Vec<PathBuf> = group.iter().map(|(_, it)| it.path.clone()).collect();
-        let disk: u64 = group.iter().map(|(_, it)| it.disk).sum();
-        // Each trashed row leaves its own view and shrinks the views above.
-        for (_, it) in &group {
-            let Some(parent) = up(&self.roots, &it.path) else {
-                continue;
-            };
+        if any {
+            let at = self.list_state.selected().unwrap_or(0);
+            self.select(at);
+        }
+        if finished {
+            self.finish_delete(d);
+        } else {
+            self.deleting = Some(d);
+            if any {
+                self.show_delete_progress();
+            }
+        }
+        any || finished
+    }
+
+    /// The trashed `it` leaves its view, and the views above it shrink;
+    /// views below it describe paths that are gone.
+    fn drop_row(&mut self, it: &Item) {
+        // The view on screen lay inside the row (marked in a view above,
+        // then opened): show the row's parent, which stays.
+        if self.cur.starts_with(&it.path) {
+            if let Some(parent) = up(&self.roots, &it.path) {
+                if !self.filter.is_empty() {
+                    self.filter.clear();
+                    self.refilter();
+                }
+                self.cur = parent;
+            }
+        }
+        if let Some(parent) = up(&self.roots, &it.path) {
             if let Some(v) = self.cache.get_mut(&parent) {
                 v.rows.retain(|r| r.path != it.path);
                 v.stash.retain(|r| r.path != it.path);
@@ -1278,20 +1416,52 @@ impl App {
                 false,
             );
         }
-        // Views below a trashed directory describe paths that are gone.
-        self.cache
-            .retain(|p, _| !gone.iter().any(|g| p.starts_with(g)));
-        self.sel.clear();
-        self.away.clear();
-        let at = self.list_state.selected().unwrap_or(0);
-        self.select(at);
-        let n = group.len();
-        if n > 0 {
-            self.undo.push(group);
+        self.cache.retain(|p, _| !p.starts_with(&it.path));
+    }
+
+    /// The status line while a delete runs.
+    fn show_delete_progress(&mut self) {
+        let Some(d) = &self.deleting else {
+            return;
+        };
+        let done = d.group.len() + d.failed;
+        self.status = if d.stop.load(Ordering::Relaxed) {
+            format!("stopping after the row in hand: {done} of {} done", d.total)
+        } else {
+            format!(
+                "trashing: {done} of {} done, {} left · q waits for the row in hand",
+                d.total,
+                format_bytes(d.left)
+            )
+        };
+    }
+
+    /// Ask the running delete to stop before its next row (on quit).
+    fn stop_delete(&mut self) {
+        if let Some(d) = &self.deleting {
+            d.stop.store(true, Ordering::Relaxed);
         }
-        self.status = match failed {
-            0 => format!("trashed {n} item(s), {} · u undo", format_bytes(disk)),
-            f => format!("trashed {n}, {f} failed · u undo"),
+        self.show_delete_progress();
+    }
+
+    fn finish_delete(&mut self, d: Deleting) {
+        let disk: u64 = d.group.iter().map(|(_, it)| it.disk).sum();
+        let n = d.group.len();
+        let left = d.pending.len();
+        if n > 0 {
+            self.undo.push(d.group);
+        }
+        let stopped = if left > 0 {
+            format!(", {left} left in place")
+        } else {
+            String::new()
+        };
+        self.status = match d.failed {
+            0 => format!(
+                "trashed {n} item(s), {}{stopped} · u undo",
+                format_bytes(disk)
+            ),
+            f => format!("trashed {n}, {f} failed{stopped} · u undo"),
         };
     }
 
@@ -1299,6 +1469,10 @@ impl App {
     fn undo_last(&mut self) {
         if self.read_only {
             self.status = "read-only (--no-delete): nothing to undo".into();
+            return;
+        }
+        if self.deleting.is_some() {
+            self.status = "a delete is running; undo once it is done".into();
             return;
         }
         let Some(group) = self.undo.pop() else {
@@ -2332,7 +2506,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 if app.read_only {
                     "read-only (--no-delete): d and u are off"
                 } else {
-                    "d delete — move to the trash (asks first)"
+                    "d delete — move to the trash (asks first; runs in the background)"
                 },
                 if app.read_only {
                     "r — rescan this directory"
@@ -2362,6 +2536,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
     loop {
         app.poll_jobs();
+        app.poll_delete();
         terminal.draw(|f| ui(f, app))?;
         if let Some(text) = app.clipboard.take() {
             let mut out = io::stdout();
@@ -2392,7 +2567,11 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
             }
             None => {}
         }
-        if app.quit {
+        if app.quit && app.deleting.is_some() {
+            // A row half moved across devices must not be cut off: stop
+            // after the one in hand, and quit once it is done.
+            app.stop_delete();
+        } else if app.quit {
             // Let running scans wind down instead of walking on unseen.
             for job in app.jobs.values() {
                 job.control.stop.store(true, Ordering::Relaxed);
@@ -2400,7 +2579,11 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
             return Ok(());
         }
         // Redraw often while a scan runs so its counters move.
-        let tick = if app.jobs.is_empty() { 200 } else { 100 };
+        let tick = if app.jobs.is_empty() && app.deleting.is_none() {
+            200
+        } else {
+            100
+        };
         if let Some((code, mods)) = tui_term::next_key(terminal, Duration::from_millis(tick))? {
             app.on_key(code, mods);
         }
@@ -2522,6 +2705,92 @@ mod tests {
             .iter()
             .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_background_delete_counts_down_and_blocks_what_would_clash() {
+        let t = tree("bgdel");
+        let mut a = app(&t);
+        a.background = true;
+        let top_before = a.view().disk;
+        // Rows: big, file, small. Mark big and small.
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        a.select(2);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        // Nothing is taken in until the next poll, so the delete is still
+        // running here however fast its thread is.
+        assert!(
+            a.status.starts_with("trashing: 0 of 2 done, "),
+            "{}",
+            a.status
+        );
+        assert!(
+            a.status.contains("q waits for the row in hand"),
+            "{}",
+            a.status
+        );
+        // A queued row cannot be opened, and d, u and r wait.
+        a.select(0);
+        a.open();
+        assert!(a.status.contains("is being trashed"), "{}", a.status);
+        assert_eq!(a.cur, t.0.join("w"));
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(a.status.contains("a delete is running"), "{}", a.status);
+        assert_eq!(a.mode, Mode::Browse);
+        a.on_key(KeyCode::Char('u'), KeyModifiers::NONE);
+        assert!(a.status.contains("undo once it is done"), "{}", a.status);
+        a.on_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(a.status.contains("rescan once it is done"), "{}", a.status);
+        settle(&mut a);
+        assert!(a.status.starts_with("trashed 2 item(s)"), "{}", a.status);
+        assert!(!t.0.join("w/big").exists() && !t.0.join("w/small").exists());
+        assert_eq!(names(&a), ["file"]);
+        assert!(a.view().disk < top_before);
+        a.on_key(KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(a.status, "restored 2 item(s)");
+        assert!(t.0.join("w/big/inner/blob").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_delete_trashes_nothing_more() {
+        let t = tree("stopdel");
+        let a = app(&t);
+        let items: Vec<Item> = a.rows().to_vec();
+        let (tx, rx) = mpsc::channel();
+        let stop = AtomicBool::new(true);
+        trash_rows("rtrash", items.clone(), a.trash_pin.as_ref(), &stop, &tx);
+        assert!(rx.try_recv().is_err(), "a stop set first trashes no row");
+        assert!(t.0.join("w/big").exists() && t.0.join("w/file").exists());
+        stop.store(false, Ordering::Relaxed);
+        trash_rows("rtrash", items, a.trash_pin.as_ref(), &stop, &tx);
+        drop(tx);
+        let sent: Vec<Trashed> = rx.iter().collect();
+        assert_eq!(sent.len(), 3);
+        assert!(sent.iter().all(|(_, ticket)| ticket.is_some()));
+        assert!(!t.0.join("w/big").exists() && !t.0.join("w/file").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deleting_the_directory_on_screen_shows_its_parent() {
+        let t = tree("delhere");
+        let mut a = app(&t);
+        // Mark big in the top view, then open it and trash the mark.
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        a.select(0);
+        a.open();
+        assert_eq!(a.cur, t.0.join("w/big"));
+        a.ask_delete();
+        assert!(a.status.starts_with("trash 1 item(s)"), "{}", a.status);
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(a.status.starts_with("trashed 1 item(s)"), "{}", a.status);
+        assert!(!t.0.join("w/big").exists());
+        assert_eq!(a.cur, t.0.join("w"));
+        assert_eq!(names(&a), ["file", "small"]);
     }
 
     #[test]
@@ -3174,9 +3443,10 @@ mod tests {
     /// Take in finished background scans until none is left.
     fn settle(a: &mut App) {
         let until = std::time::Instant::now() + Duration::from_secs(20);
-        while !a.jobs.is_empty() {
+        while !a.jobs.is_empty() || a.deleting.is_some() {
             assert!(std::time::Instant::now() < until, "scan never finished");
             a.poll_jobs();
+            a.poll_delete();
             std::thread::sleep(Duration::from_millis(5));
         }
     }

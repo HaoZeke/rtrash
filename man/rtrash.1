@@ -2087,6 +2087,18 @@ confirmation that names how many directories it spans, and one
 .B u
 brings the whole batch back.
 A mark inside a marked directory goes with that directory.
+The rows go to the trash in the background, one at a time, as in dua.
+The status line counts the rows done and the bytes left, and each row
+leaves the list as it goes.
+While a delete runs, a queued directory does not open, and
+.BR d ,
+.B u
+and
+.B r
+wait for it.
+.B q
+lets the row in hand finish, then quits; the rows not yet started stay
+in place.
 Marks also survive a rescan
 .RB ( r ,
 or a background scan finishing), take the sizes it found, and drop
