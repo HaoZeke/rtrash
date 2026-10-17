@@ -177,7 +177,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           (btrfs, XFS, APFS, ReFS)
       --link-dupes      replace every copy but the kept one with a hard
                           link to it (same device only)
-      --min-size=SIZE   with --dupes, skip files smaller than SIZE
+      --min-size=SIZE   list only rows of SIZE or more (disk use, or the
+                          apparent size under --apparent); totals stay whole.
+                          With --dupes, skip files smaller than SIZE
       --devices         list every mounted file system with its size, use
                           and free space (as df does), instead of scanning
       --ncdu=FILE       write an ncdu export of PATH to FILE (- for
@@ -3162,7 +3164,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut trash_dupes = false;
     let mut link_dupes = false;
     let mut clone_dupes = false;
-    let mut min_size: u64 = 1;
+    let mut min_size: Option<u64> = None;
     let mut from_file: Option<PathBuf> = None;
     let mut threads: Option<usize> = None;
     let mut filter = du_filter::Spec::default();
@@ -3416,7 +3418,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--clone-dupes" => clone_dupes = true,
                 a if a.starts_with("--min-size=") => {
                     match crate::filters::parse_size(&a["--min-size=".len()..]) {
-                        Some(n) => min_size = n,
+                        Some(n) => min_size = Some(n),
                         None => {
                             eprintln!(
                                 "{prog}: invalid --min-size '{}' (a size such as 1M)",
@@ -3456,6 +3458,34 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     // The SHARE column and the bars weigh rows the same way.
     let want_share = relative || bars;
+    // A floor on listed rows covers the table and --json of a scan for
+    // now; the other listings would drop rows they still rank or nest.
+    if min_size.is_some() && !dupes {
+        if tree.is_some()
+            || interactive
+            || pick
+            || print0
+            || from_file.is_some()
+            || output.is_some()
+            || stacks
+            || ncdu.is_some()
+            || opts.types
+            || devices
+        {
+            eprintln!(
+                "{prog}: --min-size floors the table and --json of a scan; it takes no \
+                 --tree, -i, --pick, --print0, -f, -o, --stacks, --ncdu, --types or --devices yet"
+            );
+            return 2;
+        }
+        if !matches!(opts.sort, SortKey::Disk | SortKey::Apparent) {
+            eprintln!(
+                "{prog}: --min-size compares disk use, or apparent size with --apparent; \
+                 it takes no --sort=items or --sort=mtime"
+            );
+            return 2;
+        }
+    }
     if summarize {
         // After the loop, so a later -n does not bring rows back.
         opts.top = 0;
@@ -3566,10 +3596,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if paths.is_empty() {
         paths.push(PathBuf::from("."));
     }
-    if (trash_dupes || link_dupes || clone_dupes || min_size != 1) && !dupes {
-        eprintln!(
-            "{prog}: --trash-dupes, --link-dupes, --clone-dupes and --min-size go with --dupes"
-        );
+    if (trash_dupes || link_dupes || clone_dupes) && !dupes {
+        eprintln!("{prog}: --trash-dupes, --link-dupes and --clone-dupes go with --dupes");
         return 2;
     }
     if dupes {
@@ -3601,6 +3629,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         } else {
             DupesAct::List
         };
+        let min_size = min_size.unwrap_or(1);
         return dupes_out(prog, &paths, &opts, min_size, json, print0, act);
     }
     // Text sizes everywhere in this run, the explorer included; JSON,
@@ -3855,6 +3884,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     if !want_files {
         report.files.clear();
+    }
+    if let Some(floor) = min_size {
+        // The scan kept the --top largest rows, so cutting those below
+        // the floor leaves the largest rows at or above it.
+        let apparent = opts.sort == SortKey::Apparent;
+        let size = |it: &Item| if apparent { it.apparent } else { it.disk };
+        report.dirs.retain(|it| size(it) >= floor);
+        report.files.retain(|it| size(it) >= floor);
     }
     let prefetched = prefetch.map(du_git::Prefetch::finish);
     if use_git && !annotate_git_with(&mut report, prefetched.as_ref()) {

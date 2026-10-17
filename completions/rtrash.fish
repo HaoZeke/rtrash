@@ -175,7 +175,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dupes -
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l clone-dupes -d 'reflink-clone every copy but one from the kept file'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l link-dupes -d 'hard-link every copy but one to the kept file'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l trash-dupes -d 'trash every copy but one in each group'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l min-size -r -d 'with --dupes, skip smaller files'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l min-size -r -d 'list only rows of SIZE or more'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l pick -d 'mark listed rows in the put browser and trash them'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s i -l interactive -d 'explore one directory at a time; trash, undo, rescan'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-delete -d 'with -i, browse only: no trash or undo'

@@ -268,7 +268,7 @@ export extern "rtrash du" [
     --clone-dupes  # replace every copy but the kept one with a reflink clone of it
     --link-dupes  # replace every copy but the kept one with a hard link to it
     --trash-dupes  # trash every copy but one in each duplicate group
-    --min-size: string  # with --dupes, skip files smaller than SIZE
+    --min-size: string  # list only rows of SIZE or more (disk use, or the
     --devices  # list every mounted file system with its size, use
     --ncdu: string  # write an ncdu export of PATH to FILE (- for
     --ncdu-binary: string  # the same in ncdu 2's binary format (ncdu -O),

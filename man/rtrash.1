@@ -1849,7 +1849,21 @@ The extra loses its own owner, mode and times.
 Exits 1 when any name was left alone.
 .TP
 .BI \-\-min\-size= SIZE
-With \fB\-\-dupes\fR, skip files smaller than \fISIZE\fR (as 10M).
+List only the rows of \fISIZE\fR (as 10M) or more: disk use, or the
+apparent size under \fB\-\-apparent\fR.
+A row of exactly \fISIZE\fR stays.
+The totals still count everything, and \fB\-n\fR still caps each table, so
+the listing holds the largest rows at or above the floor.
+The floor only drops rows: a directory left out because one
+subdirectory holds 90% or more of it stays out.
+It covers the table and \fB\-\-json\fR of a scan for now;
+.BR \-\-tree ", " \-i ", " \-\-pick ", " \-\-print0 ", " \-f ", " \-o ,
+.BR \-\-stacks ", " \-\-ncdu ", " \-\-types ", " \-\-devices ,
+.B \-\-sort=items
+and
+.B \-\-sort=mtime
+exit 2 with it.
+With \fB\-\-dupes\fR, skip files smaller than \fISIZE\fR instead.
 .TP
 .B \-\-include\-dirty
 With

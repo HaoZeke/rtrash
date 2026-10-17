@@ -880,6 +880,113 @@ fn reverse_prints_the_top_row_last() {
     assert_eq!(rev, ["small.bin", "mid.bin", "big.bin"], "{rev:?}");
 }
 
+/// `--min-size` drops listed rows below the floor, in the table and in
+/// --json: a row of exactly SIZE stays, the totals count everything, and
+/// `-n` still caps each list, so the rows left are the largest at or
+/// above the floor. The floor measures disk use, or the apparent size
+/// under --apparent.
+#[test]
+fn min_size_drops_rows_below_the_floor_and_keeps_totals() {
+    let t = Tree::new("du-min-size");
+    t.file("da/a.bin", 3000);
+    t.file("db/b.bin", 2000);
+    t.file("dc/c.bin", 1000);
+    let names = |paths: Vec<String>| -> Vec<String> {
+        paths
+            .iter()
+            .map(|p| {
+                p.rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(p.as_str())
+                    .to_string()
+            })
+            .filter(|n| n.ends_with(".bin") || ["da", "db", "dc"].contains(&n.as_str()))
+            .collect()
+    };
+    let rows = |args: &[&str]| -> (Vec<String>, Vec<String>) {
+        let mut a = vec!["--no-git", "--apparent"];
+        a.extend_from_slice(args);
+        let j = t.json(&a);
+        (names(paths_in(&j, "dirs")), names(paths_in(&j, "files")))
+    };
+    assert_eq!(rows(&[]).0, ["da", "db", "dc"]);
+    // Equal to the floor stays; one byte under it goes.
+    let (d, f) = rows(&["--min-size=2000"]);
+    assert_eq!(d, ["da", "db"]);
+    assert_eq!(f, ["a.bin", "b.bin"]);
+    let (d, f) = rows(&["--min-size=2001"]);
+    assert_eq!(d, ["da"]);
+    assert_eq!(f, ["a.bin"]);
+    // -n caps first; the floor never brings a capped row back.
+    assert_eq!(rows(&["-n", "1", "--min-size=1000"]).0, ["da"]);
+    assert_eq!(rows(&["-n", "2", "--min-size=1000"]).0, ["da", "db"]);
+    assert_eq!(rows(&["-n", "5", "--min-size=2000"]).0, ["da", "db"]);
+    // The totals stay whole.
+    let all = t.json(&["--no-git", "--apparent"]);
+    let cut = t.json(&["--no-git", "--apparent", "--min-size=2001"]);
+    assert_eq!(field(&cut, "apparent"), field(&all, "apparent"));
+    assert_eq!(field(&cut, "files"), field(&all, "files"));
+    // The table: the same rows, then the total.
+    let out = t.du(&["--no-git", "--apparent", "--min-size=2000"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let bins: Vec<&str> = text
+        .lines()
+        .filter(|l| l.ends_with(".bin"))
+        .map(|l| l.rsplit(['/', '\\']).next().unwrap_or(l))
+        .collect();
+    assert_eq!(bins, ["a.bin", "b.bin"], "{text}");
+    assert!(text.contains("Total "), "{text}");
+    // Without --apparent the floor measures disk use.
+    let j = t.json(&["--no-git", "--min-size=1T"]);
+    assert!(names(paths_in(&j, "dirs")).is_empty(), "{j}");
+    assert!(names(paths_in(&j, "files")).is_empty(), "{j}");
+}
+
+/// The listings `--min-size` does not cover yet refuse it with exit 2
+/// and write nothing, and so do the sort keys that are not sizes.
+#[test]
+fn min_size_refuses_the_listings_it_does_not_cover() {
+    let t = Tree::new("du-min-size-refused");
+    t.file("d/a.bin", 3000);
+    let cases: [&[&str]; 12] = [
+        &["--tree"],
+        &["-i"],
+        &["--pick"],
+        &["--print0"],
+        &["-f", "snap"],
+        &["-o", "snap"],
+        &["--stacks"],
+        &["--ncdu=x.json"],
+        &["--types"],
+        &["--devices"],
+        &["--sort=items"],
+        &["--sort=mtime"],
+    ];
+    for case in cases {
+        let mut a = vec!["--no-git", "--min-size=1k"];
+        a.extend_from_slice(case);
+        let out = t.du(&a);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(2), "{case:?}: {err}");
+        assert!(err.contains("--min-size"), "{case:?}: {err}");
+        assert!(out.stdout.is_empty(), "{case:?}");
+    }
+    assert!(!t.root.join("snap").exists());
+    assert!(!t.root.join("x.json").exists());
+    // --dupes keeps its own --min-size.
+    let out = t.du(&["--dupes", "--min-size=1k"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn summarize_and_skip_total_split_rows_from_totals() {
     let t = Tree::new("du-summarize");
