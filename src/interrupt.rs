@@ -258,7 +258,7 @@ impl Drop for Critical {
 /// Test seam, debug builds only: `RTRASH_TEST_SIGINT=PLACE:COUNT` raises
 /// SIGINT `COUNT` times the first time the run reaches `place`
 /// (`after-item` in a put or restore loop, `in-record` once a put has
-/// taken its trash name and before it writes the record).
+/// made the file for its record and before it writes the record).
 pub fn test_seam(place: &str) {
     static FIRED: AtomicBool = AtomicBool::new(false);
     if !cfg!(debug_assertions) {

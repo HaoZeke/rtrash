@@ -642,6 +642,8 @@ PERMANENT_ALLOW = {
     ("trashdir.rs", "remove_any_path"): (1, PRIMITIVE),
     ("trashdir.rs", "remove_record"): (1, PRIMITIVE),
     ("trashdir.rs", "move_by_copy"): (2, MOVE + "; and the part it copied, when the copy fails"),
+    ("trashdir.rs", "reserve_in_place"): (1, "a put taking back the record it could not write"),
+    ("trashdir.rs", "reserve_record"): (2, OWN + ": the .rtrash-put temporary it wrote the record into"),
     ("trashdir.rs", "trash_move_locked"): (1, "a put undoing its own record when the move fails"),
     ("tui_term.rs", "tempfile_unlinked"): (1, OWN),
     ("win_recycle.rs", "empty_run"): (1, BATCH),

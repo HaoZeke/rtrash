@@ -936,8 +936,9 @@ pub fn abs_nofollow(path: &Path) -> io::Result<PathBuf> {
     Ok(parent.join(file_name))
 }
 
-/// Move `abs` into `trash`, reserving a unique name via O_EXCL on the
-/// `.trashinfo` (the spec's atomicity requirement). Returns the name used.
+/// Move `abs` into `trash`, reserving a unique name with its whole
+/// `.trashinfo` (the spec's atomicity requirement; see
+/// `reserve_record`). Returns the name used.
 ///
 /// Holds [`TrashLock`] for the duration of reserve → fsync → payload move so
 /// concurrent empty of the same root cannot tear the pair.
@@ -1008,52 +1009,7 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
     };
     let body = info::render_batch(&recorded, &info::now_local_string(), Some(info::batch_id()));
 
-    let mut attempt: u64 = 0;
-    let (name, mut info_file) = loop {
-        let name = if attempt == 0 {
-            base.clone()
-        } else {
-            format!("{base}.{}", attempt + 1)
-        };
-        // Skip names already occupied by an orphan payload (no .trashinfo).
-        if join_name(&trash.files(), &name).symlink_metadata().is_ok() {
-            attempt += 1;
-            if attempt > 10_000 {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "could not reserve a unique trash name",
-                ));
-            }
-            continue;
-        }
-        let info_path = join_info(&trash.info(), &name);
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&info_path)
-        {
-            Ok(f) => {
-                crate::interrupt::test_seam("in-record");
-                break (name, f);
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                attempt += 1;
-                if attempt > 10_000 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "could not reserve a unique trash name",
-                    ));
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    };
-    info_file.write_all(body.as_bytes())?;
-    // Durable reservation before payload move (crash mid-put must not leave a
-    // truncated .trashinfo as the only recoverability record).
-    sync_file(&mut info_file)?;
-    drop(info_file);
-    let _ = sync_dir(&trash.info());
+    let name = reserve_record(trash, &base, body.as_bytes())?;
 
     let dest = join_name(&trash.files(), &name);
     let moved = match rename_noreplace(abs, &dest) {
@@ -1086,6 +1042,158 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
             ));
         }
         let _ = fs::remove_file(join_info(&trash.info(), &name));
+        return Err(e);
+    }
+    Ok(name)
+}
+
+/// The start of the name of the file in `info/` that a put writes its
+/// record into before it links the record to its trash name. `status
+/// --check --fix` removes one that a killed put left behind.
+pub const PUT_TEMP_PREFIX: &str = ".rtrash-put.";
+
+/// How many names past the first a put tries for one item.
+const NAME_TRIES: u64 = 10_000;
+
+/// The trash names a put tries for `base`, in order: `base`, `base.2`
+/// and on, skipping one a payload with no record already holds. `take`
+/// claims a name (true), finds it taken (false) or fails; the first name
+/// it claims is returned.
+fn claim_name(
+    trash: &TrashDir,
+    base: &str,
+    mut take: impl FnMut(&str) -> io::Result<bool>,
+) -> io::Result<String> {
+    let files = trash.files();
+    for attempt in 0..=NAME_TRIES {
+        let name = if attempt == 0 {
+            base.to_string()
+        } else {
+            format!("{base}.{}", attempt + 1)
+        };
+        if join_name(&files, &name).symlink_metadata().is_ok() {
+            continue;
+        }
+        if take(&name)? {
+            return Ok(name);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not reserve a unique trash name",
+    ))
+}
+
+/// Take a trash name for `base` in `trash` and give it the record
+/// `body`, which appears whole or not at all.
+///
+/// The record is written and synced under a temporary name in `info/`
+/// first, then hard-linked to `NAME.trashinfo`. link(2) fails when that
+/// name exists, so it reserves the name as O_EXCL does, and a tool that
+/// reads `info/` meanwhile never meets an empty or cut-off record. A put
+/// killed before the link leaves only the temporary, which no other tool
+/// reads as a record. On a file system with no hard links (FAT, exFAT,
+/// some network mounts) the record is made in place with O_EXCL.
+fn reserve_record(trash: &TrashDir, base: &str, body: &[u8]) -> io::Result<String> {
+    let _critical = crate::interrupt::critical();
+    let info_dir = trash.info();
+    let (temp, mut file) = create_put_temp(&info_dir)?;
+    crate::interrupt::test_seam("in-record");
+    let written = file.write_all(body).and_then(|()| sync_file(&mut file));
+    drop(file);
+    if let Err(e) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(e);
+    }
+    let mut no_links = false;
+    let linked = claim_name(trash, base, |name| {
+        match link_record(&temp, &join_info(&info_dir, name)) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => {
+                no_links = hard_links_unsupported(&e);
+                Err(e)
+            }
+        }
+    });
+    let _ = fs::remove_file(&temp);
+    let name = match linked {
+        Err(_) if no_links => reserve_in_place(trash, base, body)?,
+        other => other?,
+    };
+    // Durable reservation before payload move (crash mid-put must not leave a
+    // truncated .trashinfo as the only recoverability record).
+    let _ = sync_dir(&info_dir);
+    Ok(name)
+}
+
+/// A fresh, empty `.rtrash-put.PID.N` in `info_dir` for a record.
+fn create_put_temp(info_dir: &Path) -> io::Result<(PathBuf, fs::File)> {
+    let pid = std::process::id();
+    for n in 0..NAME_TRIES {
+        let temp = info_dir.join(format!("{PUT_TEMP_PREFIX}{pid}.{n}"));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(f) => return Ok((temp, f)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not make a temporary record",
+    ))
+}
+
+/// Hard-link the written record `temp` to its trash name `dest`.
+fn link_record(temp: &Path, dest: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        if tests::NO_HARD_LINKS.with(std::cell::Cell::get) {
+            return Err(io::Error::from_raw_os_error(libc::EPERM));
+        }
+    }
+    fs::hard_link(temp, dest)
+}
+
+/// Whether link(2) failed with `e` because the file system has no hard
+/// links: EPERM on FAT and exFAT, EOPNOTSUPP or ENOSYS on some mounts.
+fn hard_links_unsupported(e: &io::Error) -> bool {
+    let codes = [libc::EPERM, libc::EOPNOTSUPP, libc::ENOTSUP, libc::ENOSYS];
+    e.raw_os_error().is_some_and(|c| codes.contains(&c))
+}
+
+/// [`reserve_record`] where there are no hard links: create
+/// `NAME.trashinfo` with O_EXCL, then write `body` into it. A write that
+/// fails takes the record back.
+fn reserve_in_place(trash: &TrashDir, base: &str, body: &[u8]) -> io::Result<String> {
+    let _critical = crate::interrupt::critical();
+    let info_dir = trash.info();
+    let mut opened = None;
+    let name = claim_name(trash, base, |name| {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(join_info(&info_dir, name))
+        {
+            Ok(f) => {
+                opened = Some(f);
+                Ok(true)
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e),
+        }
+    })?;
+    let Some(mut file) = opened else {
+        return Err(io::Error::other("no record was opened"));
+    };
+    let written = file.write_all(body).and_then(|()| sync_file(&mut file));
+    drop(file);
+    if let Err(e) = written {
+        let _ = fs::remove_file(join_info(&info_dir, &name));
         return Err(e);
     }
     Ok(name)
@@ -2867,6 +2975,91 @@ fn set_times_path(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    thread_local! {
+        /// Set by a test: link(2) of a record fails with EPERM on this
+        /// thread, as on a file system with no hard links.
+        pub(super) static NO_HARD_LINKS: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+
+    /// A trash under the temp dir for one put test, fresh.
+    fn put_trash(tag: &str) -> (PathBuf, TrashDir) {
+        let root = std::env::temp_dir().join(format!("rtrash-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let td = TrashDir {
+            root: root.join("Trash"),
+            topdir: None,
+        };
+        td.ensure().unwrap();
+        (root, td)
+    }
+
+    /// The names in `dir`, sorted.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut out: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// A put writes its record under a temporary name and links it into
+    /// place: the trash then has the record alone, with one link, and a
+    /// clash takes the next name the same way.
+    #[test]
+    fn a_put_links_its_whole_record_into_place_and_leaves_no_temporary() {
+        let (root, td) = put_trash("putlink");
+        fs::write(td.info().join("a.txt.trashinfo"), b"[Trash Info]\n").unwrap();
+        for n in ["a.txt", "b.txt"] {
+            let item = root.join(n);
+            fs::write(&item, n).unwrap();
+            let meta = fs::symlink_metadata(&item).unwrap();
+            trash_move_locked(&item, &meta, &td).unwrap();
+        }
+        assert_eq!(names(&td.files()), ["a.txt.2", "b.txt"]);
+        assert_eq!(
+            names(&td.info()),
+            ["a.txt.2.trashinfo", "a.txt.trashinfo", "b.txt.trashinfo"]
+        );
+        for (name, file) in [("a.txt.2", "a.txt"), ("b.txt", "b.txt")] {
+            let record = join_info(&td.info(), name);
+            assert_eq!(fs::metadata(&record).unwrap().nlink(), 1, "{name}");
+            let body = fs::read_to_string(&record).unwrap();
+            let path = format!("Path={}\n", root.join(file).display());
+            assert!(body.starts_with("[Trash Info]\n"), "{body}");
+            assert!(
+                body.contains(&path) && body.contains("DeletionDate="),
+                "{body}"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Where link(2) fails as on FAT, a put makes its record in place
+    /// with O_EXCL, still takes the next name on a clash, and leaves no
+    /// temporary either.
+    #[test]
+    fn a_put_without_hard_links_makes_its_record_in_place() {
+        let (root, td) = put_trash("putnolink");
+        fs::write(td.info().join("a.txt.trashinfo"), b"[Trash Info]\n").unwrap();
+        let item = root.join("a.txt");
+        fs::write(&item, b"a").unwrap();
+        let meta = fs::symlink_metadata(&item).unwrap();
+        NO_HARD_LINKS.with(|n| n.set(true));
+        let name = trash_move_locked(&item, &meta, &td);
+        NO_HARD_LINKS.with(|n| n.set(false));
+        assert_eq!(name.unwrap(), "a.txt.2");
+        assert_eq!(names(&td.files()), ["a.txt.2"]);
+        assert_eq!(names(&td.info()), ["a.txt.2.trashinfo", "a.txt.trashinfo"]);
+        let body = fs::read_to_string(join_info(&td.info(), "a.txt.2")).unwrap();
+        assert!(
+            body.contains("Path=") && body.contains("DeletionDate="),
+            "{body}"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_read_only_files_dir_in_an_owned_volume_trash_falls_back() {

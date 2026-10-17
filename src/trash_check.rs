@@ -12,10 +12,15 @@
 //! still lists, and the user decides. Stale `directorysizes` lines need no
 //! check here, as every status run drops them (`DirSizes::write_back`).
 //!
+//! A put writes its record into a `.rtrash-put.PID.N` file in `info/` and
+//! then links it to its trash name (see
+//! [`crate::trashdir::PUT_TEMP_PREFIX`]). One that is still there was
+//! left by a put that was killed, so `--fix` removes it too.
+//!
 //! `--fix` scans each trash again once it has the trash lock, and
 //! removes only what that scan still finds: a put in flight when the
 //! first scan ran keeps the lock until it is done, and its record may
-//! have looked dangling.
+//! have looked dangling or its temporary left behind.
 //!
 //! Each name is sorted by its file type before its body is read: only a
 //! regular file can be a record, so a folder, link or other file named
@@ -53,13 +58,21 @@ pub enum Problem {
     /// A name in `info/` that is not a record: not `NAME.trashinfo`, or
     /// not a regular file; `what` says which.
     Stray { path: PathBuf, what: &'static str },
+    /// The temporary record a killed put left in `info/`, and the
+    /// original path in it, when it got that far.
+    PutLeftover {
+        path: PathBuf,
+        origin: Option<PathBuf>,
+    },
 }
 
 impl Problem {
     /// The record `--fix` removes, when it removes one.
     fn fix_target(&self) -> Option<&PathBuf> {
         match self {
-            Problem::Dangling { record, .. } | Problem::BadRecord { record, .. } => Some(record),
+            Problem::Dangling { record, .. }
+            | Problem::BadRecord { record, .. }
+            | Problem::PutLeftover { path: record, .. } => Some(record),
             _ => None,
         }
     }
@@ -80,6 +93,10 @@ impl Problem {
                 format!("orphan: {} (kept; rm by its name deletes it)", t(payload))
             }
             Problem::Stray { path, what } => format!("stray: {} (kept; {what})", t(path)),
+            Problem::PutLeftover { path, .. } => format!(
+                "put leftover: {} (a put stopped before its record took a name)",
+                t(path)
+            ),
         }
     }
 }
@@ -121,6 +138,21 @@ pub fn scan(dir: &TrashDir) -> Vec<Problem> {
             .as_bytes()
             .strip_suffix(b".trashinfo")
             .filter(|s| !s.is_empty());
+        let temp = fname
+            .as_bytes()
+            .starts_with(trashdir::PUT_TEMP_PREFIX.as_bytes());
+        if temp
+            && record
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_file())
+        {
+            let origin = record_origin(dir, &record).ok().map(|(o, _)| o);
+            out.push(Problem::PutLeftover {
+                path: record,
+                origin,
+            });
+            continue;
+        }
         let Some(stem) = stem else {
             out.push(Problem::Stray {
                 path: record,
@@ -192,6 +224,7 @@ pub fn run(prog: &str, dirs: &[TrashDir], fix: bool, dry_run: bool) -> i32 {
                     Some((record.clone(), Some(origin.clone())))
                 }
                 Problem::BadRecord { record, .. } => Some((record.clone(), None)),
+                Problem::PutLeftover { path, origin } => Some((path.clone(), origin.clone())),
                 _ => None,
             })
             .collect();
@@ -328,22 +361,70 @@ mod tests {
         )
     }
 
+    /// A temporary record a killed put left in `info/`, cut off or whole,
+    /// is a problem `--fix` removes, and a name that only looks like one
+    /// stays a stray.
+    #[test]
+    fn fix_removes_the_temporary_record_a_killed_put_left() {
+        let td = trash("leftover");
+        let whole = td.info().join(".rtrash-put.4242.0");
+        let cut = td.info().join(".rtrash-put.4242.1");
+        let lookalike = td.info().join(".rtrash-putter");
+        fs::write(&whole, record_for(Path::new("/gone/a.txt"))).unwrap();
+        fs::write(&cut, "[Trash Info]\n").unwrap();
+        fs::create_dir(td.info().join(".rtrash-put.4242.2")).unwrap();
+        fs::write(&lookalike, "x").unwrap();
+        let found = scan(&td);
+        assert!(
+            found.contains(&Problem::PutLeftover {
+                path: whole.clone(),
+                origin: Some(PathBuf::from("/gone/a.txt")),
+            }),
+            "{found:?}"
+        );
+        assert!(
+            found.contains(&Problem::PutLeftover {
+                path: cut.clone(),
+                origin: None,
+            }),
+            "{found:?}"
+        );
+        let leftovers = |ps: &[Problem]| {
+            ps.iter()
+                .filter(|p| matches!(p, Problem::PutLeftover { .. }))
+                .count()
+        };
+        assert_eq!(leftovers(&found), 2, "{found:?}");
+        assert_eq!(found.len(), 4, "{found:?}");
+        assert_eq!(run("rtrash", std::slice::from_ref(&td), true, false), 0);
+        assert!(!whole.exists() && !cut.exists());
+        assert!(lookalike.exists());
+        assert!(td.info().join(".rtrash-put.4242.2").is_dir());
+        assert_eq!(leftovers(&scan(&td)), 0);
+        let _ = fs::remove_dir_all(&td.root);
+    }
+
     /// A record whose payload arrives while `--fix` waits for the trash
-    /// lock, as a put in flight moves it in, stays, and does not count as
-    /// a failure.
+    /// lock, as a put in flight moves it in, stays; so does a put's
+    /// temporary that is gone by then. Neither counts as a failure.
     #[test]
     fn fix_keeps_what_a_put_finished_while_it_waited_for_the_lock() {
         let td = trash("inflight");
         let record = td.info().join("a.txt.trashinfo");
+        let temp = td.info().join(".rtrash-put.4242.0");
         let body = record_for(&td.root.join("a.txt"));
         fs::write(&record, &body).unwrap();
-        assert_eq!(scan(&td).len(), 1);
+        fs::write(&temp, &body).unwrap();
+        assert_eq!(scan(&td).len(), 2);
         let files = td.files();
+        let gone = temp.clone();
         AFTER_SCAN.set(Some(Box::new(move || {
             fs::write(files.join("a.txt"), b"a").unwrap();
+            fs::remove_file(gone).unwrap();
         })));
         assert_eq!(run("rtrash", std::slice::from_ref(&td), true, false), 0);
         assert_eq!(fs::read_to_string(&record).unwrap(), body);
+        assert!(!temp.exists());
         assert!(scan(&td).is_empty());
         let _ = fs::remove_dir_all(&td.root);
     }

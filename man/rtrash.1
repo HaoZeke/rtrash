@@ -916,7 +916,14 @@ and a name in
 that is not a
 .I .trashinfo
 or is not a regular file, such as a folder or a link by that name
-.RB ( stray: ).
+.RB ( stray: ),
+and a file in
+.I info/
+whose name starts with
+.I .rtrash\-put.
+.RB ( "put leftover:" ):
+put writes each record there first, so one that stays was left by a
+put that was killed before the record took its name.
 A summary goes to stderr, and the exit status is 1 when anything is
 found.
 It takes only
@@ -966,8 +973,8 @@ prints the same count, as trash-cli has no lines there.
 .B \-\-fix
 With
 .BR \-\-check ,
-remove the dangling and bad records, under each trash's lock; a payload
-that a bad record named stays, as an orphan.
+remove the dangling and bad records and the put leftovers, under each
+trash's lock; a payload that a bad record named stays, as an orphan.
 Once it has the lock it checks that trash again and removes only what
 that check still finds, so a record whose put was still in flight
 stays.
@@ -981,6 +988,8 @@ caps it before the first removal, and with
 .B RTRASH_ALLOW_ROOTS
 set a dangling record must name a path under a root, while a bad
 record, whose origin is unknown, refuses the run.
+A put leftover counts as a record of the path it names, or as a bad
+record when it names none.
 .TP
 .BR \-n ", " \-\-dry\-run
 With
@@ -4324,6 +4333,12 @@ so that item stays where it was.
 A second Ctrl-C quits at once, except while rtrash writes a trash
 record and moves its payload: then it quits as soon as both are whole,
 so no half-written record and no payload without one is left.
+A put writes the record under a temporary name and links it into place
+only once it is whole, so even a put that is killed leaves no cut-off
+record; on a file system with no hard links it writes the record in
+place.
+.B status \-\-check \-\-fix
+removes the temporary such a put leaves.
 With
 .B \-i
 or
