@@ -588,6 +588,53 @@ else
   echo "note: ncdu 2.7 or later missing; ncdu -c import check skipped"
 fi
 
+# trash-cli #412: trash-list leaves out the `.Trash` folders of mounts
+# it takes for virtual, such as virtiofs, 9p, fuse.sshfs and overlay.
+# rtrash lists every mount that holds files. A ramfs and an overlay
+# mount, made here when sudo -n allows, stand in for the ones CI cannot
+# make: each must be listed, and put must keep a file on it in its own
+# `.Trash-$uid`.
+fsroot=$scratch/fs
+for kind in ramfs overlay; do
+  m=$fsroot/$kind
+  mkdir -p "$m" "$fsroot/lower" "$fsroot/upper" "$fsroot/work"
+  m=$(cd "$m" && pwd -P)
+  if [[ $kind == ramfs ]]; then
+    made=$(sudo -n mount -t ramfs -o mode=0755 ramfs "$m" 2>/dev/null \
+      && sudo -n chown "$(id -u):$(id -g)" "$m" && echo yes || true)
+  else
+    made=$(sudo -n mount -t overlay overlay \
+      -o "lowerdir=$fsroot/lower,upperdir=$fsroot/upper,workdir=$fsroot/work" "$m" 2>/dev/null \
+      && echo yes || true)
+  fi
+  if [[ $made != yes ]]; then
+    echo "note: sudo -n mount -t $kind unavailable; $kind volume check skipped"
+    if mountpoint -q "$m"; then sudo -n umount "$m"; fi
+    continue
+  fi
+  f=$m/rtrash-interop-fs.txt
+  vt_k=$m/.Trash-$(id -u)
+  printf 'on %s\n' "$kind" > "$f"
+  vols=$("$rtrash" list --volumes 2>&1 || true)
+  log=$("$rtrash" put "$f" 2>&1 || true)
+  if grep -qxF "$m" <<<"$vols" && [[ ! -e $f && -f $vt_k/files/rtrash-interop-fs.txt ]]; then
+    echo "ok   rtrash lists the $kind mount and puts a file there in its own .Trash-\$uid (trash-cli #412)"
+  else
+    echo "FAIL rtrash missed the $kind mount at $m (trash-cli #412)"
+    printf '%s\n' "$vols" "$log" | sed 's/^/  | /'
+    fail=1
+  fi
+  if have trash-list; then
+    vols_tc=$(trash-list --volumes 2>/dev/null || true)
+    if ! grep -qxF "$m" <<<"$vols_tc"; then
+      echo "info: trash-list --volumes leaves out the $kind mount (trash-cli #412)"
+    fi
+  fi
+  rm -rf -- "$vt_k" "$f"
+  sudo -n umount "$m"
+done
+rm -rf -- "$fsroot"
+
 # Nothing may stay behind in the trash after every restore.
 left=$(find "$trash/files" "$trash/info" -mindepth 1 2>/dev/null | wc -l)
 if [[ $left -ne 0 ]]; then

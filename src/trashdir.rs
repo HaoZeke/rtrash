@@ -824,12 +824,21 @@ const PSEUDO_FS: &[&str] = &[
     "efivarfs",
     "fuse.portal",
     "fuse.gvfsd-fuse",
+    "fuse.lxcfs",
+    "fuse.snapfuse",
     "squashfs",
-    "ramfs",
+    "selinuxfs",
+    "smackfs",
+    "nfsd",
 ];
 
 /// Whether `fstype` is a pseudo file system: no files of its own to
-/// trash or measure.
+/// trash or measure (kernel interfaces, `lxcfs`'s view of `/proc`, a
+/// portal or `gvfs` view of files kept elsewhere), or a read-only image
+/// (`squashfs`, `snapfuse`). Anything else is listed, whether it is a
+/// disk, a network share or a VM or container mount: `virtiofs`, `9p`,
+/// `fuse.sshfs`, `overlay`, `tmpfs` and `ramfs` all hold files a user
+/// can trash (trash-cli #412).
 pub fn is_pseudo_fs(fstype: &str) -> bool {
     PSEUDO_FS.contains(&fstype) || fstype.starts_with("cgroup")
 }
@@ -3140,6 +3149,57 @@ portal /run/user/1000/doc fuse.portal rw 0 0
         assert!(!listed.iter().any(|m| m == Path::new("/mnt/x")));
         assert!(listed.iter().any(|m| m == Path::new("/mnt/y")));
         assert!(!listed.iter().any(|m| m == Path::new("/run/user/1000/doc")));
+    }
+
+    #[test]
+    fn discovery_lists_vm_container_and_network_mounts() {
+        let listed = [
+            "virtiofs",
+            "9p",
+            "fuse.sshfs",
+            "fuse.rclone",
+            "overlay",
+            "nfs4",
+            "cifs",
+            "tmpfs",
+            "ramfs",
+            "zfs",
+            "btrfs",
+            "xfs",
+            "ext4",
+            "vfat",
+        ];
+        let skipped = [
+            "proc",
+            "sysfs",
+            "selinuxfs",
+            "nfsd",
+            "fuse.lxcfs",
+            "fuse.portal",
+            "fuse.gvfsd-fuse",
+            "squashfs",
+            "fuse.snapfuse",
+            "cgroup2",
+        ];
+        let mut table = String::from("/dev/sda1 / ext4 rw 0 0\n");
+        for (i, t) in listed.iter().chain(skipped.iter()).enumerate() {
+            table.push_str(&format!("src{i} /m/{i} {t} rw 0 0\n"));
+        }
+        let mps = mount_points_from_table(&table);
+        for (i, t) in listed.iter().enumerate() {
+            let mp = PathBuf::from(format!("/m/{i}"));
+            assert!(mps.contains(&mp), "{t} is listed");
+            assert_eq!(
+                volume_top_from_table(&mp.join("f"), &table),
+                Some(mp),
+                "{t} keeps its files in its own trash"
+            );
+        }
+        for (j, t) in skipped.iter().enumerate() {
+            let mp = PathBuf::from(format!("/m/{}", listed.len() + j));
+            assert!(!mps.contains(&mp), "{t} is skipped");
+            assert_eq!(volume_top_from_table(&mp.join("f"), &table), None, "{t}");
+        }
     }
 
     #[test]
