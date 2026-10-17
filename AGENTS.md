@@ -34,6 +34,7 @@ needs no build and finishes in under a second. CI runs the same script.
 | Code under `cfg(windows)` or `cfg(target_os = "macos")` compiles before a push | `scripts/cross-clippy.sh` | round 112 |
 | Code is rustfmt-clean before a push, and lines stay within 100 columns | precheck runs `cargo fmt --all --check` when a toolchain is there (no build); line-width warning otherwise | rounds 101b, 102d, 143b, 170-172 |
 | A commit subject is a plain sentence that starts with a capital, with no `type(scope):` prefix | precheck subject check under `--base`; the prek commit-msg hook (`precheck.py --commit-msg`) | round 209: `feat(du): ...` reworded before it reached main |
+| Files a patch changes pass codespell with the arguments of the pre-commit hook before a push | precheck codespell check under `--base` (codespell from PATH, or the hook's version through uvx) | round 233: the hook flagged a word in a test name on the cloud agent after every box check had passed |
 | macOS and Windows behaviour is proven on CI before main moves: push the round to a `round*` branch, wait for green, then fast-forward main | push triggers on `main` and `round*` in every workflow | 37 of 43 red mains failed off Linux |
 
 Judgment calls no check can make:

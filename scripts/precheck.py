@@ -6,7 +6,7 @@ in AGENTS.md). Run from the repo root:
 
     python3 scripts/precheck.py            # whole tree
     python3 scripts/precheck.py --no-fmt   # skip the cargo fmt step
-    python3 scripts/precheck.py --base origin/main   # also diff-aware checks
+    python3 scripts/precheck.py --base origin/main   # also diff-aware checks, codespell
     python3 scripts/precheck.py --commit-msg FILE    # the commit-msg hook only
 
 When cargo fmt works (a toolchain with rustfmt), it also runs
@@ -14,7 +14,7 @@ When cargo fmt works (a toolchain with rustfmt), it also runs
 
 Exit 1 on any error. Warnings print but do not fail.
 """
-import re, shutil, subprocess, sys
+import fnmatch, re, shutil, subprocess, sys
 from pathlib import Path
 from collections import defaultdict
 
@@ -511,6 +511,65 @@ def commit_msg_hook(path):
         print("error:", e)
         return 1
     return 0
+
+
+def codespell_hook():
+    """The codespell version, arguments and the global exclude that
+    prek.toml gives the pre-commit hook, or None when there is no hook."""
+    import tomllib
+    cfg = tomllib.loads((ROOT / "prek.toml").read_text(encoding="utf-8"))
+    exclude = re.compile(cfg.get("exclude", r"(?!)"))
+    for repo in cfg.get("repos", []):
+        for hook in repo.get("hooks", []) if "codespell" in str(repo.get("repo", "")) else []:
+            if hook.get("id") == "codespell":
+                return str(repo.get("rev", "")).lstrip("v"), hook.get("args", []), exclude
+    return None
+
+
+def check_codespell(base):
+    """Under `--base`, codespell on the files changed since BASE, with the
+    version and arguments of the pre-commit hook in prek.toml (round 233:
+    the hook flagged a word in a test after every box check had passed).
+    codespell comes from PATH, or at the hook's version through uvx; with
+    neither, or when it cannot start, a note says nothing was checked."""
+    if not base:
+        return
+    hook = codespell_hook()
+    if hook is None:
+        errors.append("precheck codespell check found no codespell hook in prek.toml; "
+                      "the rule needs updating")
+        return
+    rev, args, exclude = hook
+    skips = [g for a in args if a.startswith("--skip=") for g in a[len("--skip="):].split(",")]
+    git = lambda *a: subprocess.run(["git", *a], cwd=ROOT, capture_output=True,
+                                    text=True).stdout.splitlines()
+    names = set(git("diff", "--name-only", "--diff-filter=ACMR", base))
+    names |= set(git("ls-files", "--others", "--exclude-standard"))
+    files = sorted(n for n in names if (ROOT / n).is_file() and not exclude.search(n)
+                   and not any(fnmatch.fnmatch(n, g) or fnmatch.fnmatch(Path(n).name, g)
+                               for g in skips))
+    if not files:
+        return
+    if shutil.which("codespell"):
+        cmd = ["codespell"]
+    elif shutil.which("uvx"):
+        cmd = ["uvx", f"codespell=={rev}" if rev else "codespell"]
+    else:
+        print("note: codespell and uvx not found; codespell check skipped (pre-commit still runs it)")
+        return
+    try:
+        r = subprocess.run(cmd + args + ["--", *files], cwd=ROOT, capture_output=True,
+                           text=True, timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"note: codespell did not run ({e}); codespell check skipped")
+        return
+    found = [l.strip() for l in r.stdout.splitlines() if "==>" in l]
+    for line in found:
+        errors.append(f"codespell: {line}; fix the word, or add it to the hook's -L list "
+                      "in prek.toml when it is a real name")
+    if r.returncode != 0 and not found:
+        print(f"note: codespell did not run (exit {r.returncode}): "
+              f"{(r.stderr or r.stdout).strip()[:300]}")
 
 
 def check_removed_literals(base):
@@ -1174,7 +1233,7 @@ def main():
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_key_reads(); check_directorysizes_paths()
-    check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
+    check_long_lines(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
