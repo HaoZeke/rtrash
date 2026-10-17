@@ -3,6 +3,7 @@
 //! that exists nowhere else.
 
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -142,9 +143,43 @@ pub fn risky_repo_state(abs: &Path) -> Option<crate::du_git::GitState> {
     state.is_risky().then_some(state)
 }
 
+/// The last component of `path` as typed, past any trailing slashes, and
+/// whether a slash trailed it. `Path::file_name` reads `d/.` as `d` and
+/// gives no name for `./` or `d/..`, so the operand rules read the bytes.
+pub fn typed_last(path: &Path) -> (&[u8], bool) {
+    let b = path.as_os_str().as_bytes();
+    let end = b.iter().rposition(|&c| c != b'/').map_or(0, |i| i + 1);
+    let start = b[..end]
+        .iter()
+        .rposition(|&c| c == b'/')
+        .map_or(0, |i| i + 1);
+    (&b[start..end], end < b.len())
+}
+
+/// An operand whose last component is `.` or `..`, however it is spelled
+/// (`.`, `./`, `d/.`, `d/..//`). put refuses each one, as GNU rm does.
+pub fn is_dot_operand(path: &Path) -> bool {
+    matches!(typed_last(path).0, b"." | b"..")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dot_operands_are_spotted_however_they_are_spelled() {
+        for p in [
+            ".", "./", ".//", "..", "../", "d/.", "d/./", "d/..", "d/..//", "/a/.",
+        ] {
+            assert!(is_dot_operand(Path::new(p)), "{p}");
+        }
+        for p in ["d", "d/", "d//", ".d", "..d", "d.", "a/.d/", "/", ""] {
+            assert!(!is_dot_operand(Path::new(p)), "{p}");
+        }
+        assert_eq!(typed_last(Path::new("a//d//")), (&b"d"[..], true));
+        assert_eq!(typed_last(Path::new("a/b")), (&b"b"[..], false));
+        assert_eq!(typed_last(Path::new("/")), (&b""[..], true));
+    }
 
     #[test]
     fn config_lines_and_patterns_protect_paths() {

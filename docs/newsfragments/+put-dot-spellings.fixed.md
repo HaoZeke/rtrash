@@ -1,0 +1,1 @@
+`put` now refuses `.` and `..` however the operand spells them, as `rm` does: `./`, `d/.`, `d/./`, `d/..` and `../` get the same "refusing to remove '.' or '..' directory" message as `.`. Before, `put -r d/.` trashed `d`, and `./` or `d/..` failed with an unclear error.

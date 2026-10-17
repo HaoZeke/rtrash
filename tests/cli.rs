@@ -925,6 +925,26 @@ fn refuses_dot_and_root() {
     assert!(stderr_of(&out).contains("dangerous"));
 }
 
+/// `.` and `..` are refused however the operand spells them, as GNU rm
+/// refuses them (trash-cli #434 lost a directory's files to `./`). `d/.`
+/// used to read as `d` and trash it.
+#[test]
+fn put_refuses_dot_operands_however_they_are_spelled() {
+    let sb = Sandbox::new("put-dot-spellings");
+    fs::create_dir(sb.work().join("d")).unwrap();
+    sb.touch("d/f");
+    for op in [
+        ".", "./", ".//", "..", "../", "d/.", "d/./", "d/..", "d/../",
+    ] {
+        let out = sb.run(&["put", "-rf", op]);
+        assert_eq!(out.status.code(), Some(1), "{op}: {}", stderr_of(&out));
+        let want = format!("refusing to remove '.' or '..' directory: skipping '{op}'");
+        assert!(stderr_of(&out).contains(&want), "{op}: {}", stderr_of(&out));
+    }
+    assert!(sb.work().join("d/f").exists());
+    assert_eq!(names_in(&sb.trash().join("files")), Vec::<String>::new());
+}
+
 #[cfg(unix)]
 #[test]
 fn put_skips_safe_rm_paths_and_refuses_home() {

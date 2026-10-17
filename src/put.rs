@@ -641,8 +641,8 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         eprintln!("{prog}: use --no-preserve-root to override this failsafe");
         return Err(1);
     }
-    let base = path.file_name().map(|f| f.to_string_lossy().into_owned());
-    if matches!(base.as_deref(), Some(".") | Some("..")) || name == "." || name == ".." {
+    // As typed: `Path::file_name` reads `d/.` as `d`, which would trash d.
+    if crate::safety::is_dot_operand(path) {
         eprintln!("{prog}: refusing to remove '.' or '..' directory: skipping '{name}'");
         return Err(1);
     }
