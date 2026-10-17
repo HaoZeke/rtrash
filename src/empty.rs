@@ -11,7 +11,6 @@ use crate::list;
 use crate::trashdir::{self, TrashDir};
 #[cfg(feature = "tui")]
 use crate::util::stdin_is_tty;
-use crate::util::url_decode;
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... [DAYS]
@@ -998,29 +997,9 @@ fn full_empty_wipe(
 }
 
 /// Rewrite the spec's `directorysizes` cache keeping only surviving entries;
-/// drop the file outright when nothing survives.
+/// the file goes when nothing survives.
 fn prune_directorysizes(dir: &TrashDir, kept: &[String]) {
-    let path = dir.root.join("directorysizes");
-    let Ok(content) = trashdir::read_sizes(&path) else {
-        return;
-    };
-    if kept.is_empty() {
-        let _ = fs::remove_file(&path);
-        return;
-    }
-    let keep: std::collections::HashSet<&str> = kept.iter().map(|s| s.as_str()).collect();
-    let filtered: String = content
-        .lines()
-        .filter(|line| {
-            line.rsplit(' ').next().is_some_and(|enc| {
-                let decoded = url_decode(enc);
-                let name = crate::util::str_from_os_ref(std::ffi::OsStr::from_bytes(&decoded));
-                keep.contains(name.as_str())
-            })
-        })
-        .map(|l| format!("{l}\n"))
-        .collect();
-    let _ = trashdir::atomic_write(&path, filtered.as_bytes());
+    trashdir::directorysizes_keep(dir, kept);
 }
 
 #[cfg(test)]

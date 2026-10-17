@@ -3224,6 +3224,49 @@ fn status_writes_missing_directorysizes_back_and_drops_gone_lines() {
     );
 }
 
+/// A cache line another tool wrote with only `%` encoded, for a name with
+/// a space: status reads it, and a later put keeps it as one line in
+/// rtrash's encoding instead of adding a second line for the same name.
+#[test]
+fn directorysizes_lines_from_other_encoders_are_read_and_kept() {
+    use std::os::unix::fs::MetadataExt;
+    let sb = Sandbox::new("dirsizes-foreign");
+    for d in ["My Dir", "later"] {
+        fs::create_dir(sb.work().join(d)).unwrap();
+        fs::write(sb.work().join(d).join("inner"), vec![b'q'; 2048]).unwrap();
+    }
+    assert!(sb.run(&["put", "-r", "My Dir"]).status.success());
+    let info = sb.trash().join("info/My Dir.trashinfo");
+    let mtime = fs::metadata(&info).unwrap().mtime();
+    let cache = sb.trash().join("directorysizes");
+    let ours = fs::read_to_string(&cache).unwrap();
+    let foreign = format!("777000000 {mtime} My Dir\n");
+    assert_ne!(
+        ours, foreign,
+        "the forged line must differ from rtrash's own"
+    );
+    fs::write(&cache, &foreign).unwrap();
+    let out = sb.run(&["status", "--home-only"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let s = stdout_of(&out);
+    assert!(
+        s.lines().any(|l| l == "Total: 1 item (741.0 MiB)"),
+        "status must read the line: {s}"
+    );
+    assert_eq!(
+        fs::read_to_string(&cache).unwrap(),
+        foreign,
+        "a hit writes nothing"
+    );
+
+    assert!(sb.run(&["put", "-r", "later"]).status.success());
+    let body = fs::read_to_string(&cache).unwrap();
+    let lines: Vec<&str> = body.lines().collect();
+    assert_eq!(lines.len(), 2, "one line per directory: {body}");
+    assert_eq!(lines[0], format!("777000000 {mtime} My%20Dir"));
+    assert!(lines[1].ends_with(" later"), "{body}");
+}
+
 #[test]
 fn empty_dry_run_uses_directorysizes_for_dir_payload() {
     let sb = Sandbox::new("empty-dry-dircache");

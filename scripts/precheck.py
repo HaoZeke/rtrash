@@ -564,7 +564,6 @@ PERMANENT_ALLOW = {
     ("du_snap.rs", "replace_file"): (2, OWN + ": the .NAME.PID.tmp it writes beside a snapshot or export"),
     ("empty.rs", "empty_one"): (1, RECORD),
     ("empty.rs", "full_empty_wipe"): (1, BATCH),
-    ("empty.rs", "prune_directorysizes"): (1, OWN),
     ("empty_tui.rs", "permanently_remove_entries"): (1, RECORD),
     ("fastdelete.rs", "remove_dir_tree"): (2, PRIMITIVE),
     ("fastdelete.rs", "remove_path"): (2, PRIMITIVE),
@@ -580,14 +579,13 @@ PERMANENT_ALLOW = {
     ("setup.rs", "run_setup"): (2, OWN),
     ("trash_total.rs", "forget"): (1, OWN),
     ("trashdir.rs", "atomic_write"): (1, OWN),
-    ("trashdir.rs", "directorysizes_remove"): (1, OWN),
+    ("trashdir.rs", "directorysizes_rewrite"): (1, OWN),
     ("trashdir.rs", "relocate_with"): (1, MOVE),
     ("trashdir.rs", "remove_any"): (2, PRIMITIVE + ", and the move's source removal"),
     ("trashdir.rs", "remove_any_path"): (1, PRIMITIVE),
     ("trashdir.rs", "remove_record"): (1, PRIMITIVE),
     ("trashdir.rs", "trash_move_locked"): (3, "a put undoing its own half-made copy and record, "
                                               "and a move's source"),
-    ("trashdir.rs", "write_back_with"): (1, OWN),
     ("tui_term.rs", "tempfile_unlinked"): (1, OWN),
     ("win_recycle.rs", "empty_run"): (1, BATCH),
     ("win_recycle.rs", "prune_after_put"): (1, BATCH),
@@ -1008,6 +1006,39 @@ def check_volume_trash_owner():
 
 
 
+SIZES_FNS = {("src/trashdir.rs", "load"), ("src/trashdir.rs", "directorysizes_rewrite")}
+
+
+def check_directorysizes_paths():
+    """Outside the test modules, only DirSizes::load and
+    directorysizes_rewrite name the `directorysizes` file. Every read then
+    shares one parser, which matches names by their decoded bytes, and
+    every update shares one writer (round 233: three hand-rolled updates
+    matched a line by its last space-separated word as written, and missed
+    lines other tools encoded another way)."""
+    starts = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)")
+    seen = set()
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        text = rust_code(path.read_text(encoding="utf-8"), strings=True)
+        skip = test_mod_lines(text.splitlines())
+        found = list(starts.finditer(text))
+        cuts = [m.start() for m in found] + [len(text)]
+        for m, a, b in zip(found, cuts, cuts[1:]):
+            line = text.count("\n", 0, a) + 1
+            if line - 1 in skip or '"directorysizes"' not in text[a:b]:
+                continue
+            key = (rel, m.group(1))
+            seen.add(key)
+            if key not in SIZES_FNS:
+                errors.append(f"{rel}:{line}: {m.group(1)} names the directorysizes file; read it "
+                              "through trashdir::read_size_lines in DirSizes::load and change it "
+                              "through trashdir::directorysizes_rewrite")
+    for rel, fn in sorted(SIZES_FNS - seen):
+        errors.append(f"precheck directorysizes check found no {fn} in {rel} naming the file; "
+                      "the rule no longer matches src and needs updating")
+
+
 KEY_READ = re.compile(r"\bevent::(read|poll)\s*\(")
 
 
@@ -1142,7 +1173,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_key_reads()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_key_reads(); check_directorysizes_paths()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

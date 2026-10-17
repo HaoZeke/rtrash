@@ -156,10 +156,14 @@ fn directorysizes_lines_survive_noise() {
     let mut rng = Rng(0x0dd5_eed5_1234_9876);
     let seed = b"8192 1791660998 d%FF%20x";
     for _ in 0..rounds() {
-        let line = text(&rng.input(seed));
-        if let Some((_, _, enc)) = rtrash::trashdir::directorysizes_parse_line(&line) {
-            assert!(!enc.is_empty());
-            let _ = rtrash::util::url_decode(&enc);
+        let line = rng.input(seed);
+        if let Some(l) = rtrash::trashdir::directorysizes_parse_line(&line) {
+            assert!(!l.name.is_empty() && !l.name.contains(&b'/'));
+            // The line rtrash writes back reads as the same line.
+            let enc = rtrash::util::url_encode(&l.name);
+            let again = format!("{} {} {enc}", l.size, l.mtime);
+            let again = rtrash::trashdir::directorysizes_parse_line(again.as_bytes());
+            assert_eq!(again.as_ref(), Some(&l));
         }
     }
 }

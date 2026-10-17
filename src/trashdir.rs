@@ -1167,75 +1167,138 @@ fn info_mtime_secs(path: &Path) -> io::Result<i64> {
 /// sizes are walked instead.
 const SIZES_CAP: u64 = 64 << 20;
 
-/// The `directorysizes` cache at `path` as text, read by
-/// [`info::read_bounded`] so a FIFO or device there cannot hang or flood a
-/// command.
-pub(crate) fn read_sizes(path: &Path) -> io::Result<String> {
-    let body = info::read_bounded(path, SIZES_CAP)?;
-    String::from_utf8(body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+/// One line of a trash root's `directorysizes` cache: `SIZE MTIME NAME`,
+/// where SIZE is the directory's block usage in bytes and MTIME the
+/// seconds of its `.trashinfo` file's modification time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SizeLine {
+    /// The directory's name under `files/`, decoded to its raw bytes.
+    pub name: Vec<u8>,
+    pub size: u64,
+    pub mtime: i64,
 }
 
-/// Insert or replace a `directorysizes` line: `size mtime percent-encoded-name`.
-/// Writes via temp file + rename (FreeDesktop: avoid concurrent cache corruption).
+/// Parse one `directorysizes` line, without its newline. The spec lets a
+/// writer percent-encode anything from just `%` and newline up to every
+/// byte RFC 2396 reserves, so the name is decoded and every comparison is
+/// on its bytes: `My Dir`, `My%20Dir` and `My%20D%69r` name one directory.
+///
+/// `None` for a line that is not `SIZE MTIME NAME` with decimal numbers
+/// (MTIME may be negative), and for a name that cannot be a child of
+/// `files/`: empty, `.`, `..`, or with a `/` or NUL byte. The spec refuses
+/// a `/` even as `%2F`.
+pub fn directorysizes_parse_line(line: &[u8]) -> Option<SizeLine> {
+    let mut parts = line.splitn(3, |&b| b == b' ');
+    let digits = |f: &[u8]| !f.is_empty() && f.iter().all(u8::is_ascii_digit);
+    let size = parts.next().filter(|f| digits(f))?;
+    let mtime = parts.next()?;
+    let unsigned = mtime.strip_prefix(b"-").unwrap_or(mtime);
+    if !digits(unsigned) {
+        return None;
+    }
+    let name = crate::util::url_decode_bytes(parts.next()?);
+    let bad = name.is_empty()
+        || name == b"."
+        || name == b".."
+        || name.iter().any(|&b| b == b'/' || b == 0);
+    if bad {
+        return None;
+    }
+    Some(SizeLine {
+        name,
+        size: std::str::from_utf8(size).ok()?.parse().ok()?,
+        mtime: std::str::from_utf8(mtime).ok()?.parse().ok()?,
+    })
+}
+
+/// Every valid line of the `directorysizes` cache at `path`, read by
+/// [`info::read_bounded`] so a FIFO or device there cannot hang or flood a
+/// command. The file is bytes, not text: a writer that encodes only `%`
+/// and newline leaves other bytes of a name as they are. A later line for
+/// a name replaces the earlier one, so each name appears once.
+pub fn read_size_lines(path: &Path) -> io::Result<Vec<SizeLine>> {
+    let body = info::read_bounded(path, SIZES_CAP)?;
+    let mut lines: Vec<SizeLine> = Vec::new();
+    let mut at: HashMap<Vec<u8>, usize> = HashMap::new();
+    for line in body
+        .split(|&b| b == b'\n')
+        .filter_map(directorysizes_parse_line)
+    {
+        match at.get(&line.name) {
+            Some(&i) => lines[i] = line,
+            None => {
+                at.insert(line.name.clone(), lines.len());
+                lines.push(line);
+            }
+        }
+    }
+    Ok(lines)
+}
+
+/// Read the `directorysizes` cache of `trash`, let `edit` change its lines,
+/// and write the result through a temporary file and a rename, as the spec
+/// requires. Every line comes out in one encoding, a name once. A cache
+/// that cannot be read counts as empty, since the cache may lose lines;
+/// one left with no lines is removed. Nothing is written when `edit`
+/// changes nothing.
+///
+/// Every update of the cache goes through here: a put, rm, restore, empty
+/// and the write back of [`DirSizes`].
+pub fn directorysizes_rewrite(
+    trash: &TrashDir,
+    edit: impl FnOnce(&mut Vec<SizeLine>),
+) -> io::Result<()> {
+    let path = trash.root.join("directorysizes");
+    let before = read_size_lines(&path).unwrap_or_default();
+    let mut lines = before.clone();
+    edit(&mut lines);
+    if lines == before {
+        return Ok(());
+    }
+    if lines.is_empty() {
+        return fs::remove_file(&path);
+    }
+    let body: String = lines
+        .iter()
+        .map(|l| {
+            let enc = crate::util::url_encode(&l.name);
+            format!("{} {} {enc}\n", l.size, l.mtime)
+        })
+        .collect();
+    atomic_write(&path, body.as_bytes())
+}
+
+/// The raw bytes of trash entry `name`, as [`SizeLine::name`] holds them.
+fn size_key(name: &str) -> Vec<u8> {
+    crate::util::os_from_str(name).as_bytes().to_vec()
+}
+
+/// Insert or replace the `directorysizes` line of directory `name`,
+/// whichever encoding the old line used.
 pub fn directorysizes_upsert(
     trash: &TrashDir,
     name: &str,
     size: u64,
     mtime: i64,
 ) -> io::Result<()> {
-    use crate::util::url_encode;
-    let path = trash.root.join("directorysizes");
-    let enc = url_encode(crate::util::os_from_str(name).as_bytes());
-    let line = format!("{size} {mtime} {enc}\n");
-    let mut out = String::new();
-    if let Ok(existing) = read_sizes(&path) {
-        for l in existing.lines() {
-            let keep = l.rsplit(' ').next().is_some_and(|e| e != enc.as_str());
-            if keep && !l.is_empty() {
-                out.push_str(l);
-                out.push('\n');
-            }
-        }
-    }
-    out.push_str(&line);
-    atomic_write(&path, out.as_bytes())
+    let name = size_key(name);
+    directorysizes_rewrite(trash, |lines| {
+        lines.retain(|l| l.name != name);
+        lines.push(SizeLine { name, size, mtime });
+    })
 }
 
-/// Drop a single name from `directorysizes` (used by selective trash-rm).
+/// Drop the `directorysizes` line of `name`, if there is one (used by
+/// selective trash-rm and restore).
 pub fn directorysizes_remove(trash: &TrashDir, name: &str) {
-    use crate::util::url_encode;
-    let path = trash.root.join("directorysizes");
-    let Ok(existing) = read_sizes(&path) else {
-        return;
-    };
-    let enc = url_encode(crate::util::os_from_str(name).as_bytes());
-    let filtered: String = existing
-        .lines()
-        .filter(|l| l.rsplit(' ').next().is_some_and(|e| e != enc.as_str()))
-        .map(|l| format!("{l}\n"))
-        .collect();
-    if filtered.is_empty() {
-        let _ = fs::remove_file(&path);
-    } else {
-        let _ = atomic_write(&path, filtered.as_bytes());
-    }
+    let name = size_key(name);
+    let _ = directorysizes_rewrite(trash, |lines| lines.retain(|l| l.name != name));
 }
 
-/// Parse one FreeDesktop `directorysizes` line: `size mtime percent-encoded-name`.
-/// Returns `None` on any malformed line (callers fall back to a real walk).
-pub fn directorysizes_parse_line(line: &str) -> Option<(u64, i64, String)> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-    let mut parts = line.splitn(3, ' ');
-    let size: u64 = parts.next()?.parse().ok()?;
-    let mtime: i64 = parts.next()?.parse().ok()?;
-    let enc = parts.next()?.to_string();
-    if enc.is_empty() {
-        return None;
-    }
-    Some((size, mtime, enc))
+/// Keep only the `directorysizes` lines of the entries in `kept`.
+pub fn directorysizes_keep(trash: &TrashDir, kept: &[String]) {
+    let keep: HashSet<Vec<u8>> = kept.iter().map(|n| size_key(n.as_str())).collect();
+    let _ = directorysizes_rewrite(trash, |lines| lines.retain(|l| keep.contains(&l.name)));
 }
 
 /// The `directorysizes` cache of one trash root, read once. Sizes are
@@ -1248,22 +1311,18 @@ pub fn directorysizes_parse_line(line: &str) -> Option<(u64, i64, String)> {
 /// between threads.
 pub struct DirSizes<'a> {
     trash: &'a TrashDir,
-    /// Percent-encoded name to (size, trashinfo mtime).
-    lines: HashMap<String, (u64, i64)>,
-    misses: std::sync::Mutex<Vec<(String, u64, i64)>>,
+    /// Decoded name to (size, trashinfo mtime).
+    lines: HashMap<Vec<u8>, (u64, i64)>,
+    misses: std::sync::Mutex<Vec<SizeLine>>,
 }
 
 impl<'a> DirSizes<'a> {
     pub fn load(trash: &'a TrashDir) -> Self {
-        let mut lines = HashMap::new();
-        if let Ok(body) = read_sizes(&trash.root.join("directorysizes")) {
-            for line in body.lines() {
-                // A later duplicate wins, as a rewrite would keep it.
-                if let Some((size, mtime, enc)) = directorysizes_parse_line(line) {
-                    lines.insert(enc, (size, mtime));
-                }
-            }
-        }
+        let lines = read_size_lines(&trash.root.join("directorysizes"))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|l| (l.name, (l.size, l.mtime)))
+            .collect();
         DirSizes {
             trash,
             lines,
@@ -1284,8 +1343,7 @@ impl<'a> DirSizes<'a> {
 
     /// [`Self::cached`] for a payload already known to be a directory.
     fn cached_dir(&self, name: &str) -> Option<u64> {
-        let key = crate::util::url_encode(crate::util::os_from_str(name).as_bytes());
-        let (size, mtime) = *self.lines.get(&key)?;
+        let (size, mtime) = *self.lines.get(&size_key(name))?;
         let info = join_info(&self.trash.info(), name);
         (info_mtime_secs(&info).ok()? == mtime).then_some(size)
     }
@@ -1309,11 +1367,14 @@ impl<'a> DirSizes<'a> {
         let info = join_info(&self.trash.info(), name);
         {
             if let Ok(mtime) = info_mtime_secs(&info) {
-                self.misses.lock().unwrap_or_else(|e| e.into_inner()).push((
-                    name.to_string(),
-                    size,
-                    mtime,
-                ));
+                self.misses
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(SizeLine {
+                        name: size_key(name),
+                        size,
+                        mtime,
+                    });
             }
         }
         size
@@ -1343,12 +1404,11 @@ impl<'a> DirSizes<'a> {
     fn write_back_with(self, lock: bool) {
         let misses = self.misses.into_inner().unwrap_or_else(|e| e.into_inner());
         let files = self.trash.files();
-        let gone = |enc: &str| {
-            let name = crate::util::url_decode(enc);
-            let name = std::ffi::OsStr::from_bytes(&name);
+        let gone = |name: &[u8]| {
+            let name = OsStr::from_bytes(name);
             !fs::symlink_metadata(files.join(name)).is_ok_and(|m| m.is_dir())
         };
-        if misses.is_empty() && !self.lines.keys().any(|enc| gone(enc)) {
+        if misses.is_empty() && !self.lines.keys().any(|name| gone(name)) {
             return;
         }
         let _lock = if lock {
@@ -1359,29 +1419,15 @@ impl<'a> DirSizes<'a> {
         } else {
             None
         };
-        // Re-read under the lock: a put may have added a line meanwhile.
-        let path = self.trash.root.join("directorysizes");
-        let mut kept: Vec<(String, u64, i64)> = read_sizes(&path)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(directorysizes_parse_line)
-            .map(|(size, mtime, enc)| (enc, size, mtime))
-            .filter(|(enc, _, _)| !gone(enc))
-            .collect();
-        for (name, size, mtime) in misses {
-            let enc = crate::util::url_encode(crate::util::os_from_str(&name).as_bytes());
-            kept.retain(|(e, _, _)| *e != enc);
-            kept.push((enc, size, mtime));
-        }
-        if kept.is_empty() {
-            let _ = fs::remove_file(&path);
-            return;
-        }
-        let body: String = kept
-            .iter()
-            .map(|(enc, size, mtime)| format!("{size} {mtime} {enc}\n"))
-            .collect();
-        let _ = atomic_write(&path, body.as_bytes());
+        // The rewrite reads again under the lock: a put may have added a
+        // line meanwhile.
+        let _ = directorysizes_rewrite(self.trash, |lines| {
+            lines.retain(|l| !gone(&l.name));
+            for miss in misses {
+                lines.retain(|l| l.name != miss.name);
+                lines.push(miss);
+            }
+        });
     }
 }
 
@@ -3790,13 +3836,141 @@ proc /proc proc rw 0 0
 
     #[test]
     fn directorysizes_parse_line_ok_and_rejects_garbage() {
-        let (sz, mt, enc) = directorysizes_parse_line("1234 1700000000 mydir").unwrap();
-        assert_eq!(sz, 1234);
-        assert_eq!(mt, 1_700_000_000);
-        assert_eq!(enc, "mydir");
-        assert!(directorysizes_parse_line("").is_none());
-        assert!(directorysizes_parse_line("not-a-number 1 x").is_none());
-        assert!(directorysizes_parse_line("1 2").is_none()); // missing name
+        let l = directorysizes_parse_line(b"1234 1700000000 mydir").unwrap();
+        assert_eq!((l.size, l.mtime), (1234, 1_700_000_000));
+        assert_eq!(l.name, b"mydir");
+        assert!(directorysizes_parse_line(b"").is_none());
+        assert!(directorysizes_parse_line(b"not-a-number 1 x").is_none());
+        assert!(directorysizes_parse_line(b"1 2").is_none()); // missing name
+    }
+
+    /// The spec's example line, and the encodings other writers may use
+    /// for one name: none past `%` and newline, lower-case hex, raw bytes
+    /// that are not UTF-8. A name that is not a child of `files/` is no
+    /// line at all, `%2F` included.
+    #[test]
+    fn directorysizes_lines_read_every_spec_encoding() {
+        let name = |line: &[u8]| directorysizes_parse_line(line).map(|l| l.name);
+        let l = directorysizes_parse_line(b"16384 15803468 Documents").unwrap();
+        assert_eq!(
+            (l.size, l.mtime, &l.name[..]),
+            (16384, 15803468, &b"Documents"[..])
+        );
+        assert_eq!(name(b"1 2 My Dir").unwrap(), b"My Dir");
+        assert_eq!(name(b"1 2 My%20Dir").unwrap(), b"My Dir");
+        assert_eq!(name(b"1 2  lead").unwrap(), b" lead");
+        assert_eq!(name(b"1 2 Zo%c3%ab").unwrap(), "Zo\u{eb}".as_bytes());
+        assert_eq!(
+            name("1 2 Zo\u{eb}".as_bytes()).unwrap(),
+            "Zo\u{eb}".as_bytes()
+        );
+        assert_eq!(name(b"1 2 d\xff").unwrap(), b"d\xff");
+        assert_eq!(name(b"1 2 100%25").unwrap(), b"100%");
+        assert_eq!(directorysizes_parse_line(b"1 -5 x").unwrap().mtime, -5);
+        for bad in [
+            &b"1 2 a%2Fb"[..],
+            b"1 2 a/b",
+            b"1 2 /abs",
+            b"1 2 .",
+            b"1 2 %2E%2E",
+            b"1 2 a%00b",
+            b"1 2 ",
+            b"+1 2 x",
+            b"-1 2 x",
+            b" 1 2 x",
+            b"1 2.5 x",
+            b"1 x y",
+            b"99999999999999999999 2 x",
+        ] {
+            assert_eq!(name(bad), None, "{:?}", String::from_utf8_lossy(bad));
+        }
+    }
+
+    fn sizes_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-ds-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("files")).unwrap();
+        fs::create_dir_all(root.join("info")).unwrap();
+        root
+    }
+
+    /// Lines another tool wrote in its own encoding are the same lines to
+    /// rtrash: a put replaces one, rm drops one, empty keeps one, and the
+    /// rewrite leaves one line per name in one encoding.
+    #[test]
+    fn directorysizes_updates_match_lines_other_writers_encoded() {
+        let root = sizes_root("foreign");
+        let trash = TrashDir {
+            root: root.clone(),
+            topdir: None,
+        };
+        let path = root.join("directorysizes");
+        let foreign: &[u8] = b"10 1 My Dir\n20 2 Zo%c3%ab\n30 3 d\xff\n40 4 My%20Dir\n";
+        fs::write(&path, foreign).unwrap();
+        directorysizes_upsert(&trash, "Zo\u{eb}", 99, 9).unwrap();
+        let after = fs::read(&path).unwrap();
+        assert_ne!(after, foreign, "the put must rewrite the cache");
+        // The later `My%20Dir` line won over `My Dir`; the old Zo\u{eb}
+        // line is gone, not kept beside the new one.
+        assert_eq!(
+            String::from_utf8(after).unwrap(),
+            "40 4 My%20Dir\n30 3 d%FF\n99 9 Zo%C3%AB\n"
+        );
+
+        let before = fs::read(&path).unwrap();
+        directorysizes_remove(&trash, "My Dir");
+        let after = fs::read(&path).unwrap();
+        assert_ne!(after, before, "rm must drop the line");
+        assert_eq!(after, b"30 3 d%FF\n99 9 Zo%C3%AB\n");
+
+        let raw = crate::util::str_from_os_ref(OsStr::from_bytes(b"d\xff"));
+        directorysizes_keep(&trash, &[raw]);
+        assert_eq!(fs::read(&path).unwrap(), b"30 3 d%FF\n");
+        directorysizes_keep(&trash, &[]);
+        assert!(!path.exists(), "a cache with no lines goes");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A status reads a line another tool wrote with little encoding, and
+    /// a line whose `.trashinfo` changed since is walked again.
+    #[test]
+    fn directorysizes_cache_hits_a_minimally_encoded_line() {
+        let root = sizes_root("minimal");
+        let trash = TrashDir {
+            root: root.clone(),
+            topdir: None,
+        };
+        fs::create_dir_all(root.join("files/My Dir")).unwrap();
+        let info = root.join("info/My Dir.trashinfo");
+        fs::write(
+            &info,
+            "[Trash Info]\nPath=/orig/My%20Dir\nDeletionDate=2020-01-01T00:00:00\n",
+        )
+        .unwrap();
+        let mtime = info_mtime_secs(&info).unwrap();
+        fs::write(
+            root.join("directorysizes"),
+            format!("999000000 {mtime} My Dir\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            directorysizes_cached_size(&trash, "My Dir"),
+            Some(999_000_000)
+        );
+        fs::write(
+            root.join("directorysizes"),
+            format!("999000000 {} My Dir\n", mtime - 1),
+        )
+        .unwrap();
+        assert_eq!(directorysizes_cached_size(&trash, "My Dir"), None);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

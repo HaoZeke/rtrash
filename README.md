@@ -287,6 +287,7 @@ Names are reserved atomically (create-new / `O_EXCL` on the `.trashinfo`), so co
 
 Putting a **directory** updates that trash dir’s FreeDesktop `directorysizes` cache (`size mtime percent-encoded-name`).
 Sizes count allocated blocks the way `du -B1` does, the directories' own blocks included and each hard-linked file once.
+rtrash reads the lines other tools write in any encoding the spec allows, from one that encodes only `%` and newline to full percent-encoding, and each update leaves one line per directory.
 Put measures the tree in parallel after the move, outside the trash lock.
 When `status` or `empty --dry-run` has to walk a directory with no valid line, it writes the size back and drops lines for directories that left the trash, so the next run reads the cache.
 Putting ordinary files does not add directory lines.
