@@ -936,7 +936,7 @@ pub fn export(
         one_file_system,
         include_kernfs: false,
     };
-    export_with(root, mounts, spec, created, w)
+    export_with(root, mounts, spec, created, None, w)
 }
 
 /// Which mounts below the root an export walks into.
@@ -949,15 +949,17 @@ pub struct Mounts {
     pub include_kernfs: bool,
 }
 
-/// [`export`] with both mount settings.
+/// [`export`] with both mount settings, leaving out `own`, the file the
+/// export is being written to, wherever the walk finds it.
 pub fn export_with(
     root: &Path,
     mounts: Mounts,
     spec: Option<&du_filter::Spec>,
     created: i64,
+    own: Option<&Path>,
     w: &mut impl Write,
 ) -> io::Result<Exported> {
-    walk_export(root, mounts, spec, &mut JsonSink { w, created })
+    walk_export(root, mounts, spec, own, &mut JsonSink { w, created })
 }
 
 /// [`export`] in ncdu 2's binary format (`ncdu -O`), which ncdu 2.6 and
@@ -972,24 +974,27 @@ pub fn export_binary(
         one_file_system,
         include_kernfs: false,
     };
-    export_binary_with(root, mounts, spec, w)
+    export_binary_with(root, mounts, spec, None, w)
 }
 
-/// [`export_binary`] with both mount settings.
+/// [`export_binary`] with both mount settings, leaving out `own` as
+/// [`export_with`] does.
 pub fn export_binary_with(
     root: &Path,
     mounts: Mounts,
     spec: Option<&du_filter::Spec>,
+    own: Option<&Path>,
     w: &mut impl Write,
 ) -> io::Result<Exported> {
     let sink = &mut crate::du_ncdu_bin::Writer::new(w);
-    walk_export(root, mounts, spec, sink)
+    walk_export(root, mounts, spec, own, sink)
 }
 
 fn walk_export(
     root: &Path,
     mounts: Mounts,
     spec: Option<&du_filter::Spec>,
+    own: Option<&Path>,
     sink: &mut impl Sink,
 ) -> io::Result<Exported> {
     let one_file_system = mounts.one_file_system;
@@ -1003,6 +1008,9 @@ fn walk_export(
     }
     du_fs::raise_nofile_limit();
     let filter = spec.map(|s| du_filter::Filter::new(s, &abs));
+    // The file being written, by name and identity: an export written
+    // inside the tree would otherwise list its own half-written temporary.
+    let own = own.and_then(|p| Some((p.file_name()?.to_owned(), du_fs::lstat(p).ok()?)));
     let mut out = Exported::default();
     let mut path = abs.clone();
     let root_dev = st.dev;
@@ -1038,6 +1046,17 @@ fn walk_export(
         let i = top.order[top.next];
         top.next += 1;
         let (name, kind) = top.entries.get(i);
+        let is_own = own.as_ref().is_some_and(|(own_name, own_st)| {
+            name.to_bytes() == own_name.as_encoded_bytes()
+                && top
+                    .entries
+                    .stat(i)
+                    .map_or_else(|| top.dir.stat_at(name), Ok)
+                    .is_ok_and(|st| (st.dev, st.ino) == (own_st.dev, own_st.ino))
+        });
+        if is_own {
+            continue;
+        }
         let excluded = |is_dir: bool, chain: Option<&du_filter::Chain>, path: &Path| {
             filter
                 .as_ref()
@@ -1201,7 +1220,7 @@ mod tests {
                 include_kernfs,
             };
             let mut buf = Vec::new();
-            export_with(Path::new("/sys/fs"), mounts, None, 0, &mut buf).unwrap();
+            export_with(Path::new("/sys/fs"), mounts, None, 0, None, &mut buf).unwrap();
             String::from_utf8_lossy(&buf).into_owned()
         };
         let skipped = run(false);

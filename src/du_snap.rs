@@ -138,6 +138,85 @@ pub fn write(report: &Report, opts: &ScanOpts, created: i64, mut w: impl Write) 
     w.flush()
 }
 
+/// Write a snapshot to `path` with [`replace_file`].
+pub fn write_file(path: &Path, report: &Report, opts: &ScanOpts, created: i64) -> io::Result<()> {
+    replace_file(path, |w, _| write(report, opts, created, w))
+}
+
+/// Write `path` whole or not at all, for snapshots and ncdu exports:
+/// `fill` writes into a new file beside it, which is flushed to disk and
+/// renamed over `path`. A full disk, a crash or a failed scan leaves the
+/// file that was there (or none), never a cut-off one. A path that names
+/// no regular file (a pipe, `/dev/stdout`, a symlink) is written in
+/// place, as before, since a rename would replace the link or device
+/// itself. `fill` is also handed the path of the new file, so an export
+/// that scans the directory it is written to can leave that file out.
+pub fn replace_file<T>(
+    path: &Path,
+    fill: impl FnOnce(&mut dyn Write, Option<&Path>) -> io::Result<T>,
+) -> io::Result<T> {
+    if fs::symlink_metadata(path).is_ok_and(|m| !m.file_type().is_file()) {
+        let mut w = io::BufWriter::new(fs::File::create(path)?);
+        let done = fill(&mut w, None)?;
+        w.flush()?;
+        return Ok(done);
+    }
+    let tmp = temp_beside(path);
+    let f = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+    {
+        // Left by a run that crashed with this process id.
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            fs::remove_file(&tmp)?;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?
+        }
+        other => other?,
+    };
+    let done = fill_and_rename(f, &tmp, path, fill);
+    if done.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    done
+}
+
+/// The body of [`replace_file`]: `fill` into `f`, opened at `tmp`, then
+/// `tmp` over `path`.
+fn fill_and_rename<T>(
+    f: fs::File,
+    tmp: &Path,
+    path: &Path,
+    fill: impl FnOnce(&mut dyn Write, Option<&Path>) -> io::Result<T>,
+) -> io::Result<T> {
+    let mut w = io::BufWriter::new(f);
+    let done = fill(&mut w, Some(tmp))?;
+    let f = w.into_inner().map_err(io::IntoInnerError::into_error)?;
+    f.sync_all()?;
+    drop(f);
+    // A file written over keeps its mode.
+    if let Ok(m) = fs::metadata(path) {
+        fs::set_permissions(tmp, m.permissions())?;
+    }
+    fs::rename(tmp, path)?;
+    Ok(done)
+}
+
+/// `.NAME.PID.tmp` in the directory of `path`.
+fn temp_beside(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map_or_else(|| "snapshot".into(), |n| n.to_string_lossy());
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    dir.join(format!(".{name}.{}.tmp", std::process::id()))
+}
+
 fn bad(line: usize, what: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("line {line}: {what}"))
 }
@@ -683,6 +762,98 @@ mod tests {
         assert!(parse(&b"{\"roots\":[]}"[..]).is_err());
         let s = parse(&b"# rtrash du snapshot 1\nfuture 1 2\ndir 1 1 0 - /x\n"[..]).unwrap();
         assert_eq!(s.dirs.len(), 1);
+    }
+
+    fn small_report() -> Report {
+        Report {
+            roots: vec![RootTotals {
+                path: PathBuf::from("/w"),
+                disk: 512,
+                apparent: 256,
+                files: 1,
+                dirs: 1,
+                ..RootTotals::default()
+            }],
+            dirs: vec![item("/w/x", 512)],
+            files: Vec::new(),
+            unreadable: 0,
+            unread: Vec::new(),
+            too_deep: 0,
+            depth_limit: du::MAX_DEPTH,
+            shared: None,
+            partial: false,
+            types: Vec::new(),
+        }
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("rtrash-snap-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_snapshot_file_is_replaced_whole_and_leaves_no_temporary() {
+        let d = scratch("whole");
+        let out = d.join("a.snap");
+        fs::write(&out, "old contents").unwrap();
+        // A temporary a crashed run left under this process id.
+        fs::write(temp_beside(&out), "stale").unwrap();
+        let opts = snapshot_opts(ScanOpts::default());
+        write_file(&out, &small_report(), &opts, 9).unwrap();
+        let snap = read(&out).unwrap();
+        assert_eq!((snap.created, snap.dirs.len()), (9, 1));
+        let names: Vec<_> = fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["a.snap"]);
+        // A directory that is missing fails before anything is written.
+        let gone = d.join("no/such/dir/b.snap");
+        assert!(write_file(&gone, &small_report(), &opts, 9).is_err());
+        assert!(!d.join("no").exists());
+        // A fill that fails halfway, as a scan can, keeps the old file.
+        let half = replace_file(&out, |w, tmp| {
+            let tmp = tmp.expect("a regular file goes through a temporary");
+            assert!(tmp.is_file() && tmp.parent() == Some(d.as_path()));
+            w.write_all(b"# rtrash du snapshot 1\ncut")?;
+            Err::<(), _>(io::Error::other("disk full"))
+        });
+        assert_eq!(half.unwrap_err().to_string(), "disk full");
+        assert_eq!(read(&out).unwrap().created, 9);
+        let names: Vec<_> = fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["a.snap"]);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_snapshot_to_a_device_or_through_a_link_is_written_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let opts = snapshot_opts(ScanOpts::default());
+        // A rename over /dev/null would need /dev; in place, it just works.
+        write_file(Path::new("/dev/null"), &small_report(), &opts, 1).unwrap();
+        let d = scratch("link");
+        let target = d.join("real.snap");
+        fs::write(&target, "old").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        let link = d.join("link.snap");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_file(&link, &small_report(), &opts, 2).unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(read(&target).unwrap().created, 2);
+        // Written over as a regular file, a snapshot keeps its mode.
+        write_file(&target, &small_report(), &opts, 3).unwrap();
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

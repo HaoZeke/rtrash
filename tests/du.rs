@@ -2161,6 +2161,55 @@ fn ncdu_exports_written_by_du_read_back_with_the_scan_totals() {
 }
 
 #[test]
+fn an_export_written_inside_the_scanned_directory_lists_no_temporary() {
+    // Each export is written to `out.*` inside the directory it scans, so
+    // the walk meets the temporary it is writing. It must leave that file
+    // out, even when a filter would have listed it as excluded.
+    let t = Tree::new("ncdu-inside");
+    let first = |s: &str, key: &str| -> String {
+        let at = s.find(&format!("\"{key}\":")).unwrap() + key.len() + 3;
+        s[at..].split([',', '}']).next().unwrap().to_string()
+    };
+    for (flag, dir, name) in [
+        ("--ncdu", "j", "out.json"),
+        ("--ncdu-binary", "b", "out.ncdu"),
+        ("-o", "s", "out.snap"),
+    ] {
+        t.file(&format!("{dir}/a/f"), 40_000);
+        t.file(&format!("{dir}/g"), 9_000);
+        let out = format!("{dir}/{name}");
+        let w = t.du(&["--no-git", flag, &out, "--exclude=.*", dir]);
+        assert!(
+            w.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&w.stderr)
+        );
+        let left: Vec<_> = fs::read_dir(t.root.join(dir))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "{name}: {left:?}");
+        if flag == "--ncdu" {
+            let text = fs::read_to_string(t.root.join(&out)).unwrap();
+            assert!(!text.contains(".tmp") && !text.contains(name), "{text}");
+        }
+        let back = t.du(&["-f", &out, "--json"]);
+        assert!(
+            back.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&back.stderr)
+        );
+        let s = String::from_utf8_lossy(&back.stdout).into_owned();
+        assert!(!s.contains(".tmp"), "{name}: {s}");
+        assert_eq!(first(&s, "files"), "2", "{name}: {s}");
+        if flag != "-o" {
+            assert_eq!(first(&s, "excluded"), "0", "{name}: {s}");
+        }
+    }
+}
+
+#[test]
 fn ncdu_binary_exports_written_by_du_read_back_like_the_json_one() {
     let t = Tree::new("ncdu-bin-out");
     t.file("t/a/f", 40_000);

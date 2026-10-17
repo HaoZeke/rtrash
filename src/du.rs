@@ -2073,18 +2073,18 @@ fn ncdu_out(
         one_file_system: opts.one_file_system,
         include_kernfs: opts.include_kernfs,
     };
-    let write = |w: &mut dyn Write| {
+    let write = |w: &mut dyn Write, own: Option<&Path>| {
         let mut w = io::BufWriter::new(w);
         if binary {
-            crate::du_ncdu::export_binary_with(path, mounts, spec, &mut w)
+            crate::du_ncdu::export_binary_with(path, mounts, spec, own, &mut w)
         } else {
-            crate::du_ncdu::export_with(path, mounts, spec, now, &mut w)
+            crate::du_ncdu::export_with(path, mounts, spec, now, own, &mut w)
         }
     };
     let written = if out.as_os_str() == "-" {
-        write(&mut io::stdout().lock())
+        write(&mut io::stdout().lock(), None)
     } else {
-        fs::File::create(out).and_then(|mut f| write(&mut f))
+        crate::du_snap::replace_file(out, write)
     };
     let done = match written {
         Ok(d) => d,
@@ -3921,8 +3921,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let written = if out.as_os_str() == "-" {
             crate::du_snap::write(&report, &opts, now, io::stdout().lock())
         } else {
-            fs::File::create(out)
-                .and_then(|f| crate::du_snap::write(&report, &opts, now, io::BufWriter::new(f)))
+            crate::du_snap::write_file(out, &report, &opts, now)
         };
         if let Err(e) = written {
             eprintln!("{prog}: cannot write snapshot '{}': {e}", out.display());

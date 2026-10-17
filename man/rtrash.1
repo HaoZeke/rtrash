@@ -1962,6 +1962,14 @@ text diff tools read them too.
 They record how many entries the scan could not read, and the first 100
 with the reason; a snapshot from an older rtrash lacks the count, and
 reads as unknown.
+The snapshot goes to a new file beside
+.I FILE
+and is renamed over it once it is whole and on disk, so a full disk or a
+crash leaves the old snapshot rather than a cut-off one.
+A
+.I FILE
+that is not a regular file (a pipe, a device or a symbolic link) is
+written in place.
 .TP
 .B \-\-devices
 List every mounted file system instead of scanning: size, use, free space,
@@ -2011,6 +2019,13 @@ The fast zstd level is the only one this build has, so the export is
 larger than ncdu's own, by about a third.
 A second thread compresses while the walk goes on, so the export takes
 about as long as the JSON one.
+Both exports go to a new file beside
+.I FILE
+and are renamed over it once whole, as
+.B \-o
+snapshots are, so a scan that fails or a full disk leaves the old file.
+An export written inside the directory it scans leaves out the new file
+it is being written to.
 .TP
 .BR \-f ", " \-\-file =\fIFILE\fR
 List the largest directories from a snapshot instead of scanning.
