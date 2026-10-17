@@ -324,6 +324,114 @@ def check_os_trash_scoped():
                 errors.append(f"{path.relative_to(ROOT)}:{k + 1}: trash::delete outside allow_roots; "
                               "call crate::allow_roots::trash_delete so the scope is checked")
 
+ITEM_FN = re.compile(r"^(\s{0,4})(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)")
+
+
+def blank_strings(s):
+    """strip_comments that keeps every newline, so line numbers hold."""
+    keep = lambda m: '""' + "\n" * m.group(0).count("\n")
+    s = re.sub(r'\br(#*)"[\s\S]*?"\1', keep, s)  # raw strings have no escapes
+    s = re.sub(r'"(?:\\[\s\S]|[^"\\])*"', keep, s)
+    return re.sub(r"//[^\n]*", "", s)
+
+
+def test_fns(text, raw):
+    """Top-level fns and impl methods of a test file: name, own cfgs, test
+    flag and line range. A body ends at the first `}` line at its indent."""
+    lines, fns, attrs = text.splitlines(), [], []
+    raw_lines = raw.splitlines()
+    impl_cfgs, impl_trait, impl_close = frozenset(), False, None
+    k = 0
+    while k < len(lines):
+        line = lines[k]
+        if impl_close is not None and line.rstrip() == impl_close:
+            impl_cfgs, impl_trait, impl_close = frozenset(), False, None
+            k += 1
+            continue
+        a = re.match(r"^\s{0,4}#\[(.*)\]\s*$", raw_lines[k] if k < len(raw_lines) else line)
+        if a:
+            attrs.append(a.group(1).strip())
+            k += 1
+            continue
+        im = re.match(r"^impl\b(.*)\{\s*$", line)
+        if im:
+            impl_cfgs = frozenset(re.sub(r"\s+", "", x) for x in attrs if x.startswith("cfg("))
+            impl_trait = " for " in im.group(1)
+            impl_close, attrs = "}", []
+            k += 1
+            continue
+        m = ITEM_FN.match(line)
+        if m and impl_close is not None and impl_trait:
+            m = None  # a trait method is called through the trait, not by name
+        if m:
+            close = m.group(1) + "}"
+            end = k
+            while end < len(lines) and lines[end].rstrip() != close and not lines[end].rstrip().endswith("{}"):
+                end += 1
+            cfgs = frozenset(re.sub(r"\s+", "", x) for x in attrs if x.startswith("cfg("))
+            if impl_close is not None:
+                cfgs = cfgs | impl_cfgs
+            fns.append({"name": m.group(2), "cfgs": cfgs, "test": "test" in attrs,
+                        "start": k, "end": end})
+            attrs = []
+            k = end + 1
+            continue
+        if line.strip() and not line.lstrip().startswith("//"):
+            attrs = []
+        k += 1
+    return lines, fns
+
+
+def check_cfg_helpers():
+    """A test helper used only under a cfg it lacks is dead code on the other
+    targets, and cross-clippy -D warnings fails there (181b: outside_lines)."""
+    for path in sorted((ROOT / "tests").glob("*.rs")):
+        raw = path.read_text(encoding="utf-8")
+        lines, fns = test_fns(blank_strings(raw), raw)
+        owner = {}
+        for i, f in enumerate(fns):
+            for n in range(f["start"], f["end"] + 1):
+                owner[n] = i
+        callers = defaultdict(list)  # helper index -> caller indexes (None: outside any fn)
+        index = {}
+        for i, f in enumerate(fns):
+            index.setdefault(f["name"], []).append(i)
+        for name, ids in index.items():
+            if len(ids) != 1:
+                continue  # a name defined twice (per-cfg variants) is not judged
+            i = ids[0]
+            pat = re.compile(rf"\b{re.escape(name)}\b")
+            for n, line in enumerate(lines):
+                if n == fns[i]["start"] or not pat.search(line):
+                    continue
+                callers[i].append(owner.get(n))
+        eff = [f["cfgs"] if (f["cfgs"] or f["test"]) else None for f in fns]
+        for _ in range(len(fns)):
+            changed = False
+            for i, f in enumerate(fns):
+                if f["cfgs"] or f["test"] or not callers[i]:
+                    continue
+                known = []
+                for c in callers[i]:
+                    if c is None or c == i:
+                        known.append(frozenset() if c is None else None)
+                    else:
+                        known.append(eff[c])
+                known = [k for k in known if k is not None]
+                if not known:
+                    continue
+                new = frozenset.intersection(*known)
+                if eff[i] != new:
+                    eff[i], changed = new, True
+            if not changed:
+                break
+        for i, f in enumerate(fns):
+            if f["cfgs"] or f["test"] or not eff[i]:
+                continue
+            gate = " ".join(f"#[{c}]" for c in sorted(eff[i]))
+            errors.append(f"{path.relative_to(ROOT)}:{f['start'] + 1}: fn {f['name']} is used only under {gate} "
+                          "and is dead code elsewhere (cross-clippy fails); give it the same cfg")
+
 
 def check_rustfmt():
     """`cargo fmt --check` when a toolchain is there; three rounds in a row
@@ -346,7 +454,7 @@ def check_rustfmt():
 def main():
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps()
-    check_fn_params(); check_permanent_gate(); check_os_trash_scoped()
+    check_fn_params(); check_permanent_gate(); check_os_trash_scoped(); check_cfg_helpers()
     check_long_lines(base); check_removed_literals(base)
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
