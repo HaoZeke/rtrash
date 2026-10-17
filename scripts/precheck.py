@@ -898,6 +898,36 @@ def check_copy_then_remove():
                               "without tree_removable before the copy; check that the whole tree can go first")
 
 
+
+def check_volume_trash_owner():
+    """A fn outside the test modules that names this user's volume trash,
+    `.Trash-{uid}`, asks `user_trash_problem` (or `ensure_user_trash`,
+    which does) before it uses the directory, so a symlink, a directory
+    another user planted, or one other users can write to is never put
+    into, listed or emptied (trash-cli #433, round 226)."""
+    starts = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)")
+    named = 0
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        text = rust_code(path.read_text(encoding="utf-8"), strings=True)
+        skip = test_mod_lines(text.splitlines())
+        found = list(starts.finditer(text))
+        cuts = [m.start() for m in found] + [len(text)]
+        for m, a, b in zip(found, cuts, cuts[1:]):
+            line = text.count("\n", 0, a) + 1
+            body = text[a:b]
+            if line - 1 in skip or '".Trash-{' not in body:
+                continue
+            named += 1
+            if "user_trash_problem(" not in body and "ensure_user_trash(" not in body:
+                errors.append(f"{rel}:{line}: {m.group(1)} names a `.Trash-{{uid}}` volume trash without "
+                              "user_trash_problem or ensure_user_trash; refuse a symlink, another "
+                              "user's directory and one others can write to before using it")
+    if not named:
+        errors.append("precheck volume-trash owner check found no fn naming `.Trash-{uid}`; "
+                      "the rule no longer matches src and needs updating")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -946,7 +976,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
     check_musl_aliases()
     if "--no-fmt" not in sys.argv:
