@@ -627,6 +627,111 @@ fn guard_and_cap_refuse_a_recycle_bin_restore_overwrite() {
     );
 }
 
+/// The value of `"key":N` in a JSON root line; None when null or absent.
+fn json_count(line: &str, key: &str) -> Option<u64> {
+    let rest = line.split(&format!("\"{key}\":")).nth(1)?;
+    rest.split([',', '}']).next()?.parse().ok()
+}
+
+/// `status --json` on the Recycle Bin: the Linux object, one root per
+/// volume, with orphans and dangling null, the cap fields, and totals
+/// that are the sum of the roots; with a filter too. `--check` refuses
+/// `--json`.
+#[test]
+fn status_json_gives_the_status_object_for_the_recycle_bin() {
+    let dir = common::scratch_dir("names", "statusjson");
+    let file = dir.join("sj.txt");
+    fs::write(&file, "status json").unwrap();
+    let put = common::rtrash_real(common::Real::RecycleBin)
+        .arg("put")
+        .arg(&file)
+        .output()
+        .unwrap();
+    let status = |args: &[&str]| {
+        common::rtrash_real(common::Real::RecycleBin)
+            .arg("status")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let plain = status(&["--json"]);
+    let filtered = status(&["--json", "--newer-than=1"]);
+    let check = common::assert_refused_unchanged(&"check json", &[dir.as_path()], 2, &[], || {
+        common::rtrash(&dir)
+            .args(["status", "--check", "--json"])
+            .output()
+            .unwrap()
+    });
+    // Put the item back so the Recycle Bin is left as found.
+    let back = common::rtrash_real(common::Real::RecycleBin)
+        .arg("restore")
+        .arg(&file)
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert!(put.status.success(), "{}", common::stderr_text(&put));
+    assert!(back.status.success(), "{}", common::stderr_text(&back));
+    let drive = &dir.to_string_lossy()[..2];
+    let ours = format!(r#"    {{"path":"{drive}\\","#);
+    for (label, out) in [("plain", &plain), ("filtered", &filtered)] {
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "{label}: {}",
+            common::stderr_text(out)
+        );
+        assert!(text.starts_with("{\n  \"roots\": [\n"), "{label}: {text}");
+        assert!(text.ends_with("\n}\n"), "{label}: {text}");
+        let roots: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("    {\"path\":"))
+            .collect();
+        let ours = ours.to_ascii_lowercase();
+        let mine = roots
+            .iter()
+            .filter(|l| l.to_ascii_lowercase().starts_with(&ours))
+            .count();
+        assert_eq!(mine, 1, "{label}: no single root for {drive}: {text}");
+        for r in &roots {
+            for field in [
+                "\"orphans\":null,\"dangling\":null",
+                "\"fs_inodes\":null,\"fs_free_inodes\":null",
+                ",\"skips_bin\":",
+            ] {
+                assert!(r.contains(field), "{label}: {field} missing in {r}");
+            }
+            assert!(r.contains(",\"cap_bytes\":"), "{label}: {r}");
+            // A volume with a cap and nothing in its bin still gets a
+            // line in the plain summary; with a filter, only volumes with
+            // passing items do.
+            let items = json_count(r, "items");
+            assert!(items.is_some(), "{label}: {r}");
+            if label == "filtered" {
+                assert!(items > Some(0), "{label}: {r}");
+            }
+        }
+        let sum = |key: &str| -> u64 { roots.iter().filter_map(|r| json_count(r, key)).sum() };
+        let total = |key: &str| {
+            text.lines()
+                .find_map(|l| l.trim().strip_prefix(&format!("\"{key}\": ")))
+                .and_then(|v| v.trim_end_matches(',').parse::<u64>().ok())
+        };
+        assert_eq!(total("total_items"), Some(sum("items")), "{label}: {text}");
+        assert_eq!(total("total_bytes"), Some(sum("bytes")), "{label}: {text}");
+    }
+    assert!(
+        check.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&check.stdout)
+    );
+    assert_eq!(
+        common::lines_ending(&check, "--check takes only --fix and -n"),
+        1,
+        "{}",
+        common::stderr_text(&check)
+    );
+}
+
 /// The cap on permanent deletions counts Recycle Bin matches first, so an
 /// rm past it purges nothing. The PATTERN names files only (no folder),
 /// so a short 8.3 %TEMP% and the long path the bin records both match.

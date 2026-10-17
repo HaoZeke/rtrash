@@ -305,22 +305,6 @@ pub(crate) fn free_line(s: &space::Space) -> String {
     space::free_line(s)
 }
 
-/// The free space fields of one root's JSON object.
-fn free_json(root: &std::path::Path) -> String {
-    let Ok(s) = space::query(root) else {
-        return String::new();
-    };
-    let opt = |v: Option<u64>| v.map_or("null".to_string(), |n| n.to_string());
-    format!(
-        ",\"fs_bytes\":{},\"fs_free_bytes\":{},\"fs_inodes\":{},\"fs_free_inodes\":{},\"fs_low\":{}",
-        s.total,
-        s.avail,
-        opt(s.inodes),
-        opt(s.inodes_avail),
-        !s.lows(space::WARN_FREE_PERCENT).is_empty()
-    )
-}
-
 fn print_status_json(
     dirs: &[TrashDir],
     older_than: Option<i64>,
@@ -328,30 +312,23 @@ fn print_status_json(
     size: list::SizeFilter,
 ) {
     let (roots, total_items, total_bytes) = summarize_dirs(dirs, older_than, newer_than, size);
-    let mut out = String::from("{\n  \"roots\": [\n");
-    for (i, r) in roots.iter().enumerate() {
-        if i > 0 {
-            out.push_str(",\n");
-        }
-        out.push_str(&format!(
-            "    {{\"path\":\"{}\",\"items\":{},\"bytes\":{},\"orphans\":{},\"dangling\":{}{}}}",
-            list::json_escape(&r.path),
-            r.items,
-            r.bytes,
-            r.orphans,
-            r.dangling,
-            free_json(&dirs[i].root)
-        ));
-    }
-    if !roots.is_empty() {
-        out.push('\n');
-    }
-    out.push_str("  ],\n");
-    out.push_str(&format!(
-        "  \"total_items\": {},\n  \"total_bytes\": {}\n}}\n",
-        total_items, total_bytes
-    ));
-    print!("{out}");
+    let rows: Vec<crate::status_json::Root> = roots
+        .iter()
+        .zip(dirs)
+        .map(|(r, d)| crate::status_json::Root {
+            path: &r.path,
+            items: r.items,
+            bytes: r.bytes,
+            orphans: Some(r.orphans),
+            dangling: Some(r.dangling),
+            space: space::query(&d.root).ok(),
+            extra: String::new(),
+        })
+        .collect();
+    print!(
+        "{}",
+        crate::status_json::document(&rows, total_items, total_bytes)
+    );
 }
 
 #[cfg(test)]

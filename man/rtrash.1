@@ -915,6 +915,39 @@ With an age or size filter it counts the passing items per drive
 instead, without the caps.
 .PP
 On Windows,
+.B status \-\-json
+gives the same object, with a root for each line of the summary (with a
+filter, each volume that has passing items).
+The shell's counts give no orphans or dangling records, so
+.B orphans
+and
+.B dangling
+are null there;
+.B status \-\-check
+finds those.
+Each root adds
+.BR cap_bytes ,
+the
+.B MaxCapacity
+cap in bytes (null when unset, as Windows then applies its own default
+share), and
+.BR skips_bin ,
+true when deletes on that volume skip the Recycle Bin.
+The free space comes from
+.BR GetDiskFreeSpaceExW ,
+and
+.B fs_inodes
+and
+.B fs_free_inodes
+are null, as Windows counts no inodes.
+On every system a root whose free space cannot be read has no
+.B fs_
+fields.
+.B \-\-check
+does not take
+.BR \-\-json .
+.PP
+On Windows,
 .B status \-\-check
 reads the current user's Recycle Bin folder on each drive and each
 volume mounted on a folder, and reports a

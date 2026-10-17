@@ -3009,8 +3009,12 @@ Without PATH, print a numbered list and read an index from stdin.
     }
 
     pub fn status_run(prog: &str, args: &[String]) -> i32 {
-        let (mut check, mut fix, mut dry_run) = (false, false, false);
+        let (mut check, mut fix, mut dry_run, mut json) = (false, false, false, false);
         let filters = parse_with_filters(prog, args, |arg| match arg {
+            "--json" => {
+                json = true;
+                None
+            }
             "--check" => {
                 check = true;
                 None
@@ -3037,6 +3041,8 @@ registry), then the total and the free space on each (a warning under
       --larger-than=SIZE  only count items over SIZE (500M, 1.5G, 64k)
       --smaller-than=SIZE only count items under SIZE
                      (a filter counts item by item, without the caps)
+      --json     emit a JSON object (scripts): one root per volume, with
+                     orphans and dangling null, cap_bytes and skips_bin
       --check    check each $I record instead: list records whose $R
                      payload is gone, records that cannot be parsed and
                      payloads with no record; exit 1 when it finds any
@@ -3069,7 +3075,7 @@ registry), then the total and the free space on each (a warning under
             return 2;
         }
         if check {
-            if filters.is_set() {
+            if filters.is_set() || json {
                 eprintln!("{prog}: --check takes only --fix and -n");
                 return 2;
             }
@@ -3080,12 +3086,13 @@ registry), then the total and the free space on each (a warning under
             return super::check_bins(prog, &dirs, fix, dry_run);
         }
         if filters.is_set() {
-            return filtered_status(prog, &filters);
+            return filtered_status(prog, &filters, json);
         }
         // One line per volume with a bin or a cap, like the per-trash lines
         // of the FreeDesktop status, then the total. A volume mounted on a
         // folder keeps a Recycle Bin of its own, so it gets a line too.
         let (mut items, mut bytes) = (0u64, 0u64);
+        let mut rows = Vec::new();
         for root in crate::trash_history::bin_roots() {
             let Some((n, b)) = query_bin(&root) else {
                 continue;
@@ -3093,6 +3100,16 @@ registry), then the total and the free space on each (a warning under
             let quota = bin_quota(&root);
             let note = cap_note(b, &quota);
             if n == 0 && note.is_empty() {
+                continue;
+            }
+            if json {
+                rows.push(super::BinStatusRow {
+                    root: root.display().to_string(),
+                    items: n,
+                    bytes: b,
+                    quota,
+                    space: crate::space::query(&root).ok(),
+                });
                 continue;
             }
             items += n;
@@ -3108,6 +3125,10 @@ registry), then the total and the free space on each (a warning under
                 line.push_str(&note);
             }
             println!("{line}");
+        }
+        if json {
+            print!("{}", super::bin_status_json(&rows));
+            return 0;
         }
         println!(
             "Total: {} ({})",
@@ -3162,7 +3183,7 @@ registry), then the total and the free space on each (a warning under
 
     /// `status` with a filter: the shell's per-drive totals cannot be
     /// filtered, so count the passing items, by the volume of their bin.
-    fn filtered_status(prog: &str, filters: &BinFilters) -> i32 {
+    fn filtered_status(prog: &str, filters: &BinFilters, json: bool) -> i32 {
         let items = match super::list_items() {
             Ok(i) => filters.apply(i, |it| it.time_deleted, item_size),
             Err(e) => {
@@ -3179,6 +3200,20 @@ registry), then the total and the free space on each (a warning under
             let e = by_drive.entry(root).or_default();
             e.0 += 1;
             e.1 = e.1.saturating_add(item_size(it));
+        }
+        if json {
+            let rows: Vec<super::BinStatusRow> = by_drive
+                .iter()
+                .map(|(root, &(items, bytes))| super::BinStatusRow {
+                    root: root.display().to_string(),
+                    items,
+                    bytes,
+                    quota: bin_quota(root),
+                    space: crate::space::query(root).ok(),
+                })
+                .collect();
+            print!("{}", super::bin_status_json(&rows));
+            return 0;
         }
         let (mut items, mut bytes) = (0u64, 0u64);
         for (root, (n, b)) in &by_drive {
@@ -3456,6 +3491,47 @@ pub fn cap_note(bytes: u64, quota: &BinQuota) -> String {
         ),
         None => String::new(),
     }
+}
+
+/// One Recycle Bin volume for `status --json`.
+pub struct BinStatusRow {
+    /// The volume root, such as `C:\`, or the folder it is mounted on.
+    pub root: String,
+    pub items: u64,
+    pub bytes: u64,
+    pub quota: BinQuota,
+    /// The volume's free space; None leaves the `fs_*` fields out.
+    pub space: Option<crate::space::Space>,
+}
+
+/// One volume as a `status --json` root. The shell's counts give no
+/// orphans and no dangling records, so both are null. The extras are
+/// `cap_bytes`, the `MaxCapacity` cap in bytes (null when unset, as
+/// Windows then applies its own default share), and `skips_bin`, true
+/// when deletes on the volume skip the bin (`NukeOnDelete`).
+pub fn bin_status_root(row: &BinStatusRow) -> crate::status_json::Root<'_> {
+    crate::status_json::Root {
+        path: &row.root,
+        items: row.items,
+        bytes: row.bytes,
+        orphans: None,
+        dangling: None,
+        space: row.space,
+        extra: format!(
+            ",\"cap_bytes\":{},\"skips_bin\":{}",
+            crate::status_json::count(row.quota.max_bytes),
+            row.quota.nuke_on_delete
+        ),
+    }
+}
+
+/// `status --json` for Recycle Bin volumes, in the order given, with
+/// their totals.
+pub fn bin_status_json(rows: &[BinStatusRow]) -> String {
+    let roots: Vec<crate::status_json::Root> = rows.iter().map(bin_status_root).collect();
+    let items = rows.iter().map(|r| r.items).fold(0u64, u64::saturating_add);
+    let bytes = rows.iter().map(|r| r.bytes).fold(0u64, u64::saturating_add);
+    crate::status_json::document(&roots, items, bytes)
 }
 
 /// The Recycle Bin settings of one volume. A missing `MaxCapacity` means
@@ -3792,6 +3868,57 @@ mod tests {
             nuke_on_delete: false,
         };
         assert!(cap_note(5, &zero).contains("skip"));
+    }
+
+    #[test]
+    fn bin_status_json_has_the_status_schema_with_nulls_and_cap_fields() {
+        let rows = [
+            BinStatusRow {
+                root: "C:\\".into(),
+                items: 3,
+                bytes: 300,
+                quota: BinQuota {
+                    max_bytes: Some(4096),
+                    nuke_on_delete: false,
+                },
+                space: Some(crate::space::Space {
+                    total: 1000,
+                    avail: 50,
+                    inodes: None,
+                    inodes_avail: None,
+                }),
+            },
+            BinStatusRow {
+                root: "D:\\mnt".into(),
+                items: u64::MAX,
+                bytes: 7,
+                quota: BinQuota {
+                    max_bytes: None,
+                    nuke_on_delete: true,
+                },
+                space: None,
+            },
+        ];
+        let doc = bin_status_json(&rows);
+        let lines: Vec<&str> = doc.lines().collect();
+        assert_eq!(
+            lines[2],
+            "    {\"path\":\"C:\\\\\",\"items\":3,\"bytes\":300,\"orphans\":null,\"dangling\":null,\
+             \"fs_bytes\":1000,\"fs_free_bytes\":50,\"fs_inodes\":null,\"fs_free_inodes\":null,\
+             \"fs_low\":true,\"cap_bytes\":4096,\"skips_bin\":false},"
+        );
+        assert_eq!(
+            lines[3],
+            "    {\"path\":\"D:\\\\mnt\",\"items\":18446744073709551615,\"bytes\":7,\
+             \"orphans\":null,\"dangling\":null,\"cap_bytes\":null,\"skips_bin\":true}"
+        );
+        // Totals saturate rather than wrap.
+        assert_eq!(lines[5], "  \"total_items\": 18446744073709551615,");
+        assert_eq!(lines[6], "  \"total_bytes\": 307");
+        assert_eq!(
+            bin_status_json(&[]),
+            crate::status_json::document(&[], 0, 0)
+        );
     }
 
     #[test]
