@@ -267,6 +267,52 @@ fn follow_symlinks_counts_targets_once_and_survives_loops() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// `--show-symlink-target` under -L: the row that is a link shows its
+/// target in the table, the tree and the JSON, and nothing else changes;
+/// plain -L output has no arrow. Without -L, or with -f, it refuses.
+#[cfg(unix)]
+#[test]
+fn show_symlink_target_marks_link_rows_under_follow() {
+    use std::os::unix::fs::symlink;
+    let t = Tree::new("targets");
+    let outside = Tree::new("targets-outside");
+    let big = outside.file("big.bin", 300_000);
+    t.file("own.bin", 100_000);
+    symlink(&big, t.root.join("big-link")).unwrap();
+    let arrow = format!("big-link -> {}", big.display());
+    let run = |args: &[&str]| {
+        let out = t.du(args);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "{args:?}: {err}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let table = run(&["-L", "--show-symlink-target", "--files"]);
+    let marked = table.lines().filter(|l| l.ends_with(&arrow)).count();
+    assert_eq!(marked, 1, "{table}");
+    assert_eq!(table.matches(" -> ").count(), 1, "{table}");
+    let plain = run(&["-L", "--files"]);
+    assert!(!plain.contains(" -> "), "{plain}");
+    let tree = run(&["-L", "--show-symlink-target", "--tree"]);
+    assert!(tree.lines().any(|l| l.ends_with(&arrow)), "{tree}");
+    let j = t.json(&["-L", "--show-symlink-target", "--files"]);
+    assert_eq!(j.matches("\"target\":").count(), 1, "{j}");
+    let want = format!("\"target\":\"{}\"", escaped(&big.display().to_string()));
+    assert!(j.contains(&want), "{j}");
+    assert!(!t.json(&["-L", "--files"]).contains("\"target\""));
+    for args in [
+        &["--show-symlink-target"][..],
+        &["-L", "--show-symlink-target", "--file=snap"][..],
+    ] {
+        let out = t.du(args);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
+        assert!(
+            err.contains("--show-symlink-target needs --follow-symlinks"),
+            "{err}"
+        );
+    }
+}
+
 #[test]
 fn dominant_child_hides_parent_unless_all_dirs() {
     let t = Tree::new("collapse");

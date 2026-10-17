@@ -53,6 +53,10 @@ directories appear as one `trash` row and are never printed by --print0.
                           a directory met again (a loop, or a second link)
                           is walked once and a file counts once; the
                           total names the repeats as repeated names
+      --show-symlink-target  with -L, show each row that is itself a
+                          symlink as PATH -> TARGET, the target as the link
+                          stores it (gdu --show-symlink-target); in the
+                          table and --tree, and --json adds \"target\"
       --apparent        rank by apparent size (file length) instead of disk use
       --sort=KEY        rank by KEY: disk (default), apparent, items (files
                           and directories below each directory; lists no
@@ -2272,6 +2276,49 @@ fn item_json(it: &Item) -> String {
     )
 }
 
+/// `--show-symlink-target`: each listed row that is itself a symlink,
+/// by its path, with the target as the link stores it (as `ls -l` shows
+/// it, relative or not). Rows reached through a linked directory are not
+/// links themselves and are left out.
+type Targets = HashMap<PathBuf, PathBuf>;
+
+/// The [`Targets`] of the rows of `r`, read from disk after the scan.
+fn link_targets(r: &Report) -> Targets {
+    r.dirs
+        .iter()
+        .chain(&r.files)
+        .filter_map(|it| Some((it.path.clone(), fs::read_link(&it.path).ok()?)))
+        .collect()
+}
+
+/// The target of `it` when `targets` names one.
+fn target_of<'a>(targets: Option<&'a Targets>, it: &Item) -> Option<&'a Path> {
+    targets?.get(&it.path).map(PathBuf::as_path)
+}
+
+/// `shown`, then ` -> TARGET` when the row is a link, as gdu and `ls -l`
+/// print it.
+fn with_target(shown: String, target: Option<&Path>) -> String {
+    match target {
+        Some(t) => format!("{shown} -> {}", crate::util::term_path(t)),
+        None => shown,
+    }
+}
+
+/// [`item_json`] with `"target"` last when the row is a link; other rows
+/// keep their shape.
+fn item_json_with(it: &Item, target: Option<&Path>) -> String {
+    let j = item_json(it);
+    match target {
+        Some(t) => format!(
+            "{},\"target\":\"{}\"}}",
+            &j[..j.len() - 1],
+            json_escape(&t.to_string_lossy())
+        ),
+        None => j,
+    }
+}
+
 /// Tags shown in the NOTE column.
 /// Unreadable entries as the report keeps them: path and reason.
 pub(crate) type Unread = [(PathBuf, String)];
@@ -2330,12 +2377,17 @@ fn trash_json(t: &TrashSummary) -> String {
 
 /// JSON form of a report (one object; arrays of roots, dirs and files).
 pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
-    report_json_with(r, trash, Some(r.unreadable))
+    report_json_with(r, trash, Some(r.unreadable), None)
 }
 
 /// [`report_json`] with the unreadable count given, `null` when unknown
 /// (a snapshot written before it was recorded).
-fn report_json_with(r: &Report, trash: &TrashSummary, unreadable: Option<u64>) -> String {
+fn report_json_with(
+    r: &Report,
+    trash: &TrashSummary,
+    unreadable: Option<u64>,
+    targets: Option<&Targets>,
+) -> String {
     let roots: Vec<String> = r
         .roots
         .iter()
@@ -2358,8 +2410,9 @@ fn report_json_with(r: &Report, trash: &TrashSummary, unreadable: Option<u64>) -
             )
         })
         .collect();
-    let dirs: Vec<String> = r.dirs.iter().map(item_json).collect();
-    let files: Vec<String> = r.files.iter().map(item_json).collect();
+    let row = |it: &Item| item_json_with(it, target_of(targets, it));
+    let dirs: Vec<String> = r.dirs.iter().map(row).collect();
+    let files: Vec<String> = r.files.iter().map(row).collect();
     let shared = r
         .shared
         .map(|s| {
@@ -2481,6 +2534,8 @@ struct Columns<'a> {
     reverse: bool,
     /// The report's unreadable paths, for the NOTE column.
     unread: &'a Unread,
+    /// `--show-symlink-target`: the rows that are links, and their targets.
+    targets: Option<&'a Targets>,
 }
 
 /// `42.5%`: the part of the scan root that holds `it`, or `-` when no
@@ -2633,6 +2688,7 @@ fn tree_lines(
     top: usize,
     dirs_first: bool,
     glyphs: &TreeGlyphs,
+    targets: Option<&Targets>,
 ) -> Vec<String> {
     let kids = tree_children(report, sort, top, dirs_first);
     let mut out = Vec::new();
@@ -2643,19 +2699,36 @@ fn tree_lines(
             format_bytes(root.apparent),
             root.path.display()
         ));
-        tree_level(&kids, &root.path, "", glyphs, &report.unread, &mut out);
+        let at = Level {
+            glyphs,
+            unread: &report.unread,
+            targets,
+        };
+        tree_level(&kids, &root.path, "", at, &mut out);
     }
     out
+}
+
+/// What every level of a `--tree` draws with.
+#[derive(Clone, Copy)]
+struct Level<'a> {
+    glyphs: &'a TreeGlyphs,
+    unread: &'a Unread,
+    targets: Option<&'a Targets>,
 }
 
 fn tree_level(
     kids: &HashMap<&Path, Vec<&Item>>,
     dir: &Path,
     prefix: &str,
-    glyphs: &TreeGlyphs,
-    unread: &Unread,
+    at: Level,
     out: &mut Vec<String>,
 ) {
+    let Level {
+        glyphs,
+        unread,
+        targets,
+    } = at;
     let Some(rows) = kids.get(dir) else {
         return;
     };
@@ -2668,15 +2741,18 @@ fn tree_level(
         let mark = read_mark(it, unread)
             .map(|m| format!("  ({m})"))
             .unwrap_or_default();
+        let shown = with_target(
+            format!("{}{slash}", name.to_string_lossy()),
+            target_of(targets, it),
+        );
         out.push(format!(
-            "{:>10}  {:>10}  {prefix}{branch}{}{slash}{mark}",
+            "{:>10}  {:>10}  {prefix}{branch}{shown}{mark}",
             format_bytes(it.disk),
             format_bytes(it.apparent),
-            name.to_string_lossy()
         ));
         if it.is_dir {
             let prefix = format!("{prefix}{more}");
-            tree_level(kids, &it.path, &prefix, glyphs, unread, out);
+            tree_level(kids, &it.path, &prefix, at, out);
         }
     }
 }
@@ -2691,6 +2767,7 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
         graph,
         reverse,
         unread,
+        targets,
     } = cols;
     if items.is_empty() {
         return;
@@ -2763,6 +2840,7 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
         if it.is_dir {
             path.push(std::path::MAIN_SEPARATOR);
         }
+        let path = with_target(path, target_of(targets, it));
         println!(
             "{:>10}  {:>10}  {}{}{}{}{:>when_width$}  {:<width$}  {}",
             format_bytes(it.disk),
@@ -3092,6 +3170,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut keep_types: Vec<String> = Vec::new();
     let mut count = false;
     let mut show_mtime = false;
+    let mut show_targets = false;
     let mut relative = false;
     let mut bars = false;
     let mut graph = GraphStyle::default();
@@ -3307,6 +3386,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--apparent" => opts.sort = SortKey::Apparent,
                 "-C" | "--count" => count = true,
                 "--show-mtime" => show_mtime = true,
+                "--show-symlink-target" => show_targets = true,
                 "--show-relative-size" => relative = true,
                 "--bars" => bars = true,
                 "--tree" => tree = Some(TREE_DEPTH),
@@ -3451,6 +3531,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             );
             return 2;
         }
+    }
+    // Without -L the walk lists only regular files and directories, so no
+    // row is a link; a snapshot keeps paths, not the links on disk now.
+    if show_targets && (!opts.follow || from_file.is_some()) {
+        eprintln!(
+            "{prog}: --show-symlink-target needs --follow-symlinks (-L) on a live scan: \
+             without -L no row is a link, and -f reads no links"
+        );
+        return 2;
     }
     if devices {
         return devices_out(
@@ -3617,7 +3706,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let report = crate::du_snap::to_report(snap, opts.sort, opts.top);
         let trash = TrashSummary::default();
         if json {
-            println!("{}", report_json_with(&report, &trash, known));
+            println!("{}", report_json_with(&report, &trash, known, None));
         } else {
             print_table(
                 &format!("{} in {}", opts.sort.title("directories"), file.display()),
@@ -3632,6 +3721,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     graph,
                     reverse,
                     unread: &report.unread,
+                    targets: None,
                 },
             );
             for t in report.roots.iter().filter(|_| !skip_total) {
@@ -3784,8 +3874,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             .unwrap_or_default();
         return crate::put_tui::run_rows(prog, &title, pick_rows(&report));
     }
+    let targets = show_targets.then(|| link_targets(&report));
     if json {
-        println!("{}", report_json(&report, &trash));
+        let unreadable = Some(report.unreadable);
+        let j = report_json_with(&report, &trash, unreadable, targets.as_ref());
+        println!("{j}");
     } else if print0 {
         let mut out = io::stdout().lock();
         let mut held = 0usize;
@@ -3812,7 +3905,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             print_types(&opts.sort.title("file types"), &report.types, opts.top);
         } else if tree.is_some() {
             let glyphs = if ascii { &TREE_ASCII } else { &TREE_UNICODE };
-            for line in tree_lines(&report, opts.sort, tree_top, dirs_first, glyphs) {
+            let lines = tree_lines(
+                &report,
+                opts.sort,
+                tree_top,
+                dirs_first,
+                glyphs,
+                targets.as_ref(),
+            );
+            for line in lines {
                 println!("{line}");
             }
         } else {
@@ -3825,6 +3926,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 graph,
                 reverse,
                 unread: &report.unread,
+                targets: targets.as_ref(),
             };
             print_table(&opts.sort.title("directories"), &report.dirs, now, cols);
             print_table(&opts.sort.title("files"), &report.files, now, cols);
@@ -3981,6 +4083,75 @@ mod tests {
             git: None,
             unique: None,
         }
+    }
+
+    /// A link row reads `PATH -> TARGET` and gains `"target"` last in its
+    /// JSON; a row with no target keeps its text and JSON as they were.
+    #[test]
+    fn link_rows_show_their_target_and_others_keep_their_shape() {
+        let t = Path::new("real.bin");
+        assert_eq!(with_target("link".into(), Some(t)), "link -> real.bin");
+        assert_eq!(with_target("own.bin".into(), None), "own.bin");
+        let it = item("/w/link", 4096, 10);
+        let plain = item_json(&it);
+        assert_eq!(item_json_with(&it, None), plain);
+        let j = item_json_with(&it, Some(Path::new("q\"t")));
+        assert!(j.starts_with(&plain[..plain.len() - 1]), "{j}");
+        assert!(j.ends_with(",\"target\":\"q\\\"t\"}"), "{j}");
+        let mut targets = Targets::new();
+        targets.insert(PathBuf::from("/w/link"), PathBuf::from("real.bin"));
+        assert_eq!(target_of(Some(&targets), &it), Some(t));
+        assert_eq!(target_of(None, &it), None);
+        assert_eq!(target_of(Some(&targets), &item("/w/other", 1, 1)), None);
+    }
+
+    /// Under -L a file link and a directory link are rows with targets; a
+    /// file reached through the linked directory is a row but no link, and
+    /// the tree and JSON show the two targets only when asked.
+    #[cfg(unix)]
+    #[test]
+    fn follow_scan_names_the_targets_of_link_rows_only() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("rtrash-du-targets-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let base = fs::canonicalize(&base).unwrap();
+        let (root, outside) = (base.join("root"), base.join("outside"));
+        fs::create_dir_all(root.join("plain")).unwrap();
+        fs::create_dir_all(outside.join("dir")).unwrap();
+        fs::write(outside.join("big.bin"), vec![1u8; 200_000]).unwrap();
+        fs::write(outside.join("dir/inner.bin"), vec![2u8; 150_000]).unwrap();
+        fs::write(root.join("plain/own.bin"), vec![3u8; 100_000]).unwrap();
+        symlink(outside.join("big.bin"), root.join("big-link")).unwrap();
+        symlink(outside.join("dir"), root.join("dir-link")).unwrap();
+        let opts = ScanOpts {
+            follow: true,
+            all_dirs: true,
+            ..ScanOpts::default()
+        };
+        let r = scan(std::slice::from_ref(&root), &opts).unwrap();
+        let targets = link_targets(&r);
+        assert_eq!(
+            targets.get(&root.join("big-link")),
+            Some(&outside.join("big.bin"))
+        );
+        assert_eq!(
+            targets.get(&root.join("dir-link")),
+            Some(&outside.join("dir"))
+        );
+        assert_eq!(targets.len(), 2, "{targets:?}");
+        let inner = root.join("dir-link/inner.bin");
+        assert!(r.files.iter().any(|f| f.path == inner), "{:?}", r.files);
+        let lines = tree_lines(&r, SortKey::Disk, 20, false, &TREE_ASCII, Some(&targets));
+        let arrow = format!("big-link -> {}", outside.join("big.bin").display());
+        assert!(lines.iter().any(|l| l.ends_with(&arrow)), "{lines:?}");
+        let plain = tree_lines(&r, SortKey::Disk, 20, false, &TREE_ASCII, None);
+        assert!(plain.iter().all(|l| !l.contains(" -> ")), "{plain:?}");
+        let none = TrashSummary::default();
+        let j = report_json_with(&r, &none, Some(0), Some(&targets));
+        assert_eq!(j.matches("\"target\":").count(), 2, "{j}");
+        assert!(!report_json(&r, &none).contains("\"target\""));
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

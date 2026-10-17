@@ -1296,6 +1296,29 @@ Only for reports: it does not combine with
 since trashing a link name would remove only the link.
 Not available on Windows.
 .TP
+.B \-\-show\-symlink\-target
+With
+.BR \-L ,
+show each row that is itself a symlink as
+.IR PATH " \-> " TARGET ,
+the target as the link stores it, as
+.B "gdu \-\-show\-symlink\-target"
+and
+.B "ls \-l"
+show it; in the table and in
+.BR \-\-tree ,
+and
+.B \-\-json
+adds a
+.B target
+key to such rows. A row reached through a linked directory is not a
+link itself and shows none. Without
+.BR \-L ,
+or with
+.BR \-f ,
+it refuses (exit 2): no other row is a link, and a snapshot keeps no
+links.
+.TP
 .B \-\-apparent
 Rank by apparent size (file length) instead of allocated disk space.
 As with coreutils

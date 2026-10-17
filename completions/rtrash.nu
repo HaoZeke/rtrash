@@ -214,6 +214,7 @@ export extern "rtrash du" [
     --one-file-system(-x)  # skip directories on other file systems
     --include-kernfs  # also walk kernel pseudo file systems such as /proc,
     --follow-symlinks(-L)  # follow symlinks; loops and repeats count once
+    --show-symlink-target  # with -L, show link rows as PATH -> TARGET
     --apparent  # rank by apparent size (file length) instead of disk use
     --sort: string  # rank by KEY: disk (default), apparent, items (files
     --count(-C)  # add an ITEMS column (each hard-linked file once)

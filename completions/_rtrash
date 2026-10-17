@@ -145,6 +145,7 @@ du_opts=(
   '(-x --one-file-system)'{-x,--one-file-system}'[skip directories on other file systems]'
   '--include-kernfs[also walk /proc, /sys and other kernel file systems]'
   '(-L --follow-symlinks)'{-L,--follow-symlinks}'[follow symlinks; loops and repeats count once]'
+  '--show-symlink-target[with -L, show link rows as PATH -> TARGET]'
   '--apparent[rank by apparent size instead of disk use]'
   '--sort=[rank rows by this key]:key:(disk apparent items inodes mtime)'
   '(-C --count)'{-C,--count}'[add an ITEMS column]'

@@ -122,6 +122,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s n -l to
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s x -l one-file-system -d 'skip directories on other file systems'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l include-kernfs -d 'also walk /proc, /sys and other kernel file systems'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s L -l follow-symlinks -d 'follow symlinks; loops and repeats count once'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l show-symlink-target -d 'with -L, show link rows as PATH -> TARGET'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l apparent -d 'rank by apparent size instead of disk use'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l sort -d 'rank rows by this key' -x -a 'disk apparent items inodes mtime'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s C -l count -d 'add an ITEMS column'
