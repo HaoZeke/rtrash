@@ -1205,7 +1205,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             }
             let root = test_bin_root().or_else(|| bin_root_of(&abs));
             let bin = verbose.then(|| root.clone()).flatten();
-            match trash::delete(f) {
+            match crate::allow_roots::trash_delete(f) {
                 Ok(()) => {
                     if verbose && !json {
                         println!(

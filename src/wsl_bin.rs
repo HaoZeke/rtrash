@@ -178,14 +178,26 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: restore needs a PATH");
         return 2;
     }
+    let newest = |abs: &Path| {
+        items
+            .iter()
+            .filter(|i| i.local.as_path() == abs)
+            .max_by_key(|i| i.deleted)
+    };
+    let abs_of = |p: &PathBuf| std::path::absolute(p).unwrap_or_else(|_| p.clone());
+    // RTRASH_ALLOW_ROOTS: every destination is checked before the first
+    // change, -f's removal of what is there included.
+    let dests: Vec<PathBuf> = paths
+        .iter()
+        .filter_map(|p| newest(abs_of(p).as_path()).map(|it| it.local.clone()))
+        .collect();
+    if let Some(code) = crate::allow_roots::refuse_outside(prog, &dests) {
+        return code;
+    }
     let mut status = 0;
     for p in paths {
-        let abs = std::path::absolute(&p).unwrap_or_else(|_| p.clone());
-        let Some(it) = items
-            .iter()
-            .filter(|i| i.local == abs)
-            .max_by_key(|i| i.deleted)
-        else {
+        let abs = abs_of(&p);
+        let Some(it) = newest(abs.as_path()) else {
             eprintln!(
                 "{prog}: '{}' is not in the Recycle Bin of its drive",
                 abs.display()

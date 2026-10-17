@@ -1039,7 +1039,8 @@ mod plat {
 
     pub fn trash(prog: &str, p: &Path, dest: &Dest) -> Result<(), ()> {
         let _ = (dest.home_only, &dest.trash_pin);
-        trash::delete(p).map_err(|e| eprintln!("{prog}: cannot trash '{}': {e}", p.display()))
+        crate::allow_roots::trash_delete(p)
+            .map_err(|e| eprintln!("{prog}: cannot trash '{}': {e}", p.display()))
     }
 }
 

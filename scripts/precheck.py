@@ -309,6 +309,22 @@ def check_permanent_gate(reach=8):
                           "through permanent_guard::remove or gate(), or add a `// scratch:` reason")
 
 
+OS_TRASH = re.compile(r"\btrash::(\{[^}]*\b)?delete(_all)?\b")
+
+
+def check_os_trash_scoped():
+    """Every hand-off to the OS trash goes through allow_roots::trash_delete,
+    which checks RTRASH_ALLOW_ROOTS first (round 182: the Windows du browser
+    called trash::delete directly and skipped the scope)."""
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        if path.name == "allow_roots.rs":
+            continue
+        for k, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+            if OS_TRASH.search(strip_comments(line)):
+                errors.append(f"{path.relative_to(ROOT)}:{k + 1}: trash::delete outside allow_roots; "
+                              "call crate::allow_roots::trash_delete so the scope is checked")
+
+
 def check_rustfmt():
     """`cargo fmt --check` when a toolchain is there; three rounds in a row
     (170-172) needed a format-only amend after CI."""
@@ -330,7 +346,7 @@ def check_rustfmt():
 def main():
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps()
-    check_fn_params(); check_permanent_gate()
+    check_fn_params(); check_permanent_gate(); check_os_trash_scoped()
     check_long_lines(base); check_removed_literals(base)
     if "--no-fmt" not in sys.argv:
         check_rustfmt()

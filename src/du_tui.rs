@@ -157,7 +157,9 @@ mod bin {
     pub type Ticket = PathBuf;
 
     pub fn trash(_prog: &str, path: &Path, _pin: Option<&PathBuf>) -> Option<Ticket> {
-        trash::delete(path).ok().map(|()| path.to_path_buf())
+        crate::allow_roots::trash_delete(path)
+            .ok()
+            .map(|()| path.to_path_buf())
     }
 
     pub fn untrash(original: &Ticket) -> bool {
@@ -189,6 +191,9 @@ struct App {
     git: bool,
     /// Trash root for deletes (tests pin one; `None` uses put's choice).
     trash_pin: Option<PathBuf>,
+    /// `RTRASH_ALLOW_ROOTS` as read at start (tests set it directly); a
+    /// delete with any row outside it trashes nothing.
+    scope: Option<Vec<PathBuf>>,
     cache: HashMap<PathBuf, View>,
     list_state: ListState,
     sel: Selection,
@@ -626,6 +631,7 @@ impl App {
             opts,
             git,
             trash_pin: None,
+            scope: crate::allow_roots::roots(),
             cache,
             list_state,
             sel: Selection::new(),
@@ -1201,6 +1207,19 @@ impl App {
     fn delete(&mut self) {
         self.mode = Mode::Browse;
         let t = self.targets();
+        // RTRASH_ALLOW_ROOTS: every row is checked before the first one
+        // goes, so a refused delete trashes nothing.
+        if let Some(roots) = &self.scope {
+            let outside = t
+                .iter()
+                .filter(|i| !crate::allow_roots::allowed_in(roots, &i.path))
+                .count();
+            if outside > 0 {
+                self.status =
+                    format!("{outside} item(s) outside RTRASH_ALLOW_ROOTS; nothing was trashed");
+                return;
+            }
+        }
         let mut group: UndoGroup = Vec::new();
         let mut failed = 0usize;
         for item in t {
@@ -2363,6 +2382,27 @@ mod tests {
             .iter()
             .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn a_delete_outside_the_scope_trashes_nothing() {
+        let t = tree("scope");
+        let mut a = app(&t);
+        // Rows: big, file, small. Only small is in scope, so file is out.
+        a.move_sel(1);
+        for roots in [vec![t.0.join("w/small")], Vec::new()] {
+            a.scope = Some(roots);
+            a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+            assert!(a.status.starts_with("trash 1 item(s)"), "{}", a.status);
+            a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+            assert_eq!(
+                a.status,
+                "1 item(s) outside RTRASH_ALLOW_ROOTS; nothing was trashed"
+            );
+            assert!(t.0.join("w/file").exists());
+            assert_eq!(names(&a), ["big", "file", "small"]);
+            assert!(a.undo.is_empty());
+        }
     }
 
     #[test]

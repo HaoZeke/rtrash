@@ -57,6 +57,20 @@ impl Fake {
             .unwrap()
     }
 
+    /// `run` with `RTRASH_ALLOW_ROOTS` set to `roots`.
+    fn run_scoped(&self, args: &[&str], roots: &Path) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            .arg("wsl")
+            .args(args)
+            .env("RTRASH_WSL_OSRELEASE", self.top.join("osrelease"))
+            .env("RTRASH_WSL_CONF", self.top.join("wsl.conf"))
+            .env("RTRASH_WSL_SID", SID)
+            .env("RTRASH_ALLOW_ROOTS", roots)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    }
+
     /// `run` with `RTRASH_NO_PERMANENT=1`.
     fn run_guarded(&self, args: &[&str]) -> std::process::Output {
         Command::new(env!("CARGO_BIN_EXE_rtrash"))
@@ -328,4 +342,60 @@ fn wsl_rm_empty_and_overwrite_refuse_under_no_permanent() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("RTRASH_NO_PERMANENT"));
     assert_eq!(fs::read(&dest).unwrap(), b"new");
     assert!(payload.exists());
+}
+
+/// `RTRASH_ALLOW_ROOTS` on wsl restore: every destination is checked
+/// before the first change, so one outside path refuses the whole run,
+/// and `-f` never removes a file outside the scope.
+#[test]
+fn wsl_restore_keeps_to_the_allowed_roots() {
+    let f = Fake::new("wslroots");
+    f.recycle("AB12CD.txt", r"C:\in\a.txt", b"a", 1_700_000_000);
+    f.recycle("EF34GH.txt", r"C:\out\b.txt", b"b", 1_700_000_100);
+    let (inside, outside) = (f.root.join("c/in"), f.root.join("c/out"));
+    fs::create_dir_all(&inside).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let (a, b) = (inside.join("a.txt"), outside.join("b.txt"));
+    fs::write(&b, b"keep").unwrap();
+    let (a_s, b_s) = (a.display().to_string(), b.display().to_string());
+    let bin_names = || {
+        let mut v: Vec<String> = fs::read_dir(f.bin())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    // A refusal exits 2, names each outside path on its own line, and
+    // leaves the bin and both destinations as they were just before.
+    let assert_refused_unchanged = |args: &[&str], roots: &Path| {
+        let before = bin_names();
+        let out = f.run_scoped(args, roots);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
+        let outside_lines = err
+            .lines()
+            .filter(|l| l.ends_with("is outside RTRASH_ALLOW_ROOTS"))
+            .count();
+        assert_eq!(outside_lines, 1, "{args:?}: {err}");
+        assert_eq!(bin_names(), before, "{args:?} changed the bin");
+        assert_eq!(fs::read(&b).unwrap(), b"keep", "{args:?}");
+    };
+    assert_eq!(bin_names().len(), 4);
+    // b.txt is outside: nothing is restored, a.txt included, and -f
+    // leaves the file at b.txt alone.
+    assert_refused_unchanged(&["restore", "-f", &a_s, &b_s], &inside);
+    assert!(!a.exists());
+    // Inside the root, a.txt comes back.
+    let out = f.run_scoped(&["restore", &a_s], &inside);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read(&a).unwrap(), b"a");
+    assert_eq!(bin_names(), ["$IEF34GH.txt", "$REF34GH.txt"]);
+    // A root that does not exist allows nothing.
+    let gone = f.top.join("no-such-root");
+    assert_refused_unchanged(&["restore", "-f", &b_s], &gone);
 }

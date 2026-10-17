@@ -104,8 +104,23 @@ pub fn under(p: &Path, root: &Path) -> bool {
 pub fn allowed(p: &Path) -> bool {
     match roots() {
         None => true,
-        Some(rs) => resolve(p).is_some_and(|q| rs.iter().any(|r| under(&q, r))),
+        Some(rs) => allowed_in(&rs, p),
     }
+}
+
+/// Whether `p` sits under one of `roots` (canonical, as [`roots`] gives
+/// them). An empty list allows nothing.
+pub fn allowed_in(roots: &[PathBuf], p: &Path) -> bool {
+    resolve(p).is_some_and(|q| roots.iter().any(|r| under(&q, r)))
+}
+
+/// The one way rtrash hands a path to the OS trash (the `trash` crate's
+/// `delete`): it checks the scope first, so no caller can skip it. The
+/// precheck refuses any other call of `trash::delete`.
+#[cfg(windows)]
+pub fn trash_delete(p: &Path) -> io::Result<()> {
+    check(p)?;
+    trash::delete(p).map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// The error a primitive returns for a path outside the scope.
