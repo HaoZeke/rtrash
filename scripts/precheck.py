@@ -812,10 +812,16 @@ def check_du_rows():
                               "take it with common::du_row, which masks the AGE cell")
 
 
+PAYLOAD_GONE = re.compile(r"\bpermanent_guard::remove\(")
+RECORD_GONE = re.compile(r"\bremove_file\(|\bremove_record\(")
+
+
 def check_record_sections():
     """A fn that reserves a .trashinfo (create_new on a join_info path)
     opens interrupt::critical() too, so a Ctrl-C between the record and
-    the payload waits until both are whole (round 220)."""
+    the payload waits until both are whole (round 220). So does a fn that
+    removes a payload and then its record (round 222), so a Ctrl-C never
+    leaves a record whose payload is gone."""
     starts = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?fn\s+\w+")
     for path in sorted((ROOT / "src").rglob("*.rs")):
         rel = path.relative_to(ROOT).as_posix()
@@ -823,11 +829,15 @@ def check_record_sections():
         cuts = [m.start() for m in starts.finditer(text)] + [len(text)]
         for a, b in zip(cuts, cuts[1:]):
             body = text[a:b]
-            if "create_new(true)" in body and "join_info(" in body \
-                    and "interrupt::critical()" not in body:
-                line = text.count("\n", 0, a) + 1
+            if "interrupt::critical()" in body:
+                continue
+            line = text.count("\n", 0, a) + 1
+            if "create_new(true)" in body and "join_info(" in body:
                 errors.append(f"{rel}:{line}: reserves a trash record outside interrupt::critical(); "
                               "open the section first so Ctrl-C cannot split the record from its payload")
+            elif PAYLOAD_GONE.search(body) and RECORD_GONE.search(body):
+                errors.append(f"{rel}:{line}: removes a payload and its record outside interrupt::critical(); "
+                              "open the section once the payload is gone so Ctrl-C waits for the record")
 
 
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
