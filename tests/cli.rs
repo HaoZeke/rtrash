@@ -2153,6 +2153,74 @@ fn list_hints_once_at_records_it_leaves_out() {
     assert_eq!(stderr_of(&out), "", "no hint once the trash is clean");
 }
 
+/// A record with no `Path=` line names no original: `status --check`
+/// calls it a bad record and trash-cli's trash-list leaves it out. list
+/// leaves it out too and counts it in its hint, with the same stdout as
+/// without it; trash-list prints the same rows and nothing more.
+#[test]
+fn list_leaves_out_a_record_with_no_path_and_counts_it() {
+    let sb = Sandbox::new("list-pathless");
+    let t = sb.trash();
+    fs::create_dir_all(t.join("files")).unwrap();
+    fs::create_dir_all(t.join("info")).unwrap();
+    let good = sb.work().join("good.txt");
+    fs::write(t.join("files/good.txt"), b"payload").unwrap();
+    fs::write(
+        t.join("info/good.txt.trashinfo"),
+        format!(
+            "[Trash Info]\nPath={}\nDeletionDate=2026-01-02T03:04:05\n",
+            good.display()
+        ),
+    )
+    .unwrap();
+    let pin = format!("--trash-dir={}", t.display());
+    let bindir = sb.root.join("bin");
+    fs::create_dir_all(&bindir).unwrap();
+    std::os::unix::fs::symlink(bin(), bindir.join("trash-list")).unwrap();
+    let trash_list = || {
+        Command::new(bindir.join("trash-list"))
+            .arg(&pin)
+            .current_dir(sb.work())
+            .env("XDG_DATA_HOME", sb.root.join("xdg"))
+            .env("HOME", &sb.root)
+            .output()
+            .unwrap()
+    };
+    let clean = sb.run(&["list", &pin]);
+    assert!(clean.status.success(), "{}", stderr_of(&clean));
+    assert!(
+        stdout_of(&clean).contains("good.txt"),
+        "{}",
+        stdout_of(&clean)
+    );
+    assert_eq!(stderr_of(&clean), "");
+    let clean_cli = trash_list();
+
+    let record = t.join("info/nopath.txt.trashinfo");
+    fs::write(t.join("files/nopath.txt"), b"payload").unwrap();
+    fs::write(&record, "[Trash Info]\nDeletionDate=2026-01-02T03:04:05\n").unwrap();
+    let out = sb.run(&["list", &pin]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(
+        out.stdout, clean.stdout,
+        "the record is left out of the rows"
+    );
+    let hint = "rtrash list: 1 trash record could not be listed; \
+                `rtrash status --check` shows it";
+    assert_eq!(stderr_of(&out), format!("{hint}\n"));
+    let cli = trash_list();
+    assert_eq!(cli.status.code(), clean_cli.status.code());
+    assert_eq!(cli.stdout, clean_cli.stdout, "trash-cli leaves it out too");
+    assert_eq!(cli.stderr, clean_cli.stderr, "trash-list says nothing more");
+    let check = sb.run(&["status", "--check", &pin]);
+    let report = format!("{}{}", stdout_of(&check), stderr_of(&check));
+    assert!(report.contains("bad record:"), "{report}");
+    assert!(
+        report.contains("nopath.txt.trashinfo: no Path line"),
+        "{report}"
+    );
+}
+
 #[test]
 fn trash_cli_command_lines_work_under_the_trash_names() {
     let sb = Sandbox::new("trash-cli-lines");

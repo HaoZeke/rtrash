@@ -77,16 +77,31 @@ impl Entry {
     }
 }
 
+/// Every item the records in `dirs` name, oldest first. A record that
+/// cannot be read, or whose relative `Path=` climbs out of its volume, is
+/// left out; one with no `Path=` stays, with an empty original (or the
+/// volume top), for rm, restore, empty and the totals as before.
 pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
-    collect_counted(dirs).0
+    collect_with(dirs, Pathless::Keep).0
 }
 
-/// [`collect`], and how many `NAME.trashinfo` records it left out: one
-/// that cannot be read (over the record cap, or not a regular file), or
-/// whose relative `Path=` climbs out of its volume with `..`. `status
-/// --check` names each of them. Other names in `info/` are not records
-/// and do not count.
+/// What `list` shows, and how many `NAME.trashinfo` records it left out:
+/// those [`collect`] leaves out, and also one with no `Path=` (or an empty
+/// one), which names no original. trash-cli's trash-list leaves that one
+/// out too. `status --check` names each of them. Other names in `info/`
+/// are not records and do not count.
 pub fn collect_counted(dirs: &[TrashDir]) -> (Vec<Entry>, u64) {
+    collect_with(dirs, Pathless::Skip)
+}
+
+/// What to do with a record that has no `Path=`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pathless {
+    Keep,
+    Skip,
+}
+
+fn collect_with(dirs: &[TrashDir], pathless: Pathless) -> (Vec<Entry>, u64) {
     use rayon::prelude::*;
     let mut out = Vec::new();
     let mut skipped = 0u64;
@@ -102,7 +117,7 @@ pub fn collect_counted(dirs: &[TrashDir]) -> (Vec<Entry>, u64) {
             .filter_map(|path| {
                 let fname = crate::util::str_from_os_ref(path.file_name()?);
                 let name = crate::util::trash_item_name(&fname)?;
-                Some(read_entry(dir, &path, name))
+                Some(read_entry(dir, &path, name, pathless))
             })
             .collect();
         let left = read.iter().filter(|e| e.is_none()).count() as u64;
@@ -119,10 +134,19 @@ pub fn collect_counted(dirs: &[TrashDir]) -> (Vec<Entry>, u64) {
 }
 
 /// The entry the record at `path` (for the payload `name`) gives, or None
-/// when it cannot be read or its `Path=` does not resolve in `dir`.
-fn read_entry(dir: &TrashDir, path: &std::path::Path, name: &str) -> Option<Entry> {
+/// when it cannot be read, its `Path=` does not resolve in `dir`, or it
+/// has none and `pathless` says to skip it (as `status --check` flags it).
+fn read_entry(
+    dir: &TrashDir,
+    path: &std::path::Path,
+    name: &str,
+    pathless: Pathless,
+) -> Option<Entry> {
     let content = info::read_bounded(path, info::RECORD_CAP).ok()?;
     let parsed = info::parse_bytes(&content);
+    if pathless == Pathless::Skip && parsed.path.as_os_str().is_empty() {
+        return None;
+    }
     let epoch = parsed
         .deletion_date
         .as_deref()
@@ -790,6 +814,45 @@ mod tests {
     use super::*;
     use crate::trashdir::TrashDir;
     use std::path::PathBuf;
+
+    /// A record with no `Path=`, or an empty one, still reaches rm,
+    /// restore and the totals through `collect`, but `list` leaves it out
+    /// and counts it, as `status --check` flags it.
+    #[test]
+    fn list_leaves_out_and_counts_records_with_no_path() {
+        let root = std::env::temp_dir().join(format!("rtrash-pathless-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("info")).unwrap();
+        fs::create_dir_all(root.join("files")).unwrap();
+        let date = "DeletionDate=2026-01-02T03:04:05\n";
+        let rec = |name: &str, body: &str| {
+            fs::write(root.join("files").join(name), b"x").unwrap();
+            let info = root.join("info").join(format!("{name}.trashinfo"));
+            fs::write(info, format!("[Trash Info]\n{body}{date}")).unwrap();
+        };
+        rec("good.txt", "Path=/tmp/good.txt\n");
+        rec("none.txt", "");
+        rec("empty.txt", "Path=\n");
+        let dir = TrashDir {
+            root: root.clone(),
+            topdir: None,
+        };
+        let dirs = [dir];
+        let mut all: Vec<String> = collect(&dirs).into_iter().map(|e| e.name).collect();
+        all.sort();
+        assert_eq!(all, ["empty.txt", "good.txt", "none.txt"]);
+        let (listed, skipped) = collect_counted(&dirs);
+        let names: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["good.txt"]);
+        assert_eq!(skipped, 2);
+        let flagged = crate::trash_check::scan(&dirs[0]);
+        let bad = flagged
+            .iter()
+            .filter(|p| matches!(p, crate::trash_check::Problem::BadRecord { .. }))
+            .count();
+        assert_eq!(bad as u64, skipped, "{flagged:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
 
     fn entry_with(date: Option<&str>, epoch: i64) -> Entry {
         Entry {
