@@ -116,10 +116,15 @@ pub fn allowed_in(roots: &[PathBuf], p: &Path) -> bool {
 
 /// The one way rtrash hands a path to the OS trash (the `trash` crate's
 /// `delete`): it checks the scope first, so no caller can skip it. The
-/// precheck refuses any other call of `trash::delete`.
+/// precheck refuses any other call of `trash::delete`. A debug build
+/// under the tests' bin seam moves the path into that folder instead, so
+/// a test never fills the user's Recycle Bin.
 #[cfg(windows)]
 pub fn trash_delete(p: &Path) -> io::Result<()> {
     check(p)?;
+    if let Some(dir) = crate::win_recycle::test_bin_dir() {
+        return crate::win_recycle::test_bin_put(&dir, p);
+    }
     trash::delete(p).map_err(|e| io::Error::other(e.to_string()))
 }
 

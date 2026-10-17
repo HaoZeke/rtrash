@@ -1871,6 +1871,13 @@ With \fB\-\-print0\fR, the extras and their links are printed.
 .TP
 .B \-\-trash\-dupes
 Like \fB\-\-dupes\fR, then trash every extra copy.
+They go where
+.B rtrash put
+would send them, with the
+.B \-\-home\-only
+or the one
+.B \-\-trash\-dir
+given to du, so they reach the trash the summary reads.
 .TP
 .B \-\-clone\-dupes
 Like \fB\-\-link\-dupes\fR, but each extra becomes a reflink clone of the

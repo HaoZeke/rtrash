@@ -2747,6 +2747,85 @@ fn dupes_find_copies_and_trash_all_but_one() {
     assert!(after.contains(r#""total":{"groups":0,"#), "{after}");
 }
 
+/// `--trash-dupes` sends the extras where a put under the same options
+/// would: the tests' scratch trash, never the system Recycle Bin, which
+/// a parallel test's du summary reads (round 231 went red on Windows).
+/// A single `--trash-dir` pins where they go, two are refused, and the
+/// du trash summary counts what arrived.
+#[test]
+fn trash_dupes_go_to_the_scratch_trash_not_the_system_bin() {
+    let t = Tree::new("dupes-bin");
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+    let older = |p: &Path| {
+        let f = fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(day_ago).unwrap();
+    };
+    older(&t.file("keep/a.bin", 50_000));
+    let copy = t.file("x/a-copy.bin", 50_000);
+    let items = |j: &str| -> u64 {
+        let summary = &j[j.rfind(",\"trash\":").unwrap()..];
+        let at = summary.find("\"items\":").unwrap() + "\"items\":".len();
+        summary[at..]
+            .split([',', '}'])
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert_eq!(items(&t.json(&["--no-git"])), 0);
+    let out = t.du(&["--dupes", "--trash-dupes", "--min-size=1k"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!copy.exists());
+    let bin = common::test_bin(&t.root);
+    let payloads = |dir: &Path| -> Vec<u64> {
+        fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("$R"))
+                    .map(|e| e.metadata().unwrap().len())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if cfg!(windows) {
+        assert_eq!(payloads(&bin), [50_000], "{}", bin.display());
+    } else {
+        assert!(!bin.exists());
+        assert!(t.root.join(".xdg/Trash/files/a-copy.bin").is_file());
+    }
+    let j = t.json(&["--no-git"]);
+    assert_eq!(items(&j), 1, "{j}");
+
+    // One --trash-dir pins the trash; a second is refused.
+    older(&t.file("keep/b.bin", 60_000));
+    let copy = t.file("y/b-copy.bin", 60_000);
+    let pin = t.root.join("pin");
+    let pinned = format!("--trash-dir={}", pin.display());
+    let other = format!("--trash-dir={}", t.root.join("other").display());
+    let two = t.du(&["--dupes", "--trash-dupes", "--min-size=1k", &pinned, &other]);
+    assert_eq!(two.status.code(), Some(2));
+    assert!(copy.exists());
+    let out = t.du(&["--dupes", "--trash-dupes", "--min-size=1k", &pinned]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!copy.exists());
+    if cfg!(windows) {
+        // The Recycle Bin has no place to pin: the extra joins the first.
+        let mut sizes = payloads(&bin);
+        sizes.sort_unstable();
+        assert_eq!(sizes, [50_000, 60_000], "{}", bin.display());
+    } else {
+        assert!(pin.join("files/b-copy.bin").is_file());
+    }
+}
+
 /// `--dupes` never reads a file whose data a read would fetch, and says
 /// how many it left. The Cloud Files bit (RECALL_ON_DATA_ACCESS, set on
 /// OneDrive online-only files) is kernel-only, so this sets OFFLINE, the

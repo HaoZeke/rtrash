@@ -23,9 +23,11 @@
 //!
 //! Every test that runs rtrash builds the command with `rtrash(home)`,
 //! which pins the home, data and config folders to `home`, keeps macOS
-//! off the Finder Trash, and clears the guard variables a developer may
-//! have set. A test that must reach the real trash calls `rtrash_real`
-//! and names why.
+//! off the Finder Trash, points Windows at a scratch Recycle Bin under
+//! `home`, and clears the guard variables a developer may have set. A
+//! test that must reach the real trash calls `rtrash_real` and names why.
+//! Round 231 went red on Windows when a parallel test's put filled the
+//! real bin that another test's du summary read.
 #![allow(dead_code)]
 
 use std::fmt::Debug;
@@ -249,9 +251,11 @@ pub fn du_row(text: &str, name: &str) -> String {
 /// `HOME` and `USERPROFILE` are `home`, `XDG_DATA_HOME` is `home/xdg`
 /// (so the home trash is `home/xdg/Trash`), `XDG_CONFIG_HOME` is
 /// `home/.config`, `RTRASH_MACOS_TRASH` is `freedesktop` (plain commands
-/// on macOS would otherwise go to the Finder Trash), and the guard and
-/// config variables are cleared. Set anything else on the result; a later
-/// `.env` wins.
+/// on macOS would otherwise go to the Finder Trash),
+/// `RTRASH_TEST_BIN_DIR` is [`test_bin`]`(home)` (Windows puts and the
+/// du trash summary use that folder, not the system Recycle Bin), and the
+/// guard and config variables are cleared. Set anything else on the
+/// result; a later `.env` wins.
 pub fn rtrash(home: &Path) -> Command {
     let mut c = Command::new(bin());
     c.env("HOME", home)
@@ -259,6 +263,7 @@ pub fn rtrash(home: &Path) -> Command {
         .env("XDG_DATA_HOME", home.join("xdg"))
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("RTRASH_MACOS_TRASH", "freedesktop")
+        .env("RTRASH_TEST_BIN_DIR", test_bin(home))
         .env_remove("RTRASH_NO_PERMANENT")
         .env_remove("RTRASH_MAX_PERMANENT")
         .env_remove("RTRASH_ALLOW_ROOTS")
@@ -273,6 +278,13 @@ pub fn rtrash(home: &Path) -> Command {
         c.env_remove(var);
     }
     c
+}
+
+/// The scratch Recycle Bin [`rtrash`] gives a Windows run under `home`.
+/// It is named like the real one, so the du duplicate walk skips it as
+/// it skips a real bin.
+pub fn test_bin(home: &Path) -> PathBuf {
+    home.join("$Recycle.Bin")
 }
 
 /// Why a test runs rtrash without the `rtrash` pin.

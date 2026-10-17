@@ -1,0 +1,1 @@
+`rtrash du --dupes --trash-dupes` now passes `--home-only` and a single `--trash-dir` on to the put, so the extra copies go to the trash the du summary reads. Before, both options changed only the summary. Two `--trash-dir` options with `--trash-dupes` are refused.

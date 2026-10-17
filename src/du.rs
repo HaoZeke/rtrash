@@ -707,9 +707,22 @@ pub fn trash_on_scanned_devices(dirs: &[TrashDir], report: &Report) -> TrashSumm
     }
 }
 
-/// Summarize the Recycle Bin of each drive that holds a scan root.
+/// Summarize the Recycle Bin of each drive that holds a scan root; under
+/// the tests' bin seam, the seam folder instead.
 #[cfg(windows)]
 pub fn recycle_bin_on_scanned_drives(report: &Report) -> TrashSummary {
+    if let Some(dir) = crate::win_recycle::test_bin_dir() {
+        let (items, _) = crate::win_recycle::list_items_in(std::slice::from_ref(&dir));
+        return TrashSummary {
+            items: items.len() as u64,
+            bytes: items
+                .iter()
+                .map(|it| crate::win_recycle::recycled_size(Path::new(&it.id)))
+                .sum(),
+            roots: vec![dir],
+            cap: None,
+        };
+    }
     let mut drives: Vec<PathBuf> = Vec::new();
     for r in &report.roots {
         let mut c = r.path.components();
@@ -1988,16 +2001,25 @@ enum DupesAct {
     Clone,
 }
 
-fn dupes_out(
-    prog: &str,
-    paths: &[PathBuf],
-    opts: &ScanOpts,
-    min_size: u64,
+/// How `--dupes` reports: JSON, NUL-separated names or the table, what it
+/// does with the extras, and the put options of `--trash-dupes`
+/// (`--home-only`, `--trash-dir`), so the extras go to the trash the
+/// summary reads, as a plain put would send them.
+struct DupesOut {
     json: bool,
     print0: bool,
     act: DupesAct,
-) -> i32 {
+    put_flags: Vec<String>,
+}
+
+fn dupes_out(prog: &str, paths: &[PathBuf], opts: &ScanOpts, min_size: u64, out: DupesOut) -> i32 {
     use std::io::Write;
+    let DupesOut {
+        json,
+        print0,
+        act,
+        put_flags,
+    } = out;
     let files = crate::du_dupes::walk(
         paths,
         crate::du_dupes::Opts {
@@ -2051,7 +2073,8 @@ fn dupes_out(
         return i32::from(!done.skipped.is_empty());
     }
     if act == DupesAct::Trash && !extras.is_empty() {
-        let mut args: Vec<String> = vec!["--".into()];
+        let mut args = put_flags;
+        args.push("--".into());
         args.extend(extras.iter().map(|p| p.to_string_lossy().into_owned()));
         return crate::put::run(prog, &args);
     }
@@ -3688,8 +3711,26 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         } else {
             DupesAct::List
         };
+        if trash_dupes && trash_pins.len() > 1 {
+            eprintln!("{prog}: --trash-dupes puts into one trash; give at most one --trash-dir");
+            return 2;
+        }
+        let mut put_flags: Vec<String> = Vec::new();
+        if home_only {
+            put_flags.push("--home-only".into());
+        }
+        for pin in &trash_pins {
+            let pin = crate::util::str_from_os(pin.clone().into_os_string());
+            put_flags.push(format!("--trash-dir={pin}"));
+        }
         let min_size = min_size.unwrap_or(1);
-        return dupes_out(prog, &paths, &opts, min_size, json, print0, act);
+        let out = DupesOut {
+            json,
+            print0,
+            act,
+            put_flags,
+        };
+        return dupes_out(prog, &paths, &opts, min_size, out);
     }
     // Text sizes everywhere in this run, the explorer included; JSON,
     // snapshots and stacks stay in bytes. The explorer keeps its units

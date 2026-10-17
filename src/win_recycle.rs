@@ -583,17 +583,70 @@ pub fn current_user_sid() -> Option<String> {
     Some(out)
 }
 
+/// Test seam, in debug builds only: `RTRASH_TEST_BIN_DIR=DIR` stands in
+/// for every Recycle Bin of the user. [`bin_dirs`] reads DIR alone, a put
+/// moves its items into DIR ([`test_bin_put`]), and the du trash summary
+/// counts DIR, so a test never reads or changes the real bin.
+/// `common::rtrash` in the tests sets it for every run.
+#[cfg(windows)]
+pub fn test_bin_dir() -> Option<PathBuf> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var_os("RTRASH_TEST_BIN_DIR").map(PathBuf::from)
+}
+
+/// The put of [`test_bin_dir`]: `p` moves into `dir` as `$R<ID><ext>`,
+/// beside a version-2 `$I<ID><ext>` record of its path, size and time,
+/// the layout of a real bin, so list, restore and du read it back.
+#[cfg(windows)]
+pub fn test_bin_put(dir: &Path, p: &Path) -> io::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let original = std::path::absolute(p)?;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let record = encode_recycle_i_v2(
+        &original,
+        tree_bytes(p),
+        FILETIME_UNIX_EPOCH + secs * HUNDRED_NS_PER_SEC,
+    );
+    let ext = p
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let mut n = 0u32;
+    let id = loop {
+        let id = format!("T{n:05}{ext}");
+        let open = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(format!("$I{id}")));
+        match open {
+            Ok(mut f) => {
+                f.write_all(&record)?;
+                break id;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < 99_999 => n += 1,
+            Err(e) => return Err(e),
+        }
+    };
+    if let Err(e) = std::fs::rename(p, dir.join(format!("$R{id}"))) {
+        let _ = std::fs::remove_file(dir.join(format!("$I{id}")));
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// The current user's Recycle Bin folders that exist, one per drive and
 /// per volume mounted on a folder, for `list`, `status --check` and
-/// [`list_items`], which rm, restore and empty read. Test seam, in debug
-/// builds only: `RTRASH_TEST_BIN_DIR=DIR` reads DIR alone, as such a
-/// folder, so a test never reads or changes the real bin. None without a
-/// SID.
+/// [`list_items`], which rm, restore and empty read; the folder of
+/// [`test_bin_dir`] alone when that is set. None without a SID.
 #[cfg(windows)]
 fn bin_dirs() -> Option<Vec<PathBuf>> {
-    let seam = std::env::var_os("RTRASH_TEST_BIN_DIR").filter(|_| cfg!(debug_assertions));
-    if let Some(d) = seam {
-        return Some(vec![PathBuf::from(d)]);
+    if let Some(d) = test_bin_dir() {
+        return Some(vec![d]);
     }
     let sid = current_user_sid()?;
     Some(

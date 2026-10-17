@@ -593,6 +593,7 @@ PERMANENT_ALLOW = {
     ("win_recycle.rs", "prune_after_put"): (1, BATCH),
     ("win_recycle.rs", "purge_oldest_on"): (1, BATCH),
     ("win_recycle.rs", "remove_retry"): (3, PRIMITIVE + " (under remove_forcing)"),
+    ("win_recycle.rs", "test_bin_put"): (1, OWN + ": the $I record it just wrote, when the move fails"),
     ("win_recycle.rs", "restore_payload"): (3, MOVE + "; then the $I record of the restored item"),
     ("win_recycle.rs", "rm_run"): (1, BATCH),
     ("wsl_bin.rs", "remove_entry"): (1, RECORD),
@@ -1051,6 +1052,40 @@ def check_rtrash_pinned():
                           "UNPINNED_LEFT allows; lower it in scripts/precheck.py")
 
 
+def fn_body(text, name):
+    """The text of fn `name` from its signature to the first `}` line at
+    column 0; empty when there is none."""
+    m = re.search(rf"(?m)^(?:pub(?:\([^)]*\))?\s+)?fn\s+{name}\b", text)
+    if not m:
+        return ""
+    end = text.find("\n}\n", m.end())
+    return text[m.start():end if end >= 0 else len(text)]
+
+
+def check_bin_seam():
+    """No test fills or reads the system Recycle Bin by accident (round 231:
+    a parallel put changed the bin another test's du summary read).
+    common::rtrash sets RTRASH_TEST_BIN_DIR, no test removes it, and the
+    two places that reach the bin under that pin, the put hand-off and the
+    du summary, ask win_recycle::test_bin_dir first. A test that needs the
+    real bin uses common::rtrash_real(Real::RecycleBin)."""
+    common = (ROOT / "tests" / "common" / "mod.rs").read_text(encoding="utf-8")
+    if '.env("RTRASH_TEST_BIN_DIR"' not in fn_body(rust_code(common, strings=True), "rtrash"):
+        errors.append("tests/common/mod.rs: rtrash(home) does not set RTRASH_TEST_BIN_DIR; "
+                      "Windows runs would reach the system Recycle Bin")
+    for path in sorted((ROOT / "tests").rglob("*.rs")):
+        text = rust_code(path.read_text(encoding="utf-8"), strings=True)
+        for m in re.finditer(r'env_remove\(\s*"RTRASH_TEST_BIN_DIR"', text):
+            errors.append(f"{path.relative_to(ROOT).as_posix()}:{text.count(chr(10), 0, m.start()) + 1}: "
+                          "removes the scratch bin pin; use common::rtrash_real(Real::RecycleBin) "
+                          "for the real bin")
+    for rel, fn in (("src/allow_roots.rs", "trash_delete"), ("src/du.rs", "recycle_bin_on_scanned_drives")):
+        body = fn_body(rust_code((ROOT / rel).read_text(encoding="utf-8")), fn)
+        if "test_bin_dir()" not in body:
+            errors.append(f"{rel}: {fn} does not ask win_recycle::test_bin_dir() first; "
+                          "a test under common::rtrash would reach the system Recycle Bin")
+
+
 def check_rustfmt():
     """`cargo fmt --check` when a toolchain is there; three rounds in a row
     (170-172) needed a format-only amend after CI."""
@@ -1074,7 +1109,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_key_reads()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_key_reads()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
