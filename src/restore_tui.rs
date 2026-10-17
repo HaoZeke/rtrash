@@ -4,7 +4,7 @@ use std::io::{self};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -652,12 +652,10 @@ pub fn run<E: TuiItem>(prog: &str, entries: Vec<&E>, force: bool, newest_first: 
             if app.quit {
                 break;
             }
-            if event::poll(Duration::from_millis(200))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press {
-                        app.on_key(key.code, key.modifiers);
-                    }
-                }
+            if let Some((code, mods)) =
+                tui_term::next_key(&mut terminal, Duration::from_millis(200))?
+            {
+                app.on_key(code, mods);
             }
         }
         Ok(())

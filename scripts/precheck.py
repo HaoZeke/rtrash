@@ -928,6 +928,26 @@ def check_volume_trash_owner():
                       "the rule no longer matches src and needs updating")
 
 
+
+KEY_READ = re.compile(r"\bevent::(read|poll)\s*\(")
+
+
+def check_key_reads():
+    """A browser reads keys through `tui_term::next_key` only, so a key
+    every browser shares (Ctrl-L redraw, Ctrl-Z suspend) is handled in
+    one place and none of the four event loops can miss it (round 228).
+    `event::read` and `event::poll` appear in src/tui_term.rs alone."""
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        if rel == "src/tui_term.rs":
+            continue
+        text = rust_code(path.read_text(encoding="utf-8"))
+        for m in KEY_READ.finditer(text):
+            line = text.count("\n", 0, m.start()) + 1
+            errors.append(f"{rel}:{line}: calls event::{m.group(1)} directly; read keys with "
+                          "tui_term::next_key so the keys every browser shares are handled")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -976,7 +996,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_key_reads()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
     check_musl_aliases()
     if "--no-fmt" not in sys.argv:

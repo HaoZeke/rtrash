@@ -6,7 +6,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -504,12 +504,8 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
         if app.quit {
             return Ok(());
         }
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.on_key(key.code, key.modifiers);
-                }
-            }
+        if let Some((code, mods)) = tui_term::next_key(terminal, Duration::from_millis(200))? {
+            app.on_key(code, mods);
         }
     }
 }

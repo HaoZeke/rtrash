@@ -2,6 +2,7 @@
 
 use std::io::{self, stdout, Stdout};
 
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -33,6 +34,25 @@ pub fn leave(terminal: &mut Term) {
     let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let _ = terminal.show_cursor();
     release_stderr();
+}
+
+/// Wait up to `tick` for the next key press, for a browser's event loop.
+/// `None` when no key came in time, or for an event that is not a press
+/// (a release, a resize, a mouse event); the caller redraws either way.
+/// Every browser reads keys here and nowhere else, so a key that means
+/// the same in all of them is handled once.
+pub fn next_key(
+    terminal: &mut Term,
+    tick: std::time::Duration,
+) -> io::Result<Option<(KeyCode, KeyModifiers)>> {
+    let _ = terminal;
+    if !event::poll(tick)? {
+        return Ok(None);
+    }
+    match event::read()? {
+        Event::Key(key) if key.kind == KeyEventKind::Press => Ok(Some((key.code, key.modifiers))),
+        _ => Ok(None),
+    }
 }
 
 /// The shell a browser opens: `$SHELL`, else `/bin/sh`; on Windows

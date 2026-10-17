@@ -19,7 +19,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -2401,12 +2401,8 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
         }
         // Redraw often while a scan runs so its counters move.
         let tick = if app.jobs.is_empty() { 200 } else { 100 };
-        if event::poll(Duration::from_millis(tick))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.on_key(key.code, key.modifiers);
-                }
-            }
+        if let Some((code, mods)) = tui_term::next_key(terminal, Duration::from_millis(tick))? {
+            app.on_key(code, mods);
         }
     }
 }
