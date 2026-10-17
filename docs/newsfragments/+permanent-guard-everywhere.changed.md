@@ -1,0 +1,2 @@
+`RTRASH_NO_PERMANENT` now covers every permanent removal, not just rm and empty: reap with `--permanent` or `--purge-trash`, a reap profile set to delete, the size cap after a put, wsl rm and empty, the Finder Trash and Recycle Bin purges, and a restore that overwrites an existing file.
+A refused put still moves the file and keeps the older items, and a refused restore leaves both copies in place.
