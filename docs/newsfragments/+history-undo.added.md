@@ -1,0 +1,1 @@
+`rtrash undo` now adds an `undo` line to `rtrash-history` in each trash it brings items back from. Restore already logs its line there, and undo on the Finder Trash already logged one. No line comes from a dry run, a refused run or a run that brings nothing back. `trash-stats --history` shows the new lines.

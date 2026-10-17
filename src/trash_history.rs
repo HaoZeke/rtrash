@@ -13,6 +13,10 @@ pub const CAP: u64 = 64 * 1024;
 /// and on Windows alike.
 pub const FIX_EVENT: &str = "fix";
 
+/// The event an `undo` that brought items back logs, for the Finder Trash
+/// and the FreeDesktop trashes alike.
+pub const UNDO_EVENT: &str = "undo";
+
 /// One line of a history.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Point {

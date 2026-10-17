@@ -83,6 +83,14 @@ fn id_millis(id: &str) -> i64 {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    let code = run_inner(prog, args);
+    // Only a trash an item came back from is touched, so a dry run, a
+    // refused run and one that matched nothing add no line.
+    crate::trash_total::log_touched(crate::trash_history::UNDO_EVENT);
+    code
+}
+
+fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut list_only = false;
     let mut dry_run = false;
     let mut conflict = Conflict::Refuse;
@@ -139,7 +147,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let snap = crate::finder_total::snapshot();
         let rc =
             crate::finder_shared::undo(prog, wanted.as_deref(), list_only, dry_run, conflict, json);
-        crate::finder_total::log("undo", &snap);
+        crate::finder_total::log(crate::trash_history::UNDO_EVENT, &snap);
         return rc;
     }
     let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);

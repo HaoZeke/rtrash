@@ -2909,6 +2909,61 @@ fn undo_restores_the_last_put_run_and_only_it() {
     );
 }
 
+/// `undo` appends one `undo` line to the history of the trash its items
+/// came back from, as restore and the Finder undo do. A dry run, an
+/// unknown run id, a run the scope refuses, a run whose every path is
+/// taken and an undo with no run left add none.
+#[test]
+fn undo_appends_one_undo_line_to_the_trash_history() {
+    let sb = Sandbox::new("undo-history");
+    sb.touch("uh-a.txt");
+    sb.touch("uh-b.txt");
+    assert!(sb.run(&["put", "uh-a.txt", "uh-b.txt"]).status.success());
+    let hist = sb.trash().join("rtrash-history");
+    let lines = || -> Vec<String> {
+        let body = fs::read_to_string(&hist).unwrap_or_default();
+        body.lines().map(String::from).collect()
+    };
+    let put = lines();
+    assert_eq!(put.len(), 1, "{put:?}");
+    assert!(
+        put[0].contains(" put ") && put[0].ends_with(" 2"),
+        "{put:?}"
+    );
+    let (info, files) = (sb.trash().join("info"), sb.trash().join("files"));
+    let watch = [hist.as_path(), info.as_path(), files.as_path()];
+    let elsewhere = sb.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let scope = elsewhere.display().to_string();
+    let undo = ["undo", "--home-only"];
+    let dry = ["undo", "--home-only", "-n"];
+    let unknown = ["undo", "--home-only", "no-such-run"];
+    common::assert_refused_unchanged(&dry, &watch, 0, &[], || sb.run(&dry));
+    common::assert_refused_unchanged(&unknown, &watch, 1, &[], || sb.run(&unknown));
+    common::assert_refused_unchanged(&"scope", &watch, 2, &[], || {
+        sb.run_env(&undo, &[("RTRASH_ALLOW_ROOTS", scope.as_str())])
+    });
+    // Both paths taken again: nothing comes back, so nothing is logged.
+    fs::write(sb.work().join("uh-a.txt"), b"new").unwrap();
+    fs::write(sb.work().join("uh-b.txt"), b"new").unwrap();
+    common::assert_refused_unchanged(&"taken", &watch, 1, &[], || sb.run(&undo));
+    fs::remove_file(sb.work().join("uh-a.txt")).unwrap();
+    fs::remove_file(sb.work().join("uh-b.txt")).unwrap();
+
+    let out = sb.run(&undo);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert!(sb.work().join("uh-a.txt").is_file() && sb.work().join("uh-b.txt").is_file());
+    let got = lines();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(got[0], put[0]);
+    let fields: Vec<&str> = got[1].split(' ').collect();
+    assert_eq!(fields.len(), 4, "{got:?}");
+    assert_eq!((fields[1], fields[3]), ("undo", "0"), "{got:?}");
+    assert!(fields[0].parse::<i64>().is_ok() && fields[2].parse::<u64>().is_ok());
+    // No run is left, so a second undo logs nothing either.
+    common::assert_refused_unchanged(&"again", &watch, 1, &[], || sb.run(&undo));
+}
+
 #[test]
 fn undo_keeps_a_recreated_path_without_force() {
     let sb = Sandbox::new("undo-conflict");

@@ -1089,7 +1089,7 @@ A disk guard can run
 to see both what the trash holds and whether emptying it is urgent.
 .TP
 .B \-\-history
-Also show each trash's history: after every put, restore, rm, empty and reap that
+Also show each trash's history: after every put, restore, undo, rm, empty and reap that
 changed a trash (purge when
 .B reap \-\-purge\-trash
 emptied items, fix when
@@ -3943,7 +3943,7 @@ trusted only while
 .B info/
 is unchanged since it was written),
 .B rtrash\-history
-(a line per put, restore, rm, empty, reap, fix or purge that changed the trash, for
+(a line per put, restore, undo, rm, empty, reap, fix or purge that changed the trash, for
 .BR "trash\-stats \-\-history" ),
 and optional lock file.
 Cache sizes count allocated blocks as
