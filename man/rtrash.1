@@ -977,7 +977,8 @@ payload is gone
 .RB ( dangling: ),
 a
 .I $I
-record that cannot be read or parsed
+record that cannot be read, is larger than any record or cannot be
+parsed
 .RB ( "bad record:" ),
 a
 .I $R
@@ -995,6 +996,9 @@ leaves the same entries out, and after its rows it says on stderr how
 many it could not show, naming
 .BR "rtrash status \-\-check" ;
 its rows on stdout are the same as without them.
+.BR rm " and " restore
+read the bin the same way, so they never act on an entry the check
+reports.
 .PP
 On Windows,
 .BR list ,

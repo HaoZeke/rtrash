@@ -288,3 +288,109 @@ fn status_fix_appends_one_fix_line_to_the_bin_history() {
     assert_eq!(lines(), got);
     let _ = fs::remove_dir_all(&home);
 }
+
+/// A `$I` padded past the record cap and a `$I` that is a link to a good
+/// record are what `status --check` flags. list leaves them out and its
+/// hint counts as many entries as the check reports; rm and restore do
+/// not see them. A file link needs the symlink privilege or Developer
+/// Mode, so without either the link case is skipped, saying why.
+#[test]
+fn list_rm_and_restore_skip_the_index_records_status_check_flags() {
+    let home = common::scratch_dir("bincheck", "rejected");
+    let (bin, work, local) = (home.join("bin"), home.join("work"), home.join("local"));
+    for d in [&bin, &work, &local] {
+        fs::create_dir_all(d).unwrap();
+    }
+    let record = |origin: &str| {
+        rtrash::win_recycle::encode_recycle_i_v2(
+            &work.join(origin),
+            1,
+            rtrash::win_recycle::FILETIME_UNIX_EPOCH,
+        )
+    };
+    fs::write(bin.join("$IRJGOOD.txt"), record("rj-good.txt")).unwrap();
+    fs::write(bin.join("$RRJGOOD.txt"), b"good").unwrap();
+    // Padding after the path still parses; only the size flags it.
+    let mut big = record("rj-big.txt");
+    big.resize(rtrash::win_recycle::I_RECORD_CAP as usize + 1, 0);
+    fs::write(bin.join("$IRJBIG.txt"), big).unwrap();
+    fs::write(bin.join("$RRJBIG.txt"), b"big").unwrap();
+    let target = home.join("rj-link-record");
+    fs::write(&target, record("rj-link.txt")).unwrap();
+    let linked = std::os::windows::fs::symlink_file(&target, bin.join("$IRJLINK.txt"));
+    match &linked {
+        Ok(()) => fs::write(bin.join("$RRJLINK.txt"), b"link").unwrap(),
+        Err(e) => eprintln!("skipping the linked $I case: cannot create a file link: {e}"),
+    }
+    let flagged: u64 = if linked.is_ok() { 2 } else { 1 };
+    let run = |args: &[&str]| {
+        common::rtrash(&home)
+            .env("RTRASH_TEST_BIN_DIR", &bin)
+            .env("LOCALAPPDATA", &local)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let err = common::stderr_text;
+    let out_text = |o: &Output| String::from_utf8_lossy(&o.stdout).into_owned();
+    let watch = [bin.as_path(), work.as_path()];
+
+    let check = run(&["status", "--check"]);
+    assert_eq!(check.status.code(), Some(1), "{}", err(&check));
+    let problems: usize = ["dangling: ", "bad record: ", "orphan: ", "stray: "]
+        .iter()
+        .map(|p| lines_starting(&check, p))
+        .sum();
+    assert_eq!(problems as u64, flagged, "{}", out_text(&check));
+    assert_eq!(
+        lines_starting(&check, "bad record: "),
+        1,
+        "{}",
+        out_text(&check)
+    );
+    assert!(out_text(&check).contains("RJBIG"), "{}", out_text(&check));
+    if linked.is_ok() {
+        assert_eq!(lines_starting(&check, "stray: "), 1, "{}", out_text(&check));
+        assert!(out_text(&check).contains("RJLINK"), "{}", out_text(&check));
+    }
+
+    // The hint counts what the check reported, and only the good row shows.
+    let tail = rtrash::win_recycle::unlisted_hint("", flagged).unwrap();
+    let list = common::assert_refused_unchanged(&"list", &watch, 0, &[(tail.as_str(), 1)], || {
+        run(&["list"])
+    });
+    let rows = out_text(&list);
+    assert_eq!(rows.lines().count(), 1, "{rows}");
+    assert!(rows.trim_end().ends_with("rj-good.txt"), "{rows}");
+
+    // rm matches only the good item, and a pattern naming a flagged one
+    // deletes nothing.
+    let dry = common::assert_refused_unchanged(&"rm -n", &watch, 0, &[], || {
+        run(&["rm", "-n", "-f", "*"])
+    });
+    let matched = out_text(&dry);
+    assert_eq!(matched.lines().count(), 1, "{matched}");
+    assert!(matched.trim_end().ends_with("rj-good.txt"), "{matched}");
+    let before = names(&bin);
+    for name in ["rj-big.txt", "rj-link.txt"] {
+        let out = run(&["rm", "-v", name]);
+        assert!(!out_text(&out).contains(name), "{}", out_text(&out));
+        assert_eq!(names(&bin), before, "rm {name}: {}", err(&out));
+    }
+
+    // restore finds no flagged item, and still restores the good one.
+    let none = "no trashed files match";
+    for name in ["rj-big.txt", "rj-link.txt"] {
+        let path = work.join(name).display().to_string();
+        common::assert_refused_unchanged(&name, &watch, 1, &[(none, 1)], || {
+            run(&["restore", &path])
+        });
+    }
+    let good = work.join("rj-good.txt");
+    let out = run(&["restore", &good.display().to_string()]);
+    assert_eq!(out.status.code(), Some(0), "{}", err(&out));
+    assert_eq!(fs::read(&good).unwrap(), b"good");
+    assert!(!bin.join("$IRJGOOD.txt").exists());
+    assert!(bin.join("$IRJBIG.txt").exists());
+    let _ = fs::remove_dir_all(&home);
+}

@@ -225,8 +225,10 @@ pub fn scan_bin_dir(dir: &Path) -> Vec<BinRecord> {
 pub struct BinScan {
     /// The items list, rm and restore can show, oldest first.
     pub records: Vec<BinRecord>,
-    /// The entries left out: a `$I` whose `$R` payload is gone, a `$I`
-    /// that cannot be read or parsed, and a `$R` with no `$I`. Other names
+    /// The entries left out, one for each problem `status --check` finds:
+    /// a `$I` that is not a record file (a folder or a link), one that
+    /// cannot be read, is too large or cannot be parsed, one whose `$R`
+    /// payload is gone, and a `$R` with no `$I`. Other names
     /// (`desktop.ini`) are the shell's and do not count.
     pub skipped: u64,
 }
@@ -249,18 +251,16 @@ pub fn scan_bin_dir_counted(dir: &Path) -> BinScan {
         let Some(rest) = kept.strip_prefix("$I") else {
             continue;
         };
+        // What the check reports as stray or bad is left out here too.
+        let IndexRead::Record(meta) = read_bin_index(&e.path()) else {
+            scan.skipped += 1;
+            continue;
+        };
         let payload = dir.join(crate::util::os_from_str(&format!("$R{rest}")));
         if std::fs::symlink_metadata(&payload).is_err() {
             scan.skipped += 1;
             continue;
         }
-        let Some(meta) = std::fs::read(e.path())
-            .ok()
-            .and_then(|b| parse_recycle_i(&b))
-        else {
-            scan.skipped += 1;
-            continue;
-        };
         out.push(BinRecord {
             payload,
             original: meta.original,
@@ -291,7 +291,39 @@ pub fn unlisted_hint(prog: &str, skipped: u64) -> Option<String> {
 
 /// The largest `$I` record: a version 2 header and a path of 32767
 /// UTF-16 units with its NUL. A bigger file is not a record.
-const I_RECORD_CAP: u64 = 0x1C + 2 * 32_768;
+pub const I_RECORD_CAP: u64 = 0x1C + 2 * 32_768;
+
+/// What one `$I` name in a Recycle Bin folder holds, read the one way
+/// both `status --check` and [`scan_bin_dir_counted`] read it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum IndexRead {
+    /// A record file that parses.
+    Record(RecycleIMeta),
+    /// Not a record file: a folder, a link or a junction, which Windows
+    /// reports as a link and the check as `stray:`. It is not followed.
+    NotAFile,
+    /// A record file that cannot be read, is larger than
+    /// [`I_RECORD_CAP`] or cannot be parsed, and why (`bad record:`).
+    Bad(String),
+}
+
+/// Read the `$I` name `record` as [`IndexRead`] says. Only a regular
+/// file, the link itself not followed, is opened, and at most
+/// [`I_RECORD_CAP`] bytes of it are read.
+pub fn read_bin_index(record: &Path) -> IndexRead {
+    let is_file = std::fs::symlink_metadata(record).is_ok_and(|m| m.file_type().is_file());
+    if !is_file {
+        return IndexRead::NotAFile;
+    }
+    let body = match read_index(record) {
+        Ok(b) => b,
+        Err(why) => return IndexRead::Bad(why),
+    };
+    match parse_recycle_i(&body) {
+        Some(meta) => IndexRead::Record(meta),
+        None => IndexRead::Bad("cannot be parsed as a $I record".to_string()),
+    }
+}
 
 /// One finding of `status --check` in a Recycle Bin folder.
 #[derive(Debug, PartialEq, Eq)]
@@ -352,7 +384,8 @@ fn read_index(path: &Path) -> Result<Vec<u8>, String> {
 
 /// The problems in one user's Recycle Bin folder (`X:\$Recycle.Bin\SID`):
 /// the `$I` records in name order, then the `$R` payloads with no record.
-/// The same reading as [`scan_bin_dir`], which skips what this reports.
+/// Each `$I` is read through [`read_bin_index`], as [`scan_bin_dir`]
+/// reads it, so the scan skips exactly what this reports.
 /// Other names (`desktop.ini`) are the shell's and are not looked at.
 pub fn check_bin_dir(dir: &Path) -> Vec<BinProblem> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
@@ -369,22 +402,16 @@ pub fn check_bin_dir(dir: &Path) -> Vec<BinProblem> {
             continue;
         };
         let record = at(name);
-        let is_file = std::fs::symlink_metadata(&record).is_ok_and(|m| m.file_type().is_file());
-        if !is_file {
-            out.push(BinProblem::Stray { path: record });
-            continue;
-        }
-        let body = match read_index(&record) {
-            Ok(b) => b,
-            Err(why) => {
+        let meta = match read_bin_index(&record) {
+            IndexRead::Record(meta) => meta,
+            IndexRead::NotAFile => {
+                out.push(BinProblem::Stray { path: record });
+                continue;
+            }
+            IndexRead::Bad(why) => {
                 out.push(BinProblem::BadRecord { record, why });
                 continue;
             }
-        };
-        let Some(meta) = parse_recycle_i(&body) else {
-            let why = "cannot be parsed as a $I record".to_string();
-            out.push(BinProblem::BadRecord { record, why });
-            continue;
         };
         if std::fs::symlink_metadata(at(&format!("$R{rest}"))).is_err() {
             out.push(BinProblem::Dangling {
@@ -556,17 +583,35 @@ pub fn current_user_sid() -> Option<String> {
     Some(out)
 }
 
+/// The current user's Recycle Bin folders that exist, one per drive and
+/// per volume mounted on a folder, for `list`, `status --check` and
+/// [`list_items`], which rm, restore and empty read. Test seam, in debug
+/// builds only: `RTRASH_TEST_BIN_DIR=DIR` reads DIR alone, as such a
+/// folder, so a test never reads or changes the real bin. None without a
+/// SID.
+#[cfg(windows)]
+fn bin_dirs() -> Option<Vec<PathBuf>> {
+    let seam = std::env::var_os("RTRASH_TEST_BIN_DIR").filter(|_| cfg!(debug_assertions));
+    if let Some(d) = seam {
+        return Some(vec![PathBuf::from(d)]);
+    }
+    let sid = current_user_sid()?;
+    Some(
+        crate::trash_history::bin_roots()
+            .into_iter()
+            .map(|r| r.join("$Recycle.Bin").join(&sid))
+            .filter(|d| d.is_dir())
+            .collect(),
+    )
+}
+
 /// Windows: every item in the current user's Recycle Bins, on the drives
 /// and on folder-mounted volumes, oldest first. Reads the `$I` records
 /// itself: the `trash` crate's list fails as a whole when one name holds
 /// an unpaired surrogate.
 #[cfg(windows)]
 pub fn list_items() -> io::Result<Vec<trash::TrashItem>> {
-    let sid = current_user_sid().ok_or_else(|| io::Error::other("cannot read the user's SID"))?;
-    let dirs: Vec<PathBuf> = crate::trash_history::bin_roots()
-        .into_iter()
-        .map(|root| root.join("$Recycle.Bin").join(&sid))
-        .collect();
+    let dirs = bin_dirs().ok_or_else(|| io::Error::other("cannot read the user's SID"))?;
     Ok(list_items_in(&dirs).0)
 }
 
@@ -1841,7 +1886,7 @@ on Windows (there is no FreeDesktop layout here).
             Some(d) => Some(dir_forms(d)),
             None => cwd_only.then(cwd_forms),
         };
-        let listed = bin_dirs()
+        let listed = super::bin_dirs()
             .map(|dirs| super::list_items_in(&dirs))
             .ok_or_else(|| io::Error::other("cannot read the user's SID"));
         match listed {
@@ -3172,7 +3217,7 @@ registry), then the total and the free space on each (a warning under
                 eprintln!("{prog}: --check takes only --fix and -n");
                 return 2;
             }
-            let Some(dirs) = bin_dirs() else {
+            let Some(dirs) = super::bin_dirs() else {
                 eprintln!("{prog}: cannot read the user's SID");
                 return 1;
             };
@@ -3232,26 +3277,6 @@ registry), then the total and the free space on each (a warning under
         );
         print_free(&crate::trash_history::bin_roots());
         0
-    }
-
-    /// The current user's Recycle Bin folders that exist, one per drive
-    /// and per volume mounted on a folder, for `list` and `status
-    /// --check`. Test seam, in debug builds only: `RTRASH_TEST_BIN_DIR=DIR`
-    /// reads DIR alone, as such a folder, so a test never reads or changes
-    /// the real bin. None without a SID.
-    fn bin_dirs() -> Option<Vec<PathBuf>> {
-        let seam = std::env::var_os("RTRASH_TEST_BIN_DIR").filter(|_| cfg!(debug_assertions));
-        if let Some(d) = seam {
-            return Some(vec![PathBuf::from(d)]);
-        }
-        let sid = super::current_user_sid()?;
-        Some(
-            crate::trash_history::bin_roots()
-                .into_iter()
-                .map(|r| r.join("$Recycle.Bin").join(&sid))
-                .filter(|d| d.is_dir())
-                .collect(),
-        )
     }
 
     /// A `Free on` line per drive, and a warning for a drive under
@@ -4340,6 +4365,60 @@ mod tests {
                  `rtrash status --check` shows them"
             )
         );
+    }
+
+    /// `read_bin_index` takes what the check takes: a record file that
+    /// parses. A link to a good record, a folder, a record padded past
+    /// the cap and junk are left out of the scan, which counts one entry
+    /// for each problem the check reports.
+    #[test]
+    fn scan_and_check_reject_the_same_index_names() {
+        let dir = std::env::temp_dir().join(format!("rtrash-binidx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let w = |name: &str, body: &[u8]| std::fs::write(dir.join(name), body).unwrap();
+        let rec = |orig: &str| encode_recycle_i_v2(Path::new(orig), 1, FILETIME_UNIX_EPOCH);
+        w("$RAAAAAA.txt", b"x");
+        w("$IAAAAAA.txt", &rec(r"C:\a.txt"));
+        // Padding after the path still parses; only the size rejects it.
+        let mut big = rec(r"C:\big.txt");
+        big.resize(I_RECORD_CAP as usize + 1, 0);
+        assert!(parse_recycle_i(&big).is_some());
+        w("$RBIGBIG.txt", b"x");
+        w("$IBIGBIG.txt", &big);
+        w("$RJUNKJU", b"x");
+        w("$IJUNKJU", b"junk");
+        w("$RDIRDIR", b"x");
+        std::fs::create_dir(dir.join("$IDIRDIR")).unwrap();
+        let at = |name: &str| dir.join(name);
+        assert!(matches!(
+            read_bin_index(&at("$IAAAAAA.txt")),
+            IndexRead::Record(m) if m.original == Path::new(r"C:\a.txt")
+        ));
+        assert_eq!(
+            read_bin_index(&at("$IBIGBIG.txt")),
+            IndexRead::Bad("larger than any $I record".to_string())
+        );
+        assert_eq!(
+            read_bin_index(&at("$IJUNKJU")),
+            IndexRead::Bad("cannot be parsed as a $I record".to_string())
+        );
+        assert_eq!(read_bin_index(&at("$IDIRDIR")), IndexRead::NotAFile);
+        assert_eq!(read_bin_index(&at("$IMISSING")), IndexRead::NotAFile);
+        #[cfg(unix)]
+        {
+            w("$RLINKLI.txt", b"x");
+            std::os::unix::fs::symlink(at("$IAAAAAA.txt"), at("$ILINKLI.txt")).unwrap();
+            assert_eq!(read_bin_index(&at("$ILINKLI.txt")), IndexRead::NotAFile);
+        }
+        let scan = scan_bin_dir_counted(&dir);
+        let originals: Vec<&Path> = scan.records.iter().map(|r| r.original.as_path()).collect();
+        assert_eq!(originals, [Path::new(r"C:\a.txt")]);
+        let problems = check_bin_dir(&dir);
+        assert_eq!(scan.skipped, problems.len() as u64, "{problems:?}");
+        let expected = if cfg!(unix) { 4 } else { 3 };
+        assert_eq!(scan.skipped, expected, "{problems:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `status --check` on a Recycle Bin folder: the records in name
