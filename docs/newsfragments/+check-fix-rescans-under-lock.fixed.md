@@ -1,0 +1,1 @@
+`rtrash status --check --fix` scans each trash again once it has taken the trash lock, and removes only what that scan still finds. Before, it could remove the record of a put in flight, such as one moving a large folder across file systems. That record looked dangling in the first scan, and the fix removed it once the put let go of the lock.

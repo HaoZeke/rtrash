@@ -968,6 +968,9 @@ With
 .BR \-\-check ,
 remove the dangling and bad records, under each trash's lock; a payload
 that a bad record named stays, as an orphan.
+Once it has the lock it checks that trash again and removes only what
+that check still finds, so a record whose put was still in flight
+stays.
 Bad dates, orphans and stray names are left for you; only a regular
 file is ever removed as a record, so a folder or link named like one
 stays, as does what it holds or points to.

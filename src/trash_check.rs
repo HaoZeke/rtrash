@@ -12,6 +12,11 @@
 //! still lists, and the user decides. Stale `directorysizes` lines need no
 //! check here, as every status run drops them (`DirSizes::write_back`).
 //!
+//! `--fix` scans each trash again once it has the trash lock, and
+//! removes only what that scan still finds: a put in flight when the
+//! first scan ran keeps the lock until it is done, and its record may
+//! have looked dangling.
+//!
 //! Each name is sorted by its file type before its body is read: only a
 //! regular file can be a record, so a folder, link or other file named
 //! `NAME.trashinfo` is stray, kept, and never reaches `--fix`. The removal
@@ -203,11 +208,18 @@ pub fn run(prog: &str, dirs: &[TrashDir], fix: bool, dry_run: bool) -> i32 {
     }
     let mut removed = 0u64;
     let mut failed = 0u64;
+    let mut changed = 0u64;
+    #[cfg(test)]
+    {
+        if let Some(f) = tests::AFTER_SCAN.take() {
+            f();
+        }
+    }
     for (dir, problems) in &found {
         if crate::interrupt::requested() {
             break;
         }
-        let _lock = match (acting && problems.iter().any(|p| p.fix_target().is_some()))
+        let lock = match (acting && problems.iter().any(|p| p.fix_target().is_some()))
             .then(|| trashdir::TrashLock::acquire(&dir.root))
         {
             Some(Err(e)) => {
@@ -217,6 +229,8 @@ pub fn run(prog: &str, dirs: &[TrashDir], fix: bool, dry_run: bool) -> i32 {
             }
             l => l,
         };
+        // What the trash holds now that no put is in flight there.
+        let now = lock.as_ref().map(|_| scan(dir));
         for p in problems {
             if crate::interrupt::requested() {
                 break;
@@ -230,6 +244,14 @@ pub fn run(prog: &str, dirs: &[TrashDir], fix: bool, dry_run: bool) -> i32 {
             }
             if dry_run {
                 println!("would remove {}", crate::util::term_path(record));
+                continue;
+            }
+            if now.as_ref().is_some_and(|now| !now.contains(p)) {
+                println!(
+                    "kept {}: it changed while the check waited for the trash lock",
+                    crate::util::term_path(record)
+                );
+                changed += 1;
                 continue;
             }
             match crate::permanent_guard::remove_record(record) {
@@ -249,7 +271,7 @@ pub fn run(prog: &str, dirs: &[TrashDir], fix: bool, dry_run: bool) -> i32 {
     }
     let plural = crate::util::plural;
     if acting && crate::interrupt::requested() {
-        let left = fixable.saturating_sub(removed + failed);
+        let left = fixable.saturating_sub(removed + failed + changed);
         eprintln!(
             "{prog}: stopped by Ctrl-C: {} removed, {left} not reached",
             plural(removed, "record", "records")
@@ -273,5 +295,56 @@ pub fn run(prog: &str, dirs: &[TrashDir], fix: bool, dry_run: bool) -> i32 {
         1
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::fs;
+
+    thread_local! {
+        /// Set by a test: run once on this thread after `run` has scanned
+        /// and before it takes the first trash lock.
+        pub(super) static AFTER_SCAN: RefCell<Option<Box<dyn FnOnce()>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// A trash under the temp dir for one test, fresh.
+    fn trash(tag: &str) -> TrashDir {
+        let root = std::env::temp_dir().join(format!("rtrash-check-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let td = TrashDir { root, topdir: None };
+        td.ensure().unwrap();
+        td
+    }
+
+    /// A record put writes, naming `path`.
+    fn record_for(path: &Path) -> String {
+        format!(
+            "[Trash Info]\nPath={}\nDeletionDate=2026-01-02T03:04:05\n",
+            path.display()
+        )
+    }
+
+    /// A record whose payload arrives while `--fix` waits for the trash
+    /// lock, as a put in flight moves it in, stays, and does not count as
+    /// a failure.
+    #[test]
+    fn fix_keeps_what_a_put_finished_while_it_waited_for_the_lock() {
+        let td = trash("inflight");
+        let record = td.info().join("a.txt.trashinfo");
+        let body = record_for(&td.root.join("a.txt"));
+        fs::write(&record, &body).unwrap();
+        assert_eq!(scan(&td).len(), 1);
+        let files = td.files();
+        AFTER_SCAN.set(Some(Box::new(move || {
+            fs::write(files.join("a.txt"), b"a").unwrap();
+        })));
+        assert_eq!(run("rtrash", std::slice::from_ref(&td), true, false), 0);
+        assert_eq!(fs::read_to_string(&record).unwrap(), body);
+        assert!(scan(&td).is_empty());
+        let _ = fs::remove_dir_all(&td.root);
     }
 }
