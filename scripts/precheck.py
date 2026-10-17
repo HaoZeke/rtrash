@@ -303,8 +303,6 @@ PERMANENT_ALLOW = {
     ("fastdelete.rs", "wipe_children_parallel"): (1, PRIMITIVE),
     ("fastdelete.rs", "wipe_two_parallel"): (2, PRIMITIVE),
     ("finder_total.rs", "prune_stale"): (1, OWN),
-    ("reap.rs", "remove"): (2, "Windows reap: gate() then std removal, which differs from "
-                               "remove_forcing (no read-only retry), so moving it is a change"),
     ("reap_timer.rs", "remove"): (1, OWN + ": the timer unit files it installed"),
     ("restore.rs", "restore_one_to"): (2, "the staged copy it made, and the record of the "
                                           "restored item"),

@@ -1027,13 +1027,11 @@ mod plat {
         pub trash_pin: Option<PathBuf>,
     }
 
+    /// Through the guard, as on Unix: [`crate::permanent_guard::remove`]
+    /// gates the removal, then clears the read-only attribute and retries
+    /// where Windows refuses, as a restore over an existing file does.
     pub fn remove(p: &Path) -> std::io::Result<()> {
-        crate::permanent_guard::gate()?;
-        if fs::symlink_metadata(p)?.is_dir() {
-            fs::remove_dir_all(p)
-        } else {
-            fs::remove_file(p)
-        }
+        crate::permanent_guard::remove(p)
     }
 
     pub fn trash(prog: &str, p: &Path, dest: &Dest) -> Result<(), ()> {

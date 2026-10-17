@@ -615,3 +615,79 @@ fn rm_json_summarizes_the_recycle_bin_removal() {
     let again = rm(&["--json"]);
     assert!(again.contains("\"removed\": 0"), "{again}");
 }
+
+/// `reap --permanent` on Windows deletes through permanent_guard::remove,
+/// as on Unix: a read-only file past its age goes like any other.
+/// RTRASH_NO_PERMANENT refuses the run before it starts (exit 2), and
+/// RTRASH_MAX_PERMANENT=0 refuses each removal at the guard (exit 1);
+/// both leave the folder as it was.
+#[test]
+fn reap_permanent_removes_a_read_only_entry_and_keeps_the_guards() {
+    use std::fs;
+    let home = common::scratch_dir("reap", "readonly");
+    let (dir, local) = (home.join("scratch"), home.join("local"));
+    fs::create_dir_all(&dir).unwrap();
+    let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+    let stale = |name: &str| {
+        let p = dir.join(name);
+        fs::write(&p, name).unwrap();
+        let times = fs::FileTimes::new()
+            .set_accessed(day_ago)
+            .set_modified(day_ago);
+        fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        p
+    };
+    let plain = stale("rp-plain.txt");
+    let locked = stale("rp-locked.txt");
+    let mut perms = fs::metadata(&locked).unwrap().permissions();
+    perms.set_readonly(true);
+    fs::set_permissions(&locked, perms).unwrap();
+    let d = dir.to_str().unwrap().to_string();
+    let run = |envs: &[(&str, &str)]| {
+        let mut c = common::rtrash(&home);
+        c.env("LOCALAPPDATA", &local).args([
+            "reap",
+            "--older-than=1h",
+            "--age-by=m",
+            "--permanent",
+            d.as_str(),
+        ]);
+        for (k, v) in envs {
+            c.env(k, v);
+        }
+        c.output().unwrap()
+    };
+    let watch = [dir.as_path()];
+    let out = common::assert_refused_unchanged(&"no permanent", &watch, 2, &[], || {
+        run(&[("RTRASH_NO_PERMANENT", "1")])
+    });
+    assert!(
+        common::stderr_text(&out).contains("RTRASH_NO_PERMANENT"),
+        "{}",
+        common::stderr_text(&out)
+    );
+    let out = common::assert_refused_unchanged(&"cap 0", &watch, 1, &[], || {
+        run(&[("RTRASH_MAX_PERMANENT", "0")])
+    });
+    let err = common::stderr_text(&out);
+    let capped = err
+        .lines()
+        .filter(|l| l.contains("caps this run at 0 permanent deletions"))
+        .count();
+    assert_eq!(capped, 2, "{err}");
+
+    let out = run(&[]);
+    let err = common::stderr_text(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(plain.symlink_metadata().is_err(), "{err}");
+    assert!(
+        locked.symlink_metadata().is_err(),
+        "the read-only file stayed: {err}"
+    );
+    let _ = fs::remove_dir_all(&home);
+}

@@ -2947,6 +2947,8 @@ total size, and change nothing.
 .TP
 .B \-\-permanent
 Delete entries instead of moving them to the trash, for every profile.
+On Windows a read-only entry goes too: the read-only attribute is
+cleared and the delete tried again, as a forced restore does.
 .TP
 .BI \-\-trash\-dir =PATH
 Put into this trash root instead of the one put would pick.
