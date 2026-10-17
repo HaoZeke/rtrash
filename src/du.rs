@@ -3458,14 +3458,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     // The SHARE column and the bars weigh rows the same way.
     let want_share = relative || bars;
-    // A floor on listed rows covers the table and --json of a scan for
-    // now; the other listings would drop rows they still rank or nest.
+    // A floor on listed rows covers the table, --json, --tree and
+    // --print0 of a scan, and -f. A snapshot (-o) records every total for
+    // du diff, so it takes none; the rest are not covered yet.
     if min_size.is_some() && !dupes {
-        if tree.is_some()
-            || interactive
+        if interactive
             || pick
-            || print0
-            || from_file.is_some()
             || output.is_some()
             || stacks
             || ncdu.is_some()
@@ -3473,8 +3471,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             || devices
         {
             eprintln!(
-                "{prog}: --min-size floors the table and --json of a scan; it takes no \
-                 --tree, -i, --pick, --print0, -f, -o, --stacks, --ncdu, --types or --devices yet"
+                "{prog}: --min-size floors the listed rows; it takes no \
+                 -i, --pick, -o, --stacks, --ncdu, --types or --devices"
             );
             return 2;
         }
@@ -3732,7 +3730,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             return 2;
         }
         let known = snap.unreadable;
-        let report = crate::du_snap::to_report(snap, opts.sort, opts.top);
+        let mut report = crate::du_snap::to_report(snap, opts.sort, opts.top);
+        if let Some(floor) = min_size {
+            floor_rows(&mut report, floor, opts.sort == SortKey::Apparent);
+        }
         let trash = TrashSummary::default();
         if json {
             println!("{}", report_json_with(&report, &trash, known, None));
@@ -3886,12 +3887,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         report.files.clear();
     }
     if let Some(floor) = min_size {
-        // The scan kept the --top largest rows, so cutting those below
-        // the floor leaves the largest rows at or above it.
-        let apparent = opts.sort == SortKey::Apparent;
-        let size = |it: &Item| if apparent { it.apparent } else { it.disk };
-        report.dirs.retain(|it| size(it) >= floor);
-        report.files.retain(|it| size(it) >= floor);
+        floor_rows(&mut report, floor, opts.sort == SortKey::Apparent);
     }
     let prefetched = prefetch.map(du_git::Prefetch::finish);
     if use_git && !annotate_git_with(&mut report, prefetched.as_ref()) {
@@ -4033,6 +4029,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 1;
     }
     0
+}
+
+/// `--min-size`: drop the rows of `report` below `floor`, by disk use or,
+/// with `apparent`, by apparent size; the totals stay. The rows came out
+/// of a size ranking capped at `--top`, so the ones left are the largest
+/// at or above the floor. A folder is at least as large as anything in
+/// it, so every row that stays keeps the folder above it for `--tree`.
+fn floor_rows(report: &mut Report, floor: u64, apparent: bool) {
+    let size = |it: &Item| if apparent { it.apparent } else { it.disk };
+    report.dirs.retain(|it| size(it) >= floor);
+    report.files.retain(|it| size(it) >= floor);
 }
 
 /// Name the first unreadable entries of `report` on stderr, then how many

@@ -947,18 +947,134 @@ fn min_size_drops_rows_below_the_floor_and_keeps_totals() {
     assert!(names(paths_in(&j, "files")).is_empty(), "{j}");
 }
 
-/// The listings `--min-size` does not cover yet refuse it with exit 2
-/// and write nothing, and so do the sort keys that are not sizes.
+/// `--min-size` under `--tree`, `--print0` and `-f`. The tree drops every
+/// row below the floor, as dust's `--min-size` does. A folder is at least
+/// as large as anything in it, so a row that stays always keeps the folder
+/// above it, and a folder whose rows all fall below the floor shows alone.
+/// `-n` still caps each folder after the floor.
+#[test]
+fn min_size_floors_tree_print0_and_snapshot_rows() {
+    let t = Tree::new("du-min-size-tree");
+    t.file("p/big.bin", 5000);
+    t.file("p/small.bin", 100);
+    t.file("p/q/mid.bin", 1200);
+    t.file("r/s.bin", 1500);
+    t.file("u/tiny.bin", 10);
+    let known = [
+        "p",
+        "q",
+        "r",
+        "u",
+        "big.bin",
+        "small.bin",
+        "mid.bin",
+        "s.bin",
+        "tiny.bin",
+    ];
+    let out_of = |args: &[&str]| -> String {
+        let out = t.du(args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // The rows of a tree, in drawing order, as `name` or `name/`.
+    let tree = |args: &[&str]| -> Vec<String> {
+        let mut a = vec!["--no-git", "--apparent", "--tree", "--no-unicode"];
+        a.extend_from_slice(args);
+        out_of(&a)
+            .lines()
+            .filter_map(|l| l.rsplit(' ').next())
+            .filter(|n| known.contains(&n.trim_end_matches('/')))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(
+        tree(&[]),
+        [
+            "p/",
+            "big.bin",
+            "q/",
+            "small.bin",
+            "r/",
+            "s.bin",
+            "u/",
+            "tiny.bin"
+        ]
+    );
+    assert_eq!(
+        tree(&["--min-size=1000"]),
+        ["p/", "big.bin", "q/", "r/", "s.bin"]
+    );
+    // Equal to the floor stays.
+    assert_eq!(
+        tree(&["--min-size=1200"]),
+        ["p/", "big.bin", "q/", "r/", "s.bin"]
+    );
+    assert_eq!(tree(&["--min-size=1201"]), ["p/", "big.bin", "r/", "s.bin"]);
+    assert_eq!(tree(&["--min-size=1501"]), ["p/", "big.bin"]);
+    // Every row of p/ is below 6300, so p/ shows with none under it.
+    assert_eq!(tree(&["--min-size=6300"]), ["p/"]);
+    assert!(tree(&["--min-size=6301"]).is_empty());
+    // -n caps each folder among the rows that pass.
+    assert_eq!(tree(&["-n", "1", "--min-size=1000"]), ["p/", "big.bin"]);
+    let all = out_of(&["--no-git", "--apparent", "--tree"]);
+    let cut = out_of(&["--no-git", "--apparent", "--tree", "--min-size=6301"]);
+    assert_eq!(
+        all.lines().next(),
+        cut.lines().next(),
+        "the root line stays"
+    );
+
+    // --print0 prints the rows the table lists.
+    let mut names: Vec<String> = out_of(&["--no-git", "--apparent", "--print0", "--min-size=1500"])
+        .split('\0')
+        .filter_map(|p| p.rsplit(['/', '\\']).next())
+        .filter(|n| known.contains(n))
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["big.bin", "p", "r", "s.bin"]);
+
+    // -f floors a snapshot's rows and keeps its totals.
+    let snap = t.root.join("snap");
+    let out = t.du(&["--no-git", "-o", snap.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = snap.to_str().unwrap();
+    let rows = |args: &[&str]| -> Vec<String> {
+        let mut a = vec!["-f", s, "--apparent"];
+        a.extend_from_slice(args);
+        paths_in(&t.json(&a), "dirs")
+            .iter()
+            .filter_map(|p| p.rsplit(['/', '\\']).next().map(str::to_string))
+            .filter(|n| known.contains(&n.as_str()))
+            .collect()
+    };
+    assert_eq!(rows(&[]), ["p", "r", "q", "u"]);
+    assert_eq!(rows(&["--min-size=1500"]), ["p", "r"]);
+    assert_eq!(rows(&["--min-size=1200"]), ["p", "r", "q"]);
+    let whole = t.json(&["-f", s, "--apparent"]);
+    let none = t.json(&["-f", s, "--apparent", "--min-size=1T"]);
+    assert_eq!(field(&none, "apparent"), field(&whole, "apparent"));
+    assert!(paths_in(&none, "dirs").is_empty(), "{none}");
+}
+
+/// The listings `--min-size` does not cover refuse it with exit 2 and
+/// write nothing, and so do the sort keys that are not sizes. A snapshot
+/// (`-o`) records every total for `du diff`, so it never takes a floor.
 #[test]
 fn min_size_refuses_the_listings_it_does_not_cover() {
     let t = Tree::new("du-min-size-refused");
     t.file("d/a.bin", 3000);
-    let cases: [&[&str]; 12] = [
-        &["--tree"],
+    let cases: [&[&str]; 9] = [
         &["-i"],
         &["--pick"],
-        &["--print0"],
-        &["-f", "snap"],
         &["-o", "snap"],
         &["--stacks"],
         &["--ncdu=x.json"],
