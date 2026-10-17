@@ -331,8 +331,10 @@ pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
     lx.expect(b',')?;
     lx.number()?;
     lx.expect(b',')?;
-    // Metadata: only the timestamp matters.
+    // Metadata: the timestamp, and the program, since gdu writes no
+    // `read_error` at all.
     let mut created = 0i64;
+    let mut progname = Vec::new();
     lx.expect(b'{')?;
     if lx.peek_token()? == Some(b'}') {
         lx.bump();
@@ -342,6 +344,8 @@ pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
             lx.expect(b':')?;
             if key == b"timestamp" {
                 created = lx.number()?.min(i64::MAX as u64) as i64;
+            } else if key == b"progname" && lx.peek_token()? == Some(b'"') {
+                progname = lx.string()?;
             } else {
                 lx.skip_value()?;
             }
@@ -376,8 +380,20 @@ pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
     if lx.peek_token()?.is_some() {
         return Err(lx.err("data after the end of the export"));
     }
-    Ok(tree.finish(created))
+    Ok(tree.finish(created, records_errors(&progname)))
 }
+
+/// Whether an export from `progname` marks what it could not read:
+/// ncdu and rtrash write `read_error` (part of the format since its first
+/// version, ncdu 1.9), so an export without one read everything. gdu
+/// writes none, so its exports say nothing either way.
+pub(crate) fn records_errors(progname: &[u8]) -> bool {
+    progname != b"gdu"
+}
+
+/// The reason an imported unreadable entry carries: ncdu records that an
+/// entry failed, not why.
+pub(crate) const READ_ERROR_REASON: &str = "marked read_error in the ncdu export";
 
 /// Totals and directory rows of an ncdu tree, fed one entry at a time in
 /// a depth-first walk: [`Builder::open`] enters a directory, and
@@ -390,6 +406,10 @@ pub(crate) struct Builder {
     path: Vec<u8>,
     stack: Vec<Frame>,
     sep: u8,
+    /// Entries marked `read_error`, as a scan counts unreadable ones.
+    unreadable: u64,
+    /// The first [`crate::du::UNREAD_KEPT`] of them.
+    unread: Vec<(PathBuf, String)>,
 }
 
 impl Builder {
@@ -413,19 +433,53 @@ impl Builder {
             dirs: 1,
             ..RootTotals::default()
         };
-        Builder {
+        let mut b = Builder {
             root,
             dirs: Vec::new(),
             seen: HashSet::new(),
             path,
             stack: vec![open_dir(top, 0, 0)],
             sep,
+            unreadable: 0,
+            unread: Vec::new(),
+        };
+        if top.read_error {
+            b.note_unread(b.path.clone());
         }
+        b
+    }
+
+    /// Count an entry marked `read_error` at `path`, keeping the path
+    /// while fewer than [`crate::du::UNREAD_KEPT`] are kept.
+    fn note_unread(&mut self, path: Vec<u8>) {
+        self.unreadable += 1;
+        if self.unread.len() < crate::du::UNREAD_KEPT {
+            self.unread
+                .push((bytes_path(path), READ_ERROR_REASON.to_string()));
+        }
+    }
+
+    /// The path of `name` in the innermost open directory.
+    fn child_path(&self, name: &[u8]) -> Vec<u8> {
+        let mut p = self.path.clone();
+        if p.last() != Some(&self.sep) {
+            p.push(self.sep);
+        }
+        p.extend_from_slice(name);
+        p
     }
 
     /// A file, or any entry that is not an open directory, in the
     /// innermost open directory.
     pub(crate) fn file(&mut self, f: &Info) {
+        let Some(p) = self.stack.last() else {
+            return;
+        };
+        // Counted, as a scan counts a file it cannot stat; the totals
+        // are as before (ncdu writes no sizes for such an entry).
+        if f.read_error && !p.excluded && !f.excluded {
+            self.note_unread(self.child_path(&f.name));
+        }
         let Some(p) = self.stack.last_mut() else {
             return;
         };
@@ -465,11 +519,13 @@ impl Builder {
             if !parent_excluded {
                 self.root.excluded += 1;
             }
-        } else if d.read_error {
-            // As in a scan: an unreadable directory adds its own blocks
-            // but gets no row.
-            self.root.dirs += 1;
         } else {
+            // As in a scan, an unreadable directory gets a row of its
+            // own (its own blocks, and whatever was listed) so the
+            // table and the tree can mark it.
+            if d.read_error {
+                self.note_unread(self.path.clone());
+            }
             self.root.dirs += 1;
             fr.row = Some(self.dirs.len());
             self.dirs.push(Item {
@@ -517,16 +573,22 @@ impl Builder {
     }
 
     /// The snapshot, once [`Builder::close`] has left the root.
-    pub(crate) fn finish(self, created: i64) -> Snapshot {
+    /// `records_errors` says whether the export marks unreadable entries
+    /// at all; when it does not, the count is unknown, not 0.
+    pub(crate) fn finish(mut self, created: i64, records_errors: bool) -> Snapshot {
+        self.unread.sort();
         Snapshot {
             created,
             max_depth: None,
             one_file_system: false,
             roots: vec![self.root],
             dirs: self.dirs,
-            // Entries marked read_error are not counted on import yet.
-            unreadable: None,
-            unread: Vec::new(),
+            unreadable: records_errors.then_some(self.unreadable),
+            unread: if records_errors {
+                self.unread
+            } else {
+                Vec::new()
+            },
         }
     }
 }
@@ -1079,6 +1141,9 @@ mod tests {
         // Written without -e: no mtime, so no age either.
         assert_eq!(d.mtime, MTIME_UNKNOWN);
         assert_eq!(snap.dirs.len(), 1);
+        // ncdu marks what it cannot read, so none marked means none.
+        assert_eq!(snap.unreadable, Some(0));
+        assert!(snap.unread.is_empty());
     }
 
     #[test]
@@ -1110,7 +1175,63 @@ mod tests {
         let b = row(&snap, "/r/b");
         assert_eq!((b.disk, b.items, b.mtime), (100, 0, 70));
         assert!(snap.dirs.iter().all(|d| !d.path.ends_with("mnt")));
-        assert_eq!(snap.dirs.len(), 3);
+        // The unreadable directory gets a row, its own blocks only, as a
+        // scan gives it one, and counts as unreadable.
+        assert_eq!(snap.dirs.len(), 4);
+        let locked = row(&snap, "/r/locked");
+        assert_eq!((locked.disk, locked.items), (7, 0));
+        assert_eq!(snap.unreadable, Some(1));
+        assert_eq!(
+            snap.unread,
+            [(PathBuf::from("/r/locked"), READ_ERROR_REASON.to_string())]
+        );
+    }
+
+    /// `read_error` counts on the root, on files and on directories, but
+    /// not below an excluded directory; the paths come sorted, the first
+    /// [`crate::du::UNREAD_KEPT`] kept, and the totals stay as before.
+    #[test]
+    fn read_errors_count_as_unreadable_entries() {
+        let snap = read(
+            r#"[1,2,{"progname":"ncdu"},
+            [{"name":"/r","dsize":10,"read_error":true},
+              {"name":"gone","read_error":true},
+              [{"name":"out","excluded":"pattern"},{"name":"inner","read_error":true}],
+              [{"name":"d","dsize":5},{"name":"f","read_error":true},{"name":"g","dsize":3}]]]"#,
+        );
+        assert_eq!(snap.unreadable, Some(3));
+        let paths: Vec<&Path> = snap.unread.iter().map(|(p, _)| p.as_path()).collect();
+        assert_eq!(
+            paths,
+            [Path::new("/r"), Path::new("/r/d/f"), Path::new("/r/gone")]
+        );
+        assert!(snap.unread.iter().all(|(_, why)| why == READ_ERROR_REASON));
+        let r = &snap.roots[0];
+        assert_eq!((r.files, r.disk, r.excluded), (3, 18, 1));
+
+        let mut doc = String::from(r#"[1,2,{},[{"name":"/m"}"#);
+        for i in 0..150 {
+            doc.push_str(&format!(r#",{{"name":"e{i:03}","read_error":true}}"#));
+        }
+        doc.push_str("]]");
+        let snap = read(&doc);
+        assert_eq!(snap.unreadable, Some(150));
+        assert_eq!(snap.unread.len(), crate::du::UNREAD_KEPT);
+        assert_eq!(snap.unread[0].0, Path::new("/m/e000"));
+    }
+
+    /// gdu writes no `read_error`, so its exports leave the count unknown;
+    /// any other program's export, or none named, records errors.
+    #[test]
+    fn gdu_exports_leave_the_unreadable_count_unknown() {
+        let snap = read(
+            r#"[1,2,{"progname":"gdu","progver":"5.29.0","timestamp":1},
+            [{"name":"/g","dsize":1},[{"name":"a","dsize":1}]]]"#,
+        );
+        assert_eq!(snap.unreadable, None);
+        assert!(snap.unread.is_empty());
+        assert!(!records_errors(b"gdu"));
+        assert!(records_errors(b"ncdu") && records_errors(b"rtrash") && records_errors(b""));
     }
 
     #[test]

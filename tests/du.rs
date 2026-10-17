@@ -1582,6 +1582,156 @@ fn ncdu_binary_exports_list_and_diff_like_their_json_form() {
     assert!(err.contains("ncdu binary export"), "{err}");
 }
 
+/// ncdu marks what it cannot read with `read_error`, and `-f` counts
+/// those entries as a scan counts unreadable ones: the real ncdu 2.9.1
+/// fixture (JSON and binary) has one locked directory, which gets a row,
+/// the mark and a stderr line, and `--strict` fails on it. An export with
+/// no `read_error` reads as 0, so `--strict` passes; a gdu export, which
+/// writes none, reads as unknown; and `du diff` names the change.
+#[test]
+fn ncdu_exports_count_read_errors_as_unreadable() {
+    let t = Tree::new("ncdu-errors");
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let text = |o: &std::process::Output| String::from_utf8_lossy(&o.stdout).into_owned();
+    let err = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    let reason = "marked read_error in the ncdu export";
+    for name in ["ncdu-2.9.1-export.json", "ncdu-2.9.1-export.ncdu"] {
+        let f = data.join(name);
+        let f = f.to_str().unwrap();
+        let json = t.du(&["-f", f, "--json"]);
+        let table = t.du(&["-f", f]);
+        let strict = t.du(&["-f", f, "--strict"]);
+        for o in [&json, &table] {
+            assert_eq!(o.status.code(), Some(0), "{name}: {}", err(o));
+        }
+        assert_eq!(strict.status.code(), Some(1), "{name}: {}", err(&strict));
+        assert!(
+            text(&json).contains("\"unreadable\":1,"),
+            "{name}: {}",
+            text(&json)
+        );
+        assert!(text(&json).contains(reason), "{name}: {}", text(&json));
+        let marked = text(&table)
+            .lines()
+            .filter(|l| l.contains("ncdu-fixture/locked") && l.contains("  unreadable  "))
+            .count();
+        assert_eq!(marked, 1, "{name}: {}", text(&table));
+        let named = err(&table)
+            .lines()
+            .filter(|l| l.contains("cannot read '") && l.ends_with(reason))
+            .count();
+        assert_eq!(named, 1, "{name}: {}", err(&table));
+    }
+
+    let doc = |prog: &str, mark: &str| {
+        format!(
+            r#"[1,2,{{"progname":"{prog}","timestamp":1700000000}},
+[{{"name":"/srv/e","dsize":4096}},[{{"name":"d","dsize":4096{mark}}}],{{"name":"f","asize":5,"dsize":4096}}]]"#
+        )
+    };
+    let write = |name: &str, body: String| {
+        let p = t.root.join(name);
+        fs::write(&p, body).unwrap();
+        p.to_str().unwrap().to_string()
+    };
+    let clean = write("clean.json", doc("ncdu", ""));
+    let marked = write("marked.json", doc("ncdu", r#","read_error":true"#));
+    let gdu = write("gdu.json", doc("gdu", ""));
+    let ok = t.du(&["-f", &clean, "--strict", "--json"]);
+    assert_eq!(ok.status.code(), Some(0), "{}", err(&ok));
+    assert!(text(&ok).contains("\"unreadable\":0,"), "{}", text(&ok));
+    let unknown = t.du(&["-f", &gdu, "--strict", "--json"]);
+    assert_eq!(unknown.status.code(), Some(1), "{}", err(&unknown));
+    assert!(
+        text(&unknown).contains("\"unreadable\":null"),
+        "{}",
+        text(&unknown)
+    );
+    let why = err(&unknown)
+        .lines()
+        .filter(|l| l.contains("records no unreadable count"))
+        .count();
+    assert_eq!(why, 1, "{}", err(&unknown));
+
+    let diff = t.du(&["diff", &clean, &marked]);
+    let diff_json = t.du(&["diff", "--json", &clean, &marked]);
+    for o in [&diff, &diff_json] {
+        assert_eq!(o.status.code(), Some(0), "{}", err(o));
+    }
+    let changed = text(&diff)
+        .lines()
+        .filter(|l| *l == "Unreadable entries: 0 -> 1")
+        .count();
+    assert_eq!(changed, 1, "{}", text(&diff));
+    assert!(
+        text(&diff_json).contains("\"old_unreadable\":0,\"new_unreadable\":1"),
+        "{}",
+        text(&diff_json)
+    );
+}
+
+/// rtrash's own ncdu exports, JSON and binary, of a tree with a locked
+/// folder read back with the scan's unreadable count, mark and `--strict`
+/// status, and `du diff` against a clean export names the change. Unix
+/// only (a mode of 000 does not lock a folder on Windows); as root the
+/// folder stays readable, and the test checks only the clean export.
+#[cfg(unix)]
+#[test]
+fn own_ncdu_exports_of_a_locked_folder_read_back_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tree::new("ncdu-locked");
+    t.file("nl/ok.bin", 3000);
+    t.file("nl/nl-locked/x", 10);
+    let locked = t.root.join("nl/nl-locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let blocked = fs::read_dir(&locked).is_err();
+    let json_out = t.du(&["--ncdu=locked.json", "nl"]);
+    let bin_out = t.du(&["--ncdu-binary=locked.ncdu", "nl"]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    let clean_out = t.du(&["--ncdu=clean.json", "nl"]);
+    let text = |o: &Output| String::from_utf8_lossy(&o.stdout).into_owned();
+    let err = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    assert_eq!(clean_out.status.code(), Some(0), "{}", err(&clean_out));
+    let clean = t.du(&["-f", "clean.json", "--strict", "--json"]);
+    assert_eq!(clean.status.code(), Some(0), "{}", err(&clean));
+    assert!(
+        text(&clean).contains("\"unreadable\":0,"),
+        "{}",
+        text(&clean)
+    );
+    if !blocked {
+        return;
+    }
+    for o in [&json_out, &bin_out] {
+        assert_eq!(o.status.code(), Some(0), "{}", err(o));
+    }
+    for name in ["locked.json", "locked.ncdu"] {
+        let json = t.du(&["-f", name, "--json"]);
+        let table = t.du(&["-f", name]);
+        let strict = t.du(&["-f", name, "--strict"]);
+        let diff = t.du(&["diff", name, "clean.json"]);
+        for o in [&json, &table, &diff] {
+            assert_eq!(o.status.code(), Some(0), "{name}: {}", err(o));
+        }
+        assert_eq!(strict.status.code(), Some(1), "{name}: {}", err(&strict));
+        assert!(
+            text(&json).contains("\"unreadable\":1,"),
+            "{name}: {}",
+            text(&json)
+        );
+        let marked = text(&table)
+            .lines()
+            .filter(|l| l.ends_with("/nl-locked/") && l.contains("  unreadable  "))
+            .count();
+        assert_eq!(marked, 1, "{name}: {}", text(&table));
+        let changed = text(&diff)
+            .lines()
+            .filter(|l| *l == "Unreadable entries: 1 -> 0")
+            .count();
+        assert_eq!(changed, 1, "{name}: {}", text(&diff));
+    }
+}
+
 #[test]
 fn ncdu_exports_written_by_du_read_back_with_the_scan_totals() {
     let t = Tree::new("ncdu-out");

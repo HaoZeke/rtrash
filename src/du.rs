@@ -840,7 +840,7 @@ struct Ctx<'a> {
 }
 
 /// Unreadable entries a scan remembers by name; the count covers the rest.
-const UNREAD_KEPT: usize = 100;
+pub(crate) const UNREAD_KEPT: usize = 100;
 /// Of those, how many stderr names before it sums up the rest.
 const UNREAD_SHOWN: usize = 10;
 
@@ -3650,7 +3650,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 Some(_) => return 1,
                 None => {
                     eprintln!(
-                        "{prog}: '{}' records no unreadable count (an older snapshot or an ncdu import); --strict cannot pass it",
+                        "{prog}: '{}' records no unreadable count (an older snapshot or a gdu export); --strict cannot pass it",
                         file.display()
                     );
                     return 1;

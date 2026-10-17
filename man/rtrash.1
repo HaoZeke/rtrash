@@ -1834,8 +1834,13 @@ An export written without \fBncdu \-e\fR has no modification times: AGE reads \-
 and the JSON \fImtime\fR is null.
 A binary export records no scan date, so du uses the file's modification
 time instead.
+In an ncdu export the entries marked \fIread_error\fR are the unreadable
+ones, given that as their reason (ncdu records no other), and an
+unreadable directory gets a row of its own, as in a scan; an export with
+none marked counts 0, since ncdu marks every one.
 A snapshot's unreadable entries are marked and named as a scan's are; one
-without the count (an older snapshot or an ncdu export) shows null for
+without the count (an older snapshot or a gdu export, which marks none)
+shows null for
 \fIunreadable\fR in the JSON.
 A snapshot can be stale, so it cannot drive
 .BR \-\-print0 ,

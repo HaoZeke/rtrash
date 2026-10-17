@@ -78,7 +78,9 @@ pub fn parse(r: impl Read + Seek, created: i64) -> io::Result<Snapshot> {
             tree.file(&it.info);
         }
     }
-    Ok(tree.finish(created))
+    // The binary format marks unreadable entries (type -1, or a
+    // directory's read error), so the count is known.
+    Ok(tree.finish(created, true))
 }
 
 /// The blocks of an export, decompressed on demand.
@@ -1145,10 +1147,15 @@ mod tests {
             v
         };
         assert_eq!(key(&bin), key(&json));
-        // One hard link counted once, one excluded log, one unreadable
-        // directory with no row.
+        // One hard link counted once, one excluded log, and one
+        // unreadable directory, with a row as a scan gives it one.
         assert_eq!((r.links, r.excluded), (1, 1));
-        assert!(bin.dirs.iter().all(|d| !d.path.ends_with("locked")));
+        let locked = row(&bin, "/tmp/ncdu-fixture/locked");
+        assert!(locked.path.ends_with("locked"));
+        assert_eq!(locked.items, 0);
+        assert_eq!(bin.unreadable, Some(1));
+        assert_eq!((json.unreadable, &json.unread), (Some(1), &bin.unread));
+        assert_eq!(bin.unread[0].0, Path::new("/tmp/ncdu-fixture/locked"));
         assert_eq!(bin.created, 7);
     }
 

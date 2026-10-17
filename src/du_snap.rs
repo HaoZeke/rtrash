@@ -56,7 +56,7 @@ pub struct Snapshot {
     pub roots: Vec<RootTotals>,
     pub dirs: Vec<Item>,
     /// Entries the scan could not read; `None` when the snapshot does not
-    /// say (an older writer, or an ncdu export).
+    /// say (an older writer, or a gdu export, which writes no `read_error`).
     pub unreadable: Option<u64>,
     /// The first unreadable entries, with the reason.
     pub unread: Vec<(PathBuf, String)>,
