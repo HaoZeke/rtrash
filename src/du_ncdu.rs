@@ -524,6 +524,9 @@ impl Builder {
             one_file_system: false,
             roots: vec![self.root],
             dirs: self.dirs,
+            // Entries marked read_error are not counted on import yet.
+            unreadable: None,
+            unread: Vec::new(),
         }
     }
 }

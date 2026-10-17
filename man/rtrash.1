@@ -1100,6 +1100,14 @@ Without
 it scans the roots of
 .I OLD
 again at the same depth.
+When the count of entries that could not be read differs, a last line
+reads
+.RI "Unreadable entries: " OLD " \-> " NEW ,
+with
+.I unknown
+for a snapshot that does not record it;
+.B \-\-json
+gives \fIold_unreadable\fR and \fInew_unreadable\fR (null when unknown).
 To scan a directory named diff, write
 .BR "rtrash du ./diff" .
 .PP
@@ -1340,9 +1348,13 @@ the stderr lines naming them, as GNU
 .B du
 does; without it du exits 0.
 It applies to the listing,
-.B \-\-json
-and the ncdu exports, not to the interactive browser or a snapshot,
-which records no unreadable entries.
+.BR \-\-json ,
+the ncdu exports,
+.B \-o
+(the snapshot is still written) and
+.BR \-f ,
+where a snapshot that does not record the count fails too, since it
+cannot show the scan was whole; not to the interactive browser.
 In the NOTE column, in
 .B \-\-tree
 and in the row badges of the interactive browser,
@@ -1728,6 +1740,9 @@ to
 instead of listing.
 Snapshots hold one record per line with percent-encoded paths, so grep and
 text diff tools read them too.
+They record how many entries the scan could not read, and the first 100
+with the reason; a snapshot from an older rtrash lacks the count, and
+reads as unknown.
 .TP
 .B \-\-devices
 List every mounted file system instead of scanning: size, use, free space,
@@ -1790,6 +1805,9 @@ An export written without \fBncdu \-e\fR has no modification times: AGE reads \-
 and the JSON \fImtime\fR is null.
 A binary export records no scan date, so du uses the file's modification
 time instead.
+A snapshot's unreadable entries are marked and named as a scan's are; one
+without the count (an older snapshot or an ncdu export) shows null for
+\fIunreadable\fR in the JSON.
 A snapshot can be stale, so it cannot drive
 .BR \-\-print0 ,
 .BR \-\-pick " or " \-\-interactive .

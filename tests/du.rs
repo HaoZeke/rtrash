@@ -2488,3 +2488,137 @@ fn strict_exits_1_and_rows_mark_unreadable_folders() {
         text(&ncdu)
     );
 }
+
+/// A snapshot written before the unreadable count loads with the count
+/// unknown, not 0: `--json` shows null, `--strict` fails with one line
+/// saying why, and `du diff` against a fresh scan names the change.
+#[test]
+fn old_snapshot_reads_the_unreadable_count_as_unknown() {
+    let t = Tree::new("snap-old");
+    t.file("so/a.bin", 5000);
+    fs::write(
+        t.root.join("old.snap"),
+        "# rtrash du snapshot 1\ncreated 1700000000\nmax_depth -\n\
+         one_file_system 0\nroot 8192 5000 1 1 so\n\
+         dir 8192 5000 1700000000 - so\n",
+    )
+    .unwrap();
+    let plain = t.du(&["-f", "old.snap"]);
+    let json = t.du(&["-f", "old.snap", "--json"]);
+    let strict = t.du(&["-f", "old.snap", "--strict"]);
+    let diff = t.du(&["diff", "old.snap"]);
+    let diff_json = t.du(&["diff", "--json", "old.snap"]);
+    let text = |o: &Output| String::from_utf8_lossy(&o.stdout).into_owned();
+    let err = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    for o in [&plain, &json, &diff, &diff_json] {
+        assert_eq!(o.status.code(), Some(0), "{}", err(o));
+    }
+    assert!(
+        text(&json).contains("\"unreadable\":null"),
+        "{}",
+        text(&json)
+    );
+    assert_eq!(strict.status.code(), Some(1), "{}", err(&strict));
+    let why = err(&strict)
+        .lines()
+        .filter(|l| l.contains("records no unreadable count"))
+        .count();
+    assert_eq!(why, 1, "{}", err(&strict));
+    let changed = text(&diff)
+        .lines()
+        .filter(|l| *l == "Unreadable entries: unknown -> 0")
+        .count();
+    assert_eq!(changed, 1, "{}", text(&diff));
+    assert!(
+        text(&diff_json).contains("\"old_unreadable\":null,\"new_unreadable\":0"),
+        "{}",
+        text(&diff_json)
+    );
+}
+
+/// `-o` records the unreadable count and the first entries with their
+/// reasons; `-f` shows them as a scan does and `--strict` reads them, and
+/// `du diff` names the change once the folder opens again. Unix only (a
+/// mode of 000 does not lock a folder on Windows); as root the folder stays
+/// readable, and the test checks only the clean snapshot.
+#[cfg(unix)]
+#[test]
+fn snapshots_keep_the_unreadable_count_and_diff_reports_its_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tree::new("snap-unread");
+    t.file("su/ok.bin", 3000);
+    t.file("su/su-locked/x", 10);
+    let locked = t.root.join("su/su-locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let blocked = fs::read_dir(&locked).is_err();
+    let write = t.du(&["--no-git", "-o", "locked.snap", "su"]);
+    let write_strict = t.du(&["--no-git", "-o", "strict.snap", "--strict", "su"]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    let write_clean = t.du(&["--no-git", "-o", "clean.snap", "su"]);
+    let clean_strict = t.du(&["-f", "clean.snap", "--strict"]);
+    let text = |o: &Output| String::from_utf8_lossy(&o.stdout).into_owned();
+    let err = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    let lines = |name: &str, want: &dyn Fn(&str) -> bool| {
+        fs::read_to_string(t.root.join(name))
+            .unwrap()
+            .lines()
+            .filter(|l| want(l))
+            .count()
+    };
+    assert_eq!(write_clean.status.code(), Some(0), "{}", err(&write_clean));
+    assert_eq!(
+        clean_strict.status.code(),
+        Some(0),
+        "{}",
+        err(&clean_strict)
+    );
+    assert_eq!(lines("clean.snap", &|l| l == "unreadable 0"), 1);
+    assert_eq!(lines("clean.snap", &|l| l.starts_with("unread ")), 0);
+    if !blocked {
+        return;
+    }
+    assert_eq!(write.status.code(), Some(0), "{}", err(&write));
+    assert_eq!(
+        write_strict.status.code(),
+        Some(1),
+        "{}",
+        err(&write_strict)
+    );
+    for name in ["locked.snap", "strict.snap"] {
+        assert_eq!(lines(name, &|l| l == "unreadable 1"), 1, "{name}");
+        let named = lines(name, &|l| {
+            l.starts_with("unread ") && l.ends_with("su-locked")
+        });
+        assert_eq!(named, 1, "{name}");
+    }
+    let table = t.du(&["-f", "locked.snap"]);
+    let json = t.du(&["-f", "locked.snap", "--json"]);
+    let strict = t.du(&["-f", "locked.snap", "--strict"]);
+    let diff = t.du(&["diff", "locked.snap", "clean.snap"]);
+    let diff_json = t.du(&["diff", "--json", "locked.snap", "clean.snap"]);
+    for o in [&table, &json, &diff, &diff_json] {
+        assert_eq!(o.status.code(), Some(0), "{}", err(o));
+    }
+    assert_eq!(strict.status.code(), Some(1), "{}", err(&strict));
+    let marked = text(&table)
+        .lines()
+        .filter(|l| l.ends_with("/su-locked/") && l.contains("  unreadable  "))
+        .count();
+    assert_eq!(marked, 1, "{}", text(&table));
+    let named = err(&table)
+        .lines()
+        .filter(|l| l.contains("cannot read '") && l.contains("su-locked"))
+        .count();
+    assert_eq!(named, 1, "{}", err(&table));
+    assert!(text(&json).contains("\"unreadable\":1"), "{}", text(&json));
+    let changed = text(&diff)
+        .lines()
+        .filter(|l| *l == "Unreadable entries: 1 -> 0")
+        .count();
+    assert_eq!(changed, 1, "{}", text(&diff));
+    assert!(
+        text(&diff_json).contains("\"old_unreadable\":1,\"new_unreadable\":0"),
+        "{}",
+        text(&diff_json)
+    );
+}

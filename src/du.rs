@@ -81,8 +81,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           consoles without UTF-8 (gdu --no-unicode)
   -s, --summarize       print only the totals, no rows (GNU du -s, gdu)
       --strict          exit 1 when any entry could not be read, after the
-                          usual output (GNU du's status; the listing, --json
-                          and ncdu export)
+                          usual output (GNU du's status; the listing, --json,
+                          ncdu export, --output and --file, where an older
+                          snapshot without the count fails too)
       --skip-total      print the rows without the Total lines (dust)
       --reverse         print each table in reverse, the top row last
                           (dust -r); JSON and --print0 keep the ranking
@@ -2329,6 +2330,12 @@ fn trash_json(t: &TrashSummary) -> String {
 
 /// JSON form of a report (one object; arrays of roots, dirs and files).
 pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
+    report_json_with(r, trash, Some(r.unreadable))
+}
+
+/// [`report_json`] with the unreadable count given, `null` when unknown
+/// (a snapshot written before it was recorded).
+fn report_json_with(r: &Report, trash: &TrashSummary, unreadable: Option<u64>) -> String {
     let roots: Vec<String> = r
         .roots
         .iter()
@@ -2409,7 +2416,7 @@ pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
         roots.join(","),
         dirs.join(","),
         files.join(","),
-        r.unreadable,
+        unreadable.map_or_else(|| "null".to_string(), |n| n.to_string()),
         trash_json(trash)
     )
 }
@@ -3606,10 +3613,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             eprintln!("{prog}: snapshots do not record item counts; --sort=items needs a scan");
             return 2;
         }
+        let known = snap.unreadable;
         let report = crate::du_snap::to_report(snap, opts.sort, opts.top);
         let trash = TrashSummary::default();
         if json {
-            println!("{}", report_json(&report, &trash));
+            println!("{}", report_json_with(&report, &trash, known));
         } else {
             print_table(
                 &format!("{} in {}", opts.sort.title("directories"), file.display()),
@@ -3633,6 +3641,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     format_bytes(t.disk),
                     format_bytes(t.apparent)
                 );
+            }
+        }
+        warn_unread(prog, &report);
+        if strict {
+            match known {
+                Some(0) => {}
+                Some(_) => return 1,
+                None => {
+                    eprintln!(
+                        "{prog}: '{}' records no unreadable count (an older snapshot or an ncdu import); --strict cannot pass it",
+                        file.display()
+                    );
+                    return 1;
+                }
             }
         }
         return 0;
@@ -3730,6 +3752,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 plural(report.dirs.len() as u64, "directory", "directories"),
                 out.display()
             );
+        }
+        // The snapshot keeps the count; --strict still reports the scan.
+        if strict && report.unreadable > 0 {
+            warn_unread(prog, &report);
+            return 1;
         }
         return 0;
     }
@@ -3850,23 +3877,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         print_trash(&trash);
     }
-    if report.unreadable > 0 {
-        for (p, why) in report.unread.iter().take(UNREAD_SHOWN) {
-            eprintln!("{prog}: cannot read '{}': {why}", crate::util::err_path(p));
-        }
-        let named = report.unread.len().min(UNREAD_SHOWN) as u64;
-        let more = report.unreadable - named;
-        if more > 0 && named > 0 {
-            eprintln!(
-                "{prog}: and {more} more could not be read (--json lists up to {UNREAD_KEPT})"
-            );
-        } else if named == 0 {
-            eprintln!(
-                "{prog}: {} could not be read",
-                plural(report.unreadable, "entry", "entries")
-            );
-        }
-    }
+    warn_unread(prog, &report);
     if report.too_deep > 0 {
         eprintln!(
             "{prog}: {} past {} levels or {} KiB of path counted without their contents",
@@ -3883,6 +3894,28 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 1;
     }
     0
+}
+
+/// Name the first unreadable entries of `report` on stderr, then how many
+/// more there were.
+fn warn_unread(prog: &str, report: &Report) {
+    if report.unreadable > 0 {
+        for (p, why) in report.unread.iter().take(UNREAD_SHOWN) {
+            eprintln!("{prog}: cannot read '{}': {why}", crate::util::err_path(p));
+        }
+        let named = report.unread.len().min(UNREAD_SHOWN) as u64;
+        let more = report.unreadable.saturating_sub(named);
+        if more > 0 && named > 0 {
+            eprintln!(
+                "{prog}: and {more} more could not be read (--json lists up to {UNREAD_KEPT})"
+            );
+        } else if named == 0 {
+            eprintln!(
+                "{prog}: {} could not be read",
+                plural(report.unreadable, "entry", "entries")
+            );
+        }
+    }
 }
 
 #[cfg(test)]

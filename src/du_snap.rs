@@ -9,12 +9,21 @@
 //! created 1791650000
 //! max_depth -
 //! one_file_system 0
+//! unreadable COUNT
+//! unread REASON PATH
 //! root DISK APPARENT FILES DIRS PATH
 //! dir DISK APPARENT MTIME ARTEFACT PATH
 //! ```
 //!
 //! Fields are space-separated; PATH comes last, percent-encoded (spaces,
 //! `%` and control bytes), and ARTEFACT reads `-` when the row has none.
+//!
+//! `unreadable` counts the entries the scan could not read, and each
+//! `unread` record (the first 100) names one with its percent-encoded
+//! reason. Writers before them left both out: such a snapshot loads with
+//! the count unknown, not 0. The magic line stays at version 1, since a
+//! reader skips records it does not know, so an older rtrash still reads
+//! a newer snapshot (without the count).
 
 use std::collections::HashMap;
 use std::fs;
@@ -46,6 +55,11 @@ pub struct Snapshot {
     pub one_file_system: bool,
     pub roots: Vec<RootTotals>,
     pub dirs: Vec<Item>,
+    /// Entries the scan could not read; `None` when the snapshot does not
+    /// say (an older writer, or an ncdu export).
+    pub unreadable: Option<u64>,
+    /// The first unreadable entries, with the reason.
+    pub unread: Vec<(PathBuf, String)>,
 }
 
 #[cfg(unix)]
@@ -95,6 +109,10 @@ pub fn write(report: &Report, opts: &ScanOpts, created: i64, mut w: impl Write) 
         None => writeln!(w, "max_depth -")?,
     }
     writeln!(w, "one_file_system {}", u8::from(opts.one_file_system))?;
+    writeln!(w, "unreadable {}", report.unreadable)?;
+    for (p, why) in &report.unread {
+        writeln!(w, "unread {} {}", url_encode(why.as_bytes()), enc(p))?;
+    }
     for r in &report.roots {
         writeln!(
             w,
@@ -170,6 +188,11 @@ pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
                 }
             }
             "one_file_system" => snap.one_file_system = num(1)? != 0,
+            "unreadable" => snap.unreadable = Some(num(1)?),
+            "unread" if f.len() == 3 => snap.unread.push((
+                bytes_path(url_decode(f[2])),
+                String::from_utf8_lossy(&url_decode(f[1])).into_owned(),
+            )),
             "root" if f.len() == 6 => snap.roots.push(RootTotals {
                 path: bytes_path(url_decode(f[5])),
                 disk: num(1)?,
@@ -296,6 +319,8 @@ pub fn read(path: &Path) -> io::Result<Snapshot> {
 }
 
 /// A snapshot as a du report, ranked by `sort` and cut to `top` rows.
+/// An unknown unreadable count reads as 0 here; callers that show it
+/// check [`Snapshot::unreadable`] first.
 pub fn to_report(snap: Snapshot, sort: SortKey, top: usize) -> Report {
     let mut keep = du::TopN::new(top, sort);
     keep.merge_vec(snap.dirs);
@@ -303,8 +328,8 @@ pub fn to_report(snap: Snapshot, sort: SortKey, top: usize) -> Report {
         roots: snap.roots,
         dirs: keep.into_vec(),
         files: Vec::new(),
-        unreadable: 0,
-        unread: Vec::new(),
+        unreadable: snap.unreadable.unwrap_or(0),
+        unread: snap.unread,
         too_deep: 0,
         depth_limit: du::MAX_DEPTH,
         shared: None,
@@ -401,7 +426,14 @@ fn rescan(old: &Snapshot) -> io::Result<Snapshot> {
         one_file_system: old.one_file_system,
         roots: report.roots,
         dirs: report.dirs,
+        unreadable: Some(report.unreadable),
+        unread: report.unread,
     })
+}
+
+/// An unreadable count for people: the number, or `unknown`.
+fn count_text(n: Option<u64>) -> String {
+    n.map_or_else(|| "unknown".to_string(), |n| n.to_string())
 }
 
 /// `rtrash du diff`.
@@ -488,16 +520,29 @@ pub fn run_diff(prog: &str, args: &[String]) -> i32 {
             })
             .collect();
         println!(
-            "{{\"old_created\":{},\"new_created\":{},\"changes\":[{}],\"changed\":{}}}",
+            "{{\"old_created\":{},\"new_created\":{},\"changes\":[{}],\"changed\":{},\"old_unreadable\":{},\"new_unreadable\":{}}}",
             old.created,
             new.created,
             rows.join(","),
-            changes.len()
+            changes.len(),
+            opt_json(old.unreadable),
+            opt_json(new.unreadable)
         );
         return 0;
     }
+    // A change in what could not be read changes what the sizes mean.
+    let unread_line = (old.unreadable != new.unreadable).then(|| {
+        format!(
+            "Unreadable entries: {} -> {}",
+            count_text(old.unreadable),
+            count_text(new.unreadable)
+        )
+    });
     if changes.is_empty() {
         println!("No directory changed size.");
+        if let Some(l) = &unread_line {
+            println!("{l}");
+        }
         return 0;
     }
     println!("{:>11}  {:>10}  {:>10}  PATH", "CHANGE", "BEFORE", "AFTER");
@@ -514,6 +559,9 @@ pub fn run_diff(prog: &str, args: &[String]) -> i32 {
     }
     if changes.len() > shown.len() {
         println!("({} more; -n N lists more)", changes.len() - shown.len());
+    }
+    if let Some(l) = &unread_line {
+        println!("{l}");
     }
     0
 }
@@ -571,11 +619,57 @@ mod tests {
             text.contains("dir 4096 2048 7 cargo-target /w/a%20b/target\n"),
             "{text}"
         );
+        assert!(text.contains("\nunreadable 0\n"), "{text}");
         let snap = parse(&buf[..]).unwrap();
+        assert_eq!(snap.unreadable, Some(0));
         assert_eq!(snap.created, 42);
         assert_eq!(snap.max_depth, Some(3));
         assert_eq!(snap.roots, report.roots);
         assert_eq!(snap.dirs, report.dirs);
+    }
+
+    #[test]
+    fn unreadable_count_and_paths_round_trip_and_old_snapshots_say_unknown() {
+        let report = Report {
+            roots: Vec::new(),
+            dirs: vec![item("/w/x", 512)],
+            files: Vec::new(),
+            unreadable: 3,
+            unread: vec![
+                (
+                    PathBuf::from("/w/a b"),
+                    "Permission denied (os error 13)".into(),
+                ),
+                (PathBuf::from("/w/100%"), "gone".into()),
+            ],
+            too_deep: 0,
+            depth_limit: du::MAX_DEPTH,
+            shared: None,
+            partial: false,
+            types: Vec::new(),
+        };
+        let mut buf = Vec::new();
+        write(&report, &snapshot_opts(ScanOpts::default()), 1, &mut buf).unwrap();
+        let text = String::from_utf8(buf.clone()).unwrap();
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("unread ")).count(),
+            2,
+            "{text}"
+        );
+        assert!(
+            text.contains("\nunread Permission%20denied%20%28os%20error%2013%29 /w/a%20b\n"),
+            "{text}"
+        );
+        let snap = parse(&buf[..]).unwrap();
+        assert_eq!(snap.unreadable, Some(3));
+        assert_eq!(snap.unread, report.unread);
+        let r = to_report(snap, SortKey::Disk, 10);
+        assert_eq!((r.unreadable, r.unread.len()), (3, 2));
+        // Written before the count existed: unknown, not 0.
+        let old = parse(&b"# rtrash du snapshot 1\ncreated 5\ndir 1 1 0 - /x\n"[..]).unwrap();
+        assert_eq!(old.unreadable, None);
+        assert!(old.unread.is_empty());
+        assert_eq!(count_text(old.unreadable), "unknown");
     }
 
     #[test]
