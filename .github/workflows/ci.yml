@@ -64,6 +64,31 @@ jobs:
           echo hi > "$fixture/d/e/f"
           scripts/du-smoke.sh target/release/rtrash "$(rustc --print sysroot)" "${CARGO_HOME:-$HOME/.cargo}/registry/src" "$fixture"
 
+  musl-clippy:
+    name: clippy · x86_64 musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      # mimalloc's C code builds with musl-gcc for the musl target.
+      - name: musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # libc deprecates some aliases on musl only (time_t, suseconds_t),
+      # so the glibc clippy above does not see them.
+      - name: Clippy (musl)
+        run: cargo clippy --locked --all-targets --target x86_64-unknown-linux-musl -- -D warnings
+
+      - name: Clippy (musl, no TUI feature, tests included)
+        run: cargo clippy --locked --all-targets --target x86_64-unknown-linux-musl --no-default-features -- -D warnings
+
   reflink:
     name: reflink · ${{ matrix.fs }}
     runs-on: ubuntu-latest

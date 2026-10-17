@@ -1,0 +1,1 @@
+CI now runs clippy for the x86_64 musl target with default features and with `--no-default-features`, and `scripts/cross-clippy.sh` adds that target. On musl, libc deprecates the `time_t` and `suseconds_t` type names, so `src/info.rs` no longer names `time_t`, and a precheck rule refuses either name in `src/` and `tests/`.

@@ -17,6 +17,7 @@ needs no build and finishes in under a second. CI runs the same script.
 | Finder paths are compared as `finder_shared::FinderPath` (links resolved, NFC), never as written | the type; `same_path` and `under` go through it | 125b, 165 |
 | A test sandbox tag is unique per test file | precheck duplicate-tag check | round 149 |
 | No function takes more than 7 parameters; group options in a struct | precheck arg count, clippy `-D warnings` | round 155 |
+| Code never names `libc::time_t` or `libc::suseconds_t`, which libc deprecates on musl; a cast is `as _`, so the call or field gives the width | precheck musl-alias check; CI musl clippy job and `scripts/cross-clippy.sh` | round 225: `src/info.rs` failed clippy on x86_64-unknown-linux-musl |
 | Completion tests for pwsh, elvish, fish and nu run, not skip, before a push | `RTRASH_REQUIRE_SHELLS=1` on the agent; pwsh is required on CI | round 143c |
 | A changed message or newly valid value is updated in every test, including `src/` unit tests and `tests/windows_mount.rs` | precheck removed-literal warning (partial); judgment | rounds 144b, 154 |
 | A permanent removal outside `permanent_guard` calls `permanent_guard::remove` or `remove_record`; any other call of a removal primitive sits in a function `PERMANENT_ALLOW` lists with its count and reason | precheck permanent-route check | round 194: two Windows restores hand-rolled `gate()` plus `remove_forcing` |

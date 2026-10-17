@@ -334,6 +334,24 @@ def check_rust_code():
                           "the source blanker the checks share is broken")
 
 
+
+MUSL_DEPRECATED = re.compile(r"\blibc::(time_t|suseconds_t)\b")
+
+
+def check_musl_aliases():
+    """libc deprecates the `time_t` and `suseconds_t` aliases on musl,
+    since musl 1.2 widened both to 64 bits, so naming either fails musl
+    clippy under -D warnings (round 225: src/info.rs). Write `as _` and
+    let the libc call or struct field give the width."""
+    for top in ("src", "tests"):
+        for path in sorted((ROOT / top).rglob("*.rs")):
+            rel = path.relative_to(ROOT).as_posix()
+            text = rust_code(path.read_text(encoding="utf-8"))
+            for m in MUSL_DEPRECATED.finditer(text):
+                line = text.count("\n", 0, m.start()) + 1
+                errors.append(f"{rel}:{line}: names libc::{m.group(1)}, which libc deprecates on musl; "
+                              "cast with `as _` so the call or field gives the width")
+
 def check_fn_params(limit=7):
     """clippy::too_many_arguments fires above 7 parameters (self excluded)."""
     sig = re.compile(r"\bfn\s+(\w+)\s*(<[^>{]*>)?\s*\(")
@@ -907,6 +925,7 @@ def main():
     check_rust_code(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_du_rows(); check_record_sections(); check_dot_operands()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
+    check_musl_aliases()
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
     for w in warnings:

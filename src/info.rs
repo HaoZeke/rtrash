@@ -150,9 +150,11 @@ pub fn now_local_string() -> String {
 /// `epoch` as local time in the trashinfo format.
 pub fn local_string(epoch: i64) -> String {
     unsafe {
-        let t = epoch as libc::time_t;
+        // `as _` takes the width localtime_r's argument has, so the code
+        // never names `libc::time_t`, which libc deprecates on musl.
+        let t = [epoch as _];
         let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&t, &mut tm);
+        libc::localtime_r(t.as_ptr(), &mut tm);
         format!(
             "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
             tm.tm_year + 1900,
