@@ -179,6 +179,7 @@ directories appear as one `trash` row and are never printed by --print0.
                           link to it (same device only)
       --min-size=SIZE   list only rows of SIZE or more (disk use, or the
                           apparent size under --apparent); totals stay whole.
+                          A subdirectory below SIZE hides no parent
                           With --dupes, skip files smaller than SIZE
       --devices         list every mounted file system with its size, use
                           and free space (as df does), instead of scanning
@@ -374,6 +375,11 @@ pub struct ScanOpts {
     /// List symlinks (not followed) as file rows of their own size,
     /// tagged [`LINK`]. The explorer sets it; other listings do not.
     pub list_links: bool,
+    /// `--min-size`: the floor the listing applies to the rows after the
+    /// scan, compared with the sort key (disk use or apparent size). A
+    /// subdirectory below it never takes its parent's row, since the
+    /// floor would drop it and leave neither.
+    pub min_size: Option<u64>,
 }
 
 /// The tag of a symlink row listed under [`ScanOpts::list_links`].
@@ -401,6 +407,7 @@ impl Default for ScanOpts {
             include_kernfs: false,
             collapse: Vec::new(),
             list_links: false,
+            min_size: None,
         }
     }
 }
@@ -1531,8 +1538,8 @@ fn walk_dir(
 
     let mut largest_child = 0u64;
     for child in children.into_iter().flatten() {
-        if child.listable {
-            let k = ctx.key(child.apparent, child.disk, child.items, child.mtime);
+        let k = ctx.key(child.apparent, child.disk, child.items, child.mtime);
+        if child.listable && opts.min_size.is_none_or(|floor| k >= floor) {
             largest_child = largest_child.max(k);
         }
         node.items += 1 + child.items;
@@ -1606,6 +1613,7 @@ const MARKERS: &[&str] = &[
 impl Node {
     /// Offer this directory to the list unless it is the scan root or one
     /// listable subdirectory already accounts for 90% or more of it.
+    /// `largest` counts only subdirectories at or above `--min-size`.
     fn offer_self(
         &self,
         ctx: &Ctx<'_>,
@@ -3493,6 +3501,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             );
             return 2;
         }
+        // A subdirectory the floor drops must not hide its parent.
+        opts.min_size = min_size;
     }
     if summarize {
         // After the loop, so a later -n does not bring rows back.

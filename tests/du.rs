@@ -1065,6 +1065,71 @@ fn min_size_floors_tree_print0_and_snapshot_rows() {
     assert!(paths_in(&none, "dirs").is_empty(), "{none}");
 }
 
+/// A directory hidden because one subdirectory makes up 90% or more of it
+/// comes back under `--min-size` once that subdirectory falls below the
+/// floor; otherwise the floor would drop the row standing for it and
+/// leave neither. A subdirectory at or above the floor still hides it.
+#[test]
+fn min_size_brings_back_a_parent_whose_dominant_child_falls_below() {
+    let t = Tree::new("du-min-size-dominant");
+    // outer 10000 > inner 9500 = deep 9500: each hides the one above.
+    t.file("outer/inner/deep/x.bin", 9500);
+    t.file("outer/y.bin", 500);
+    t.file("other/z.bin", 3000);
+    let known = ["outer", "inner", "deep", "other"];
+    let pick = |paths: Vec<String>| -> Vec<String> {
+        paths
+            .iter()
+            .filter_map(|p| p.rsplit(['/', '\\']).next().map(str::to_string))
+            .filter(|n| known.contains(&n.as_str()))
+            .collect()
+    };
+    let dirs = |args: &[&str]| -> Vec<String> {
+        let mut a = vec!["--no-git", "--apparent"];
+        a.extend_from_slice(args);
+        pick(paths_in(&t.json(&a), "dirs"))
+    };
+    assert_eq!(dirs(&[]), ["deep", "other"]);
+    assert_eq!(dirs(&["--all-dirs"]), ["outer", "inner", "deep", "other"]);
+    // deep passes at its own size and still stands for inner and outer.
+    assert_eq!(dirs(&["--min-size=9500"]), ["deep"]);
+    // One byte more drops deep and inner, so outer shows instead.
+    assert_eq!(dirs(&["--min-size=9501"]), ["outer"]);
+    assert_eq!(dirs(&["--all-dirs", "--min-size=9501"]), ["outer"]);
+    assert_eq!(dirs(&["--min-size=10000"]), ["outer"]);
+    assert!(dirs(&["--min-size=10001"]).is_empty());
+    // -n caps the rows that pass, as before.
+    assert_eq!(dirs(&["-n", "1", "--min-size=3000"]), ["deep"]);
+
+    // The table and --print0 list the same row.
+    let out = t.du(&["--no-git", "--apparent", "--min-size=9501"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let rows: Vec<&str> = text
+        .lines()
+        .filter_map(|l| {
+            l.trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\', ' '])
+                .next()
+        })
+        .filter(|n| known.contains(n))
+        .collect();
+    assert_eq!(rows, ["outer"], "{text}");
+    let out = t.du(&["--no-git", "--apparent", "--print0", "--min-size=9501"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8_lossy(&out.stdout).into_owned();
+    let printed = pick(printed.split('\0').map(str::to_string).collect());
+    assert_eq!(printed, ["outer"]);
+}
+
 /// The listings `--min-size` does not cover refuse it with exit 2 and
 /// write nothing, and so do the sort keys that are not sizes. A snapshot
 /// (`-o`) records every total for `du diff`, so it never takes a floor.

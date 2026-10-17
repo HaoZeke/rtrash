@@ -1854,9 +1854,9 @@ apparent size under \fB\-\-apparent\fR.
 A row of exactly \fISIZE\fR stays.
 The totals still count everything, and \fB\-n\fR still caps each table, so
 the listing holds the largest rows at or above the floor.
-The floor only drops rows: in the table, \fB\-\-json\fR and
-\fB\-\-print0\fR a directory left out because one subdirectory holds 90%
-or more of it stays out.
+A directory left out because one subdirectory makes up 90% or more of it
+comes back when that subdirectory falls below the floor, so a large
+directory never vanishes with the rows that stood for it.
 It applies to the table, \fB\-\-json\fR, \fB\-\-tree\fR and
 \fB\-\-print0\fR of a scan, and to a snapshot or export read with \fB\-f\fR.
 Under \fB\-\-tree\fR, as with dust's \fB\-\-min\-size\fR, every row below the
