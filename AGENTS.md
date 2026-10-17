@@ -11,6 +11,7 @@ needs no build and finishes in under a second. CI runs the same script.
 | Test scratch dirs come from `tests/common::scratch_dir` | the helper's counter; precheck `process::id()` ratchet | round 149 -> red 4a96122 |
 | Two trash puts that a test orders by date are a whole second apart, by `common::next_trash_second()`, not a fixed sleep | precheck long-sleep check | 9708b71 |
 | A test asserts what code does, not how fast it ran: no `assert!` that `elapsed()` stays under 5 s; count the polls through a seam, and keep a time bound only as a hang guard of 5 s or more | precheck tight-elapsed check | round 215: a 1.5 s bound in `next_trash_second_waits_for_a_later_second` failed on a busy macOS runner |
+| A test that compares du table rows, against a literal or another run, takes each with `common::du_row`, which writes the AGE cell as `AGE`; to check an age, assert that cell alone | precheck du-row check | round 218: `block_size_variables_set_the_text_units` compared whole rows and failed when `0s` became `1s` |
 | Finder paths are compared as `finder_shared::FinderPath` (links resolved, NFC), never as written | the type; `same_path` and `under` go through it | 125b, 165 |
 | A test sandbox tag is unique per test file | precheck duplicate-tag check | round 149 |
 | No function takes more than 7 parameters; group options in a struct | precheck arg count, clippy `-D warnings` | round 155 |

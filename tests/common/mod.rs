@@ -16,6 +16,11 @@
 //! the command runs, so a stale baseline cannot hide a change (round
 //! 181c compared against a listing taken several calls earlier).
 //!
+//! Every test that compares a du table row, against a literal or a row
+//! from another run, takes it from `du_row`, which writes the AGE cell
+//! as `AGE`. A second can tick between two runs (round 218 failed when
+//! `0s` became `1s`).
+//!
 //! Every test that runs rtrash builds the command with `rtrash(home)`,
 //! which pins the home, data and config folders to `home`, keeps macOS
 //! off the Finder Trash, and clears the guard variables a developer may
@@ -216,6 +221,28 @@ pub fn assert_refused_unchanged(
 /// The rtrash binary under test.
 pub fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_rtrash")
+}
+
+/// The du table row of `text` that ends with `name`, its cells joined
+/// by one space and the AGE cell (`45s`, `3m`, `2h`, `5d`, `1y`) written
+/// as `AGE`, so that rows from two runs compare equal whatever second
+/// each one ran in. Panics when no row ends with `name`.
+pub fn du_row(text: &str, name: &str) -> String {
+    let row = text
+        .lines()
+        .find(|l| l.ends_with(name))
+        .unwrap_or_else(|| panic!("no row ends with {name:?} in:\n{text}"));
+    let mut cells = String::new();
+    for cell in row.split_whitespace() {
+        let age = cell.len() > 1
+            && cell.ends_with(|c: char| "smhdy".contains(c))
+            && cell[..cell.len() - 1].bytes().all(|b| b.is_ascii_digit());
+        if !cells.is_empty() {
+            cells.push(' ');
+        }
+        cells.push_str(if age { "AGE" } else { cell });
+    }
+    cells
 }
 
 /// rtrash with every trash and config lookup pinned under `home`:

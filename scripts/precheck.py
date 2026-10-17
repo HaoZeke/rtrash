@@ -690,6 +690,47 @@ def check_refusal_helpers():
                               "use common::OUTSIDE or common::outside_lines")
 
 
+def method_chain(text, at):
+    """The `.name(...)` calls that follow position `at`, as one string."""
+    i, n = at, len(text)
+    while True:
+        m = re.compile(r"\s*\.\s*\w+(?:::<[^()]*>)?\s*\(").match(text, i)
+        if not m:
+            return text[at:i]
+        depth, i = 1, m.end()
+        while depth and i < n:
+            depth += {"(": 1, ")": -1}.get(text[i], 0)
+            i += 1
+
+
+def check_du_rows():
+    """A test compares du table rows through common::du_row, which writes
+    the AGE cell as `AGE`: a second can tick between two runs, and round
+    218 failed when `0s` became `1s`. Flag a row put together by hand from
+    split_whitespace() and join, and a row taken with .lines().find() that
+    an assert_eq!/assert_ne! compares whole."""
+    bound = re.compile(r"\blet\s+(\w+)\s*=\s*[^;|]*?\.lines\(\)\s*\.find\(")
+    for path in sorted((ROOT / "tests").glob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        # Char literals first: a '"' would start a string for blank_strings.
+        raw = re.sub(r"'(?:\\.|[^'\\\n])'", "' '", path.read_text(encoding="utf-8"))
+        text = blank_strings(raw)
+        line_of = lambda k: text.count("\n", 0, k) + 1
+        for m in re.finditer(r"\.split_whitespace\(\)", text):
+            if ".join(" in method_chain(text, m.end()):
+                errors.append(f"{rel}:{line_of(m.start())}: joins a row's cells by hand; "
+                              "compare du rows through common::du_row, which masks the AGE cell")
+        for m in bound.finditer(text):
+            name = m.group(1)
+            end = re.compile(r"\n(?:#\[|fn |pub fn )").search(text, m.end())
+            scope = text[m.end():end.start() if end else len(text)]
+            whole = re.compile(rf"assert_(?:eq|ne)!\(\s*(?:{name}\s*,|[^;]*?,\s*{name}\s*[,)])")
+            hit = whole.search(scope)
+            if hit:
+                errors.append(f"{rel}:{line_of(m.end() + hit.start())}: compares the row `{name}` whole; "
+                              "take it with common::du_row, which masks the AGE cell")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -738,7 +779,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_du_rows()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base)
     if "--no-fmt" not in sys.argv:
         check_rustfmt()

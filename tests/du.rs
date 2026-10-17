@@ -3026,6 +3026,28 @@ fn no_prefix_prints_plain_byte_counts() {
     assert!(said.contains("--no-prefix"), "{said}");
 }
 
+/// `common::du_row` masks the AGE cell and nothing else, so two runs a
+/// second apart give the same row while a changed size still shows.
+#[test]
+fn du_rows_compare_without_their_age_cell() {
+    let text = "   DISK  APPARENT  AGE  NOTE  PATH\n\
+                124.0 KiB  120.6 KiB   1s  -  /t/one/odd.bin\n\
+                  4.0 KiB    12 B   3d  -  /t/1s\n";
+    let row = common::du_row(text, "odd.bin");
+    assert_eq!(row, "124.0 KiB 120.6 KiB AGE - /t/one/odd.bin");
+    let later = text.replace(" 1s ", " 2m ");
+    assert_eq!(common::du_row(&later, "odd.bin"), row);
+    let bigger = text.replace("120.6 KiB", "120.7 KiB");
+    assert_ne!(common::du_row(&bigger, "odd.bin"), row);
+    // Sizes in block units are not ages, and neither is a name.
+    let blocks = "124K 121K 9y - /t/1s\n";
+    assert_eq!(common::du_row(blocks, "/t/1s"), "124K 121K AGE - /t/1s");
+    for age in ["45s", "3m", "2h", "5d", "1y"] {
+        let row = format!("1M 1M {age} - x\n");
+        assert_eq!(common::du_row(&row, "x"), "1M 1M AGE - x", "{age}");
+    }
+}
+
 /// The block size variables set du's text units as GNU du reads them:
 /// `RTRASH_BLOCK_SIZE`, then `DU_BLOCK_SIZE`, `BLOCK_SIZE` and
 /// `BLOCKSIZE`, the first one set deciding. `--si` and `--no-prefix` win
@@ -3045,16 +3067,12 @@ fn block_size_variables_set_the_text_units() {
             String::from_utf8_lossy(&out.stderr)
         );
         let text = String::from_utf8(out.stdout).unwrap();
-        let row = text.lines().find(|l| l.ends_with("odd.bin")).expect("row");
-        // The APPARENT column is the second field when a size has no
-        // space in it; with units, the tests compare whole rows.
-        let field = row
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or_default()
-            .to_string();
+        // The APPARENT column is the second cell when a size has no
+        // space in it; with units, the tests compare whole rows, each
+        // with its AGE cell masked, as a second can tick between runs.
+        let row = common::du_row(&text, "odd.bin");
+        let field = row.split(' ').nth(1).unwrap_or_default().to_string();
         let said = String::from_utf8_lossy(&out.stderr).into_owned();
-        let row = row.split_whitespace().collect::<Vec<_>>().join(" ");
         (field, row, said)
     };
     let plain = apparent(&[], &[]).1;
