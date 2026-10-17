@@ -88,13 +88,26 @@ pub fn collect(dirs: &[TrashDir]) -> Vec<Entry> {
     collect_with(dirs, Pathless::Keep).0
 }
 
-/// What `list` shows, and how many `NAME.trashinfo` records it left out:
-/// those [`collect`] leaves out, and also one with no `Path=` (or an empty
-/// one), which names no original. trash-cli's trash-list leaves that one
-/// out too. `status --check` names each of them. Other names in `info/`
-/// are not records and do not count.
-pub fn collect_counted(dirs: &[TrashDir]) -> (Vec<Entry>, u64) {
-    collect_with(dirs, Pathless::Skip)
+/// What `list` shows, and the `NAME.trashinfo` records it left out, in
+/// path order: those [`collect`] leaves out, and also one with no `Path=`
+/// (or an empty one), which names no original. trash-cli's trash-list
+/// leaves that one out too. `status --check` names each of them. Other
+/// names in `info/` are not records and do not count.
+pub fn collect_counted(dirs: &[TrashDir]) -> (Vec<Entry>, Vec<Unlisted>) {
+    let (entries, mut left) = collect_with(dirs, Pathless::Skip);
+    left.sort_by(|a, b| a.record.cmp(&b.record));
+    (entries, left)
+}
+
+/// A record `list` leaves out, and the line trash-cli's trash-list prints
+/// on stderr for it, when trash-cli reports that record too: one it
+/// cannot open (`[Errno N] TEXT: 'FILE'`) and one with no line starting
+/// `Path=` (`Parse Error: FILE: Unable to parse Path.`). trash-cli lists
+/// the rest (an empty `Path=`, one that climbs out of its volume, one
+/// over the size cap) or hangs on them (a FIFO), so they get no line.
+pub struct Unlisted {
+    pub record: PathBuf,
+    pub trash_cli: Option<String>,
 }
 
 /// What to do with a record that has no `Path=`.
@@ -104,28 +117,36 @@ enum Pathless {
     Skip,
 }
 
-fn collect_with(dirs: &[TrashDir], pathless: Pathless) -> (Vec<Entry>, u64) {
+fn collect_with(dirs: &[TrashDir], pathless: Pathless) -> (Vec<Entry>, Vec<Unlisted>) {
     use rayon::prelude::*;
     let mut out = Vec::new();
-    let mut skipped = 0u64;
+    let mut left = Vec::new();
     for dir in dirs {
         let Ok(entries) = fs::read_dir(dir.info()) else {
             continue;
         };
         let paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
         // One read per item: spread a big trash over the rayon pool. A
-        // record left out is Some(None); a name that is not one, None.
-        let read: Vec<Option<Entry>> = paths
+        // name that is not a record gives None.
+        let read: Vec<Result<Entry, Unlisted>> = paths
             .into_par_iter()
             .filter_map(|path| {
                 let fname = crate::util::str_from_os_ref(path.file_name()?);
                 let name = crate::util::trash_item_name(&fname)?;
-                Some(read_entry(dir, &path, name, pathless))
+                Some(
+                    read_entry(dir, &path, name, pathless).map_err(|trash_cli| Unlisted {
+                        record: path.clone(),
+                        trash_cli,
+                    }),
+                )
             })
             .collect();
-        let left = read.iter().filter(|e| e.is_none()).count() as u64;
-        skipped = skipped.saturating_add(left);
-        out.extend(read.into_iter().flatten());
+        for r in read {
+            match r {
+                Ok(e) => out.push(e),
+                Err(u) => left.push(u),
+            }
+        }
     }
     out.sort_by(|a, b| {
         a.epoch
@@ -133,22 +154,35 @@ fn collect_with(dirs: &[TrashDir], pathless: Pathless) -> (Vec<Entry>, u64) {
             .then_with(|| a.original.cmp(&b.original))
             .then_with(|| a.name.cmp(&b.name))
     });
-    (out, skipped)
+    (out, left)
 }
 
-/// The entry the record at `path` (for the payload `name`) gives, or None
-/// when it cannot be read, its `Path=` does not resolve in `dir`, or it
-/// has none and `pathless` says to skip it (as `status --check` flags it).
+/// The entry the record at `path` (for the payload `name`) gives. It is
+/// an error when the record cannot be read, its `Path=` does not resolve
+/// in `dir`, or it has none and `pathless` says to skip it (as `status
+/// --check` flags it); the error carries trash-cli's stderr line for it,
+/// if trash-cli prints one (see [`Unlisted`]).
 fn read_entry(
     dir: &TrashDir,
     path: &std::path::Path,
     name: &str,
     pathless: Pathless,
-) -> Option<Entry> {
-    let content = info::read_bounded(path, info::RECORD_CAP).ok()?;
+) -> Result<Entry, Option<String>> {
+    let content =
+        info::read_bounded(path, info::RECORD_CAP).map_err(|e| trash_cli_read_line(&e, path))?;
     let parsed = info::parse_bytes(&content);
     if pathless == Pathless::Skip && parsed.path.as_os_str().is_empty() {
-        return None;
+        // trash-cli takes the first line that starts with `Path=`, even an
+        // empty one, and fails only when there is none.
+        let has_line = content
+            .split(|&b| b == b'\n')
+            .any(|l| l.starts_with(b"Path="));
+        return Err((!has_line).then(|| {
+            format!(
+                "Parse Error: {}: Unable to parse Path.",
+                py_text(path, false)
+            )
+        }));
     }
     let epoch = parsed
         .deletion_date
@@ -156,8 +190,10 @@ fn read_entry(
         .and_then(info::parse_local_to_epoch)
         .unwrap_or(0);
     // Skip hostile/corrupt relative Path= that escape the volume topdir.
-    let original = dir.resolve_original_checked(&parsed.path).ok()?;
-    Some(Entry {
+    let original = dir
+        .resolve_original_checked(&parsed.path)
+        .map_err(|_| None)?;
+    Ok(Entry {
         original,
         date: parsed.deletion_date,
         epoch,
@@ -165,6 +201,79 @@ fn read_entry(
         dir: dir.clone(),
         batch: parsed.batch,
     })
+}
+
+/// trash-cli's line for a record it cannot open: Python's `str()` of the
+/// OSError, `[Errno N] TEXT: 'FILE'`. read_bounded refuses a directory
+/// before it opens one, where Python's open() fails with EISDIR. A FIFO,
+/// a device or a record over the cap gets no line (trash-cli would hang
+/// on a FIFO, or read the rest).
+fn trash_cli_read_line(e: &std::io::Error, record: &std::path::Path) -> Option<String> {
+    if e.raw_os_error().is_some() {
+        return trash_cli_os_line(e, record);
+    }
+    if fs::metadata(record).is_ok_and(|m| m.is_dir()) {
+        return trash_cli_os_line(&std::io::Error::from_raw_os_error(libc::EISDIR), record);
+    }
+    None
+}
+
+fn trash_cli_os_line(e: &std::io::Error, record: &std::path::Path) -> Option<String> {
+    let n = e.raw_os_error()?;
+    let full = e.to_string();
+    let text = full
+        .strip_suffix(&format!(" (os error {n})"))
+        .unwrap_or(&full);
+    Some(format!("[Errno {n}] {text}: {}", py_text(record, true)))
+}
+
+/// A path as trash-cli prints it in an error line. With `repr`, as
+/// Python's `repr()` of the name: quoted (in double quotes when it holds a
+/// `'` and no `"`), with backslashes, that quote and control characters
+/// escaped, and a byte that is not UTF-8 as `\udcNN`. Without, as
+/// trash-cli's printable(): the text as is, and such a byte as `\xNN`.
+fn py_text(p: &std::path::Path, repr: bool) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = p.as_os_str().as_bytes();
+    let lossy = String::from_utf8_lossy(bytes);
+    let quote = if lossy.contains('\'') && !lossy.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut body = String::new();
+    for chunk in bytes.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            let cp = c as u32;
+            match c {
+                _ if !repr => body.push(c),
+                '\\' => body.push_str("\\\\"),
+                '\t' => body.push_str("\\t"),
+                '\n' => body.push_str("\\n"),
+                '\r' => body.push_str("\\r"),
+                _ if c == quote => {
+                    body.push('\\');
+                    body.push(c);
+                }
+                _ if cp < 0x20 || (0x7f..=0x9f).contains(&cp) => {
+                    body.push_str(&format!("\\x{cp:02x}"));
+                }
+                _ => body.push(c),
+            }
+        }
+        for b in chunk.invalid() {
+            if repr {
+                body.push_str(&format!("\\udc{b:02x}"));
+            } else {
+                body.push_str(&format!("\\x{b:02x}"));
+            }
+        }
+    }
+    if repr {
+        format!("{quote}{body}{quote}")
+    } else {
+        body
+    }
 }
 
 /// Payloads in `files/` with no `.trashinfo` (left by a crash or another
@@ -582,7 +691,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         return 0;
     }
-    let (collected, skipped) = collect_counted(&dirs);
+    let (collected, left) = collect_counted(&dirs);
+    // The trash-list name prints trash-cli's own line for each record
+    // trash-cli reports, and the hint counts only the rest; rtrash list
+    // counts them all.
+    let mut skipped = left.len() as u64;
+    if prog == "trash-list" {
+        for line in left.iter().filter_map(|u| u.trash_cli.as_deref()) {
+            eprintln!("{}", crate::util::err_text(line));
+            skipped -= 1;
+        }
+    }
     let mut unsized_rows = 0usize;
     let mut entries = filter_age_secs(collected, older_than, newer_than);
     entries.retain(|e| keep(&e.original, &e.name));
@@ -748,9 +867,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let _ = out.flush();
     }
     // After the rows, on stderr, so stdout is the same with or without
-    // it. The trash-list name keeps trash-cli's output and says nothing.
+    // it. trash-list prints it too, as on Windows, for what trash-cli
+    // itself would list or not report.
     let hint = crate::util::unlisted_hint(prog, skipped, "trash record", "trash records");
-    if let Some(hint) = hint.filter(|_| prog != "trash-list") {
+    if let Some(hint) = hint {
         eprintln!("{hint}");
     }
     i32::from(unsized_rows > 0)
@@ -913,7 +1033,14 @@ mod tests {
         let mut all: Vec<String> = collect(&dirs).into_iter().map(|e| e.name).collect();
         all.sort();
         assert_eq!(all, ["empty.txt", "good.txt", "none.txt"]);
-        let (listed, skipped) = collect_counted(&dirs);
+        let (listed, left) = collect_counted(&dirs);
+        let skipped = left.len() as u64;
+        // trash-cli reports the record with no Path line, and lists the
+        // one with an empty Path= as its volume.
+        let lines: Vec<Option<&str>> = left.iter().map(|u| u.trash_cli.as_deref()).collect();
+        let none = root.join("info/none.txt.trashinfo");
+        let want = format!("Parse Error: {}: Unable to parse Path.", none.display());
+        assert_eq!(lines, [None, Some(want.as_str())]);
         let names: Vec<&str> = listed.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["good.txt"]);
         assert_eq!(skipped, 2);
@@ -942,6 +1069,53 @@ mod tests {
         assert_eq!(trash_cli_size(&root.join("d")).unwrap(), own);
         let gone = trash_cli_size(&root.join("gone")).unwrap_err();
         assert_eq!(gone.kind(), std::io::ErrorKind::NotFound);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The stderr lines trash-cli's trash-list prints for a record it
+    /// cannot read, with the name as Python's repr() quotes it.
+    #[test]
+    fn trash_cli_error_lines_quote_the_record_as_python_does() {
+        use std::os::unix::ffi::OsStrExt;
+        let p = |s: &str| py_text(std::path::Path::new(s), true);
+        assert_eq!(p("/t/a b"), "'/t/a b'");
+        assert_eq!(p("/t/it's"), "\"/t/it's\"");
+        assert_eq!(p("/t/a'\"b"), "'/t/a\\'\"b'");
+        assert_eq!(p("/t/x\ny"), "'/t/x\\ny'");
+        assert_eq!(p("/t/a\\b"), "'/t/a\\\\b'");
+        assert_eq!(p("/t/\u{7f}\u{85}é"), "'/t/\\x7f\\x85é'");
+        let raw = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/t/\xff"));
+        assert_eq!(py_text(raw, true), "'/t/\\udcff'");
+        assert_eq!(py_text(raw, false), "/t/\\xff");
+
+        let root = std::env::temp_dir().join(format!("rtrash-tl-errs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("dir.trashinfo")).unwrap();
+        std::os::unix::fs::symlink("nowhere", root.join("dangling.trashinfo")).unwrap();
+        fs::write(root.join("big.trashinfo"), vec![b'x'; (1 << 20) + 1]).unwrap();
+        let line = |name: &str| {
+            let path = root.join(name);
+            let e = info::read_bounded(&path, info::RECORD_CAP).unwrap_err();
+            trash_cli_read_line(&e, &path)
+        };
+        let dir = line("dir.trashinfo").unwrap();
+        let shown = format!(": '{}'", root.join("dir.trashinfo").display());
+        assert!(
+            dir.starts_with("[Errno 21] ") && dir.ends_with(&shown),
+            "{dir}"
+        );
+        assert_eq!(
+            line("dangling.trashinfo").unwrap(),
+            format!(
+                "[Errno 2] No such file or directory: '{}'",
+                root.join("dangling.trashinfo").display()
+            )
+        );
+        assert_eq!(
+            line("big.trashinfo"),
+            None,
+            "trash-cli reads it; only the hint counts it"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

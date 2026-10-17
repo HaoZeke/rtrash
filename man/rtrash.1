@@ -903,9 +903,24 @@ leaves out a record it cannot read, one with no
 line, as trash\-cli's trash\-list does, and one whose path climbs out
 of its volume, and after its rows it says on stderr how many, naming
 .BR "rtrash status \-\-check" ;
-its rows on stdout are the same as without them, and
+its rows on stdout are the same as without them.
 .B trash\-list
-says nothing more.
+first prints trash-cli's own stderr line for each record trash-cli
+reports, in path order:
+.RB \(oq "Parse Error: FILE: Unable to parse Path." \(cq
+for one with no line starting
+.BR Path= ,
+and
+.RB \(oq "[Errno N] TEXT: 'FILE'" \(cq
+for one it cannot open (a directory, a dangling symlink, no read
+permission).
+Its count after the rows then covers only the rest, which trash-cli
+would list: an empty
+.BR Path= ,
+a path that climbs out, a record over 1 MiB, a FIFO or a device.
+On Windows,
+.B trash\-list
+prints the same count, as trash-cli has no lines there.
 .TP
 .B \-\-fix
 With

@@ -289,6 +289,38 @@ if have trash-list; then
     fi
   done
   rm -rf -- "$tl"
+
+  # Records trash-cli reports on stderr: one with no Path= line, a
+  # directory and a dangling symlink where a record should be. Both
+  # tools print the same lines (rtrash adds no hint for them) and the
+  # same rows; trash-cli's go in directory order, so both get sorted.
+  tl=$scratch/tl-bad
+  mkdir -p "$tl/files" "$tl/info"
+  printf 'ok\n' > "$tl/files/ok"
+  printf '[Trash Info]\nPath=%s\nDeletionDate=2026-01-02T03:04:05\n' "$scratch/w/from/ok" > "$tl/info/ok.trashinfo"
+  printf '[Trash Info]\nDeletionDate=2026-01-02T03:04:05\n' > "$tl/info/no path.trashinfo"
+  mkdir "$tl/info/dir.trashinfo"
+  ln -s "$scratch/nowhere" "$tl/info/dangling.trashinfo"
+  for stream in stdout stderr; do
+    if [[ $stream == stdout ]]; then
+      want=$( { trash-list --trash-dir="$tl" 2>/dev/null || echo "exit $?"; } | LC_ALL=C sort)
+      got=$( { "$scratch/bin/trash-list" --trash-dir="$tl" 2>/dev/null || echo "exit $?"; } | LC_ALL=C sort)
+    else
+      want=$( { trash-list --trash-dir="$tl" 2>&1 >/dev/null || echo "exit $?"; } | LC_ALL=C sort)
+      got=$( { "$scratch/bin/trash-list" --trash-dir="$tl" 2>&1 >/dev/null || echo "exit $?"; } | LC_ALL=C sort)
+    fi
+    if [[ $want == "$got" ]]; then
+      echo "ok   trash-list $stream beside bad records matches trash-cli"
+    else
+      echo "FAIL trash-list $stream beside bad records differs from trash-cli"
+      echo "  trash-cli:"
+      printf '%s\n' "$want" | sed 's/^/  | /'
+      echo "  rtrash:"
+      printf '%s\n' "$got" | sed 's/^/  | /'
+      fail=1
+    fi
+  done
+  rm -rf -- "$tl"
 else
   echo "note: trash-list missing; trash-list row check skipped"
 fi
