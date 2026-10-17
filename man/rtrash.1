@@ -2258,6 +2258,10 @@ JSON, snapshots and stacks stay in bytes.
 The
 .B si
 config key makes it the default.
+Without either flag,
+.B BLOCK_SIZE
+and its kin set the units (see
+.BR ENVIRONMENT ).
 .TP
 .B \-\-help
 Display help and exit.
@@ -4074,6 +4078,37 @@ Set to
 .B largest
 to make that prune remove the largest items first (default
 .BR oldest ).
+.TP
+.BR RTRASH_BLOCK_SIZE ", " DU_BLOCK_SIZE ", " BLOCK_SIZE ", " BLOCKSIZE
+The units of the sizes
+.B du
+prints, read as GNU du reads them; the first one set decides.
+A number counts blocks of that many bytes, rounded up
+.RB ( 1K
+prints 121 for 123456 bytes), and a leading unit letter adds the unit
+.RB ( K
+prints 121K).
+K, M, G, T, P and E are powers of 1024, and KB or MB (with a B) are
+powers of 1000.
+.B human\-readable
+keeps the default units and
+.B si
+is
+.BR \-\-si .
+A value rtrash cannot read keeps the default units, and only a bad
+.B RTRASH_BLOCK_SIZE
+gets a warning.
+.B \-\-si
+and
+.B \-\-no\-prefix
+win over these, which win over the
+.B si
+config key.
+JSON,
+.B \-\-print0
+and the explorer
+.RB ( \-i )
+keep their units.
 .SH FILES
 .TP
 .I $XDG_STATE_HOME/rtrash/finder\-totals

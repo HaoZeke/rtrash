@@ -346,14 +346,124 @@ pub fn set_raw_bytes(on: bool) {
     RAW_BYTES.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// A block size from `BLOCK_SIZE` or the like: [`format_bytes`] then
+/// prints a count of `size`-byte blocks for the rest of the run.
+static BLOCK_UNITS: std::sync::Mutex<Option<(u64, String)>> = std::sync::Mutex::new(None);
+
+/// Switch [`format_bytes`] to whole blocks of `size` bytes, rounded up
+/// as GNU du rounds, with `suffix` after each count; `None` switches back.
+pub fn set_block_units(units: Option<(u64, String)>) {
+    *BLOCK_UNITS.lock().unwrap_or_else(|e| e.into_inner()) = units;
+}
+
 /// Human-readable sizes for CLI summaries: binary units (KiB/MiB/GiB), or
-/// decimal ones after [`set_si_units`], or plain bytes after
-/// [`set_raw_bytes`].
+/// decimal ones after [`set_si_units`], plain bytes after
+/// [`set_raw_bytes`], or blocks after [`set_block_units`].
 pub fn format_bytes(n: u64) -> String {
     if RAW_BYTES.load(std::sync::atomic::Ordering::Relaxed) {
         return n.to_string();
     }
+    if let Some((size, suffix)) = &*BLOCK_UNITS.lock().unwrap_or_else(|e| e.into_inner()) {
+        return format_blocks(n, *size, suffix);
+    }
     format_bytes_in(n, SI_UNITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// `n` bytes as whole `size`-byte blocks, rounded up as GNU du rounds,
+/// with `suffix` after the count.
+pub fn format_blocks(n: u64, size: u64, suffix: &str) -> String {
+    format!("{}{suffix}", n.div_ceil(size.max(1)))
+}
+
+/// A size display from a GNU block size value (`--block-size`,
+/// `BLOCK_SIZE`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockSize {
+    /// `human-readable`: rtrash's own units (KiB, MiB, GiB).
+    Human,
+    /// `si`: powers of 1000, as `--si`.
+    Si,
+    /// A count of `size`-byte blocks with `suffix` after it.
+    Blocks { size: u64, suffix: String },
+}
+
+/// Parse a block size as GNU coreutils reads one: `human-readable` or
+/// `si` (or a part of either from the start), else an optional count
+/// and an optional unit: K, M, G, T, P or E (any case) for powers of
+/// 1024, the same with `iB`, or with `B` for powers of 1000. The unit
+/// is printed after each size only when the value starts with it, so
+/// `M` prints `12M` and `1M` prints `12`. A leading `'` asks GNU tools
+/// to group digits; rtrash takes the value and does not group. Zero, an
+/// unknown unit or a size past 2^64 gives `None`.
+pub fn parse_block_size(spec: &str) -> Option<BlockSize> {
+    let spec = spec.strip_prefix('\'').unwrap_or(spec);
+    if spec.is_empty() {
+        return None;
+    }
+    if "human-readable".starts_with(spec) {
+        return Some(BlockSize::Human);
+    }
+    if "si".starts_with(spec) {
+        return Some(BlockSize::Si);
+    }
+    let digits = spec.bytes().take_while(u8::is_ascii_digit).count();
+    let count: u64 = if digits == 0 {
+        1
+    } else {
+        spec[..digits].parse().ok()?
+    };
+    let unit = &spec[digits..];
+    let (size, suffix) = if unit.is_empty() {
+        (1, String::new())
+    } else {
+        let mut chars = unit.chars();
+        let letter = chars.next()?.to_ascii_uppercase();
+        let power = "KMGTPE".find(letter)? as u32 + 1;
+        let (base, tail) = match chars.as_str() {
+            "" => (1024u64, ""),
+            "iB" => (1024, "iB"),
+            "B" => (1000, "B"),
+            _ => return None,
+        };
+        // A decimal kilo is a small k, as GNU prints it (kB).
+        let shown = if base == 1000 && power == 1 {
+            'k'
+        } else {
+            letter
+        };
+        (base.checked_pow(power)?, format!("{shown}{tail}"))
+    };
+    let size = count.checked_mul(size).filter(|&n| n > 0)?;
+    let suffix = if digits == 0 { suffix } else { String::new() };
+    Some(BlockSize::Blocks { size, suffix })
+}
+
+/// The variables du takes a block size from, first one set first:
+/// rtrash's own, then GNU du's order.
+pub const BLOCK_SIZE_VARS: [&str; 4] = [
+    "RTRASH_BLOCK_SIZE",
+    "DU_BLOCK_SIZE",
+    "BLOCK_SIZE",
+    "BLOCKSIZE",
+];
+
+/// The block size from the first of [`BLOCK_SIZE_VARS`] that is set and
+/// not empty. A value that does not parse gives `None`, as GNU du then
+/// uses its default and does not look further; only a bad
+/// `RTRASH_BLOCK_SIZE` gets a warning, since the others are shared with
+/// tools that may take values rtrash does not.
+pub fn block_size_from_env(prog: &str) -> Option<BlockSize> {
+    let (var, value) = BLOCK_SIZE_VARS.iter().find_map(|v| {
+        std::env::var_os(v)
+            .filter(|x| !x.is_empty())
+            .map(|x| (*v, x.to_string_lossy().into_owned()))
+    })?;
+    let parsed = parse_block_size(&value);
+    if parsed.is_none() && var == BLOCK_SIZE_VARS[0] {
+        let want = "a size such as 1K, M or MB, or human-readable or si";
+        eprintln!("{prog}: ignoring {var}='{value}' ({want})");
+    }
+    parsed
 }
 
 /// [`format_bytes`] with the unit base given: decimal when `si` is set.
@@ -698,6 +808,54 @@ mod tests {
         assert_eq!(format_bytes_in(2_500_000, true), "2.5 MB");
         assert_eq!(format_bytes_in(3_000_000_000, true), "3.00 GB");
         assert_eq!(format_bytes_in(4_000_000_000_000, true), "4.00 TB");
+    }
+
+    #[test]
+    fn block_sizes_parse_as_gnu_coreutils_reads_them() {
+        let blocks = |size: u64, suffix: &str| {
+            Some(BlockSize::Blocks {
+                size,
+                suffix: suffix.to_string(),
+            })
+        };
+        assert_eq!(parse_block_size("human-readable"), Some(BlockSize::Human));
+        assert_eq!(parse_block_size("human"), Some(BlockSize::Human));
+        assert_eq!(parse_block_size("si"), Some(BlockSize::Si));
+        assert_eq!(parse_block_size("1"), blocks(1, ""));
+        assert_eq!(parse_block_size("512"), blocks(512, ""));
+        assert_eq!(parse_block_size("1K"), blocks(1024, ""));
+        assert_eq!(parse_block_size("1k"), blocks(1024, ""));
+        assert_eq!(parse_block_size("K"), blocks(1024, "K"));
+        assert_eq!(parse_block_size("KiB"), blocks(1024, "KiB"));
+        assert_eq!(parse_block_size("kB"), blocks(1000, "kB"));
+        assert_eq!(parse_block_size("KB"), blocks(1000, "kB"));
+        assert_eq!(parse_block_size("M"), blocks(1 << 20, "M"));
+        assert_eq!(parse_block_size("MB"), blocks(1_000_000, "MB"));
+        assert_eq!(parse_block_size("4M"), blocks(4 << 20, ""));
+        assert_eq!(parse_block_size("'1K"), blocks(1024, ""));
+        assert_eq!(parse_block_size("G"), blocks(1 << 30, "G"));
+        for bad in [
+            "",
+            "0",
+            "0K",
+            "1X",
+            "Mb",
+            "1KiBx",
+            "Z",
+            "99999999999999999999",
+            "16E",
+            "-1",
+        ] {
+            assert_eq!(parse_block_size(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn block_units_print_whole_blocks_rounded_up() {
+        let k = |n| format_blocks(n, 1024, "K");
+        assert_eq!([k(0), k(1), k(1024), k(1025)], ["0K", "1K", "1K", "2K"]);
+        assert_eq!(format_blocks(2_500_000, 1_000_000, ""), "3");
+        assert_eq!(format_blocks(u64::MAX, 1, ""), u64::MAX.to_string());
     }
 
     #[test]

@@ -236,6 +236,15 @@ pub fn rtrash(home: &Path) -> Command {
         .env_remove("RTRASH_MAX_PERMANENT")
         .env_remove("RTRASH_ALLOW_ROOTS")
         .env_remove("RTRASH_CONFIG");
+    // Sizes print in rtrash's own units unless a test sets one of these.
+    for var in [
+        "RTRASH_BLOCK_SIZE",
+        "DU_BLOCK_SIZE",
+        "BLOCK_SIZE",
+        "BLOCKSIZE",
+    ] {
+        c.env_remove(var);
+    }
     c
 }
 

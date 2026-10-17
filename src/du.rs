@@ -211,6 +211,11 @@ directories appear as one `trash` row and are never printed by --print0.
                           --interactive
       --help            display this help and exit
       --version         output version information and exit
+
+Without --si or --no-prefix, the first of RTRASH_BLOCK_SIZE, DU_BLOCK_SIZE,
+BLOCK_SIZE and BLOCKSIZE that is set picks the printed units, as in GNU du:
+1K prints 1024-byte blocks, K adds the unit, MB uses 1000s, si is --si.
+JSON, --print0 and the explorer keep their units.
 ";
 
 /// Every artefact kind a row can carry, `trash` included.
@@ -1925,13 +1930,40 @@ fn root_file_share(
     }
 }
 
+/// Set the units of this run's text sizes. The `--si` and `--no-prefix`
+/// flags win. Without either, and when `env` allows, the first block size
+/// variable set ([`crate::util::BLOCK_SIZE_VARS`]) picks them, as
+/// `BLOCK_SIZE` does for GNU du and gdu. The `si` config key (in `si`
+/// along with the flag) comes last.
+fn set_text_units(prog: &str, si: bool, si_flag: bool, raw: bool, env: bool) {
+    use crate::util::BlockSize;
+    let picked = (env && !si_flag && !raw)
+        .then(|| crate::util::block_size_from_env(prog))
+        .flatten();
+    crate::util::set_si_units(match picked {
+        Some(BlockSize::Si) => true,
+        Some(_) => false,
+        None => si,
+    });
+    crate::util::set_block_units(match picked {
+        Some(BlockSize::Blocks { size, suffix }) => Some((size, suffix)),
+        _ => None,
+    });
+}
+
 /// `du --devices`: the mounted file systems, as text or JSON.
-fn devices_out(prog: &str, paths: &[PathBuf], json: bool, si: bool, other_mode: bool) -> i32 {
+fn devices_out(
+    prog: &str,
+    paths: &[PathBuf],
+    json: bool,
+    (si, si_flag): (bool, bool),
+    other_mode: bool,
+) -> i32 {
     if !paths.is_empty() || other_mode {
         eprintln!("{prog}: --devices lists every mounted file system; it takes no PATH and no other mode but --json");
         return 2;
     }
-    crate::util::set_si_units(si);
+    set_text_units(prog, si, si_flag, false, true);
     match crate::du_dev::listed() {
         Ok(devs) if json => println!("{}", crate::du_dev::json(&devs)),
         Ok(devs) => print!("{}", crate::du_dev::table(&devs)),
@@ -3235,6 +3267,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     opts.one_file_system = cfg.bool("du", "one_file_system").unwrap_or(false);
     use_git = cfg.bool("du", "git").unwrap_or(use_git);
     let mut si = cfg.bool("du", "si").unwrap_or(false);
+    let mut si_flag = false;
     let mut raw_bytes = false;
     // The config key only shapes -i; the flag alone is an error below.
     let mut read_only = cfg.bool("du", "no_delete").unwrap_or(false);
@@ -3467,7 +3500,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--pick" => pick = true,
                 "-i" | "--interactive" => interactive = true,
                 "--no-delete" => no_delete = true,
-                "--si" => si = true,
+                "--si" => (si, si_flag) = (true, true),
                 "--no-prefix" => raw_bytes = true,
                 "--help" => {
                     print!("{}", HELP.replace("{prog}", prog));
@@ -3602,7 +3635,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             prog,
             &paths,
             json,
-            si,
+            (si, si_flag),
             ncdu.is_some()
                 || output.is_some()
                 || from_file.is_some()
@@ -3645,7 +3678,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             );
             return 2;
         }
-        crate::util::set_si_units(si);
+        set_text_units(prog, si, si_flag, raw_bytes, true);
         let act = if trash_dupes {
             DupesAct::Trash
         } else if link_dupes {
@@ -3659,8 +3692,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return dupes_out(prog, &paths, &opts, min_size, json, print0, act);
     }
     // Text sizes everywhere in this run, the explorer included; JSON,
-    // snapshots and stacks stay in bytes.
-    crate::util::set_si_units(si);
+    // snapshots and stacks stay in bytes. The explorer keeps its units
+    // under a block size variable too, as it refuses --no-prefix.
+    set_text_units(prog, si, si_flag, raw_bytes, !interactive);
     crate::util::set_raw_bytes(raw_bytes);
     if no_delete && !interactive {
         eprintln!("{prog}: --no-delete applies to --interactive; other modes never delete");

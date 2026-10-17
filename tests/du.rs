@@ -41,6 +41,19 @@ impl Tree {
             .expect("run rtrash du")
     }
 
+    /// Like `du`, with `envs` set on top.
+    fn du_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
+        common::rtrash(&self.root)
+            .arg("du")
+            .args(args)
+            .current_dir(&self.root)
+            .env("XDG_DATA_HOME", self.root.join(".xdg"))
+            .env("XDG_CONFIG_HOME", self.root.join(".cfg"))
+            .envs(envs.iter().copied())
+            .output()
+            .expect("run rtrash du")
+    }
+
     fn json(&self, args: &[&str]) -> String {
         let mut a = vec!["--json"];
         a.extend_from_slice(args);
@@ -3011,6 +3024,91 @@ fn no_prefix_prints_plain_byte_counts() {
     assert_eq!(tui.status.code(), Some(2));
     let said = String::from_utf8_lossy(&tui.stderr);
     assert!(said.contains("--no-prefix"), "{said}");
+}
+
+/// The block size variables set du's text units as GNU du reads them:
+/// `RTRASH_BLOCK_SIZE`, then `DU_BLOCK_SIZE`, `BLOCK_SIZE` and
+/// `BLOCKSIZE`, the first one set deciding. `--si` and `--no-prefix` win
+/// over all of them, and `--json` and `--print0` stay byte for byte.
+#[test]
+fn block_size_variables_set_the_text_units() {
+    let t = Tree::new("dublocksize");
+    // 123_456 bytes: 121 KiB blocks, 124 kB blocks, 1 MiB block.
+    t.file("one/odd.bin", 123_456);
+    let apparent = |envs: &[(&str, &str)], flags: &[&str]| {
+        let mut args = vec!["--no-git", "--apparent", "--files"];
+        args.extend_from_slice(flags);
+        let out = t.du_env(&args, envs);
+        assert!(
+            out.status.success(),
+            "{envs:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = String::from_utf8(out.stdout).unwrap();
+        let row = text.lines().find(|l| l.ends_with("odd.bin")).expect("row");
+        // The APPARENT column is the second field when a size has no
+        // space in it; with units, the tests compare whole rows.
+        let field = row
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        let row = row.split_whitespace().collect::<Vec<_>>().join(" ");
+        (field, row, said)
+    };
+    let plain = apparent(&[], &[]).1;
+    assert_eq!(apparent(&[("BLOCK_SIZE", "1K")], &[]).0, "121");
+    assert_eq!(apparent(&[("BLOCK_SIZE", "K")], &[]).0, "121K");
+    assert_eq!(apparent(&[("BLOCKSIZE", "kB")], &[]).0, "124kB");
+    assert_eq!(apparent(&[("DU_BLOCK_SIZE", "M")], &[]).0, "1M");
+    assert_eq!(apparent(&[("BLOCK_SIZE", "1")], &[]).0, "123456");
+    assert_eq!(apparent(&[("BLOCK_SIZE", "human-readable")], &[]).1, plain);
+    // The first one set decides.
+    let all = [
+        ("BLOCKSIZE", "1"),
+        ("BLOCK_SIZE", "K"),
+        ("DU_BLOCK_SIZE", "kB"),
+        ("RTRASH_BLOCK_SIZE", "M"),
+    ];
+    assert_eq!(apparent(&all, &[]).0, "1M");
+    assert_eq!(apparent(&all[..3], &[]).0, "124kB");
+    assert_eq!(apparent(&all[..2], &[]).0, "121K");
+    // A value rtrash cannot read keeps the default and looks no further,
+    // as GNU du does; only rtrash's own variable gets a warning.
+    let (_, row, said) = apparent(&[("BLOCK_SIZE", "1X"), ("BLOCKSIZE", "K")], &[]);
+    assert_eq!(row, plain);
+    assert!(!said.contains("BLOCK"), "{said}");
+    let (_, row, said) = apparent(&[("RTRASH_BLOCK_SIZE", "1X")], &[]);
+    assert_eq!(row, plain);
+    assert!(said.contains("ignoring RTRASH_BLOCK_SIZE='1X'"), "{said}");
+    // Flags win.
+    let si = apparent(&[], &["--si"]).1;
+    assert_ne!(si, plain);
+    assert_eq!(apparent(&[("BLOCK_SIZE", "K")], &["--si"]).1, si);
+    assert_eq!(
+        apparent(&[("BLOCK_SIZE", "K")], &["--no-prefix"]).0,
+        "123456"
+    );
+    assert_eq!(apparent(&[("BLOCK_SIZE", "si")], &[]).1, si);
+    // Machine output keeps bytes.
+    for flag in ["--json", "--print0"] {
+        let bare = t.du_env(&["--no-git", "--files", flag], &[]).stdout;
+        let env = t
+            .du_env(&["--no-git", "--files", flag], &[("BLOCK_SIZE", "K")])
+            .stdout;
+        assert!(!bare.is_empty(), "{flag}");
+        assert_eq!(bare, env, "{flag}");
+    }
+    // The `si` config key comes after the variables.
+    fs::create_dir_all(t.root.join(".cfg/rtrash")).unwrap();
+    fs::write(t.root.join(".cfg/rtrash/config.toml"), "[du]\nsi = true\n").unwrap();
+    let si = apparent(&[], &["--si"]).1;
+    assert_eq!(apparent(&[], &[]).1, si);
+    assert!(si.contains("kB"), "{si}");
+    assert_eq!(apparent(&[("BLOCK_SIZE", "K")], &[]).0, "121K");
+    let human = apparent(&[("BLOCK_SIZE", "human")], &[]).1;
+    assert!(human.contains("KiB") && !human.contains("kB"), "{human}");
 }
 
 /// A folder du cannot read shows `unreadable` in the NOTE column and the
