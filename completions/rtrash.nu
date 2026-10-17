@@ -227,6 +227,7 @@ export extern "rtrash du" [
     --reverse  # print each table in reverse, the top row last
     --summarize(-s)  # print only the totals, no rows (GNU du -s, gdu)
     --skip-total  # print the rows without the Total lines (dust)
+    --strict  # exit 1 when any entry could not be read
     --inodes  # rank by inodes, as --sort=items: files and
     --types  # list file types instead of directories and files:
     --unique  # add a UNIQUE column: the bytes in extents no other

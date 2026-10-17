@@ -158,6 +158,7 @@ du_opts=(
   '--reverse[print each table in reverse, the top row last]'
   '(-s --summarize --skip-total)'{-s,--summarize}'[print only the totals, no rows]'
   '(-s --summarize)--skip-total[print the rows without the Total lines]'
+  '--strict[exit 1 when any entry could not be read]'
   '--inodes[rank by inodes and total them]'
   '--unique[add a UNIQUE column of bytes no other file shares]'
   '--shared[count each shared extent once in sizes]'

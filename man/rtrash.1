@@ -1334,6 +1334,27 @@ Print the rows without the Total lines, as
 .B dust \-\-skip\-total
 does.
 .TP
+.B \-\-strict
+Exit 1 when any entry could not be read, after the usual output and
+the stderr lines naming them, as GNU
+.B du
+does; without it du exits 0.
+It applies to the listing,
+.B \-\-json
+and the ncdu exports, not to the interactive browser or a snapshot,
+which records no unreadable entries.
+In the NOTE column and in
+.BR \-\-tree ,
+a directory du could not read shows
+.B unreadable
+and one with an unreadable entry below it, whose sizes are low, shows
+.BR incomplete ,
+as ncdu marks
+.B !
+and
+.BR . ;
+du marks the first 100 unreadable entries it keeps.
+.TP
 .B \-\-reverse
 Print each table in reverse, so the top row comes last, next to the
 prompt, as

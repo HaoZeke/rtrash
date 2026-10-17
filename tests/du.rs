@@ -2433,3 +2433,65 @@ fn no_prefix_prints_plain_byte_counts() {
     let said = String::from_utf8_lossy(&tui.stderr);
     assert!(said.contains("--no-prefix"), "{said}");
 }
+
+/// A folder du cannot read shows `unreadable` in the NOTE column and the
+/// tree, its parent `incomplete`; `--strict` turns the skip into exit 1 in
+/// the table, `--json` and the ncdu export, and a clean scan stays 0.
+/// Unix only (a mode of 000 does not lock a folder on Windows); as root
+/// the folder stays readable, and the test checks only the clean exit.
+#[cfg(unix)]
+#[test]
+fn strict_exits_1_and_rows_mark_unreadable_folders() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tree::new("strict");
+    t.file("st-outer/st-locked/x", 10);
+    t.file("st-outer/ok.bin", 200_000);
+    let locked = t.root.join("st-outer/st-locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let blocked = fs::read_dir(&locked).is_err();
+    let plain = t.du(&["--no-git", "--all-dirs", "."]);
+    let strict = t.du(&["--no-git", "--all-dirs", "--strict", "."]);
+    let tree = t.du(&["--no-git", "--tree", "."]);
+    let json = t.du(&["--json", "--no-git", "--strict", "."]);
+    let ncdu = t.du(&["--ncdu=-", "--strict", "."]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    let clean = t.du(&["--no-git", "--strict", "."]);
+    let text = |o: &Output| String::from_utf8_lossy(&o.stdout).into_owned();
+    let err = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    assert_eq!(clean.status.code(), Some(0), "{}", err(&clean));
+    if !blocked {
+        return;
+    }
+    assert_eq!(plain.status.code(), Some(0), "{}", err(&plain));
+    for o in [&strict, &json, &ncdu] {
+        assert_eq!(o.status.code(), Some(1), "{}", err(o));
+    }
+    let rows = |o: &Output, end: &str, note: &str| {
+        text(o)
+            .lines()
+            .filter(|l| l.ends_with(end) && l.contains(note))
+            .count()
+    };
+    for o in [&plain, &strict] {
+        assert_eq!(rows(o, "/st-locked/", "  unreadable  "), 1, "{}", text(o));
+        assert_eq!(rows(o, "/st-outer/", "  incomplete  "), 1, "{}", text(o));
+    }
+    assert_eq!(
+        rows(&tree, "st-locked/  (unreadable)", ""),
+        1,
+        "{}",
+        text(&tree)
+    );
+    assert_eq!(
+        rows(&tree, "st-outer/  (incomplete)", ""),
+        1,
+        "{}",
+        text(&tree)
+    );
+    assert!(text(&json).contains("\"unreadable\":1"), "{}", text(&json));
+    assert!(
+        text(&ncdu).contains("\"read_error\":true"),
+        "{}",
+        text(&ncdu)
+    );
+}

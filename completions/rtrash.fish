@@ -135,6 +135,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dirs-fi
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l reverse -d 'print each table in reverse, the top row last'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s s -l summarize -d 'print only the totals, no rows'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l skip-total -d 'print the rows without the Total lines'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l strict -d 'exit 1 when any entry could not be read'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l inodes -d 'rank by inodes and total them'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l unique -d 'add a UNIQUE column of bytes no other file shares'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l shared -d 'count each shared extent once in sizes'

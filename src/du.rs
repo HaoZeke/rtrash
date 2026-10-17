@@ -80,6 +80,9 @@ directories appear as one `trash` row and are never printed by --print0.
       --no-unicode      draw --tree with ASCII lines (|--, `--), for
                           consoles without UTF-8 (gdu --no-unicode)
   -s, --summarize       print only the totals, no rows (GNU du -s, gdu)
+      --strict          exit 1 when any entry could not be read, after the
+                          usual output (GNU du's status; the listing, --json
+                          and ncdu export)
       --skip-total      print the rows without the Total lines (dust)
       --reverse         print each table in reverse, the top row last
                           (dust -r); JSON and --print0 keep the ranking
@@ -1093,7 +1096,11 @@ fn enter(
                 return unreadable(e);
             }
             ctx.unread(|| path.to_path_buf(), e);
-            return Some(shut(st));
+            // It gets a row of its own, its own blocks only, so the table
+            // and the tree can mark it, as ncdu lists it with `!`.
+            let node = shut(st);
+            node.offer_self(ctx, path, depth, 0, None);
+            return Some(node);
         }
     };
     let st = match known {
@@ -1986,7 +1993,16 @@ fn dupes_out(
     0
 }
 
-fn ncdu_out(prog: &str, path: &Path, out: &Path, binary: bool, opts: &ScanOpts, now: i64) -> i32 {
+/// `--strict`: exit 1 when the export marked any entry `read_error`.
+fn ncdu_out(
+    prog: &str,
+    path: &Path,
+    out: &Path,
+    binary: bool,
+    opts: &ScanOpts,
+    now: i64,
+    strict: bool,
+) -> i32 {
     let spec = opts.filter.as_deref();
     let mounts = crate::du_ncdu::Mounts {
         one_file_system: opts.one_file_system,
@@ -2024,6 +2040,9 @@ fn ncdu_out(prog: &str, path: &Path, out: &Path, binary: bool, opts: &ScanOpts, 
             done.too_deep,
             MAX_PATH_BYTES / 1024
         );
+    }
+    if strict && done.unreadable > 0 {
+        return 1;
     }
     0
 }
@@ -2253,10 +2272,33 @@ fn item_json(it: &Item) -> String {
 }
 
 /// Tags shown in the NOTE column.
-fn notes(it: &Item) -> String {
+/// Unreadable entries as the report keeps them: path and reason.
+type Unread = [(PathBuf, String)];
+
+/// `unreadable` for a directory the scan could not read, `incomplete` for
+/// one with an unreadable entry below it (its sizes are low), as ncdu
+/// marks `!` and `.`; None otherwise. The report keeps the first 100
+/// unreadable paths, so rows past those go unmarked.
+fn read_mark(it: &Item, unread: &Unread) -> Option<&'static str> {
+    if !it.is_dir {
+        return None;
+    }
+    if unread.iter().any(|(p, _)| *p == it.path) {
+        Some("unreadable")
+    } else if unread.iter().any(|(p, _)| p.starts_with(&it.path)) {
+        Some("incomplete")
+    } else {
+        None
+    }
+}
+
+fn notes(it: &Item, unread: &Unread) -> String {
     let mut v: Vec<String> = Vec::new();
     if let Some(a) = it.artefact {
         v.push(a.to_string());
+    }
+    if let Some(m) = read_mark(it, unread) {
+        v.push(m.to_string());
     }
     if let Some((s, _)) = &it.git {
         v.push(format!("git:{}", s.as_str()));
@@ -2430,6 +2472,8 @@ struct Columns<'a> {
     /// `--reverse`: the smallest (or oldest) row first, so the largest
     /// ends at the bottom next to the prompt, as dust -r.
     reverse: bool,
+    /// The report's unreadable paths, for the NOTE column.
+    unread: &'a Unread,
 }
 
 /// `42.5%`: the part of the scan root that holds `it`, or `-` when no
@@ -2592,7 +2636,7 @@ fn tree_lines(
             format_bytes(root.apparent),
             root.path.display()
         ));
-        tree_level(&kids, &root.path, "", glyphs, &mut out);
+        tree_level(&kids, &root.path, "", glyphs, &report.unread, &mut out);
     }
     out
 }
@@ -2602,6 +2646,7 @@ fn tree_level(
     dir: &Path,
     prefix: &str,
     glyphs: &TreeGlyphs,
+    unread: &Unread,
     out: &mut Vec<String>,
 ) {
     let Some(rows) = kids.get(dir) else {
@@ -2613,15 +2658,18 @@ fn tree_level(
         let (branch, more) = if n == last { (end, gap) } else { (mid, rail) };
         let name = it.path.file_name().unwrap_or(it.path.as_os_str());
         let slash = if it.is_dir { "/" } else { "" };
+        let mark = read_mark(it, unread)
+            .map(|m| format!("  ({m})"))
+            .unwrap_or_default();
         out.push(format!(
-            "{:>10}  {:>10}  {prefix}{branch}{}{slash}",
+            "{:>10}  {:>10}  {prefix}{branch}{}{slash}{mark}",
             format_bytes(it.disk),
             format_bytes(it.apparent),
             name.to_string_lossy()
         ));
         if it.is_dir {
             let prefix = format!("{prefix}{more}");
-            tree_level(kids, &it.path, &prefix, glyphs, out);
+            tree_level(kids, &it.path, &prefix, glyphs, unread, out);
         }
     }
 }
@@ -2635,6 +2683,7 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
         bars,
         graph,
         reverse,
+        unread,
     } = cols;
     if items.is_empty() {
         return;
@@ -2642,7 +2691,7 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
     println!("{title}");
     let width = items
         .iter()
-        .map(|it| notes(it).len())
+        .map(|it| notes(it, unread).len())
         .max()
         .unwrap_or(4)
         .max(4);
@@ -2716,7 +2765,7 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
             uniques(&it.unique.map(format_bytes).unwrap_or_default()),
             counts(&it.items.to_string()),
             when_of(it),
-            notes(it),
+            notes(it, unread),
             path
         );
     }
@@ -2781,7 +2830,11 @@ pub fn pick_rows(report: &Report) -> Vec<crate::put_tui::PathRow> {
         .chain(report.files.iter())
         .filter(|it| it.artefact != Some("trash"))
         .collect();
-    let width = items.iter().map(|it| notes(it).len()).max().unwrap_or(1);
+    let width = items
+        .iter()
+        .map(|it| notes(it, &report.unread).len())
+        .max()
+        .unwrap_or(1);
     items
         .into_iter()
         .map(|it| crate::put_tui::PathRow {
@@ -2790,7 +2843,7 @@ pub fn pick_rows(report: &Report) -> Vec<crate::put_tui::PathRow> {
             label: Some(format!(
                 "{:>10}  {:<width$}  {}",
                 format_bytes(it.disk),
-                notes(it),
+                notes(it, &report.unread),
                 it.path.display()
             )),
             warn: it.git.as_ref().is_some_and(|(s, _)| s.is_risky()),
@@ -3038,6 +3091,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut tree: Option<usize> = None;
     let mut ascii = false;
     let mut dirs_first = false;
+    let mut strict = false;
     let mut reverse = false;
     let mut summarize = false;
     let mut skip_total = false;
@@ -3251,6 +3305,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--tree" => tree = Some(TREE_DEPTH),
                 "--no-unicode" => ascii = true,
                 "--dirs-first" => dirs_first = true,
+                "--strict" => strict = true,
                 "--reverse" => reverse = true,
                 // GNU du -s and gdu --summarize: the totals, no rows.
                 "-s" | "--summarize" => summarize = true,
@@ -3491,7 +3546,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             eprintln!("{prog}: {flag} exports one PATH");
             return 2;
         }
-        return ncdu_out(prog, &paths[0], out, ncdu_binary, &opts, now);
+        return ncdu_out(prog, &paths[0], out, ncdu_binary, &opts, now, strict);
     }
     if stacks && (output.is_some() || json || print0 || pick || interactive) {
         eprintln!("{prog}: --stacks prints folded stacks; it takes no other output mode");
@@ -3568,6 +3623,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     bars,
                     graph,
                     reverse,
+                    unread: &report.unread,
                 },
             );
             for t in report.roots.iter().filter(|_| !skip_total) {
@@ -3741,6 +3797,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 bars,
                 graph,
                 reverse,
+                unread: &report.unread,
             };
             print_table(&opts.sort.title("directories"), &report.dirs, now, cols);
             print_table(&opts.sort.title("files"), &report.files, now, cols);
@@ -3821,6 +3878,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if report.partial {
         eprintln!("{prog}: interrupted; the listing covers what was scanned before Ctrl-C");
         return 130;
+    }
+    if strict && report.unreadable > 0 {
+        return 1;
     }
     0
 }
