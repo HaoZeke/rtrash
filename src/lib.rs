@@ -77,6 +77,8 @@ pub mod shell_assets;
 pub mod space;
 #[cfg(unix)]
 pub mod status;
+#[cfg(unix)]
+pub mod trash_check;
 pub mod trash_history;
 #[cfg(unix)]
 pub mod trash_inodes;

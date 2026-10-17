@@ -30,7 +30,7 @@ _rtrash_trash_stats_opts=(
 
 _rtrash_status_opts=(
   --home-only --trash-dir= --older-than= --newer-than= --json
-  --larger-than= --smaller-than= --help --version
+  --larger-than= --smaller-than= --check --fix -n --dry-run --help --version
 )
 
 _rtrash_du_opts=(

@@ -1425,3 +1425,18 @@ fn allow_roots_keeps_finder_put_restore_and_rm_inside() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(inside.join("fa-a").exists() && !b.finder().join("fa-a").exists());
 }
+
+/// `status --check` on the Finder Trash says it has no records to check,
+/// exits 0 and touches nothing; `--fix` the same.
+#[test]
+fn status_check_explains_the_finder_trash_has_no_records() {
+    let b = Box_::new("fcheck");
+    fs::write(b.work().join("fk-a"), "fk-a").unwrap();
+    assert!(b.run(&["put", "fk-a"], "").status.success());
+    for args in [&["status", "--check"][..], &["status", "--check", "--fix"]] {
+        let o = b.run(args, "");
+        assert_eq!(o.status.code(), Some(0), "{args:?}: {}", err(&o));
+        assert!(err(&o).contains("no .trashinfo records"), "{}", err(&o));
+        assert!(b.finder().join("fk-a").exists(), "{args:?}");
+    }
+}

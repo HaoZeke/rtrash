@@ -834,6 +834,55 @@ on disk.
 Emit a JSON object
 (\fIroots\fR, \fItotal_items\fR, \fItotal_bytes\fR).
 .TP
+.B \-\-check
+Check each record instead of summing up, and print one line per
+problem: a record whose payload is gone
+.RB ( dangling: ),
+a record that cannot serve a restore because it cannot be read, has no
+.B Path=
+line, or names a relative path that climbs out of its volume
+.RB ( "bad record:" ),
+a record with no readable
+.B DeletionDate=
+.RB ( "bad date:" ),
+a payload with no record
+.RB ( orphan: )
+and a name in
+.I info/
+that is not a
+.I .trashinfo
+.RB ( stray: ).
+A summary goes to stderr, and the exit status is 1 when anything is
+found.
+It takes only
+.BR \-\-home\-only ,
+.BR \-\-trash\-dir ,
+.B \-\-fix
+and
+.BR \-n .
+On macOS the Finder Trash keeps no records, so pin
+.B \-\-trash\-dir
+to check a FreeDesktop trash there.
+.TP
+.B \-\-fix
+With
+.BR \-\-check ,
+remove the dangling and bad records, under each trash's lock; a payload
+that a bad record named stays, as an orphan.
+Bad dates, orphans and stray names are left for you.
+.B RTRASH_NO_PERMANENT
+refuses it,
+.B RTRASH_MAX_PERMANENT
+caps it before the first removal, and with
+.B RTRASH_ALLOW_ROOTS
+set a dangling record must name a path under a root, while a bad
+record, whose origin is unknown, refuses the run.
+.TP
+.BR \-n ", " \-\-dry\-run
+With
+.BR \-\-fix ,
+print what it would remove and remove nothing.
+.TP
 .B \-\-help
 Display help and exit.
 .TP

@@ -6949,3 +6949,147 @@ fn allow_roots_keeps_put_restore_and_rm_inside() {
     let out = sb.run_env(&["put", "ar-out/ar-d"], &[("RTRASH_ALLOW_ROOTS", "")]);
     assert!(out.status.success(), "{}", stderr_of(&out));
 }
+
+/// The `info/` names of the sandbox trash, sorted.
+fn info_names(sb: &Sandbox) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(sb.trash().join("info"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+/// The stdout lines of `out` that start with `prefix`.
+fn lines_starting(out: &Output, prefix: &str) -> usize {
+    stdout_of(out)
+        .lines()
+        .filter(|l| l.starts_with(prefix))
+        .count()
+}
+
+/// `status --check` finds each kind of problem once, `--fix -n` and every
+/// guard leave the trash as it was just before, and `--fix` removes the
+/// dangling and bad records only, keeping the bad record's payload.
+#[test]
+fn status_check_reports_and_fix_removes_only_broken_records() {
+    let sb = Sandbox::new("trashcheck");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("ck-a");
+    assert!(sb.run(&["put", "ck-a"]).status.success());
+    let (info, files) = (sb.trash().join("info"), sb.trash().join("files"));
+    let record = |name: &str, body: &str| {
+        fs::write(info.join(format!("{name}.trashinfo")), body).unwrap();
+    };
+    let work = sb.work().display().to_string();
+    let good = |name: &str| {
+        format!("[Trash Info]\nPath={work}/{name}\nDeletionDate=2026-01-02T03:04:05\n")
+    };
+    record("ck-gone", &good("ck-gone"));
+    record("ck-bad", "[Trash Info]\nDeletionDate=2026-01-02T03:04:05\n");
+    fs::write(files.join("ck-bad"), b"bad").unwrap();
+    record(
+        "ck-date",
+        &format!("[Trash Info]\nPath={work}/ck-date\nDeletionDate=soon\n"),
+    );
+    fs::write(files.join("ck-date"), b"date").unwrap();
+    fs::write(files.join("ck-orph"), b"orph").unwrap();
+    fs::write(info.join("ck-stray.txt"), b"stray").unwrap();
+
+    let check = sb.run(&["status", &pin, "--check"]);
+    assert_eq!(check.status.code(), Some(1), "{}", stderr_of(&check));
+    for prefix in [
+        "dangling: ",
+        "bad record: ",
+        "bad date: ",
+        "orphan: ",
+        "stray: ",
+    ] {
+        assert_eq!(
+            lines_starting(&check, prefix),
+            1,
+            "{prefix}: {}",
+            stdout_of(&check)
+        );
+    }
+    assert!(!stdout_of(&check).contains("ck-a"), "{}", stdout_of(&check));
+    assert!(
+        stderr_of(&check).contains("5 problems found, 2 records --fix would remove"),
+        "{}",
+        stderr_of(&check)
+    );
+
+    // Each of these leaves info/ and files/ as they were just before it.
+    let unchanged = |args: &[&str], envs: &[(&str, &str)], code: i32| {
+        let (info_before, files_before) = (info_names(&sb), names_in_trash(&sb));
+        let out = sb.run_env(args, envs);
+        assert_eq!(
+            out.status.code(),
+            Some(code),
+            "{args:?} {envs:?}: {}",
+            stderr_of(&out)
+        );
+        assert_eq!(info_names(&sb), info_before, "{args:?} {envs:?}");
+        assert_eq!(names_in_trash(&sb), files_before, "{args:?} {envs:?}");
+        out
+    };
+    let fix = ["status", pin.as_str(), "--check", "--fix"];
+    let dry = ["status", pin.as_str(), "--check", "--fix", "-n"];
+    let out = unchanged(&dry, &[], 1);
+    assert_eq!(
+        lines_starting(&out, "would remove "),
+        2,
+        "{}",
+        stdout_of(&out)
+    );
+    let out = unchanged(&fix, &[("RTRASH_NO_PERMANENT", "1")], 2);
+    assert!(
+        stderr_of(&out).contains("RTRASH_NO_PERMANENT"),
+        "{}",
+        stderr_of(&out)
+    );
+    let out = unchanged(&fix, &[("RTRASH_MAX_PERMANENT", "1")], 2);
+    assert!(
+        stderr_of(&out).contains("more than the cap of 1"),
+        "{}",
+        stderr_of(&out)
+    );
+    // The bad record names no origin, so a scope refuses the whole fix.
+    let out = unchanged(&fix, &[("RTRASH_ALLOW_ROOTS", work.as_str())], 2);
+    let outside = stderr_of(&out)
+        .lines()
+        .filter(|l| l.ends_with("is outside RTRASH_ALLOW_ROOTS"))
+        .count();
+    assert_eq!(outside, 1, "{}", stderr_of(&out));
+    unchanged(&["status", pin.as_str(), "--fix"], &[], 2);
+
+    let out = sb.run(&fix);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert_eq!(lines_starting(&out, "removed "), 2, "{}", stdout_of(&out));
+    assert_eq!(
+        info_names(&sb),
+        ["ck-a.trashinfo", "ck-date.trashinfo", "ck-stray.txt"]
+    );
+    assert_eq!(
+        names_in_trash(&sb),
+        ["ck-a", "ck-bad", "ck-date", "ck-orph"]
+    );
+
+    // What is left is for the user: the date, two orphans, the stray name.
+    let again = sb.run(&["status", &pin, "--check"]);
+    assert_eq!(again.status.code(), Some(1), "{}", stderr_of(&again));
+    assert_eq!(
+        lines_starting(&again, "orphan: "),
+        2,
+        "{}",
+        stdout_of(&again)
+    );
+    for prefix in ["dangling: ", "bad record: "] {
+        assert_eq!(lines_starting(&again, prefix), 0, "{}", stdout_of(&again));
+    }
+    assert!(
+        stderr_of(&again).contains("4 problems found, 0 records --fix would remove"),
+        "{}",
+        stderr_of(&again)
+    );
+}

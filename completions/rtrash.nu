@@ -187,6 +187,9 @@ export extern "rtrash status" [
     --larger-than: string  # only count items taking more than SIZE on disk
     --smaller-than: string  # only count items taking less than SIZE on disk
     --json  # emit a JSON object (scripts)
+    --check  # check each record and list problems
+    --fix  # with --check, remove broken and dangling records
+    --dry-run(-n)  # with --fix, print what it would remove
     --help  # display this help and exit
     --version  # output version information and exit
 ]

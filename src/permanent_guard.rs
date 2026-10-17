@@ -160,6 +160,7 @@ pub fn deletes_for_good(cmd: &str, args: &[String]) -> bool {
             .iter()
             .any(|a| a == "--permanent" || a == "--purge-trash"),
         "wsl" => matches!(args.first().map(String::as_str), Some("rm" | "empty")),
+        "status" => args.iter().any(|a| a == "--fix"),
         _ => false,
     }
 }
@@ -255,6 +256,8 @@ mod tests {
         assert!(deletes_for_good("wsl", &args(&["empty", "--all"])));
         assert!(deletes_for_good("wsl", &args(&["rm", "x"])));
         assert!(!deletes_for_good("wsl", &args(&["list"])));
+        assert!(deletes_for_good("status", &args(&["--check", "--fix"])));
+        assert!(!deletes_for_good("status", &args(&["--check"])));
         assert!(!deletes_for_good("put", &args(&["x"])));
         assert!(!deletes_for_good("restore", &args(&["x"])));
     }

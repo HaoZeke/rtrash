@@ -27,6 +27,13 @@ on stderr to remove them with `rtrash empty --dangling`.
       --smaller-than=SIZE only count items taking less than SIZE on disk
                      (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
       --json            emit a JSON object (scripts)
+      --check           check each record instead: list records whose
+                     payload is gone or that cannot serve a restore, bad
+                     dates, payloads with no record and stray names in
+                     info/; exit 1 when it finds any
+      --fix             with --check, remove the records whose payload is
+                     gone or that cannot serve a restore (a payload stays)
+  -n, --dry-run         with --fix, print what it would remove
       --help            display this help and exit
       --version         output version information and exit
 ";
@@ -38,6 +45,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
     let mut size = list::SizeFilter::default();
+    let (mut check, mut fix, mut dry_run) = (false, false, false);
     let mut i = 0usize;
     while i < args.len() {
         match size.take(args, &mut i) {
@@ -55,6 +63,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         match arg.as_str() {
             "--home-only" => home_only = true,
             "--json" => json = true,
+            "--check" => check = true,
+            "--fix" => fix = true,
+            "-n" | "--dry-run" => dry_run = true,
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -111,6 +122,29 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if let Err(e) = size.check() {
         eprintln!("{prog}: {e}");
         return 2;
+    }
+    if (fix || dry_run) && !check {
+        eprintln!("{prog}: --fix and --dry-run need --check");
+        return 2;
+    }
+    if check {
+        let filtered = older_than.is_some() || newer_than.is_some() || size.is_set();
+        if json || filtered {
+            eprintln!("{prog}: --check takes only --home-only, --trash-dir, --fix and -n");
+            return 2;
+        }
+        if crate::finder::is_default(!trash_dirs.is_empty()) {
+            eprintln!(
+                "{prog}: the Finder Trash has no .trashinfo records; pin --trash-dir to check one"
+            );
+            return 0;
+        }
+        let dirs = trashdir::resolve_dirs_opts(&trash_dirs, home_only);
+        if dirs.is_empty() && !trash_dirs.is_empty() {
+            eprintln!("{prog}: no valid --trash-dir pins");
+            return 2;
+        }
+        return crate::trash_check::run(prog, &dirs, fix, dry_run);
     }
     // macOS sums up the Finder Trash unless a pin or the setting says
     // otherwise.
