@@ -5,9 +5,10 @@
 // The browsers and their helpers exist only with the `tui` feature.
 #![cfg(all(unix, feature = "tui"))]
 
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Mutex;
 
 /// Serialise tests that mutate process env (put_one reads XDG_DATA_HOME).
@@ -18,10 +19,6 @@ use rtrash::list;
 use rtrash::put_tui;
 use rtrash::restore_tui;
 use rtrash::trashdir;
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_rtrash")
-}
 
 struct TrashSandbox {
     root: PathBuf,
@@ -60,14 +57,9 @@ impl TrashSandbox {
             let p = self.work().join(n);
             fs::write(&p, format!("payload-{n}").as_bytes()).unwrap();
         }
-        let mut cmd = Command::new(bin());
+        let mut cmd = common::rtrash(&self.root);
         cmd.arg("put").args(names);
-        let out = cmd
-            .current_dir(self.work())
-            .env("XDG_DATA_HOME", self.root.join("xdg"))
-            .env("HOME", &self.root)
-            .output()
-            .expect("put");
+        let out = cmd.current_dir(self.work()).output().expect("put");
         assert!(
             out.status.success(),
             "put failed: {}",

@@ -8,7 +8,6 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use rtrash::win_recycle::{encode_recycle_i_v2, FILETIME_UNIX_EPOCH};
 
@@ -46,7 +45,7 @@ impl Fake {
     }
 
     fn run(&self, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        common::rtrash(&self.top)
             .arg("wsl")
             .args(args)
             .env("RTRASH_WSL_OSRELEASE", self.top.join("osrelease"))
@@ -59,7 +58,7 @@ impl Fake {
 
     /// `run` with `RTRASH_ALLOW_ROOTS` set to `roots`.
     fn run_scoped(&self, args: &[&str], roots: &Path) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        common::rtrash(&self.top)
             .arg("wsl")
             .args(args)
             .env("RTRASH_WSL_OSRELEASE", self.top.join("osrelease"))
@@ -73,7 +72,7 @@ impl Fake {
 
     /// `run` with `RTRASH_NO_PERMANENT=1`.
     fn run_guarded(&self, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        common::rtrash(&self.top)
             .arg("wsl")
             .args(args)
             .env("RTRASH_WSL_OSRELEASE", self.top.join("osrelease"))
@@ -166,7 +165,7 @@ fn wsl_commands_need_wsl_and_a_known_action() {
     assert_eq!(f.run(&["nope"]).status.code(), Some(2));
     assert_eq!(f.run(&[]).status.code(), Some(2));
     assert!(f.run(&["--help"]).status.success());
-    let out = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+    let out = common::rtrash(&f.top)
         .args(["wsl", "list"])
         .env("RTRASH_WSL_OSRELEASE", f.top.join("missing"))
         .output()

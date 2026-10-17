@@ -2,12 +2,10 @@
 //! script is the one that matters.
 #![cfg(windows)]
 
+mod common;
+
 use std::path::Path;
 use std::process::Command;
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_rtrash")
-}
 
 fn read(rel: &str) -> String {
     std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)).unwrap()
@@ -20,17 +18,20 @@ fn completions_and_man_print_the_embedded_files() {
         ("pwsh", "completions/rtrash.ps1"),
         ("bash", "completions/rtrash.bash"),
     ] {
-        let out = Command::new(bin())
+        let out = common::rtrash_real(common::Real::NoTrash)
             .args(["completions", shell])
             .output()
             .unwrap();
         assert!(out.status.success(), "completions {shell}");
         assert_eq!(String::from_utf8_lossy(&out.stdout), read(file), "{shell}");
     }
-    let out = Command::new(bin()).arg("man").output().unwrap();
+    let out = common::rtrash_real(common::Real::NoTrash)
+        .arg("man")
+        .output()
+        .unwrap();
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains(".TH RTRASH 1"));
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::NoTrash)
         .args(["completions", "tcsh"])
         .output()
         .unwrap();
@@ -39,7 +40,10 @@ fn completions_and_man_print_the_embedded_files() {
 
 /// Long options from the option table of `rtrash SUB --help` on Windows.
 fn help_long_opts(sub: &str) -> Vec<String> {
-    let out = Command::new(bin()).args([sub, "--help"]).output().unwrap();
+    let out = common::rtrash_real(common::Real::NoTrash)
+        .args([sub, "--help"])
+        .output()
+        .unwrap();
     assert!(out.status.success(), "{sub} --help");
     let mut opts = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -106,7 +110,7 @@ fn pwsh_completes_the_windows_options() {
     let dir = std::env::temp_dir().join(format!("rtrash-pwsh-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("rtrash.ps1");
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::NoTrash)
         .args(["completions", "powershell"])
         .output()
         .unwrap();
@@ -130,7 +134,7 @@ fn pwsh_completes_the_windows_options() {
     );
     let got = String::from_utf8_lossy(&run.stdout).trim().to_string();
     // An option the help shows as `--name=VALUE` completes with its `=`.
-    let help = Command::new(bin())
+    let help = common::rtrash_real(common::Real::NoTrash)
         .args(["empty", "--help"])
         .output()
         .unwrap();

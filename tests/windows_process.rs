@@ -2,14 +2,12 @@
 //! ask the Restart Manager which processes have a file open.
 #![cfg(windows)]
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Duration, SystemTime};
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_rtrash")
-}
 
 fn sandbox(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("rtrash-win-{name}-{}", std::process::id()));
@@ -19,7 +17,7 @@ fn sandbox(name: &str) -> PathBuf {
 }
 
 fn run(home: &Path, args: &[&str]) -> Output {
-    Command::new(bin())
+    common::rtrash_real(common::Real::RecycleBin)
         .args(args)
         .env("HOME", home)
         .env("USERPROFILE", home)

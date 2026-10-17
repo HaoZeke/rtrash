@@ -10,11 +10,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
-use std::process::{Command, Output};
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_rtrash")
-}
+use std::process::Output;
 
 struct Rng(u64);
 impl Rng {
@@ -71,13 +67,9 @@ impl Sb {
         self.root.join("xdg/Trash")
     }
     fn run(&self, args: &[&OsStr]) -> Output {
-        let out = Command::new(bin())
+        let out = common::rtrash(&self.root)
             .args(args)
             .current_dir(self.work())
-            .env("XDG_DATA_HOME", self.root.join("xdg"))
-            .env("XDG_CONFIG_HOME", self.root.join(".config"))
-            .env("HOME", &self.root)
-            .env("RTRASH_MACOS_TRASH", "freedesktop")
             .output()
             .unwrap();
         let err = String::from_utf8_lossy(&out.stderr);

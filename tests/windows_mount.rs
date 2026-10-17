@@ -12,10 +12,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_rtrash")
-}
-
 fn mounted() -> Option<PathBuf> {
     std::env::var_os("RTRASH_MOUNTED_DIR").map(PathBuf::from)
 }
@@ -30,14 +26,18 @@ fn local_app_data(tag: &str) -> PathBuf {
 
 /// The binary with a private `%LOCALAPPDATA%` and debug output on.
 fn cmd(lad: &Path) -> Command {
-    let mut c = Command::new(bin());
+    let mut c = common::rtrash_real(common::Real::RecycleBin);
     c.env("LOCALAPPDATA", lad).env("RTRASH_DEBUG", "1");
     c
 }
 
 fn put(p: &Path) {
     fs::write(p, p.to_string_lossy().as_bytes()).unwrap();
-    let out = Command::new(bin()).arg("put").arg(p).output().unwrap();
+    let out = common::rtrash_real(common::Real::RecycleBin)
+        .arg("put")
+        .arg(p)
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "put {}: {:?}",
@@ -77,7 +77,7 @@ fn purge_takes_the_mounted_volume_recycle_bin_only() {
     let there = format!("rtrash-on-drive-{id}.txt");
     put(&m.join(&here));
     put(&std::env::temp_dir().join(&there));
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args([
             "reap",
             "--older-than=1h",
@@ -122,7 +122,7 @@ fn put_on_a_mounted_volume_writes_its_own_history() {
     let _ = fs::remove_dir_all(&local);
     let p = m.join(format!("rtrash-hist-{}.txt", std::process::id()));
     fs::write(&p, "h").unwrap();
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .arg("put")
         .arg(&p)
         .env("LOCALAPPDATA", &local)
@@ -159,14 +159,17 @@ fn status_and_devices_list_the_mounted_volume() {
         return;
     };
     let label = m.to_string_lossy().trim_end_matches('\\').to_lowercase();
-    let status = Command::new(bin()).arg("status").output().unwrap();
+    let status = common::rtrash_real(common::Real::RecycleBin)
+        .arg("status")
+        .output()
+        .unwrap();
     let text = String::from_utf8_lossy(&status.stdout).to_lowercase();
     assert!(
         text.lines()
             .any(|l| l.starts_with(&format!("free on {label}"))),
         "{text:?}"
     );
-    let devs = Command::new(bin())
+    let devs = common::rtrash_real(common::Real::RecycleBin)
         .args(["du", "--devices", "--json"])
         .output()
         .unwrap();
@@ -186,7 +189,7 @@ fn put_names_the_mounted_bin_and_status_counts_it() {
     let label = m.to_string_lossy().trim_end_matches('\\').to_lowercase();
     let f = m.join(format!("rtrash-where-{}.txt", std::process::id()));
     fs::write(&f, "x").unwrap();
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["put", "-v"])
         .arg(&f)
         .output()
@@ -201,7 +204,10 @@ fn put_names_the_mounted_bin_and_status_counts_it() {
         said.contains(&format!("(recycle bin of {label}")),
         "{said:?}"
     );
-    let status = Command::new(bin()).arg("status").output().unwrap();
+    let status = common::rtrash_real(common::Real::RecycleBin)
+        .arg("status")
+        .output()
+        .unwrap();
     let text = String::from_utf8_lossy(&status.stdout).to_lowercase();
     assert!(
         text.lines()
@@ -219,7 +225,7 @@ fn list_format_size_and_matchers_read_the_recycle_bin() {
     let p = m.join(&name);
     // A dry run checks and moves nothing.
     fs::write(&p, b"x").unwrap();
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["put", "--dry-run"])
         .arg(&p)
         .output()
@@ -228,7 +234,7 @@ fn list_format_size_and_matchers_read_the_recycle_bin() {
     assert!(p.exists());
     put(&p);
     let glob = format!("--glob={name}");
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["list", &glob, "--format={name}|{size}\\n"])
         .output()
         .unwrap();
@@ -242,12 +248,12 @@ fn list_format_size_and_matchers_read_the_recycle_bin() {
     let (n, size) = line.split_once('|').expect("one row");
     assert_eq!(n, name);
     assert!(size.parse::<u64>().unwrap() > 0, "{line}");
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["list", &glob, "--size"])
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 1);
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["list", "--format={nope}"])
         .output()
         .unwrap();
@@ -263,7 +269,7 @@ fn list_show_trashpath_names_the_recycle_bin_file() {
     let p = m.join(&name);
     put(&p);
     let glob = format!("--glob={name}");
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["list", &glob, "--show-trashpath"])
         .output()
         .unwrap();
@@ -279,7 +285,7 @@ fn list_show_trashpath_names_the_recycle_bin_file() {
     let file = at.file_name().unwrap().to_string_lossy().into_owned();
     assert!(file.starts_with("$R"), "{text}");
     assert!(at.exists(), "{text}");
-    let fmt = Command::new(bin())
+    let fmt = common::rtrash_real(common::Real::RecycleBin)
         .args(["list", &glob, "--show-trashpath", "--format={name}"])
         .output()
         .unwrap();
@@ -844,7 +850,10 @@ fn odd_names_survive_the_recycle_bin() {
         format!("two  spaces {id}"),
     ];
     let run = |args: &[&std::ffi::OsStr]| {
-        let o = Command::new(bin()).args(args).output().unwrap();
+        let o = common::rtrash_real(common::Real::RecycleBin)
+            .args(args)
+            .output()
+            .unwrap();
         let e = String::from_utf8_lossy(&o.stderr).into_owned();
         assert!(
             o.status.code() != Some(101) && !e.contains("panicked"),

@@ -21,6 +21,8 @@
 //! `RTRASH_FUZZ_ROUNDS` sets the number of rounds.
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
@@ -46,10 +48,6 @@ fn cap_memory(cmd: &mut Command) {
             Ok(())
         });
     }
-}
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_rtrash")
 }
 
 fn rounds() -> usize {
@@ -140,7 +138,7 @@ impl Sandbox {
     fn run(&self, args: &[String]) -> Output {
         let out_path = self.root.join("run.out");
         let err_path = self.root.join("run.err");
-        let mut cmd = Command::new(bin());
+        let mut cmd = common::rtrash(&self.root);
         // A child that reads without bound (a sizes cache linked to
         // /dev/zero, say) stops at 2 GiB instead of filling the memory.
         cap_memory(&mut cmd);
@@ -148,8 +146,6 @@ impl Sandbox {
             .args(args)
             .current_dir(self.work())
             .env("XDG_DATA_HOME", self.data())
-            .env("XDG_CONFIG_HOME", self.root.join(".config"))
-            .env("HOME", &self.root)
             .stdin(Stdio::null())
             .stdout(fs::File::create(&out_path).unwrap())
             .stderr(fs::File::create(&err_path).unwrap())

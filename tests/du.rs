@@ -11,10 +11,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime};
 
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_rtrash")
-}
-
 struct Tree {
     root: PathBuf,
 }
@@ -35,13 +31,12 @@ impl Tree {
     }
 
     fn du(&self, args: &[&str]) -> Output {
-        Command::new(bin())
+        common::rtrash(&self.root)
             .arg("du")
             .args(args)
             .current_dir(&self.root)
             .env("XDG_DATA_HOME", self.root.join(".xdg"))
             .env("XDG_CONFIG_HOME", self.root.join(".cfg"))
-            .env("HOME", &self.root)
             .output()
             .expect("run rtrash du")
     }
@@ -1369,9 +1364,11 @@ fn trash_is_one_row_and_summarized() {
     let trash = t.root.join("Trash");
     let pin = format!("--trash-dir={}", trash.display());
     t.file("junk/old.bin", 400_000);
-    let put = Command::new(bin())
+    let put = common::rtrash(&t.root)
         .args(["put", &pin, "-r", "junk"])
         .current_dir(&t.root)
+        .env("XDG_DATA_HOME", t.root.join(".xdg"))
+        .env("XDG_CONFIG_HOME", t.root.join(".cfg"))
         .output()
         .unwrap();
     assert!(
@@ -1798,14 +1795,13 @@ fn exclude_matches_names_that_are_not_utf8() {
     let odd = t.root.join("b").join(OsStr::from_bytes(b"n\xe9.log"));
     fs::write(&odd, vec![b'x'; 300_000]).unwrap();
     let run = |extra: &[&OsStr]| {
-        let out = Command::new(bin())
+        let out = common::rtrash(&t.root)
             .args(["du", "--json", "--no-git"])
             .args(extra)
             .arg("b")
             .current_dir(&t.root)
             .env("XDG_DATA_HOME", t.root.join(".xdg"))
             .env("XDG_CONFIG_HOME", t.root.join(".cfg"))
-            .env("HOME", &t.root)
             .output()
             .unwrap();
         assert!(
@@ -1866,14 +1862,13 @@ fn ctrl_c_keeps_a_partial_listing() {
     t.file("top.bin", 7000);
     t.file("sub/deep/far.bin", 90_000);
     let interrupted = |extra: &[&str]| {
-        let mut child = Command::new(bin())
+        let mut child = common::rtrash(&t.root)
             .args(["du", "--no-git", "-X", "-"])
             .args(extra)
             .arg(&t.root)
             .current_dir(&t.root)
             .env("XDG_DATA_HOME", t.root.join(".xdg"))
             .env("XDG_CONFIG_HOME", t.root.join(".cfg"))
-            .env("HOME", &t.root)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1963,12 +1958,11 @@ fn a_capped_address_space_walks_fewer_levels_instead_of_overflowing() {
         deep.push("d");
     }
     fs::create_dir_all(&deep).unwrap();
-    let mut cmd = Command::new(bin());
+    let mut cmd = common::rtrash(&t.root);
     cmd.args(["du", "-n", "1", "chain"])
         .current_dir(&t.root)
         .env("XDG_DATA_HOME", t.root.join(".xdg"))
         .env("XDG_CONFIG_HOME", t.root.join(".cfg"))
-        .env("HOME", &t.root)
         // Eight walk threads of 256 MiB fill a 2 GiB cap on their own.
         .env("RAYON_NUM_THREADS", "8");
     // SAFETY: setrlimit is async-signal-safe and touches no memory of the
@@ -2004,7 +1998,7 @@ fn devices_list_the_test_file_system_with_known_numbers() {
     t.file("fs/small", 10);
     let fs_dir = t.root.join("fs");
     let devices = || {
-        let out = Command::new(bin())
+        let out = common::rtrash(&t.root)
             .args(["du", "--devices", "--json"])
             .env("RTRASH_TEST_FS", format!("10000000:{}", fs_dir.display()))
             .output()
@@ -2212,13 +2206,12 @@ fn diff_reads_a_snapshot_whose_name_is_not_utf8() {
     t.file("d/a", 4000);
     let snap = OsStr::from_bytes(b"snap-\xe9.json");
     let run = |args: &[&OsStr]| {
-        Command::new(bin())
+        common::rtrash(&t.root)
             .arg("du")
             .args(args)
             .current_dir(&t.root)
             .env("XDG_DATA_HOME", t.root.join(".xdg"))
             .env("XDG_CONFIG_HOME", t.root.join(".cfg"))
-            .env("HOME", &t.root)
             .output()
             .unwrap()
     };

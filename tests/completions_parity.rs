@@ -4,6 +4,8 @@
 //! whose `--help` text differs from the Windows one.
 #![cfg(unix)]
 
+mod common;
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -48,7 +50,7 @@ fn read(rel: &str) -> String {
 /// Long options from the option table of `rtrash SUB --help` (lines that
 /// start with whitespace and then `-x, --opt` or `--opt`).
 fn help_long_opts(sub: &str) -> Vec<String> {
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::NoTrash)
         .args([sub, "--help"])
         .output()
         .expect("run rtrash --help");
@@ -328,7 +330,7 @@ fn bash_restore_completes_trashed_items() {
         ("XDG_CONFIG_HOME", root.join(".config")),
         ("HOME", root.clone()),
     ];
-    let put = Command::new(bin())
+    let put = common::rtrash(&root)
         .args(["put", "a b.txt"])
         .current_dir(root.join("work"))
         .envs(envs.iter().map(|(k, v)| (*k, v.as_os_str())))
@@ -520,7 +522,10 @@ fn nu_block(script: &str, name: &str) -> String {
 /// Long options that `rtrash SUB --help` shows with an optional value,
 /// such as `--interactive[=WHEN]`.
 fn help_optional_value_opts(sub: &str) -> Vec<String> {
-    let out = Command::new(bin()).args([sub, "--help"]).output().unwrap();
+    let out = common::rtrash_real(common::Real::NoTrash)
+        .args([sub, "--help"])
+        .output()
+        .unwrap();
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.split("--")
         .skip(1)
@@ -583,7 +588,7 @@ fn nu_externs_cover_every_help_option() {
 /// installed.
 #[test]
 fn nu_script_is_embedded_and_parses() {
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::NoTrash)
         .args(["completions", "nu"])
         .output()
         .unwrap();
@@ -662,7 +667,7 @@ fn powershell_tables_cover_every_help_option() {
 /// completes from it when pwsh is installed.
 #[test]
 fn powershell_script_is_embedded_and_completes() {
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::NoTrash)
         .args(["completions", "powershell"])
         .output()
         .unwrap();
@@ -809,7 +814,7 @@ fn elvish_map_covers_every_help_option() {
 /// shell, so the run leaves out the lines that register the completer.
 #[test]
 fn elvish_script_is_embedded_and_completes() {
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::NoTrash)
         .args(["completions", "elvish"])
         .output()
         .unwrap();

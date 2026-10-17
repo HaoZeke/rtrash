@@ -7,15 +7,12 @@
 
 mod common;
 
-use std::process::Command;
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_rtrash")
-}
-
 #[test]
 fn status_shows_free_space_on_each_drive() {
-    let out = Command::new(bin()).arg("status").output().unwrap();
+    let out = common::rtrash_real(common::Real::RecycleBin)
+        .arg("status")
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -41,14 +38,14 @@ fn status_shows_free_space_on_each_drive() {
 
 #[test]
 fn restore_takes_no_space_check_and_status_rejects_a_bad_floor_quietly() {
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["restore", "--no-space-check", "--help"])
         .output()
         .unwrap();
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("--no-space-check"));
     // The floor only matters to a copy; status still reports.
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .arg("status")
         .env("RTRASH_MIN_FREE", "lots")
         .output()
@@ -58,7 +55,7 @@ fn restore_takes_no_space_check_and_status_rejects_a_bad_floor_quietly() {
 
 #[test]
 fn trash_stats_summarizes_the_recycle_bins_as_json() {
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["trash-stats", "--json", "--top=2"])
         .output()
         .unwrap();
@@ -76,7 +73,7 @@ fn trash_stats_summarizes_the_recycle_bins_as_json() {
 
 #[test]
 fn reap_install_timer_dry_run_prints_a_schtasks_command() {
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args([
             "reap",
             "--install-timer=30m",
@@ -134,14 +131,18 @@ fn reap_purge_trash_dry_run_lists_the_drive_recycle_bin_oldest_first() {
         }
         let p = base.join(name);
         fs::write(&p, name).unwrap();
-        let out = Command::new(bin()).arg("put").arg(&p).output().unwrap();
+        let out = common::rtrash_real(common::Real::RecycleBin)
+            .arg("put")
+            .arg(&p)
+            .output()
+            .unwrap();
         assert!(
             out.status.success(),
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
     }
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args([
             "reap",
             "--older-than=1h",
@@ -183,7 +184,7 @@ fn reap_install_timer_dry_run_prints_task_xml_for_a_long_command() {
     let mut args = vec!["reap", "--install-timer=30m", "-n", "--when-below=10%"];
     // Past the 261 characters /TR takes.
     args.extend(std::iter::repeat_n("--older-than=1h", 20));
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(&args)
         .env("LOCALAPPDATA", &local)
         .output()
@@ -216,7 +217,7 @@ fn reap_install_timer_dry_run_prints_task_xml_for_a_long_command() {
 
 #[test]
 fn reap_remove_timer_dry_run_prints_the_schtasks_delete() {
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["reap", "--remove-timer", "-n"])
         .output()
         .unwrap();
@@ -239,7 +240,7 @@ fn reap_remove_timer_dry_run_prints_the_schtasks_delete() {
 fn reap_install_timer_with_watch_makes_a_logon_task_and_starts_it() {
     let (fake, log) = fake_schtasks("watch-task");
     let local = log.parent().unwrap().join("local");
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["reap", "--install-timer", "--watch=5m", "--when-below=10%"])
         .env("RTRASH_TEST_SERVICE_TOOL", &fake)
         .env("LOCALAPPDATA", &local)
@@ -268,7 +269,7 @@ fn reap_install_timer_with_watch_makes_a_logon_task_and_starts_it() {
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(calls.contains("/Create /F /TN rtrash-reap /XML"), "{calls}");
     assert!(calls.contains("/Run /TN rtrash-reap"), "{calls}");
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["reap", "--remove-timer"])
         .env("RTRASH_TEST_SERVICE_TOOL", &fake)
         .env("LOCALAPPDATA", &local)
@@ -305,7 +306,7 @@ fn fake_schtasks(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 #[test]
 fn reap_timer_status_says_when_no_task_is_installed() {
     let (fake, log) = fake_schtasks("status");
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["reap", "--timer-status"])
         .env("RTRASH_TEST_SERVICE_TOOL", &fake)
         .output()
@@ -313,7 +314,7 @@ fn reap_timer_status_says_when_no_task_is_installed() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{text}");
     assert!(text.contains("no reap timer installed"), "{text}");
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["reap", "--timer-status", "--json"])
         .env("RTRASH_TEST_SERVICE_TOOL", &fake)
         .output()
@@ -335,13 +336,17 @@ fn put_adds_a_line_to_the_recycle_bin_history() {
     use std::fs;
     let p = std::env::temp_dir().join(format!("rtrash-history-{}.txt", std::process::id()));
     fs::write(&p, "history").unwrap();
-    let out = Command::new(bin()).arg("put").arg(&p).output().unwrap();
+    let out = common::rtrash_real(common::Real::RecycleBin)
+        .arg("put")
+        .arg(&p)
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["trash-stats", "--history", "--json", "--top=0"])
         .output()
         .unwrap();
@@ -381,7 +386,7 @@ fn trash_stats_history_lists_a_drive_whose_bin_is_empty() {
     let mut body = fs::read_to_string(&file).unwrap_or_default();
     body.push_str("1700000000 empty 0 0\n");
     fs::write(&file, body).unwrap();
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["trash-stats", "--history", "--json", "--top=0"])
         .output()
         .unwrap();
@@ -407,7 +412,7 @@ fn put_warns_when_the_recycle_bin_volume_is_low() {
     let put = |name: &str, fake: bool| {
         let f = base.join(name);
         std::fs::write(&f, b"x").unwrap();
-        let mut c = Command::new(bin());
+        let mut c = common::rtrash_real(common::Real::RecycleBin);
         c.args(["put", f.to_str().unwrap()])
             .env("RTRASH_TEST_BIN_ROOT", &vol)
             .env("RTRASH_IN_USE", "ignore");
@@ -445,13 +450,17 @@ fn empty_until_free_dry_run_reports_each_short_drive() {
     let name = format!("rtrash-untilfree-{}.txt", std::process::id());
     let p = base.join(&name);
     fs::write(&p, "until free").unwrap();
-    let out = Command::new(bin()).arg("put").arg(&p).output().unwrap();
+    let out = common::rtrash_real(common::Real::RecycleBin)
+        .arg("put")
+        .arg(&p)
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .args(["empty", "--until-free=999999G", "--json", "-n"])
         .output()
         .unwrap();
@@ -468,9 +477,11 @@ fn empty_until_free_dry_run_reports_each_short_drive() {
     );
     assert!(stderr.contains("from the Recycle Bin of"), "{stderr}");
     // The dry run left the item; take it out by name.
-    let _ = Command::new(bin()).args(["rm", &name]).output();
+    let _ = common::rtrash_real(common::Real::RecycleBin)
+        .args(["rm", &name])
+        .output();
     assert_eq!(
-        Command::new(bin())
+        common::rtrash_real(common::Real::RecycleBin)
             .args(["empty", "--until-free=10%", "3"])
             .output()
             .unwrap()
@@ -491,14 +502,18 @@ fn empty_max_size_dry_run_trims_the_recycle_bins() {
     let name = format!("rtrash-maxsize-{}.txt", std::process::id());
     let p = base.join(&name);
     fs::write(&p, "budget").unwrap();
-    let out = Command::new(bin()).arg("put").arg(&p).output().unwrap();
+    let out = common::rtrash_real(common::Real::RecycleBin)
+        .arg("put")
+        .arg(&p)
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let dry = |args: &[&str]| {
-        let out = Command::new(bin())
+        let out = common::rtrash_real(common::Real::RecycleBin)
             .arg("empty")
             .args(args)
             .arg("-n")
@@ -520,9 +535,11 @@ fn empty_max_size_dry_run_trims_the_recycle_bins() {
         json.starts_with(r#"{"dry_run":true,"removed":"#) && json.contains(r#""max_size":0}"#),
         "{json}"
     );
-    let _ = Command::new(bin()).args(["rm", &name]).output();
+    let _ = common::rtrash_real(common::Real::RecycleBin)
+        .args(["rm", &name])
+        .output();
     assert_eq!(
-        Command::new(bin())
+        common::rtrash_real(common::Real::RecycleBin)
             .args(["empty", "--prune=newest", "-n"])
             .output()
             .unwrap()
@@ -542,7 +559,7 @@ fn put_under_a_roomy_budget_trims_nothing() {
     let name = format!("rtrash-budget-{}.txt", std::process::id());
     let p = std::env::temp_dir().join(&name);
     fs::write(&p, "budget").unwrap();
-    let out = Command::new(bin())
+    let out = common::rtrash_real(common::Real::RecycleBin)
         .arg("put")
         .arg(&p)
         .env("RTRASH_MAX_SIZE", "999999G")
@@ -551,7 +568,9 @@ fn put_under_a_roomy_budget_trims_nothing() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{err}");
     assert!(!err.contains("to keep them under"), "{err}");
-    let _ = Command::new(bin()).args(["rm", &name]).output();
+    let _ = common::rtrash_real(common::Real::RecycleBin)
+        .args(["rm", &name])
+        .output();
 }
 
 /// `rm --json` on the Recycle Bin prints the FreeDesktop summary: a dry
@@ -562,14 +581,18 @@ fn rm_json_summarizes_the_recycle_bin_removal() {
     let name = format!("rtrash-rm-json-{}.txt", std::process::id());
     let p = std::env::temp_dir().join(&name);
     fs::write(&p, "rm json").unwrap();
-    let put = Command::new(bin()).arg("put").arg(&p).output().unwrap();
+    let put = common::rtrash_real(common::Real::RecycleBin)
+        .arg("put")
+        .arg(&p)
+        .output()
+        .unwrap();
     assert!(
         put.status.success(),
         "{}",
         String::from_utf8_lossy(&put.stderr)
     );
     let rm = |args: &[&str]| {
-        let out = Command::new(bin())
+        let out = common::rtrash_real(common::Real::RecycleBin)
             .arg("rm")
             .args(args)
             .arg(&name)

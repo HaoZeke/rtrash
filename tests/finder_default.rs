@@ -71,7 +71,7 @@ impl Box_ {
 
     /// `run` with `envs` set on top, stdin closed.
     fn run_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        common::rtrash_real(common::Real::Finder)
             .args(args)
             .current_dir(self.work())
             .env("HOME", &self.root)
@@ -91,7 +91,7 @@ impl Box_ {
     /// `run` with `RTRASH_NO_PERMANENT=1` (and `RTRASH_MAX_SIZE` when
     /// `budget` names one), stdin closed.
     fn run_guarded(&self, args: &[&str], budget: Option<&str>) -> Output {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_rtrash"));
+        let mut c = common::rtrash_real(common::Real::Finder);
         c.args(args)
             .current_dir(self.work())
             .env("HOME", &self.root)
@@ -242,7 +242,7 @@ fn a_pin_or_the_setting_keeps_the_freedesktop_trash() {
         "[macos]\ntrash = \"freedesktop\"\n",
     )
     .unwrap();
-    let mut c = Command::new(env!("CARGO_BIN_EXE_rtrash"));
+    let mut c = common::rtrash_real(common::Real::Finder);
     let o = c
         .args(["list"])
         .env("HOME", &b.root)
@@ -371,7 +371,7 @@ fn volume_trashes_join_list_restore_rm_and_status() {
     };
     fs::write(vt.join(".DS_Store"), ds_store::write(&[rec])).unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        common::rtrash_real(common::Real::Finder)
             .args(args)
             .current_dir(b.work())
             .env("HOME", &b.root)
@@ -941,7 +941,7 @@ fn empty_until_free_takes_finder_items() {
     assert!(b.run(&["put", p.to_str().unwrap()], "").status.success());
     let fs_spec = format!("{}:{}", 1u64 << 40, b.root.display());
     let run = |args: &[&str], spec: &str| {
-        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        common::rtrash_real(common::Real::Finder)
             .args(args)
             .env("HOME", &b.root)
             .env("XDG_DATA_HOME", b.root.join("xdg"))
@@ -973,7 +973,7 @@ fn a_budget_trims_the_finder_trash_after_put_and_low_space_warns() {
         let fs_total = fs_total.get();
         let p = b.work().join(name);
         fs::write(&p, "z".repeat(20_000)).unwrap();
-        let mut c = Command::new(env!("CARGO_BIN_EXE_rtrash"));
+        let mut c = common::rtrash_real(common::Real::Finder);
         c.arg("put")
             .arg(&p)
             .current_dir(b.work())
@@ -1024,7 +1024,7 @@ fn a_finder_put_warns_past_the_warn_size() {
     let put = |name: &str, warn: &str| {
         let p = b.work().join(name);
         fs::write(&p, "z".repeat(20_000)).unwrap();
-        Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        common::rtrash_real(common::Real::Finder)
             .arg("put")
             .arg(&p)
             .current_dir(b.work())

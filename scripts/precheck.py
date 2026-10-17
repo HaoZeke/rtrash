@@ -425,10 +425,12 @@ def check_cfg_helpers():
                     eff[i], changed = new, True
             if not changed:
                 break
+        # A file-level #![cfg(...)] already gates every fn in the file.
+        file_cfgs = frozenset(re.sub(r"\s+", "", m) for m in re.findall(r"(?m)^#!\[(cfg\(.*\))\]\s*$", raw))
         for i, f in enumerate(fns):
-            if f["cfgs"] or f["test"] or not eff[i]:
+            if f["cfgs"] or f["test"] or not eff[i] or not (eff[i] - file_cfgs):
                 continue
-            gate = " ".join(f"#[{c}]" for c in sorted(eff[i]))
+            gate = " ".join(f"#[{c}]" for c in sorted(eff[i] - file_cfgs))
             errors.append(f"{path.relative_to(ROOT)}:{f['start'] + 1}: fn {f['name']} is used only under {gate} "
                           "and is dead code elsewhere (cross-clippy fails); give it the same cfg")
 
@@ -462,23 +464,9 @@ def check_refusal_helpers():
                               "use common::OUTSIDE or common::outside_lines")
 
 
-# Unpinned rtrash runs still left per test file, not yet on common::rtrash.
-# The count may only go down: lower it (or drop the file) as callers move.
-UNPINNED_LEFT = {
-    "tests/completions_parity.rs": 6,
-    "tests/du.rs": 7,
-    "tests/finder_default.rs": 7,
-    "tests/odd_names.rs": 1,
-    "tests/reflink_fs.rs": 1,
-    "tests/trash_hostile.rs": 1,
-    "tests/tui_logic.rs": 1,
-    "tests/windows_completions.rs": 6,
-    "tests/windows_mount.rs": 15,
-    "tests/windows_names.rs": 23,
-    "tests/windows_process.rs": 1,
-    "tests/windows_space.rs": 29,
-    "tests/wsl_bin.rs": 4,
-}
+# Bare rtrash runs allowed per test file. Empty since round 188: every test
+# goes through common::rtrash or common::rtrash_real.
+UNPINNED_LEFT: dict[str, int] = {}
 UNPINNED = re.compile(r'Command::new\(\s*(?:bin\(\)|env!\("CARGO_BIN_EXE_rtrash"\)|rtrash)\s*\)')
 
 

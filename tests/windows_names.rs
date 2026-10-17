@@ -86,7 +86,7 @@ fn trash_restore_scopes_to_the_current_directory() {
     // An item trashed from elsewhere stays out of the current directory scope.
     let gone = away.join("elsewhere.txt");
     fs::write(&gone, "x").unwrap();
-    let put = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+    let put = common::rtrash_real(common::Real::RecycleBin)
         .arg("put")
         .arg(&gone)
         .output()
@@ -108,7 +108,7 @@ fn trash_restore_scopes_to_the_current_directory() {
         .unwrap();
     let all_out = String::from_utf8_lossy(&all.stdout).into_owned();
     // Tidy the Recycle Bin item before the asserts.
-    let _ = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+    let _ = common::rtrash_real(common::Real::RecycleBin)
         .arg("restore")
         .arg(&gone)
         .output();
@@ -135,7 +135,7 @@ fn trash_restore_takes_path_as_a_scope() {
     // One item from under sub/: trash-restore sub asks, as trash-cli does.
     let inner = sub.join("inner.txt");
     fs::write(&inner, "in").unwrap();
-    let put = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+    let put = common::rtrash_real(common::Real::RecycleBin)
         .arg("put")
         .arg(&inner)
         .output()
@@ -153,7 +153,7 @@ fn trash_restore_takes_path_as_a_scope() {
     let out = run_with(&restore, &dir, &["sub"], "0\n");
     let back = fs::read(&inner).ok();
     if back.is_none() {
-        let _ = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        let _ = common::rtrash_real(common::Real::RecycleBin)
             .arg("restore")
             .arg(&inner)
             .output();
@@ -188,7 +188,7 @@ fn trash_restore_takes_a_range_pick() {
     let names = ["a.txt", "b.txt", "c.txt"];
     for n in names {
         fs::write(sub.join(n), n).unwrap();
-        let put = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        let put = common::rtrash_real(common::Real::RecycleBin)
             .arg("put")
             .arg(sub.join(n))
             .output()
@@ -207,7 +207,7 @@ fn trash_restore_takes_a_range_pick() {
     let back: Vec<bool> = names.iter().map(|n| sub.join(n).exists()).collect();
     for n in names {
         if !sub.join(n).exists() {
-            let _ = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+            let _ = common::rtrash_real(common::Real::RecycleBin)
                 .arg("restore")
                 .arg(sub.join(n))
                 .output();
@@ -232,7 +232,7 @@ fn a_blank_pick_asks_for_an_index() {
     let names = ["one.txt", "two.txt"];
     for n in names {
         fs::write(sub.join(n), n).unwrap();
-        let put = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        let put = common::rtrash_real(common::Real::RecycleBin)
             .arg("put")
             .arg(sub.join(n))
             .output()
@@ -253,7 +253,7 @@ fn a_blank_pick_asks_for_an_index() {
     );
     let kept = names.iter().all(|n| !sub.join(n).exists());
     for n in names {
-        let _ = Command::new(env!("CARGO_BIN_EXE_rtrash"))
+        let _ = common::rtrash_real(common::Real::RecycleBin)
             .arg("restore")
             .arg(sub.join(n))
             .output();
@@ -276,7 +276,11 @@ fn restore_takes_age_filters_on_windows() {
     let file = dir.join("fresh.txt");
     fs::write(&file, "fresh").unwrap();
     let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
-    let put = Command::new(rtrash).arg("put").arg(&file).output().unwrap();
+    let put = common::rtrash_real(common::Real::RecycleBin)
+        .arg("put")
+        .arg(&file)
+        .output()
+        .unwrap();
     assert!(
         put.status.success(),
         "{}",
@@ -300,7 +304,10 @@ fn restore_takes_age_filters_on_windows() {
     );
     let back = fs::read(&file).ok();
     if back.is_none() {
-        let _ = Command::new(rtrash).arg("restore").arg(&file).output();
+        let _ = common::rtrash_real(common::Real::RecycleBin)
+            .arg("restore")
+            .arg(&file)
+            .output();
     }
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(
@@ -334,7 +341,11 @@ fn restore_takes_size_filters_on_windows() {
     fs::write(&small, "s").unwrap();
     let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
     for f in [&big, &small] {
-        let put = Command::new(rtrash).arg("put").arg(f).output().unwrap();
+        let put = common::rtrash_real(common::Real::RecycleBin)
+            .arg("put")
+            .arg(f)
+            .output()
+            .unwrap();
         assert!(
             put.status.success(),
             "{}",
@@ -352,7 +363,10 @@ fn restore_takes_size_filters_on_windows() {
     let bad = run_with(rtrash, &dir, &["restore", "--larger-than=lots"], "");
     for f in [&big, &small] {
         if !f.exists() {
-            let _ = Command::new(rtrash).arg("restore").arg(f).output();
+            let _ = common::rtrash_real(common::Real::RecycleBin)
+                .arg("restore")
+                .arg(f)
+                .output();
         }
     }
     let _ = fs::remove_dir_all(&dir);
@@ -384,7 +398,11 @@ fn restore_sorts_by_size_on_windows() {
     let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
     // The small file goes first, so date order would list it at 0.
     for f in [&small, &big] {
-        let put = Command::new(rtrash).arg("put").arg(f).output().unwrap();
+        let put = common::rtrash_real(common::Real::RecycleBin)
+            .arg("put")
+            .arg(f)
+            .output()
+            .unwrap();
         assert!(
             put.status.success(),
             "{}",
@@ -402,7 +420,10 @@ fn restore_sorts_by_size_on_windows() {
     let (big_back, small_back) = (big.exists(), small.exists());
     for f in [&big, &small] {
         if !f.exists() {
-            let _ = Command::new(rtrash).arg("restore").arg(f).output();
+            let _ = common::rtrash_real(common::Real::RecycleBin)
+                .arg("restore")
+                .arg(f)
+                .output();
         }
     }
     let _ = fs::remove_dir_all(&dir);
@@ -436,7 +457,10 @@ fn put_inspect_asks_with_the_size_on_windows() {
     let yes = run_with(rtrash, &dir, &["put", "--inspect", "proj"], "y\n");
     let gone = !proj.exists();
     if gone {
-        let _ = Command::new(rtrash).arg("restore").arg(&proj).output();
+        let _ = common::rtrash_real(common::Real::RecycleBin)
+            .arg("restore")
+            .arg(&proj)
+            .output();
     }
     let _ = fs::remove_dir_all(&dir);
     assert!(err.contains("remove directory '"), "{err}");
@@ -461,11 +485,18 @@ fn list_depth_shows_a_deleted_tree_on_windows() {
     fs::write(proj.join("sub").join("c.txt"), "c").unwrap();
     fs::write(proj.join("sub").join("deeper").join("x.txt"), "x").unwrap();
     let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
-    let put = Command::new(rtrash).arg("put").arg(&proj).output().unwrap();
+    let put = common::rtrash_real(common::Real::RecycleBin)
+        .arg("put")
+        .arg(&proj)
+        .output()
+        .unwrap();
     let scope = format!("--directory={}", dir.display());
     let out = run_with(rtrash, &dir, &["list", &scope, "--depth=2"], "");
     let bad = run_with(rtrash, &dir, &["list", "--depth=x"], "");
-    let _ = Command::new(rtrash).arg("restore").arg(&proj).output();
+    let _ = common::rtrash_real(common::Real::RecycleBin)
+        .arg("restore")
+        .arg(&proj)
+        .output();
     let _ = fs::remove_dir_all(&dir);
     assert!(
         put.status.success(),
@@ -489,11 +520,14 @@ fn no_permanent_guard_keeps_the_recycle_bin_on_windows() {
     fs::create_dir_all(&dir).unwrap();
     let file = dir.join("pg.txt");
     fs::write(&file, "trashed").unwrap();
-    let rtrash = env!("CARGO_BIN_EXE_rtrash");
-    let put = Command::new(rtrash).arg("put").arg(&file).output().unwrap();
+    let put = common::rtrash_real(common::Real::RecycleBin)
+        .arg("put")
+        .arg(&file)
+        .output()
+        .unwrap();
     fs::write(&file, "newer").unwrap();
     let guarded = |args: &[&str]| {
-        Command::new(rtrash)
+        common::rtrash_real(common::Real::RecycleBin)
             .args(args)
             .current_dir(&dir)
             .env("RTRASH_NO_PERMANENT", "1")
@@ -506,7 +540,7 @@ fn no_permanent_guard_keeps_the_recycle_bin_on_windows() {
     let kept = fs::read_to_string(&file).unwrap_or_default();
     // Put the trashed copy back so the Recycle Bin is left as found.
     let _ = fs::remove_file(&file);
-    let back = Command::new(rtrash)
+    let back = common::rtrash_real(common::Real::RecycleBin)
         .arg("restore")
         .arg(&file)
         .output()
@@ -539,18 +573,17 @@ fn max_count_refuses_a_recycle_bin_rm_past_the_cap() {
         .iter()
         .map(|n| dir.join(format!("{tag}-{n}.txt")))
         .collect();
-    let rtrash = env!("CARGO_BIN_EXE_rtrash");
     for f in &files {
         fs::write(f, "x").unwrap();
     }
-    let put = Command::new(rtrash)
+    let put = common::rtrash_real(common::Real::RecycleBin)
         .arg("put")
         .args(&files)
         .output()
         .unwrap();
     let pattern = format!("{tag}-*.txt");
     let rm = |args: &[&str], cap: Option<&str>| {
-        let mut c = Command::new(rtrash);
+        let mut c = common::rtrash_real(common::Real::RecycleBin);
         c.arg("rm").args(args).arg(&pattern).current_dir(&dir);
         match cap {
             Some(v) => c.env("RTRASH_MAX_PERMANENT", v),
@@ -604,9 +637,8 @@ fn allow_roots_scopes_the_recycle_bin_on_windows() {
     let stray = outside.join(format!("{tag}-y.txt"));
     fs::write(&file, "x").unwrap();
     fs::write(&stray, "y").unwrap();
-    let rtrash = env!("CARGO_BIN_EXE_rtrash");
     let run = |args: &[&std::ffi::OsStr], root: Option<&str>| {
-        let mut c = Command::new(rtrash);
+        let mut c = common::rtrash_real(common::Real::RecycleBin);
         c.args(args).current_dir(&dir);
         match root {
             Some(v) => c.env("RTRASH_ALLOW_ROOTS", v),

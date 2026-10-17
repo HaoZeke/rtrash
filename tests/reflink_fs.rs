@@ -6,13 +6,11 @@
 
 #![cfg(target_os = "linux")]
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_rtrash")
-}
 
 /// A fresh directory under `RTRASH_REFLINK_DIR` holding `a.bin` (2 MiB of
 /// varied bytes) and `clone.bin`, its reflink copy; `None` when unset.
@@ -40,13 +38,11 @@ fn cloned_pair(tag: &str) -> Option<PathBuf> {
 }
 
 fn run(dir: &Path, args: &[&str]) -> String {
-    let out: Output = Command::new(bin())
+    let out: Output = common::rtrash(&home(dir))
         .args(args)
         .current_dir(dir)
         // A home beside the files, not the directory reaped: reap refuses
         // to reap a home directory.
-        .env("HOME", home(dir))
-        .env("XDG_DATA_HOME", home(dir).join("xdg"))
         .output()
         .unwrap();
     assert!(

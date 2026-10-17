@@ -1,1 +1,1 @@
-A shared test builder, `common::rtrash(home)`, pins the home, data and config folders and keeps macOS off the Finder Trash. The CLI tests use it. Precheck fails when a test file gains a bare rtrash run.
+A shared test builder, `common::rtrash(home)`, pins the home, data and config folders and keeps macOS off the Finder Trash. Every test file uses it, or names its reason for the real environment with `common::rtrash_real`: the Finder tests, the Recycle Bin tests, or output that reads no trash. Precheck fails on any bare rtrash run in a test.
