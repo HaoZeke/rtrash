@@ -2273,13 +2273,13 @@ fn item_json(it: &Item) -> String {
 
 /// Tags shown in the NOTE column.
 /// Unreadable entries as the report keeps them: path and reason.
-type Unread = [(PathBuf, String)];
+pub(crate) type Unread = [(PathBuf, String)];
 
 /// `unreadable` for a directory the scan could not read, `incomplete` for
 /// one with an unreadable entry below it (its sizes are low), as ncdu
 /// marks `!` and `.`; None otherwise. The report keeps the first 100
 /// unreadable paths, so rows past those go unmarked.
-fn read_mark(it: &Item, unread: &Unread) -> Option<&'static str> {
+pub(crate) fn read_mark(it: &Item, unread: &Unread) -> Option<&'static str> {
     if !it.is_dir {
         return None;
     }

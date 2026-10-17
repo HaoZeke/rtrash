@@ -47,6 +47,10 @@ struct View {
     partial: bool,
     /// Rows the name filter hides (current view only).
     stash: Vec<Item>,
+    /// The entries this view's scan could not read, as the report keeps
+    /// them; rows on or above one get the table's `unreadable` or
+    /// `incomplete` mark.
+    unread: Vec<(PathBuf, String)>,
 }
 
 /// A scan running in the background.
@@ -319,6 +323,7 @@ fn scan_view(dir: &Path, opts: &ScanOpts, git: bool, sorting: Sorting) -> io::Re
         scanning: false,
         partial: report.partial,
         stash: Vec::new(),
+        unread: report.unread,
     })
 }
 
@@ -371,6 +376,7 @@ fn quick_view(dir: &Path) -> io::Result<View> {
         scanning: true,
         partial: false,
         stash: Vec::new(),
+        unread: Vec::new(),
     })
 }
 
@@ -395,8 +401,10 @@ fn scan_roots(
     let mut rows = Vec::new();
     let mut below = Vec::new();
     let mut partial = false;
+    let mut unread = Vec::new();
     for root in roots {
         let view = scan_view(root, opts, git, sorting)?;
+        unread.extend(view.unread.iter().cloned());
         let mut repos: Vec<PathBuf> = Vec::new();
         for r in view.rows.iter().flat_map(|r| &r.repos) {
             if !repos.contains(r) {
@@ -459,6 +467,7 @@ fn scan_roots(
         scanning: false,
         partial,
         stash: Vec::new(),
+        unread,
     };
     Ok((view, below))
 }
@@ -489,6 +498,7 @@ fn quick_roots(roots: &[PathBuf]) -> View {
         scanning: true,
         partial: false,
         stash: Vec::new(),
+        unread: Vec::new(),
     }
 }
 
@@ -1911,30 +1921,43 @@ fn bar(part: u64, whole: u64, width: usize) -> String {
 
 #[cfg(test)]
 fn row_text(it: &Item, marked: bool, whole: u64, sort: SortKey) -> String {
-    row_text_in(
-        it,
-        marked,
+    let ctx = RowCtx {
         whole,
         sort,
-        sort == SortKey::Apparent,
-        false,
-        false,
-    )
+        apparent: sort == SortKey::Apparent,
+        pending: false,
+        whole_path: false,
+        unread: &[],
+    };
+    row_text_in(it, marked, &ctx)
 }
 
-/// [`row_text`]; `apparent` shows apparent sizes instead of disk use,
-/// `pending` shows a directory whose size is still coming, and `whole_path`
-/// names the row by its path (the rows of several roots) instead of its
-/// last part.
-fn row_text_in(
-    it: &Item,
-    marked: bool,
+/// What every row of one view shares when it is drawn.
+struct RowCtx<'a> {
+    /// The view's total, the bar's full width.
     whole: u64,
     sort: SortKey,
+    /// Apparent sizes instead of disk use.
     apparent: bool,
+    /// Directory sizes are still coming.
     pending: bool,
+    /// Name each row by its path (the rows of several roots).
     whole_path: bool,
-) -> String {
+    /// The view's unreadable entries, for the `unreadable` and
+    /// `incomplete` badges.
+    unread: &'a du::Unread,
+}
+
+/// [`row_text`] with the view's [`RowCtx`].
+fn row_text_in(it: &Item, marked: bool, ctx: &RowCtx) -> String {
+    let &RowCtx {
+        whole,
+        sort,
+        apparent,
+        pending,
+        whole_path,
+        unread,
+    } = ctx;
     let name = if whole_path {
         it.path.to_string_lossy()
     } else {
@@ -1951,6 +1974,10 @@ fn row_text_in(
     let mut badges = Vec::new();
     if let Some(a) = it.artefact {
         badges.push(a.to_string());
+    }
+    // The same marks, in the same place, as the table's NOTE column.
+    if let Some(m) = du::read_mark(it, unread) {
+        badges.push(m.to_string());
     }
     if let Some((s, _)) = &it.git {
         badges.push(format!("git:{}", s.as_str()));
@@ -2027,22 +2054,19 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         app.cur.display().to_string()
     };
     let title = format!(" {}{tail}", fit_left(&place, room));
-    let pending = view.scanning;
+    let ctx = RowCtx {
+        whole,
+        sort,
+        apparent,
+        pending: view.scanning,
+        whole_path: is_top_of_roots(&app.cur),
+        unread: &view.unread,
+    };
     let items: Vec<ListItem> = view
         .rows
         .iter()
         .enumerate()
-        .map(|(i, it)| {
-            ListItem::new(row_text_in(
-                it,
-                app.sel.is_marked(i),
-                whole,
-                sort,
-                apparent,
-                pending,
-                is_top_of_roots(&app.cur),
-            ))
-        })
+        .map(|(i, it)| ListItem::new(row_text_in(it, app.sel.is_marked(i), &ctx)))
         .collect();
     f.render_widget(
         Paragraph::new(Span::styled(
@@ -2708,6 +2732,95 @@ mod tests {
         assert!(!row_text(&it, false, 1024, SortKey::Disk).contains('!'));
         let s = row_text(&it, false, 1024, SortKey::Items);
         assert!(s.ends_with("[cargo-target 3 items]"), "{s}");
+    }
+
+    #[test]
+    fn row_badges_carry_the_read_marks() {
+        let it = |path: &str, is_dir: bool| Item {
+            path: PathBuf::from(path),
+            is_dir,
+            apparent: 0,
+            disk: 512,
+            mtime: 0,
+            items: 1,
+            artefact: None,
+            repos: Vec::new(),
+            git: None,
+            unique: None,
+        };
+        let text = |row: &Item, unread: &du::Unread| {
+            let ctx = RowCtx {
+                whole: 1024,
+                sort: SortKey::Disk,
+                apparent: false,
+                pending: false,
+                whole_path: false,
+                unread,
+            };
+            row_text_in(row, false, &ctx)
+        };
+        let here = [(PathBuf::from("/x/a"), "denied".to_string())];
+        let below = [(PathBuf::from("/x/a/b"), "denied".to_string())];
+        let s = text(&it("/x/a", true), &here);
+        assert!(s.ends_with("a/  [unreadable]"), "{s}");
+        let s = text(&it("/x/a", true), &below);
+        assert!(s.ends_with("a/  [incomplete]"), "{s}");
+        let s = text(&it("/x/c", true), &below);
+        assert!(s.ends_with("c/"), "{s}");
+        // A file is never marked, as in the table.
+        let s = text(&it("/x/a", false), &here);
+        assert!(s.ends_with(" a"), "{s}");
+    }
+
+    /// A folder the scan cannot open shows `unreadable`, a folder with one
+    /// below it `incomplete`, as the du table marks them; opening the
+    /// incomplete folder shows the unreadable one inside. As root nothing
+    /// is locked, so no row is marked.
+    #[cfg(unix)]
+    #[test]
+    fn rows_mark_unreadable_and_incomplete_folders() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tree("unread");
+        let w = t.0.join("w");
+        let (locked, shut) = (w.join("ur-outer/ur-locked"), w.join("ur-shut"));
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("x"), b"x").unwrap();
+        fs::create_dir_all(&shut).unwrap();
+        fs::write(shut.join("y"), b"y").unwrap();
+        let mode =
+            |p: &Path, m: u32| fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+        mode(&locked, 0o000);
+        mode(&shut, 0o000);
+        let blocked = fs::read_dir(&locked).is_err() && fs::read_dir(&shut).is_err();
+        let mut a = app(&t);
+        let top = tui_term::render_text(120, 20, |f| ui(f, &mut a));
+        let at = a
+            .rows()
+            .iter()
+            .position(|r| r.path == w.join("ur-outer"))
+            .unwrap();
+        a.select(at);
+        a.open();
+        settle(&mut a);
+        assert_eq!(a.cur, w.join("ur-outer"));
+        let inner = tui_term::render_text(120, 20, |f| ui(f, &mut a));
+        mode(&locked, 0o755);
+        mode(&shut, 0o755);
+        let count = |text: &str, part: &str| text.lines().filter(|l| l.contains(part)).count();
+        if !blocked {
+            assert_eq!(
+                count(&top, "[unreadable]") + count(&top, "[incomplete]"),
+                0,
+                "{top}"
+            );
+            return;
+        }
+        assert_eq!(count(&top, "ur-shut/  [unreadable]"), 1, "{top}");
+        assert_eq!(count(&top, "ur-outer/  [incomplete]"), 1, "{top}");
+        assert_eq!(count(&top, "[unreadable]"), 1, "{top}");
+        assert_eq!(count(&top, "[incomplete]"), 1, "{top}");
+        assert_eq!(count(&inner, "ur-locked/  [unreadable]"), 1, "{inner}");
+        assert_eq!(count(&inner, "[incomplete]"), 0, "{inner}");
     }
 
     #[test]
