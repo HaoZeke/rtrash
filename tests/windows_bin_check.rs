@@ -147,3 +147,69 @@ fn status_check_reports_and_fix_removes_only_broken_bin_records() {
     );
     let _ = fs::remove_dir_all(&home);
 }
+
+/// `list` shows the items it can read and, after its rows, one stderr
+/// line counting the entries it left out (a dangling record, a record
+/// that cannot be parsed and a payload with no record), naming
+/// `rtrash status --check`. stdout is the same as for a bin holding only
+/// the readable item, and with nothing left out there is no hint.
+#[test]
+fn list_counts_the_bin_entries_it_skips_and_points_at_status_check() {
+    let home = common::scratch_dir("bincheck", "list");
+    let (bin, work) = (home.join("bin"), home.join("work"));
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    let record = |name: &str, origin: &str| {
+        let body = rtrash::win_recycle::encode_recycle_i_v2(
+            &work.join(origin),
+            1,
+            rtrash::win_recycle::FILETIME_UNIX_EPOCH,
+        );
+        fs::write(bin.join(name), body).unwrap();
+    };
+    record("$ILSTGOOD.txt", "ls-good.txt");
+    fs::write(bin.join("$RLSTGOOD.txt"), b"good").unwrap();
+    record("$ILSTGONE.txt", "ls-gone.txt");
+    fs::write(bin.join("$ILSTBAD.txt"), b"junk").unwrap();
+    fs::write(bin.join("$RLSTBAD.txt"), b"bad").unwrap();
+    fs::write(bin.join("$RLSTORPH.txt"), b"orph").unwrap();
+    fs::write(bin.join("desktop.ini"), b"[.ShellClassInfo]").unwrap();
+    let list = || {
+        common::rtrash(&home)
+            .env("RTRASH_TEST_BIN_DIR", &bin)
+            .arg("list")
+            .output()
+            .unwrap()
+    };
+    let hint = "`rtrash status --check` shows them";
+    let out = common::assert_refused_unchanged(&"list", &[bin.as_path()], 0, &[(hint, 1)], list);
+    let err = common::stderr_text(&out);
+    let rows = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(rows.lines().count(), 1, "{rows}");
+    assert!(rows.trim_end().ends_with("ls-good.txt"), "{rows}");
+    let counted = err
+        .lines()
+        .filter(|l| l.contains("3 Recycle Bin entries could not be listed"))
+        .count();
+    assert_eq!(counted, 1, "{err}");
+
+    // With only the readable item left, the rows are the same and the
+    // hint is gone.
+    for name in [
+        "$ILSTGONE.txt",
+        "$ILSTBAD.txt",
+        "$RLSTBAD.txt",
+        "$RLSTORPH.txt",
+    ] {
+        fs::remove_file(bin.join(name)).unwrap();
+    }
+    let clean = common::assert_refused_unchanged(&"clean list", &[bin.as_path()], 0, &[], list);
+    let _ = fs::remove_dir_all(&home);
+    assert_eq!(clean.stdout, out.stdout);
+    let err = common::stderr_text(&clean);
+    let hints = err
+        .lines()
+        .filter(|l| l.contains("could not be listed"))
+        .count();
+    assert_eq!(hints, 0, "{err}");
+}

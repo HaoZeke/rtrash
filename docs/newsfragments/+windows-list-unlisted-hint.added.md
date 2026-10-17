@@ -1,0 +1,1 @@
+On Windows, `rtrash list` now says on stderr how many Recycle Bin entries it could not show: a record whose payload is gone, a record it cannot read, or a payload with no record. The line names `rtrash status --check`, which lists each one. The rows on stdout do not change.

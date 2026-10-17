@@ -217,23 +217,48 @@ pub struct BinRecord {
 /// first. Names stay exact, so one odd name cannot hide the rest. A
 /// missing or unreadable folder gives none.
 pub fn scan_bin_dir(dir: &Path) -> Vec<BinRecord> {
-    let mut out = Vec::new();
+    scan_bin_dir_counted(dir).records
+}
+
+/// What [`scan_bin_dir_counted`] reads from one Recycle Bin folder.
+#[derive(Debug, Default)]
+pub struct BinScan {
+    /// The items list, rm and restore can show, oldest first.
+    pub records: Vec<BinRecord>,
+    /// The entries left out: a `$I` whose `$R` payload is gone, a `$I`
+    /// that cannot be read or parsed, and a `$R` with no `$I`. Other names
+    /// (`desktop.ini`) are the shell's and do not count.
+    pub skipped: u64,
+}
+
+/// [`scan_bin_dir`], counting what it leaves out, so `list` can point at
+/// `status --check`, which names each one.
+pub fn scan_bin_dir_counted(dir: &Path) -> BinScan {
+    let mut scan = BinScan::default();
     let Ok(rd) = std::fs::read_dir(dir) else {
-        return out;
+        return scan;
     };
+    let out = &mut scan.records;
+    let mut payloads = Vec::new();
     for e in rd.flatten() {
         let kept = crate::util::str_from_os(e.file_name());
+        if let Some(rest) = kept.strip_prefix("$R") {
+            payloads.push(rest.to_string());
+            continue;
+        }
         let Some(rest) = kept.strip_prefix("$I") else {
             continue;
         };
         let payload = dir.join(crate::util::os_from_str(&format!("$R{rest}")));
         if std::fs::symlink_metadata(&payload).is_err() {
+            scan.skipped += 1;
             continue;
         }
         let Some(meta) = std::fs::read(e.path())
             .ok()
             .and_then(|b| parse_recycle_i(&b))
         else {
+            scan.skipped += 1;
             continue;
         };
         out.push(BinRecord {
@@ -243,12 +268,31 @@ pub fn scan_bin_dir(dir: &Path) -> Vec<BinRecord> {
             size: meta.size,
         });
     }
-    out.sort_by(|a, b| {
+    let index = |rest: &str| dir.join(crate::util::os_from_str(&format!("$I{rest}")));
+    let orphans = payloads
+        .iter()
+        .filter(|rest| std::fs::symlink_metadata(index(rest)).is_err())
+        .count();
+    scan.skipped += orphans as u64;
+    scan.records.sort_by(|a, b| {
         a.deleted
             .cmp(&b.deleted)
             .then_with(|| a.payload.cmp(&b.payload))
     });
-    out
+    scan
+}
+
+/// The stderr line `list` prints after its rows when `skipped` Recycle
+/// Bin entries could not be listed; None when there are none. stdout is
+/// left as it was, so scripts reading the rows see no change.
+pub fn unlisted_hint(prog: &str, skipped: u64) -> Option<String> {
+    (skipped > 0).then(|| {
+        format!(
+            "{prog}: {} could not be listed; `rtrash status --check` shows {}",
+            crate::util::plural(skipped, "Recycle Bin entry", "Recycle Bin entries"),
+            if skipped == 1 { "it" } else { "them" }
+        )
+    })
 }
 
 /// The largest `$I` record: a version 2 header and a path of 32767
@@ -492,16 +536,30 @@ pub fn current_user_sid() -> Option<String> {
 #[cfg(windows)]
 pub fn list_items() -> io::Result<Vec<trash::TrashItem>> {
     let sid = current_user_sid().ok_or_else(|| io::Error::other("cannot read the user's SID"))?;
+    let dirs: Vec<PathBuf> = crate::trash_history::bin_roots()
+        .into_iter()
+        .map(|root| root.join("$Recycle.Bin").join(&sid))
+        .collect();
+    Ok(list_items_in(&dirs).0)
+}
+
+/// The items in the Recycle Bin folders `dirs`, oldest first, and how many
+/// entries [`scan_bin_dir_counted`] left out of them.
+#[cfg(windows)]
+pub fn list_items_in(dirs: &[PathBuf]) -> (Vec<trash::TrashItem>, u64) {
     let mut recs = Vec::new();
-    for root in crate::trash_history::bin_roots() {
-        recs.extend(scan_bin_dir(&root.join("$Recycle.Bin").join(&sid)));
+    let mut skipped = 0u64;
+    for dir in dirs {
+        let scan = scan_bin_dir_counted(dir);
+        recs.extend(scan.records);
+        skipped = skipped.saturating_add(scan.skipped);
     }
     recs.sort_by(|a, b| {
         a.deleted
             .cmp(&b.deleted)
             .then_with(|| a.payload.cmp(&b.payload))
     });
-    Ok(recs
+    let items: Vec<trash::TrashItem> = recs
         .into_iter()
         .map(|r| trash::TrashItem {
             id: r.payload.into_os_string(),
@@ -517,7 +575,8 @@ pub fn list_items() -> io::Result<Vec<trash::TrashItem>> {
                 .unwrap_or_default(),
             time_deleted: r.deleted,
         })
-        .collect())
+        .collect();
+    (items, skipped)
 }
 
 /// The drive root (`C:\`) a Recycle Bin path such as
@@ -1755,8 +1814,11 @@ on Windows (there is no FreeDesktop layout here).
             Some(d) => Some(dir_forms(d)),
             None => cwd_only.then(cwd_forms),
         };
-        match super::list_items() {
-            Ok(items) => {
+        let listed = bin_dirs()
+            .map(|dirs| super::list_items_in(&dirs))
+            .ok_or_else(|| io::Error::other("cannot read the user's SID"));
+        match listed {
+            Ok((items, skipped)) => {
                 let items: Vec<TrashItem> = items
                     .into_iter()
                     .filter(|it| {
@@ -1834,6 +1896,10 @@ on Windows (there is no FreeDesktop layout here).
                     }
                 }
                 let _ = out.flush();
+                drop(out);
+                if let Some(hint) = super::unlisted_hint(prog, skipped) {
+                    eprintln!("{hint}");
+                }
                 0
             }
             Err(e) => {
@@ -3079,7 +3145,7 @@ registry), then the total and the free space on each (a warning under
                 eprintln!("{prog}: --check takes only --fix and -n");
                 return 2;
             }
-            let Some(dirs) = check_dirs() else {
+            let Some(dirs) = bin_dirs() else {
                 eprintln!("{prog}: cannot read the user's SID");
                 return 1;
             };
@@ -3140,10 +3206,11 @@ registry), then the total and the free space on each (a warning under
     }
 
     /// The current user's Recycle Bin folders that exist, one per drive
-    /// and per volume mounted on a folder. Test seam, in debug builds
-    /// only: `RTRASH_TEST_BIN_DIR=DIR` checks DIR alone, as such a folder,
-    /// so a test never reads or changes the real bin. None without a SID.
-    fn check_dirs() -> Option<Vec<PathBuf>> {
+    /// and per volume mounted on a folder, for `list` and `status
+    /// --check`. Test seam, in debug builds only: `RTRASH_TEST_BIN_DIR=DIR`
+    /// reads DIR alone, as such a folder, so a test never reads or changes
+    /// the real bin. None without a SID.
+    fn bin_dirs() -> Option<Vec<PathBuf>> {
         let seam = std::env::var_os("RTRASH_TEST_BIN_DIR").filter(|_| cfg!(debug_assertions));
         if let Some(d) = seam {
             return Some(vec![PathBuf::from(d)]);
@@ -4211,8 +4278,39 @@ mod tests {
         assert_eq!(originals, [r"C:\a\old.txt", r"C:\b\new.txt"]);
         assert_eq!(got[0].payload, dir.join("$RAAAAAA.txt"));
         assert_eq!(got[0].deleted, 100);
+        // The three left out are counted: the dangling CCCCCC, the orphan
+        // DDDDDD and the damaged EEEEEE; desktop.ini is not an entry.
+        let counted = scan_bin_dir_counted(&dir);
+        assert_eq!(counted.records, got);
+        assert_eq!(counted.skipped, 3);
+        // A $I name that is a folder cannot be read, so it counts too.
+        std::fs::create_dir(dir.join("$IFFFFFF")).unwrap();
+        std::fs::write(dir.join("$RFFFFFF"), b"x").unwrap();
+        let counted = scan_bin_dir_counted(&dir);
+        assert_eq!(counted.records, got);
+        assert_eq!(counted.skipped, 4);
         assert!(scan_bin_dir(&dir.join("missing")).is_empty());
+        assert_eq!(scan_bin_dir_counted(&dir.join("missing")).skipped, 0);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unlisted_hint_names_status_check_only_when_something_was_skipped() {
+        assert_eq!(unlisted_hint("rtrash", 0), None);
+        assert_eq!(
+            unlisted_hint("rtrash", 1).as_deref(),
+            Some(
+                "rtrash: 1 Recycle Bin entry could not be listed; \
+                 `rtrash status --check` shows it"
+            )
+        );
+        assert_eq!(
+            unlisted_hint("trash-list", 3).as_deref(),
+            Some(
+                "trash-list: 3 Recycle Bin entries could not be listed; \
+                 `rtrash status --check` shows them"
+            )
+        );
     }
 
     /// `status --check` on a Recycle Bin folder: the records in name

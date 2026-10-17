@@ -971,6 +971,11 @@ name that is a folder or a link
 .B \-\-fix
 removes the dangling and bad records under the same guards, and a
 payload a bad record named stays, as an orphan.
+.B list
+leaves the same entries out, and after its rows it says on stderr how
+many it could not show, naming
+.BR "rtrash status \-\-check" ;
+its rows on stdout are the same as without them.
 .PP
 On Windows,
 .BR list ,
