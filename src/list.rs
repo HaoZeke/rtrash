@@ -227,6 +227,80 @@ fn trash_cli_os_line(e: &std::io::Error, record: &std::path::Path) -> Option<Str
     Some(format!("[Errno {n}] {text}: {}", py_text(record, true)))
 }
 
+/// A path in a trash-list row, as trash-cli 0.26.9 prints it: quoted in
+/// GNU ls's shell-escape style on a terminal, as is in a pipe, and a byte
+/// that is not UTF-8 as `\xNN` either way. trash-cli prints the name raw
+/// on a terminal too under TRASH_RAW_OUTPUT; rtrash does not.
+fn cli_row_path(p: &std::path::Path) -> String {
+    if crate::util::stdout_is_tty() {
+        shell_escape(p)
+    } else {
+        py_text(p, false)
+    }
+}
+
+/// trash-cli's `shell_escape` (from GNU ls and rm): a name of safe
+/// characters only stays bare; the rest goes in single quotes, a `'` as
+/// `'\''`, and each control character outside them as `$'\n'`, or
+/// `$'\NNN'` in octal. A byte that is not UTF-8 stays inside the quotes
+/// as `\xNN`. The bidirectional overrides, which trash-cli leaves raw,
+/// get `$'\uNNNN'` so they cannot reorder the row.
+fn shell_escape(p: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    const SAFE: &str = "%+-./:=@_,";
+    let bytes = p.as_os_str().as_bytes();
+    let safe = |c: char| c.is_ascii_alphanumeric() || SAFE.contains(c);
+    if !bytes.is_empty() && std::str::from_utf8(bytes).is_ok_and(|t| t.chars().all(safe)) {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut out = String::new();
+    let mut quoted = false;
+    let mut open = |out: &mut String, want: bool| {
+        if quoted != want {
+            out.push('\'');
+            quoted = want;
+        }
+    };
+    for chunk in bytes.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            let cp = c as u32;
+            let control = cp < 0x20 || (0x7f..=0x9f).contains(&cp);
+            let bidi = matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+            if control || bidi {
+                open(&mut out, false);
+                let mnemonic = match c {
+                    '\x07' => Some('a'),
+                    '\x08' => Some('b'),
+                    '\t' => Some('t'),
+                    '\n' => Some('n'),
+                    '\x0b' => Some('v'),
+                    '\x0c' => Some('f'),
+                    '\r' => Some('r'),
+                    _ => None,
+                };
+                out.push_str(&match mnemonic {
+                    Some(m) => format!("$'\\{m}'"),
+                    None if bidi => format!("$'\\u{cp:04x}'"),
+                    None => format!("$'\\{cp:03o}'"),
+                });
+                continue;
+            }
+            open(&mut out, true);
+            if c == '\'' {
+                out.push_str("'\\''");
+            } else {
+                out.push(c);
+            }
+        }
+        for b in chunk.invalid() {
+            open(&mut out, true);
+            out.push_str(&format!("\\x{b:02x}"));
+        }
+    }
+    open(&mut out, false);
+    out
+}
+
 /// A path as trash-cli prints it in an error line. With `repr`, as
 /// Python's `repr()` of the name: quoted (in double quotes when it holds a
 /// `'` and no `"`), with backslashes, that quote and control characters
@@ -826,10 +900,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 let date = entry.date.as_deref().unwrap_or("????-??-??T??:??:??");
                 crate::util::term_text(date).replacen('T', " ", 1)
             };
-            let mut line = format!("{attr} {}", crate::util::term_path(&entry.original));
+            let mut line = format!("{attr} {}", cli_row_path(&entry.original));
             if show_files {
                 line.push_str(" -> ");
-                line.push_str(&crate::util::term_path(&payload));
+                line.push_str(&cli_row_path(&payload));
             }
             let res = writeln!(out, "{line}");
             let res = res.and_then(|()| crate::listfmt::trash_line(&mut out, &payload, show_trash));
@@ -1070,6 +1144,36 @@ mod tests {
         let gone = trash_cli_size(&root.join("gone")).unwrap_err();
         assert_eq!(gone.kind(), std::io::ErrorKind::NotFound);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// trash-list rows on a terminal quote names as trash-cli 0.26.9's
+    /// shell_escape does; each expected string is what that function and
+    /// its printable() give for the same bytes.
+    #[test]
+    fn trash_list_rows_quote_names_as_trash_cli_does() {
+        use std::os::unix::ffi::OsStrExt;
+        let q = |b: &[u8]| shell_escape(std::path::Path::new(std::ffi::OsStr::from_bytes(b)));
+        let cases: [(&[u8], &str); 12] = [
+            (b"/t/plain-1.txt", "/t/plain-1.txt"),
+            (b"/t/a b", "'/t/a b'"),
+            (b"/t/it's", r"'/t/it'\''s'"),
+            (b"/t/x\ny", r"'/t/x'$'\n''y'"),
+            (b"/t/tab\there", r"'/t/tab'$'\t''here'"),
+            (b"/t/esc\x1b[31m", r"'/t/esc'$'\033''[31m'"),
+            (b"/t/\x7f", r"'/t/'$'\177'"),
+            ("/t/\u{85}é".as_bytes(), "'/t/'$'\\205''é'"),
+            (b"/t/\xff", r"'/t/\xff'"),
+            (b"", ""),
+            (b"/t/a'b c", r"'/t/a'\''b c'"),
+            // trash-cli leaves a bidi override raw; rtrash escapes it.
+            ("/t/a\u{202e}b".as_bytes(), r"'/t/a'$'\u202e''b'"),
+        ];
+        for (bytes, want) in cases {
+            assert_eq!(q(bytes), want, "{:?}", String::from_utf8_lossy(bytes));
+        }
+        // In a pipe the row keeps the name, with such a byte as \xNN.
+        let raw = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/t/x\ny\xff"));
+        assert_eq!(py_text(raw, false), "/t/x\ny\\xff");
     }
 
     /// The stderr lines trash-cli's trash-list prints for a record it

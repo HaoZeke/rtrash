@@ -135,7 +135,11 @@ exits 74 when a file cannot be trashed.
 .PP
 File names need not be UTF-8. An argument or a trashed name with other
 bytes keeps them through every command. Output shows each such byte as
-the Unicode replacement character.
+the Unicode replacement character; rows under the
+.B trash\-list
+name show it as
+.BR \exNN ,
+as trash-cli does.
 .PP
 When standard output is a terminal, names and paths in text output show
 each control character (C0, DEL, and C1) and each bidirectional override
@@ -150,7 +154,10 @@ extra rows that way. A pipe, a file, and
 .B \-\-json
 still get the raw name. Errors about a trashed item on standard error
 follow the same rule when standard error is a terminal. The browsers
-drop control characters when they draw.
+drop control characters when they draw. Rows under the
+.B trash\-list
+name quote such a name instead, as trash-cli does (see
+.BR list ).
 .SH GLOBAL OPTIONS
 When
 .B rtrash
@@ -284,6 +291,12 @@ Put into this FreeDesktop trash root (creates
 and
 .B info/
 if needed). Scripts and tests use this instead of XDG discovery.
+A volume trash such as
+.I /mnt/usb/.Trash\-1000
+takes only items from inside its volume, as trash-cli's does, since
+restore refuses the absolute
+.B Path=
+an item from elsewhere would need there.
 .TP
 .B \-\-home\-only
 Always use the home trash (skip volume trash selection).
@@ -738,6 +751,21 @@ and
 A payload whose size cannot be read is named on stderr and left out, and
 .B trash\-list
 then exits 1.
+Its rows print paths as trash-cli 0.26.9 does. In a pipe or a file a
+path goes out as is, with a byte that is not UTF-8 as
+.BR \exNN .
+On a terminal, a path with anything but ASCII letters, digits and
+.B %+\-./:=@_,
+goes in single quotes, as
+.BR ls (1)
+quotes it, with each control character written outside them as
+.B $\(aq\en\(aq
+or
+.BR $\(aq\e033\(aq .
+Unlike trash-cli, rtrash writes a bidirectional override that way too,
+and it ignores
+.BR TRASH_RAW_OUTPUT ,
+so a terminal never gets a raw path.
 .TP
 .BI \-\-sort= KEY
 Order rows by
@@ -873,7 +901,8 @@ problem: a record whose payload is gone
 .RB ( dangling: ),
 a record that cannot serve a restore because it cannot be read, has no
 .B Path=
-line, or names a relative path that climbs out of its volume
+line, or, in a volume trash, names a path that climbs out of its volume
+or an absolute path outside it
 .RB ( "bad record:" ),
 a record with no readable
 .B DeletionDate=
@@ -900,8 +929,9 @@ to check a FreeDesktop trash there.
 .B list
 leaves out a record it cannot read, one with no
 .B Path=
-line, as trash\-cli's trash\-list does, and one whose path climbs out
-of its volume, and after its rows it says on stderr how many, naming
+line, as trash\-cli's trash\-list does, and one in a volume trash whose
+path climbs out of its volume or is an absolute path outside it, and
+after its rows it says on stderr how many, naming
 .BR "rtrash status \-\-check" ;
 its rows on stdout are the same as without them.
 .B trash\-list
@@ -917,7 +947,8 @@ permission).
 Its count after the rows then covers only the rest, which trash-cli
 would list: an empty
 .BR Path= ,
-a path that climbs out, a record over 1 MiB, a FIFO or a device.
+a path that leads out of its volume, a record over 1 MiB, a FIFO or a
+device.
 On Windows,
 .B trash\-list
 prints the same count, as trash-cli has no lines there.
@@ -2285,6 +2316,18 @@ it;
 .BI \-\-to= DIR
 restores such an item into
 .IR DIR .
+In a volume trash, restore follows trash-cli 0.26.9 and refuses a
+.B Path=
+that leads out of the volume: an absolute path outside it, or a relative
+one that climbs out with
+.BR .. ;
+list leaves such a record out.
+rtrash is stricter about
+.B ..
+and refuses it in a relative
+.B Path=
+even when the path stays inside, but takes an absolute path inside the
+volume, which trash-cli refuses.
 .TP
 .BR \-f ", " \-\-force
 Overwrite an existing file at the destination (same as

@@ -1,0 +1,3 @@
+Restore now follows trash-cli 0.26.9 on a volume trash whose record leads out of its volume. When a `.trashinfo` on a USB stick has a `Path=` naming an absolute path elsewhere, such as `/home/you/.bashrc`, restore leaves it alone and list drops it, as for one that climbs out with `..`. `rtrash status --check` reports it. An absolute path inside the volume still restores. `put --trash-dir` now refuses to fill such a volume trash with an item from outside its volume.
+
+Under the `trash-list` name, rows print paths as trash-cli 0.26.9 does. A pipe gets each path as is, with a byte that is not UTF-8 as `\xNN`. A terminal gets `ls`-style quoting, such as `'/t/new'$'\n''line'`. Unlike trash-cli, rtrash also quotes bidirectional overrides there and ignores `TRASH_RAW_OUTPUT`.

@@ -3,8 +3,9 @@
 //!
 //! Each `.trashinfo` in `info/` is read once and sorted into one problem
 //! or none. Records that cannot serve a restore (unreadable, over the
-//! record cap, no `Path=`, or a relative `Path=` that climbs out of its
-//! volume) and records whose payload is gone are what `--fix` removes; a
+//! record cap, no `Path=`, or a volume trash's `Path=` that climbs out
+//! of its volume or names a path outside it) and records whose payload
+//! is gone are what `--fix` removes; a
 //! payload a bad record named stays, as an orphan that list and rm show.
 //! A missing or unreadable `DeletionDate=`, a payload with no record, and
 //! a name in `info/` that is not `NAME.trashinfo` are reported only: each

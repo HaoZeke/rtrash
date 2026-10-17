@@ -82,8 +82,9 @@ impl TrashDir {
         }
     }
 
-    /// Like [`resolve_original`] but returns an error if a relative `Path=`
-    /// escapes the volume topdir (contains `..` that leaves the mount root).
+    /// Like [`resolve_original`] but returns an error when a volume trash's
+    /// `Path=` could lead out of its volume: a relative one with any `..`,
+    /// or an absolute one with `..` or outside the topdir.
     pub fn resolve_original_checked(&self, recorded: &Path) -> io::Result<PathBuf> {
         match (&self.topdir, recorded.is_absolute()) {
             (Some(top), false) => {
@@ -108,7 +109,23 @@ impl TrashDir {
                 }
                 Ok(top.join(recorded))
             }
-            _ => Ok(recorded.to_path_buf()),
+            // A volume trash holds what came from its volume, so an
+            // absolute Path= must stay inside it, as trash-cli 0.26.9
+            // requires: a stick that names `/home/u/.bashrc` restores
+            // nothing there. On the root volume every path is inside.
+            (Some(top), true) => {
+                let climbs = recorded
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir));
+                if climbs || !recorded.starts_with(top) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "trash Path= is absolute and outside the volume topdir",
+                    ));
+                }
+                Ok(recorded.to_path_buf())
+            }
+            (None, _) => Ok(recorded.to_path_buf()),
         }
     }
 }
@@ -2724,6 +2741,53 @@ mod tests {
         };
         td.resolve_original_checked(Path::new("../../../etc/passwd"))
             .is_err()
+    }
+
+    /// A volume trash takes an absolute Path= only inside its volume, as
+    /// trash-cli 0.26.9's restore does; the home trash takes any, and on
+    /// the root volume every path is inside.
+    #[test]
+    fn volume_trash_refuses_an_absolute_path_outside_its_volume() {
+        let usb = TrashDir {
+            root: PathBuf::from("/mnt/usb/.Trash-1"),
+            topdir: Some(PathBuf::from("/mnt/usb")),
+        };
+        let ok = |td: &TrashDir, p: &str| td.resolve_original_checked(Path::new(p)).ok();
+        assert_eq!(
+            ok(&usb, "/mnt/usb/a.txt"),
+            Some(PathBuf::from("/mnt/usb/a.txt"))
+        );
+        assert_eq!(
+            ok(&usb, "docs/a.txt"),
+            Some(PathBuf::from("/mnt/usb/docs/a.txt"))
+        );
+        for bad in [
+            "/home/u/.bashrc",
+            "/mnt/usbx/a.txt",
+            "/mnt/usb/../etc/passwd",
+            "/mnt/usb/a/../../x",
+            "/mnt",
+        ] {
+            assert_eq!(ok(&usb, bad), None, "{bad}");
+        }
+        // The soft form still shows the record as written.
+        assert_eq!(
+            usb.resolve_original(Path::new("/home/u/.bashrc")),
+            PathBuf::from("/home/u/.bashrc")
+        );
+        let root = TrashDir {
+            root: PathBuf::from("/.Trash-1"),
+            topdir: Some(PathBuf::from("/")),
+        };
+        assert_eq!(ok(&root, "/etc/x"), Some(PathBuf::from("/etc/x")));
+        let home = TrashDir {
+            root: PathBuf::from("/home/u/.local/share/Trash"),
+            topdir: None,
+        };
+        assert_eq!(
+            ok(&home, "/mnt/usb/a.txt"),
+            Some(PathBuf::from("/mnt/usb/a.txt"))
+        );
     }
 
     #[test]

@@ -2701,6 +2701,79 @@ fn volume_trash_pin_resolves_relative_path() {
     assert!(!trash_root.join("info/rel.txt.trashinfo").exists());
 }
 
+/// A volume trash restores only into its own volume, as trash-cli 0.26.9
+/// does: a record whose Path= climbs out with `..`, or names an absolute
+/// path elsewhere, is left out of the list (counted in the hint) and never
+/// restored. put refuses to fill a pinned volume trash with an item from
+/// outside its volume, since that record would need such a Path=.
+#[test]
+fn volume_trash_keeps_restores_and_puts_inside_its_volume() {
+    let sb = Sandbox::new("volume-outside");
+    let uid = unsafe { libc::getuid() };
+    let vol = sb.root.join("vol");
+    let outside = sb.root.join("outside");
+    let trash_root = vol.join(format!(".Trash-{uid}"));
+    fs::create_dir_all(trash_root.join("files")).unwrap();
+    fs::create_dir_all(trash_root.join("info")).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    let abs = outside.join("abs.txt");
+    let climb = outside.join("climb.txt");
+    let records = [
+        ("ok.txt", "ok.txt".to_string()),
+        ("abs.txt", abs.display().to_string()),
+        ("climb.txt", "../outside/climb.txt".to_string()),
+    ];
+    for (name, path) in &records {
+        fs::write(trash_root.join("files").join(name), b"payload").unwrap();
+        fs::write(
+            trash_root.join("info").join(format!("{name}.trashinfo")),
+            format!("[Trash Info]\nPath={path}\nDeletionDate=2026-01-02T03:04:05\n"),
+        )
+        .unwrap();
+    }
+    let pin = format!("--trash-dir={}", trash_root.display());
+
+    let out = sb.run(&["list", &pin]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let listed = stdout_of(&out);
+    assert!(
+        listed.contains(&vol.join("ok.txt").display().to_string()),
+        "{listed}"
+    );
+    assert!(
+        !listed.contains("abs.txt") && !listed.contains("climb.txt"),
+        "{listed}"
+    );
+    assert!(
+        stderr_of(&out).contains("2 trash records could not be listed"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    for target in [&abs, &climb] {
+        let out = sb.run(&["restore", &pin, target.to_str().unwrap()]);
+        assert!(!out.status.success(), "{}", stdout_of(&out));
+        assert!(!target.exists(), "{} was restored", target.display());
+    }
+    assert!(trash_root.join("files/abs.txt").exists());
+    assert!(trash_root.join("files/climb.txt").exists());
+    let ok = vol.join("ok.txt");
+    let out = sb.run(&["restore", &pin, ok.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(ok.is_file());
+
+    let item = sb.touch("from-work.txt");
+    let out = sb.run(&["put", &pin, "from-work.txt"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("keeps only items from"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(item.exists());
+    assert!(!trash_root.join("info/from-work.txt.trashinfo").exists());
+}
+
 /// Multi-file directory payload must be fully removed via the shipped empty
 /// path (fastdelete / full wipe), not only a single top-level name.
 #[test]

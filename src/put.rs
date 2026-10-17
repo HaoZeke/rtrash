@@ -865,6 +865,18 @@ fn resolve_put_trash(
 ) -> io::Result<trashdir::TrashDir> {
     if let Some(pin) = &opts.trash_pin {
         let td = trashdir::TrashDir::from_root(pin)?;
+        // Its Path= would have to be absolute, and restore refuses an
+        // absolute Path= outside a volume trash's volume.
+        if let Some(top) = td.topdir.as_deref().filter(|t| !abs.starts_with(t)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the volume trash '{}' keeps only items from '{}'",
+                    pin.display(),
+                    top.display()
+                ),
+            ));
+        }
         td.ensure()?;
         return Ok(td);
     }
