@@ -32,7 +32,7 @@ Register-ArgumentCompleter -Native -CommandName @('rtrash', 'trash', 'trash-put'
         'list' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--glob=', '--regex=', '--name=', '--cwd-only', '--directory=', '--sort=', '--reverse', '--last=', '--depth=', '--size', '--show-trashpath', '--format=', '--help', '--version')
         'empty' = @('-n', '--dry-run', '-v', '--verbose', '--older-than=', '--max-size=', '--max-count=', '--prune=', '--until-free=', '--all', '--json', '--help', '--version')
         'restore' = @('-f', '--force', '--conflict=', '--to=', '--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--sort=', '--cwd-only', '--directory=', '--name=', '--glob=', '--regex=', '-m', '--match=', '--latest', '--all', '-n', '--dry-run', '--json', '--plain', '--newest-first', '--oldest-first', '--batch=', '--no-space-check', '--help', '--version')
-        'status' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--help', '--version')
+        'status' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--check', '--fix', '-n', '--dry-run', '--help', '--version')
         'rm' = @('--older-than=', '--newer-than=', '--larger-than=', '--smaller-than=', '--batch=', '--max-count=', '--regex', '--match=', '-n', '--dry-run', '-f', '--force', '-v', '--verbose', '--json', '--help')
     }
     if ($IsWindows -or $env:OS -eq 'Windows_NT') {

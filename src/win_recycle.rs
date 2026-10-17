@@ -251,6 +251,199 @@ pub fn scan_bin_dir(dir: &Path) -> Vec<BinRecord> {
     out
 }
 
+/// The largest `$I` record: a version 2 header and a path of 32767
+/// UTF-16 units with its NUL. A bigger file is not a record.
+const I_RECORD_CAP: u64 = 0x1C + 2 * 32_768;
+
+/// One finding of `status --check` in a Recycle Bin folder.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BinProblem {
+    /// A `$I` record whose `$R` payload is gone; the original path it names.
+    Dangling { record: PathBuf, origin: PathBuf },
+    /// A `$I` record that cannot be read or parsed, and why.
+    BadRecord { record: PathBuf, why: String },
+    /// A `$R` payload with no `$I` record.
+    Orphan { payload: PathBuf },
+    /// A `$I` name that is a folder or a link, not a record file.
+    Stray { path: PathBuf },
+}
+
+impl BinProblem {
+    /// The record `--fix` removes, when it removes one.
+    pub fn fix_target(&self) -> Option<&Path> {
+        match self {
+            BinProblem::Dangling { record, .. } | BinProblem::BadRecord { record, .. } => {
+                Some(record.as_path())
+            }
+            _ => None,
+        }
+    }
+
+    /// The report line, the same with and without `--fix`; the prefixes
+    /// are those of the FreeDesktop check.
+    pub fn line(&self) -> String {
+        let t = crate::util::term_path;
+        match self {
+            BinProblem::Dangling { record, .. } => {
+                format!("dangling: {} (the payload is gone)", t(record))
+            }
+            BinProblem::BadRecord { record, why } => format!("bad record: {}: {why}", t(record)),
+            BinProblem::Orphan { payload } => format!(
+                "orphan: {} (kept; with no record, list and rm do not show it)",
+                t(payload)
+            ),
+            BinProblem::Stray { path } => {
+                format!("stray: {} (kept; not a record file)", t(path))
+            }
+        }
+    }
+}
+
+/// Read a `$I` record, refusing one larger than [`I_RECORD_CAP`].
+fn read_index(path: &Path) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut body = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(I_RECORD_CAP + 1).read_to_end(&mut body))
+        .map_err(|e| format!("cannot be read ({e})"))?;
+    if body.len() as u64 > I_RECORD_CAP {
+        return Err("larger than any $I record".to_string());
+    }
+    Ok(body)
+}
+
+/// The problems in one user's Recycle Bin folder (`X:\$Recycle.Bin\SID`):
+/// the `$I` records in name order, then the `$R` payloads with no record.
+/// The same reading as [`scan_bin_dir`], which skips what this reports.
+/// Other names (`desktop.ini`) are the shell's and are not looked at.
+pub fn check_bin_dir(dir: &Path) -> Vec<BinProblem> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| crate::util::str_from_os(e.file_name()))
+        .collect();
+    names.sort();
+    let at = |name: &str| dir.join(crate::util::os_from_str(name));
+    let mut out = Vec::new();
+    for name in &names {
+        let Some(rest) = name.strip_prefix("$I") else {
+            continue;
+        };
+        let record = at(name);
+        let is_file = std::fs::symlink_metadata(&record).is_ok_and(|m| m.file_type().is_file());
+        if !is_file {
+            out.push(BinProblem::Stray { path: record });
+            continue;
+        }
+        let body = match read_index(&record) {
+            Ok(b) => b,
+            Err(why) => {
+                out.push(BinProblem::BadRecord { record, why });
+                continue;
+            }
+        };
+        let Some(meta) = parse_recycle_i(&body) else {
+            let why = "cannot be parsed as a $I record".to_string();
+            out.push(BinProblem::BadRecord { record, why });
+            continue;
+        };
+        if std::fs::symlink_metadata(at(&format!("$R{rest}"))).is_err() {
+            out.push(BinProblem::Dangling {
+                record,
+                origin: meta.original,
+            });
+        }
+    }
+    for name in &names {
+        let Some(rest) = name.strip_prefix("$R") else {
+            continue;
+        };
+        if std::fs::symlink_metadata(at(&format!("$I{rest}"))).is_err() {
+            out.push(BinProblem::Orphan { payload: at(name) });
+        }
+    }
+    out
+}
+
+/// `status --check`, and `--fix` with or without `-n`, over the Recycle
+/// Bin folders `dirs`, as [`crate::trash_check`] does for FreeDesktop
+/// trashes. `--fix` removes dangling and bad `$I` records only, through
+/// [`crate::permanent_guard::remove`]: `RTRASH_NO_PERMANENT` refuses it,
+/// `RTRASH_MAX_PERMANENT` caps it before the first removal, and with
+/// `RTRASH_ALLOW_ROOTS` set a dangling record must name a path under a
+/// root while a bad record, whose origin is unknown, refuses the run.
+/// A payload a bad record named stays, as an orphan. Exit 0 when nothing
+/// is found or every removal went through; 1 when a check or a preview
+/// finds problems, or a removal failed; 2 when a guard refuses the fix.
+pub fn check_bins(prog: &str, dirs: &[PathBuf], fix: bool, dry_run: bool) -> i32 {
+    let found: Vec<BinProblem> = dirs
+        .iter()
+        .map(PathBuf::as_path)
+        .flat_map(check_bin_dir)
+        .collect();
+    let fixable = found.iter().filter(|p| p.fix_target().is_some()).count() as u64;
+    let total = found.len() as u64;
+    let acting = fix && !dry_run;
+    if acting && fixable > 0 {
+        let scoped: Vec<(PathBuf, Option<PathBuf>)> = found
+            .iter()
+            .filter_map(|p| match p {
+                BinProblem::Dangling { record, origin } => {
+                    Some((record.clone(), Some(origin.clone())))
+                }
+                BinProblem::BadRecord { record, .. } => Some((record.clone(), None)),
+                _ => None,
+            })
+            .collect();
+        if let Some(code) = crate::allow_roots::refuse_outside_or_unplaced(prog, &scoped) {
+            return code;
+        }
+        if let Some(code) = crate::permanent_guard::check_count(prog, fixable) {
+            return code;
+        }
+    }
+    let (mut removed, mut failed) = (0u64, 0u64);
+    for p in &found {
+        println!("{}", p.line());
+        let Some(record) = p.fix_target().filter(|_| fix) else {
+            continue;
+        };
+        if dry_run {
+            println!("would remove {}", crate::util::term_path(record));
+            continue;
+        }
+        match crate::permanent_guard::remove(record) {
+            Ok(()) => {
+                println!("removed {}", crate::util::term_path(record));
+                removed += 1;
+            }
+            Err(e) => {
+                eprintln!(
+                    "{prog}: cannot remove '{}': {e}",
+                    crate::util::err_path(record)
+                );
+                failed += 1;
+            }
+        }
+    }
+    let plural = crate::util::plural;
+    if acting {
+        eprintln!(
+            "{prog}: removed {}; {} left to review",
+            plural(removed, "record", "records"),
+            plural(total - fixable, "problem", "problems")
+        );
+    } else {
+        eprintln!(
+            "{prog}: {} found, {} --fix would remove",
+            plural(total, "problem", "problems"),
+            plural(fixable, "record", "records")
+        );
+    }
+    i32::from(failed > 0 || (!acting && total > 0))
+}
+
 /// Windows: the current user's SID as text (`S-1-5-21-…`).
 #[cfg(windows)]
 pub fn current_user_sid() -> Option<String> {
@@ -2818,7 +3011,20 @@ Without PATH, print a numbered list and read an index from stdin.
     }
 
     pub fn status_run(prog: &str, args: &[String]) -> i32 {
+        let (mut check, mut fix, mut dry_run) = (false, false, false);
         let filters = parse_with_filters(prog, args, |arg| match arg {
+            "--check" => {
+                check = true;
+                None
+            }
+            "--fix" => {
+                fix = true;
+                None
+            }
+            "-n" | "--dry-run" => {
+                dry_run = true;
+                None
+            }
             "--help" => {
                 print!(
                     "\
@@ -2833,6 +3039,12 @@ registry), then the total and the free space on each (a warning under
       --larger-than=SIZE  only count items over SIZE (500M, 1.5G, 64k)
       --smaller-than=SIZE only count items under SIZE
                      (a filter counts item by item, without the caps)
+      --check    check each $I record instead: list records whose $R
+                     payload is gone, records that cannot be parsed and
+                     payloads with no record; exit 1 when it finds any
+      --fix      with --check, remove the records whose payload is gone
+                     or that cannot be parsed (a payload stays)
+  -n, --dry-run  with --fix, print what it would remove
       --help     display this help and exit
       --version  output version information and exit
 "
@@ -2854,6 +3066,21 @@ registry), then the total and the free space on each (a warning under
             Ok(f) => f,
             Err(code) => return code,
         };
+        if (fix || dry_run) && !check {
+            eprintln!("{prog}: --fix and --dry-run need --check");
+            return 2;
+        }
+        if check {
+            if filters.is_set() {
+                eprintln!("{prog}: --check takes only --fix and -n");
+                return 2;
+            }
+            let Some(dirs) = check_dirs() else {
+                eprintln!("{prog}: cannot read the user's SID");
+                return 1;
+            };
+            return super::check_bins(prog, &dirs, fix, dry_run);
+        }
         if filters.is_set() {
             return filtered_status(prog, &filters);
         }
@@ -2891,6 +3118,25 @@ registry), then the total and the free space on each (a warning under
         );
         print_free(&crate::trash_history::bin_roots());
         0
+    }
+
+    /// The current user's Recycle Bin folders that exist, one per drive
+    /// and per volume mounted on a folder. Test seam, in debug builds
+    /// only: `RTRASH_TEST_BIN_DIR=DIR` checks DIR alone, as such a folder,
+    /// so a test never reads or changes the real bin. None without a SID.
+    fn check_dirs() -> Option<Vec<PathBuf>> {
+        let seam = std::env::var_os("RTRASH_TEST_BIN_DIR").filter(|_| cfg!(debug_assertions));
+        if let Some(d) = seam {
+            return Some(vec![PathBuf::from(d)]);
+        }
+        let sid = super::current_user_sid()?;
+        Some(
+            crate::trash_history::bin_roots()
+                .into_iter()
+                .map(|r| r.join("$Recycle.Bin").join(&sid))
+                .filter(|d| d.is_dir())
+                .collect(),
+        )
     }
 
     /// A `Free on` line per drive, and a warning for a drive under
@@ -3841,6 +4087,90 @@ mod tests {
         assert_eq!(got[0].payload, dir.join("$RAAAAAA.txt"));
         assert_eq!(got[0].deleted, 100);
         assert!(scan_bin_dir(&dir.join("missing")).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `status --check` on a Recycle Bin folder: the records in name
+    /// order, then the orphans; a check and a dry run change nothing, and
+    /// `--fix` removes only the dangling and bad records, so their
+    /// payloads turn up as orphans.
+    #[test]
+    fn check_bin_dir_sorts_problems_and_fix_removes_only_records() {
+        let dir = std::env::temp_dir().join(format!("rtrash-checkbin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let w = |name: &str, body: &[u8]| std::fs::write(dir.join(name), body).unwrap();
+        let rec = |orig: &str| encode_recycle_i_v2(Path::new(orig), 1, FILETIME_UNIX_EPOCH);
+        w("$RAAAAAA.txt", b"x");
+        w("$IAAAAAA.txt", &rec(r"C:\a.txt"));
+        w("$RBBBBBB", b"x");
+        w("$IBBBBBB", &[0u8; I_RECORD_CAP as usize + 1]);
+        w("$ICCCCCC.txt", &rec(r"C:\gone.txt"));
+        w("$RDDDDDD", b"x");
+        w("$REEEEEE", b"x");
+        w("$IEEEEEE", b"junk");
+        std::fs::create_dir(dir.join("$IFFFFFF")).unwrap();
+        w("desktop.ini", b"x");
+        let bad = |name: &str, why: &str| BinProblem::BadRecord {
+            record: dir.join(name),
+            why: why.to_string(),
+        };
+        let found = vec![
+            bad("$IBBBBBB", "larger than any $I record"),
+            BinProblem::Dangling {
+                record: dir.join("$ICCCCCC.txt"),
+                origin: PathBuf::from(r"C:\gone.txt"),
+            },
+            bad("$IEEEEEE", "cannot be parsed as a $I record"),
+            BinProblem::Stray {
+                path: dir.join("$IFFFFFF"),
+            },
+            BinProblem::Orphan {
+                payload: dir.join("$RDDDDDD"),
+            },
+        ];
+        assert_eq!(check_bin_dir(&dir), found);
+        let prefixes: Vec<String> = found
+            .iter()
+            .map(|p| p.line().split(':').next().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(
+            prefixes,
+            ["bad record", "dangling", "bad record", "stray", "orphan"]
+        );
+        let fixable = found.iter().filter(|p| p.fix_target().is_some()).count();
+        assert_eq!(fixable, 3);
+        let dirs = [dir.clone()];
+        assert_eq!(check_bins("t", &dirs, false, false), 1);
+        assert_eq!(check_bins("t", &dirs, true, true), 1);
+        assert_eq!(check_bin_dir(&dir), found);
+        // The guards are the integration tests' business; a set one here
+        // would refuse the fix.
+        let guarded = [
+            "RTRASH_NO_PERMANENT",
+            "RTRASH_MAX_PERMANENT",
+            "RTRASH_ALLOW_ROOTS",
+        ]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some_and(|x| !x.is_empty()));
+        if !guarded {
+            assert_eq!(check_bins("t", &dirs, true, false), 0);
+            let orphan = |name: &str| BinProblem::Orphan {
+                payload: dir.join(name),
+            };
+            assert_eq!(
+                check_bin_dir(&dir),
+                [
+                    BinProblem::Stray {
+                        path: dir.join("$IFFFFFF")
+                    },
+                    orphan("$RBBBBBB"),
+                    orphan("$RDDDDDD"),
+                    orphan("$REEEEEE"),
+                ]
+            );
+            assert!(dir.join("$IAAAAAA.txt").exists() && dir.join("desktop.ini").exists());
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

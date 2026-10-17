@@ -25,7 +25,6 @@
 
 use std::ffi::OsStr;
 use std::io;
-#[cfg(unix)]
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -139,6 +138,14 @@ pub fn gate_many(n: u64) -> io::Result<()> {
 pub fn remove(path: &Path) -> io::Result<()> {
     gate()?;
     crate::trashdir::remove_any_path(path)
+}
+
+/// Remove `path` for good, through [`gate`]: a file, link or whole tree,
+/// with the read-only attribute cleared as the Recycle Bin purges clear it.
+#[cfg(windows)]
+pub fn remove(path: &Path) -> io::Result<()> {
+    gate()?;
+    crate::win_recycle::remove_forcing(path)
 }
 
 /// Whether `args` only look and delete nothing: a dry run, or help or

@@ -1,0 +1,1 @@
+`rtrash status --check` on Windows now checks the Recycle Bin: it reports `$I` records whose `$R` payload is gone, `$I` records that cannot be parsed, and `$R` payloads with no record. `--fix` removes the dangling and bad records under `RTRASH_NO_PERMANENT`, `RTRASH_MAX_PERMANENT` and `RTRASH_ALLOW_ROOTS`, and `-n` previews it.

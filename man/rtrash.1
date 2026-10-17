@@ -911,6 +911,31 @@ With an age or size filter it counts the passing items per drive
 instead, without the caps.
 .PP
 On Windows,
+.B status \-\-check
+reads the current user's Recycle Bin folder on each drive and each
+volume mounted on a folder, and reports a
+.I $I
+record whose
+.I $R
+payload is gone
+.RB ( dangling: ),
+a
+.I $I
+record that cannot be read or parsed
+.RB ( "bad record:" ),
+a
+.I $R
+payload with no record, which list and rm cannot show
+.RB ( orphan: ),
+and a
+.I $I
+name that is a folder or a link
+.RB ( stray: ).
+.B \-\-fix
+removes the dangling and bad records under the same guards, and a
+payload a bad record named stays, as an orphan.
+.PP
+On Windows,
 .BR list ,
 .BR status ,
 .B rm
