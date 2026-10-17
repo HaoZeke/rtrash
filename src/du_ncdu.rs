@@ -12,7 +12,7 @@
 //! recursion, so exports of deep trees read like any other.
 
 use std::collections::HashSet;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::du::{Item, RootTotals, MTIME_UNKNOWN};
@@ -25,6 +25,105 @@ pub fn looks_like_export(head: &[u8]) -> bool {
     head.iter()
         .find(|b| !b.is_ascii_whitespace())
         .is_some_and(|&b| b == b'[')
+}
+
+/// First bytes of a zstd frame, which `ncdu -c` writes its JSON export
+/// in. ncdu tells the two apart by these bytes too.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+
+/// Whether `head` starts a zstd frame.
+pub fn looks_like_zstd(head: &[u8]) -> bool {
+    head.starts_with(&ZSTD_MAGIC)
+}
+
+/// Read a zstd-compressed ncdu JSON export (`ncdu -c -o FILE`) as
+/// [`parse`] reads a plain one. Positions in errors count bytes of the
+/// decompressed JSON.
+pub fn parse_zstd(r: impl BufRead) -> io::Result<Snapshot> {
+    let mut z = io::BufReader::new(Zstd::new(r));
+    if !looks_like_export(z.fill_buf()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "zstd-compressed, but not an ncdu JSON export",
+        ));
+    }
+    parse(z)
+}
+
+/// The decompressed bytes of a zstd stream: frames one after another,
+/// as the format allows, with skippable frames passed over. Blocks are
+/// decoded as they are read, so memory stays at the frame's window.
+pub(crate) struct Zstd<R> {
+    src: R,
+    dec: ruzstd::decoding::FrameDecoder,
+    open: bool,
+}
+
+fn zstd_err(e: impl std::fmt::Display) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, format!("zstd data: {e}"))
+}
+
+impl<R: BufRead> Zstd<R> {
+    pub(crate) fn new(src: R) -> Self {
+        Zstd {
+            src,
+            dec: ruzstd::decoding::FrameDecoder::new(),
+            open: false,
+        }
+    }
+
+    /// Start the next frame; false at the end of the input.
+    fn next_frame(&mut self) -> io::Result<bool> {
+        use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
+        loop {
+            if self.src.fill_buf()?.is_empty() {
+                return Ok(false);
+            }
+            match self.dec.init(&mut self.src) {
+                Ok(()) => return Ok(true),
+                Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
+                    length,
+                    ..
+                })) => {
+                    let want = u64::from(length);
+                    let got = io::copy(&mut self.src.by_ref().take(want), &mut io::sink())?;
+                    if got != want {
+                        return Err(zstd_err("a skippable frame is cut off"));
+                    }
+                }
+                Err(e) => return Err(zstd_err(e)),
+            }
+        }
+    }
+}
+
+impl<R: BufRead> Read for Zstd<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        use ruzstd::decoding::BlockDecodingStrategy;
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if !self.open {
+                if !self.next_frame()? {
+                    return Ok(0);
+                }
+                self.open = true;
+            }
+            while self.dec.can_collect() == 0 && !self.dec.is_finished() {
+                self.dec
+                    .decode_blocks(&mut self.src, BlockDecodingStrategy::UptoBlocks(1))
+                    .map_err(zstd_err)?;
+            }
+            let n = self.dec.read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+            if self.dec.is_finished() {
+                self.open = false;
+            }
+        }
+    }
 }
 
 /// One info object, with the fields the totals need.
@@ -1144,6 +1243,60 @@ mod tests {
         // ncdu marks what it cannot read, so none marked means none.
         assert_eq!(snap.unreadable, Some(0));
         assert!(snap.unread.is_empty());
+    }
+
+    fn zstd(data: &[u8]) -> Vec<u8> {
+        ruzstd::encoding::compress_to_vec(data, ruzstd::encoding::CompressionLevel::Fastest)
+    }
+
+    fn unzstd(data: &[u8]) -> io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        Zstd::new(data).read_to_end(&mut out)?;
+        Ok(out)
+    }
+
+    /// `ncdu -c` output reads as its JSON: a stream of several blocks,
+    /// several frames with a skippable one between them, and the empty
+    /// stream. A cut-off or corrupt stream fails, and nothing else
+    /// passes for zstd.
+    #[test]
+    fn zstd_streams_read_frame_after_frame() {
+        let mut json = String::from(r#"[1,2,{"timestamp":5},[{"name":"/r","dsize":4096}"#);
+        for i in 0..20_000 {
+            json.push_str(&format!(r#",{{"name":"f{i}","asize":{i},"dsize":4096}}"#));
+        }
+        json.push_str("]]");
+        let one = zstd(json.as_bytes());
+        assert!(looks_like_zstd(&one));
+        assert_eq!(unzstd(&one).unwrap(), json.as_bytes());
+        let snap = parse_zstd(&one[..]).unwrap();
+        assert_eq!((snap.created, snap.roots[0].files), (5, 20_000));
+        let e = parse_zstd(&zstd(b"# rtrash du snapshot 1\n")[..]).unwrap_err();
+        assert!(e.to_string().contains("not an ncdu JSON export"), "{e}");
+
+        let (a, b) = json.split_at(json.len() / 3);
+        let mut two = zstd(a.as_bytes());
+        two.extend(0x184d_2a53u32.to_le_bytes());
+        two.extend(3u32.to_le_bytes());
+        two.extend(b"abc");
+        two.extend(zstd(b.as_bytes()));
+        assert_eq!(unzstd(&two).unwrap(), json.as_bytes());
+        assert!(unzstd(&[]).unwrap().is_empty());
+
+        for cut in [5, one.len() / 2, one.len() - 1] {
+            let e = unzstd(&one[..cut]).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+            assert!(e.to_string().starts_with("zstd data: "), "{e}");
+        }
+        let mut junk = one.clone();
+        junk.extend(b"[1]");
+        let e = unzstd(&junk).unwrap_err().to_string();
+        assert!(e.starts_with("zstd data: "), "{e}");
+        let short_skip = [0x50, 0x2a, 0x4d, 0x18, 9, 0, 0, 0, 1];
+        let e = unzstd(&short_skip).unwrap_err().to_string();
+        assert!(e.contains("skippable frame is cut off"), "{e}");
+        assert!(!looks_like_zstd(b"[1,2"));
+        assert!(!looks_like_zstd(&one[..3]));
     }
 
     #[test]

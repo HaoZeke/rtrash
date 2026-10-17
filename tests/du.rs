@@ -1628,6 +1628,57 @@ fn ncdu_binary_exports_list_and_diff_like_their_json_form() {
     assert!(err.contains("ncdu binary export"), "{err}");
 }
 
+/// `ncdu -c` writes its JSON export through zstd. The fixture is the
+/// JSON fixture as ncdu 2.9.1 rewrites it compressed (`ncdu -e -f
+/// ncdu-2.9.1-export.json -c -o FILE`), which changes only the export
+/// date, so `-f` and `du diff` read both alike. The bytes decide, not
+/// the name, and a cut-off or wrong stream fails.
+#[test]
+fn ncdu_zstd_exports_read_like_their_json_form() {
+    let t = Tree::new("ncdu-zstd");
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let zst = data.join("ncdu-2.9.1-export.json.zst");
+    let json = data.join("ncdu-2.9.1-export.json");
+    let (z, j) = (zst.to_str().unwrap(), json.to_str().unwrap());
+    let (zo, jo) = (t.du(&["-f", z, "--json"]), t.du(&["-f", j, "--json"]));
+    assert!(
+        zo.status.success(),
+        "{}",
+        String::from_utf8_lossy(&zo.stderr)
+    );
+    let out = String::from_utf8_lossy(&zo.stdout).into_owned();
+    assert!(
+        out.contains(r#""disk":49152,"apparent":9009,"files":4,"links":1,"dirs":7,"excluded":1"#),
+        "{out}"
+    );
+    assert_eq!(out, String::from_utf8_lossy(&jo.stdout));
+    let d = t.du(&["diff", j, z]);
+    assert!(d.status.success(), "{}", String::from_utf8_lossy(&d.stderr));
+    let d = String::from_utf8_lossy(&d.stdout).into_owned();
+    assert!(d.contains("No directory changed size."), "{d}");
+    // Any name: the magic bytes pick the reader.
+    let renamed = t.root.join("export.ncdu");
+    fs::copy(&zst, &renamed).unwrap();
+    let again = t.du(&["-f", renamed.to_str().unwrap(), "--json"]);
+    assert_eq!(String::from_utf8_lossy(&again.stdout), out);
+    let cut = t.root.join("cut.json.zst");
+    fs::write(&cut, &fs::read(&zst).unwrap()[..200]).unwrap();
+    let bad = t.du(&["-f", cut.to_str().unwrap()]);
+    assert_eq!(bad.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&bad.stderr).into_owned();
+    assert!(err.contains("zstd data: "), "{err}");
+    let other = t.root.join("other.zst");
+    let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd];
+    // A raw block of 3 bytes, the last of a single-segment frame.
+    frame.extend([0x20, 3, 0x19, 0, 0]);
+    frame.extend(b"abc");
+    fs::write(&other, frame).unwrap();
+    let bad = t.du(&["-f", other.to_str().unwrap()]);
+    assert_eq!(bad.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&bad.stderr).into_owned();
+    assert!(err.contains("not an ncdu JSON export"), "{err}");
+}
+
 /// ncdu marks what it cannot read with `read_error`, and `-f` counts
 /// those entries as a scan counts unreadable ones: the real ncdu 2.9.1
 /// fixture (JSON and binary) has one locked directory, which gets a row,

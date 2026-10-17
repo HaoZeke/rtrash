@@ -1,0 +1,1 @@
+`rtrash du -f` and `du diff` now read ncdu JSON exports compressed with Zstandard (`ncdu -c -o FILE`, ncdu 2.7 and later). The file's first bytes pick the reader, whatever its name, and a compressed export lists the same rows and totals as its plain form.

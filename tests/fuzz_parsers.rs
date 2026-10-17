@@ -1,6 +1,6 @@
 //! Deterministic fuzz loops over every parser that reads files other tools
 //! write: `.trashinfo`, `directorysizes`, `.DS_Store`, Recycle Bin `$I`,
-//! du snapshots, ncdu exports (JSON and binary), the config file and
+//! du snapshots, ncdu exports (JSON, zstd JSON and binary), the config file and
 //! exclude patterns. Each loop mutates a
 //! valid seed (bit flips, byte overwrites, truncation, splices) and also
 //! feeds pure noise. A parser may reject input; it must never panic. The
@@ -232,6 +232,26 @@ fn ncdu_json_export_parser_survives_noise() {
     for _ in 0..rounds() {
         let input = rng.input(seed);
         let _ = rtrash::du_ncdu::parse(&input[..]);
+    }
+}
+
+/// The zstd reader under `ncdu -c` exports: noise in the frames, and
+/// in the JSON behind them.
+#[test]
+fn ncdu_zstd_export_parser_survives_noise() {
+    let json = include_bytes!("data/ncdu-2.9.1-export.json");
+    let seed = include_bytes!("data/ncdu-2.9.1-export.json.zst");
+    let mut rng = Rng(0x0005_7a95_407d_0004);
+    for _ in 0..rounds() {
+        let input = if rng.below(2) == 0 {
+            rng.input(seed)
+        } else {
+            ruzstd::encoding::compress_to_vec(
+                &rng.input(json)[..],
+                ruzstd::encoding::CompressionLevel::Fastest,
+            )
+        };
+        let _ = rtrash::du_ncdu::parse_zstd(&input[..]);
     }
 }
 

@@ -8,6 +8,8 @@
 # and gio, in every pairing. trash-cli and gtrash then remove one rtrash
 # item and empty the rest; gio does too when RTRASH_INTEROP_GIO_EMPTY=1,
 # since `gio trash --empty` also empties every volume trash it finds. File names carry a space, a '%' and Unicode.
+# With ncdu 2.7 or later on PATH, `rtrash du -f` must read its `ncdu -c`
+# export as it reads the plain one.
 # Tools that are missing get skipped with a note; rtrash must be there.
 # gio needs a session bus and gvfsd, so the script starts both in
 # dbus-run-session when gio is on PATH and no gvfsd runs yet.
@@ -323,6 +325,39 @@ if have trash-list; then
   rm -rf -- "$tl"
 else
   echo "note: trash-list missing; trash-list row check skipped"
+fi
+
+# ncdu 2.7 and later compress a JSON export with -c. One scan exported
+# both ways must list the same in `rtrash du -f` and diff clean in
+# `du diff`; the compressed file must start with the zstd magic.
+if have ncdu && ncdu --help 2>&1 | has -e '--compress'; then
+  nc=$scratch/ncdu
+  mkdir -p "$nc/tree/a b/c" "$nc/tree/d"
+  head -c 70000 /dev/urandom > "$nc/tree/a b/c/big"
+  printf 'x\n' > "$nc/tree/d/small 100%.txt"
+  ln "$nc/tree/d/small 100%.txt" "$nc/tree/a b/hard"
+  ncdu --ignore-config -0 -e -o "$nc/plain.json" "$nc/tree" >/dev/null
+  ncdu --ignore-config -0 -e -c -o "$nc/packed" "$nc/tree" >/dev/null
+  magic=$(od -An -tx1 -N4 "$nc/packed" | tr -d ' \n')
+  want=$("$rtrash" du -f "$nc/plain.json" --json 2>&1 || echo "exit $?")
+  got=$("$rtrash" du -f "$nc/packed" --json 2>&1 || echo "exit $?")
+  if [[ $magic == 28b52ffd && $want == "$got" && $got == *'"files":2'* ]]; then
+    echo "ok   du -f reads an ncdu -c export like its plain form"
+  else
+    echo "FAIL du -f reads an ncdu -c export differently (magic $magic)"
+    printf '  plain: %s\n  ncdu -c: %s\n' "$want" "$got"
+    fail=1
+  fi
+  if "$rtrash" du diff "$nc/plain.json" "$nc/packed" 2>&1 | has -F "No directory changed size."; then
+    echo "ok   du diff of an ncdu -c export and its plain form is clean"
+  else
+    echo "FAIL du diff of an ncdu -c export and its plain form"
+    "$rtrash" du diff "$nc/plain.json" "$nc/packed" 2>&1 | sed 's/^/  | /' || true
+    fail=1
+  fi
+  rm -rf -- "$nc"
+else
+  echo "note: ncdu 2.7 or later missing; ncdu -c import check skipped"
 fi
 
 # Nothing may stay behind in the trash after every restore.

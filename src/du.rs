@@ -185,7 +185,7 @@ directories appear as one `trash` row and are never printed by --print0.
       --ncdu-binary=FILE  the same in ncdu 2's binary format (ncdu -O),
                           for ncdu 2.6 or later
   -f, --file=FILE       list from a snapshot, or an ncdu export (ncdu -o,
-                          ncdu -O, gdu -o), instead of scanning
+                          ncdu -c -o, ncdu -O, gdu -o), instead of scanning
       --stacks          print folded stacks of every directory's own size
                           for flame graph tools (flamegraph.pl, inferno,
                           speedscope) instead of listing; works with -f

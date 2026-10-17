@@ -1949,9 +1949,10 @@ about as long as the JSON one.
 .TP
 .BR \-f ", " \-\-file =\fIFILE\fR
 List the largest directories from a snapshot instead of scanning.
-\fIFILE\fR may also be an ncdu export (\fBncdu \-o\fR or \fBgdu \-o\fR, or the
+\fIFILE\fR may also be an ncdu export (\fBncdu \-o\fR or \fBgdu \-o\fR, the
+JSON export compressed with \fBncdu \-c\fR (ncdu 2.7 and later), or the
 binary export of ncdu 2.6 and later, \fBncdu \-O\fR, told
-apart by its first bytes): its totals are counted as a scan counts them,
+apart by its first bytes, whatever the file is named): its totals are counted as a scan counts them,
 with each hard link counted once (when the export records inodes)
 and excluded entries left out.
 gdu exports carry no directory sizes or inodes, so their totals can be lower or higher.
