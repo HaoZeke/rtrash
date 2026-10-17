@@ -140,6 +140,15 @@ pub fn remove(path: &Path) -> io::Result<()> {
     crate::trashdir::remove_any_path(path)
 }
 
+/// Remove one `.trashinfo` record for good, through [`gate`]: a regular
+/// file only, never a folder or what a link points to (see
+/// [`crate::trashdir::remove_record`]).
+#[cfg(unix)]
+pub fn remove_record(path: &Path) -> io::Result<()> {
+    gate()?;
+    crate::trashdir::remove_record(path)
+}
+
 /// Remove `path` for good, through [`gate`]: a file, link or whole tree,
 /// with the read-only attribute cleared as the Recycle Bin purges clear it.
 #[cfg(windows)]

@@ -11,7 +11,13 @@
 //! still lists, and the user decides. Stale `directorysizes` lines need no
 //! check here, as every status run drops them (`DirSizes::write_back`).
 //!
-//! `--fix` removes records through [`crate::permanent_guard::remove`], so
+//! Each name is sorted by its file type before its body is read: only a
+//! regular file can be a record, so a folder, link or other file named
+//! `NAME.trashinfo` is stray, kept, and never reaches `--fix`. The removal
+//! itself, [`crate::permanent_guard::remove_record`], refuses anything but
+//! a regular file too, so a classifier bug cannot hand it a tree.
+//!
+//! `--fix` removes records through [`crate::permanent_guard::remove_record`], so
 //! `RTRASH_NO_PERMANENT` refuses it and `RTRASH_MAX_PERMANENT` caps it,
 //! counted before the first removal. With `RTRASH_ALLOW_ROOTS` set, a
 //! record whose payload is gone must name a path under a root, and a bad
@@ -22,6 +28,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use crate::trashdir::{self, TrashDir};
+
+/// Why a stray name is not a record.
+const NOT_TRASHINFO: &str = "not a .trashinfo";
+const NOT_REGULAR: &str = "not a regular file, so not a record";
 
 /// One finding in one trash.
 #[derive(Debug, PartialEq, Eq)]
@@ -34,8 +44,9 @@ pub enum Problem {
     BadDate { record: PathBuf },
     /// A payload in `files/` with no record.
     Orphan { payload: PathBuf },
-    /// A name in `info/` that is not `NAME.trashinfo`.
-    Stray { path: PathBuf },
+    /// A name in `info/` that is not a record: not `NAME.trashinfo`, or
+    /// not a regular file; `what` says which.
+    Stray { path: PathBuf, what: &'static str },
 }
 
 impl Problem {
@@ -62,7 +73,7 @@ impl Problem {
             Problem::Orphan { payload } => {
                 format!("orphan: {} (kept; rm by its name deletes it)", t(payload))
             }
-            Problem::Stray { path } => format!("stray: {} (kept; not a .trashinfo)", t(path)),
+            Problem::Stray { path, what } => format!("stray: {} (kept; {what})", t(path)),
         }
     }
 }
@@ -79,13 +90,33 @@ pub fn scan(dir: &TrashDir) -> Vec<Problem> {
     let mut out = Vec::new();
     for fname in names {
         let record = dir.info().join(&fname);
-        let Some(stem) = fname.as_bytes().strip_suffix(b".trashinfo") else {
-            out.push(Problem::Stray { path: record });
+        let stem = fname
+            .as_bytes()
+            .strip_suffix(b".trashinfo")
+            .filter(|s| !s.is_empty());
+        let Some(stem) = stem else {
+            out.push(Problem::Stray {
+                path: record,
+                what: NOT_TRASHINFO,
+            });
             continue;
         };
-        if stem.is_empty() {
-            out.push(Problem::Stray { path: record });
-            continue;
+        // By file type first, the link itself not followed: only a
+        // regular file is a record, and only a record can be removed.
+        match record.symlink_metadata() {
+            Ok(m) if m.file_type().is_file() => {}
+            Ok(_) => {
+                out.push(Problem::Stray {
+                    path: record,
+                    what: NOT_REGULAR,
+                });
+                continue;
+            }
+            Err(e) => {
+                let why = format!("cannot be read ({e})");
+                out.push(Problem::BadRecord { record, why });
+                continue;
+            }
         }
         let payload = dir.files().join(OsStr::from_bytes(stem));
         let has_payload = payload.symlink_metadata().is_ok();
@@ -186,7 +217,7 @@ pub fn run(prog: &str, dirs: &[TrashDir], fix: bool, dry_run: bool) -> i32 {
                 println!("would remove {}", crate::util::term_path(record));
                 continue;
             }
-            match crate::permanent_guard::remove(record) {
+            match crate::permanent_guard::remove_record(record) {
                 Ok(()) => {
                     println!("removed {}", crate::util::term_path(record));
                     crate::trash_total::forget(dir);

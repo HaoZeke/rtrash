@@ -1640,6 +1640,29 @@ pub fn remove_any_path(path: &Path) -> io::Result<()> {
     crate::fastdelete::remove_path(path)
 }
 
+/// Whether `path` is a regular file, not followed if it is a link: the
+/// only thing a `.trashinfo` record can be. A folder, link, fifo or
+/// socket by that name is something else, and no record removal takes it.
+pub fn is_record_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+}
+
+/// Remove the `.trashinfo` record at `path`, and only a record: anything
+/// [`is_record_file`] does not take is refused and left in place. The
+/// removal is one unlink, which cannot take a folder even if one replaces
+/// the file after the look, and takes only the link itself if a link
+/// does. Callers that delete for good go through
+/// [`crate::permanent_guard::remove_record`].
+pub fn remove_record(path: &Path) -> io::Result<()> {
+    if !is_record_file(path) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file, so not a record; left in place",
+        ));
+    }
+    fs::remove_file(path)
+}
+
 /// Move `src` to `dest`, falling back to copy+delete across devices (EXDEV).
 /// Used by restore when the trash entry lives on a different filesystem than
 /// the original path (e.g. home-trash fallback after a volume was full).
@@ -3276,6 +3299,29 @@ proc /proc proc rw 0 0
             );
         }
         fs::set_permissions(td.files(), fs::Permissions::from_mode(0o700)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A record removal takes a regular file and refuses a folder (with
+    /// what is in it) and a link, leaving the link's target too.
+    #[test]
+    fn remove_record_takes_only_a_regular_file() {
+        let root = std::env::temp_dir().join(format!("rtrash-rmrecord-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("d.trashinfo")).unwrap();
+        fs::write(root.join("d.trashinfo/inner"), b"x").unwrap();
+        fs::write(root.join("target"), b"t").unwrap();
+        std::os::unix::fs::symlink(root.join("target"), root.join("s.trashinfo")).unwrap();
+        fs::write(root.join("f.trashinfo"), b"[Trash Info]\n").unwrap();
+        for name in ["d.trashinfo", "s.trashinfo"] {
+            let e = remove_record(&root.join(name)).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{name}");
+            assert!(root.join(name).symlink_metadata().is_ok(), "{name}");
+        }
+        assert!(root.join("d.trashinfo/inner").is_file());
+        assert_eq!(fs::read(root.join("target")).unwrap(), b"t");
+        remove_record(&root.join("f.trashinfo")).unwrap();
+        assert!(!root.join("f.trashinfo").exists());
         let _ = fs::remove_dir_all(&root);
     }
 }

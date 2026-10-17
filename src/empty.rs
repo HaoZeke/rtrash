@@ -83,8 +83,9 @@ struct Opts {
     all_users: bool,
 }
 
-/// The `.trashinfo` names in `dir` whose payload in `files/` is gone,
-/// sorted.
+/// The `.trashinfo` records in `dir` whose payload in `files/` is gone,
+/// sorted. Only regular files are records: a folder or link by such a
+/// name is left alone, as `status --check` reports it stray.
 fn dangling_records(dir: &TrashDir) -> Vec<std::ffi::OsString> {
     let files = dir.files();
     let mut out: Vec<std::ffi::OsString> = fs::read_dir(dir.info())
@@ -95,6 +96,9 @@ fn dangling_records(dir: &TrashDir) -> Vec<std::ffi::OsString> {
             // Raw bytes, so a name that is not UTF-8 still finds its
             // payload and is never taken for dangling.
             let fname = e.file_name();
+            if !e.file_type().is_ok_and(|t| t.is_file()) {
+                return None;
+            }
             let stem = fname.as_bytes().strip_suffix(b".trashinfo")?;
             if stem.is_empty() || stem.contains(&b'/') {
                 return None;
@@ -139,7 +143,7 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
                 use std::os::unix::fs::MetadataExt;
                 m.blocks().saturating_mul(512)
             });
-            match fs::remove_file(&path) {
+            match trashdir::remove_record(&path) {
                 Ok(()) => {
                     if opts.verbose && !opts.json {
                         println!("removed {}", crate::util::term_path(&path));

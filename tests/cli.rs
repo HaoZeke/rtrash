@@ -6929,3 +6929,72 @@ fn status_check_reports_and_fix_removes_only_broken_records() {
         stderr_of(&again)
     );
 }
+
+/// A folder and a link named like records are stray, never records:
+/// `status --check` reports both and `--fix`, `--fix -n` and
+/// `empty --dangling` leave the folder, its file, the link and the
+/// link's target as they were (21a: --fix removed such a folder whole).
+#[test]
+fn status_fix_and_empty_dangling_leave_non_file_records_alone() {
+    let sb = Sandbox::new("trashcheck-nonfile");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("nf-keep");
+    assert!(sb.run(&["put", "nf-keep"]).status.success());
+    let info = sb.trash().join("info");
+    let files = sb.trash().join("files");
+    let folder = info.join("d.trashinfo");
+    fs::create_dir(&folder).unwrap();
+    fs::write(folder.join("inner"), b"keep me").unwrap();
+    // A link to a record that parses and whose payload is missing: read
+    // through the link, it would pass for a dangling record.
+    let target = sb.root.join("nf-target.trashinfo");
+    let work = sb.work().display().to_string();
+    fs::write(
+        &target,
+        format!("[Trash Info]\nPath={work}/s\nDeletionDate=2026-01-02T03:04:05\n"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&target, info.join("s.trashinfo")).unwrap();
+
+    let stray = "(kept; not a regular file, so not a record)";
+    let check = sb.run(&["status", &pin, "--check"]);
+    assert_eq!(check.status.code(), Some(1), "{}", stderr_of(&check));
+    let strays = stdout_of(&check)
+        .lines()
+        .filter(|l| l.starts_with("stray: ") && l.ends_with(stray))
+        .count();
+    assert_eq!(strays, 2, "{}", stdout_of(&check));
+    for prefix in ["dangling: ", "bad record: "] {
+        assert_eq!(lines_starting(&check, prefix), 0, "{}", stdout_of(&check));
+    }
+    assert!(
+        stderr_of(&check).contains("2 problems found, 0 records --fix would remove"),
+        "{}",
+        stderr_of(&check)
+    );
+
+    // Nothing here is a record to remove, so each run changes nothing.
+    let watch = [info.as_path(), files.as_path(), target.as_path()];
+    let unchanged = |args: &[&str], code: i32, lines: &[(&str, usize)]| {
+        common::assert_refused_unchanged(&args, &watch, code, lines, || sb.run(args))
+    };
+    let out = unchanged(&["status", &pin, "--check", "--fix", "-n"], 1, &[]);
+    assert_eq!(
+        lines_starting(&out, "would remove "),
+        0,
+        "{}",
+        stdout_of(&out)
+    );
+    let left = [("removed 0 records; 2 problems left to review", 1)];
+    let out = unchanged(&["status", &pin, "--check", "--fix"], 0, &left[..]);
+    assert_eq!(lines_starting(&out, "removed "), 0, "{}", stdout_of(&out));
+    let none = [("Removed 0 records without a payload", 1)];
+    unchanged(&["empty", "--home-only", "--dangling"], 0, &none[..]);
+    assert_eq!(
+        info_names(&sb),
+        ["d.trashinfo", "nf-keep.trashinfo", "s.trashinfo"]
+    );
+    assert_eq!(fs::read(folder.join("inner")).unwrap(), b"keep me");
+    let link = fs::symlink_metadata(info.join("s.trashinfo")).unwrap();
+    assert!(link.file_type().is_symlink());
+}
