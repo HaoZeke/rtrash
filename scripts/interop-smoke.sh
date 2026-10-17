@@ -13,6 +13,8 @@
 # With trash-cli, rtrash's trash-list must print trash-cli's rows, odd
 # names included, and with RTRASH_INTEROP_VOLUME naming a mount point
 # both tools must refuse a volume record that leads out of its volume.
+# With trash-cli too, rtrash status --check --fix must clear the records
+# a trash-put killed mid-way leaves (trash-cli #414).
 # Tools that are missing get skipped with a note; rtrash must be there.
 # gio needs a session bus and gvfsd, so the script starts both in
 # dbus-run-session when gio is on PATH and no gvfsd runs yet.
@@ -326,6 +328,32 @@ if have trash-list; then
       fail=1
     fi
   done
+  rm -rf -- "$tl"
+
+  # trash-cli #414: a trash-put that dies between its record and its
+  # move leaves an empty record, one cut off before Path=, or a whole
+  # one whose payload never came. rtrash status --check --fix takes all
+  # three, and trash-list then prints the good row and no error.
+  tl=$scratch/tl-crash
+  mkdir -p "$tl/files" "$tl/info"
+  printf 'ok\n' > "$tl/files/ok"
+  printf '[Trash Info]\nPath=%s\nDeletionDate=2026-01-02T03:04:05\n' "$scratch/w/from/ok" > "$tl/info/ok.trashinfo"
+  : > "$tl/info/empty.trashinfo"
+  printf '[Trash Info]\n' > "$tl/info/cut.trashinfo"
+  printf '[Trash Info]\nPath=%s\nDeletionDate=2026-01-02T03:04:05\n' "$scratch/w/from/gone" > "$tl/info/gone.trashinfo"
+  before=$(trash-list --trash-dir="$tl" 2>&1 >/dev/null || true)
+  code=0; "$rtrash" status --trash-dir="$tl" --check --fix >/dev/null 2>&1 || code=$?
+  after=$(trash-list --trash-dir="$tl" 2>&1 >/dev/null || echo "exit $?")
+  rows=$(trash-list --trash-dir="$tl" 2>/dev/null || true)
+  if [[ $code == 0 && $before == *"Parse Error"* && -z $after && $rows == *"/w/from/ok" \
+    && -f $tl/files/ok && $(ls -A "$tl/info") == ok.trashinfo ]]; then
+    echo "ok   status --fix clears the records a crashed trash-put leaves (trash-cli #414)"
+  else
+    echo "FAIL status --fix and the records a crashed trash-put leaves (exit $code)"
+    printf '  before: %s\n  after: %s\n  rows: %s\n' "$before" "$after" "$rows"
+    ls -lA "$tl/info" | sed 's/^/  | /'
+    fail=1
+  fi
   rm -rf -- "$tl"
 
   # Odd names in rows, as trash-cli 0.26.9 prints them: as is in a pipe,

@@ -7993,3 +7993,47 @@ fn empty_days_stops_at_the_first_ctrl_c_and_leaves_no_half_pair() {
     assert!(said.contains("stopped by Ctrl-C: "), "{said}");
     assert!(pairs_whole(&sb, &names) >= 1, "{said}");
 }
+
+/// The records a put killed between its record and its move leaves
+/// (trash-cli #414): an empty one, one cut off before `Path=`, and a
+/// whole one whose payload never came. `status --check` names all three
+/// and `--fix` removes them, and nothing else.
+#[test]
+fn status_fix_clears_the_records_a_killed_put_leaves() {
+    let sb = Sandbox::new("crash-records");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("cr-good");
+    assert!(sb.run(&["put", "cr-good"]).status.success());
+    let info = sb.trash().join("info");
+    let work = sb.work().display().to_string();
+    fs::write(info.join("cr-empty.trashinfo"), b"").unwrap();
+    fs::write(info.join("cr-cut.trashinfo"), b"[Trash Info]\n").unwrap();
+    fs::write(
+        info.join("cr-gone.trashinfo"),
+        format!("[Trash Info]\nPath={work}/cr-gone\nDeletionDate=2026-01-02T03:04:05\n"),
+    )
+    .unwrap();
+
+    let check = sb.run(&["status", pin.as_str(), "--check"]);
+    assert_eq!(check.status.code(), Some(1), "{}", stderr_of(&check));
+    assert_eq!(
+        lines_starting(&check, "dangling: "),
+        1,
+        "{}",
+        stdout_of(&check)
+    );
+    assert_eq!(
+        lines_starting(&check, "bad record: "),
+        2,
+        "{}",
+        stdout_of(&check)
+    );
+
+    let fix = sb.run(&["status", pin.as_str(), "--check", "--fix"]);
+    assert_eq!(fix.status.code(), Some(0), "{}", stderr_of(&fix));
+    assert_eq!(lines_starting(&fix, "removed "), 3, "{}", stdout_of(&fix));
+    assert_eq!(names_in(&info), ["cr-good.trashinfo"]);
+    assert_eq!(names_in_trash(&sb), ["cr-good"]);
+    let again = sb.run(&["status", pin.as_str(), "--check"]);
+    assert_eq!(again.status.code(), Some(0), "{}", stderr_of(&again));
+}

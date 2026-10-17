@@ -1,0 +1,1 @@
+The interop smoke test and a CLI test now cover the records that a put killed between its record and its move leaves behind (trash-cli #414): an empty record, one cut off before `Path=`, and a whole one whose payload never came. `status --check --fix` removes all three and leaves the good entry, and trash-cli's trash-list then prints no parse errors.
