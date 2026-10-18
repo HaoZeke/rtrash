@@ -152,8 +152,9 @@ does. A name or a
 line in a shared trash can't move the cursor, recolor the screen, or fake
 extra rows that way. A pipe, a file, and
 .B \-\-json
-still get the raw name. Errors about a trashed item on standard error
-follow the same rule when standard error is a terminal. The browsers
+still get the raw name. Messages on standard error follow the same rule
+when standard error is a terminal. It covers each message that names a
+file or folder, put's own operands too. The browsers
 drop control characters when they draw. Rows under the
 .B trash\-list
 name quote such a name instead, as trash-cli does (see

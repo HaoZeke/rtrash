@@ -442,7 +442,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     }
     if let Some(d) = &to {
         if !d.is_dir() {
-            eprintln!("{prog}: --to: '{}' is not a directory", d.display());
+            eprintln!(
+                "{prog}: --to: '{}' is not a directory",
+                crate::util::err_path(&d)
+            );
             return 2;
         }
     }
@@ -559,7 +562,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     };
     if matches.is_empty() && trash_cli && target.is_none() && matcher.is_none() {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-        println!("No files trashed from current dir ('{}')", cwd.display());
+        println!(
+            "No files trashed from current dir ('{}')",
+            crate::util::term_path(&cwd)
+        );
         return 1;
     }
     if matches.is_empty() {

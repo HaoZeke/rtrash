@@ -608,7 +608,7 @@ pub fn resolve_dirs_opts(pins: &[PathBuf], home_only: bool) -> Vec<TrashDir> {
             if !is_valid_trash_root(&td.root) {
                 eprintln!(
                     "rtrash: ignoring --trash-dir='{}' (need non-symlink files/ and info/ directories)",
-                    p.display()
+                    crate::util::err_path(&p)
                 );
                 return None;
             }

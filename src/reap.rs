@@ -1062,7 +1062,7 @@ mod plat {
     pub fn trash(prog: &str, p: &Path, dest: &Dest) -> Result<(), ()> {
         let _ = (dest.home_only, &dest.trash_pin);
         crate::allow_roots::trash_delete(p)
-            .map_err(|e| eprintln!("{prog}: cannot trash '{}': {e}", p.display()))
+            .map_err(|e| eprintln!("{prog}: cannot trash '{}': {e}", crate::util::err_path(&p)))
     }
 }
 
@@ -1512,18 +1512,18 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         match fs::canonicalize(d) {
             Ok(c) if c.is_dir() => {
                 if c.parent().is_none() || is_home(&c) {
-                    eprintln!("{prog}: refusing to reap '{}'", d.display());
+                    eprintln!("{prog}: refusing to reap '{}'", crate::util::err_path(&d));
                     status = 1;
                 } else if !roots.contains(&c) {
                     roots.push(c);
                 }
             }
             Ok(_) if explicit => {
-                eprintln!("{prog}: '{}' is not a directory", d.display());
+                eprintln!("{prog}: '{}' is not a directory", crate::util::err_path(&d));
                 status = 1;
             }
             Err(e) if explicit => {
-                eprintln!("{prog}: cannot reap '{}': {e}", d.display());
+                eprintln!("{prog}: cannot reap '{}': {e}", crate::util::err_path(&d));
                 status = 1;
             }
             _ => {}
@@ -1610,7 +1610,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 continue;
             };
             let Ok(rd) = fs::read_dir(root) else {
-                eprintln!("{prog}: cannot read '{}'", root.display());
+                eprintln!("{prog}: cannot read '{}'", crate::util::err_path(&root));
                 status = 1;
                 continue;
             };
@@ -1890,7 +1890,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         if !dry_run {
             let done = if groups[o.group].action == Action::Permanent {
                 plat::remove(&o.path).map_err(|e| {
-                    eprintln!("{prog}: cannot remove '{}': {e}", o.path.display());
+                    eprintln!(
+                        "{prog}: cannot remove '{}': {e}",
+                        crate::util::err_path(&o.path)
+                    );
                 })
             } else {
                 plat::trash(prog, &o.path, &dest)
@@ -2129,7 +2132,7 @@ pub(crate) fn purge_oldest(
                 if dry_run { "would empty" } else { "emptied" },
                 crate::util::plural(done.removed, "item", "items"),
                 crate::util::format_bytes(done.bytes),
-                dir.root.display()
+                crate::util::err_path(&dir.root)
             );
         }
         left = if dry_run {
@@ -2181,7 +2184,7 @@ pub(crate) fn purge_oldest(
             if dry_run { "would empty" } else { "emptied" },
             crate::util::plural(n, "item", "items"),
             crate::util::format_bytes(bytes),
-            drive.display()
+            crate::util::err_path(&drive)
         );
     }
     if dry_run {
@@ -2235,7 +2238,7 @@ pub(crate) fn free_until(
             still += 1;
             eprintln!(
                 "{prog}: the file system of '{}' is still under {spec} free; the trash there held too little",
-                root.display()
+                crate::util::err_path(&root)
             );
         }
         rows.push(format!(

@@ -79,7 +79,7 @@ impl Problem {
 
     /// The report line, the same with and without `--fix`.
     fn line(&self) -> String {
-        let t = crate::util::term_path;
+        let t = crate::util::term_path::<std::path::PathBuf>;
         match self {
             Problem::Dangling { record, .. } => {
                 format!("dangling: {} (the payload is gone)", t(record))
@@ -256,7 +256,10 @@ pub fn run(prog: &str, dirs: &[TrashDir], fix: bool, dry_run: bool) -> i32 {
             .then(|| trashdir::TrashLock::acquire(&dir.root))
         {
             Some(Err(e)) => {
-                eprintln!("{prog}: cannot lock trash '{}': {e}", dir.root.display());
+                eprintln!(
+                    "{prog}: cannot lock trash '{}': {e}",
+                    crate::util::err_path(&dir.root)
+                );
                 failed += 1;
                 continue;
             }
@@ -295,7 +298,10 @@ pub fn run(prog: &str, dirs: &[TrashDir], fix: bool, dry_run: bool) -> i32 {
                     removed += 1;
                 }
                 Err(e) => {
-                    eprintln!("{prog}: cannot remove '{}': {e}", record.display());
+                    eprintln!(
+                        "{prog}: cannot remove '{}': {e}",
+                        crate::util::err_path(&record)
+                    );
                     failed += 1;
                 }
             }

@@ -82,7 +82,7 @@ fn ensure_dir(path: &Path, dry_run: bool, verbose: bool) -> io::Result<()> {
         return Ok(());
     }
     if verbose || dry_run {
-        eprintln!("mkdir -p {}", path.display());
+        eprintln!("mkdir -p {}", crate::util::err_path(&path));
     }
     if !dry_run {
         fs::create_dir_all(path)?;
@@ -102,7 +102,7 @@ fn write_file(
         if let Ok(existing) = fs::read_to_string(path) {
             if existing == data {
                 if verbose {
-                    eprintln!("unchanged {}", path.display());
+                    eprintln!("unchanged {}", crate::util::err_path(&path));
                 }
                 return Ok(());
             }
@@ -113,7 +113,7 @@ fn write_file(
         ));
     }
     if verbose || dry_run {
-        eprintln!("write {}", path.display());
+        eprintln!("write {}", crate::util::err_path(&path));
     }
     if !dry_run {
         if let Some(parent) = path.parent() {
@@ -150,7 +150,11 @@ fn link_multicall(
                 };
             if dest_ok {
                 if verbose {
-                    eprintln!("unchanged link {} -> {}", link.display(), dest.display());
+                    eprintln!(
+                        "unchanged link {} -> {}",
+                        crate::util::err_path(&link),
+                        crate::util::err_path(&dest)
+                    );
                 }
                 return Ok(());
             }
@@ -162,7 +166,7 @@ fn link_multicall(
         {
             // hardlink / same file
             if verbose {
-                eprintln!("unchanged {}", link.display());
+                eprintln!("unchanged {}", crate::util::err_path(&link));
             }
             return Ok(());
         }
@@ -176,14 +180,18 @@ fn link_multicall(
             ));
         }
         if verbose || dry_run {
-            eprintln!("rm {}", link.display());
+            eprintln!("rm {}", crate::util::err_path(&link));
         }
         if !dry_run {
             fs::remove_file(link)?;
         }
     }
     if verbose || dry_run {
-        eprintln!("ln -s {} {}", target.display(), link.display());
+        eprintln!(
+            "ln -s {} {}",
+            crate::util::err_path(&target),
+            crate::util::err_path(&link)
+        );
     }
     if !dry_run {
         if let Some(parent) = link.parent() {
@@ -320,7 +328,7 @@ fn run_setup(args: &[String]) -> i32 {
         if link.symlink_metadata().is_ok() {
             if opts.force {
                 if opts.verbose || opts.dry_run {
-                    eprintln!("rm {}", link.display());
+                    eprintln!("rm {}", crate::util::err_path(&link));
                 }
                 if !opts.dry_run {
                     ok &= absorb(fs::remove_file(&link));
@@ -333,14 +341,14 @@ fn run_setup(args: &[String]) -> i32 {
             }
         }
         if opts.verbose || opts.dry_run {
-            eprintln!("ln -s rtrash {}", link.display());
+            eprintln!("ln -s rtrash {}", crate::util::err_path(&link));
         }
         if !opts.dry_run {
             match symlink(&dest, &link) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) => {
-                    eprintln!("rtrash setup: {}: {e}", link.display());
+                    eprintln!("rtrash setup: {}: {e}", crate::util::err_path(&link));
                     ok = false;
                 }
             }
@@ -391,7 +399,7 @@ fn run_setup(args: &[String]) -> i32 {
         if link.symlink_metadata().is_ok() || link.exists() {
             if opts.force {
                 if opts.verbose || opts.dry_run {
-                    eprintln!("rm {}", link.display());
+                    eprintln!("rm {}", crate::util::err_path(&link));
                 }
                 if !opts.dry_run {
                     ok &= absorb(fs::remove_file(&link));
@@ -404,14 +412,14 @@ fn run_setup(args: &[String]) -> i32 {
             }
         }
         if opts.verbose || opts.dry_run {
-            eprintln!("ln -s rtrash.fish {}", link.display());
+            eprintln!("ln -s rtrash.fish {}", crate::util::err_path(&link));
         }
         if !opts.dry_run {
             match symlink(&dest, &link) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) => {
-                    eprintln!("rtrash setup: {}: {e}", link.display());
+                    eprintln!("rtrash setup: {}: {e}", crate::util::err_path(&link));
                     ok = false;
                 }
             }
@@ -447,20 +455,38 @@ fn run_setup(args: &[String]) -> i32 {
     println!("rtrash setup complete under {prefix}");
     println!();
     println!("Installed:");
-    println!("  multi-call links → {}", bin_dir.display());
-    println!("  bash completion  → {}/rtrash", bash_dir.display());
-    println!("  zsh completion   → {}/_rtrash", zsh_dir.display());
+    println!("  multi-call links → {}", crate::util::term_path(&bin_dir));
+    println!(
+        "  bash completion  → {}/rtrash",
+        crate::util::term_path(&bash_dir)
+    );
+    println!(
+        "  zsh completion   → {}/_rtrash",
+        crate::util::term_path(&zsh_dir)
+    );
     println!(
         "  fish completion  → {}/rtrash.fish (+ multi-call *.fish links)",
-        fish_dir.display()
+        crate::util::term_path(&fish_dir)
     );
-    println!("  nu completion    → {}/rtrash.nu", nu_dir.display());
-    println!("  elvish module    → {}/rtrash.elv", elvish_dir.display());
-    println!("  man page         → {}/rtrash.1", man_dir.display());
-    println!("  mc menu sample   → {}/mc.menu.sample", mc_dir.display());
+    println!(
+        "  nu completion    → {}/rtrash.nu",
+        crate::util::term_path(&nu_dir)
+    );
+    println!(
+        "  elvish module    → {}/rtrash.elv",
+        crate::util::term_path(&elvish_dir)
+    );
+    println!(
+        "  man page         → {}/rtrash.1",
+        crate::util::term_path(&man_dir)
+    );
+    println!(
+        "  mc menu sample   → {}/mc.menu.sample",
+        crate::util::term_path(&mc_dir)
+    );
     println!();
     println!("Shell notes (once per machine/login config):");
-    println!("  • PATH must include {}", bin_dir.display());
+    println!("  • PATH must include {}", crate::util::term_path(&bin_dir));
     println!("    (cargo install already uses ~/.cargo/bin; multi-call names");
     println!("    live under the prefix bin dir above — add it if needed.)");
     println!("  • bash: bash-completion loads");
@@ -470,7 +496,7 @@ fn run_setup(args: &[String]) -> i32 {
     println!("  • zsh: ensure the site-functions dir is on fpath, e.g. in ~/.zshrc:");
     println!(
         "      fpath=({}/zsh/site-functions $fpath)",
-        share.display()
+        crate::util::term_path(&share)
     );
     println!("      autoload -Uz compinit && compinit");
     println!("  • fish: user completions are loaded from");
@@ -485,10 +511,10 @@ fn run_setup(args: &[String]) -> i32 {
     println!("  • man: if `man rtrash` misses the page, set:");
     println!(
         "      export MANPATH=\"{}:${{MANPATH:-}}\"",
-        manpath.display()
+        crate::util::term_path(&manpath)
     );
     println!("  • midnight commander: append lines from");
-    println!("      {}/mc.menu.sample", mc_dir.display());
+    println!("      {}/mc.menu.sample", crate::util::term_path(&mc_dir));
     println!("    into ~/.config/mc/menu (optional; never auto-merged).");
     if !opts.with_rm {
         println!();

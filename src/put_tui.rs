@@ -524,7 +524,7 @@ pub fn run(prog: &str, start_dir: &Path) -> i32 {
     let rows = match list_dir_rows(&cwd) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("{prog}: cannot read '{}': {e}", cwd.display());
+            eprintln!("{prog}: cannot read '{}': {e}", crate::util::err_path(&cwd));
             return 1;
         }
     };

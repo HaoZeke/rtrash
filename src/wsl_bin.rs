@@ -211,14 +211,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let Some(it) = newest(abs.as_path()) else {
             eprintln!(
                 "{prog}: '{}' is not in the Recycle Bin of its drive",
-                abs.display()
+                crate::util::err_path(&abs)
             );
             status = 1;
             continue;
         };
         // Another item may have taken the payload's name since the scan.
         if let Err(s) = it.recheck() {
-            eprintln!("{prog}: {}", s.reason(&it.local.to_string_lossy()));
+            eprintln!("{prog}: {}", s.reason(&crate::util::err_path(&it.local)));
             status = 1;
             continue;
         }
@@ -226,14 +226,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             if !force {
                 eprintln!(
                     "{prog}: refusing to overwrite '{}' (use -f)",
-                    it.local.display()
+                    crate::util::err_path(&it.local)
                 );
                 status = 1;
                 continue;
             }
             let gone = crate::permanent_guard::remove(&it.local);
             if let Err(e) = gone {
-                eprintln!("{prog}: cannot replace '{}': {e}", it.local.display());
+                eprintln!(
+                    "{prog}: cannot replace '{}': {e}",
+                    crate::util::err_path(&it.local)
+                );
                 status = 1;
                 continue;
             }
@@ -243,12 +246,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             Ok(()) => {
                 eprintln!(
                     "{prog}: restored '{}' but nothing is there now",
-                    it.local.display()
+                    crate::util::err_path(&it.local)
                 );
                 status = 1;
             }
             Err(e) => {
-                eprintln!("{prog}: cannot restore '{}': {e}", it.local.display());
+                eprintln!(
+                    "{prog}: cannot restore '{}': {e}",
+                    crate::util::err_path(&it.local)
+                );
                 status = 1;
             }
         }
@@ -425,13 +431,16 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     let mut status = 0;
     for it in chosen {
         if dry {
-            println!("would remove '{}'", it.local.display());
+            println!("would remove '{}'", crate::util::term_path(&it.local));
             continue;
         }
         match remove_entry(it) {
-            Ok(()) => println!("removed '{}'", it.local.display()),
+            Ok(()) => println!("removed '{}'", crate::util::term_path(&it.local)),
             Err(e) => {
-                eprintln!("{prog}: cannot remove '{}': {e}", it.local.display());
+                eprintln!(
+                    "{prog}: cannot remove '{}': {e}",
+                    crate::util::err_path(&it.local)
+                );
                 status = 1;
             }
         }
@@ -496,11 +505,14 @@ pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
     let mut status = 0;
     for it in chosen {
         if dry {
-            println!("would remove '{}'", it.local.display());
+            println!("would remove '{}'", crate::util::term_path(&it.local));
             continue;
         }
         if let Err(e) = remove_entry(it) {
-            eprintln!("{prog}: cannot remove '{}': {e}", it.local.display());
+            eprintln!(
+                "{prog}: cannot remove '{}': {e}",
+                crate::util::err_path(&it.local)
+            );
             status = 1;
         }
     }

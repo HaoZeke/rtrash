@@ -1,0 +1,1 @@
+Messages now show the control characters of a file name as `?` on a terminal, in put, restore, rm, empty, du and the rest. That includes the operand put was given. Before, a file name could move the cursor or fake a line on the screen through such a message (dua #365).

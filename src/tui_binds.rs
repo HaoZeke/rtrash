@@ -744,7 +744,7 @@ confirm mode and action in browse mode (e.g. enter).
     }
     if path_only {
         match default_keys_path() {
-            Some(p) => println!("{}", p.display()),
+            Some(p) => println!("{}", crate::util::term_path(&p)),
             None => {
                 eprintln!("{prog}: cannot resolve config path (set HOME or XDG_CONFIG_HOME)");
                 return 1;

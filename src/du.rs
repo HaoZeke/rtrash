@@ -2202,7 +2202,10 @@ fn ncdu_out(
     let done = match written {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("{prog}: cannot write ncdu export '{}': {e}", out.display());
+            eprintln!(
+                "{prog}: cannot write ncdu export '{}': {e}",
+                crate::util::err_path(&out)
+            );
             return 1;
         }
     };
@@ -4064,7 +4067,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let snap = match crate::du_snap::read(file) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("{prog}: cannot read snapshot '{}': {e}", file.display());
+                eprintln!(
+                    "{prog}: cannot read snapshot '{}': {e}",
+                    crate::util::err_path(&file)
+                );
                 return 1;
             }
         };
@@ -4127,7 +4133,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 None => {
                     eprintln!(
                         "{prog}: '{}' records no unreadable count (an older snapshot or a gdu export); --strict cannot pass it",
-                        file.display()
+                        crate::util::err_path(&file)
                     );
                     return 1;
                 }
@@ -4220,14 +4226,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             crate::du_snap::write_file(out, &report, &opts, now)
         };
         if let Err(e) = written {
-            eprintln!("{prog}: cannot write snapshot '{}': {e}", out.display());
+            eprintln!(
+                "{prog}: cannot write snapshot '{}': {e}",
+                crate::util::err_path(&out)
+            );
             return 1;
         }
         if out.as_os_str() != "-" {
             eprintln!(
                 "{prog}: wrote {} to '{}'",
                 plural(report.dirs.len() as u64, "directory", "directories"),
-                out.display()
+                crate::util::err_path(&out)
             );
         }
         // The snapshot keeps the count; --strict still reports the scan.

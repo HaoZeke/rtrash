@@ -2464,6 +2464,50 @@ def check_reparse_links():
                               "du_fs::fileid::is_link (the name-surrogate bit)")
 
 
+# A path in a message goes through util::err_path (stderr) or
+# util::term_path (stdout), which turn control characters into `?` on a
+# terminal. A bare `.display()` or `.to_string_lossy()` in a print macro
+# let a file name write escape sequences to the terminal (dua #365; 147
+# such calls before round 265). PRINT_PATH_CASES tests the matcher.
+PRINT_MACRO = re.compile(r"\b(?:e?println|e?print|say)!\s*\(")
+RAW_PATH = re.compile(r"\.(?:display|to_string_lossy)\(\)")
+PRINT_PATH_CASES = [
+    ("display", 'eprintln!("{prog}: cannot read \'{}\': {e}", p.display());', 1),
+    ("lossy", 'say!("{prog}: {}", name.to_string_lossy());', 1),
+    ("split", 'println!(\n    "{}",\n    root.display()\n);', 1),
+    ("routed", 'eprintln!("{prog}: \'{}\'", crate::util::err_path(&p));', 0),
+    ("format", 'let s = format!("{}", p.display());', 0),
+]
+
+
+def raw_print_paths(code):
+    """0-based lines of print macros whose arguments show a path raw."""
+    hits = []
+    for m in PRINT_MACRO.finditer(code):
+        depth, j = 1, m.end()
+        while j < len(code) and depth:
+            depth += {"(": 1, ")": -1}.get(code[j], 0)
+            j += 1
+        if RAW_PATH.search(code[m.start():j]):
+            hits.append(code.count("\n", 0, m.start()))
+    return hits
+
+
+def check_message_paths():
+    """No print macro outside the tests shows a path raw."""
+    for what, text, want in PRINT_PATH_CASES:
+        if len(raw_print_paths(rust_code(text))) != want:
+            errors.append(f"scripts/precheck.py: raw_print_paths gets PRINT_PATH_CASES '{what}' "
+                          "wrong; the message-path check is broken")
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        raw = path.read_text(encoding="utf-8")
+        skip = test_mod_lines(raw.split("\n"))
+        for k in raw_print_paths(rust_code(raw)):
+            if k not in skip:
+                errors.append(f"{path.relative_to(ROOT).as_posix()}:{k + 1}: a print macro shows a "
+                              "path raw; use crate::util::err_path (stderr) or term_path (stdout)")
+
+
 # Btrfs decides at writeback which blocks it compresses (a range of one
 # block goes out plain), so a test that asserts the exact count of encoded
 # bytes fails at random: main CI 39154329766 got 16769024 for 2 * 8 MiB.
@@ -2647,7 +2691,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_directorysizes_paths()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

@@ -433,7 +433,7 @@ fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
             eprintln!(
                 "{prog}: removed {} from '{}' to keep it under {} ({source})",
                 crate::util::plural(done.removed, "item", "items"),
-                dir.root.display(),
+                crate::util::err_path(&dir.root),
                 crate::fastdelete::format_bytes(max)
             );
         }
@@ -527,7 +527,7 @@ fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
             };
             eprintln!(
                 "{prog}: warning: trash '{}' holds {}{share}, past {src}; free it with `rtrash empty`",
-                root.display(),
+                crate::util::err_path(&root),
                 crate::fastdelete::format_bytes(bytes)
             );
         }
@@ -561,7 +561,7 @@ fn warn_big_finder_trash(prog: &str, trashed: &[Trashed]) {
         if limit.exceeded(bytes, disk) {
             eprintln!(
                 "{prog}: warning: trash '{}' holds about {}, past {src}; free it with `rtrash empty --until-free=10%` or `rtrash empty`",
-                root.display(),
+                crate::util::err_path(&root),
                 crate::fastdelete::format_bytes(bytes)
             );
         }
@@ -634,8 +634,8 @@ thread_local! {
     static HEARD: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
 }
 
-/// A message of [`put_one`]: on stderr as always, and kept for [`heard`]
-/// when it listens on this thread.
+/// A message of [`put_one`]: on stderr as always (scrubbed on a terminal),
+/// and kept for [`heard`] when it listens on this thread.
 fn say(args: std::fmt::Arguments) {
     let text = args.to_string();
     HEARD.with(|h| {
@@ -643,7 +643,9 @@ fn say(args: std::fmt::Arguments) {
             said.push(text.clone());
         }
     });
-    eprintln!("{text}");
+    // The message names the operand as given, so on a terminal its
+    // control characters show as `?` (dua #365).
+    eprintln!("{}", crate::util::err_text(&text));
 }
 
 /// `eprintln!` for [`put_one`], through [`say`].
@@ -868,14 +870,14 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         Some(Overlap::Contains) => {
             say!(
                 "{prog}: cannot trash '{name}': it contains the trash directory '{}' it would move into",
-                trash.root.display()
+                crate::util::err_path(&trash.root)
             );
             return Err(1);
         }
         Some(Overlap::Inside) => {
             say!(
                 "{prog}: cannot trash '{name}': it is inside the trash directory '{}'; `rtrash rm` or `rtrash empty` deletes trashed items",
-                trash.root.display()
+                crate::util::err_path(&trash.root)
             );
             return Err(1);
         }

@@ -3277,12 +3277,18 @@ fn explorer_roots(prog: &str, roots: &[PathBuf]) -> Result<Vec<PathBuf>, i32> {
         let root = match given.canonicalize() {
             Ok(p) => crate::util::plain_path(&p),
             Err(e) => {
-                eprintln!("{prog}: cannot access '{}': {e}", given.display());
+                eprintln!(
+                    "{prog}: cannot access '{}': {e}",
+                    crate::util::err_path(&given)
+                );
                 return Err(1);
             }
         };
         if !root.is_dir() {
-            eprintln!("{prog}: -i needs a directory: '{}'", root.display());
+            eprintln!(
+                "{prog}: -i needs a directory: '{}'",
+                crate::util::err_path(&root)
+            );
             return Err(2);
         }
         if seen.contains(&root) {
@@ -3294,8 +3300,8 @@ fn explorer_roots(prog: &str, roots: &[PathBuf]) -> Result<Vec<PathBuf>, i32> {
         {
             eprintln!(
                 "{prog}: -i: '{}' and '{}' overlap; give one of them",
-                outer.display(),
-                root.display()
+                crate::util::err_path(&outer),
+                crate::util::err_path(&root)
             );
             return Err(2);
         }
@@ -3344,7 +3350,10 @@ pub fn run_snapshot(
     match App::from_snapshot(prog, file, snap, opts) {
         Ok(mut app) => drive(prog, &mut app),
         Err(why) => {
-            eprintln!("{prog}: cannot browse '{}': {why}", file.display());
+            eprintln!(
+                "{prog}: cannot browse '{}': {why}",
+                crate::util::err_path(&file)
+            );
             2
         }
     }

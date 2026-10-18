@@ -113,7 +113,7 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
             Err(e) => {
                 eprintln!(
                     "{prog}: cannot lock trash '{}': {e}",
-                    dirs[i].root.display()
+                    crate::util::err_path(&dirs[i].root)
                 );
                 out.errors += 1;
             }
@@ -168,7 +168,7 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
             if p.verbose {
                 println!(
                     "would remove {} ({})",
-                    shown.display(),
+                    crate::util::term_path(&shown),
                     format_bytes(c.bytes)
                 );
             }

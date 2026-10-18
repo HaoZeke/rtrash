@@ -611,15 +611,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     match mode {
         "path" => match path() {
-            Some(p) => println!("{}", p.display()),
+            Some(p) => println!("{}", crate::util::term_path(&p)),
             None => println!("(off: RTRASH_CONFIG is empty)"),
         },
         "default" => print!("{}", template()),
         _ => {
             let c = load();
             match &c.path {
-                Some(p) if p.is_file() => println!("# {}", p.display()),
-                Some(p) => println!("# {} (not present)", p.display()),
+                Some(p) if p.is_file() => println!("# {}", crate::util::term_path(&p)),
+                Some(p) => println!("# {} (not present)", crate::util::term_path(&p)),
                 None => println!("# off: RTRASH_CONFIG is empty"),
             }
             let mut section = "";

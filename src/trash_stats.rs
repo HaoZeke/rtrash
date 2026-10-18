@@ -787,12 +787,12 @@ fn print_totals(
         match t {
             Some((b, n, fresh)) => println!(
                 "{}\t{}\t{}{ino}{}{free}",
-                root.display(),
+                crate::util::term_path(&root),
                 format_bytes(*b),
                 crate::util::plural(*n, "item", "items"),
                 if *fresh { "" } else { "\t(stale)" }
             ),
-            None => println!("{}\tno stored total{free}", root.display()),
+            None => println!("{}\tno stored total{free}", crate::util::term_path(&root)),
         }
     }
 }

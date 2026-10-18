@@ -432,7 +432,7 @@ impl BinProblem {
     /// The report line, the same with and without `--fix`; the prefixes
     /// are those of the FreeDesktop check.
     pub fn line(&self) -> String {
-        let t = crate::util::term_path;
+        let t = crate::util::term_path::<std::path::PathBuf>;
         match self {
             BinProblem::Dangling { record, .. } => {
                 format!("dangling: {} (the payload is gone)", t(record))
@@ -1443,7 +1443,10 @@ mod os {
                 Ok(()) => true,
                 Err(crate::util::Stale::Gone) => false,
                 Err(s) => {
-                    eprintln!("{prog}: {}", s.reason(&original_of(it).to_string_lossy()));
+                    eprintln!(
+                        "{prog}: {}",
+                        s.reason(&crate::util::err_path(&original_of(it)))
+                    );
                     changed += 1;
                     false
                 }
@@ -1667,14 +1670,14 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 crate::util::Look::Gone => {
                     eprintln!(
                         "{prog}: cannot remove '{}': No such file or directory",
-                        f.display()
+                        crate::util::err_path(&f)
                     );
                     status = status.max(1);
                     failed += 1;
                     continue;
                 }
                 crate::util::Look::Unreachable(e) => {
-                    eprintln!("{prog}: cannot remove '{}': {e}", f.display());
+                    eprintln!("{prog}: cannot remove '{}': {e}", crate::util::err_path(&f));
                     status = status.max(1);
                     failed += 1;
                     continue;
@@ -1688,13 +1691,19 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 if !holds.is_empty() {
                     let who = crate::holders::describe(&holds);
                     if in_use == "refuse" {
-                        eprintln!("{prog}: cannot trash '{}': in use by {who}", f.display());
+                        eprintln!(
+                            "{prog}: cannot trash '{}': in use by {who}",
+                            crate::util::err_path(&f)
+                        );
                         eprintln!("{prog}: use --in-use=warn to trash it anyway");
                         status = status.max(1);
                         failed += 1;
                         continue;
                     }
-                    eprintln!("{prog}: warning: '{}' is in use by {who}", f.display());
+                    eprintln!(
+                        "{prog}: warning: '{}' is in use by {who}",
+                        crate::util::err_path(&f)
+                    );
                 }
             }
             if inspect && !inspect_ok(prog, f) {
@@ -1707,7 +1716,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 if let (Some(why), false) = (&nuke, allow_permanent) {
                     eprintln!(
                         "{prog}: cannot trash '{}': {why}, so Windows would delete it for good",
-                        f.display()
+                        crate::util::err_path(&f)
                     );
                     eprintln!("{prog}: use --allow-permanent to delete it for good");
                     status = status.max(1);
@@ -1727,10 +1736,13 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             match crate::allow_roots::trash_delete_as(f, allow_permanent) {
                 // Gone for good: no bin to name, nothing to undo.
                 Ok(false) => {
-                    eprintln!("{prog}: warning: deleted '{}' for good", f.display());
+                    eprintln!(
+                        "{prog}: warning: deleted '{}' for good",
+                        crate::util::err_path(&f)
+                    );
                 }
                 Err(e) if crate::allow_roots::would_delete_for_good(&e) => {
-                    eprintln!("{prog}: cannot trash '{}': {e}", f.display());
+                    eprintln!("{prog}: cannot trash '{}': {e}", crate::util::err_path(&f));
                     eprintln!("{prog}: use --allow-permanent to delete it for good");
                     status = status.max(1);
                     failed += 1;
@@ -1757,7 +1769,11 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     }
                 }
                 Err(e) => {
-                    eprintln!("{prog}: cannot trash '{}': {}", f.display(), err_msg(e));
+                    eprintln!(
+                        "{prog}: cannot trash '{}': {}",
+                        crate::util::err_path(&f),
+                        err_msg(e)
+                    );
                     status = status.max(1);
                     failed += 1;
                 }
@@ -2461,7 +2477,10 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         if picked.is_empty() {
             eprintln!("{prog}: nothing from the latest put is left in the Recycle Bin");
             for p in &last {
-                eprintln!("{prog}:   the latest put moved '{}'", p.display());
+                eprintln!(
+                    "{prog}:   the latest put moved '{}'",
+                    crate::util::err_path(&p)
+                );
             }
             explain_no_match(prog, items, since);
             return Err(1);
@@ -2490,9 +2509,9 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             let o = original_of(it);
             eprintln!(
                 "{prog}:   original '{}' (compared as '{}', payload '{}')",
-                o.display(),
-                key_of(&o, &mounts).display(),
-                it.id.to_string_lossy()
+                crate::util::err_path(&o),
+                crate::util::err_path(&key_of(&o, &mounts)),
+                crate::util::err_path(&it.id)
             );
         }
     }
@@ -2891,7 +2910,10 @@ Without PATH, print a numbered list and read an index from stdin.
         }
         if let Some(d) = &to {
             if !d.is_dir() {
-                eprintln!("{prog}: --to: '{}' is not a directory", d.display());
+                eprintln!(
+                    "{prog}: --to: '{}' is not a directory",
+                    crate::util::err_path(&d)
+                );
                 return 2;
             }
         }
@@ -2959,7 +2981,7 @@ Without PATH, print a numbered list and read an index from stdin.
                     }
                     if std::env::var_os("RTRASH_DEBUG").is_some() {
                         for w in &want {
-                            eprintln!("{prog}:   wanted '{}'", w.display());
+                            eprintln!("{prog}:   wanted '{}'", crate::util::err_path(&w));
                         }
                         explain_no_match(prog, &items, i64::MIN);
                     }
@@ -2998,7 +3020,10 @@ Without PATH, print a numbered list and read an index from stdin.
         };
         if matches.is_empty() && trash_cli && target.is_none() && matcher.is_none() {
             let cwd = std::env::current_dir().unwrap_or_default();
-            println!("No files trashed from current dir ('{}')", cwd.display());
+            println!(
+                "No files trashed from current dir ('{}')",
+                crate::util::term_path(&cwd)
+            );
             return 1;
         }
         if matches.is_empty() {
@@ -3260,7 +3285,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 (Some(_), None) => {
                     eprintln!(
                         "{prog}: cannot restore '{}' by name: no file name",
-                        orig.display()
+                        crate::util::err_path(&orig)
                     );
                     failed += 1;
                     continue;
@@ -3273,7 +3298,10 @@ Without PATH, print a numbered list and read an index from stdin.
                     if o.dry_run {
                         say(format!("would skip '{}': it exists", base.display()));
                     } else {
-                        eprintln!("{prog}: skipping '{}': it exists", base.display());
+                        eprintln!(
+                            "{prog}: skipping '{}': it exists",
+                            crate::util::err_path(&base)
+                        );
                     }
                     skipped += 1;
                     continue;
@@ -3284,7 +3312,7 @@ Without PATH, print a numbered list and read an index from stdin.
                     } else {
                         eprintln!(
                             "{prog}: refusing to overwrite '{}' (use -f)",
-                            base.display()
+                            crate::util::err_path(&base)
                         );
                     }
                     failed += 1;
@@ -3346,26 +3374,32 @@ Without PATH, print a numbered list and read an index from stdin.
         for (it, orig, dest) in plan {
             // Another item may have taken the payload's name since the scan.
             if let Err(s) = super::recheck_item(it) {
-                eprintln!("{prog}: {}", s.reason(&orig.to_string_lossy()));
+                eprintln!("{prog}: {}", s.reason(&crate::util::err_path(&orig)));
                 failed += 1;
                 continue;
             }
             if o.conflict == Conflict::Overwrite && dest.symlink_metadata().is_ok() {
                 let gone = crate::permanent_guard::remove(&dest);
                 if let Err(e) = gone {
-                    eprintln!("{prog}: cannot replace '{}': {e}", dest.display());
+                    eprintln!(
+                        "{prog}: cannot replace '{}': {e}",
+                        crate::util::err_path(&dest)
+                    );
                     failed += 1;
                     continue;
                 }
             }
             if let Err(e) = super::restore_payload(Path::new(&it.id), &dest) {
                 let why = held_reason(Path::new(&it.id), &e);
-                eprintln!("{prog}: cannot restore '{}': {why}", dest.display());
+                eprintln!(
+                    "{prog}: cannot restore '{}': {why}",
+                    crate::util::err_path(&dest)
+                );
                 failed += 1;
             } else if crate::util::is_gone(&dest) {
                 eprintln!(
                     "{prog}: restored '{}' but nothing is there now",
-                    dest.display()
+                    crate::util::err_path(&dest)
                 );
                 failed += 1;
             } else {
@@ -3520,14 +3554,14 @@ registry), then the total and the free space on each (a warning under
             };
             println!(
                 "Free on {}: {}",
-                root.display(),
+                crate::util::term_path(&root),
                 crate::space::free_line(&s)
             );
             let lows = s.lows(crate::space::WARN_FREE_PERCENT);
             if !lows.is_empty() {
                 eprintln!(
                     "rtrash: warning: {} is low: {}; free space with `rtrash empty --until-free=10%` (only the oldest items it needs) or `rtrash empty`",
-                    root.display(),
+                    crate::util::err_path(&root),
                     lows.join(", ")
                 );
             }
@@ -3574,7 +3608,7 @@ registry), then the total and the free space on each (a warning under
             bytes = bytes.saturating_add(*b);
             println!(
                 "{}\t{}\t{}",
-                root.display(),
+                crate::util::term_path(&root),
                 crate::util::plural(*n, "item", "items"),
                 crate::util::format_bytes(*b)
             );

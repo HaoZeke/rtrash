@@ -199,7 +199,7 @@ fn trash_or_default(prog: &str, pinned: Option<PathBuf>) -> Result<PathBuf, i32>
     match pinned.or_else(home_trash) {
         Some(t) if t.is_dir() => Ok(t),
         Some(t) => {
-            eprintln!("{prog}: no Finder trash at '{}'", t.display());
+            eprintln!("{prog}: no Finder trash at '{}'", crate::util::err_path(&t));
             Err(1)
         }
         None => {
@@ -231,7 +231,10 @@ fn list(prog: &str, args: &[String]) -> i32 {
     let items = match items(&trash) {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("{prog}: cannot read '{}': {e}", trash.display());
+            eprintln!(
+                "{prog}: cannot read '{}': {e}",
+                crate::util::err_path(&trash)
+            );
             return 1;
         }
     };
@@ -304,7 +307,10 @@ fn restore(prog: &str, args: &[String]) -> i32 {
     let items = match crate::finder_shared::entries_in(&trash) {
         Ok(i) => i,
         Err(e) => {
-            eprintln!("{prog}: cannot read '{}': {e}", trash.display());
+            eprintln!(
+                "{prog}: cannot read '{}': {e}",
+                crate::util::err_path(&trash)
+            );
             return 1;
         }
     };
@@ -324,7 +330,10 @@ fn restore(prog: &str, args: &[String]) -> i32 {
             Some(i) if !chosen.iter().any(|c| std::ptr::eq(*c, i)) => chosen.push(i),
             Some(_) => {}
             None => {
-                eprintln!("{prog}: no item named '{w}' in '{}'", trash.display());
+                eprintln!(
+                    "{prog}: no item named '{w}' in '{}'",
+                    crate::util::err_path(&trash)
+                );
                 failed += 1;
             }
         }
@@ -345,7 +354,10 @@ fn restore(prog: &str, args: &[String]) -> i32 {
         let exists = dest.symlink_metadata().is_ok();
         let (dest, force) = match (exists, conflict) {
             (true, Conflict::Skip) => {
-                eprintln!("{prog}: skipping '{}': it exists", dest.display());
+                eprintln!(
+                    "{prog}: skipping '{}': it exists",
+                    crate::util::err_path(&dest)
+                );
                 skipped += 1;
                 continue;
             }
@@ -353,7 +365,7 @@ fn restore(prog: &str, args: &[String]) -> i32 {
             (true, Conflict::Refuse) => {
                 eprintln!(
                     "{prog}: refusing to overwrite existing '{}' (use -f to force)",
-                    dest.display()
+                    crate::util::err_path(&dest)
                 );
                 failed += 1;
                 continue;
@@ -895,14 +907,20 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
     } else if o.all {
         if placed.is_empty() && o.cwd_note {
             let cwd = std::env::current_dir().unwrap_or_default();
-            println!("No files trashed from current dir ('{}')", cwd.display());
+            println!(
+                "No files trashed from current dir ('{}')",
+                crate::util::term_path(&cwd)
+            );
             return 1;
         }
         placed.clone()
     } else {
         if placed.is_empty() && o.cwd_note {
             let cwd = std::env::current_dir().unwrap_or_default();
-            println!("No files trashed from current dir ('{}')", cwd.display());
+            println!(
+                "No files trashed from current dir ('{}')",
+                crate::util::term_path(&cwd)
+            );
             return 1;
         }
         if placed.is_empty() {
@@ -988,7 +1006,10 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
                         crate::util::term_path(&dest)
                     ));
                 } else {
-                    eprintln!("{prog}: skipping '{}': it exists", dest.display());
+                    eprintln!(
+                        "{prog}: skipping '{}': it exists",
+                        crate::util::err_path(&dest)
+                    );
                 }
                 skipped += 1;
                 continue;
@@ -1142,7 +1163,10 @@ pub fn prune_after_put(prog: &str, moved: &[(PathBuf, String)], quiet: bool) {
                 }
                 Err(err) => {
                     crate::finder_total::uncarried(trash);
-                    eprintln!("{prog}: cannot remove '{}': {err}", path.display());
+                    eprintln!(
+                        "{prog}: cannot remove '{}': {err}",
+                        crate::util::err_path(&path)
+                    );
                 }
             }
         }
@@ -1150,7 +1174,7 @@ pub fn prune_after_put(prog: &str, moved: &[(PathBuf, String)], quiet: bool) {
             eprintln!(
                 "{prog}: removed {} from '{}' to keep it under {} ({source})",
                 crate::util::plural(n, "item", "items"),
-                trash.display(),
+                crate::util::err_path(&trash),
                 crate::util::format_bytes(max)
             );
         }
@@ -1187,7 +1211,10 @@ pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u
         if !dry_run {
             if let Err(err) = crate::permanent_guard::remove(&path) {
                 crate::finder_total::uncarried(&e.trash);
-                eprintln!("{prog}: cannot remove '{}': {err}", path.display());
+                eprintln!(
+                    "{prog}: cannot remove '{}': {err}",
+                    crate::util::err_path(&path)
+                );
                 continue;
             }
             crate::finder_total::carry(&e.trash, (b, inodes), false);
@@ -1264,7 +1291,10 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
             Err(err) => {
                 // Part of the item may be gone, so measure afterwards.
                 crate::finder_total::uncarried(&e.trash);
-                eprintln!("{prog}: cannot remove '{}': {err}", path.display());
+                eprintln!(
+                    "{prog}: cannot remove '{}': {err}",
+                    crate::util::err_path(&path)
+                );
                 failed += 1;
             }
         }
@@ -1304,20 +1334,23 @@ fn put(prog: &str, args: &[String]) -> i32 {
             Ok(m) if m.file_type().is_symlink() => {
                 eprintln!(
                     "{prog}: refusing symbolic link '{}'; use rtrash put",
-                    f.display()
+                    crate::util::err_path(&f)
                 );
                 failed = true;
             }
             Ok(_) => match std::env::current_dir().map(|cwd| cwd.join(&f)) {
                 Ok(abs) => paths.push(abs),
                 Err(e) => {
-                    eprintln!("{prog}: cannot resolve '{}': {e}", f.display());
+                    eprintln!(
+                        "{prog}: cannot resolve '{}': {e}",
+                        crate::util::err_path(&f)
+                    );
                     failed = true;
                 }
             },
             Err(_) if force => {}
             Err(e) => {
-                eprintln!("{prog}: cannot remove '{}': {e}", f.display());
+                eprintln!("{prog}: cannot remove '{}': {e}", crate::util::err_path(&f));
                 failed = true;
             }
         }

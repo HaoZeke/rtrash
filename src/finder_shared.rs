@@ -428,7 +428,7 @@ pub fn undo(
                     crate::info::local_string(v[0].epoch).replacen('T', " ", 1),
                     v.len(),
                     if v.len() == 1 { " " } else { "s" },
-                    v[0].original.display()
+                    crate::util::term_path(&v[0].original)
                 );
             }
         }
@@ -457,7 +457,10 @@ pub fn undo(
         let exists = l.original.symlink_metadata().is_ok();
         let (dest, force) = match (exists, conflict) {
             (true, Conflict::Skip) => {
-                eprintln!("{prog}: skipping '{}': it exists", l.original.display());
+                eprintln!(
+                    "{prog}: skipping '{}': it exists",
+                    crate::util::err_path(&l.original)
+                );
                 skipped += 1;
                 continue;
             }
@@ -465,7 +468,7 @@ pub fn undo(
             (true, Conflict::Refuse) => {
                 eprintln!(
                     "{prog}: refusing to overwrite existing '{}' (use -f to force)",
-                    l.original.display()
+                    crate::util::err_path(&l.original)
                 );
                 failed += 1;
                 continue;
@@ -473,7 +476,7 @@ pub fn undo(
             (_, c) => (l.original.clone(), c == Conflict::Overwrite),
         };
         if dry_run {
-            println!("would restore '{}'", dest.display());
+            println!("would restore '{}'", crate::util::term_path(&dest));
             restored.push(dest);
             continue;
         }
@@ -519,7 +522,10 @@ pub fn status(prog: &str, json: bool, filter: Filter) -> i32 {
         let all = match from_items(&trash) {
             Ok(a) => filter.apply(a),
             Err(e) => {
-                eprintln!("{prog}: cannot read '{}': {e}", trash.display());
+                eprintln!(
+                    "{prog}: cannot read '{}': {e}",
+                    crate::util::err_path(&trash)
+                );
                 return 1;
             }
         };
@@ -562,7 +568,7 @@ pub fn status(prog: &str, json: bool, filter: Filter) -> i32 {
         };
         println!(
             "{}\t{}{note}\t{}",
-            r.trash.display(),
+            crate::util::term_path(&r.trash),
             crate::util::plural(r.items, "item", "items"),
             crate::fastdelete::format_bytes(r.bytes)
         );
@@ -576,7 +582,7 @@ pub fn status(prog: &str, json: bool, filter: Filter) -> i32 {
         if let Ok(s) = crate::space::query(&r.trash) {
             println!(
                 "Free on {}: {}",
-                r.trash.display(),
+                crate::util::term_path(&r.trash),
                 crate::space::free_line(&s)
             );
         }
@@ -738,7 +744,10 @@ pub fn rm(
             }
         } else if let Err(err) = crate::permanent_guard::remove(&path) {
             crate::finder_total::uncarried(&e.trash);
-            eprintln!("{prog}: cannot remove '{}': {err}", path.display());
+            eprintln!(
+                "{prog}: cannot remove '{}': {err}",
+                crate::util::err_path(&path)
+            );
             status = 1;
             continue;
         } else {

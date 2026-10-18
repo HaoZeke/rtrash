@@ -387,12 +387,12 @@ pub fn remove(prog: &str, dry_run: bool) -> i32 {
     let mut status = 0;
     for f in &present {
         if dry_run {
-            println!("would remove {}", f.display());
+            println!("would remove {}", crate::util::term_path(&f));
         } else if let Err(e) = std::fs::remove_file(f) {
-            eprintln!("{prog}: cannot remove '{}': {e}", f.display());
+            eprintln!("{prog}: cannot remove '{}': {e}", crate::util::err_path(&f));
             status = 1;
         } else {
-            println!("removed {}", f.display());
+            println!("removed {}", crate::util::term_path(&f));
         }
     }
     for cmd in &after {
@@ -577,7 +577,7 @@ pub fn status(prog: &str, json: bool) -> i32 {
     } else {
         println!("installed:");
         for p in &f.files {
-            println!("  {}", p.display());
+            println!("  {}", crate::util::term_path(&p));
         }
         if f.fields.is_empty() {
             println!("the service manager reports nothing; it may not be turned on");
@@ -605,7 +605,7 @@ fn install_task(prog: &str, exe: &Path, args: &[String], every: i64, dry_run: bo
             .chain([path.to_string_lossy().into_owned()])
             .collect();
         if dry_run {
-            println!("would write {}:\n{body}", path.display());
+            println!("would write {}:\n{body}", crate::util::term_path(&path));
         } else {
             // Task Scheduler reads the encoding the XML header names.
             let mut bytes = vec![0xFF, 0xFE];
@@ -615,7 +615,7 @@ fn install_task(prog: &str, exe: &Path, args: &[String], every: i64, dry_run: bo
                 .map_or(Ok(()), std::fs::create_dir_all)
                 .and_then(|_| crate::file_replace::write_whole(&path, &bytes));
             if let Err(e) = written {
-                eprintln!("{prog}: cannot write {}: {e}", path.display());
+                eprintln!("{prog}: cannot write {}: {e}", crate::util::err_path(&path));
                 return 1;
             }
         }
@@ -677,7 +677,7 @@ pub fn install(prog: &str, args: &[String], every: i64, dry_run: bool) -> i32 {
     };
     for (path, body) in &files {
         if dry_run {
-            println!("# {}\n{body}", path.display());
+            println!("# {}\n{body}", crate::util::term_path(&path));
             continue;
         }
         let write = path
@@ -685,10 +685,13 @@ pub fn install(prog: &str, args: &[String], every: i64, dry_run: bool) -> i32 {
             .map_or(Ok(()), std::fs::create_dir_all)
             .and_then(|()| crate::file_replace::write_whole(path, body.as_bytes()));
         if let Err(e) = write {
-            eprintln!("{prog}: cannot write '{}': {e}", path.display());
+            eprintln!(
+                "{prog}: cannot write '{}': {e}",
+                crate::util::err_path(&path)
+            );
             return 1;
         }
-        println!("wrote {}", path.display());
+        println!("wrote {}", crate::util::term_path(&path));
     }
     if dry_run {
         println!("# then: {on}");

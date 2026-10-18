@@ -158,7 +158,10 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
         let _lock = match trashdir::TrashLock::acquire(&dir.root) {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("{prog}: cannot lock trash '{}': {e}", dir.root.display());
+                eprintln!(
+                    "{prog}: cannot lock trash '{}': {e}",
+                    crate::util::err_path(&dir.root)
+                );
                 status = 1;
                 continue;
             }
@@ -199,7 +202,10 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
                     removed += 1;
                 }
                 Err(e) => {
-                    eprintln!("{prog}: cannot remove '{}': {e}", path.display());
+                    eprintln!(
+                        "{prog}: cannot remove '{}': {e}",
+                        crate::util::err_path(&path)
+                    );
                     status = 1;
                 }
             }
@@ -248,7 +254,10 @@ fn confirm(seen: &[trashdir::Seen]) -> bool {
     eprintln!("Would empty the following trash directories:");
     for s in seen {
         let (size, n) = holds(s);
-        eprintln!("    - {} ({size}, {n})", s.dir().root.display());
+        eprintln!(
+            "    - {} ({size}, {n})",
+            crate::util::err_path(&s.dir().root)
+        );
     }
     crate::answer::ask("Proceed? (y/N) ")
 }
@@ -538,7 +547,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         let _lock = match trashdir::TrashLock::acquire(&dir.root) {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("{prog}: cannot lock trash '{}': {e}", dir.root.display());
+                eprintln!(
+                    "{prog}: cannot lock trash '{}': {e}",
+                    crate::util::err_path(&dir.root)
+                );
                 errors.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
@@ -851,7 +863,7 @@ fn empty_one(
             if opts.verbose {
                 println!(
                     "would remove {} ({})",
-                    display.display(),
+                    crate::util::term_path(&display),
                     crate::fastdelete::format_bytes(sz)
                 );
             }
@@ -924,7 +936,7 @@ fn report_late(prog: &str, dir: &TrashDir, late: u64) {
         eprintln!(
             "{prog}: left {} that came into '{}' after the count; empty again to take them",
             crate::util::plural(late, "item", "items"),
-            dir.root.display()
+            crate::util::err_path(&dir.root)
         );
     }
 }
@@ -1048,7 +1060,7 @@ fn full_empty_wipe(
         Err(e) => {
             eprintln!(
                 "{prog}: cannot wipe trash under '{}': {e}",
-                dir.root.display()
+                crate::util::err_path(&dir.root)
             );
             errors.fetch_add(1, Ordering::Relaxed);
             return left;

@@ -655,9 +655,10 @@ pub fn term_text(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// A path for human output on stdout (see [`term_text`]).
-pub fn term_path(p: &std::path::Path) -> String {
-    let shown = p.display().to_string();
+/// A path for human output on stdout (see [`term_text`]). Anything that
+/// names a path will do: a `Path`, `PathBuf`, `OsStr` or a reference to one.
+pub fn term_path<P: AsRef<std::path::Path> + ?Sized>(p: &P) -> String {
+    let shown = p.as_ref().display().to_string();
     match term_text(&shown) {
         std::borrow::Cow::Borrowed(_) => shown,
         std::borrow::Cow::Owned(o) => o,
@@ -674,8 +675,8 @@ pub fn err_text(s: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// A path for messages on stderr: scrubbed when stderr is a terminal.
-pub fn err_path(p: &std::path::Path) -> String {
-    let shown = p.display().to_string();
+pub fn err_path<P: AsRef<std::path::Path> + ?Sized>(p: &P) -> String {
+    let shown = p.as_ref().display().to_string();
     if stderr_is_tty() {
         scrub(&shown).into_owned()
     } else {

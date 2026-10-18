@@ -293,12 +293,16 @@ pub fn print_status(
         let Ok(s) = space::query(&d.root) else {
             continue;
         };
-        println!("Free on {}: {}", d.root.display(), free_line(&s));
+        println!(
+            "Free on {}: {}",
+            crate::util::term_path(&d.root),
+            free_line(&s)
+        );
         let lows = s.lows(space::WARN_FREE_PERCENT);
         if !lows.is_empty() {
             eprintln!(
                 "rtrash: warning: {} is low: {}; free space with `rtrash empty --until-free=10%` (only the oldest items it needs) or `rtrash empty`",
-                d.root.display(),
+                crate::util::err_path(&d.root),
                 lows.join(", ")
             );
         }

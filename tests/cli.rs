@@ -617,6 +617,68 @@ fn a_restore_that_cannot_place_the_item_leaves_it_in_the_trash() {
     assert!(left.is_empty(), "{left:?}");
 }
 
+/// What `rtrash ARGS` shows on a terminal, through script(1), in `sb`;
+/// `None` without script(1). `args` is shell text, so a name with control
+/// characters can come from printf.
+#[cfg(target_os = "linux")]
+fn on_a_terminal(sb: &Sandbox, args: &str) -> Option<String> {
+    if !Path::new("/usr/bin/script").exists() {
+        return None;
+    }
+    let cmd = format!("{} {args}", bin());
+    let tty = Command::new("/usr/bin/script")
+        .args(["-qec", &cmd, "/dev/null"])
+        .current_dir(sb.work())
+        .env("SHELL", "/bin/sh")
+        .env("NO_COLOR", "1")
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", sb.root.join(".config"))
+        .env("HOME", &sb.root)
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to run script");
+    Some(stdout_of(&tty))
+}
+
+/// dua #365: a name with an escape sequence and a newline must not reach
+/// the terminal raw through a message. put, restore, rm, empty and du each
+/// name it with `?` for each control character on a terminal.
+#[cfg(target_os = "linux")]
+#[test]
+fn messages_scrub_control_characters_on_a_terminal() {
+    let sb = Sandbox::new("msg-scrub");
+    let evil = r#""$(printf 'a\033[2Jb\nc')""#;
+    let shown = "a?[2Jb?c";
+    // A pipe gets the name as it is, as before.
+    let piped = sb.run(&["put", "a\x1b[2Jb\nc"]);
+    assert!(stderr_of(&piped).contains("a\x1b[2Jb\nc"), "{piped:?}");
+    // A trashed item whose original path carries both characters.
+    fs::create_dir_all(sb.trash().join("files")).unwrap();
+    fs::create_dir_all(sb.trash().join("info")).unwrap();
+    fs::write(sb.trash().join("files/evil"), b"x").unwrap();
+    let record = format!(
+        "[Trash Info]\nPath={}/a%1B%5B2Jb%0Ac\nDeletionDate=2024-01-02T03:04:05\n",
+        sb.work().display()
+    );
+    fs::write(sb.trash().join("info/evil.trashinfo"), record).unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let cases = [
+        format!("put -- {evil}"),
+        format!("restore --to={evil}"),
+        "rm --home-only --dry-run evil".to_string(),
+        format!("empty {pin} --plain --dry-run --verbose"),
+        format!("du --file={evil}"),
+    ];
+    for args in &cases {
+        let Some(out) = on_a_terminal(&sb, args) else {
+            eprintln!("skipping: no script(1) to give rtrash a terminal");
+            return;
+        };
+        assert!(out.contains(shown), "{args}: {out:?}");
+        assert!(!out.contains('\x1b'), "{args}: {out:?}");
+    }
+}
+
 /// restore errors quote the record's Path= verbatim; on a terminal its
 /// escape sequences must show as `?`, as list shows them.
 #[cfg(target_os = "linux")]

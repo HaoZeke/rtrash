@@ -878,12 +878,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if volumes || show_dirs {
         if volumes {
             for m in trashdir::mount_points() {
-                println!("{}", m.display());
+                println!("{}", crate::util::term_path(&m));
             }
         }
         if show_dirs {
             for d in &dirs {
-                println!("{}", d.root.display());
+                println!("{}", crate::util::term_path(&d.root));
             }
         }
         return 0;

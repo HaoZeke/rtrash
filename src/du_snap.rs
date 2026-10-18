@@ -715,7 +715,10 @@ pub fn run_diff(prog: &str, args: &[String]) -> i32 {
     }
     let load = |p: &Path| {
         read(p).map_err(|e| {
-            eprintln!("{prog}: cannot read snapshot '{}': {e}", p.display());
+            eprintln!(
+                "{prog}: cannot read snapshot '{}': {e}",
+                crate::util::err_path(&p)
+            );
         })
     };
     let Ok(old) = load(&files[0]) else {
@@ -784,7 +787,7 @@ pub fn run_diff(prog: &str, args: &[String]) -> i32 {
             signed(c.delta()),
             side(c.old, "new"),
             side(c.new, "gone"),
-            c.path.display()
+            crate::util::term_path(&c.path)
         );
     }
     if changes.len() > shown.len() {

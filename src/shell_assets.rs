@@ -140,19 +140,28 @@ pub fn setup_powershell_profile(arg: Option<&str>, dry_run: bool) -> i32 {
     };
     match add_to_powershell_profile(&path, dry_run) {
         Ok(true) if dry_run => {
-            println!("would add the rtrash completer to {}", path.display());
+            println!(
+                "would add the rtrash completer to {}",
+                crate::util::term_path(&path)
+            );
             0
         }
         Ok(true) => {
-            println!("added the rtrash completer to {}", path.display());
+            println!(
+                "added the rtrash completer to {}",
+                crate::util::term_path(&path)
+            );
             0
         }
         Ok(false) => {
-            println!("{} loads the rtrash completer already", path.display());
+            println!(
+                "{} loads the rtrash completer already",
+                crate::util::term_path(&path)
+            );
             0
         }
         Err(e) => {
-            eprintln!("rtrash setup: {}: {e}", path.display());
+            eprintln!("rtrash setup: {}: {e}", crate::util::err_path(&path));
             1
         }
     }
