@@ -1924,6 +1924,56 @@ def check_explorer_walks():
                       "App::spawn_with; go through them so du -f FILE -i never scans (ncdu #247)")
 
 
+# The explorer moves the totals of views and rows only in these fns, so a
+# change carries every total up the chain at once (struct Totals).
+CHAIN_TOTAL_FNS = {"carry", "put_row"}
+CHAIN_TOTAL = re.compile(r"\.(?:disk|apparent|items)\s*(?:[-+*]=|=(?!=))|"
+                         r"&mut\s+[\w.()\[\]&]+\.(?:disk|apparent|items)\b")
+CHAIN_TOTAL_CASES = [
+    ("carry", "fn carry(v: &mut View) {\n    v.disk = shift(v.disk, a, b);\n}\n", []),
+    ("by hand", "    fn drop_row(&mut self) {\n        v.disk -= it.disk;\n    }\n", [2]),
+    ("set", "    fn apply_fresh(&mut self) {\n        row.items = n;\n    }\n", [2]),
+    ("closure", "fn adjust(v: &mut View) {\n    apply(&mut v.apparent, d);\n}\n", [2]),
+    ("compare", "    fn f(&self) {\n        if row.disk == 0 {}\n    }\n", []),
+    ("literal", "    fn f() -> Item {\n        Item { disk: 0, items: 1 }\n    }\n", []),
+]
+
+
+def chain_total_lines(text, skip=()):
+    """Lines that change a view's or row's disk, apparent or items field
+    outside CHAIN_TOTAL_FNS. Comment lines and 0-based `skip` are left out."""
+    hits, owner, end = [], None, None
+    for n, line in enumerate(text.split("\n")):
+        m = re.match(r"(\s*)(?:pub(?:\([a-z]+\))? )?fn (\w+)", line)
+        if m and (owner is None or len(m.group(1)) <= len(end) - 1):
+            owner, end = m.group(2), m.group(1) + "}"
+            continue
+        if owner is not None and line == end:
+            owner = None
+            continue
+        if n in skip or line.lstrip().startswith("//"):
+            continue
+        if owner not in CHAIN_TOTAL_FNS and CHAIN_TOTAL.search(line):
+            hits.append(n + 1)
+    return hits
+
+
+def check_chain_totals():
+    """In src/du_tui.rs the sizes and item counts of views and rows change
+    only in carry and put_row, which move every total of struct Totals at
+    once (round 255: deletes moved sizes but not item counts; round 257: a
+    rescan moved the apparent size only the way disk use went).
+    CHAIN_TOTAL_CASES tests the matcher."""
+    for what, text, want in CHAIN_TOTAL_CASES:
+        if chain_total_lines(text) != want:
+            errors.append(f"scripts/precheck.py: chain_total_lines gets CHAIN_TOTAL_CASES '{what}' "
+                          "wrong; the chain-total check is broken")
+    raw = (ROOT / "src" / "du_tui.rs").read_text(encoding="utf-8")
+    for line in chain_total_lines(raw, test_mod_lines(raw.split("\n"))):
+        errors.append(f"src/du_tui.rs:{line}: changes a view or row total by hand; go through "
+                      "carry or put_row so every field of Totals moves together")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -2039,7 +2089,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

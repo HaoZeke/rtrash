@@ -827,30 +827,69 @@ fn up(roots: &[PathBuf], dir: &Path) -> Option<PathBuf> {
     dir.parent().map(Path::to_path_buf)
 }
 
-/// Add (`grow`) or remove sizes along the chain from `dir` up to the
-/// top: each view's totals, and the row that leads to `dir` in the view
-/// above it.
-fn adjust_chain(
+/// What lies below a directory, as the explorer carries it up the chain:
+/// its disk use, apparent size and item count. Every change moves all of
+/// them at once through [`carry`], so a total added here cannot be left
+/// behind (round 254 nearly kept a stale scan, and round 255 found item
+/// counts that deletes never touched).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Totals {
+    disk: u64,
+    apparent: u64,
+    items: u64,
+}
+
+impl Totals {
+    /// What the row `it` adds below its parent: itself and, for a
+    /// directory, everything in it.
+    fn of_row(it: &Item) -> Self {
+        Totals {
+            disk: it.disk,
+            apparent: it.apparent,
+            items: row_items(it),
+        }
+    }
+
+    /// What lies below the view's directory.
+    fn of_view(v: &View) -> Self {
+        Totals {
+            disk: v.disk,
+            apparent: v.apparent,
+            items: view_items(v),
+        }
+    }
+}
+
+/// `v` with `from` taken out and `to` put in, stopping at 0 and at the top.
+fn shift(v: u64, from: u64, to: u64) -> u64 {
+    v.saturating_sub(from).saturating_add(to)
+}
+
+/// Set the row that leads to a directory to the directory's totals.
+fn put_row(row: &mut Item, t: Totals) {
+    row.disk = t.disk;
+    row.apparent = t.apparent;
+    row.items = t.items;
+}
+
+/// Carry a change below `dir`, from `from` to `to`, up the chain to the
+/// top: each view's own sizes (its item count is the sum of its rows,
+/// [`view_items`]) and the row that leads to each directory in the view
+/// above it. Each field moves on its own, so a disk use that grows while
+/// the apparent size shrinks moves both the right way. Every view on the
+/// way drops its kept scan, which no longer says what it holds.
+fn carry(
     cache: &mut HashMap<PathBuf, View>,
     roots: &[PathBuf],
     dir: &Path,
-    disk: u64,
-    apparent: u64,
-    grow: bool,
+    from: Totals,
+    to: Totals,
 ) {
-    let apply = |v: &mut u64, d: u64| {
-        *v = if grow {
-            v.saturating_add(d)
-        } else {
-            v.saturating_sub(d)
-        }
-    };
     let mut d = dir.to_path_buf();
     loop {
         if let Some(v) = cache.get_mut(&d) {
-            apply(&mut v.disk, disk);
-            apply(&mut v.apparent, apparent);
-            // Its scan no longer says what the directory holds.
+            v.disk = shift(v.disk, from.disk, to.disk);
+            v.apparent = shift(v.apparent, from.apparent, to.apparent);
             v.scan = None;
         }
         let Some(parent) = up(roots, &d) else {
@@ -858,35 +897,20 @@ fn adjust_chain(
         };
         if let Some(v) = cache.get_mut(&parent) {
             if let Some(row) = v.rows.iter_mut().chain(&mut v.stash).find(|r| r.path == d) {
-                apply(&mut row.disk, disk);
-                apply(&mut row.apparent, apparent);
-            }
-        }
-        d = parent;
-    }
-}
-
-/// Add (`grow`) or remove `items` along the chain from `dir` up to the
-/// top: the row that leads to each directory in the view above it. A
-/// view's own count is the sum of its rows ([`view_items`]).
-fn adjust_items(
-    cache: &mut HashMap<PathBuf, View>,
-    roots: &[PathBuf],
-    dir: &Path,
-    items: u64,
-    grow: bool,
-) {
-    let mut d = dir.to_path_buf();
-    while let Some(parent) = up(roots, &d) {
-        if let Some(v) = cache.get_mut(&parent) {
-            if let Some(row) = v.rows.iter_mut().chain(&mut v.stash).find(|r| r.path == d) {
-                row.items = if grow {
-                    row.items.saturating_add(items)
-                } else {
-                    row.items.saturating_sub(items)
+                let was = Totals {
+                    disk: row.disk,
+                    apparent: row.apparent,
+                    items: row.items,
                 };
+                put_row(
+                    row,
+                    Totals {
+                        disk: shift(was.disk, from.disk, to.disk),
+                        apparent: shift(was.apparent, from.apparent, to.apparent),
+                        items: shift(was.items, from.items, to.items),
+                    },
+                );
             }
-            v.scan = None;
         }
         d = parent;
     }
@@ -1393,44 +1417,23 @@ impl App {
         let cur = cur.to_path_buf();
         // Children views may hold stale sizes now; drop them.
         self.cache.retain(|p, _| p == &cur || !p.starts_with(&cur));
-        let fresh_items = view_items(&fresh);
-        let old = self
-            .cache
-            .insert(cur.clone(), fresh.clone())
-            .expect("current view");
-        let old_items = view_items(&old);
+        let to = Totals::of_view(&fresh);
+        let old = self.cache.insert(cur.clone(), fresh).expect("current view");
+        let from = Totals::of_view(&old);
         let Some(parent) = up(&self.roots, &cur) else {
             return;
         };
-        let parent = parent.as_path();
-        let (grow, d, a) = if fresh.disk >= old.disk {
-            (
-                true,
-                fresh.disk - old.disk,
-                fresh.apparent.saturating_sub(old.apparent),
-            )
-        } else {
-            (
-                false,
-                old.disk - fresh.disk,
-                old.apparent.saturating_sub(fresh.apparent),
-            )
-        };
-        // Restore the view's own totals; the chain then fixes the rest.
-        adjust_chain(&mut self.cache, &self.roots, parent, d, a, grow);
-        let more = fresh_items >= old_items;
-        let n = fresh_items.abs_diff(old_items);
-        adjust_items(&mut self.cache, &self.roots, &cur, n, more);
-        if let Some(pv) = self.cache.get_mut(parent) {
+        // The fresh view has its totals; the chain above it moves by the
+        // change, and the row that leads to it takes them as they are.
+        carry(&mut self.cache, &self.roots, &parent, from, to);
+        if let Some(pv) = self.cache.get_mut(&parent) {
             if let Some(row) = pv
                 .rows
                 .iter_mut()
                 .chain(&mut pv.stash)
                 .find(|r| r.path == cur)
             {
-                row.disk = fresh.disk;
-                row.apparent = fresh.apparent;
-                row.items = fresh_items;
+                put_row(row, to);
             }
         }
     }
@@ -1791,15 +1794,14 @@ impl App {
                 v.rows.retain(|r| r.path != it.path);
                 v.stash.retain(|r| r.path != it.path);
             }
-            adjust_chain(
+            let gone = Totals::of_row(it);
+            carry(
                 &mut self.cache,
                 &self.roots,
                 &parent,
-                it.disk,
-                it.apparent,
-                false,
+                gone,
+                Totals::default(),
             );
-            adjust_items(&mut self.cache, &self.roots, &parent, row_items(it), false);
         }
         self.cache.retain(|p, _| !p.starts_with(&it.path));
     }
@@ -1919,14 +1921,19 @@ impl App {
             let Some(parent) = up(&self.roots, &item.path) else {
                 continue;
             };
-            let (d, a, n) = (item.disk, item.apparent, row_items(&item));
+            let back_in = Totals::of_row(&item);
             if let Some(v) = self.cache.get_mut(&parent) {
                 if !v.rows.iter().any(|r| r.path == item.path) {
                     insert_in_order(&mut v.rows, item, self.sorting);
                 }
             }
-            adjust_chain(&mut self.cache, &self.roots, &parent, d, a, true);
-            adjust_items(&mut self.cache, &self.roots, &parent, n, true);
+            carry(
+                &mut self.cache,
+                &self.roots,
+                &parent,
+                Totals::default(),
+                back_in,
+            );
         }
         if self.narrowed() {
             self.refilter();
@@ -4600,9 +4607,56 @@ mod tests {
         let dot = a.cur.join(".cache");
         let before = a.view().stash.iter().find(|r| r.path == dot).unwrap().disk;
         let roots = a.roots.clone();
-        adjust_chain(&mut a.cache, &roots, &dot, 1000, 1000, false);
+        let gone = Totals {
+            disk: 1000,
+            apparent: 1000,
+            items: 0,
+        };
+        carry(&mut a.cache, &roots, &dot, gone, Totals::default());
         let after = a.view().stash.iter().find(|r| r.path == dot).unwrap().disk;
         assert_eq!(after, before - 1000);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rescan_moves_each_total_up_on_its_own() {
+        // Below big, the disk use shrinks while the apparent size grows: a
+        // 30000-byte file goes, and a sparse 1 MiB file with no blocks
+        // comes. Each total of the views above must follow its own change.
+        let t = tree("carryeach");
+        let mut a = app(&t);
+        let w = t.0.join("w");
+        let big = w.join("big");
+        let row = |a: &App| -> Totals {
+            let v = &a.cache[&w];
+            Totals::of_row(v.rows.iter().find(|r| r.path == big).unwrap())
+        };
+        let (was_w, was_big) = (Totals::of_view(&a.cache[&w]), row(&a));
+        a.select(0);
+        a.open();
+        assert_eq!(a.cur, big);
+        let was = Totals::of_view(a.view());
+        fs::remove_file(big.join("side")).unwrap();
+        fs::File::create(big.join("sparse"))
+            .unwrap()
+            .set_len(1 << 20)
+            .unwrap();
+        a.on_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        let fresh = Totals::of_view(&a.cache[&big]);
+        assert!(fresh.disk < was.disk, "{fresh:?} {was:?}");
+        assert!(fresh.apparent > was.apparent, "{fresh:?} {was:?}");
+        let now_big = row(&a);
+        assert_eq!(now_big.disk, fresh.disk);
+        assert_eq!(now_big.apparent, fresh.apparent);
+        let now_w = Totals::of_view(&a.cache[&w]);
+        assert_eq!(now_w.disk, was_w.disk - was.disk + fresh.disk);
+        assert_eq!(
+            now_w.apparent,
+            was_w.apparent - was.apparent + fresh.apparent
+        );
+        // side went and sparse came: big still holds three entries.
+        assert_eq!(now_big.items, was_big.items);
+        let _ = fs::remove_dir_all(&t.0);
     }
 
     #[test]
