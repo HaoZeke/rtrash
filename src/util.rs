@@ -813,8 +813,75 @@ pub fn parse_selection(line: &str, len: usize) -> Result<Vec<usize>, String> {
     Ok(out)
 }
 
+/// What a look at a path finds, without following a final link.
+pub enum Look {
+    There(std::fs::Metadata),
+    /// The system says nothing is there: [`is_missing`].
+    Gone,
+    /// Something may be there, but the look failed: a parent that
+    /// denies search, a name too long, an I/O error.
+    Unreachable(io::Error),
+}
+
+/// Look at `path` without following a final link. A path that cannot be
+/// reached is never taken for a missing one, so a denied file is not
+/// reported as "No such file or directory" (trash-cli #377), and a
+/// record whose payload sits under a denied folder is not taken for
+/// dangling. The precheck refuses `metadata(..).is_err()` elsewhere.
+pub fn look(path: &std::path::Path) -> Look {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) => Look::There(m),
+        Err(e) if is_missing(&e) => Look::Gone,
+        Err(e) => Look::Unreachable(e),
+    }
+}
+
+/// Whether nothing is at `path`, as [`look`] tells it: false for a path
+/// that is there and for one that cannot be reached.
+pub fn is_gone(path: &std::path::Path) -> bool {
+    matches!(look(path), Look::Gone)
+}
+
+/// Whether `e` says that a path is not there: ENOENT, or ENOTDIR when a
+/// part of the path is a file (Windows: file or path not found).
+pub fn is_missing(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    /// A missing path and a path below a file are gone; a path that is
+    /// there is not, and (on Unix, not as root) neither is one below a
+    /// folder that denies search.
+    #[test]
+    fn look_tells_gone_from_unreachable() {
+        use super::{is_gone, look, Look};
+        let top = std::env::temp_dir().join(format!("rtrash-look-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&top);
+        std::fs::create_dir_all(top.join("shut")).unwrap();
+        std::fs::write(top.join("file"), b"x").unwrap();
+        std::fs::write(top.join("shut/inner"), b"x").unwrap();
+        assert!(is_gone(&top.join("none")));
+        assert!(is_gone(&top.join("file/below")));
+        assert!(matches!(look(&top.join("file")), Look::There(_)));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let shut = top.join("shut");
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o600)).unwrap();
+            // SAFETY: geteuid has no preconditions.
+            if unsafe { libc::geteuid() } != 0 {
+                assert!(matches!(look(&shut.join("inner")), Look::Unreachable(_)));
+                assert!(!is_gone(&shut.join("inner")));
+            }
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::remove_dir_all(&top).unwrap();
+    }
+
     #[test]
     fn unlisted_hint_counts_and_names_status_check() {
         assert_eq!(

@@ -248,13 +248,13 @@ pub fn recheck_bin_item(
     same_original: impl Fn(&Path) -> bool,
 ) -> Result<(), crate::util::Stale> {
     use crate::util::Stale;
-    if std::fs::symlink_metadata(payload).is_err() {
+    if crate::util::is_gone(payload) {
         return Err(Stale::Gone);
     }
     let Some(index) = index_file_for(payload) else {
         return Err(Stale::Changed);
     };
-    if std::fs::symlink_metadata(&index).is_err() {
+    if crate::util::is_gone(&index) {
         return Err(Stale::Gone);
     }
     match read_bin_index(&index) {
@@ -337,7 +337,7 @@ pub fn scan_bin_dir_counted(dir: &Path) -> BinScan {
             continue;
         };
         let payload = dir.join(crate::util::os_from_str(&format!("$R{rest}")));
-        if std::fs::symlink_metadata(&payload).is_err() {
+        if !matches!(crate::util::look(&payload), crate::util::Look::There(_)) {
             scan.skipped += 1;
             continue;
         }
@@ -351,7 +351,7 @@ pub fn scan_bin_dir_counted(dir: &Path) -> BinScan {
     let index = |rest: &str| dir.join(crate::util::os_from_str(&format!("$I{rest}")));
     let orphans = payloads
         .iter()
-        .filter(|rest| std::fs::symlink_metadata(index(rest)).is_err())
+        .filter(|rest| crate::util::is_gone(&index(rest)))
         .count();
     scan.skipped += orphans as u64;
     scan.records.sort_by(|a, b| {
@@ -1660,17 +1660,25 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut moved: Vec<PathBuf> = Vec::new();
         let mut roots: Vec<PathBuf> = Vec::new();
         for f in &files {
-            if std::fs::symlink_metadata(f).is_err() {
-                if force {
+            match crate::util::look(f) {
+                crate::util::Look::There(_) => {}
+                // -f ignores a missing file only, as rm does.
+                crate::util::Look::Gone if force => continue,
+                crate::util::Look::Gone => {
+                    eprintln!(
+                        "{prog}: cannot remove '{}': No such file or directory",
+                        f.display()
+                    );
+                    status = status.max(1);
+                    failed += 1;
                     continue;
                 }
-                eprintln!(
-                    "{prog}: cannot remove '{}': No such file or directory",
-                    f.display()
-                );
-                status = status.max(1);
-                failed += 1;
-                continue;
+                crate::util::Look::Unreachable(e) => {
+                    eprintln!("{prog}: cannot remove '{}': {e}", f.display());
+                    status = status.max(1);
+                    failed += 1;
+                    continue;
+                }
             }
             let abs = std::fs::canonicalize(f)
                 .map(|p| crate::util::plain_path(&p))
@@ -3202,7 +3210,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 };
                 parent.join(name)
             })
-            .find(|p| p.symlink_metadata().is_err())
+            .find(|p| crate::util::is_gone(p))
             .unwrap_or_else(|| dest.to_path_buf())
     }
 
@@ -3286,7 +3294,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 _ => base,
             };
             if o.dry_run {
-                if Path::new(&it.id).symlink_metadata().is_err() {
+                if crate::util::is_gone(Path::new(&it.id)) {
                     say(format!(
                         "would fail: the payload of '{}' is gone",
                         orig.display()
@@ -3354,7 +3362,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 let why = held_reason(Path::new(&it.id), &e);
                 eprintln!("{prog}: cannot restore '{}': {why}", dest.display());
                 failed += 1;
-            } else if dest.symlink_metadata().is_err() {
+            } else if crate::util::is_gone(&dest) {
                 eprintln!(
                     "{prog}: restored '{}' but nothing is there now",
                     dest.display()

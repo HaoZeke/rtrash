@@ -843,11 +843,8 @@ impl Plan<'_> {
             ))
         } else if let Some(err) = trash_conflict(e, &dest) {
             Some(err)
-        } else if src.symlink_metadata().is_err() {
-            Some(format!(
-                "the payload of '{}' is gone",
-                crate::util::term_path(&e.original)
-            ))
+        } else if let Some(why) = payload_unusable(&src, &e.original) {
+            Some(why)
         } else if !force && dest.symlink_metadata().is_ok() {
             Some(format!("'{}' exists", crate::util::term_path(&dest)))
         } else {
@@ -887,7 +884,7 @@ pub(crate) fn free_name(dest: &Path) -> PathBuf {
             };
             parent.join(name)
         })
-        .find(|p| p.symlink_metadata().is_err())
+        .find(|p| crate::util::is_gone(p))
         .unwrap_or_else(|| dest.to_path_buf())
 }
 
@@ -1015,7 +1012,7 @@ fn staging_path(parent: &Path, name: &str) -> PathBuf {
             };
             crate::util::join_name(parent, &tag)
         })
-        .find(|p| p.symlink_metadata().is_err())
+        .find(|p| crate::util::is_gone(p))
         .unwrap_or_else(|| crate::util::join_name(parent, name))
 }
 
@@ -1030,6 +1027,23 @@ fn unstage(err: String, staged: &Path, src: &Path) -> String {
             staged.display(),
             src.display()
         ),
+    }
+}
+
+/// Why the payload at `src` of the item from `original` cannot be put
+/// back: it is gone, or it cannot be read (a folder that denies search),
+/// which is not the same as gone. None when it is there.
+fn payload_unusable(src: &Path, original: &Path) -> Option<String> {
+    match crate::util::look(src) {
+        crate::util::Look::There(_) => None,
+        crate::util::Look::Gone => Some(format!(
+            "the payload of '{}' is gone",
+            crate::util::term_path(original)
+        )),
+        crate::util::Look::Unreachable(e) => Some(format!(
+            "the payload of '{}' cannot be read: {e}",
+            crate::util::term_path(original)
+        )),
     }
 }
 
@@ -1086,11 +1100,20 @@ pub(crate) fn restore_one_to(
     let src = crate::util::join_name(&entry.dir.files(), &entry.name);
 
     // Never destroy the live destination until the trash payload is known good.
-    if src.symlink_metadata().is_err() {
-        return Err(format!(
-            "trash payload missing for '{}' (stale .trashinfo?)",
-            crate::util::show_name(&entry.name)
-        ));
+    match crate::util::look(&src) {
+        crate::util::Look::There(_) => {}
+        crate::util::Look::Gone => {
+            return Err(format!(
+                "trash payload missing for '{}' (stale .trashinfo?)",
+                crate::util::show_name(&entry.name)
+            ));
+        }
+        crate::util::Look::Unreachable(e) => {
+            return Err(format!(
+                "cannot read the trash payload of '{}': {e}",
+                crate::util::show_name(&entry.name)
+            ));
+        }
     }
 
     let dest_exists = dest.symlink_metadata().is_ok();

@@ -1,0 +1,1 @@
+A path that cannot be reached no longer counts as missing (trash-cli #377). On Windows, `rtrash put` names the real error for a file in a folder that denies access, and `-f` no longer hides it. When files/ in a trash lacks search permission, `rtrash empty --dangling` keeps the records of its payloads. Restore then says that the payload cannot be read.

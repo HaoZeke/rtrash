@@ -861,7 +861,7 @@ impl Seen {
         }
         let mut rec = name.to_os_string();
         rec.push(".trashinfo");
-        self.info.contains(&rec) || fs::symlink_metadata(self.dir.info().join(&rec)).is_err()
+        self.info.contains(&rec) || crate::util::is_gone(&self.dir.info().join(&rec))
     }
 
     /// The name `rec` in info/ was counted. The record of a payload that
@@ -2316,7 +2316,7 @@ pub fn source_left(e: &io::Error) -> Option<&SourceLeft> {
 /// Callers ask [`tree_removable`] first, so that removal rarely fails.
 fn move_by_copy(src: &Path, dest: &Path, meta: &fs::Metadata) -> io::Result<()> {
     // Only what this copy made is taken back, never a path that was there.
-    let fresh = dest.symlink_metadata().is_err();
+    let fresh = crate::util::is_gone(dest);
     if let Err(e) = copy_recursive(src, dest, meta) {
         if fresh && e.kind() != io::ErrorKind::AlreadyExists {
             make_tree_writable(dest);

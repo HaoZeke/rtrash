@@ -53,7 +53,7 @@ pub fn resolve(p: &Path) -> Option<PathBuf> {
         tail.push(name.to_os_string());
         base = parent;
     }
-    while base.symlink_metadata().is_err() {
+    while !matches!(crate::util::look(base), crate::util::Look::There(_)) {
         let (Some(name), Some(parent)) = (base.file_name(), base.parent()) else {
             return None;
         };

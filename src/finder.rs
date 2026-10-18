@@ -402,9 +402,9 @@ pub(crate) fn move_back(src: &Path, dest: &Path, force: bool) -> Result<(), Stri
     let trash = src.parent().unwrap_or(src).to_path_buf();
     let size = crate::finder_total::measure_item(src);
     let r = move_back_inner(src, dest, force);
-    if src.symlink_metadata().is_err() && r.is_ok() {
+    if crate::util::is_gone(src) && r.is_ok() {
         crate::finder_total::carry(&trash, size, false);
-    } else if src.symlink_metadata().is_err() {
+    } else if crate::util::is_gone(src) {
         crate::finder_total::uncarried(&trash);
     }
     r
@@ -997,7 +997,7 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
             (_, c) => (dest, c == Conflict::Overwrite),
         };
         if o.dry_run {
-            if e.path().symlink_metadata().is_err() {
+            if crate::util::is_gone(&e.path()) {
                 say(format!(
                     "would fail: '{}' is gone from the trash",
                     crate::util::term_path(&e.shown)

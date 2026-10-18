@@ -280,7 +280,7 @@ enum DryRun {
 }
 
 fn dry_run_dest(e: &list::Entry, conflict: Conflict) -> DryRun {
-    if e.original.symlink_metadata().is_err() {
+    if crate::util::is_gone(&e.original) {
         return DryRun::Restore(e.original.clone());
     }
     match conflict {

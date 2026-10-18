@@ -164,7 +164,10 @@ pub fn status_is_dirty(out: &[u8]) -> bool {
 /// A bare repository (no `.git` entry) has no work tree to be dirty, so
 /// only its branches and stash count.
 fn repo_state(bin: &Path, repo: &Path, show_stash: bool) -> GitState {
-    let bare = repo.join(".git").symlink_metadata().is_err();
+    let bare = !matches!(
+        crate::util::look(&repo.join(".git")),
+        crate::util::Look::There(_)
+    );
     // Commits reachable from a local branch but from no remote ref.
     let mut log = git(bin, repo);
     log.args([

@@ -737,7 +737,11 @@ fn judge(path: &Path, parent_dev: u64, gi: usize, g: &Group, ctx: &Ctx) -> Optio
     let m = fs::symlink_metadata(path).ok()?;
     if let Some(marker) = &g.marker {
         // Not the kind of entry this profile is about.
-        if !m.is_dir() || fs::symlink_metadata(path.join(marker)).is_err() {
+        let marked = matches!(
+            crate::util::look(&path.join(marker)),
+            crate::util::Look::There(_)
+        );
+        if !m.is_dir() || !marked {
             return None;
         }
     }

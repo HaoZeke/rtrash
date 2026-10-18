@@ -7469,6 +7469,53 @@ fn empty_dangling_removes_only_records_without_a_payload() {
     );
 }
 
+/// A record whose payload sits in a files/ folder that denies search is
+/// not dangling: the payload may well be there, so `empty --dangling`
+/// keeps the record (round 261; it took every such record for dangling).
+#[test]
+fn empty_dangling_keeps_records_whose_payload_cannot_be_reached() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("root searches every folder; skipping");
+        return;
+    }
+    let sb = Sandbox::new("dangling-shut");
+    let keep = sb.work().join("keep.txt");
+    fs::write(&keep, "k").unwrap();
+    assert!(sb.run(&["put", keep.to_str().unwrap()]).status.success());
+    let files = sb.trash().join("files");
+    let record = sb.trash().join("info").join("keep.txt.trashinfo");
+    fs::set_permissions(&files, fs::Permissions::from_mode(0o600)).unwrap();
+    let out = sb.run(&["empty", "--home-only", "--dangling"]);
+    fs::set_permissions(&files, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(record.exists(), "{} {}", stdout_of(&out), stderr_of(&out));
+}
+
+/// A file in a folder that denies search is not reported missing: put
+/// names the real error (trash-cli #377), and `-f`, which ignores only
+/// missing files, does not hide it.
+#[test]
+fn put_reports_a_file_it_cannot_reach_as_denied_not_missing() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("root searches every folder; skipping");
+        return;
+    }
+    let sb = Sandbox::new("put-denied");
+    let shut = sb.work().join("shut");
+    fs::create_dir(&shut).unwrap();
+    fs::write(shut.join("f"), "x").unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o600)).unwrap();
+    let out = sb.run(&["put", "-f", shut.join("f").to_str().unwrap()]);
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o755)).unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("Permission denied"), "{err}");
+    assert!(!err.contains("No such file"), "{err}");
+}
+
 /// `empty --dangling` keeps the limits `status --check --fix` keeps for
 /// the same records: `RTRASH_NO_PERMANENT`, `RTRASH_MAX_PERMANENT` (and
 /// `--max-count`) and `RTRASH_ALLOW_ROOTS` each refuse the run whole with

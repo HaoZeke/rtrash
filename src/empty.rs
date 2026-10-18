@@ -105,7 +105,8 @@ fn dangling_records(dir: &TrashDir) -> Vec<std::ffi::OsString> {
                 return None;
             }
             let payload = files.join(std::ffi::OsStr::from_bytes(stem));
-            payload.symlink_metadata().is_err().then_some(fname)
+            // A payload that cannot be reached is not missing.
+            crate::util::is_gone(&payload).then_some(fname)
         })
         .collect();
     out.sort();

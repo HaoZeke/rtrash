@@ -2265,6 +2265,41 @@ def check_bounded_walks():
                       "recurses through directories; remove it")
 
 
+# `metadata(..).is_err()` takes a path that cannot be reached (EACCES on a
+# parent) for a missing one: put said "No such file or directory" for a
+# denied file on Windows (trash-cli #377), and empty --dangling took every
+# record under a denied files/ for dangling (round 261). util::look and
+# util::is_gone tell the two apart.
+METADATA_IS_ERR = re.compile(r"\b(?:symlink_)?metadata\((?:[^()]|\([^()]*\))*\)\s*\.is_err\(\)")
+METADATA_IS_ERR_CASES = [
+    ("method", "if p.symlink_metadata().is_err() {", True),
+    ("fn", "if std::fs::symlink_metadata(&p.join(x)).is_err() {", True),
+    ("follows", "let gone = fs::metadata(p).is_err();", True),
+    ("is_ok", "if p.symlink_metadata().is_ok() {", False),
+    ("helper", "if crate::util::is_gone(&p) {", False),
+    ("match", "match fs::symlink_metadata(p) {", False),
+]
+
+
+def check_missing_looks():
+    """No code outside the tests decides that a path is missing from a
+    failed metadata call: it goes through util::look or util::is_gone,
+    which take only ENOENT and ENOTDIR for missing. METADATA_IS_ERR_CASES
+    tests the matcher."""
+    for what, line, want in METADATA_IS_ERR_CASES:
+        if bool(METADATA_IS_ERR.search(line)) != want:
+            errors.append(f"scripts/precheck.py: METADATA_IS_ERR gets METADATA_IS_ERR_CASES "
+                          f"'{what}' wrong; the missing-path check is broken")
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        raw = path.read_text(encoding="utf-8")
+        skip = test_mod_lines(raw.split("\n"))
+        for k, line in enumerate(rust_code(raw).split("\n")):
+            if k not in skip and METADATA_IS_ERR.search(line):
+                errors.append(f"{path.relative_to(ROOT).as_posix()}:{k + 1}: metadata(..).is_err() "
+                              "takes a path that cannot be reached for a missing one; use "
+                              "crate::util::is_gone or crate::util::look")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -2383,7 +2418,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_directorysizes_paths()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

@@ -167,7 +167,7 @@ impl<'a> Locked<'a> {
 
     /// Whether the payload is gone from `files/`, read under the lock.
     pub fn gone(&self) -> bool {
-        fs::symlink_metadata(self.payload()).is_err()
+        crate::util::is_gone(&self.payload())
     }
 }
 
