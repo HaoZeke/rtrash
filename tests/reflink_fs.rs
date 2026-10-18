@@ -124,15 +124,21 @@ fn du_unique_and_shared_see_a_reflink_copy_as_one() {
 fn compressed_pair(tag: &str) -> Option<PathBuf> {
     use std::io::Write;
     let dir = fresh_under("RTRASH_COMPRESS_DIR", tag)?;
-    let body: Vec<u8> = b"rtrash compressed extents\n"
+    let unit: Vec<u8> = b"rtrash compressed extents\n"
         .iter()
         .copied()
         .cycle()
-        .take(8 << 20)
+        .take(128 << 10)
         .collect();
     let mut f = fs::File::create(dir.join("text.txt")).unwrap();
-    f.write_all(&body).unwrap();
-    // Btrfs compresses at writeback, and the scan maps without syncing.
+    // Btrfs compresses at writeback, in units of 128 KiB, and writes a
+    // range of one block as it is. Each unit goes out whole before the
+    // next, so background writeback rarely meets a part of one. The scan
+    // maps without syncing.
+    for _ in 0..64 {
+        f.write_all(&unit).unwrap();
+        f.sync_data().unwrap();
+    }
     f.sync_all().unwrap();
     let ok = Command::new("cp")
         .arg("--reflink=always")
@@ -163,10 +169,19 @@ fn compressed_extents_count_once_at_their_uncompressed_size() {
     let unique = run(&dir, &["du", "--unique", "--no-git", "--json", "."]);
     assert_eq!(num(&unique, "\"shared\":{", "distinct"), mib8, "{unique}");
     assert_eq!(
-        num(&unique, "\"shared\":{", "encoded"),
+        num(&unique, "\"shared\":{", "referenced"),
         2 * mib8,
         "{unique}"
     );
+    // Btrfs decides at writeback which blocks it compresses: a range of one
+    // block goes out plain (main CI 39154329766 had 4 KiB of each copy so).
+    // So the encoded bytes are bounded, never exact. They count at mapped
+    // (uncompressed) length, once per copy: two equal halves, each over
+    // 7 MiB. At compressed size the two would come to well under 1 MiB.
+    let encoded = num(&unique, "\"shared\":{", "encoded");
+    assert!(encoded <= 2 * mib8, "{unique}");
+    assert!(encoded > 14 << 20, "{unique}");
+    assert_eq!(encoded % 8192, 0, "{unique}");
     let text = run(&dir, &["du", "--unique", "--no-git", "."]);
     assert!(text.contains("Compressed extents: "), "{text}");
     let _ = fs::remove_dir_all(&dir);

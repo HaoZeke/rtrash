@@ -135,6 +135,16 @@ jobs:
       - name: Shared extent tests
         run: cargo test --locked --test reflink_fs -- --nocapture
 
+      # Btrfs picks the blocks it compresses at writeback, so one green run
+      # proves little about the compressed extent test; run it ten times.
+      - name: Compressed extent test, ten runs
+        if: matrix.fs == 'btrfs'
+        run: |
+          for i in $(seq 10); do
+            echo "run $i"
+            cargo test --locked --test reflink_fs compressed_extents -- --nocapture
+          done
+
   windows:
     name: windows · test · du smoke
     runs-on: windows-latest

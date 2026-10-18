@@ -2464,6 +2464,43 @@ def check_reparse_links():
                               "du_fs::fileid::is_link (the name-surrogate bit)")
 
 
+# Btrfs decides at writeback which blocks it compresses (a range of one
+# block goes out plain), so a test that asserts the exact count of encoded
+# bytes fails at random: main CI 39154329766 got 16769024 for 2 * 8 MiB.
+# ENCODED_EXACT_CASES tests the matcher.
+ENCODED_EXACT_CASES = [
+    ("exact", 'assert_eq!(\n    num(&j, "\\"shared\\":{", "encoded"),\n    2 * mib8,\n);', 1),
+    ("bounded", 'let encoded = num(&j, "x", "encoded");\nassert!(encoded > 14 << 20);', 0),
+    ("other", 'assert_eq!(num(&j, "x", "distinct"), mib8);', 0),
+]
+
+
+def exact_encoded_lines(code):
+    """0-based lines where an assert_eq! or assert_ne! names "encoded"."""
+    hits = []
+    for m in re.finditer(r"\bassert_(?:eq|ne)!\(", code):
+        depth, j = 1, m.end()
+        while j < len(code) and depth:
+            depth += {"(": 1, ")": -1}.get(code[j], 0)
+            j += 1
+        if '"encoded"' in code[m.start():j]:
+            hits.append(code.count("\n", 0, m.start()))
+    return hits
+
+
+def check_exact_encoded():
+    """No test pins the exact encoded byte count of a scan."""
+    for what, text, want in ENCODED_EXACT_CASES:
+        if len(exact_encoded_lines(text)) != want:
+            errors.append(f"scripts/precheck.py: exact_encoded_lines gets ENCODED_EXACT_CASES "
+                          f"'{what}' wrong; the encoded-bytes check is broken")
+    for path in sorted((ROOT / "tests").rglob("*.rs")):
+        code = rust_code(path.read_text(encoding="utf-8"), strings=True)
+        for k in exact_encoded_lines(code):
+            errors.append(f"{path.relative_to(ROOT).as_posix()}:{k + 1}: an exact count of "
+                          "encoded bytes; btrfs leaves some blocks plain at random, so bound it")
+
+
 # Every mklink in the tests goes through tests/du.rs mklink_junction, which
 # refuses a '/' in either path. cmd reads a '/' anywhere in an argument as a
 # switch: round 263 passed "...\\d/again" and mklink failed with "Invalid
@@ -2610,7 +2647,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_directorysizes_paths()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
