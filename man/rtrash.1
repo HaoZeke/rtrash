@@ -2306,7 +2306,8 @@ opens a panel listing every mark with its size and path: Space or
 unmarks the row, Enter goes to its directory with the cursor on it,
 .B d
 trashes the batch, and any other key closes the panel.
-Sizes of the parent directories follow each change without a rescan.
+Sizes and item counts of the parent directories follow each change
+without a rescan.
 Their rows keep their places, as ncdu #237 asks, so going back up finds
 the row walked out of where it was, with the cursor on it; a sort key or
 a rescan puts them in order again.
@@ -2436,8 +2437,14 @@ with case ignored.
 Enter keeps the filter, and Esc, or
 .B q
 in the list, clears it.
-Marking all, trashing and the title count cover only the rows shown,
-and opening or leaving the directory ends the filter.
+Marking all covers only the rows shown, and so does trashing.
+The title says how many entries show of how many.
+Its size and item count stay those of the whole directory, as with
+.B .
+hiding dot names, so they match
+.B "du \-\-json"
+and a rescan.
+Opening or leaving the directory ends the filter.
 Rows show the artefact kind and git state; risky git state shows
 .BR ! .
 Trash directories stay closed.

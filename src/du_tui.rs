@@ -378,6 +378,13 @@ fn row_items(it: &Item) -> u64 {
     }
 }
 
+/// Everything below a view's directory, as ncdu's Items count: each row,
+/// and for a directory also what it holds. Rows the name filter or `.`
+/// hides count too, as they do in the view's size.
+fn view_items(v: &View) -> u64 {
+    du::size_sum(v.rows.iter().chain(&v.stash).map(row_items))
+}
+
 /// Rows in the order of `s`: largest, most items or newest change first,
 /// or by name from A; `reverse` flips it.
 fn sort_rows(rows: &mut [Item], s: Sorting) {
@@ -740,6 +747,32 @@ fn adjust_chain(
                 apply(&mut row.disk, disk);
                 apply(&mut row.apparent, apparent);
             }
+        }
+        d = parent;
+    }
+}
+
+/// Add (`grow`) or remove `items` along the chain from `dir` up to the
+/// top: the row that leads to each directory in the view above it. A
+/// view's own count is the sum of its rows ([`view_items`]).
+fn adjust_items(
+    cache: &mut HashMap<PathBuf, View>,
+    roots: &[PathBuf],
+    dir: &Path,
+    items: u64,
+    grow: bool,
+) {
+    let mut d = dir.to_path_buf();
+    while let Some(parent) = up(roots, &d) {
+        if let Some(v) = cache.get_mut(&parent) {
+            if let Some(row) = v.rows.iter_mut().chain(&mut v.stash).find(|r| r.path == d) {
+                row.items = if grow {
+                    row.items.saturating_add(items)
+                } else {
+                    row.items.saturating_sub(items)
+                };
+            }
+            v.scan = None;
         }
         d = parent;
     }
@@ -1168,10 +1201,12 @@ impl App {
         let cur = cur.to_path_buf();
         // Children views may hold stale sizes now; drop them.
         self.cache.retain(|p, _| p == &cur || !p.starts_with(&cur));
+        let fresh_items = view_items(&fresh);
         let old = self
             .cache
             .insert(cur.clone(), fresh.clone())
             .expect("current view");
+        let old_items = view_items(&old);
         let Some(parent) = up(&self.roots, &cur) else {
             return;
         };
@@ -1191,6 +1226,9 @@ impl App {
         };
         // Restore the view's own totals; the chain then fixes the rest.
         adjust_chain(&mut self.cache, &self.roots, parent, d, a, grow);
+        let more = fresh_items >= old_items;
+        let n = fresh_items.abs_diff(old_items);
+        adjust_items(&mut self.cache, &self.roots, &cur, n, more);
         if let Some(pv) = self.cache.get_mut(parent) {
             if let Some(row) = pv
                 .rows
@@ -1200,6 +1238,7 @@ impl App {
             {
                 row.disk = fresh.disk;
                 row.apparent = fresh.apparent;
+                row.items = fresh_items;
             }
         }
     }
@@ -1568,6 +1607,7 @@ impl App {
                 it.apparent,
                 false,
             );
+            adjust_items(&mut self.cache, &self.roots, &parent, row_items(it), false);
         }
         self.cache.retain(|p, _| !p.starts_with(&it.path));
     }
@@ -1687,13 +1727,14 @@ impl App {
             let Some(parent) = up(&self.roots, &item.path) else {
                 continue;
             };
-            let (d, a) = (item.disk, item.apparent);
+            let (d, a, n) = (item.disk, item.apparent, row_items(&item));
             if let Some(v) = self.cache.get_mut(&parent) {
                 if !v.rows.iter().any(|r| r.path == item.path) {
                     insert_in_order(&mut v.rows, item, self.sorting);
                 }
             }
             adjust_chain(&mut self.cache, &self.roots, &parent, d, a, true);
+            adjust_items(&mut self.cache, &self.roots, &parent, n, true);
         }
         if self.narrowed() {
             self.refilter();
@@ -2678,9 +2719,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             view.rows.len() + view.stash.len()
         )
     };
-    // Everything below this directory, as ncdu's Items count: each row,
-    // and for a directory also what it holds.
-    let below = du::size_sum(view.rows.iter().map(row_items));
+    let below = view_items(view);
     let items = crate::util::plural(below, "item", "items");
     let marked = app.marked_count();
     let tail = format!(" · {size} · {items} · {entries} · {marked} marked ");
@@ -4933,6 +4972,49 @@ mod tests {
         assert!(a.status.starts_with("wrote '"), "{}", a.status);
         let snap = crate::du_snap::read(&out).unwrap();
         assert_eq!(snap.roots[0].path, t.0.join("w/big"));
+        let _ = fs::remove_dir_all(&t.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn item_counts_follow_deletes_undo_and_hidden_rows() {
+        let t = tree("items");
+        fs::write(t.0.join("w/.env"), b"e").unwrap();
+        let mut a = app(&t);
+        let count = |a: &App, name: &str| -> u64 {
+            let p = t.0.join("w").join(name);
+            let v = &a.cache[&t.0.join("w")];
+            v.rows
+                .iter()
+                .chain(&v.stash)
+                .find(|r| r.path == p)
+                .unwrap()
+                .items
+        };
+        // big holds inner, inner/blob and side; small holds s.
+        assert_eq!(count(&a, "big"), 3);
+        assert_eq!(view_items(a.view()), 8);
+        // Hidden dot names still count, as they do in the size.
+        a.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
+        assert_eq!(view_items(a.view()), 8);
+        a.select(0);
+        a.open(); // big
+        a.select(0); // inner and its blob
+        a.ask_delete();
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(!t.0.join("w/big/inner").exists());
+        assert_eq!(view_items(a.view()), 1);
+        a.back();
+        assert_eq!(count(&a, "big"), 1);
+        assert_eq!(view_items(a.view()), 6);
+        // A rescan of w counts what the explorer kept.
+        a.on_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(count(&a, "big"), 1);
+        assert_eq!(view_items(a.view()), 6);
+        a.on_key(KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(a.status, "restored 1 item(s)");
+        assert_eq!(count(&a, "big"), 3);
+        assert_eq!(view_items(a.view()), 8);
         let _ = fs::remove_dir_all(&t.0);
     }
 }

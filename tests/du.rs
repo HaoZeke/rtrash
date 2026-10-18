@@ -2402,6 +2402,77 @@ fn ncdu_exports_written_by_du_read_back_with_the_scan_totals() {
     assert_eq!(t.du(&["--ncdu", o, "t", "t/a"]).status.code(), Some(2));
 }
 
+/// Every directory's item count, keyed by its path below `zq`, from a
+/// `--json --all-dirs` listing. A row for `zq` itself is left out: the
+/// walk never lists its PATH, and the root totals stand for it.
+fn zq_counts(json: &str) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = paths_in(json, "dirs")
+        .into_iter()
+        .map(|p| {
+            let items = field(row(json, &p), "items");
+            let n = format!("/{}", p.replace('\\', "/"));
+            let at = n.rfind("/zq").expect("a row below zq") + 3;
+            (n[at..].to_string(), items)
+        })
+        .filter(|(k, _)| !k.is_empty())
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn item_counts_agree_across_walks_and_ncdu_exports() {
+    // gdu #691: one tree gave different counts by how it was read. Here
+    // the walk with getattrlistbulk on and off (macOS reads both ways),
+    // and both ncdu exports read back, must give the same counts. A
+    // directory's count leaves itself out and a second hard link counts
+    // nothing. The PATH's files plus dirs (308) is its count (a: 5 + 1,
+    // wide: 300 + 1) plus the PATH itself.
+    let t = Tree::new("item-agree");
+    t.file("zq/a/x", 10);
+    t.file("zq/a/y", 10);
+    t.file("zq/a/b/z", 10);
+    fs::create_dir_all(t.root.join("zq/a/empty")).unwrap();
+    // Wider than WIDE_DIR (256), so these are stat'ed in parallel.
+    for i in 0..300 {
+        t.file(&format!("zq/wide/f{i}"), 1);
+    }
+    #[cfg(unix)]
+    fs::hard_link(t.root.join("zq/a/x"), t.root.join("zq/a/x-link")).unwrap();
+    let want: Vec<(String, u64)> = [("/a", 5), ("/a/b", 1), ("/a/empty", 0), ("/wide", 300)]
+        .iter()
+        .map(|&(p, n)| (p.to_string(), n))
+        .collect();
+    let list = ["--json", "--no-git", "--all-dirs", "-n", "50"];
+    for bulk in ["1", "0"] {
+        let mut args = list.to_vec();
+        args.push("zq");
+        let out = t.du_env(&args, &[("RTRASH_DU_BULK", bulk)]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let j = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(zq_counts(&j), want, "RTRASH_DU_BULK={bulk}");
+        assert_eq!(
+            field(&j, "files") + field(&j, "dirs"),
+            308,
+            "RTRASH_DU_BULK={bulk}"
+        );
+    }
+    for (flag, name) in [("--ncdu", "zq.json"), ("--ncdu-binary", "zq.ncdu")] {
+        let to = format!("{flag}={name}");
+        let w = t.du(&[to.as_str(), "zq"]);
+        assert!(w.status.success(), "{}", String::from_utf8_lossy(&w.stderr));
+        let mut args = list.to_vec();
+        args.extend(["-f", name]);
+        let j = t.json(&args[1..]);
+        assert_eq!(zq_counts(&j), want, "{name}");
+        assert_eq!(field(&j, "files") + field(&j, "dirs"), 308, "{name}");
+    }
+}
+
 #[test]
 fn an_export_written_inside_the_scanned_directory_lists_no_temporary() {
     // Each export is written to `out.*` inside the directory it scans, so
