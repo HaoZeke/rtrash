@@ -1023,8 +1023,11 @@ PERMANENT_ALLOW = {
     ("trashdir.rs", "reserve_record"): (2, OWN + ": the .rtrash-put temporary it wrote the record into"),
     ("trashdir.rs", "trash_move_locked"): (1, "a put undoing its own record when the move fails"),
     ("tui_term.rs", "tempfile_unlinked"): (1, OWN),
+    ("win_recycle.rs", "copy_tree"): (2, OWN + ": the part copy it just made, when the copy fails"),
     ("win_recycle.rs", "empty_run"): (1, BATCH),
     ("win_recycle.rs", "prune_after_put"): (1, BATCH),
+    ("win_recycle.rs", "make_junction"): (1, OWN + ": the empty folder it just made, when the "
+                                          "reparse data does not take"),
     ("win_recycle.rs", "purge_oldest_on"): (1, BATCH),
     ("win_recycle.rs", "remove_retry"): (3, PRIMITIVE + " (under remove_forcing)"),
     ("win_recycle.rs", "test_bin_put"): (1, OWN + ": the $I record it just wrote, when the move fails"),
@@ -2445,6 +2448,10 @@ REPARSE_TAG_CASES = [
 
 
 REPARSE_TAG_DATA = {"is_wof"}
+# A restore to another volume makes each link again (34(i)): std's
+# is_symlink, the name-surrogate bit, says that it is a link, and the tag
+# says which kind to make. These fns read or write that tag.
+REPARSE_TAG_REMAKE = {"link_kind", "junction_data"}
 
 
 def reparse_tag_line(line):
@@ -2466,7 +2473,7 @@ def check_reparse_links():
         for k, line in enumerate(lines):
             if k in skip or not reparse_tag_line(line):
                 continue
-            if enclosing_fn(lines, k) not in REPARSE_TAG_DATA:
+            if enclosing_fn(lines, k) not in REPARSE_TAG_DATA | REPARSE_TAG_REMAKE:
                 errors.append(f"{path.relative_to(ROOT).as_posix()}:{k + 1}: a reparse tag decides "
                               "here; a list of tags misses the rest, so tell a link by "
                               "du_fs::fileid::is_link (the name-surrogate bit)")
@@ -2691,6 +2698,50 @@ def check_disk_floors():
                               "0 < disk && disk < N")
 
 
+# 34(i): win_recycle::copy_tree walked a folder and handed a junction to
+# fs::copy, which copies through a link or fails on one half way. A fn in
+# src/ that walks folders (read_dir) and copies files (fs::copy) checks
+# is_symlink() and makes a link again instead. LINK_COPY_CASES tests it.
+LINK_COPY_CASES = [
+    ("through", "fn c(s: &Path) {\n    for e in fs::read_dir(s)? {}\n    fs::copy(&a, &b)?;\n}", 1),
+    ("remade", "fn c(s: &Path) {\n    if m.is_symlink() {}\n    fs::read_dir(s)?;\n"
+               "    std::fs::copy(&a, &b)?;\n}", 0),
+    ("one file", "fn c() {\n    fs::copy(&a, &b)?;\n}", 0),
+]
+
+
+def link_copy_errors(text):
+    """The 1-based lines of fns in `text` that walk, copy and skip links."""
+    lines = text.split("\n")
+    decl = re.compile(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?fn\s+\w+")
+    starts = [k for k, line in enumerate(lines) if decl.match(line)] + [len(lines)]
+    bad = []
+    for a, b in zip(starts, starts[1:]):
+        body = "\n".join(lines[a:b])
+        if "read_dir(" in body and re.search(r"\bfs::copy\(", body) \
+                and "is_symlink()" not in body:
+            bad.append(a + 1)
+    return bad
+
+
+def check_link_copies():
+    """A fn that walks folders and copies files makes each link again."""
+    for what, text, want in LINK_COPY_CASES:
+        if len(link_copy_errors(text)) != want:
+            errors.append(f"scripts/precheck.py: link_copy_errors gets LINK_COPY_CASES '{what}' "
+                          "wrong; the link copy check is broken")
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        raw = path.read_text(encoding="utf-8")
+        skip = test_mod_lines(raw.split("\n"))
+        for line in link_copy_errors(rust_code(raw)):
+            if line - 1 in skip:
+                continue
+            errors.append(f"{path.relative_to(ROOT).as_posix()}:{line}: this fn walks folders and "
+                          "copies files but never checks is_symlink(); fs::copy goes through a "
+                          "link, so make the link again (win_recycle::copy_link)")
+
+
+
 
 def enclosing_fn(lines, k):
     """The name of the last fn declared at or above 0-based line `k`."""
@@ -2799,7 +2850,7 @@ def check_exact_encoded():
                           "encoded bytes; btrfs leaves some blocks plain at random, so bound it")
 
 
-# Every mklink in the tests goes through tests/du.rs mklink_junction, which
+# Every mklink in the tests goes through common::mklink_junction, which
 # refuses a '/' in either path. cmd reads a '/' anywhere in an argument as a
 # switch: round 263 passed "...\\d/again" and mklink failed with "Invalid
 # switch". MKLINK_CASES tests the matcher.
@@ -2812,7 +2863,7 @@ MKLINK_CASES = [
 
 
 def check_mklink_calls():
-    """A test makes a junction only through mklink_junction in tests/du.rs."""
+    """A test makes a junction only through common::mklink_junction."""
     for what, line, want in MKLINK_CASES:
         if bool(MKLINK.search(line)) != want:
             errors.append(f"scripts/precheck.py: MKLINK gets MKLINK_CASES '{what}' wrong; "
@@ -2820,7 +2871,8 @@ def check_mklink_calls():
     for path in sorted((ROOT / "tests").rglob("*.rs")):
         rel = path.relative_to(ROOT).as_posix()
         lines = rust_code(path.read_text(encoding="utf-8"), strings=True).split("\n")
-        allowed = fn_lines(lines, "mklink_junction") if rel == "tests/du.rs" else set()
+        own = rel == "tests/common/mod.rs"
+        allowed = fn_lines(lines, "mklink_junction") if own else set()
         for k, line in enumerate(lines):
             if k not in allowed and MKLINK.search(line):
                 errors.append(f"{rel}:{k + 1}: mklink outside mklink_junction; cmd takes a '/' "
@@ -2945,7 +2997,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_link_copies(); check_directorysizes_paths()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

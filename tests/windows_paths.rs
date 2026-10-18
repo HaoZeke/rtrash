@@ -209,3 +209,54 @@ fn a_read_only_tree_past_max_path_leaves_the_bin_by_rm_and_empty() {
     }
     let _ = fs::remove_dir_all(&home);
 }
+
+/// 34(i): a restore to another volume makes a junction in the folder
+/// again, to the same target, and never copies through it. On the CI
+/// runners the build folder (CARGO_TARGET_TMPDIR) and the temp dir sit
+/// on different volumes; elsewhere the test says so and stops.
+#[test]
+fn a_restore_across_volumes_makes_a_junction_again() {
+    if std::env::var_os("WINEPREFIX").is_some() {
+        return;
+    }
+    let home = home("junction-away");
+    let away = Path::new(env!("CARGO_TARGET_TMPDIR")).join(home.file_name().unwrap());
+    let drive = |p: &Path| s(p).chars().next().map(|c| c.to_ascii_lowercase());
+    if drive(&away) == drive(&home) {
+        eprintln!("CARGO_TARGET_TMPDIR shares a volume with the temp dir; skipping");
+        let _ = fs::remove_dir_all(&home);
+        return;
+    }
+    let target = home.join("target");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("t.txt"), "t").unwrap();
+    let tree = home.join("tree");
+    fs::create_dir_all(&tree).unwrap();
+    fs::write(tree.join("f.txt"), "f").unwrap();
+    common::mklink_junction(&tree.join("link"), &target);
+    ok(&run(&home, &["put", &s(&tree)]));
+    fs::create_dir_all(&away).unwrap();
+    let to = format!("--to={}", s(&away));
+    ok(&run(&home, &["restore", &to, &s(&tree)]));
+    let back = away.join("tree");
+    assert_eq!(fs::read_to_string(back.join("f.txt")).unwrap(), "f");
+    let link = back.join("link");
+    let meta = fs::symlink_metadata(&link).unwrap();
+    assert!(
+        meta.file_type().is_symlink(),
+        "the junction was copied through"
+    );
+    assert_eq!(
+        fs::canonicalize(&link).unwrap(),
+        fs::canonicalize(&target).unwrap()
+    );
+    assert_eq!(fs::read_to_string(target.join("t.txt")).unwrap(), "t");
+    let left = fs::read_dir(common::test_bin(&home))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("$R"))
+        .count();
+    assert_eq!(left, 0);
+    let _ = fs::remove_dir_all(&away);
+    let _ = fs::remove_dir_all(&home);
+}

@@ -298,6 +298,27 @@ pub fn rtrash(home: &Path) -> Command {
     c
 }
 
+/// Make the junction `link` to `target` with `mklink /J`. cmd reads a `/`
+/// anywhere in an argument as the start of a switch ("Invalid switch"),
+/// so both paths must be native; a `/` in either fails here first. Every
+/// mklink call in the tests goes through here (precheck
+/// check_mklink_calls).
+#[cfg(windows)]
+pub fn mklink_junction(link: &Path, target: &Path) {
+    for p in [link, target] {
+        let plain = !p.as_os_str().to_string_lossy().contains('/');
+        assert!(plain, "a mklink path with '/': {}", p.display());
+    }
+    let out = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "mklink /J {}: {err}", link.display());
+}
+
 /// The `LOCALAPPDATA` that [`rtrash`] gives a Windows run under `home`.
 /// The last-put record that `empty` and `restore --last` read lives
 /// there, so a parallel test's put cannot replace it.
