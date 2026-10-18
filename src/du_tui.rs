@@ -340,6 +340,8 @@ struct App {
     hide_dots: bool,
     /// What each row shows of its share of the view (`%` cycles it).
     share: Share,
+    /// Whether the bars use a log scale (`L` switches it, ncdu #75).
+    log_bars: bool,
     /// Paths `p` prints on stdout once the explorer has closed.
     print_on_exit: Vec<PathBuf>,
     /// Text `y` sends to the terminal clipboard on the next draw.
@@ -1012,6 +1014,7 @@ impl App {
             filter: String::new(),
             hide_dots: false,
             share: Share::Bar,
+            log_bars: false,
             print_on_exit: Vec::new(),
             clipboard: None,
             export_to: String::new(),
@@ -2024,6 +2027,16 @@ impl App {
         self.status = format!("rows show {} · % changes it", self.share.label());
     }
 
+    /// Draw the bars on a log scale, or back on a linear one (ncdu #75).
+    fn toggle_log_bars(&mut self) {
+        self.log_bars = !self.log_bars;
+        self.status = if self.log_bars {
+            "bars use a log scale: two cells fewer is a tenth of the share · L changes it".into()
+        } else {
+            "bars use a linear scale · L changes it".into()
+        };
+    }
+
     /// Hide names that start with a dot, or show them again.
     fn toggle_dots(&mut self) {
         self.hide_dots = !self.hide_dots;
@@ -2430,6 +2443,7 @@ impl App {
                         KeyCode::Char('o') => return self.open_row(),
                         KeyCode::Char('.') => return self.toggle_dots(),
                         KeyCode::Char('%') => return self.cycle_share(),
+                        KeyCode::Char('L') => return self.toggle_log_bars(),
                         _ => {}
                     }
                 }
@@ -2761,9 +2775,10 @@ impl Share {
     }
 
     /// The share columns of a row, each with the space after it: a
-    /// six-cell percent such as ` 12.5%`, then a bar in brackets. With
-    /// `blank` (a size still coming), the same width of spaces.
-    fn cols(self, part: u64, whole: u64, blank: bool) -> String {
+    /// six-cell percent such as ` 12.5%`, then a bar in brackets, on a
+    /// log scale with `log`. With `blank` (a size still coming), the same
+    /// width of spaces.
+    fn cols(self, part: u64, whole: u64, blank: bool, log: bool) -> String {
         let mut out = String::new();
         if matches!(self, Share::Percent | Share::Both) {
             if blank {
@@ -2775,6 +2790,8 @@ impl Share {
         if matches!(self, Share::Bar | Share::Both) {
             let cells = if blank {
                 " ".repeat(10)
+            } else if log {
+                log_bar(part, whole, 10)
             } else {
                 bar(part, whole, 10)
             };
@@ -2806,16 +2823,29 @@ fn bar(part: u64, whole: u64, width: usize) -> String {
     format!("{}{}", "#".repeat(filled), " ".repeat(width - filled))
 }
 
+/// Cells a log-scale bar loses for each tenth of the share.
+const LOG_CELLS_PER_DECADE: f64 = 2.0;
+
+/// Bar of `width` cells for `part` of `whole` on a log scale (ncdu #75):
+/// the whole fills it, and [`LOG_CELLS_PER_DECADE`] cells fewer stand for
+/// a share ten times smaller, so a row with 1% of a 10-cell view still
+/// gets 6 cells. A part above 0 gets at least one cell.
+fn log_bar(part: u64, whole: u64, width: usize) -> String {
+    let filled = if part == 0 || whole == 0 {
+        0
+    } else {
+        let share = (part as f64 / whole as f64).min(1.0);
+        let cells = width as f64 + LOG_CELLS_PER_DECADE * share.log10();
+        (cells.round().max(1.0) as usize).min(width)
+    };
+    format!("{}{}", "#".repeat(filled), " ".repeat(width - filled))
+}
+
 #[cfg(test)]
 fn row_text(it: &Item, marked: bool, whole: u64, sort: SortKey) -> String {
     let ctx = RowCtx {
-        whole,
-        sort,
         apparent: sort == SortKey::Apparent,
-        pending: false,
-        whole_path: false,
-        unread: &[],
-        share: Share::Bar,
+        ..RowCtx::plain(whole, sort)
     };
     row_text_in(it, marked, &ctx)
 }
@@ -2837,6 +2867,28 @@ struct RowCtx<'a> {
     unread: &'a du::Unread,
     /// What each row shows of its share of `whole`.
     share: Share,
+    /// Bars on a log scale.
+    log: bool,
+}
+
+#[cfg(test)]
+impl RowCtx<'_> {
+    /// The context tests start from: disk use, sizes in, rows named by
+    /// file name, nothing unreadable, a linear bar. A test changes what it
+    /// needs with `RowCtx { share, ..RowCtx::plain(whole, sort) }`, so a
+    /// field added later is set here once, not at every test.
+    fn plain(whole: u64, sort: SortKey) -> Self {
+        RowCtx {
+            whole,
+            sort,
+            apparent: false,
+            pending: false,
+            whole_path: false,
+            unread: &[],
+            share: Share::Bar,
+            log: false,
+        }
+    }
 }
 
 /// [`row_text`] with the view's [`RowCtx`].
@@ -2849,6 +2901,7 @@ fn row_text_in(it: &Item, marked: bool, ctx: &RowCtx) -> String {
         whole_path,
         unread,
         share,
+        log,
     } = ctx;
     let name = if whole_path {
         it.path.to_string_lossy()
@@ -2857,7 +2910,7 @@ fn row_text_in(it: &Item, marked: bool, ctx: &RowCtx) -> String {
     };
     if pending && it.is_dir {
         let mark = if marked { "[x]" } else { "[ ]" };
-        return format!("{mark} {:>10} {}{name}/", "…", share.cols(0, 0, true));
+        return format!("{mark} {:>10} {}{name}/", "…", share.cols(0, 0, true, log));
     }
     let mark = if marked { "[x]" } else { "[ ]" };
     let risky = it.git.as_ref().is_some_and(|(s, _)| s.is_risky());
@@ -2900,7 +2953,7 @@ fn row_text_in(it: &Item, marked: bool, ctx: &RowCtx) -> String {
     format!(
         "{mark}{warn}{:>10} {}{name}{slash}{badges}",
         format_bytes(key_of(it, apparent)),
-        share.cols(part, whole, false)
+        share.cols(part, whole, false, log)
     )
 }
 
@@ -2961,6 +3014,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         whole_path: is_top_of_roots(&app.cur),
         unread: &view.unread,
         share: app.share,
+        log: app.log_bars,
     };
     let items: Vec<ListItem> = view
         .rows
@@ -3149,6 +3203,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 "v — show the cursor file in $PAGER · o — open the row with its default program",
                 ". — hide names that start with a dot, or show them again",
                 "% — show each row's share as a bar, in percent, both, or neither",
+                "L — draw the bars on a log scale (two cells per tenth), or linear again",
                 "/ — show only rows whose name matches (a part, or a glob with * ? [); Esc clears",
                 "! — git work at risk (dirty, unpushed or unknown)",
             ],
@@ -3938,13 +3993,9 @@ mod tests {
         };
         let text = |share: Share, pending: bool| {
             let ctx = RowCtx {
-                whole: 1024,
-                sort: SortKey::Disk,
-                apparent: false,
                 pending,
-                whole_path: false,
-                unread: &[],
                 share,
+                ..RowCtx::plain(1024, SortKey::Disk)
             };
             row_text_in(&it, false, &ctx)
         };
@@ -3994,13 +4045,8 @@ mod tests {
         let file = row("f.bin", false, 24, 1);
         let text = |it: &Item, sort: SortKey, whole: u64| {
             let ctx = RowCtx {
-                whole,
-                sort,
-                apparent: false,
-                pending: false,
-                whole_path: false,
-                unread: &[],
                 share: Share::Both,
+                ..RowCtx::plain(whole, sort)
             };
             row_text_in(it, false, &ctx)
         };
@@ -4059,6 +4105,32 @@ mod tests {
     }
 
     #[test]
+    fn log_bars_show_small_shares_and_fill_for_the_whole() {
+        assert_eq!(log_bar(100, 100, 10), "#".repeat(10));
+        assert_eq!(
+            log_bar(1, 100, 10),
+            format!("{}{}", "#".repeat(6), " ".repeat(4))
+        );
+        assert_eq!(log_bar(1, 1 << 40, 10), format!("#{}", " ".repeat(9)));
+        assert_eq!(log_bar(0, 100, 10), " ".repeat(10));
+        assert_eq!(log_bar(5, 0, 10), " ".repeat(10));
+    }
+
+    #[test]
+    fn capital_l_switches_the_bars_to_a_log_scale_and_back() {
+        let t = tree("logbars");
+        let mut a = app(&t);
+        a.keys = Keymap::builtin();
+        a.on_key(KeyCode::Char('L'), KeyModifiers::SHIFT);
+        assert!(a.log_bars);
+        assert!(a.status.starts_with("bars use a log scale"), "{}", a.status);
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("] big/"), "{text}");
+        a.on_key(KeyCode::Char('L'), KeyModifiers::SHIFT);
+        assert!(!a.log_bars);
+    }
+
+    #[test]
     fn percent_key_cycles_the_share_columns() {
         let t = tree("share");
         let mut a = app(&t);
@@ -4098,13 +4170,8 @@ mod tests {
         };
         let text = |row: &Item, unread: &du::Unread| {
             let ctx = RowCtx {
-                whole: 1024,
-                sort: SortKey::Disk,
-                apparent: false,
-                pending: false,
-                whole_path: false,
                 unread,
-                share: Share::Bar,
+                ..RowCtx::plain(1024, SortKey::Disk)
             };
             row_text_in(row, false, &ctx)
         };
