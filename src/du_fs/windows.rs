@@ -7,7 +7,7 @@
 //! Names are kept in the `OsStr` encoding of std, NUL-terminated like the
 //! Unix names, so the walk handles both the same way.
 
-use super::fileid::{mode_of, mtime_of, needs_real_size, parse};
+use super::fileid::{is_wof, mode_of, mtime_of, needs_real_size, parse, wof_streams_size};
 use super::{Entries, Stat};
 use std::cell::RefCell;
 use std::ffi::{c_void, CStr, OsStr};
@@ -21,7 +21,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FileAttributeTagInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-    FileStandardInfo, GetCompressedFileSizeW, GetFileInformationByHandle,
+    FileStandardInfo, FileStreamInfo, GetCompressedFileSizeW, GetFileInformationByHandle,
     GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_TAG_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO,
     FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
@@ -88,8 +88,51 @@ fn compressed_size(path: &Path) -> Option<u64> {
     Some(u64::from(high) << 32 | u64::from(low))
 }
 
-/// The stat of the open handle `h`. With `path`, a compressed or Compact
-/// file gets its real disk use ([`compressed_size`]).
+/// 34(j): the disk use of a Compact file, whose main stream is sparse
+/// with no clusters: the allocation of its streams, the packed
+/// `WofCompressedData` among them. The handle of a stat skips the Compact
+/// filter, so the stream list shows that stream. Failing that, the
+/// packed stream opened by name gives its own allocation size.
+fn wof_size(h: &OwnedHandle, path: Option<&Path>) -> Option<u64> {
+    let mut buf = vec![0u64; 2048];
+    // SAFETY: the buffer is 8-byte aligned and writable for its full
+    // length.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            h.as_raw_handle() as _,
+            FileStreamInfo,
+            buf.as_mut_ptr() as *mut c_void,
+            (buf.len() * 8) as u32,
+        )
+    };
+    if ok != 0 {
+        // SAFETY: a u64 slice viewed as its bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, buf.len() * 8) };
+        if let Some(n) = wof_streams_size(bytes) {
+            return Some(n);
+        }
+    }
+    let mut named = path?.as_os_str().to_os_string();
+    named.push(":WofCompressedData");
+    let stream = open_handle(Path::new(&named), FILE_READ_ATTRIBUTES).ok()?;
+    let info: FILE_STANDARD_INFO = info_ex(&stream, FileStandardInfo).ok()?;
+    Some(info.AllocationSize.max(0) as u64)
+}
+
+/// The disk use of a file that [`needs_real_size`] names: the packed
+/// streams of a Compact file ([`wof_size`]), else GetCompressedFileSizeW
+/// by `path` ([`compressed_size`]).
+fn packed_size(h: &OwnedHandle, attrs: u32, tag: u32, path: Option<&Path>) -> Option<u64> {
+    if is_wof(attrs, tag) {
+        if let Some(n) = wof_size(h, path) {
+            return Some(n);
+        }
+    }
+    path.and_then(compressed_size)
+}
+
+/// The stat of the open handle `h`. A compressed or Compact file gets
+/// its real disk use ([`packed_size`]); `path` is the name of `h`.
 fn handle_stat(h: &OwnedHandle, path: Option<&Path>) -> io::Result<Stat> {
     let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
     // SAFETY: GetFileInformationByHandle fills `info` on success.
@@ -101,9 +144,12 @@ fn handle_stat(h: &OwnedHandle, path: Option<&Path>) -> io::Result<Stat> {
     let std_info: FILE_STANDARD_INFO = info_ex(h, FileStandardInfo)?;
     let wt = info.ftLastWriteTime;
     let write = (u64::from(wt.dwHighDateTime) << 32 | u64::from(wt.dwLowDateTime)) as i64;
-    let packed = path
-        .filter(|_| needs_real_size(tag.FileAttributes, tag.ReparseTag))
-        .and_then(compressed_size);
+    let (attrs, rtag) = (tag.FileAttributes, tag.ReparseTag);
+    let packed = if needs_real_size(attrs, rtag) {
+        packed_size(h, attrs, rtag, path)
+    } else {
+        None
+    };
     let allocated = packed.unwrap_or(std_info.AllocationSize.max(0) as u64);
     Ok(Stat {
         mode: mode_of(tag.FileAttributes, tag.ReparseTag),
@@ -227,6 +273,17 @@ impl Dir {
         })
     }
 }
+
+// The stream parser reads FILE_STREAM_INFO at its own offsets.
+const _: () = {
+    use super::fileid::{STREAM_ALLOC, STREAM_NAME, STREAM_NAME_LEN, STREAM_NEXT};
+    use std::mem::offset_of;
+    use windows_sys::Win32::Storage::FileSystem::FILE_STREAM_INFO;
+    assert!(offset_of!(FILE_STREAM_INFO, NextEntryOffset) == STREAM_NEXT);
+    assert!(offset_of!(FILE_STREAM_INFO, StreamNameLength) == STREAM_NAME_LEN);
+    assert!(offset_of!(FILE_STREAM_INFO, StreamAllocationSize) == STREAM_ALLOC);
+    assert!(offset_of!(FILE_STREAM_INFO, StreamName) == STREAM_NAME);
+};
 
 // The parser reads records through its own mirror of the struct.
 const _: () = {

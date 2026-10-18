@@ -3254,18 +3254,33 @@ fn trash_dupes_go_to_the_scratch_trash_not_the_system_bin() {
     }
 }
 
-/// gdu #407: a file that file compression or Compact packed counts its
-/// bytes on disk, well below its length. `compact /c` needs no admin
-/// rights; `compact /c /exe:lzx` (Compact, the Windows Overlay Filter)
-/// runs where the system has it. Each run prints one `compressed-size:`
-/// line per file with what it measured and whether `/exe:lzx` ran; the
+/// gdu #407 and 34(j): a file that file compression or Compact packed
+/// counts its bytes on disk: more than none, less than its length. The
+/// files hold text of a few words, which both packers shrink but neither
+/// can fit in the file record. `compact /c` needs no admin rights;
+/// `compact /c /exe:lzx` (Compact, the Windows Overlay Filter) runs
+/// where the system has it. Each run prints `compressed-size:` lines
+/// with what compact and du measured and whether `/exe:lzx` ran; the
 /// Windows CI job runs this test with `--nocapture` so the lines show.
 #[cfg(windows)]
 #[test]
 fn compressed_files_count_their_disk_use_on_windows() {
     let t = Tree::new("compact");
-    let ntfs = t.file("ntfs.bin", 1 << 20);
-    let wof = t.file("wof.bin", 1 << 20);
+    let words = [
+        "alpha ", "beta ", "gamma ", "delta ", "disk ", "trash ", "size ", "packed ",
+    ];
+    let mut text = Vec::with_capacity(1 << 20);
+    let mut x = 0x2545_f491_u32;
+    while text.len() < 1 << 20 {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        text.extend_from_slice(words[(x >> 28) as usize % words.len()].as_bytes());
+    }
+    text.truncate(1 << 20);
+    let ntfs = t.file("ntfs.bin", 0);
+    let wof = t.file("wof.bin", 0);
+    for f in [&ntfs, &wof] {
+        fs::write(f, &text).unwrap();
+    }
     let compact = |args: &[&str], f: &Path| Command::new("compact").args(args).arg(f).output();
     let out = compact(&["/c"], &ntfs).expect("run compact");
     assert!(
@@ -3284,6 +3299,12 @@ fn compressed_files_count_their_disk_use_on_windows() {
             continue;
         }
         let name = f.file_name().unwrap().to_str().unwrap();
+        if let Ok(o) = compact(&[], f) {
+            let said = String::from_utf8_lossy(&o.stdout);
+            for line in said.lines().filter(|l| l.contains(name)) {
+                eprintln!("compressed-size: compact says {}", line.trim());
+            }
+        }
         let at = j
             .find(&format!("{name}\",\"type\":\"file\""))
             .expect("file row");
@@ -3291,7 +3312,7 @@ fn compressed_files_count_their_disk_use_on_windows() {
         let disk = field(&j[at..], "disk");
         eprintln!("compressed-size: {name} apparent {apparent} disk {disk}");
         assert_eq!(apparent, 1 << 20, "{name}: {j}");
-        assert!(disk < 1 << 19, "{name}: disk {disk}: {j}");
+        assert!(0 < disk && disk < apparent, "{name}: disk {disk}: {j}");
     }
 }
 
