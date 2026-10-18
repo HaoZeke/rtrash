@@ -811,12 +811,11 @@ pub fn drive_key(path: &Path) -> u64 {
 /// volume cannot be asked.
 #[cfg(windows)]
 pub fn volume_key(path: &Path) -> u64 {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
     let Some(root) = volume_root(path) else {
         return drive_key(path);
     };
-    let root: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+    let root = crate::util::win_path(&root);
     let mut serial = 0u32;
     // SAFETY: `root` is NUL-terminated; the other outputs are null or a u32.
     let ok = unsafe {
@@ -841,17 +840,19 @@ pub fn volume_key(path: &Path) -> u64 {
 /// plain drive, or the folder a volume is mounted on (`C:\\mnt\\data\\`).
 #[cfg(windows)]
 pub fn volume_root(path: &Path) -> Option<PathBuf> {
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Storage::FileSystem::GetVolumePathNameW;
     let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let w: Vec<u16> = abs.as_os_str().encode_wide().chain(Some(0)).collect();
+    let w = crate::util::win_path(&abs);
     let mut root = [0u16; 1024];
     // SAFETY: `w` is NUL-terminated and `root` is as long as the length passed.
     if unsafe { GetVolumePathNameW(w.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
         return None;
     }
     let n = root.iter().position(|&c| c == 0).unwrap_or(root.len());
-    Some(PathBuf::from(std::ffi::OsString::from_wide(&root[..n])))
+    // A long path went in verbatim, and its root comes back so: `\\?\C:\`.
+    let root = PathBuf::from(std::ffi::OsString::from_wide(&root[..n]));
+    Some(crate::util::plain_path(&root))
 }
 
 /// Windows: the root of the volume whose Recycle Bin holds the item at
@@ -1355,7 +1356,7 @@ fn clear_readonly(path: &Path) -> bool {
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_READONLY, INVALID_FILE_ATTRIBUTES,
     };
-    let wide = wide(path.as_os_str());
+    let wide = crate::util::win_path(path);
     let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
     if attrs == INVALID_FILE_ATTRIBUTES || attrs & FILE_ATTRIBUTE_READONLY == 0 {
         return false;
@@ -4037,7 +4038,7 @@ fn drive_has_bin(root: &Path) -> bool {
     const DRIVE_REMOTE: u32 = 4;
     const DRIVE_CDROM: u32 = 5;
     const DRIVE_RAMDISK: u32 = 6;
-    let mut w = wide(root.as_os_str());
+    let mut w = crate::util::win_path(root);
     // GetDriveTypeW wants the root with its trailing backslash.
     if w.len() >= 2 && w[w.len() - 2] != u16::from(b'\\') {
         w.insert(w.len() - 1, u16::from(b'\\'));
@@ -4076,15 +4077,12 @@ pub fn bin_quota(root: &Path) -> BinQuota {
 }
 
 #[cfg(windows)]
-fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt;
-    s.encode_wide().chain(Some(0)).collect()
-}
-
-#[cfg(windows)]
 fn reg_dword(key: &str, name: &str) -> Option<u32> {
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
-    let (k, n) = (wide(key.as_ref()), wide(name.as_ref()));
+    let (k, n) = (
+        crate::util::win_text(key.as_ref()),
+        crate::util::win_text(name.as_ref()),
+    );
     let mut data: u32 = 0;
     let mut size: u32 = 4;
     // SAFETY: both names are NUL-terminated and `data` is the 4 bytes `size` names.
@@ -4109,7 +4107,7 @@ fn volume_guid_of(root: &Path) -> Option<String> {
     if !r.to_string_lossy().ends_with('\\') {
         r.push("\\");
     }
-    let w = wide(&r);
+    let w = crate::util::win_path(Path::new(&r));
     let mut buf = [0u16; 64];
     // SAFETY: `w` is NUL-terminated and `buf` holds the 50 characters a
     // volume name needs.
@@ -4135,7 +4133,7 @@ pub fn bin_drives() -> Vec<PathBuf> {
         .filter(|i| mask & (1 << i) != 0)
         .map(|i| PathBuf::from(format!("{}:\\", char::from(b'A' + i))))
         .filter(|root| {
-            let w = wide(root.as_os_str());
+            let w = crate::util::win_path(root);
             // SAFETY: `w` is NUL-terminated.
             let t = unsafe { GetDriveTypeW(w.as_ptr()) };
             t == DRIVE_FIXED || t == DRIVE_REMOVABLE
@@ -4147,9 +4145,8 @@ pub fn bin_drives() -> Vec<PathBuf> {
 /// (for example `C:\\`).
 #[cfg(windows)]
 pub fn query_bin(root: &Path) -> Option<(u64, u64)> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
-    let w: Vec<u16> = root.as_os_str().encode_wide().chain(Some(0)).collect();
+    let w = crate::util::win_path(root);
     let mut info = SHQUERYRBINFO {
         cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
         i64Size: 0,

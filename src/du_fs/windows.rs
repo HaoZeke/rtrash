@@ -13,7 +13,6 @@ use std::cell::RefCell;
 use std::ffi::{c_void, CStr, OsStr};
 use std::io;
 use std::mem::{size_of, MaybeUninit};
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 
@@ -30,34 +29,9 @@ use windows_sys::Win32::Storage::FileSystem::{
 /// Bytes of the per-thread listing buffer.
 const LIST_BUF: usize = 64 * 1024;
 
-/// `path` as a NUL-terminated wide string. Long paths get the verbatim
-/// prefix, which lifts the 260-character limit. A path that has one
-/// already, or a `\\.\` device path, is left as it is: read as a share,
-/// `\\.\C:\dir` would become `\\?\UNC\.\C:\dir`.
-fn wide(path: &Path) -> Vec<u16> {
-    let s: Vec<u16> = path.as_os_str().encode_wide().collect();
-    let bs = u16::from(b'\\');
-    let mut out = Vec::with_capacity(s.len() + 9);
-    let verbatim = s.starts_with(&[bs, bs, u16::from(b'?'), bs])
-        || s.starts_with(&[bs, bs, u16::from(b'.'), bs]);
-    if s.len() >= 248 && !verbatim && path.is_absolute() {
-        if s.starts_with(&[bs, bs]) {
-            out.extend(r"\\?\UNC".encode_utf16());
-            out.extend_from_slice(&s[1..]);
-        } else {
-            out.extend(r"\\?\".encode_utf16());
-            out.extend_from_slice(&s);
-        }
-    } else {
-        out.extend_from_slice(&s);
-    }
-    out.push(0);
-    out
-}
-
 /// Open `path` itself, never what a reparse point names.
 fn open_handle(path: &Path, access: u32) -> io::Result<OwnedHandle> {
-    let w = wide(path);
+    let w = crate::util::win_path(path);
     // SAFETY: `w` is NUL-terminated; a valid returned handle is ours.
     let h = unsafe {
         CreateFileW(

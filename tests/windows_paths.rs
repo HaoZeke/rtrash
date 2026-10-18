@@ -1,5 +1,5 @@
 //! Windows paths past MAX_PATH (260 characters) and verbatim `\\?\`
-//! operands through put, list, restore, rm and du, on the scratch Recycle
+//! operands through put, list, restore, rm, empty and du, on the scratch Recycle
 //! Bin of `common::rtrash`. Every path prints and is recorded without the
 //! verbatim prefix, as users type it and the shell records it. A payload
 //! another process holds open stays in the bin, and restore names it.
@@ -167,5 +167,39 @@ fn a_held_payload_stays_in_the_bin_and_restore_names_the_holder() {
     drop(held);
     ok(&run(&home, &["restore", &path]));
     assert_eq!(fs::read_to_string(&f).unwrap(), "held");
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// dua #410 and #406: a tree whose files sit past MAX_PATH, one of them
+/// read-only, leaves the bin for good through rm and through empty. Both
+/// clear the read-only bit through a Win32 call, which takes the verbatim
+/// form from util::win_path.
+#[test]
+fn a_read_only_tree_past_max_path_leaves_the_bin_by_rm_and_empty() {
+    let home = home("deep-gone");
+    for (name, how) in [("by-rm", "rm"), ("by-empty", "empty")] {
+        let top = home.join(name);
+        let f = deep_dir(&top).join("ro.txt");
+        fs::write(&f, "ro").unwrap();
+        let mut perm = fs::metadata(&f).unwrap().permissions();
+        perm.set_readonly(true);
+        fs::set_permissions(&f, perm).unwrap();
+        ok(&run(&home, &["put", &s(&top)]));
+        let args: Vec<&str> = if how == "rm" {
+            vec!["rm", name]
+        } else {
+            vec!["empty"]
+        };
+        ok(&run(&home, &args));
+        let shown = ok(&run(&home, &["list"]));
+        assert!(!shown.contains(&s(&top)), "{how}: {shown}");
+        let left: Vec<_> = fs::read_dir(common::test_bin(&home))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("$R"))
+            .collect();
+        assert!(left.is_empty(), "{how} left {left:?}");
+    }
     let _ = fs::remove_dir_all(&home);
 }

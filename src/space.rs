@@ -196,9 +196,8 @@ pub fn query(path: &Path) -> io::Result<Space> {
     if let Some(s) = fake(path) {
         return Ok(s);
     }
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-    let w: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let w = crate::util::win_path(path);
     let (mut avail, mut total, mut free) = (0u64, 0u64, 0u64);
     // SAFETY: `w` is NUL-terminated; the outputs are plain integers.
     if unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut avail, &mut total, &mut free) } == 0 {
