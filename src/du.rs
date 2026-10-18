@@ -109,7 +109,9 @@ directories appear as one `trash` row and are never printed by --print0.
       --unique          add a UNIQUE column: the bytes in extents no other
                           file shares, roughly what deleting a row frees on
                           btrfs, XFS or APFS (reflinks, clones, snapshots);
-                          slower, since it maps every file's extents
+                          slower, since it maps every file's extents; btrfs
+                          compressed extents count at their uncompressed
+                          size, and the summary says how much
       --shared          count each extent that reflinks, clones or snapshots
                           share once per row and total, as btrfs and XFS
                           flag them on Linux; slower, since it maps every
@@ -696,6 +698,9 @@ pub struct SharedTotals {
     pub distinct: u64,
     /// Bytes the files reference, with repeats.
     pub referenced: u64,
+    /// Bytes the mapped files have in compressed (encoded) extents, at
+    /// their uncompressed size: the kernel gives no other figure.
+    pub encoded: u64,
 }
 
 /// Trash on the file systems that were scanned: emptying it is what
@@ -941,6 +946,7 @@ impl Ctx<'_> {
         let whole = crate::du_extent::FileShare {
             unique: disk,
             shared: Vec::new(),
+            encoded: 0,
         };
         #[cfg(unix)]
         {
@@ -961,9 +967,10 @@ impl Ctx<'_> {
 
     #[cfg(unix)]
     fn note_shares(&self, dev: u64, s: crate::du_extent::FileShare) -> crate::du_extent::FileShare {
-        if self.opts.unique && !s.shared.is_empty() {
+        if self.opts.unique && (!s.shared.is_empty() || s.encoded > 0) {
             if let Ok(mut set) = self.shared.lock() {
                 set.add(dev, &s.shared);
+                set.encoded = set.encoded.saturating_add(s.encoded);
             }
         }
         s
@@ -1008,10 +1015,10 @@ struct Node {
     /// Bytes no other file shares (`--unique`), else 0.
     unique: u64,
     /// `--shared`: bytes outside shared extents, and the shared extents
-    /// as merged `(device, start, end)` ranges; `disk_all` counts every
-    /// reference. `disk` is then `base` plus what the ranges cover.
+    /// as merged spans; `disk_all` counts every reference. `disk` is then
+    /// `base` plus what the spans cover.
     base: u64,
-    ranges: Vec<(u64, u64, u64)>,
+    ranges: Vec<crate::du_extent::Span>,
     disk_all: u64,
     mtime: i64,
     /// Files and directories below this one.
@@ -1233,7 +1240,7 @@ struct Stats {
     unique: u64,
     /// `--shared`: as in [`Node`], for these entries.
     base: u64,
-    ranges: Vec<(u64, u64, u64)>,
+    ranges: Vec<crate::du_extent::Span>,
     mtime: i64,
     /// Files counted (each hard-linked file once).
     files: u64,
@@ -1254,7 +1261,7 @@ fn count_once(
     raw: u64,
     shared: &[crate::du_extent::Extent],
     base: &mut u64,
-    ranges: &mut Vec<(u64, u64, u64)>,
+    ranges: &mut Vec<crate::du_extent::Span>,
 ) -> u64 {
     if shared.is_empty() {
         *base = base.saturating_add(raw);
@@ -1263,10 +1270,7 @@ fn count_once(
     let referenced = size_sum(shared.iter().map(|e| e.length));
     let own = raw.saturating_sub(referenced);
     *base = base.saturating_add(own);
-    let mut mine: Vec<(u64, u64, u64)> = shared
-        .iter()
-        .map(|e| (dev, e.physical, e.physical.saturating_add(e.length)))
-        .collect();
+    let mut mine: Vec<crate::du_extent::Span> = shared.iter().map(|e| e.span(dev)).collect();
     let once = crate::du_extent::coalesce(&mut mine);
     ranges.extend(mine);
     raw.min(own.saturating_add(once))
@@ -1988,6 +1992,7 @@ fn scan_pooled(
         shared: opts.unique.then(|| SharedTotals {
             distinct: shared.distinct(),
             referenced: shared.referenced,
+            encoded: shared.encoded,
         }),
         partial,
         types: type_rows(types, opts.sort),
@@ -2008,6 +2013,7 @@ fn root_file_share(
     let whole = crate::du_extent::FileShare {
         unique: disk,
         shared: Vec::new(),
+        encoded: 0,
     };
     #[cfg(unix)]
     {
@@ -2645,8 +2651,14 @@ fn report_json_with(
     let shared = r
         .shared
         .map(|s| {
+            // Only a scan that met compressed extents has the key.
+            let encoded = if s.encoded > 0 {
+                format!(",\"encoded\":{}", s.encoded)
+            } else {
+                String::new()
+            };
             format!(
-                ",\"shared\":{{\"distinct\":{},\"referenced\":{}}}",
+                ",\"shared\":{{\"distinct\":{},\"referenced\":{}{encoded}}}",
                 s.distinct, s.referenced
             )
         })
@@ -3106,6 +3118,19 @@ fn shared_line(s: SharedTotals) -> String {
         format_bytes(s.distinct),
         format_bytes(s.referenced)
     )
+}
+
+/// The `--unique` note on compressed extents, when the scan met any: they
+/// count at their uncompressed size, the only one FIEMAP and `st_blocks`
+/// give.
+fn encoded_line(s: SharedTotals) -> Option<String> {
+    (s.encoded > 0).then(|| {
+        format!(
+            "Compressed extents: {} of the mapped files, counted at their uncompressed size \
+             (compsize, as root, reads what they take)",
+            format_bytes(s.encoded)
+        )
+    })
 }
 
 fn print_trash(t: &TrashSummary) {
@@ -4334,6 +4359,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         if let Some(s) = report.shared {
             println!("{}", shared_line(s));
+            if let Some(line) = encoded_line(s) {
+                println!("{line}");
+            }
         }
         if report.partial {
             println!("Partial scan: stopped by Ctrl-C, so sizes are lower bounds");
@@ -4797,6 +4825,7 @@ mod tests {
             physical,
             length,
             shared: true,
+            encoded: false,
         };
         let (mut base, mut ranges) = (0, Vec::new());
         // No shared extents: all of it is the file's own.
@@ -4812,7 +4841,13 @@ mod tests {
         );
         assert_eq!(d, 8192 + 20480);
         assert_eq!(base, 4096 + 8192);
-        assert_eq!(ranges, vec![(1, 0, 20480)]);
+        let whole = crate::du_extent::Span {
+            dev: 1,
+            encoded: false,
+            start: 0,
+            end: 20480,
+        };
+        assert_eq!(ranges, vec![whole]);
         // Compressed data can map longer than its blocks: never more than
         // the file's allocated size.
         let mut b2 = 0;
@@ -4921,11 +4956,23 @@ mod tests {
         let s = shared_line(SharedTotals {
             distinct: 1 << 20,
             referenced: 3 << 20,
+            encoded: 0,
         });
         assert!(
             s.contains(&format_bytes(1 << 20)) && s.contains(&format_bytes(3 << 20)),
             "{s}"
         );
+    }
+
+    #[test]
+    fn only_a_scan_with_compressed_extents_notes_them() {
+        assert_eq!(encoded_line(SharedTotals::default()), None);
+        let s = SharedTotals {
+            encoded: 3 << 20,
+            ..SharedTotals::default()
+        };
+        let line = encoded_line(s).unwrap_or_default();
+        assert!(line.contains(&format_bytes(3 << 20)), "{line}");
     }
 
     #[test]

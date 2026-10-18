@@ -11,6 +11,12 @@
 //! The shared extents met during a scan are kept by physical range, so
 //! the report can say how much space they take when each counts once.
 //!
+//! Compressed extents on btrfs (`FIEMAP_EXTENT_ENCODED`) map at their
+//! uncompressed length, from where their compressed data starts, so their
+//! ranges overlap the extents after them. The kernel gives no compressed
+//! length without root, so such an extent counts once by where it
+//! starts, at the length it maps: the size `st_blocks` counts too.
+//!
 //! Mapping costs a syscall or more per file, so a [`Probe`] maps only
 //! files of at least [`PROBE_MIN`] bytes on disk (`RTRASH_EXTENT_MIN`
 //! overrides it) on file systems that can share extents: btrfs, XFS,
@@ -25,6 +31,44 @@ pub struct Extent {
     pub physical: u64,
     pub length: u64,
     pub shared: bool,
+    /// Compressed or otherwise encoded: `length` is not its size on disk.
+    pub encoded: bool,
+}
+
+impl Extent {
+    /// Where the extent sits on device `dev`.
+    pub fn span(&self, dev: u64) -> Span {
+        Span {
+            dev,
+            encoded: self.encoded,
+            start: self.physical,
+            end: self.physical.saturating_add(self.length),
+        }
+    }
+}
+
+/// Disk bytes one or more files point at, half-open `[start, end)` on
+/// device `dev`. Spans of encoded extents join only when they start at
+/// the same place: their ends are not where their data ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Span {
+    pub dev: u64,
+    pub encoded: bool,
+    pub start: u64,
+    pub end: u64,
+}
+
+impl Span {
+    /// Whether `next`, sorted after `self`, covers bytes of it.
+    fn joins(&self, next: &Span) -> bool {
+        self.dev == next.dev
+            && self.encoded == next.encoded
+            && if next.encoded {
+                next.start == self.start
+            } else {
+                next.start <= self.end
+            }
+    }
 }
 
 /// Bytes in extents only this file uses, and the shared extents, from a
@@ -47,73 +91,50 @@ pub fn split(extents: &[Extent], disk: u64) -> (u64, Vec<Extent>) {
 /// once however many files point at it.
 #[derive(Debug, Default)]
 pub struct SharedSet {
-    ranges: HashMap<u64, Vec<(u64, u64)>>,
+    spans: Vec<Span>,
     /// Bytes of shared extents as the files reference them, with repeats.
     pub referenced: u64,
+    /// Bytes the mapped files have in encoded extents, at the length they
+    /// map: the uncompressed size.
+    pub encoded: u64,
 }
 
 impl SharedSet {
     pub fn add(&mut self, dev: u64, extents: &[Extent]) {
-        if extents.is_empty() {
-            return;
-        }
-        let v = self.ranges.entry(dev).or_default();
         for e in extents {
             self.referenced = self.referenced.saturating_add(e.length);
-            v.push((e.physical, e.physical.saturating_add(e.length)));
+            self.spans.push(e.span(dev));
         }
     }
 
     pub fn merge(&mut self, other: SharedSet) {
         self.referenced = self.referenced.saturating_add(other.referenced);
-        for (dev, v) in other.ranges {
-            self.ranges.entry(dev).or_default().extend(v);
-        }
+        self.encoded = self.encoded.saturating_add(other.encoded);
+        self.spans.extend(other.spans);
     }
 
-    /// Bytes the shared extents take on disk, each range counted once.
+    /// Bytes the shared extents take on disk, each extent counted once
+    /// (compressed ones at their mapped length).
     pub fn distinct(&self) -> u64 {
-        crate::du::size_sum(self.ranges.values().map(|v| union_len(v)))
+        coalesce(&mut self.spans.clone())
     }
 }
 
-/// Total length of the union of half-open ranges `[start, end)`.
-pub fn union_len(ranges: &[(u64, u64)]) -> u64 {
-    let mut v: Vec<(u64, u64)> = ranges.iter().copied().filter(|(s, e)| e > s).collect();
-    v.sort_unstable();
-    let mut total = 0u64;
-    let mut cur: Option<(u64, u64)> = None;
-    for (s, e) in v {
-        cur = match cur {
-            Some((cs, ce)) if s <= ce => Some((cs, ce.max(e))),
-            Some((cs, ce)) => {
-                total = total.saturating_add(ce - cs);
-                Some((s, e))
-            }
-            None => Some((s, e)),
-        };
-    }
-    if let Some((cs, ce)) = cur {
-        total = total.saturating_add(ce - cs);
-    }
-    total
-}
-
-/// Merge `ranges`, half-open `(device, start, end)` triples, in place:
-/// sorted, with overlapping or touching ranges on one device joined.
-/// Returns the bytes they cover, each counted once.
-pub fn coalesce(ranges: &mut Vec<(u64, u64, u64)>) -> u64 {
-    ranges.retain(|&(_, s, e)| e > s);
-    ranges.sort_unstable();
-    let mut out: Vec<(u64, u64, u64)> = Vec::with_capacity(ranges.len());
-    for &(d, s, e) in ranges.iter() {
+/// Merge `spans` in place: sorted, with the ones that overlap or touch
+/// joined (encoded ones only when they start at the same place). Returns
+/// the bytes they cover, each counted once.
+pub fn coalesce(spans: &mut Vec<Span>) -> u64 {
+    spans.retain(|s| s.end > s.start);
+    spans.sort_unstable();
+    let mut out: Vec<Span> = Vec::with_capacity(spans.len());
+    for s in spans.iter() {
         match out.last_mut() {
-            Some(last) if last.0 == d && s <= last.2 => last.2 = last.2.max(e),
-            _ => out.push((d, s, e)),
+            Some(last) if last.joins(s) => last.end = last.end.max(s.end),
+            _ => out.push(*s),
         }
     }
-    *ranges = out;
-    crate::du::size_sum(ranges.iter().map(|&(_, s, e)| e - s))
+    *spans = out;
+    crate::du::size_sum(spans.iter().map(|s| s.end - s.start))
 }
 
 /// What one file adds to a `--unique` scan.
@@ -121,6 +142,8 @@ pub fn coalesce(ranges: &mut Vec<(u64, u64, u64)>) -> u64 {
 pub struct FileShare {
     pub unique: u64,
     pub shared: Vec<Extent>,
+    /// Bytes in encoded extents, at their mapped (uncompressed) length.
+    pub encoded: u64,
 }
 
 /// Unique size of an open regular file whose allocated size is `disk`.
@@ -131,15 +154,22 @@ pub fn file_share(file: &std::fs::File, disk: u64) -> FileShare {
     match file_extents(file, disk) {
         Ok(Mapped::Extents(ext)) => {
             let (unique, shared) = split(&ext, disk);
-            FileShare { unique, shared }
+            let encoded = crate::du::size_sum(ext.iter().filter(|e| e.encoded).map(|e| e.length));
+            FileShare {
+                unique,
+                shared,
+                encoded,
+            }
         }
         Ok(Mapped::Private(p)) => FileShare {
             unique: p.min(disk),
             shared: Vec::new(),
+            encoded: 0,
         },
         Err(_) => FileShare {
             unique: disk,
             shared: Vec::new(),
+            encoded: 0,
         },
     }
 }
@@ -252,6 +282,7 @@ mod fiemap {
 
     pub const FS_IOC_FIEMAP: libc::c_ulong = 0xC020_660B;
     pub const FIEMAP_EXTENT_LAST: u32 = 0x1;
+    pub const FIEMAP_EXTENT_ENCODED: u32 = 0x8;
     pub const FIEMAP_EXTENT_SHARED: u32 = 0x2000;
     /// Extents asked for per call.
     pub const BATCH: usize = 256;
@@ -324,6 +355,7 @@ fn file_extents(file: &std::fs::File, _disk: u64) -> std::io::Result<Mapped> {
                 physical: e.physical,
                 length: e.length,
                 shared: e.flags & fiemap::FIEMAP_EXTENT_SHARED != 0,
+                encoded: e.flags & fiemap::FIEMAP_EXTENT_ENCODED != 0,
             });
             last |= e.flags & fiemap::FIEMAP_EXTENT_LAST != 0;
         }
@@ -423,23 +455,66 @@ mod tests {
             physical,
             length,
             shared,
+            encoded: false,
+        }
+    }
+
+    /// A shared compressed extent, as btrfs maps one.
+    fn zext(physical: u64, length: u64) -> Extent {
+        Extent {
+            encoded: true,
+            ..ext(physical, length, true)
+        }
+    }
+
+    fn span(dev: u64, start: u64, end: u64) -> Span {
+        Span {
+            dev,
+            encoded: false,
+            start,
+            end,
         }
     }
 
     #[test]
     fn coalesce_joins_ranges_per_device() {
         let mut v = vec![
-            (2, 0, 10),
-            (1, 50, 60),
-            (1, 0, 20),
-            (1, 10, 30),
-            (1, 30, 40),
-            (1, 5, 5),
+            span(2, 0, 10),
+            span(1, 50, 60),
+            span(1, 0, 20),
+            span(1, 10, 30),
+            span(1, 30, 40),
+            span(1, 5, 5),
         ];
         assert_eq!(coalesce(&mut v), 10 + 40 + 10);
-        assert_eq!(v, vec![(1, 0, 40), (1, 50, 60), (2, 0, 10)]);
+        assert_eq!(v, vec![span(1, 0, 40), span(1, 50, 60), span(2, 0, 10)]);
         let mut none = Vec::new();
         assert_eq!(coalesce(&mut none), 0);
+    }
+
+    #[test]
+    fn compressed_extents_count_once_by_where_they_start() {
+        // What btrfs mapped in CI for 8 MiB of zstd text: 128 KiB extents,
+        // each starting one 4 KiB block after the last.
+        let file: Vec<Extent> = (0..64).map(|i| zext(4096 * i, 131072)).collect();
+        let mut set = SharedSet::default();
+        set.add(1, &file);
+        // A reflink copy points at the same extents.
+        set.add(1, &file);
+        // Ranges would overlap into 63 blocks plus one extent.
+        assert_eq!(set.distinct(), 64 * 131072);
+    }
+
+    #[test]
+    fn a_compressed_extent_counts_at_its_longest_reference() {
+        let mut v = vec![zext(0, 4096).span(1), zext(0, 65536).span(1)];
+        assert_eq!(coalesce(&mut v), 65536);
+    }
+
+    #[test]
+    fn a_plain_extent_inside_a_compressed_one_counts_on_its_own() {
+        let mut v = vec![zext(0, 131072).span(1), ext(4096, 4096, true).span(1)];
+        assert_eq!(coalesce(&mut v), 131072 + 4096);
     }
 
     #[test]
@@ -458,11 +533,10 @@ mod tests {
     }
 
     #[test]
-    fn union_counts_overlaps_once() {
-        assert_eq!(union_len(&[]), 0);
-        assert_eq!(union_len(&[(0, 10), (5, 15), (20, 25)]), 20);
-        assert_eq!(union_len(&[(20, 25), (0, 10), (10, 20)]), 25);
-        assert_eq!(union_len(&[(7, 7), (3, 1)]), 0);
+    fn shared_set_counts_overlaps_once() {
+        let mut a = SharedSet::default();
+        a.add(1, &[ext(0, 10, true), ext(5, 10, true), ext(20, 5, true)]);
+        assert_eq!(a.distinct(), 20);
     }
 
     #[test]

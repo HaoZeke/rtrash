@@ -121,64 +121,19 @@ jobs:
           mkdir -p /mnt/reflink/bind/src /mnt/reflink/bind/dst
           sudo mount --bind /mnt/reflink/bind/src /mnt/reflink/bind/dst
           echo "RTRASH_BIND_DIR=/mnt/reflink/bind" >> "$GITHUB_ENV"
+          # Compressed extents: a second btrfs image, mounted with
+          # compress-force=zstd, keeps the tests above on a plain mount.
+          if [ "${{ matrix.fs }}" = btrfs ]; then
+            truncate -s 1G "$RUNNER_TEMP/zstd.img"
+            mkfs.btrfs -q "$RUNNER_TEMP/zstd.img"
+            sudo mkdir -p /mnt/zstd
+            sudo mount -o loop,compress-force=zstd "$RUNNER_TEMP/zstd.img" /mnt/zstd
+            sudo chown "$(id -u):$(id -g)" /mnt/zstd
+            echo "RTRASH_COMPRESS_DIR=/mnt/zstd" >> "$GITHUB_ENV"
+          fi
 
       - name: Shared extent tests
         run: cargo test --locked --test reflink_fs -- --nocapture
-
-      # Facts for shortlist 31(f) (ncdu #234): what st_blocks, FIEMAP and
-      # rtrash du report for compressed files on btrfs, next to compsize
-      # (which reads the extent tree as root). A second image, mounted
-      # with compress-force=zstd, keeps the tests above on a plain mount.
-      # It asserts nothing and cannot fail the job.
-      - name: Report what du sees of compressed btrfs files (facts only)
-        if: matrix.fs == 'btrfs'
-        continue-on-error: true
-        run: |
-          uname -r || true
-          sudo apt-get install -y -qq btrfs-compsize || true
-          truncate -s 1G "$RUNNER_TEMP/zstd.img"
-          mkfs.btrfs -q "$RUNNER_TEMP/zstd.img" || true
-          sudo mkdir -p /mnt/zstd
-          sudo mount -o loop,compress-force=zstd "$RUNNER_TEMP/zstd.img" /mnt/zstd || true
-          sudo chown "$(id -u):$(id -g)" /mnt/zstd || true
-          mkdir -p /mnt/zstd/d
-          # 8 MiB that compresses well, 8 MiB that does not, and a small file.
-          yes 'rtrash compressed btrfs facts' | head -c 8388608 > /mnt/zstd/d/text || true
-          head -c 8388608 /dev/urandom > /mnt/zstd/d/random || true
-          printf 'tiny file\n' > /mnt/zstd/d/tiny || true
-          cp --reflink=always /mnt/zstd/d/text /mnt/zstd/d/text-clone || true
-          sync
-          echo "== stat: name, size, st_blocks, block unit"
-          stat -c '%n %s %b %B' /mnt/zstd/d/* || true
-          echo "== du -B1 and du -b"
-          du -B1 /mnt/zstd/d/* /mnt/zstd/d || true
-          du -b /mnt/zstd/d/* /mnt/zstd/d || true
-          echo "== compsize"
-          sudo compsize -b /mnt/zstd/d || true
-          for f in text random tiny text-clone; do
-            sudo compsize -b "/mnt/zstd/d/$f" || true
-          done
-          echo "== filefrag -v"
-          filefrag -v /mnt/zstd/d/text /mnt/zstd/d/random /mnt/zstd/d/tiny || true
-          echo "== raw FIEMAP: logical physical length reserved64[0] reserved64[1] flags"
-          python3 - /mnt/zstd/d/text /mnt/zstd/d/random /mnt/zstd/d/tiny <<'PY' || true
-          import fcntl, struct, sys
-          N = 32
-          for path in sys.argv[1:]:
-              buf = bytearray(struct.pack("=QQIIII", 0, 2**64 - 1, 1, 0, N, 0) + bytes(56 * N))
-              with open(path, "rb") as f:
-                  fcntl.ioctl(f.fileno(), 0xC020660B, buf)
-              mapped = struct.unpack_from("=I", buf, 20)[0]
-              print(path, "mapped", mapped)
-              for i in range(min(mapped, N)):
-                  lo, ph, ln, r0, r1, fl = struct.unpack_from("=QQQQQI", buf, 32 + 56 * i)
-                  print(f"  {lo} {ph} {ln} {r0} {r1} 0x{fl:x}")
-          PY
-          echo "== rtrash du --json root totals, plain and with --unique"
-          for extra in "" "--unique"; do
-            target/debug/rtrash du --json --no-git $extra /mnt/zstd/d | tr ',' '\n' \
-              | grep -E '"(path|disk|apparent|unique|files)"' | head -n 12 || true
-          done
 
   windows:
     name: windows · test · du smoke

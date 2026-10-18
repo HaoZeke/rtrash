@@ -4,7 +4,9 @@
 //! which CI makes from a loop image. Without it they pass without checking
 //! anything, so a plain `cargo test` stays the same everywhere. The bind
 //! mount test needs `RTRASH_BIND_DIR`, a directory holding `src` and its
-//! bind mount `dst`, which CI also makes.
+//! bind mount `dst`, which CI also makes. The compressed extent test needs
+//! `RTRASH_COMPRESS_DIR`, a btrfs mount with `compress-force=zstd`, which
+//! the btrfs job makes.
 
 #![cfg(target_os = "linux")]
 
@@ -15,13 +17,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// A fresh directory under `RTRASH_REFLINK_DIR` holding `a.bin` (2 MiB of
-/// varied bytes) and `clone.bin`, its reflink copy; `None` when unset.
-fn cloned_pair(tag: &str) -> Option<PathBuf> {
-    let base = std::env::var_os("RTRASH_REFLINK_DIR")?;
+/// An empty directory named for `tag` and this run under the directory
+/// in the environment variable `var`; `None` when it is unset.
+fn fresh_under(var: &str, tag: &str) -> Option<PathBuf> {
+    let base = std::env::var_os(var)?;
     let dir = PathBuf::from(base).join(format!("{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
+    Some(dir)
+}
+
+/// A fresh directory under `RTRASH_REFLINK_DIR` holding `a.bin` (2 MiB of
+/// varied bytes) and `clone.bin`, its reflink copy; `None` when unset.
+fn cloned_pair(tag: &str) -> Option<PathBuf> {
+    let dir = fresh_under("RTRASH_REFLINK_DIR", tag)?;
     let body: Vec<u8> = (0..2u32 << 20)
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
         .collect();
@@ -105,6 +114,61 @@ fn du_unique_and_shared_see_a_reflink_copy_as_one() {
         num(&json, "\"roots\"", "disk_all"),
     );
     assert!(all >= 2 * mib2 && once < all * 3 / 4, "{json}");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(dir.with_extension("home"));
+}
+
+/// A fresh directory under `RTRASH_COMPRESS_DIR` holding `text.txt`, 8 MiB
+/// that compresses well, written out to disk, and `clone.txt`, its reflink
+/// copy; `None` when unset.
+fn compressed_pair(tag: &str) -> Option<PathBuf> {
+    use std::io::Write;
+    let dir = fresh_under("RTRASH_COMPRESS_DIR", tag)?;
+    let body: Vec<u8> = b"rtrash compressed extents\n"
+        .iter()
+        .copied()
+        .cycle()
+        .take(8 << 20)
+        .collect();
+    let mut f = fs::File::create(dir.join("text.txt")).unwrap();
+    f.write_all(&body).unwrap();
+    // Btrfs compresses at writeback, and the scan maps without syncing.
+    f.sync_all().unwrap();
+    let ok = Command::new("cp")
+        .arg("--reflink=always")
+        .arg(dir.join("text.txt"))
+        .arg(dir.join("clone.txt"))
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "cp --reflink=always failed in RTRASH_COMPRESS_DIR");
+    Some(dir)
+}
+
+#[test]
+fn compressed_extents_count_once_at_their_uncompressed_size() {
+    let Some(dir) = compressed_pair("zstd") else {
+        eprintln!("RTRASH_COMPRESS_DIR unset; skipping");
+        return;
+    };
+    let mib8 = 8u64 << 20;
+    // st_blocks counts each copy at its uncompressed size, as du(1) does.
+    let plain = run(&dir, &["du", "--no-git", "--json", "."]);
+    assert_eq!(num(&plain, "\"roots\"", "disk"), 2 * mib8, "{plain}");
+    // The copies point at the same compressed extents, which map at 128
+    // KiB each from starts one block apart: counted once by start, not
+    // as overlapping ranges.
+    let once = run(&dir, &["du", "--shared", "--no-git", "--json", "."]);
+    assert_eq!(num(&once, "\"roots\"", "disk"), mib8, "{once}");
+    let unique = run(&dir, &["du", "--unique", "--no-git", "--json", "."]);
+    assert_eq!(num(&unique, "\"shared\":{", "distinct"), mib8, "{unique}");
+    assert_eq!(
+        num(&unique, "\"shared\":{", "encoded"),
+        2 * mib8,
+        "{unique}"
+    );
+    let text = run(&dir, &["du", "--unique", "--no-git", "."]);
+    assert!(text.contains("Compressed extents: "), "{text}");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(dir.with_extension("home"));
 }
