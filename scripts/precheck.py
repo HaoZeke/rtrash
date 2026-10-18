@@ -1633,6 +1633,53 @@ def check_prompt_answers():
                               "or answer::read_reply so every prompt parses them alike")
 
 
+# Clippy's empty_line_after_doc_comments fails CI on a `///` comment
+# that a blank line parts from its item, and only a build shows it
+# (round 251: rm_ask kept the doc of a removed fn above a blank line).
+DOC_GAP_CASES = [
+    ("gap", "/// a\n\nfn f() {}\n", [1]),
+    ("no gap", "/// a\nfn f() {}\n", []),
+    ("indented gap", "    /// a\n    /// b\n    \n    fn f() {}\n", [2]),
+    ("inner doc", "//! m\n\nuse x;\n", []),
+    ("plain comment", "// a\n\nfn f() {}\n", []),
+    ("four slashes", "//// banner\n\nfn f() {}\n", []),
+    ("in a string", 'let s = "\n/// a\n\n";\n', []),
+    ("last line", "fn f() {}\n/// a\n", []),
+]
+
+
+def doc_gap_lines(text):
+    """Lines of `text` holding a `///` doc comment with a blank line right
+    after it and code further down. A `///` inside a string literal is not a comment: the code
+    with comments gone (strings kept) still has it."""
+    raw = text.split("\n")
+    code = rust_code(text, strings=True).split("\n")
+    last = max((k for k, line in enumerate(raw) if line.strip()), default=0)
+    hits = []
+    for n, line in enumerate(raw[:last]):
+        t = line.strip()
+        doc = t.startswith("///") and not t.startswith("////")
+        if doc and not code[n].strip() and not raw[n + 1].strip():
+            hits.append(n + 1)
+    return hits
+
+
+def check_doc_gaps():
+    """No `///` doc comment in src/ or tests/ sits above a blank line, and
+    the matcher meets every DOC_GAP_CASES case."""
+    for what, text, want in DOC_GAP_CASES:
+        if doc_gap_lines(text) != want:
+            errors.append(f"scripts/precheck.py: doc_gap_lines gets DOC_GAP_CASES '{what}' "
+                          "wrong; the doc-gap check is broken")
+    for top in ("src", "tests"):
+        for path in sorted((ROOT / top).rglob("*.rs")):
+            rel = path.relative_to(ROOT).as_posix()
+            for line in doc_gap_lines(path.read_text(encoding="utf-8")):
+                errors.append(f"{rel}:{line}: a blank line follows this doc comment "
+                              "(clippy::empty_line_after_doc_comments); remove the gap, or "
+                              "make it a // comment if it documents nothing")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -1748,7 +1795,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
