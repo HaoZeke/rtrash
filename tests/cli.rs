@@ -4411,6 +4411,65 @@ fn as_root(args: &[&str]) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// The mount point `path` is on: the longest one above it in
+/// `/proc/self/mounts`.
+#[cfg(target_os = "linux")]
+fn mount_top(path: &Path) -> PathBuf {
+    let table = fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    table
+        .lines()
+        .filter_map(|l| l.split(' ').nth(1))
+        .map(|m| PathBuf::from(m.replace("\\040", " ")))
+        .filter(|m| path.starts_with(m))
+        .max_by_key(|m| m.components().count())
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// glib #883: with `$XDG_DATA_HOME` on another file system than a file,
+/// and no trash of ours on the file's volume, a put copies the file to
+/// the home trash, where list and restore find it. The test runs only
+/// where that volume's top directory holds no trash of ours and takes
+/// none (an ordinary user under a root-owned `/`), so it never makes or
+/// uses a trash outside the sandbox.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_home_trash_on_another_device_takes_files_its_volume_cannot() {
+    use std::os::unix::ffi::OsStrExt;
+    let sb = Sandbox::new("xdg-other-device");
+    let Some(xdg) = other_device_dir(&sb.root, "xdg") else {
+        eprintln!("no second file system here; skipping");
+        return;
+    };
+    let top = mount_top(&sb.root);
+    let uid = unsafe { libc::getuid() };
+    let c_top = std::ffi::CString::new(top.as_os_str().as_bytes()).unwrap();
+    // SAFETY: a valid C string.
+    let writable = unsafe { libc::access(c_top.as_ptr(), libc::W_OK) } == 0;
+    let present = |name: String| fs::symlink_metadata(top.join(name)).is_ok();
+    if writable || present(".Trash".into()) || present(format!(".Trash-{uid}")) {
+        eprintln!("{} may hold a trash of ours; skipping", top.display());
+        let _ = fs::remove_dir_all(&xdg);
+        return;
+    }
+    let f = sb.work().join("far.txt");
+    fs::write(&f, b"far away").unwrap();
+    let env = [("XDG_DATA_HOME", xdg.to_str().unwrap())];
+    let out = sb.run_env(&["put", "far.txt"], &env);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!f.exists());
+    let trash = xdg.join("Trash");
+    assert_eq!(names_in(&trash.join("files")), vec!["far.txt".to_string()]);
+    let info = fs::read_to_string(trash.join("info/far.txt.trashinfo")).unwrap();
+    assert!(info.contains(&format!("Path={}\n", f.display())), "{info}");
+    let listed = stdout_of(&sb.run_env(&["list"], &env));
+    assert!(listed.contains(&f.display().to_string()), "{listed}");
+    let back = sb.run_env(&["restore", "far.txt"], &env);
+    assert!(back.status.success(), "{}", stderr_of(&back));
+    assert_eq!(fs::read(&f).unwrap(), b"far away");
+    assert_eq!(names_in(&trash.join("files")), Vec::<String>::new());
+    let _ = fs::remove_dir_all(&xdg);
+}
+
 /// trash-cli #427: a put to another file system copies, then removes the
 /// original, so a tree it cannot wholly remove ends up half gone. rtrash
 /// refuses before it copies: a read-only directory deep inside, a parent

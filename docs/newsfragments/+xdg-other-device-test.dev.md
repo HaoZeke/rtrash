@@ -1,0 +1,1 @@
+A Linux test now puts a file into a home trash on another file system (glib #883). It sets `XDG_DATA_HOME` to a directory on `/dev/shm`. The file's volume has no trash of ours, so put copies the file into the home trash; `list` must show it and `restore` must bring it back. It skips if the volume's top directory has a trash of ours or would take one.
