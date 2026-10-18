@@ -1255,6 +1255,68 @@ def check_record_sections():
 
 
 
+# Each fn outside the tests that takes a trash lock, with what it reads
+# again under it: a look taken before the lock is stale by the time the
+# lock is held (round 244). A new site needs an entry saying so.
+LOCK_SITES = {
+    ("src/empty.rs", "empty_dangling"): "reads the dangling records again; only counted ones go",
+    ("src/empty.rs", "run_inner"): "empty_one scans under the lock; the counts before only "
+                                   "refuse early, and permanent_guard caps each removal",
+    ("src/list.rs", "relock"): "reads the record again; only a Locked entry is acted on",
+    ("src/retention.rs", "prune"): "locks every root before it lists and sizes the items",
+    ("src/trash_check.rs", "run"): "scans again and keeps what changed (tests::AFTER_SCAN)",
+    ("src/trashdir.rs", "trash_move"): "takes the name and writes the record under the lock",
+    ("src/trashdir.rs", "record_dir_size"): "writes only for the record it sized "
+                                            "(tests::AFTER_WALK)",
+    ("src/trashdir.rs", "write_back_with"): "directorysizes_rewrite reads the cache again",
+}
+# A fn that removes a payload and its record acts on a listed item. It
+# takes the item through list::Entry::relock, unless it is listed here.
+LOCKED_REMOVERS = {
+    ("src/empty.rs", "empty_one"): "runs with the lock held and scans under it",
+    ("src/retention.rs", "remove_entry"): "prune lists the items under the locks it holds",
+    ("src/wsl_bin.rs", "remove_entry"): "the Windows Recycle Bin has no trash lock",
+}
+TAKES_LOCK = re.compile(r"\bTrashLock::(?:try_)?acquire\(")
+
+
+def check_lock_rechecks():
+    """A fn that takes a trash lock is listed in LOCK_SITES with what it
+    reads again under it, and a fn that removes a payload and its record
+    calls list::Entry::relock or is listed in LOCKED_REMOVERS (round 244:
+    rm, restore and the empty browser acted on a scan taken before the
+    lock, so an item whose name a put gave to another was hit instead)."""
+    starts = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)")
+    sites, removers = set(), set()
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        text = rust_code(path.read_text(encoding="utf-8"))
+        skip = test_mod_lines(text.splitlines())
+        found = list(starts.finditer(text))
+        cuts = [m.start() for m in found] + [len(text)]
+        for m, a, b in zip(found, cuts, cuts[1:]):
+            line = text.count("\n", 0, a) + 1
+            body, key = text[a:b], (rel, m.group(1))
+            if line - 1 in skip:
+                continue
+            if TAKES_LOCK.search(body):
+                sites.add(key)
+                if key not in LOCK_SITES:
+                    errors.append(f"{rel}:{line}: {key[1]} takes the trash lock; read again under "
+                                  "it what it acts on, and list it in LOCK_SITES saying what")
+            if PAYLOAD_GONE.search(body) and RECORD_GONE.search(body) and ".relock(" not in body:
+                removers.add(key)
+                if key not in LOCKED_REMOVERS:
+                    errors.append(f"{rel}:{line}: {key[1]} removes a payload and its record "
+                                  "without list::Entry::relock; check the item again under the "
+                                  "trash lock, or list it in LOCKED_REMOVERS with a reason")
+    for rel, fn in sorted(set(LOCK_SITES) - sites):
+        errors.append(f"LOCK_SITES lists {fn} in {rel}, which takes no trash lock; drop the entry")
+    for rel, fn in sorted(set(LOCKED_REMOVERS) - removers):
+        errors.append(f"LOCKED_REMOVERS lists {fn} in {rel}, which removes no listed item "
+                      "without relock; drop the entry")
+
+
 DOT_BY_NAME = re.compile(r'Some\(\s*"\.\.?"\s*\)|OsStr::new\(\s*"\.\.?"\s*\)')
 
 
@@ -1537,7 +1599,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
