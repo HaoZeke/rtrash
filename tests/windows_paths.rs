@@ -1,7 +1,8 @@
 //! Windows paths past MAX_PATH (260 characters) and verbatim `\\?\`
 //! operands through put, list, restore, rm and du, on the scratch Recycle
 //! Bin of `common::rtrash`. Every path prints and is recorded without the
-//! verbatim prefix, as users type it and the shell records it.
+//! verbatim prefix, as users type it and the shell records it. A payload
+//! another process holds open stays in the bin, and restore names it.
 #![cfg(windows)]
 
 mod common;
@@ -128,5 +129,43 @@ fn verbatim_operands_are_recorded_and_shown_plain() {
     let du = run(&home, &["du", "--json", "--files", "-n", "100", &operand]);
     let scan = common::du_scan(ok(&du));
     assert!(scan.contains(&json(&s(&sub.join("in.txt")))), "{scan}");
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// trashy #114: a payload another process holds open. The move back
+/// fails, nothing is copied out, the record stays, and restore names the
+/// holder as put does; once it is closed the item restores.
+#[test]
+fn a_held_payload_stays_in_the_bin_and_restore_names_the_holder() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let home = home("held");
+    let f = home.join("held.txt");
+    fs::write(&f, "held").unwrap();
+    let path = s(&f);
+    ok(&run(&home, &["put", &path]));
+    let payload = fs::read_dir(common::test_bin(&home))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("$R"))
+        .expect("a $R payload");
+    // FILE_SHARE_READ alone: others may read it, but not move or delete it.
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&payload)
+        .unwrap();
+    let out = run(&home, &["restore", &path]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(err.contains("cannot restore"), "{err}");
+    // The holder is this test; tests/windows_process.rs checks the pid.
+    assert!(err.contains("in use by pid "), "{err}");
+    assert!(!f.exists(), "a held payload was copied out");
+    let shown = ok(&run(&home, &["list"]));
+    assert!(shown.lines().any(|l| l.ends_with(&path)), "{shown}");
+    drop(held);
+    ok(&run(&home, &["restore", &path]));
+    assert_eq!(fs::read_to_string(&f).unwrap(), "held");
     let _ = fs::remove_dir_all(&home);
 }

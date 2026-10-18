@@ -183,21 +183,27 @@ pub fn index_file_for(payload: &Path) -> Option<PathBuf> {
 /// drop the `$I` record beside it. The shell's restore names the result
 /// after the display name, which loses a known extension, so rtrash moves
 /// the payload itself. Another volume gets a copy, then the payload goes.
+/// Any other failed move is the error: a payload another process holds
+/// open would copy and then fail to go, leaving it both restored and in
+/// the bin.
 pub fn restore_payload(payload: &Path, dest: &Path) -> std::io::Result<()> {
     crate::allow_roots::check(dest)?;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if std::fs::rename(payload, dest).is_err() {
-        // Most likely another volume: copy, then remove the payload.
-        // scratch: a move; the copy is whole first.
-        copy_tree(payload, dest)?;
-        let meta = std::fs::symlink_metadata(payload)?;
-        if meta.is_dir() {
-            std::fs::remove_dir_all(payload)?;
-        } else {
-            std::fs::remove_file(payload)?;
+    match std::fs::rename(payload, dest) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+            // scratch: a move; the copy is whole first.
+            copy_tree(payload, dest)?;
+            let meta = std::fs::symlink_metadata(payload)?;
+            if meta.is_dir() {
+                std::fs::remove_dir_all(payload)?;
+            } else {
+                std::fs::remove_file(payload)?;
+            }
         }
+        Err(e) => return Err(e),
     }
     if let Some(index) = index_file_for(payload) {
         match std::fs::remove_file(&index) {
@@ -1660,6 +1666,21 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             }
         }
         status
+    }
+
+    /// Why a payload would not move: the processes that hold it open, named
+    /// as put names them, when the error is a sharing or lock violation
+    /// and the Restart Manager finds them; else the error itself.
+    fn held_reason(payload: &Path, e: &io::Error) -> String {
+        // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
+        if matches!(e.raw_os_error(), Some(32 | 33)) {
+            let snap = crate::holders::Snapshot::scan_under(&[payload.to_path_buf()], false);
+            let holds = snap.under(payload);
+            if !holds.is_empty() {
+                return format!("in use by {}", crate::holders::describe(&holds));
+            }
+        }
+        err_msg(e)
     }
 
     /// Test seam, in debug builds only: `RTRASH_TEST_BIN_ROOT=DIR` names
@@ -3207,7 +3228,8 @@ Without PATH, print a numbered list and read an index from stdin.
                 }
             }
             if let Err(e) = super::restore_payload(Path::new(&it.id), &dest) {
-                eprintln!("{prog}: cannot restore '{}': {e}", dest.display());
+                let why = held_reason(Path::new(&it.id), &e);
+                eprintln!("{prog}: cannot restore '{}': {why}", dest.display());
                 failed += 1;
             } else if dest.symlink_metadata().is_err() {
                 eprintln!(
