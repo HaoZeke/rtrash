@@ -1814,6 +1814,55 @@ def check_size_args():
                           "filters::parse_size so every option takes the same units (dust #629)")
 
 
+REPORT_LIT = re.compile(r"(?<!\w)Report \{")
+REPORT_DECL = re.compile(r"(?:\bstruct|\bimpl|\bfor|->)\s*(?:[\w:]*::)?$")
+REPORT_FILL_CASES = [
+    ("named", "let r = Report {\n    roots,\n    partial: false,\n};\n", []),
+    ("filled", "let r = du::Report {\n    roots,\n    ..old.clone()\n};\n", [3]),
+    ("nested fill", "let r = Report {\n    opts: ScanOpts {\n        ..o\n    },\n};\n", []),
+    ("struct", "pub struct Report {\n    ..\n}\n", []),
+    ("return type", "fn f() -> du::Report {\n    ..x\n}\n", []),
+    ("crate path", "Ok(crate::du::Report {\n    ..r\n})\n", [2]),
+]
+
+
+def report_fill_lines(text):
+    """Lines of `..` fills directly inside a `Report { .. }` literal."""
+    hits = []
+    for m in REPORT_LIT.finditer(text):
+        if REPORT_DECL.search(text[text.rfind("\n", 0, m.start()) + 1:m.start()]):
+            continue
+        depth, i = 0, m.end() - 1
+        while i < len(text):
+            c = text[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif c == "\n" and depth == 1 and text[i + 1:].lstrip(" ").startswith(".."):
+                hits.append(text.count("\n", 0, i) + 2)
+            i += 1
+    return hits
+
+
+def check_report_literals():
+    """A du::Report built by hand names every field: a `..other` fill would
+    copy a field such as partial or unread from one part into a joined or
+    converted report, and a field added later would pass unnoticed.
+    REPORT_FILL_CASES tests the matcher."""
+    for what, text, want in REPORT_FILL_CASES:
+        if report_fill_lines(text) != want:
+            errors.append(f"scripts/precheck.py: report_fill_lines gets REPORT_FILL_CASES '{what}' "
+                          "wrong; the report-literal check is broken")
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        for line in report_fill_lines(path.read_text(encoding="utf-8")):
+            errors.append(f"{rel}:{line}: fills a du::Report from another with `..`; name every "
+                          "field so a new one must be set here too")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -1929,7 +1978,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

@@ -644,6 +644,43 @@ fn scan_roots(
     Ok((view, below))
 }
 
+/// One report of the one-level scans of several roots, in their order:
+/// what `du -o FILE --max-depth=1 A B` scans, since du walks each PATH
+/// alone too (a file linked from two roots counts in both). Every field
+/// is named, with no `..` fill, so a field added to the report fails to
+/// build here until it is joined too.
+fn join_reports(parts: &[Arc<du::Report>]) -> du::Report {
+    let mut unread: Vec<(PathBuf, String)> = parts
+        .iter()
+        .flat_map(|p| p.unread.iter().cloned())
+        .collect();
+    // As du keeps them: sorted, the first UNREAD_KEPT.
+    unread.sort();
+    unread.truncate(du::UNREAD_KEPT);
+    let mut snapshots: Vec<PathBuf> = parts
+        .iter()
+        .flat_map(|p| p.snapshots.iter().cloned())
+        .collect();
+    snapshots.sort();
+    du::Report {
+        roots: parts.iter().flat_map(|p| p.roots.iter().cloned()).collect(),
+        dirs: parts.iter().flat_map(|p| p.dirs.iter().cloned()).collect(),
+        files: Vec::new(),
+        unreadable: du::size_sum(parts.iter().map(|p| p.unreadable)),
+        unread,
+        too_deep: du::size_sum(parts.iter().map(|p| p.too_deep)),
+        depth_limit: parts
+            .iter()
+            .map(|p| p.depth_limit)
+            .min()
+            .unwrap_or(du::MAX_DEPTH),
+        shared: None,
+        partial: parts.iter().any(|p| p.partial),
+        types: Vec::new(),
+        snapshots,
+    }
+}
+
 /// The view of several roots before their scan ends: every root, its
 /// size to come.
 fn quick_roots(roots: &[PathBuf]) -> View {
@@ -1948,17 +1985,30 @@ impl App {
     /// Why `E` cannot write the current view, if it cannot.
     fn export_refusal(&self) -> Option<&'static str> {
         let v = self.view();
-        if is_top_of_roots(&self.cur) {
-            Some("open one of the directories first; E writes one directory")
-        } else if v.scanning {
+        if v.scanning {
             Some("still scanning this directory; E writes it once the scan is done")
         } else if v.partial {
             Some("the scan was stopped; r rescans in full, then E writes it")
-        } else if v.scan.is_none() {
+        } else if self.export_report().is_none() {
             Some("sizes changed since the scan; r rescans, then E writes it")
         } else {
             None
         }
+    }
+
+    /// What `E` writes of the current view: its own scan, or above
+    /// several roots the scans their views keep, joined as one report.
+    /// `None` once a delete, an undo or a rescan has dropped one.
+    fn export_report(&self) -> Option<Arc<du::Report>> {
+        if !is_top_of_roots(&self.cur) {
+            return self.view().scan.clone();
+        }
+        let parts: Option<Vec<Arc<du::Report>>> = self
+            .roots
+            .iter()
+            .map(|r| self.cache.get(r).and_then(|v| v.scan.clone()))
+            .collect();
+        parts.map(|p| Arc::new(join_reports(&p)))
     }
 
     /// Ask for the file to write this view's snapshot to (`E`).
@@ -1973,8 +2023,13 @@ impl App {
     }
 
     fn export_status(&self) -> String {
+        let what = if is_top_of_roots(&self.cur) {
+            format!("these {} directories", self.roots.len())
+        } else {
+            "this directory".to_string()
+        };
         format!(
-            "write a du snapshot of this directory to: {} · Enter writes · Esc cancels",
+            "write a du snapshot of {what} to: {} · Enter writes · Esc cancels",
             self.export_to
         )
     }
@@ -2008,13 +2063,14 @@ impl App {
     }
 
     /// Write the current view as the snapshot `du -o FILE --max-depth=1`
-    /// would write of its directory, from the scan in memory: no second
-    /// walk. An existing file is left alone. Returns the status line.
+    /// would write of its directory (above several roots, of all of
+    /// them), from the scans in memory: no second walk. An existing file
+    /// is left alone. Returns the status line.
     fn export(&self) -> String {
         if let Some(why) = self.export_refusal() {
             return why.into();
         }
-        let Some(report) = self.view().scan.clone() else {
+        let Some(report) = self.export_report() else {
             return "nothing to write".into();
         };
         if self.export_to.is_empty() {
@@ -4942,6 +4998,76 @@ mod tests {
         assert!(!none.exists());
         export_as(&mut a, Path::new(""), KeyCode::Enter);
         assert_eq!(a.status, "no file name; nothing written");
+        let _ = fs::remove_dir_all(&t.0);
+    }
+
+    #[test]
+    fn e_above_several_roots_writes_the_snapshot_du_o_writes_of_them() {
+        let t = tree("export-roots");
+        let mut a = app_on(&t, &["w/small", "w/big"]);
+        assert!(is_top_of_roots(&a.cur));
+        a.on_key(KeyCode::Char('E'), KeyModifiers::SHIFT);
+        assert!(a.status.contains("of these 2 directories"), "{}", a.status);
+        a.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        let out = t.0.join("roots.snap");
+        export_as(&mut a, &out, KeyCode::Enter);
+        assert!(a.status.starts_with("wrote '"), "{}", a.status);
+        let mut got = crate::du_snap::read(&out).unwrap();
+        // What du -o FILE --max-depth=1 w/small w/big writes.
+        let opts = ScanOpts {
+            max_depth: Some(1),
+            ..crate::du_snap::snapshot_opts(ScanOpts::default())
+        };
+        let dirs = [t.0.join("w/small"), t.0.join("w/big")];
+        let report = du::scan(&dirs, &opts).unwrap();
+        let mut text = Vec::new();
+        crate::du_snap::write(&report, &opts, got.created, &mut text).unwrap();
+        let mut want = crate::du_snap::parse(&text[..]).unwrap();
+        for snap in [&mut got, &mut want] {
+            snap.dirs.sort_by(|x, y| x.path.cmp(&y.path));
+        }
+        assert_eq!(got.max_depth, Some(1));
+        assert_eq!(got.unreadable, Some(0));
+        assert_eq!(got.roots, want.roots);
+        assert_eq!(got.dirs, want.dirs);
+        let roots: Vec<&Path> = got.roots.iter().map(|r| r.path.as_path()).collect();
+        assert_eq!(roots, [dirs[0].as_path(), dirs[1].as_path()]);
+        let inner = t.0.join("w/big/inner");
+        assert!(got.dirs.iter().any(|d| d.path == inner), "{:?}", got.dirs);
+        let _ = fs::remove_dir_all(&t.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn e_above_several_roots_waits_for_a_rescan_after_a_delete_below() {
+        let t = tree("export-roots-stale");
+        let mut a = app_on(&t, &["w/small", "w/big"]);
+        let stale = "sizes changed since the scan; r rescans, then E writes it";
+        a.select(0);
+        a.open(); // big, the larger root
+        assert_eq!(a.cur, t.0.join("w/big"));
+        a.select(0); // inner
+        a.ask_delete();
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(!t.0.join("w/big/inner").exists());
+        a.back();
+        assert!(is_top_of_roots(&a.cur));
+        a.on_key(KeyCode::Char('E'), KeyModifiers::SHIFT);
+        assert_eq!(a.status, stale);
+        assert_eq!(a.mode, Mode::Browse);
+        // A rescan of the top view scans every root again.
+        a.on_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        let out = t.0.join("roots.snap");
+        export_as(&mut a, &out, KeyCode::Enter);
+        assert!(a.status.starts_with("wrote '"), "{}", a.status);
+        let snap = crate::du_snap::read(&out).unwrap();
+        let inner = t.0.join("w/big/inner");
+        assert!(
+            !snap.dirs.iter().any(|d| d.path == inner),
+            "{:?}",
+            snap.dirs
+        );
+        assert_eq!(snap.roots.len(), 2);
         let _ = fs::remove_dir_all(&t.0);
     }
 

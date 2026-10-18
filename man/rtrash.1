@@ -2367,6 +2367,11 @@ and
 .BR "du diff" .
 It comes from the scan in memory, with no second walk, so the name
 filter and hidden dot names do not change it.
+On the view above two or more directories,
+.B E
+writes all of them as one snapshot with a root record each, the one
+.B "du \-o FILE \-\-max\-depth=1 A B"
+writes.
 A file that exists is left alone.
 Once a delete, an undo or a rescan below has changed the sizes,
 .B E

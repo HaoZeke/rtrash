@@ -1,0 +1,1 @@
+In the explorer, `E` now works on the view above two or more directories (`du -i a b`). It writes one snapshot with a root record for each directory, the one `du -o FILE --max-depth=1 a b` writes. It comes from the scans in memory, with no second walk. Before, `E` asked to open one of the directories first.
