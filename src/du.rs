@@ -617,6 +617,9 @@ pub struct Report {
     pub partial: bool,
     /// `--types` scans: every file type, in the order of the sort key.
     pub types: Vec<TypeRow>,
+    /// Read-only btrfs subvolumes (snapshots) met below a PATH, sorted.
+    /// They count in full, as with du(1), unless `--shared` is on.
+    pub snapshots: Vec<PathBuf>,
 }
 
 /// The files of one type in a `--types` scan: names ending in `.EXT`
@@ -892,6 +895,8 @@ struct Ctx<'a> {
     cut: std::sync::atomic::AtomicBool,
     /// File type totals (`--types`), merged once per directory chunk.
     types: Mutex<TypeMap>,
+    /// Read-only btrfs subvolumes entered below the root.
+    snapshots: Mutex<Vec<PathBuf>>,
 }
 
 /// Unreadable entries a scan remembers by name; the count covers the rest.
@@ -1183,6 +1188,13 @@ fn enter(
     if !ctx.opts.include_kernfs && st.dev != ctx.root_dev && dir.is_kernfs() {
         return None;
     }
+    // Each btrfs subvolume has a device of its own and its top is inode
+    // 256, so the ioctl runs on those alone. A read-only one (a snapshot)
+    // counts in full, as with du(1), and is named after the scan.
+    if st.ino == BTRFS_SUBVOL_INO && st.dev != ctx.root_dev && dir.is_readonly_snapshot() {
+        let mut s = ctx.snapshots.lock().unwrap_or_else(|e| e.into_inner());
+        s.push(path.to_path_buf());
+    }
     // -L: a directory met again, through a loop or a second link, is
     // walked once.
     if follow && st.ino != 0 && !ctx.dirs_seen.insert(st.dev, st.ino) {
@@ -1190,6 +1202,9 @@ fn enter(
     }
     walk_dir(ctx, dir, path, &st, depth, listing, chain)
 }
+
+/// The inode of the top directory of every btrfs subvolume.
+const BTRFS_SUBVOL_INO: u64 = 256;
 
 /// Directories with more entries than this stat them in parallel.
 const WIDE_DIR: usize = 256;
@@ -1820,6 +1835,7 @@ fn scan_pooled(
     let mut unreadable = 0u64;
     let mut unread = Vec::new();
     let mut too_deep = 0u64;
+    let mut snapshots = Vec::new();
     let mut shared = crate::du_extent::SharedSet::default();
     let mut partial = false;
     let mut types = TypeMap::new();
@@ -1860,6 +1876,7 @@ fn scan_pooled(
             probe: Default::default(),
             cut: Default::default(),
             types: Default::default(),
+            snapshots: Default::default(),
         };
         let (apparent, disk, disk_all, unique, artefact) = if meta.is_dir() {
             enter(
@@ -1913,6 +1930,11 @@ fn scan_pooled(
         unread.extend(ctx.unread.into_inner().unwrap_or_else(|e| e.into_inner()));
         too_deep += ctx.too_deep.load(Ordering::Relaxed);
         partial |= ctx.cut.load(Ordering::Relaxed);
+        snapshots.extend(
+            ctx.snapshots
+                .into_inner()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
         roots.push(RootTotals {
             path: abs,
             apparent,
@@ -1954,6 +1976,10 @@ fn scan_pooled(
         }),
         partial,
         types: type_rows(types, opts.sort),
+        snapshots: {
+            snapshots.sort();
+            snapshots
+        },
     })
 }
 
@@ -2651,6 +2677,16 @@ fn report_json_with(
         format!(",\"too_deep\":{}", r.too_deep)
     } else {
         String::new()
+    };
+    let too_deep = if r.snapshots.is_empty() {
+        too_deep
+    } else {
+        let rows: Vec<String> = r
+            .snapshots
+            .iter()
+            .map(|p| format!("\"{}\"", json_escape(&p.to_string_lossy())))
+            .collect();
+        format!("{too_deep},\"snapshots\":[{}]", rows.join(","))
     };
     format!(
         "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{}{unread}{too_deep}{shared}{partial}{types},\"trash\":{}}}",
@@ -4283,6 +4319,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         print_trash(&trash);
     }
     warn_unread(prog, &report);
+    if !opts.shared_once {
+        note_snapshots(prog, &report.snapshots);
+    }
     if report.too_deep > 0 {
         eprintln!(
             "{prog}: {} past {} levels or {} KiB of path counted without their contents",
@@ -4310,6 +4349,32 @@ fn floor_rows(report: &mut Report, floor: u64, apparent: bool) {
     let size = |it: &Item| if apparent { it.apparent } else { it.disk };
     report.dirs.retain(|it| size(it) >= floor);
     report.files.retain(|it| size(it) >= floor);
+}
+
+/// Name the read-only btrfs snapshots a scan counted in full, up to
+/// [`UNREAD_SHOWN`] of them, with the two ways to count them otherwise.
+fn note_snapshots(prog: &str, snapshots: &[PathBuf]) {
+    if snapshots.is_empty() {
+        return;
+    }
+    eprintln!(
+        "{prog}: note: {} counted in full \
+         (--shared counts shared extents once, -x leaves them out)",
+        plural(
+            snapshots.len() as u64,
+            "read-only btrfs snapshot",
+            "read-only btrfs snapshots"
+        )
+    );
+    for p in snapshots.iter().take(UNREAD_SHOWN) {
+        eprintln!("{prog}: snapshot '{}'", crate::util::err_path(p));
+    }
+    if snapshots.len() > UNREAD_SHOWN {
+        eprintln!(
+            "{prog}: and {} more (--json lists them all)",
+            snapshots.len() - UNREAD_SHOWN
+        );
+    }
 }
 
 /// Name the first unreadable entries of `report` on stderr, then how many
@@ -4894,6 +4959,7 @@ mod tests {
             shared: None,
             partial: false,
             types: Vec::new(),
+            snapshots: Vec::new(),
         };
         let rows = pick_rows(&report);
         let paths: Vec<_> = rows.iter().map(|r| r.path.clone()).collect();

@@ -564,6 +564,7 @@ pub fn to_report(snap: Snapshot, sort: SortKey, top: usize) -> Report {
         shared: None,
         partial: false,
         types: Vec::new(),
+        snapshots: Vec::new(),
     }
 }
 
@@ -838,6 +839,7 @@ mod tests {
             shared: None,
             partial: false,
             types: Vec::new(),
+            snapshots: Vec::new(),
         };
         let opts = snapshot_opts(ScanOpts {
             max_depth: Some(3),
@@ -878,6 +880,7 @@ mod tests {
             shared: None,
             partial: false,
             types: Vec::new(),
+            snapshots: Vec::new(),
         };
         let mut buf = Vec::new();
         write(&report, &snapshot_opts(ScanOpts::default()), 1, &mut buf).unwrap();
@@ -929,6 +932,7 @@ mod tests {
             shared: None,
             partial: false,
             types: Vec::new(),
+            snapshots: Vec::new(),
         }
     }
 

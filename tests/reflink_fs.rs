@@ -8,6 +8,7 @@
 
 mod common;
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -227,6 +228,96 @@ fn clone_dupes_share_the_extents_and_keep_each_mode() {
         num(&json, "\"total\"", "reclaim") < (2u64 << 20) / 4,
         "{json}"
     );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(dir.with_extension("home"));
+}
+
+/// Run `btrfs ARGS`, which must succeed.
+fn btrfs(args: &[&OsStr]) {
+    let out = Command::new("btrfs").args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "btrfs {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn du_names_read_only_btrfs_snapshots_and_x_leaves_them_out() {
+    let Some(dir) = cloned_pair("snap") else {
+        eprintln!("RTRASH_REFLINK_DIR unset; skipping");
+        return;
+    };
+    let kind = Command::new("stat")
+        .args(["-f", "-c", "%T"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    if String::from_utf8_lossy(&kind.stdout).trim() != "btrfs" {
+        eprintln!("RTRASH_REFLINK_DIR is not on btrfs; skipping");
+        let _ = fs::remove_dir_all(&dir);
+        return;
+    }
+    let (vol, snap) = (dir.join("vol"), dir.join("snap"));
+    btrfs(&[
+        OsStr::new("subvolume"),
+        OsStr::new("create"),
+        vol.as_os_str(),
+    ]);
+    fs::write(vol.join("data.bin"), vec![7u8; 1 << 20]).unwrap();
+    btrfs(&[
+        OsStr::new("subvolume"),
+        OsStr::new("snapshot"),
+        OsStr::new("-r"),
+        vol.as_os_str(),
+        snap.as_os_str(),
+    ]);
+    let du = |flags: &[&str]| -> Output {
+        common::rtrash(&home(&dir))
+            .arg("du")
+            .args(flags)
+            .arg(&dir)
+            .current_dir(&dir)
+            .output()
+            .unwrap()
+    };
+    let out = du(&["--no-git", "--json"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{err}");
+    assert!(
+        err.contains("note: 1 read-only btrfs snapshot counted in full"),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!("snapshot '{}'", snap.display())),
+        "{err}"
+    );
+    // A writable subvolume is no snapshot.
+    assert!(!err.contains(&format!("'{}'", vol.display())), "{err}");
+    let json = String::from_utf8(out.stdout).unwrap();
+    let listed = format!("\"snapshots\":[\"{}\"]", snap.display());
+    assert!(json.contains(&listed), "{json}");
+    // Counted in full, as du(1) counts it.
+    let copy = snap.join("data.bin");
+    assert!(json.contains(&format!("\"{}\"", copy.display())), "{json}");
+    // Shared extents counted once, or one subvolume only: no note.
+    for flag in ["--shared", "-x"] {
+        let out = du(&["--no-git", "--json", flag]);
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "{err}");
+        assert!(!err.contains("btrfs snapshot"), "{flag}: {err}");
+    }
+    // -x stays on the subvolume of PATH, so neither copy counts.
+    let out = du(&["--no-git", "--json", "-x"]);
+    let json = String::from_utf8(out.stdout).unwrap();
+    assert!(!json.contains("data.bin"), "{json}");
+    assert!(!json.contains("\"snapshots\""), "{json}");
+    // Unprivileged deletes may be refused; the image goes with the runner.
+    let _ = Command::new("btrfs")
+        .args(["subvolume", "delete"])
+        .arg(&snap)
+        .arg(&vol)
+        .output();
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(dir.with_extension("home"));
 }

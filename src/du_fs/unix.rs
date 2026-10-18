@@ -49,6 +49,16 @@ fn retry<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     }
 }
 
+/// statfs magic of btrfs.
+#[cfg(target_os = "linux")]
+const BTRFS_MAGIC: u32 = 0x9123_683e;
+/// `_IOR(0x94, 25, u64)` from linux/btrfs.h: the flags of a subvolume.
+#[cfg(target_os = "linux")]
+const BTRFS_IOC_SUBVOL_GETFLAGS: u32 = 0x8008_9419;
+/// The read-only bit of those flags.
+#[cfg(target_os = "linux")]
+const BTRFS_SUBVOL_RDONLY: u64 = 1 << 1;
+
 /// statfs magic numbers of the kernel pseudo file systems ncdu's
 /// --exclude-kernfs skips, in this order: proc, sysfs, cgroup, cgroup2,
 /// debugfs, tracefs, securityfs, pstore, bpf, configfs, efivarfs and
@@ -138,6 +148,38 @@ impl Dir {
             }
             let kind = unsafe { s.assume_init() }.f_type as u32;
             KERNFS_MAGIC.contains(&kind)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    /// True when the directory is the top of a read-only btrfs
+    /// subvolume, as the snapshots of snapper and Timeshift are. Linux
+    /// only; elsewhere it is always false.
+    pub fn is_readonly_snapshot(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let mut s = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: fstatfs fills `s` on success; it is read only then.
+            if unsafe { libc::fstatfs(self.fd.as_raw_fd(), s.as_mut_ptr()) } != 0 {
+                return false;
+            }
+            if unsafe { s.assume_init() }.f_type as u32 != BTRFS_MAGIC {
+                return false;
+            }
+            let mut flags = 0u64;
+            // SAFETY: the ioctl writes one u64 into `flags`; it fails for
+            // a directory that is not the top of a subvolume.
+            let r = unsafe {
+                libc::ioctl(
+                    self.fd.as_raw_fd(),
+                    BTRFS_IOC_SUBVOL_GETFLAGS as _,
+                    &mut flags as *mut u64,
+                )
+            };
+            r == 0 && flags & BTRFS_SUBVOL_RDONLY != 0
         }
         #[cfg(not(target_os = "linux"))]
         {

@@ -1,0 +1,1 @@
+On btrfs, `rtrash du` now names on stderr the read-only snapshots it met below `PATH` and counted in full, the way `du` counts them, and points at `--shared` and `-x`. The JSON object lists them in `snapshots`. With `--shared` the note stays quiet, since shared extents then count once.

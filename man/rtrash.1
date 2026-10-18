@@ -1384,6 +1384,18 @@ files (default 20).
 .TP
 .BR \-x ", " \-\-one\-file\-system
 Skip directories on other file systems.
+On btrfs every subvolume, snapshots included, has a device number of its
+own, so
+.B \-x
+also leaves out the subvolumes below
+.IR PATH .
+Without it, as with
+.BR du (1),
+each snapshot counts in full; on Linux stderr names the read-only
+snapshots met (the first 10) unless
+.B \-\-shared
+counts their shared extents once, and the JSON object lists them all in
+\fIsnapshots\fR.
 .TP
 .B \-\-include\-kernfs
 Also walk kernel pseudo file systems met below

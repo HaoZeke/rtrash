@@ -129,6 +129,11 @@ impl Dir {
         false
     }
 
+    /// Windows has no btrfs snapshots.
+    pub fn is_readonly_snapshot(&self) -> bool {
+        false
+    }
+
     /// Open the directory at `path`; a symlink or junction is refused.
     pub fn open(path: &Path) -> io::Result<Dir> {
         let handle = open_handle(path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?;
