@@ -280,6 +280,70 @@ fn follow_symlinks_counts_targets_once_and_survives_loops() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// A PATH inside another would count twice, in the totals, `--json` and
+/// `--dupes`: du refuses it in either order, as gdu 5.38 does. A PATH
+/// given twice counts once, with a note on stderr.
+#[test]
+fn a_path_inside_another_is_refused_and_a_repeated_one_counts_once() {
+    let t = Tree::new("du-nested-roots");
+    t.file("a/one.bin", 30_000);
+    t.file("a/b/two.bin", 30_000);
+    let nested: [&[&str]; 4] = [
+        &["a", "a/b"],
+        &["a/b", "a"],
+        &["--json", "./a/b", "a"],
+        &["--dupes", "--min-size=1k", "a", "a/b"],
+    ];
+    for args in nested {
+        let out = t.du(args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
+        assert!(
+            err.contains("which counts it already; give one of them"),
+            "{args:?}: {err}"
+        );
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+    let once = t.json(&["--no-git", "a"]);
+    let out = t.du(&["--json", "--no-git", "a", "./a"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("is given twice; counting it once"), "{err}");
+    let twice = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(paths_in(&twice, "roots"), [s(&t.root.join("a"))], "{twice}");
+    // The first "dirs" key is the root's own count, after these two.
+    let roots = |j: &str| j[..j.find("\"dirs\"").unwrap()].to_string();
+    for key in ["apparent", "files"] {
+        assert_eq!(
+            field(&roots(&twice), key),
+            field(&roots(&once), key),
+            "{key}: {twice}"
+        );
+    }
+    assert_eq!(field(&roots(&twice), "files"), 2, "{twice}");
+    // The two copies are one group; the repeated PATH names neither again.
+    let d = t.json(&["--dupes", "--min-size=1k", "a", "a"]);
+    let total = &d[d.find("\"total\"").unwrap()..];
+    assert_eq!(field(total, "extras"), 1, "{d}");
+    assert!(d.contains("\"keep_links\":[],"), "{d}");
+    assert!(d.contains("\"extra_links\":[]"), "{d}");
+}
+
+/// Under -L a PATH reached through a link to another PATH is inside it
+/// too. Without -L the link is scanned as a link, so both PATHs stay.
+#[cfg(unix)]
+#[test]
+fn a_link_to_an_outer_path_counts_as_that_path_under_follow() {
+    let t = Tree::new("du-nested-link");
+    t.file("a/b/two.bin", 30_000);
+    std::os::unix::fs::symlink(t.root.join("a"), t.root.join("l")).unwrap();
+    let out = t.du(&["-L", "--no-git", "l", "a/b"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("'a/b' is inside 'l'"), "{err}");
+    let j = t.json(&["--no-git", "l", "a/b"]);
+    assert_eq!(paths_in(&j, "roots").len(), 2, "{j}");
+}
+
 /// `--show-symlink-target` under -L: the row that is a link shows its
 /// target in the table, the tree and the JSON, and nothing else changes;
 /// plain -L output has no arrow. Without -L, or with -f, it refuses.
@@ -3576,6 +3640,32 @@ impl Pty {
     }
 }
 
+/// A new pty of 24 rows and 80 columns: (parent side, child side).
+#[cfg(all(target_os = "linux", feature = "tui"))]
+fn open_pty() -> (File, File) {
+    use std::os::fd::FromRawFd;
+    let (mut m, mut s) = (0, 0);
+    let ws = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: openpty writes the two fds; no name buffer, no termios.
+    let rc = unsafe {
+        libc::openpty(
+            &mut m,
+            &mut s,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &ws,
+        )
+    };
+    assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+    // SAFETY: both fds are new and owned here alone.
+    unsafe { (File::from_raw_fd(m), File::from_raw_fd(s)) }
+}
+
 /// Ctrl-L redraws the explorer and Ctrl-Z suspends it, as in dua 2.44.
 /// Before it stops, the terminal is out of raw mode and off the alternate
 /// screen; a SIGCONT brings both back, and Ctrl-C then quits. The
@@ -3584,33 +3674,12 @@ impl Pty {
 #[cfg(all(target_os = "linux", feature = "tui"))]
 #[test]
 fn explorer_redraws_on_ctrl_l_and_suspends_on_ctrl_z() {
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
 
     let t = Tree::new("explorer-suspend");
     t.file("d/a.bin", 4096);
-    let (master, slave) = {
-        let (mut m, mut s) = (0, 0);
-        let ws = libc::winsize {
-            ws_row: 24,
-            ws_col: 80,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        // SAFETY: openpty writes the two fds; no name buffer, no termios.
-        let rc = unsafe {
-            libc::openpty(
-                &mut m,
-                &mut s,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &ws,
-            )
-        };
-        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
-        // SAFETY: both fds are new and owned here alone.
-        unsafe { (File::from_raw_fd(m), File::from_raw_fd(s)) }
-    };
+    let (master, slave) = open_pty();
     // SAFETY: fcntl on the master fd this test owns.
     unsafe {
         let fl = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
@@ -3712,4 +3781,39 @@ fn explorer_redraws_on_ctrl_l_and_suspends_on_ctrl_z() {
     reap.1 = false;
     assert!(status.success(), "{status:?}");
     fs::remove_dir_all(&t.root).unwrap();
+}
+
+/// The explorer refuses a PATH inside another before it starts, as the
+/// listing does, so its totals never count one tree twice.
+#[cfg(all(target_os = "linux", feature = "tui"))]
+#[test]
+fn the_explorer_refuses_a_path_inside_another() {
+    let t = Tree::new("explorer-nested");
+    t.file("a/b/two.bin", 4096);
+    let (_master, slave) = open_pty();
+    let mut child = common::rtrash(&t.root)
+        .args(["du", "--no-git", "-i", "a", "a/b"])
+        .current_dir(&t.root)
+        .stdin(slave)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if std::time::Instant::now() >= until {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the explorer started on nested PATHs");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut err = String::new();
+    let mut pipe = child.stderr.take().unwrap();
+    std::io::Read::read_to_string(&mut pipe, &mut err).unwrap();
+    assert_eq!(status.code(), Some(2), "{err}");
+    assert!(err.contains("'a/b' is inside 'a'"), "{err}");
 }

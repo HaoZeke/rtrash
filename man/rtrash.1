@@ -1308,6 +1308,21 @@ so files plus directories match
 the total names the extra links. When one subdirectory accounts for
 90% or more of a directory's size, only the subdirectory is listed.
 The scan root itself appears only in the closing total.
+.I PATH
+given twice is scanned once, with a note on standard error.
+A
+.I PATH
+inside another one is refused with exit status 2, as gdu refuses it:
+the walk of the outer one counts it already, so the totals,
+.BR \-\-json ,
+.B \-\-dupes
+and the explorer would count it twice.
+Under
+.BR \-x ,
+a
+.I PATH
+on another file system than the one around it stays, since the outer
+walk stops at its mount.
 A root that is a regenerable artefact (see
 .BR \-\-artefacts )
 has its kind named in the total, and its contents are listed, since

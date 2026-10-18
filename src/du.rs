@@ -26,6 +26,8 @@ const HELP: &str = "\
 Usage: {prog} [OPTION]... [PATH]...
 Find what to delete: walk each PATH (default .) in parallel and list the
 largest directories and files, by on-disk size unless --apparent is given.
+A PATH given twice counts once. A PATH inside another is refused, since
+it would count twice (under -x, one on another file system stays).
 
 Symlinks are not followed unless -L is given, and a file with more than one hard link
 counts once, in the sizes and in the file count (as with du --inodes);
@@ -2135,6 +2137,71 @@ fn ncdu_out(
     0
 }
 
+/// The PATHs of one run with each tree counted once. A PATH given twice
+/// is scanned once, with a note to print. A PATH inside another one is
+/// refused, as gdu 5.38 refuses it: the walk of the outer PATH counts it
+/// already, so the totals, the explorer and `--dupes` would count it
+/// twice. Under `-x` a PATH on another file system than the outer one
+/// stays, since that walk stops at the mount. A PATH that cannot be read
+/// stays too, for the scan to report.
+fn roots_once(
+    paths: Vec<PathBuf>,
+    follow: bool,
+    one_fs: bool,
+) -> Result<(Vec<PathBuf>, Vec<String>), String> {
+    let stat = |p: &Path| {
+        let st = if follow {
+            du_fs::stat_follow(p)
+        } else {
+            du_fs::lstat(p)
+        };
+        st.ok()
+    };
+    // Without -L a final link is scanned as a link, so only its parent
+    // resolves; with -L the walk goes where the link points.
+    let key = |p: &Path| -> Option<PathBuf> {
+        let name = p.file_name().filter(|_| !follow);
+        let Some(name) = name else {
+            return canonical(p).ok();
+        };
+        let parent = p.parent().filter(|d| !d.as_os_str().is_empty());
+        Some(canonical(parent.unwrap_or(Path::new("."))).ok()?.join(name))
+    };
+    let mut kept: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+    let mut notes = Vec::new();
+    for p in paths {
+        let k = key(&p);
+        if k.is_some() && kept.iter().any(|(_, q)| *q == k) {
+            let shown = crate::util::err_path(&p);
+            notes.push(format!("'{shown}' is given twice; counting it once"));
+        } else {
+            kept.push((p, k));
+        }
+    }
+    for (inner, in_key) in &kept {
+        for (outer, out_key) in &kept {
+            let (Some(in_key), Some(out_key)) = (in_key, out_key) else {
+                continue;
+            };
+            if in_key == out_key || !in_key.starts_with(out_key) {
+                continue;
+            }
+            let (Some(o), Some(i)) = (stat(outer), stat(inner)) else {
+                continue;
+            };
+            if !o.is_dir() || (one_fs && i.dev != o.dev) {
+                continue;
+            }
+            return Err(format!(
+                "'{}' is inside '{}', which counts it already; give one of them",
+                crate::util::err_path(inner),
+                crate::util::err_path(outer)
+            ));
+        }
+    }
+    Ok((kept.into_iter().map(|(p, _)| p).collect(), notes))
+}
+
 pub(crate) fn absolute(p: &Path) -> io::Result<PathBuf> {
     if p.file_name().is_none() {
         // `.`, `..`, `/`: no final component to keep unresolved.
@@ -3677,6 +3744,24 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     if paths.is_empty() {
         paths.push(PathBuf::from("."));
+    }
+    if from_file.is_none() {
+        match roots_once(
+            std::mem::take(&mut paths),
+            opts.follow,
+            opts.one_file_system,
+        ) {
+            Ok((once, notes)) => {
+                for n in notes {
+                    eprintln!("{prog}: {n}");
+                }
+                paths = once;
+            }
+            Err(e) => {
+                eprintln!("{prog}: {e}");
+                return 2;
+            }
+        }
     }
     if (trash_dupes || link_dupes || clone_dupes) && !dupes {
         eprintln!("{prog}: --trash-dupes, --link-dupes and --clone-dupes go with --dupes");

@@ -355,6 +355,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du --max-depth=2 --all-dirs` | Every directory level, at most 2 below `PATH` |
 | `rtrash du --json` | One object with `roots`, `dirs`, `files`, `unreadable`, `unreadable_paths` (up to 100 entries with `path` and `error`), plus `too_deep` when the walk met directories past its limits of 4096 levels and 32 KiB of path (counted without their contents) |
 | Ctrl-C during `rtrash du` | Stops the scan and prints what it counted, marked partial (`"partial": true` in JSON), with exit status 130; `--print0`, `--pick`, `-o` and `--stacks` print nothing then. A second Ctrl-C ends it at once |
+| `rtrash du ~/src ~/src/app` | Exits with status 2, as gdu does: the walk of `~/src` counts `~/src/app` already, so the totals, `--json`, `--dupes` and the explorer would count it twice. du scans a repeated `PATH` once and notes it on stderr. Under `-x`, du keeps a `PATH` on another file system, since the outer walk stops at its mount |
 | `rtrash du --no-git` | Skip the git checks |
 | `rtrash du --trash-dir=PATH` / `--home-only` | Limit the trash summary to these trash directories |
 | `rtrash du --print0 … \| xargs -0 rtrash put -rf --` | Trash the listed paths |

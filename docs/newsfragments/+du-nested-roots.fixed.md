@@ -1,0 +1,1 @@
+`rtrash du` refuses a `PATH` inside another one, as gdu 5.38 does, since the walk of the outer `PATH` counted it already and the totals, `--json`, `--dupes` and the explorer counted it twice. A `PATH` given twice is scanned once, with a note on stderr, and under `-x` a `PATH` on another file system than the one around it stays.
