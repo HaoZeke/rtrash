@@ -979,15 +979,48 @@ pub fn record_dir_size(trash: &TrashDir, name: &str) {
         return;
     }
     let dest = join_name(&trash.files(), name);
+    let record = join_info(&trash.info(), name);
+    let Some(seen) = RecordLook::take(&record) else {
+        return;
+    };
     let size = crate::fastdelete::disk_usage(&dest);
-    let Ok(mtime) = info_mtime_secs(&join_info(&trash.info(), name)) else {
+    let Ok(mtime) = info_mtime_secs(&record) else {
         return;
     };
     let inodes = crate::trash_inodes::tree_inodes(&dest);
+    #[cfg(test)]
+    {
+        if let Some(f) = tests::AFTER_WALK.take() {
+            f();
+        }
+    }
     if let Ok(_lock) = TrashLock::acquire(&trash.root) {
+        // Under the lock, the line goes only to the record the walk
+        // sized. A restore or rm since, then a put that gave the name to
+        // another item, would leave that item with this size.
+        if RecordLook::take(&record).as_ref() != Some(&seen) {
+            return;
+        }
         let _critical = crate::interrupt::critical();
         let _ = directorysizes_upsert(trash, name, size, mtime);
         crate::trash_inodes::record(trash, name, inodes);
+    }
+}
+
+/// One look at a record: its bytes, and which file held them since when.
+/// Two looks that differ saw two records, even under one name.
+#[derive(PartialEq, Eq)]
+struct RecordLook {
+    body: Vec<u8>,
+    file: (u64, u64, i64, i64),
+}
+
+impl RecordLook {
+    fn take(path: &Path) -> Option<Self> {
+        let meta = fs::metadata(path).ok()?;
+        let body = info::read_bounded(path, info::RECORD_CAP).ok()?;
+        let file = (meta.dev(), meta.ino(), meta.mtime(), meta.mtime_nsec());
+        Some(RecordLook { body, file })
     }
 }
 
@@ -2956,6 +2989,10 @@ mod tests {
         /// thread, as on a file system with no hard links.
         pub(super) static NO_HARD_LINKS: std::cell::Cell<bool> =
             const { std::cell::Cell::new(false) };
+        /// Set by a test: run once on this thread after `record_dir_size`
+        /// has sized the item and before it takes the trash lock.
+        pub(super) static AFTER_WALK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
     }
 
     /// A trash under the temp dir for one put test, fresh.
@@ -4430,6 +4467,40 @@ proc /proc proc rw 0 0
         assert_eq!(fs::read(root.join("target")).unwrap(), b"t");
         remove_record(&root.join("f.trashinfo")).unwrap();
         assert!(!root.join("f.trashinfo").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// record_dir_size sizes a trashed directory outside the lock, then
+    /// writes its line under it only for the record it sized. A put that
+    /// gave the name to another item meanwhile gets no line with the old
+    /// size (round 244).
+    #[test]
+    fn a_dir_size_skips_a_name_taken_during_the_walk() {
+        let (root, td) = put_trash("dirsize-retaken");
+        let item = root.join("d");
+        fs::create_dir(&item).unwrap();
+        fs::write(item.join("f"), vec![7u8; 64 * 1024]).unwrap();
+        let meta = fs::symlink_metadata(&item).unwrap();
+        let name = trash_move_locked(&item, &meta, &td).unwrap();
+        let (files, info_dir, again) = (td.files(), td.info(), name.clone());
+        AFTER_WALK.set(Some(Box::new(move || {
+            // Another run takes the item out, and a put gives its name to
+            // another, empty directory.
+            fs::remove_dir_all(join_name(&files, &again)).unwrap();
+            let record = join_info(&info_dir, &again);
+            fs::remove_file(&record).unwrap();
+            fs::create_dir(join_name(&files, &again)).unwrap();
+            let body = info::render_batch(&item, &info::now_local_string(), Some("1-1"));
+            fs::write(&record, body).unwrap();
+        })));
+        record_dir_size(&td, &name);
+        let sizes = td.root.join("directorysizes");
+        let lines = fs::read_to_string(&sizes).unwrap_or_default();
+        assert!(!lines.contains(&name), "{lines}");
+        // With nothing in between, the line is written.
+        record_dir_size(&td, &name);
+        let lines = fs::read_to_string(&sizes).unwrap_or_default();
+        assert!(lines.contains(&name), "{lines}");
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -1,0 +1,1 @@
+rtrash sizes a trashed directory after the put lets go of the trash lock, so other puts need not wait for the walk. During that walk, the item could leave the trash and another item could take its name. The cache of directory sizes then got the old size for the new item. Now the size goes into the cache only when the record is still the one that was sized.
