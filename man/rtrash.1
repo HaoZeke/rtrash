@@ -1378,6 +1378,12 @@ a file met again through a symlink counts where a walk thread first
 meets it.
 On Windows, where the listing gives no link count, a file counts where a
 walk thread first meets it.
+On Windows du gives a compressed file its real disk use, the
+"Size on disk" of Explorer.
+That covers file compression
+.RB ( "compact /c" )
+and Compact, the Windows Overlay Filter
+.RB ( "compact /exe" ).
 On Unix a directory met a second time with the same device and inode, as a
 bind mount on the same file system shows it, is walked once, under the name
 met first; one

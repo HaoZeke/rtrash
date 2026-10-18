@@ -164,6 +164,11 @@ jobs:
       - name: Test without the TUI feature
         run: cargo test --locked --no-default-features
 
+      # The sizes du measured for compressed files, and whether Compact
+      # (compact /exe:lzx) ran, as compressed-size: lines in the log.
+      - name: Compressed file sizes
+        run: cargo test --locked --test du compressed_files_count_their_disk_use_on_windows -- --exact --nocapture
+
       # The PowerShell tables against what this build's --help shows, and a
       # live completion through the runner's pwsh.
       - name: PowerShell completions against the Windows help

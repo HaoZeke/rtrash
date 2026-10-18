@@ -2431,7 +2431,9 @@ def check_mount_table_reads():
 # junctions for links, while std and the --dupes walk took every name
 # surrogate for a link (round 263; diskus #42, gdu #441). Code outside the
 # tests tells a link by du_fs::fileid::is_link, the name-surrogate bit,
-# and names no IO_REPARSE_TAG_* constant but where one is declared.
+# and names no IO_REPARSE_TAG_* constant but where one is declared. One fn
+# names a tag that holds data, not a link: fileid::needs_real_size, which
+# tells a Compact file by IO_REPARSE_TAG_WOF (gdu #407; REPARSE_TAG_DATA).
 REPARSE_TAG_USE = re.compile(r"\bIO_REPARSE_TAG_\w+")
 REPARSE_TAG_DECL = re.compile(r"^\s*(?:pub(?:\([a-z]+\))? )?const IO_REPARSE_TAG_\w+\s*:")
 REPARSE_TAG_CASES = [
@@ -2440,6 +2442,9 @@ REPARSE_TAG_CASES = [
     ("declared", "    pub const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;", False),
     ("surrogate", "    tag & NAME_SURROGATE != 0", False),
 ]
+
+
+REPARSE_TAG_DATA = {"needs_real_size"}
 
 
 def reparse_tag_line(line):
@@ -2457,8 +2462,11 @@ def check_reparse_links():
     for path in sorted((ROOT / "src").rglob("*.rs")):
         raw = path.read_text(encoding="utf-8")
         skip = test_mod_lines(raw.split("\n"))
-        for k, line in enumerate(rust_code(raw).split("\n")):
-            if k not in skip and reparse_tag_line(line):
+        lines = rust_code(raw).split("\n")
+        for k, line in enumerate(lines):
+            if k in skip or not reparse_tag_line(line):
+                continue
+            if enclosing_fn(lines, k) not in REPARSE_TAG_DATA:
                 errors.append(f"{path.relative_to(ROOT).as_posix()}:{k + 1}: a reparse tag decides "
                               "here; a list of tags misses the rest, so tell a link by "
                               "du_fs::fileid::is_link (the name-surrogate bit)")
@@ -2590,6 +2598,51 @@ def check_win_paths():
                           "so a path of 260 characters or more fails; use util::win_path (or "
                           "util::win_text for a name that is not a path)")
 
+
+# gdu #407: on Windows the allocation size of a file that NTFS compression
+# or Compact (WOF) packed is not its disk use. du_fs::fileid::needs_real_size
+# says which files those are; GetCompressedFileSizeW gives their real size.
+# A function that reads an allocation size and never asks it counts such a
+# file at its full size. ALLOC_CASES tests the matcher.
+ALLOC_READ = re.compile(r"\bAllocationSize\b|\ballocation_size\s*\)")
+ALLOC_CASES = [
+    ("std", "    let mut allocated = std_info.AllocationSize.max(0) as u64;", True),
+    ("listing", "    let a = i64_at(rec, offset_of!(I, allocation_size));", True),
+    ("field", "        pub allocation_size: i64,", False),
+]
+
+
+def enclosing_fn_text(lines, k):
+    """Lines from the fn declared at or above 0-based `k` to the next fn."""
+    decl = re.compile(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?fn\s+\w+")
+    start = k
+    while start > 0 and not decl.match(lines[start]):
+        start -= 1
+    end = k + 1
+    while end < len(lines) and not decl.match(lines[end]):
+        end += 1
+    return "\n".join(lines[start:end])
+
+
+def check_compressed_sizes():
+    """Each fn in src/ that reads an allocation size asks needs_real_size."""
+    for what, line, want in ALLOC_CASES:
+        if bool(ALLOC_READ.search(line)) != want:
+            errors.append(f"scripts/precheck.py: ALLOC_READ gets ALLOC_CASES '{what}' wrong; "
+                          "the compressed-size check is broken")
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        raw = path.read_text(encoding="utf-8")
+        skip = test_mod_lines(raw.split("\n"))
+        lines = rust_code(raw).split("\n")
+        for k, line in enumerate(lines):
+            if k in skip or not ALLOC_READ.search(line):
+                continue
+            if "needs_real_size(" in enclosing_fn_text(lines, k):
+                continue
+            errors.append(f"{rel}:{k + 1}: an allocation size read without needs_real_size counts "
+                          "a compressed or Compact file at its full size; check "
+                          "du_fs::fileid::needs_real_size and use GetCompressedFileSizeW")
 
 # trash-cli #354: a blocking flock hangs without a word behind a long empty
 # or a process stuck on a dead mount. The trash lock waits in
@@ -2859,7 +2912,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_directorysizes_paths()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
