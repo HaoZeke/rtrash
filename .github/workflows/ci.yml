@@ -117,6 +117,10 @@ jobs:
           sudo mount -o loop "$RUNNER_TEMP/reflink.img" /mnt/reflink
           sudo chown "$(id -u):$(id -g)" /mnt/reflink
           echo "RTRASH_REFLINK_DIR=/mnt/reflink" >> "$GITHUB_ENV"
+          # The bind mount test: dst shows src, on the same device.
+          mkdir -p /mnt/reflink/bind/src /mnt/reflink/bind/dst
+          sudo mount --bind /mnt/reflink/bind/src /mnt/reflink/bind/dst
+          echo "RTRASH_BIND_DIR=/mnt/reflink/bind" >> "$GITHUB_ENV"
 
       - name: Shared extent tests
         run: cargo test --locked --test reflink_fs -- --nocapture

@@ -2,7 +2,9 @@
 //!
 //! These need a directory on such a file system in `RTRASH_REFLINK_DIR`,
 //! which CI makes from a loop image. Without it they pass without checking
-//! anything, so a plain `cargo test` stays the same everywhere.
+//! anything, so a plain `cargo test` stays the same everywhere. The bind
+//! mount test needs `RTRASH_BIND_DIR`, a directory holding `src` and its
+//! bind mount `dst`, which CI also makes.
 
 #![cfg(target_os = "linux")]
 
@@ -406,4 +408,58 @@ fn du_x_totals_match_gnu_du_x_across_a_btrfs_subvolume() {
         .output();
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(dir.with_extension("home"));
+}
+
+/// ncdu #223: a directory bind-mounted on the same device keeps its
+/// device and inode, so a walk that meets both names would count its
+/// files twice. CI bind-mounts `src` at `dst` under `RTRASH_BIND_DIR`
+/// (the mount needs root, so the workflow makes it, not the test). The
+/// totals match coreutils du with `dst` left out, with and without -x.
+#[test]
+fn a_bind_mount_on_the_same_device_counts_once() {
+    use std::os::unix::fs::MetadataExt;
+    let Some(base) = std::env::var_os("RTRASH_BIND_DIR").map(PathBuf::from) else {
+        eprintln!("RTRASH_BIND_DIR unset; skipping");
+        return;
+    };
+    let (src, dst) = (base.join("src"), base.join("dst"));
+    let (s, d) = (fs::metadata(&src).unwrap(), fs::metadata(&dst).unwrap());
+    assert_eq!(
+        (s.dev(), s.ino()),
+        (d.dev(), d.ino()),
+        "dst is not a bind mount of src"
+    );
+    let work = src.join("t");
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(work.join("d")).unwrap();
+    fs::write(work.join("big.bin"), vec![5u8; 400_000]).unwrap();
+    fs::write(work.join("d/inner.bin"), vec![6u8; 50_000]).unwrap();
+    assert!(
+        dst.join("t/big.bin").is_file(),
+        "the bind mount does not show src"
+    );
+    assert!(Command::new("sync").status().unwrap().success());
+    let arg = base.to_str().unwrap().to_owned();
+    let once = |flag: &'static str| gnu_du(&base, &["--exclude=dst", flag]);
+    let (disk, apparent, inodes) = (once("-B1"), once("-b"), once("--inodes"));
+    // For the log: one PATH, so coreutils du counts the bind twice.
+    eprintln!("coreutils du -sb of both names: {}", gnu_du(&base, &["-b"]));
+    for x in [false, true] {
+        let mut args = vec!["du", "--json", "--no-git"];
+        if x {
+            args.push("-x");
+        }
+        args.push(&arg);
+        let json = run(&base, &args);
+        assert_eq!(num(&json, "\"roots\"", "disk"), disk, "-x {x}: {json}");
+        assert_eq!(
+            num(&json, "\"roots\"", "apparent"),
+            apparent,
+            "-x {x}: {json}"
+        );
+        let counted = num(&json, "\"roots\"", "files") + num(&json, "\"roots\"", "dirs");
+        assert_eq!(counted, inodes, "-x {x}: {json}");
+    }
+    let _ = fs::remove_dir_all(&work);
+    let _ = fs::remove_dir_all(base.with_extension("home"));
 }

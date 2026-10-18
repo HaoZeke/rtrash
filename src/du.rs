@@ -865,8 +865,9 @@ struct Ctx<'a> {
     root_dev: u64,
     /// Multiply-linked files already counted.
     seen: LinkSet,
-    /// `-L`: directories entered so far, so a symlink loop or a second
-    /// link to a directory walks it once.
+    /// Directories entered so far, so one met again is walked once: a
+    /// bind mount on the same device on Unix, and with `-L` a symlink
+    /// loop or a second link to a directory.
     dirs_seen: LinkSet,
     unreadable: AtomicU64,
     /// The first [`UNREAD_KEPT`] unreadable entries, with the reason.
@@ -1195,9 +1196,12 @@ fn enter(
         let mut s = ctx.snapshots.lock().unwrap_or_else(|e| e.into_inner());
         s.push(path.to_path_buf());
     }
-    // -L: a directory met again, through a loop or a second link, is
-    // walked once.
-    if follow && st.ino != 0 && !ctx.dirs_seen.insert(st.dev, st.ino) {
+    // A directory met again is walked once. Without -L only a bind mount
+    // on the same device shows one twice, with the same inode, and its
+    // files then counted twice (ncdu #223); coreutils du counts them
+    // once only when given several PATHs. With -L a loop or a second link
+    // does it too. Windows file IDs are not checked.
+    if (follow || cfg!(unix)) && st.ino != 0 && !ctx.dirs_seen.insert(st.dev, st.ino) {
         return None;
     }
     walk_dir(ctx, dir, path, &st, depth, listing, chain)

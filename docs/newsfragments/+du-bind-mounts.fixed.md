@@ -1,0 +1,1 @@
+On Unix, `rtrash du` walks a directory met a second time with the same device and inode once, under the name it met first. A bind mount on the same file system shows a directory that way, and its files used to count twice (ncdu #223). The totals now match coreutils `du` with the second name left out; `du` over one `PATH` still counts them twice.
