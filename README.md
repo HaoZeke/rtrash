@@ -484,7 +484,8 @@ Permanently deletes trash entries whose original path, basename, or trash name m
 Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
 An orphan matches by its name in `files/` or its path there.
 Does **not** restore.
-Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-f`/`--force` (mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).
+On a terminal it names the matches (the first 10, with sizes) and asks once before it deletes, as `rm -I` does and as trash-cli #383 asks of `trash-rm`. Only `y` or `yes` goes on. A script, whose stdin or stderr is not a terminal, is never asked, so pipelines and cron jobs work as before. `-i`/`--interactive` asks even then, with the reply read from stdin. `-y`/`--yes` and `-f`/`--force` never ask, and the last of the three wins.
+Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-i`/`--interactive`, `-y`/`--yes`, `-f`/`--force` (no question, and mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).
 
 ## FreeDesktop durability notes
 

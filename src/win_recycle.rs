@@ -3428,7 +3428,12 @@ registry), then the total and the free space on each (a warning under
                     Err(e) => bad_match = Some(e),
                 },
                 "--json" => json = true,
-                "-f" | "--force" => force = true,
+                "-f" | "--force" => {
+                    force = true;
+                    crate::rm_ask::set(crate::rm_ask::Mode::Never);
+                }
+                "-y" | "--yes" => crate::rm_ask::set(crate::rm_ask::Mode::Never),
+                "-i" | "--interactive" => crate::rm_ask::set(crate::rm_ask::Mode::Always),
                 a if a.starts_with("--max-count=") => {
                     match crate::permanent_guard::max_count_arg(a) {
                         Some(Ok(n)) => crate::permanent_guard::set_max_count(n),
@@ -3461,7 +3466,10 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
       --batch=last  only the items the latest put moved (Windows keeps
                    that one run); with no PATTERN, all of them
   -n, --dry-run  list matches only
-  -f, --force    allow mass patterns (e.g. '*')
+  -i, --interactive  ask even when stdin is not a terminal (rm asks on
+                   a terminal by default, naming the matches)
+  -y, --yes      do not ask
+  -f, --force    do not ask, and allow mass patterns (e.g. '*')
       --max-count=N  refuse, deleting nothing, when more than N items
                    would go (also RTRASH_MAX_PERMANENT)
   -v, --verbose  print each path
@@ -3571,6 +3579,16 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             }
             if let Some(code) = crate::permanent_guard::check_count(prog, matched.len() as u64) {
                 return code;
+            }
+        }
+        // On a terminal, or with -i, rm names the matches and asks once.
+        if crate::rm_ask::would_ask(dry_run, json) {
+            let named: Vec<(String, u64)> = matched
+                .iter()
+                .map(|it| (crate::util::term_path(&original_of(it)), item_size(it)))
+                .collect();
+            if !crate::rm_ask::confirm(prog, &named) {
+                return 0;
             }
         }
         if !json && (dry_run || verbose) {

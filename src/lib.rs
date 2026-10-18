@@ -72,6 +72,7 @@ pub mod restore_tui;
 pub mod retention;
 #[cfg(unix)]
 pub mod rm;
+pub mod rm_ask;
 #[cfg(unix)]
 pub mod safety;
 #[cfg(unix)]

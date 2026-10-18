@@ -3846,6 +3846,28 @@ or multi-call
 permanently deletes matching
 .I trash
 entries — not a synonym for put.
+.PP
+When stdin and stderr are both terminals, rm names the matches (the
+first 10, with their sizes, then a count of the rest) and asks once,
+as
+.B rm \-I
+does; only
+.B y
+or
+.B yes
+goes on, and any other reply removes nothing and exits 0.
+A script, whose stdin or stderr is not a terminal, is not asked and
+works as before; so is a dry run, and a
+.B \-\-json
+run unless
+.B \-i
+is given.
+The last of
+.BR \-i ,
+.B \-f
+and
+.B \-y
+on the command line wins, as with rm(1).
 .TP
 .BI \-\-trash\-dir =PATH
 Only consider this trash directory (repeatable).
@@ -3943,8 +3965,15 @@ works: the Recycle Bin keeps no run ids, and rtrash records the latest put.
 .BR \-n ", " \-\-dry\-run
 List matches and reclaimable size; do not delete.
 .TP
+.BR \-i ", " \-\-interactive
+Ask before deleting even when stdin is not a terminal, reading the
+reply from stdin; end of input is a no.
+.TP
+.BR \-y ", " \-\-yes
+Do not ask.
+.TP
 .BR \-f ", " \-\-force
-Allow mass patterns that match everything (e.g.
+Do not ask, and allow mass patterns that match everything (e.g.
 .RB \(oq * \(cq).
 .TP
 .BR \-v ", " \-\-verbose

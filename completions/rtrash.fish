@@ -269,7 +269,9 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l max-cou
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l regex -d 'PATTERNs are regular expressions on the original path'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s m -l match -d 'how to read PATTERNs' -xa 'glob regex substring exact'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s n -l dry-run -d 'list matches and reclaimable size; do not delete'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s f -l force -d 'allow mass patterns that match everything'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s i -l interactive -d 'ask before deleting, even off a terminal'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s y -l yes -d 'do not ask before deleting'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s f -l force -d 'do not ask, and allow mass patterns that match everything'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s v -l verbose -d 'print each permanently removed original path'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l json -d 'JSON summary with matches'
 
@@ -401,6 +403,8 @@ complete -c trash-rm -l regex
 complete -c trash-rm -s m -l match -xa 'glob regex substring exact'
 complete -c trash-rm -l json
 complete -c trash-rm -s n -l dry-run
+complete -c trash-rm -s i -l interactive
+complete -c trash-rm -s y -l yes
 complete -c trash-rm -s f -l force
 complete -c trash-rm -s v -l verbose
 complete -c trash-rm -l help

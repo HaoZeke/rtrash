@@ -342,7 +342,9 @@ export extern "rtrash rm" [
     --regex  # PATTERNs are regular expressions on the original path
     --match(-m): string  # how to read PATTERNs: glob, regex, substring or exact
     --dry-run(-n)  # list matches and reclaimable size; do not delete
-    --force(-f)  # allow mass patterns that match everything (e.g. '*')
+    --interactive(-i)  # ask before deleting, even when stdin is not a terminal
+    --yes(-y)  # do not ask
+    --force(-f)  # do not ask, and allow mass patterns that match everything
     --verbose(-v)  # print each permanently removed original path
     --json  # emit a JSON summary (and matched originals array)
     --help  # display this help and exit
@@ -562,7 +564,9 @@ export extern "trash-rm" [
     --max-count: string  # refuse when more than N items would go
     --regex  # PATTERNs are regular expressions on the original path
     --match(-m): string  # how to read PATTERNs: glob, regex, substring or exact
-    --force(-f)  # allow mass patterns that match everything (e.g. '*')
+    --interactive(-i)  # ask before deleting, even when stdin is not a terminal
+    --yes(-y)  # do not ask
+    --force(-f)  # do not ask, and allow mass patterns that match everything
     --verbose(-v)  # print each permanently removed original path
     --json  # emit a JSON summary (and matched originals array)
     --help  # display this help and exit

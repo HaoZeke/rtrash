@@ -18,6 +18,10 @@ Note: multi-call name `rm` means *put into trash* (safe). This command
 (subcommand `rtrash rm` or multi-call `trash-rm`) permanently deletes
 matching *trash* entries — not a synonym for put.
 
+On a terminal, rm names the matches (the first 10, with sizes) and asks
+once before it deletes them, as rm -I does. A script whose stdin or
+stderr is not a terminal is not asked. The last of -i, -f and -y wins.
+
       --trash-dir=PATH  only consider this trash directory (repeatable)
       --home-only  only the home trash (skip volume trash)
       --older-than=AGE  only match items trashed more than AGE ago: DAYS,
@@ -34,7 +38,11 @@ matching *trash* entries — not a synonym for put.
       --batch=ID   only items from one put run: an ID from `undo --list`,
                      or `last` for the latest; with no PATTERN, all of it
   -n, --dry-run    list matches and reclaimable size; do not delete
-  -f, --force      allow mass patterns that match everything (e.g. '*')
+  -i, --interactive  ask even when stdin is not a terminal (the reply is
+                     read from stdin; no reply removes nothing)
+  -y, --yes        do not ask
+  -f, --force      do not ask, and allow mass patterns that match
+                     everything (e.g. '*')
       --max-count=N  refuse, deleting nothing, when more than N items
                      would go (also RTRASH_MAX_PERMANENT)
   -v, --verbose    print each permanently removed original path
@@ -89,7 +97,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         let arg = &args[i];
         match arg.as_str() {
             "-v" | "--verbose" => verbose = true,
-            "-f" | "--force" => force = true,
+            "-f" | "--force" => {
+                force = true;
+                crate::rm_ask::set(crate::rm_ask::Mode::Never);
+            }
+            "-y" | "--yes" => crate::rm_ask::set(crate::rm_ask::Mode::Never),
+            "-i" | "--interactive" => crate::rm_ask::set(crate::rm_ask::Mode::Always),
             "-n" | "--dry-run" => dry_run = true,
             "--home-only" => home_only = true,
             "--json" => json = true,
@@ -316,6 +329,18 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
         if let Some(code) = crate::permanent_guard::check_count(prog, hits.len() as u64) {
             return code;
+        }
+    }
+
+    // On a terminal, or with -i, rm names the matches and asks once.
+    if crate::rm_ask::would_ask(dry_run, json) {
+        let named: Vec<(String, u64)> = entries
+            .iter()
+            .filter(|e| wanted(e))
+            .map(|e| (crate::util::term_path(&e.original), size_of(e)))
+            .collect();
+        if !crate::rm_ask::confirm(prog, &named) {
+            return 0;
         }
     }
 

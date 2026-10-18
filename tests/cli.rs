@@ -8441,3 +8441,124 @@ fn status_fix_clears_the_records_a_killed_put_leaves() {
     let again = sb.run(&["status", pin.as_str(), "--check"]);
     assert_eq!(again.status.code(), Some(0), "{}", stderr_of(&again));
 }
+
+/// A sandbox with `a.o` in its trash, and the pin to that trash.
+fn trashed_a_o(tag: &str) -> (Sandbox, String) {
+    let sb = Sandbox::new(tag);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("a.o");
+    assert!(sb.run(&["put", "a.o"]).status.success());
+    (sb, pin)
+}
+
+#[test]
+fn scripts_get_no_rm_question() {
+    let (sb, pin) = trashed_a_o("rm-no-tty");
+    // A script's stdin is a pipe: it is never asked, even with a no
+    // waiting in it.
+    let out = sb.run_with_stdin(&["rm", &pin, "a.o"], "n\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.trash().join("files/a.o").exists());
+    assert!(!stderr_of(&out).contains("(y/N)"), "{}", stderr_of(&out));
+}
+
+#[test]
+fn rm_interactive_asks_and_only_a_yes_deletes() {
+    let (sb, pin) = trashed_a_o("rm-ask");
+    let no = sb.run_with_stdin(&["rm", &pin, "-i", "a.o"], "n\n");
+    assert_eq!(no.status.code(), Some(0));
+    let err = stderr_of(&no);
+    assert!(err.contains("Permanently remove 1 item ("), "{err}");
+    assert!(err.contains("nothing removed"), "{err}");
+    assert!(sb.trash().join("files/a.o").is_file());
+    // End of input is a no as well.
+    let eof = sb.run_with_stdin(&["rm", &pin, "--interactive", "a.o"], "");
+    assert_eq!(eof.status.code(), Some(0));
+    assert!(sb.trash().join("files/a.o").is_file());
+    let yes = sb.run_with_stdin(&["rm", &pin, "-i", "a.o"], "yes\n");
+    assert!(yes.status.success(), "{}", stderr_of(&yes));
+    assert!(!sb.trash().join("files/a.o").exists());
+}
+
+#[test]
+fn the_last_of_rm_i_y_and_f_wins() {
+    for (tag, flag) in [
+        ("rm-ask-y", "-y"),
+        ("rm-ask-yes", "--yes"),
+        ("rm-ask-f", "-f"),
+    ] {
+        let (sb, pin) = trashed_a_o(tag);
+        let out = sb.run_with_stdin(&["rm", &pin, "-i", flag, "a.o"], "n\n");
+        assert!(out.status.success(), "{flag}: {}", stderr_of(&out));
+        assert!(!sb.trash().join("files/a.o").exists(), "{flag}");
+    }
+    // -i after -y asks again.
+    let (sb, pin) = trashed_a_o("rm-ask-last");
+    let out = sb.run_with_stdin(&["rm", &pin, "-y", "-i", "a.o"], "n\n");
+    assert!(
+        stderr_of(&out).contains("nothing removed"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(sb.trash().join("files/a.o").is_file());
+}
+
+/// On a terminal rm names the match and asks without -i; a no keeps it.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_terminal_gets_the_rm_question_and_a_no_keeps_it() {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+
+    let (sb, pin) = trashed_a_o("rm-tty");
+    let (mut m, mut s) = (0, 0);
+    // SAFETY: openpty writes the two fds; no name, termios or size.
+    let rc = unsafe {
+        libc::openpty(
+            &mut m,
+            &mut s,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+    // SAFETY: both fds are new and owned here alone.
+    let (mut master, slave) = unsafe { (fs::File::from_raw_fd(m), fs::File::from_raw_fd(s)) };
+    let mut child = common::rtrash(&sb.root)
+        .args(["rm", &pin, "a.o"])
+        .current_dir(sb.work())
+        .stdin(slave.try_clone().unwrap())
+        .stderr(slave.try_clone().unwrap())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("failed to spawn rtrash");
+    drop(slave);
+    // The line waits in the terminal until rm reads its reply.
+    master.write_all(b"n\n").unwrap();
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(30) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("rtrash rm still waiting after 30 s");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    // With the child gone, the master reads what it wrote, then EIO.
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 4096];
+    while let Ok(n) = master.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        seen.extend_from_slice(&buf[..n]);
+    }
+    let seen = String::from_utf8_lossy(&seen);
+    assert!(status.success(), "{seen}");
+    assert!(seen.contains("Permanently remove 1 item ("), "{seen}");
+    assert!(sb.trash().join("files/a.o").is_file());
+}

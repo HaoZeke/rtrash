@@ -45,7 +45,7 @@ run "trash-list $PIN"
 
 banner "selective permanent delete (rtrash rm / trash-rm)"
 run "rtrash rm -n $PIN '*.o'"
-run "rtrash rm $PIN '*.o'"
+run "rtrash rm -y $PIN '*.o'"
 run "trash-list $PIN"
 
 banner "empty --dry-run then purge leftover"

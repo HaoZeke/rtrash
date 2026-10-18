@@ -663,6 +663,19 @@ pub fn rm(
             return code;
         }
     }
+    // On a terminal, or with -i, rm names the matches and asks once.
+    if crate::rm_ask::would_ask(dry_run, json) {
+        let named: Vec<(String, u64)> = hits
+            .iter()
+            .map(|e| {
+                let size = crate::finder_total::measure_item(&e.path()).0;
+                (crate::util::term_path(&e.shown), size)
+            })
+            .collect();
+        if !crate::rm_ask::confirm(prog, &named) {
+            return 0;
+        }
+    }
     for e in hits {
         let path_s = e.shown.to_string_lossy();
         let m = crate::finder_total::measure_item(&e.path());
