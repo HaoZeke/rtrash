@@ -3673,6 +3673,8 @@ one_file_system = false   # \-x
 threads = 8               # \-\-threads
 git = true                # false = \-\-no\-git
 exclude = ["*.iso"]       # \-\-exclude, before any given on the command line
+exclude_regex = ['\e.tmp$'] # \-\-exclude\-regex, before any given on the command line
+include_regex = []        # \-\-include\-regex, likewise
 exclude_caches = false    # \-\-exclude\-caches
 gitignore = false         # \-\-gitignore
 no_delete = false         # \-\-no\-delete for every \-i

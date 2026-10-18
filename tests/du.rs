@@ -870,6 +870,33 @@ fn config_file_sets_du_defaults_and_options_win() {
 }
 
 #[test]
+fn config_file_regexes_filter_and_the_flags_add_to_them() {
+    let t = Tree::new("config-regex");
+    t.file("a/x.iso", 300_000);
+    t.file("a/y.bin", 100_000);
+    t.file("b/z.bin", 200_000);
+    t.file("b/w.txt", 50_000);
+    fs::create_dir_all(t.root.join(".cfg/rtrash")).unwrap();
+    fs::write(
+        t.root.join(".cfg/rtrash/config.toml"),
+        "[du]\ngit = false\nexclude_regex = ['\\.iso$', '(']\ninclude_regex = ['\\.bin$']\n",
+    )
+    .unwrap();
+    let out = t.du(&["--json"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{err}");
+    // The bad regex is named and skipped; the others still apply.
+    assert!(
+        err.contains("config du.exclude_regex: invalid regex '('"),
+        "{err}"
+    );
+    let j = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(field(&j, "apparent"), 300_000, "{j}");
+    let j = t.json(&["--exclude-regex=z\\.bin$"]);
+    assert_eq!(field(&j, "apparent"), 100_000, "{j}");
+}
+
+#[test]
 fn show_relative_size_adds_a_share_of_the_path_total() {
     let t = Tree::new("relsize");
     t.file("big/a.bin", 300_000);

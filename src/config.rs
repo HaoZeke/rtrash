@@ -76,6 +76,18 @@ const KEYS: &[(&str, &str, Kind, &str)] = &[
     ),
     (
         "du",
+        "exclude_regex",
+        Kind::List,
+        "path regexes to leave out (--exclude-regex)",
+    ),
+    (
+        "du",
+        "include_regex",
+        Kind::List,
+        "path regexes the files must match (--include-regex)",
+    ),
+    (
+        "du",
         "exclude_caches",
         Kind::Bool,
         "leave out tagged caches (--exclude-caches)",
@@ -540,6 +552,7 @@ pub fn template() -> String {
             ("du", "top", _) => "20".to_string(),
             ("du", "threads", _) => "8".to_string(),
             ("du", "exclude", _) => "[\"*.iso\", \"/scratch/\"]".to_string(),
+            ("du", "exclude_regex", _) => "[\"\\\\.tmp$\"]".to_string(),
             ("du", "git", _) => "true".to_string(),
             ("list", "sort", _) => "\"date\"".to_string(),
             ("policy", "max_size", _) => "\"50G\"".to_string(),

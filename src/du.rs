@@ -3416,6 +3416,19 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             filter.patterns.push(p.clone());
         }
     }
+    // Regexes as --exclude-regex and --include-regex take them; the flags
+    // add to these. A regex that does not compile is named and skipped.
+    for (key, out) in [
+        ("exclude_regex", &mut filter.regex_out),
+        ("include_regex", &mut filter.regex_in),
+    ] {
+        for re in cfg.list("du", key) {
+            match du_filter::path_regex(re) {
+                Ok(_) => out.push(re.clone()),
+                Err(e) => eprintln!("{prog}: warning: config du.{key}: {e}"),
+            }
+        }
+    }
     let mut i = 0usize;
     while i < args.len() {
         let arg = args[i].as_str();
