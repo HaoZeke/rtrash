@@ -37,6 +37,9 @@ impl Tree {
             .current_dir(&self.root)
             .env("XDG_DATA_HOME", self.root.join(".xdg"))
             .env("XDG_CONFIG_HOME", self.root.join(".cfg"))
+            .envs(no_host_git_config(&self.root))
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_PARAMETERS")
             .output()
             .expect("run rtrash du")
     }
@@ -49,6 +52,9 @@ impl Tree {
             .current_dir(&self.root)
             .env("XDG_DATA_HOME", self.root.join(".xdg"))
             .env("XDG_CONFIG_HOME", self.root.join(".cfg"))
+            .envs(no_host_git_config(&self.root))
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_PARAMETERS")
             .envs(envs.iter().copied())
             .output()
             .expect("run rtrash du")
@@ -4001,4 +4007,161 @@ fn a_cache_left_out_whole_counts_once_in_its_parent() {
     .unwrap();
     let j = t.json(&["--no-git", "--dirs", "--exclude-caches"]);
     assert_eq!(field(row(&j, &s(&mixed)), "filtered_out"), 1);
+}
+
+/// The git config of the machine running the tests stays out: no system
+/// file, and a global file under `root` that a test may write. Callers
+/// also drop `GIT_CONFIG_COUNT` and `GIT_CONFIG_PARAMETERS`.
+fn no_host_git_config(root: &Path) -> [(&'static str, std::ffi::OsString); 2] {
+    [
+        ("GIT_CONFIG_NOSYSTEM", "1".into()),
+        (
+            "GIT_CONFIG_GLOBAL",
+            root.join(".gitconfig").into_os_string(),
+        ),
+    ]
+}
+
+/// Whether `git check-ignore` ignores `rel` in `dir`, with the home and
+/// config that `Tree::du` gives rtrash.
+fn git_check_ignore(t: &Tree, dir: &Path, rel: &str) -> bool {
+    let out = Command::new("git")
+        .args(["check-ignore", "-q", rel])
+        .current_dir(dir)
+        .env("HOME", &t.root)
+        .env("USERPROFILE", &t.root)
+        .env("XDG_CONFIG_HOME", t.root.join(".cfg"))
+        .envs(no_host_git_config(&t.root))
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .output()
+        .unwrap();
+    let code = out.status.code();
+    assert!(
+        matches!(code, Some(0 | 1)),
+        "git check-ignore {rel}: {out:?}"
+    );
+    code == Some(0)
+}
+
+#[test]
+fn gitignore_reads_the_excludes_file_git_config_names() {
+    let t = Tree::new("gitignore-excludes-file");
+    let repo = t.root.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let have_git = git_ok();
+    if have_git {
+        git(&repo, &["init", "-q"]);
+    }
+    fs::create_dir_all(repo.join(".git").join("info")).unwrap();
+    fs::create_dir_all(t.root.join(".cfg").join("git")).unwrap();
+    fs::write(t.root.join(".cfg").join("git").join("ignore"), "*.tmp\n").unwrap();
+    fs::write(t.root.join("global-ignore"), "*.bak\n*.loc\n*.dat\n").unwrap();
+    fs::write(t.root.join("home-ignore"), "keep.txt\n").unwrap();
+    // Lowest first: the global file, info/exclude, then .gitignore.
+    fs::write(repo.join(".git/info/exclude"), "!*.loc\n*.dat\n*.inf\n").unwrap();
+    fs::write(repo.join(".gitignore"), "!*.dat\n*.gi\n").unwrap();
+    // Kept with no core.excludesFile, with one in the global config, and
+    // with `~/home-ignore` in the repository config on top.
+    let table = [
+        ("a.tmp", [false, true, true]),
+        ("b.bak", [true, false, true]),
+        ("c.loc", [true, true, true]),
+        ("d.dat", [true, true, true]),
+        ("e.gi", [false, false, false]),
+        ("f.inf", [false, false, false]),
+        ("keep.txt", [true, true, false]),
+    ];
+    for (i, (rel, _)) in table.iter().enumerate() {
+        t.file(&format!("repo/{rel}"), 100 * (i + 1));
+    }
+    let path = s(&repo);
+    let args = [
+        "--json",
+        "--no-git",
+        "--gitignore",
+        "--files",
+        "-n",
+        "100",
+        path.as_str(),
+    ];
+    let check = |case: usize, envs: &[(&str, &str)], ask_git: bool| {
+        let out = t.du_env(&args, envs);
+        assert!(out.status.success(), "{out:?}");
+        let j = String::from_utf8(out.stdout).unwrap();
+        let files = paths_in(&j, "files");
+        for (rel, kept) in table {
+            let listed = files.contains(&s(&repo.join(rel)));
+            assert_eq!(listed, kept[case], "case {case}, {rel}: {j}");
+            if ask_git {
+                let ignored = git_check_ignore(&t, &repo, rel);
+                assert_eq!(!ignored, kept[case], "case {case}, git check-ignore {rel}");
+            }
+        }
+    };
+    check(0, &[], have_git);
+    if !have_git {
+        return;
+    }
+    let global = s(&t.root.join("global-ignore")).replace('\\', "/");
+    let config = format!("[core]\n\texcludesFile = \"{global}\"\n");
+    fs::write(t.root.join(".gitconfig"), config).unwrap();
+    check(1, &[], true);
+    // Without git on PATH only the default file counts.
+    if cfg!(unix) {
+        check(0, &[("PATH", "")], false);
+    }
+    git(&repo, &["config", "core.excludesFile", "~/home-ignore"]);
+    check(2, &[], true);
+}
+
+#[test]
+fn gitignore_reads_info_exclude_through_a_git_file() {
+    let t = Tree::new("gitignore-git-file");
+    let main = t.root.join("main");
+    let wt = t.root.join("wt");
+    fs::create_dir_all(&main).unwrap();
+    let have_git = git_ok();
+    if have_git {
+        git(&main, &["init", "-q"]);
+        t.file("main/README", 10);
+        git(&main, &["add", "README"]);
+        git(&main, &["commit", "-q", "-m", "first"]);
+        git(&main, &["worktree", "add", "-q", "-b", "wt", &s(&wt)]);
+    } else {
+        // The layout `git worktree add` leaves.
+        let admin = main.join(".git").join("worktrees").join("wt");
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(admin.join("commondir"), "../..\n").unwrap();
+        fs::create_dir_all(&wt).unwrap();
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", s(&admin))).unwrap();
+    }
+    fs::create_dir_all(main.join(".git").join("info")).unwrap();
+    fs::write(main.join(".git/info/exclude"), "*.wt\n").unwrap();
+    t.file("wt/x.wt", 100);
+    t.file("wt/y.txt", 200);
+    t.file("wt/sub/z.wt", 300);
+    t.file("wt/sub/k.txt", 400);
+    for root in [&t.root, &wt, &wt.join("sub")] {
+        let j = t.json(&["--no-git", "--gitignore", "--files", "-n", "1000", &s(root)]);
+        let files = paths_in(&j, "files");
+        for (rel, kept) in [
+            ("x.wt", false),
+            ("y.txt", true),
+            ("sub/z.wt", false),
+            ("sub/k.txt", true),
+        ] {
+            let p = wt.join(rel);
+            if p.starts_with(root) {
+                assert_eq!(files.contains(&s(&p)), kept, "{rel} from {root:?}: {j}");
+            }
+            if have_git {
+                assert_eq!(
+                    !git_check_ignore(&t, &wt, rel),
+                    kept,
+                    "git check-ignore {rel}"
+                );
+            }
+        }
+    }
 }

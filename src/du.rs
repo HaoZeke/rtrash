@@ -150,7 +150,8 @@ directories appear as one `trash` row and are never printed by --print0.
       --no-hidden       leave out hidden entries, those named with a
                           leading dot (same as --exclude='.*')
       --gitignore       leave out what git ignores: .gitignore files,
-                          .git/info/exclude and ~/.config/git/ignore, inside
+                          .git/info/exclude and the core.excludesFile of git
+                          config (by default ~/.config/git/ignore), inside
                           git repositories; a ! rule brings nothing back
                           from inside an excluded directory, as in git
       --dirs            list directories only

@@ -501,22 +501,63 @@ impl Filter {
     }
 }
 
-/// The user's global ignore file at its default place
-/// (`$XDG_CONFIG_HOME/git/ignore`).
-fn global_ignore() -> Option<String> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| crate::util::home_dir().map(|h| h.join(".config")))?;
-    read_text(&base.join("git").join("ignore")).ok()
+/// The global ignore file git reads for repository `repo`: the
+/// `core.excludesFile` its config sets, asked of git itself, else the
+/// default `$XDG_CONFIG_HOME/git/ignore`, or `~/.config/git/ignore` when
+/// that variable is unset or empty. Without git only the default counts.
+/// A relative path is taken from `repo`, as git takes it from the top of
+/// the work tree, and an empty value means none.
+fn global_ignore(repo: &Path) -> Option<String> {
+    let path = match crate::du_git::config_path(repo, "core.excludesFile") {
+        Some(Some(v)) if v.is_empty() => return None,
+        Some(Some(v)) => repo.join(v),
+        Some(None) | None => repo.join(default_global_ignore()?),
+    };
+    read_text(&path).ok()
 }
 
-/// The rules every path in repository `repo` starts from: the global
-/// ignore file, then `.git/info/exclude`.
+fn default_global_ignore() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| crate::util::home_dir().map(|h| h.join(".config")))?;
+    Some(base.join("git").join("ignore"))
+}
+
+/// The directory whose `info/exclude` applies to `repo`: its `.git`, or,
+/// when `.git` is a file as in a linked worktree or a submodule, the git
+/// directory that file names, and from there the common directory that
+/// worktrees share.
+fn exclude_dir(repo: &Path) -> PathBuf {
+    let dot = repo.join(".git");
+    let from = |base: &Path, text: &str| {
+        let p = PathBuf::from(text.trim_end_matches(['\n', '\r']));
+        if p.is_relative() {
+            base.join(p)
+        } else {
+            p
+        }
+    };
+    let Ok(text) = fs::read_to_string(&dot) else {
+        return dot;
+    };
+    let Some(gitdir) = text.lines().next().and_then(|l| l.strip_prefix("gitdir:")) else {
+        return dot;
+    };
+    let gitdir = from(repo, gitdir.trim_start());
+    match fs::read_to_string(gitdir.join("commondir")) {
+        Ok(common) => from(gitdir.as_path(), common.as_str()),
+        Err(_) => gitdir,
+    }
+}
+
+/// The rules every path in repository `repo` starts from, lowest first as
+/// git ranks them: the global ignore file, then `info/exclude`. Each
+/// `.gitignore` then goes on top.
 fn repo_base_chain(repo: &Path) -> Arc<Chain> {
     let mut chain = Arc::new(Chain::default());
-    let info = read_text(&repo.join(".git").join("info").join("exclude")).ok();
-    for text in [global_ignore(), info].into_iter().flatten() {
+    let info = read_text(&exclude_dir(repo).join("info").join("exclude")).ok();
+    for text in [global_ignore(repo), info].into_iter().flatten() {
         let r = Rules::new(repo.to_path_buf(), &text);
         if !r.is_empty() {
             chain = Chain::push(Some(chain), r);

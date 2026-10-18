@@ -1802,12 +1802,26 @@ Leave out what git ignores: patterns from
 .I .gitignore
 files,
 .I .git/info/exclude
-and
-.IR $XDG_CONFIG_HOME/git/ignore ,
-applied only inside git repositories. A nested repository starts afresh,
-as in git. A
+and the global ignore file, applied only inside git repositories. The
+global file is the
 .B core.excludesFile
-set elsewhere is not read.
+that git config sets, asked of git once per repository (even under
+.BR \-\-no\-git ),
+so repository config and includes count; when it is unset, or git is
+missing, it is
+.IR $XDG_CONFIG_HOME/git/ignore ,
+or
+.I ~/.config/git/ignore
+without that variable. A linked worktree or a submodule reads the
+.I info/exclude
+of the git directory its
+.I .git
+file names. Rules rank as in git, lowest first: the global file, then
+.IR info/exclude ,
+then each
+.IR .gitignore ,
+a deeper one over a shallower one. A nested repository starts afresh,
+as in git.
 A
 .B !
 pattern re-includes what an earlier one left out, and the last pattern

@@ -89,6 +89,30 @@ fn git(bin: &Path, repo: &Path) -> Command {
     c
 }
 
+/// What `git config --path --get KEY` prints in `repo`, so system, global
+/// and repository config, includes and `GIT_CONFIG_*` all count:
+/// `Some(Some(value))` when set, `Some(None)` when unset, `None` when git
+/// is missing or cannot answer. Git refuses the config of a repository it
+/// does not trust, so then it is asked from outside any repository.
+pub fn config_path(repo: &Path, key: &str) -> Option<Option<String>> {
+    let bin = find_git()?;
+    let ask = |dir: &Path| {
+        let out = git(&bin, dir)
+            .args(["config", "--path", "--get", key])
+            .output()
+            .ok()?;
+        match out.status.code() {
+            Some(0) => {
+                let v = crate::util::str_from_bytes(out.stdout);
+                Some(Some(v.trim_end_matches(['\n', '\r']).to_string()))
+            }
+            Some(1) => Some(None),
+            _ => None,
+        }
+    };
+    ask(repo).or_else(|| ask(&std::env::temp_dir()))
+}
+
 /// Nearest ancestor of `path` (not `path` itself) that has a `.git` entry.
 pub fn enclosing_repo(path: &Path) -> Option<PathBuf> {
     let mut cur = path.parent();
