@@ -446,10 +446,10 @@ pub fn find(files: Vec<File>) -> (Vec<Group>, u64) {
         })
         .collect();
     groups.sort_by(|a, b| {
-        b.reclaim
-            .cmp(&a.reclaim)
-            .then(b.size.cmp(&a.size))
-            .then_with(|| a.keep.path.cmp(&b.keep.path))
+        crate::du::rank(
+            ((a.reclaim, a.size), &a.keep.path),
+            ((b.reclaim, b.size), &b.keep.path),
+        )
     });
     (groups, cloud)
 }

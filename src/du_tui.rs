@@ -406,10 +406,9 @@ fn row_order(a: &Item, b: &Item, s: Sorting) -> std::cmp::Ordering {
             .to_lowercase()
     };
     let o = match s.order {
-        Order::Key(k) => b.key(k).cmp(&a.key(k)),
-        Order::Name => name(a).cmp(&name(b)),
-    }
-    .then_with(|| a.path.cmp(&b.path));
+        Order::Key(k) => du::rank_items(a, b, k),
+        Order::Name => name(a).cmp(&name(b)).then_with(|| a.path.cmp(&b.path)),
+    };
     if s.reverse {
         o.reverse()
     } else {

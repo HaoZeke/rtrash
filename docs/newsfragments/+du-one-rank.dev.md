@@ -1,0 +1,1 @@
+Every du ranking now orders through one function, du::rank: the table, the tree, the explorer, the type list, du diff and the dupe groups. Precheck refuses a comparator of its own in du that puts the larger first.

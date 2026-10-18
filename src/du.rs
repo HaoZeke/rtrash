@@ -470,6 +470,21 @@ impl Item {
     }
 }
 
+/// gdu #289 and 34(h): the one order of every du ranking, largest key
+/// first and ties by name, so the table, the tree, the explorer, the
+/// type list, du diff and the dupe groups agree on which row comes first.
+/// The keys and names are whatever a list ranks by. Precheck
+/// (`check_rank_order`) refuses a comparator anywhere else in du that
+/// puts a larger value first.
+pub fn rank<K: Ord, N: Ord + ?Sized>(a: (K, &N), b: (K, &N)) -> std::cmp::Ordering {
+    b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1))
+}
+
+/// [`rank`] of two rows by `sort`, ties by path.
+pub fn rank_items(a: &Item, b: &Item, sort: SortKey) -> std::cmp::Ordering {
+    rank((a.key(sort), &a.path), (b.key(sort), &b.path))
+}
+
 /// Lists up to this long keep sorted order on every insert.
 const SORTED_INSERT_CAP: usize = 1024;
 
@@ -507,7 +522,8 @@ impl TopN {
         }
         let k = item.key(self.sort);
         if let Some((fk, fp)) = &self.floor {
-            if (*fk, &item.path) >= (k, fp) {
+            // Turned away unless it ranks ahead of the floor.
+            if rank((k, &item.path), (*fk, fp)).is_ge() {
                 return false;
             }
         }
@@ -515,10 +531,9 @@ impl TopN {
             // Small lists stay sorted, so the floor is known as soon as
             // the list fills and workers prune from the start.
             let sort = self.sort;
-            let pos = self.items.partition_point(|x| {
-                let xk = x.key(sort);
-                xk > k || (xk == k && x.path < item.path)
-            });
+            let pos = self
+                .items
+                .partition_point(|x| rank_items(x, &item, sort).is_lt());
             self.items.insert(pos, item);
             self.items.truncate(self.cap);
             if self.items.len() == self.cap {
@@ -536,11 +551,7 @@ impl TopN {
     /// Sort largest first (ties by path) and keep the best N.
     fn cut(&mut self) {
         let sort = self.sort;
-        self.items.sort_unstable_by(|a, b| {
-            b.key(sort)
-                .cmp(&a.key(sort))
-                .then_with(|| a.path.cmp(&b.path))
-        });
+        self.items.sort_unstable_by(|a, b| rank_items(a, b, sort));
         self.items.truncate(self.cap);
         if self.items.len() == self.cap {
             self.floor = self.items.last().map(|x| (x.key(sort), x.path.clone()));
@@ -690,7 +701,7 @@ fn type_rows(map: TypeMap, sort: SortKey) -> Vec<TypeRow> {
         SortKey::Items => r.files,
         _ => r.disk,
     };
-    rows.sort_by(|a, b| key(b).cmp(&key(a)).then_with(|| a.ext.cmp(&b.ext)));
+    rows.sort_by(|a, b| rank((key(a), &a.ext), (key(b), &b.ext)));
     rows
 }
 
@@ -1774,9 +1785,10 @@ fn walk_dir(
         // thousands of files tie on size.
         let name_of = |c: &FileCandidate| entries.get(c.entry).0.to_bytes();
         let best_first = |x: &FileCandidate, y: &FileCandidate| {
-            ctx.key(y.apparent, y.disk, 1, y.mtime)
-                .cmp(&ctx.key(x.apparent, x.disk, 1, x.mtime))
-                .then_with(|| name_of(x).cmp(name_of(y)))
+            rank(
+                (ctx.key(x.apparent, x.disk, 1, x.mtime), name_of(x)),
+                (ctx.key(y.apparent, y.disk, 1, y.mtime), name_of(y)),
+            )
         };
         let top = opts.top;
         if candidates.len() > top {
@@ -3160,11 +3172,7 @@ fn tree_children(
         }
     }
     for v in kids.values_mut() {
-        v.sort_by(|a, b| {
-            b.key(sort)
-                .cmp(&a.key(sort))
-                .then_with(|| a.path.cmp(&b.path))
-        });
+        v.sort_by(|a, b| rank_items(a, b, sort));
         v.truncate(top);
         if dirs_first {
             // A stable sort keeps the rank order inside each group.
@@ -5037,6 +5045,40 @@ mod tests {
             want.truncate(cap);
             assert_eq!(big.into_vec(), want, "cap {cap}");
         }
+    }
+
+    /// 34(h): one order for every ranking: the larger key first, then
+    /// the smaller name.
+    #[test]
+    fn rank_puts_the_larger_first_and_ties_by_name() {
+        use std::cmp::Ordering::{Greater, Less};
+        assert_eq!(rank((5u64, "b"), (3, "a")), Less);
+        assert_eq!(rank((3u64, "a"), (5, "b")), Greater);
+        assert_eq!(rank((4u64, "a"), (4, "b")), Less);
+        assert!(rank((4u64, "a"), (4, "a")).is_eq());
+        let mut rows = [item("/m", 4, 4), item("/z", 9, 9), item("/a", 4, 4)];
+        rows.sort_by(|a, b| rank_items(a, b, SortKey::Disk));
+        let order: Vec<&Path> = rows.iter().map(|r| r.path.as_path()).collect();
+        assert_eq!(order, [Path::new("/z"), Path::new("/a"), Path::new("/m")]);
+    }
+
+    /// 34(h): the table (TopN) keeps the rows that `rank_items` puts
+    /// first, in that order, whatever order the scan met them in.
+    #[test]
+    fn the_table_keeps_the_rows_that_rank_puts_first() {
+        let rows = [
+            item("/r/c", 7, 7),
+            item("/r/a", 7, 7),
+            item("/r/b", 9, 9),
+            item("/r/d", 1, 1),
+        ];
+        let mut top = TopN::new(3, SortKey::Disk);
+        top.merge_vec(rows.iter().rev().cloned().collect());
+        let table: Vec<PathBuf> = top.into_vec().into_iter().map(|i| i.path).collect();
+        let mut sorted = rows.clone();
+        sorted.sort_by(|a, b| rank_items(a, b, SortKey::Disk));
+        let ranked: Vec<PathBuf> = sorted.into_iter().take(3).map(|i| i.path).collect();
+        assert_eq!(table, ranked);
     }
 
     #[test]

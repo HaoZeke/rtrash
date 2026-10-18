@@ -2715,6 +2715,100 @@ def check_link_copies():
                           "link, so make the link again (win_recycle::copy_link)")
 
 
+# gdu #289 and 34(h): the table, the tree and the explorer each sorted
+# largest first with their own comparator, and a copy can drift from the
+# others. Every du ranking goes through du::rank. In src/du*.rs and
+# src/du_fs/, test code aside, a `.cmp(` whose receiver names the second
+# value of a pair (b or y) and whose argument names the first (a or x)
+# puts the larger first; only the fns in RANK_FNS may do that.
+# RANK_CASES tests the matcher.
+RANK_FNS = {("src/du.rs", "rank")}
+RANK_CASES = [
+    ("inline", "v.sort_by(|a, b| b.key(s).cmp(&a.key(s)).then_with(|| a.path.cmp(&b.path)));", 1),
+    ("split", "let f = |x: &C, y: &C| {\n    key(y)\n        .cmp(&key(x))\n};", 1),
+    ("field", "g.sort_by(|a, b| {\n    b.reclaim\n        .cmp(&a.reclaim)\n});", 1),
+    ("by name", "v.sort_by(|a, b| a.path.cmp(&b.path));", 0),
+    ("ranked", "v.sort_by(|a, b| rank_items(a, b, sort));", 0),
+    ("tuple", "g.sort_by(|a, b| (a.mtime, &a.path).cmp(&(b.mtime, &b.path)));", 0),
+]
+RANK_IDENT = re.compile(r"(?<![\w.])([A-Za-z_]\w*)")
+
+
+def cmp_receiver(text, i):
+    """The receiver of the `.cmp(` whose dot is at `i`: a chain of names,
+    calls and fields, across line breaks before a dot."""
+    j = i
+    while j > 0:
+        c = text[j - 1]
+        if c.isspace():
+            k = j - 1
+            while k > 0 and text[k - 1].isspace():
+                k -= 1
+            if k > 0 and (text[k - 1] == "." or text[j:j + 1] == "."):
+                j = k
+                continue
+            break
+        if c == ")":
+            depth, k = 0, j - 1
+            while k >= 0:
+                depth += {")": 1, "(": -1}.get(text[k], 0)
+                if depth == 0:
+                    break
+                k -= 1
+            j = k
+            continue
+        if c.isalnum() or c in "_.:&*":
+            j -= 1
+            continue
+        break
+    return text[j:i]
+
+
+def cmp_argument(text, i):
+    """The argument of the `.cmp(` whose dot is at `i`."""
+    k = text.index("(", i)
+    depth = 0
+    for e in range(k, len(text)):
+        depth += {"(": 1, ")": -1}.get(text[e], 0)
+        if depth == 0:
+            return text[k + 1:e]
+    return text[k + 1:]
+
+
+def rank_errors(text):
+    """The 0-based lines of `text` with a comparison that ranks larger
+    first."""
+    bad = []
+    for m in re.finditer(r"\.\s*cmp\(", text):
+        recv = set(RANK_IDENT.findall(cmp_receiver(text, m.start())))
+        arg = set(RANK_IDENT.findall(cmp_argument(text, m.start())))
+        if ("b" in recv and "a" in arg) or ("y" in recv and "x" in arg):
+            bad.append(text.count("\n", 0, m.start()))
+    return bad
+
+
+def check_rank_order():
+    """Every du ranking orders through du::rank."""
+    for what, text, want in RANK_CASES:
+        if len(rank_errors(text)) != want:
+            errors.append(f"scripts/precheck.py: rank_errors gets RANK_CASES '{what}' wrong; "
+                          "the rank order check is broken")
+    src = ROOT / "src"
+    paths = sorted(src.glob("du*.rs")) + sorted((src / "du_fs").rglob("*.rs"))
+    for path in paths:
+        rel = path.relative_to(ROOT).as_posix()
+        raw = path.read_text(encoding="utf-8")
+        skip = test_mod_lines(raw.split("\n"))
+        code = rust_code(raw)
+        lines = code.split("\n")
+        for k in rank_errors(code):
+            if k in skip or (rel, enclosing_fn(lines, k)) in RANK_FNS:
+                continue
+            errors.append(f"{rel}:{k + 1}: a comparator that puts the larger first; rank "
+                          "through du::rank or du::rank_items, so every du list breaks ties "
+                          "the same way (gdu #289)")
+
+
 def enclosing_fn(lines, k):
     """The name of the last fn declared at or above 0-based line `k`."""
     for j in range(k, -1, -1):
@@ -2969,7 +3063,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_directorysizes_paths(); check_link_copies()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_directorysizes_paths(); check_link_copies(); check_rank_order()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

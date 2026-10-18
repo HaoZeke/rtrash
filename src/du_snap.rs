@@ -619,12 +619,7 @@ pub fn diff(old: &Snapshot, new: &Snapshot, sort: SortKey) -> Vec<Change> {
         })
         .filter(|c| c.old != c.new)
         .collect();
-    out.sort_by(|a, b| {
-        b.delta()
-            .abs()
-            .cmp(&a.delta().abs())
-            .then_with(|| a.path.cmp(&b.path))
-    });
+    out.sort_by(|a, b| crate::du::rank((a.delta().abs(), &a.path), (b.delta().abs(), &b.path)));
     out
 }
 
