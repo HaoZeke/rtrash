@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn a_failed_fill_keeps_the_old_file() {
         let d = scratch("half");
-        let out = d.join("snapshot");
+        let out = d.join("out.txt");
         fs::write(&out, "old").unwrap();
         let half = replace_file(&out, |w, tmp| {
             assert!(tmp.is_some_and(Path::is_file));
@@ -176,7 +176,7 @@ mod tests {
         });
         assert_eq!(half.unwrap_err().to_string(), "disk full");
         assert_eq!(fs::read_to_string(&out).unwrap(), "old");
-        assert_eq!(names(&d), ["snapshot"]);
+        assert_eq!(names(&d), ["out.txt"]);
         let _ = fs::remove_dir_all(&d);
     }
 

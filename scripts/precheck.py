@@ -572,31 +572,120 @@ def check_codespell(base):
               f"{(r.stderr or r.stdout).strip()[:300]}")
 
 
+# Each string literal in Rust source, comments skipped: a raw string
+# (r"..", r#".."#, br"..") or a plain one (b".." keeps its b as code).
+LITERAL = re.compile(r'(?<!\w)b?r(#*)"(.*?)"\1|"((?:\\.|[^"\\])*)"', re.S)
+FORMAT_ARG = re.compile(r"\{[^{}]*\}")
+
+
+def rust_literals(text):
+    """(line, body) of each string literal in `text`."""
+    code = rust_code(text, strings=True)
+    for m in LITERAL.finditer(code):
+        body = m.group(2) if m.group(2) is not None else m.group(3)
+        yield code.count("\n", 0, m.start()) + 1, body
+
+
+def literal_parts(body):
+    """The fixed text of a literal: a format string splits at each `{..}`,
+    so `"{n} could not be listed"` gives `" could not be listed"`."""
+    return [s for s in FORMAT_ARG.split(body) if s]
+
+
+def split_literals(rel, text):
+    """(product, test) literals of one file, each as (where, body). All of
+    tests/ is test code; in src, the `#[cfg(test)]` modules are."""
+    tests = None if rel.startswith("tests/") else test_mod_lines(text.splitlines())
+    product, test = [], []
+    for line, body in rust_literals(text):
+        side = test if tests is None or line - 1 in tests else product
+        side.append((f"{rel}:{line}", body))
+    return product, test
+
+
+def stale_literals(base_product, head_product, test_lits):
+    """The test literals that only gone product text could match: each is
+    part of a string src had at the base and part of none it has now. A
+    string that moved, or that lives on inside another, is not gone."""
+    head = {p for _, b in head_product for p in literal_parts(b)}
+    gone = {p for _, b in base_product for p in literal_parts(b)} - head
+    if not gone:
+        return []
+    gone_text, head_text = "\0".join(sorted(gone)), "\0".join(sorted(head))
+    return [(where, part) for where, body in test_lits for part in literal_parts(body)
+            if len(part) >= 6 and re.search(r"[A-Za-z]{3}", part)
+            and part in gone_text and part not in head_text]
+
+
+# Known cases for stale_literals: (src at the base, src now, test strings,
+# the parts it must report). Round 237 moved a writer and got 73 warnings
+# for "rtrash" and "snapshot", which other src strings still held.
+STALE_CASES = [
+    # A message moved to another file: the same string is still in src.
+    (["could not be listed"], ["could not be listed"], ["could not be listed"], []),
+    # A dropped fallback name lives on inside a longer message.
+    (["snapshot", "an older snapshot or a gdu export"], ["an older snapshot or a gdu export"],
+     ["snapshot"], []),
+    # A test string longer than the gone one asserts something else.
+    (["rtrash"], [], ["rtrash du"], []),
+    # A reworded message the test still asserts, matched through formats.
+    (["{n} records could not be listed"], ["{n} records were skipped"],
+     ["could not be listed", "{} records were skipped"], ["could not be listed"]),
+    # Only fixed text counts: a test that names the argument alone is fine.
+    (["cannot scan {path}: {e}"], ["cannot read {path}: {e}"], ["{path}"], []),
+]
+
+
+def check_stale_cases():
+    for base, head, tests, want in STALE_CASES:
+        lit = lambda xs: [("case", x) for x in xs]
+        got = [part for _, part in stale_literals(lit(base), lit(head), lit(tests))]
+        if got != want:
+            errors.append(f"scripts/precheck.py: stale_literals({base!r}, {head!r}, {tests!r}) "
+                          f"gave {got!r}, not {want!r}; the stale-string check is broken")
+
+
+def base_rust_files(base):
+    """{path: text} of every .rs file under src and tests at `base`, or
+    None when git cannot read it."""
+    ls = subprocess.run(["git", "ls-tree", "-r", "--name-only", base, "--", "src", "tests"],
+                        cwd=ROOT, capture_output=True, text=True)
+    if ls.returncode:
+        return None
+    names = [n for n in ls.stdout.splitlines() if n.endswith(".rs")]
+    cat = subprocess.run(["git", "cat-file", "--batch"], cwd=ROOT, capture_output=True,
+                         input="".join(f"{base}:{n}\n" for n in names).encode())
+    out, at, files = cat.stdout, 0, {}
+    for n in names:
+        end = out.index(b"\n", at)
+        size = int(out[at:end].split()[2])
+        files[n] = out[end + 1:end + 1 + size].decode("utf-8", "replace")
+        at = end + 2 + size
+    return files
+
+
 def check_removed_literals(base):
-    """A string literal removed from product code but still in a test is likely a stale assert."""
+    """A test that asserts a message src no longer prints is a stale assert.
+    It compares whole string literals at the base with the tree now, so a
+    message that moved or that another string still holds does not count;
+    only test strings that match nothing src prints now are reported."""
     if not base:
         return
-    diff = subprocess.run(["git", "diff", "-U0", base, "--", "src"], cwd=ROOT,
-                          capture_output=True, text=True).stdout
-    removed, added = set(), set()
-    for line in diff.splitlines():
-        for tok in re.findall(r'"(?:\\.|[^"\\])*"', line[1:]):
-            lit = tok[1:-1]
-            if len(lit) < 6 or not re.search(r"[A-Za-z]{3}", lit):
-                continue
-            (removed if line.startswith("-") else added if line.startswith("+") else set()).add(lit)
-    gone = removed - added
-    if not gone:
+    files = base_rust_files(base)
+    if files is None:
         return
-    files = [p for p in list((ROOT / "src").rglob("*.rs")) + list((ROOT / "tests").rglob("*.rs"))]
-    for lit in sorted(gone):
-        for p in files:
-            t = p.read_text(encoding="utf-8")
-            if "src" in p.relative_to(ROOT).parts[:1]:
-                t = t[t.find("#[cfg(test)]"):] if "#[cfg(test)]" in t else ""
-            if lit in t:
-                warnings.append(f"{p.relative_to(ROOT)}: still contains removed literal \"{lit}\"; "
-                                "update the assert or the example (tests/windows_mount.rs runs only in CI)")
+    base_product = [lit for rel, t in files.items() if rel.startswith("src/")
+                    for lit in split_literals(rel, t)[0]]
+    head_product, test_lits = [], []
+    for p in sorted(list((ROOT / "src").rglob("*.rs")) + list((ROOT / "tests").rglob("*.rs"))):
+        rel = p.relative_to(ROOT).as_posix()
+        product, test = split_literals(rel, p.read_text(encoding="utf-8"))
+        head_product += product if rel.startswith("src/") else []
+        test_lits += test
+    for where, part in stale_literals(base_product, head_product, test_lits):
+        warnings.append(f"{where}: asserts \"{part}\", which src printed at {base} and no "
+                        "longer does; update the assert or the example "
+                        "(tests/windows_mount.rs runs only in CI)")
 
 
 REMOVAL = re.compile(r"(?<!permanent_guard::)\b(remove_any_path|remove_path|remove_any|remove_forcing|"
@@ -1275,7 +1364,7 @@ def main():
     if "--commit-msg" in sys.argv:
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
-    check_rust_code(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
+    check_rust_code(); check_stale_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_directorysizes_paths()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()

@@ -1,0 +1,1 @@
+Precheck now compares the string literals of `src` at the base with those in the tree before it warns about a stale test string. A message that moved, or that another string still contains, no longer warns. Each warning names the test file and line of a string that no message in `src` contains any more.
