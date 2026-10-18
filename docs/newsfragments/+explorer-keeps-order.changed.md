@@ -1,0 +1,1 @@
+After a delete or an undo deep in the `rtrash du -i` explorer, the views above keep their row order, as ncdu #237 asks. Going back up finds the row walked out of in its place, with the cursor on it, even when it is now smaller than the row below. A sort key or a rescan puts the rows in order again. With `.` hiding dot names, going back used to sort the view.

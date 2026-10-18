@@ -2279,6 +2279,9 @@ unmarks the row, Enter goes to its directory with the cursor on it,
 .B d
 trashes the batch, and any other key closes the panel.
 Sizes of the parent directories follow each change without a rescan.
+Their rows keep their places, as ncdu #237 asks, so going back up finds
+the row walked out of where it was, with the cursor on it; a sort key or
+a rescan puts them in order again.
 Each directory opens at once: its entries show while the scan runs in the
 background, files with their sizes and directories with
 .B …

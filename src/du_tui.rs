@@ -372,6 +372,11 @@ fn row_items(it: &Item) -> u64 {
 /// Rows in the order of `s`: largest, most items or newest change first,
 /// or by name from A; `reverse` flips it.
 fn sort_rows(rows: &mut [Item], s: Sorting) {
+    rows.sort_by(|a, b| row_order(a, b, s));
+}
+
+/// Where `a` goes against `b` in the order of `s`.
+fn row_order(a: &Item, b: &Item, s: Sorting) -> std::cmp::Ordering {
     let name = |it: &Item| {
         it.path
             .file_name()
@@ -379,18 +384,28 @@ fn sort_rows(rows: &mut [Item], s: Sorting) {
             .to_string_lossy()
             .to_lowercase()
     };
-    rows.sort_by(|a, b| {
-        let o = match s.order {
-            Order::Key(k) => b.key(k).cmp(&a.key(k)),
-            Order::Name => name(a).cmp(&name(b)),
-        }
-        .then_with(|| a.path.cmp(&b.path));
-        if s.reverse {
-            o.reverse()
-        } else {
-            o
-        }
-    });
+    let o = match s.order {
+        Order::Key(k) => b.key(k).cmp(&a.key(k)),
+        Order::Name => name(a).cmp(&name(b)),
+    }
+    .then_with(|| a.path.cmp(&b.path));
+    if s.reverse {
+        o.reverse()
+    } else {
+        o
+    }
+}
+
+/// Put `it` among `rows` before the first row it sorts ahead of, leaving
+/// the others where they are. A delete or an undo changes sizes without
+/// reordering a view (ncdu #237): the rows stay where the user saw them
+/// until a rescan or a sort key orders them again.
+fn insert_in_order(rows: &mut Vec<Item>, it: Item, s: Sorting) {
+    let at = rows
+        .iter()
+        .position(|r| row_order(&it, r, s).is_lt())
+        .unwrap_or(rows.len());
+    rows.insert(at, it);
 }
 
 fn is_trash(it: &Item) -> bool {
@@ -1657,8 +1672,7 @@ impl App {
             let (d, a) = (item.disk, item.apparent);
             if let Some(v) = self.cache.get_mut(&parent) {
                 if !v.rows.iter().any(|r| r.path == item.path) {
-                    v.rows.push(item);
-                    sort_rows(&mut v.rows, self.sorting);
+                    insert_in_order(&mut v.rows, item, self.sorting);
                 }
             }
             adjust_chain(&mut self.cache, &self.roots, &parent, d, a, true);
@@ -1782,14 +1796,19 @@ impl App {
         let Some(v) = self.cache.get_mut(&self.cur) else {
             return;
         };
-        let mut all = std::mem::take(&mut v.rows);
-        all.append(&mut v.stash);
-        let (shown, hidden): (Vec<Item>, Vec<Item>) = all
-            .into_iter()
-            .partition(|it| name_matches(it, &pat) && !(hide && is_dot_name(it)));
+        // Rows that stay shown keep their order, which a delete below may
+        // have left unsorted (ncdu #237); rows back from the stash slot in.
+        let show = |it: &Item| name_matches(it, &pat) && !(hide && is_dot_name(it));
+        let (mut shown, mut hidden): (Vec<Item>, Vec<Item>) =
+            std::mem::take(&mut v.rows).into_iter().partition(show);
+        let (back, still): (Vec<Item>, Vec<Item>) =
+            std::mem::take(&mut v.stash).into_iter().partition(show);
+        hidden.extend(still);
+        for it in back {
+            insert_in_order(&mut shown, it, sorting);
+        }
         v.rows = shown;
         v.stash = hidden;
-        sort_rows(&mut v.rows, sorting);
         let pos = |a: &App, p: &Path| a.rows().iter().position(|r| r.path == p);
         self.sel.clear();
         for p in &marked {
@@ -4644,5 +4663,64 @@ mod tests {
         let it = it.expect("hollow.bin in the scan");
         assert_eq!(it.disk, q.disk, "{it:?}");
         let _ = fs::remove_dir_all(&t.0);
+    }
+
+    /// ncdu #237: a delete deep in the tree leaves the views above it in
+    /// the order the user saw. Back up, the row walked out of is still in
+    /// its place with the cursor on it, though it is now smaller than the
+    /// row below. A sort key puts the view in order again. With `.`
+    /// hiding dot names, going back refilters the view, which used to
+    /// sort it. Unix only: the delete uses the pinned trash.
+    #[cfg(unix)]
+    #[test]
+    fn rows_above_a_delete_keep_their_order_and_the_cursor() {
+        let t = tree("keep");
+        fs::write(t.0.join("w/mid"), vec![3u8; 100_000]).unwrap();
+        let mut a = app(&t);
+        assert_eq!(names(&a), ["big", "mid", "file", "small"]);
+        a.on_key(KeyCode::Char('.'), KeyModifiers::NONE);
+        a.select(0);
+        a.open(); // big
+        a.select(0); // inner, 200 kB of big's 230 kB
+        a.ask_delete();
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(!t.0.join("w/big/inner").exists());
+        a.back();
+        assert_eq!(names(&a), ["big", "mid", "file", "small"]);
+        assert_eq!(a.list_state.selected(), Some(0));
+        let big = &a.rows()[0];
+        assert!(big.disk < a.rows()[1].disk, "{big:?}");
+        // s on the size order already in use reverses it; n then s
+        // sorts by size afresh.
+        a.on_key(KeyCode::Char('n'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert_eq!(names(&a)[0], "mid");
+        let _ = fs::remove_dir_all(&t.0);
+    }
+
+    #[test]
+    fn a_row_back_from_the_stash_slots_in_without_moving_the_rest() {
+        let row = |name: &str, disk: u64| Item {
+            path: PathBuf::from("/v").join(name),
+            is_dir: false,
+            apparent: disk,
+            disk,
+            mtime: 0,
+            items: 1,
+            artefact: None,
+            repos: Vec::new(),
+            git: None,
+            unique: None,
+            filtered_out: 0,
+        };
+        let s = Sorting::of(SortKey::Disk);
+        // Out of order on purpose, as a delete below "a" leaves it.
+        let mut rows = vec![row("a", 10), row("b", 50), row("c", 5)];
+        insert_in_order(&mut rows, row("d", 20), s);
+        let names: Vec<String> = rows
+            .iter()
+            .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["d", "a", "b", "c"]);
     }
 }
