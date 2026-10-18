@@ -4988,4 +4988,48 @@ mod tests {
         assert!(j.contains("\"too_deep\":1,"), "{j}");
         fs::remove_dir_all(&root).unwrap();
     }
+
+    /// A directory adds its own st_blocks to disk use and nothing to the
+    /// apparent size, as du(1) counts it: none for an inline or tmpfs
+    /// directory, several blocks for a wide one. One that cannot be read
+    /// still adds its own blocks.
+    #[cfg(unix)]
+    #[test]
+    fn directories_count_their_own_blocks_as_du_does() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = std::env::temp_dir().join(format!("rtrash-du-dirblk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("empty")).unwrap();
+        fs::create_dir_all(root.join("locked")).unwrap();
+        fs::create_dir_all(root.join("wide")).unwrap();
+        let root = fs::canonicalize(&root).unwrap();
+        fs::write(root.join("f.bin"), vec![5u8; 1000]).unwrap();
+        for i in 0..400 {
+            let name = format!("an-entry-with-a-long-name-to-grow-the-directory-{i:04}");
+            fs::write(root.join("wide").join(name), b"").unwrap();
+        }
+        let own = |p: &Path| fs::symlink_metadata(p).unwrap().blocks() * 512;
+        let mut want = own(&root) + own(&root.join("f.bin"));
+        for d in ["empty", "locked", "wide"] {
+            want += own(&root.join(d));
+        }
+        let locked = root.join("locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let opts = ScanOpts {
+            all_dirs: true,
+            top: 50,
+            ..ScanOpts::default()
+        };
+        let r = scan(std::slice::from_ref(&root), &opts);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let r = r.unwrap();
+        assert_eq!(r.roots[0].disk, want, "{:?}", r.roots[0]);
+        assert_eq!(r.roots[0].apparent, 1000, "{:?}", r.roots[0]);
+        assert_eq!(r.roots[0].dirs, 4, "{:?}", r.roots[0]);
+        let wide = r.dirs.iter().find(|d| d.path == root.join("wide"));
+        let wide = wide.unwrap_or_else(|| panic!("{:?}", r.dirs));
+        assert_eq!(wide.disk, own(&root.join("wide")), "{wide:?}");
+        assert_eq!(wide.apparent, 0, "{wide:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
 }

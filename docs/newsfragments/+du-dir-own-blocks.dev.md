@@ -1,0 +1,1 @@
+A new Unix unit test pins the blocks a directory itself adds in `rtrash du`. Its `st_blocks` count toward disk use and add nothing to the apparent size, as in `du`, whether the directory is empty, wide or unreadable.
