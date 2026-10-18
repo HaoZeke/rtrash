@@ -4521,6 +4521,74 @@ fn as_root(args: &[&str]) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Bind mounts made with [`as_root`], undone (lazily) when dropped, before
+/// the sandbox that holds them goes.
+#[cfg(target_os = "linux")]
+struct Binds(Vec<PathBuf>);
+
+#[cfg(target_os = "linux")]
+impl Drop for Binds {
+    fn drop(&mut self) {
+        for m in self.0.iter().rev() {
+            as_root(&["umount", "-l", m.to_str().unwrap()]);
+        }
+    }
+}
+
+/// trash-cli #301 and #341, gtrash #20: one volume trash seen through two
+/// bind mounts is one trash. list and `empty --dry-run` name its item once,
+/// and restore puts the item back once, under the first mount.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_trash_seen_through_two_bind_mounts_counts_once() {
+    use std::os::unix::fs::PermissionsExt;
+    if !as_root(&["true"]) {
+        eprintln!("sudo unavailable; skipping");
+        return;
+    }
+    let sb = Sandbox::new("bind-twice");
+    let vol = sb.root.join("vol");
+    let trash = vol.join(format!(".Trash-{}", unsafe { libc::getuid() }));
+    fs::create_dir_all(trash.join("files")).unwrap();
+    fs::create_dir_all(trash.join("info")).unwrap();
+    fs::set_permissions(&trash, fs::Permissions::from_mode(0o700)).unwrap();
+    let name = "rtrash-bind-twice-item".to_string();
+    fs::write(trash.join("files").join(&name), b"x").unwrap();
+    let record = format!("[Trash Info]\nPath={name}\nDeletionDate=2024-01-02T03:04:05\n");
+    fs::write(trash.join("info").join(format!("{name}.trashinfo")), record).unwrap();
+    let mut binds = Binds(Vec::new());
+    for at in ["a", "b"] {
+        let m = sb.root.join(at);
+        fs::create_dir_all(&m).unwrap();
+        let bound = as_root(&[
+            "mount",
+            "--bind",
+            vol.to_str().unwrap(),
+            m.to_str().unwrap(),
+        ]);
+        assert!(bound, "sudo -n mount --bind failed for {}", m.display());
+        binds.0.push(m);
+    }
+    let rows = |out: &Output| stdout_of(out).matches(name.as_str()).count();
+    let list = sb.run(&["list"]);
+    assert_eq!(rows(&list), 1, "{}", stdout_of(&list));
+    let dry = sb.run(&["empty", "--dry-run", "--verbose"]);
+    assert_eq!(rows(&dry), 1, "{}", stdout_of(&dry));
+    let restore = sb.run(&["restore", &format!("--name={name}")]);
+    assert!(restore.status.success(), "{}", stderr_of(&restore));
+    assert!(
+        sb.root.join("a").join(&name).exists(),
+        "{}",
+        stderr_of(&restore)
+    );
+    assert!(
+        !trash.join("files").join(&name).exists(),
+        "{}",
+        stderr_of(&restore)
+    );
+    drop(binds);
+}
+
 /// The mount point `path` is on: the longest one above it in
 /// `/proc/self/mounts`.
 #[cfg(target_os = "linux")]

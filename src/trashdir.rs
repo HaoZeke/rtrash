@@ -601,7 +601,7 @@ pub fn resolve_dirs_opts(pins: &[PathBuf], home_only: bool) -> Vec<TrashDir> {
     }
     // A trash pinned twice, however spelled, is one trash: a command that
     // locks every root at once would otherwise wait on its own lock.
-    let mut seen = HashSet::new();
+    let mut seen = RootSet::default();
     pins.iter()
         .filter_map(|p| {
             let td = TrashDir::from_root(p).ok()?;
@@ -614,11 +614,28 @@ pub fn resolve_dirs_opts(pins: &[PathBuf], home_only: bool) -> Vec<TrashDir> {
             }
             Some(td)
         })
-        .filter(|td| match fs::metadata(&td.root) {
-            Ok(m) => seen.insert((m.dev(), m.ino())),
-            Err(_) => true,
-        })
+        .filter(|td| seen.first(&td.root))
         .collect()
+}
+
+/// Trash roots met so far, by device and inode: one folder reached through
+/// a bind mount, or spelled two ways, counts once (trash-cli #301 and #341,
+/// gtrash #20). A root that cannot be read counts by its path. Every list
+/// of trash roots drops repeats through [`RootSet::first`].
+#[derive(Default)]
+struct RootSet {
+    ids: HashSet<(u64, u64)>,
+    unread: HashSet<PathBuf>,
+}
+
+impl RootSet {
+    /// Whether `root` is met here for the first time.
+    fn first(&mut self, root: &Path) -> bool {
+        match fs::metadata(root) {
+            Ok(m) => self.ids.insert((m.dev(), m.ino())),
+            Err(_) => self.unread.insert(root.to_path_buf()),
+        }
+    }
 }
 
 /// Home trash only (if it exists), for `--home-only`.
@@ -652,12 +669,15 @@ pub fn is_valid_trash_root(root: &Path) -> bool {
 /// mounted volume’s existing user trash (trash-cli multi-volume default),
 /// when it passes the checks a put would make ([`volume_trashes_of`]).
 /// Does not create missing volume trash dirs — only discovers existing ones.
+/// A trash seen through several mounts (a bind mount) comes once, with the
+/// first of them in the mount table as its top: a bind mount is listed after
+/// the mount it shows.
 pub fn all() -> Vec<TrashDir> {
-    let mut seen = HashSet::new();
+    let mut seen = RootSet::default();
     let mut out = Vec::new();
     let home = home_trash();
     if home.is_dir() {
-        seen.insert(home.clone());
+        seen.first(&home);
         out.push(TrashDir {
             root: home,
             topdir: None,
@@ -668,7 +688,7 @@ pub fn all() -> Vec<TrashDir> {
         // A dead network share must not hang the scan (glib #605).
         let found = crate::mount_probe::probe(&mp, move |mp| volume_trashes_of(mp, uid));
         for cand in found.unwrap_or_default() {
-            if seen.insert(cand.clone()) {
+            if seen.first(&cand) {
                 out.push(TrashDir {
                     root: cand,
                     topdir: Some(mp.clone()),
@@ -686,10 +706,10 @@ pub fn all() -> Vec<TrashDir> {
 /// reads them all; anyone else gets the ones that let them in. Nothing is
 /// created or changed.
 pub fn all_users() -> Vec<TrashDir> {
-    let mut seen = HashSet::new();
+    let mut seen = RootSet::default();
     let mut out = Vec::new();
     let mut push = |root: PathBuf, topdir: Option<PathBuf>| {
-        if seen.insert(root.clone())
+        if seen.first(&root)
             && is_valid_trash_root(&root)
             && fs::read_dir(root.join("info")).is_ok()
         {

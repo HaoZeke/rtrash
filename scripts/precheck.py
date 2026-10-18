@@ -2464,6 +2464,47 @@ def check_reparse_links():
                               "du_fs::fileid::is_link (the name-surrogate bit)")
 
 
+# A trash seen through a bind mount has two paths and one device and inode;
+# a set of paths listed it twice (trash-cli #301 and #341, gtrash #20). A fn
+# that returns a list of trash roots drops repeats through
+# trashdir::RootSet::first, never a set or dedup of its own.
+# ROOT_SET_CASES tests the matcher.
+ROOT_LIST_FN = re.compile(
+    r"^(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)[^{]*->\s*Vec<(?:trashdir::)?TrashDir>")
+OWN_DEDUP = re.compile(r"\b(?:HashSet|BTreeSet)\b|\.dedup(?:_by\w*)?\(")
+ROOT_SET_CASES = [
+    ("paths", "pub fn all() -> Vec<TrashDir> {\n    let mut seen = HashSet::new();\n}", 1),
+    ("dedup", "fn roots() -> Vec<trashdir::TrashDir> {\n    v.dedup();\n}", 1),
+    ("rootset", "pub fn all() -> Vec<TrashDir> {\n    let mut seen = RootSet::default();\n}", 0),
+    ("other", "fn names() -> Vec<String> {\n    let mut seen = HashSet::new();\n}", 0),
+]
+
+
+def own_dedup_lines(code):
+    """0-based lines where a fn returning trash roots dedups on its own."""
+    lines = code.split("\n")
+    hits = []
+    for line in lines:
+        m = ROOT_LIST_FN.match(line)
+        if m:
+            body = sorted(fn_lines(lines, m.group(1)))
+            hits.extend(j for j in body if OWN_DEDUP.search(lines[j]))
+    return hits
+
+
+def check_trash_root_sets():
+    """Lists of trash roots drop repeats by device and inode (RootSet)."""
+    for what, text, want in ROOT_SET_CASES:
+        if len(own_dedup_lines(text)) != want:
+            errors.append(f"scripts/precheck.py: own_dedup_lines gets ROOT_SET_CASES '{what}' "
+                          "wrong; the trash-root set check is broken")
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        for k in own_dedup_lines(rust_code(path.read_text(encoding="utf-8"))):
+            errors.append(f"{path.relative_to(ROOT).as_posix()}:{k + 1}: a list of trash roots "
+                          "drops repeats on its own; a bind mount shows one trash at two paths, "
+                          "so use trashdir::RootSet::first (device and inode)")
+
+
 # trash-cli #354: a blocking flock hangs without a word behind a long empty
 # or a process stuck on a dead mount. The trash lock waits in
 # trashdir::wait_for_lock, which names the trash after a second and gives up
@@ -2732,7 +2773,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_directorysizes_paths()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

@@ -1,0 +1,1 @@
+A volume trash that two mounts show, such as a bind mount of a disk, now counts once in list, restore and empty, by its device and inode. Before, list showed each of its items twice, and restore offered both rows (trash-cli #301 and #341, gtrash #20).

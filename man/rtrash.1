@@ -27,6 +27,11 @@ implements the freedesktop.org Trash specification on Linux: home trash
 files. It provides an rm-compatible put path and a trash-cli-style suite
 (list, restore, empty, selective permanent delete).
 .PP
+A volume trash that two mounts show, such as a bind mount of a disk, is
+one trash: list, restore and empty take it once, by its device and inode.
+Its items keep the paths under the first of those mounts in the mount
+table.
+.PP
 On macOS, plain
 .BR put ,
 .BR list ,
