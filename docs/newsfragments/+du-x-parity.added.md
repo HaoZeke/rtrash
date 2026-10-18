@@ -1,0 +1,1 @@
+CI now checks `rtrash du -x` against coreutils `du -s -x` on Btrfs. Across a subvolume, disk use, apparent size and the inode count match, with and without `-x`. Under `-x` a directory on another device adds nothing, as in `du -x`.

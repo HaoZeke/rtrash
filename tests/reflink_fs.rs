@@ -232,6 +232,16 @@ fn clone_dupes_share_the_extents_and_keep_each_mode() {
     let _ = fs::remove_dir_all(dir.with_extension("home"));
 }
 
+/// Whether `dir` is on btrfs (the reflink job also runs on XFS).
+fn on_btrfs(dir: &Path) -> bool {
+    let kind = Command::new("stat")
+        .args(["-f", "-c", "%T"])
+        .arg(dir)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&kind.stdout).trim() == "btrfs"
+}
+
 /// Run `btrfs ARGS`, which must succeed.
 fn btrfs(args: &[&OsStr]) {
     let out = Command::new("btrfs").args(args).output().unwrap();
@@ -248,12 +258,7 @@ fn du_names_read_only_btrfs_snapshots_and_x_leaves_them_out() {
         eprintln!("RTRASH_REFLINK_DIR unset; skipping");
         return;
     };
-    let kind = Command::new("stat")
-        .args(["-f", "-c", "%T"])
-        .arg(&dir)
-        .output()
-        .unwrap();
-    if String::from_utf8_lossy(&kind.stdout).trim() != "btrfs" {
+    if !on_btrfs(&dir) {
         eprintln!("RTRASH_REFLINK_DIR is not on btrfs; skipping");
         let _ = fs::remove_dir_all(&dir);
         return;
@@ -316,6 +321,87 @@ fn du_names_read_only_btrfs_snapshots_and_x_leaves_them_out() {
     let _ = Command::new("btrfs")
         .args(["subvolume", "delete"])
         .arg(&snap)
+        .arg(&vol)
+        .output();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(dir.with_extension("home"));
+}
+
+/// GNU `du -s` of `dir` with `flags`, as a number.
+fn gnu_du(dir: &Path, flags: &[&str]) -> u64 {
+    let out = Command::new("du")
+        .arg("-s")
+        .args(flags)
+        .arg(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout).unwrap();
+    text.split_whitespace().next().unwrap().parse().unwrap()
+}
+
+/// Each btrfs subvolume has a device number of its own, so it is a file
+/// system boundary for -x without any mount (gdu #666: gdu -x / and
+/// du -shx / disagreed). With and without -x, the totals and the inode
+/// count match GNU du's.
+#[test]
+fn du_x_totals_match_gnu_du_x_across_a_btrfs_subvolume() {
+    let Some(dir) = cloned_pair("xdev") else {
+        eprintln!("RTRASH_REFLINK_DIR unset; skipping");
+        return;
+    };
+    if !on_btrfs(&dir) {
+        eprintln!("RTRASH_REFLINK_DIR is not on btrfs; skipping");
+        let _ = fs::remove_dir_all(&dir);
+        return;
+    }
+    let vol = dir.join("vol");
+    btrfs(&[
+        OsStr::new("subvolume"),
+        OsStr::new("create"),
+        vol.as_os_str(),
+    ]);
+    fs::create_dir(vol.join("d")).unwrap();
+    fs::write(vol.join("d/inner.bin"), vec![3u8; 300_000]).unwrap();
+    fs::write(dir.join("outer.bin"), vec![4u8; 70_000]).unwrap();
+    // Settle delayed allocation, so both readers see the same blocks.
+    assert!(Command::new("sync").status().unwrap().success());
+    let arg = dir.to_str().unwrap().to_owned();
+    for x in [true, false] {
+        let mut flags = vec!["du", "--json", "--no-git"];
+        let mut gnu: Vec<&'static str> = Vec::new();
+        if x {
+            flags.push("-x");
+            gnu.push("-x");
+        }
+        flags.push(&arg);
+        let json = run(&dir, &flags);
+        let du_with = |flag: &'static str| {
+            let mut v = gnu.clone();
+            v.push(flag);
+            gnu_du(&dir, &v)
+        };
+        let (disk, apparent, inodes) = (du_with("-B1"), du_with("-b"), du_with("--inodes"));
+        assert_eq!(num(&json, "\"roots\"", "disk"), disk, "-x {x}: {json}");
+        assert_eq!(
+            num(&json, "\"roots\"", "apparent"),
+            apparent,
+            "-x {x}: {json}"
+        );
+        let counted = num(&json, "\"roots\"", "files") + num(&json, "\"roots\"", "dirs");
+        assert_eq!(counted, inodes, "-x {x}: {json}");
+    }
+    // -x leaves the subvolume out: its 300 kB count only without it.
+    let with = run(&dir, &["du", "--json", "--no-git", "-x", &arg]);
+    let without = run(&dir, &["du", "--json", "--no-git", &arg]);
+    let gap = num(&without, "\"roots\"", "apparent") - num(&with, "\"roots\"", "apparent");
+    assert_eq!(gap, 300_000, "{with}\n{without}");
+    let _ = Command::new("btrfs")
+        .args(["subvolume", "delete"])
         .arg(&vol)
         .output();
     let _ = fs::remove_dir_all(&dir);

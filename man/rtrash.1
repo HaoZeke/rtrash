@@ -1400,6 +1400,10 @@ files (default 20).
 .TP
 .BR \-x ", " \-\-one\-file\-system
 Skip directories on other file systems.
+As with
+.BR "du \-x" ,
+a directory on another device adds nothing to any total, not even its
+own blocks.
 On btrfs every subvolume, snapshots included, has a device number of its
 own, so
 .B \-x

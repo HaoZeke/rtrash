@@ -339,7 +339,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | Invocation | Behavior |
 |------------|----------|
 | `rtrash du /workspace` | 20 largest directories and 20 largest files, ranked by disk use |
-| `rtrash du -n 5 -x ~` | Top 5 of each, staying on the file system of `~` |
+| `rtrash du -n 5 -x ~` | Top 5 of each, staying on the file system of `~`. The totals match coreutils `du -sx`; a CI test checks this across a Btrfs subvolume, which has a device number of its own |
 | `rtrash du --apparent` | Rank by file length; sparse files rank higher than their disk use |
 | `rtrash du --sort=items` | Directories with the most files and subdirectories below them (inode hogs such as `node_modules`); `-C` adds an item count column to any listing |
 | `rtrash du --types ~/data` | Lists file types instead of directories and files: disk use, apparent size and file count per extension, with case ignored, ranked by disk use, `--apparent` or `--sort=items`. JSON adds a `types` array |
