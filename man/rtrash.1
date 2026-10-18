@@ -2337,6 +2337,23 @@ marked, on stdout once the screen is restored, one per line.
 copies the same paths to the clipboard with the OSC 52 escape, which
 xterm, kitty, iTerm2, WezTerm and Windows Terminal accept, and tmux with
 .BR set\-clipboard " on" .
+.B E
+asks for a file name and writes the current directory to it as a
+snapshot, the one
+.B "du \-o FILE \-\-max\-depth=1"
+writes, for
+.B "du \-f"
+and
+.BR "du diff" .
+It comes from the scan in memory, with no second walk, so the name
+filter and hidden dot names do not change it.
+A file that exists is left alone.
+Once a delete, an undo or a rescan below has changed the sizes,
+.B E
+asks for
+.B r
+first, as it does after a stopped scan.
+While the scan of the directory runs, it waits.
 .B b
 opens a shell in the current directory, as ncdu and gdu do:
 .B $SHELL

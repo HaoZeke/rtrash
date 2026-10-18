@@ -1,0 +1,1 @@
+In the explorer, `E` writes the current directory to a file as a snapshot (ncdu #174). The snapshot is the one `rtrash du -o FILE --max-depth=1` writes, so `du -f` and `du diff` read it. It comes from the scan in memory, with no second walk. A file that exists is left alone, and a view whose sizes changed since its scan asks for `r` first.

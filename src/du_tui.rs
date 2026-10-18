@@ -63,6 +63,11 @@ struct View {
     unread: Vec<(PathBuf, String)>,
     /// Entries below this view's directory that the filters left out.
     filtered_out: u64,
+    /// The directory records of this view's scan, for `E` to write as a
+    /// `du -o` snapshot (files left out, as a snapshot holds none).
+    /// `None` for a quick listing, the view above several roots, and once
+    /// a delete, an undo or a rescan below has changed the sizes.
+    scan: Option<Arc<du::Report>>,
 }
 
 /// A scan running in the background.
@@ -84,6 +89,8 @@ enum Mode {
     Filter,
     /// Every mark, from all directories (`m`).
     Marks,
+    /// Typing the file name `E` writes this view's snapshot to.
+    Export,
 }
 
 /// What the explorer orders rows by: a size, count or age key, or name.
@@ -334,6 +341,8 @@ struct App {
     print_on_exit: Vec<PathBuf>,
     /// Text `y` sends to the terminal clipboard on the next draw.
     clipboard: Option<String>,
+    /// The file name typed after `E`.
+    export_to: String,
     /// What gets the terminal on the next turn of the loop (`b`, `v`).
     hand_off: Option<HandOff>,
     /// Program and arguments `o` opens a row with (tests set their own).
@@ -438,6 +447,8 @@ fn scan_view(dir: &Path, opts: &ScanOpts, git: bool, sorting: Sorting) -> io::Re
     if git {
         du::annotate_git(&mut report);
     }
+    let files = std::mem::take(&mut report.files);
+    let scan = Some(Arc::new(report.clone()));
     let (disk, apparent, filtered_out) = report
         .roots
         .first()
@@ -446,7 +457,7 @@ fn scan_view(dir: &Path, opts: &ScanOpts, git: bool, sorting: Sorting) -> io::Re
     let mut rows: Vec<Item> = report
         .dirs
         .into_iter()
-        .chain(report.files)
+        .chain(files)
         .filter(|it| it.path != dir)
         .collect();
     sort_rows(&mut rows, sorting);
@@ -460,6 +471,7 @@ fn scan_view(dir: &Path, opts: &ScanOpts, git: bool, sorting: Sorting) -> io::Re
         stash: Vec::new(),
         unread: report.unread,
         filtered_out,
+        scan,
     })
 }
 
@@ -523,6 +535,7 @@ fn quick_view(dir: &Path) -> io::Result<View> {
         stash: Vec::new(),
         unread: Vec::new(),
         filtered_out: 0,
+        scan: None,
     })
 }
 
@@ -619,6 +632,7 @@ fn scan_roots(
         stash: Vec::new(),
         unread,
         filtered_out,
+        scan: None,
     };
     Ok((view, below))
 }
@@ -652,6 +666,7 @@ fn quick_roots(roots: &[PathBuf]) -> View {
         stash: Vec::new(),
         unread: Vec::new(),
         filtered_out: 0,
+        scan: None,
     }
 }
 
@@ -714,6 +729,8 @@ fn adjust_chain(
         if let Some(v) = cache.get_mut(&d) {
             apply(&mut v.disk, disk);
             apply(&mut v.apparent, apparent);
+            // Its scan no longer says what the directory holds.
+            v.scan = None;
         }
         let Some(parent) = up(roots, &d) else {
             break;
@@ -786,6 +803,7 @@ impl App {
             share: Share::Bar,
             print_on_exit: Vec::new(),
             clipboard: None,
+            export_to: String::new(),
             hand_off: None,
             opener: tui_term::opener(),
             prog: prog.to_string(),
@@ -1886,6 +1904,104 @@ impl App {
         self.quit = true;
     }
 
+    /// Why `E` cannot write the current view, if it cannot.
+    fn export_refusal(&self) -> Option<&'static str> {
+        let v = self.view();
+        if is_top_of_roots(&self.cur) {
+            Some("open one of the directories first; E writes one directory")
+        } else if v.scanning {
+            Some("still scanning this directory; E writes it once the scan is done")
+        } else if v.partial {
+            Some("the scan was stopped; r rescans in full, then E writes it")
+        } else if v.scan.is_none() {
+            Some("sizes changed since the scan; r rescans, then E writes it")
+        } else {
+            None
+        }
+    }
+
+    /// Ask for the file to write this view's snapshot to (`E`).
+    fn ask_export(&mut self) {
+        if let Some(why) = self.export_refusal() {
+            self.status = why.into();
+            return;
+        }
+        self.export_to.clear();
+        self.mode = Mode::Export;
+        self.status = self.export_status();
+    }
+
+    fn export_status(&self) -> String {
+        format!(
+            "write a du snapshot of this directory to: {} · Enter writes · Esc cancels",
+            self.export_to
+        )
+    }
+
+    fn on_key_export(&mut self, code: KeyCode, mods: KeyModifiers) {
+        match self.keys.resolve_filter(code, mods) {
+            Some(Action::FilterCommit) => {
+                self.mode = Mode::Browse;
+                self.status = self.export();
+            }
+            Some(Action::FilterCancel) => {
+                self.mode = Mode::Browse;
+                self.status = "nothing written".into();
+            }
+            Some(Action::QuitHard) => self.quit = true,
+            _ => {
+                if code == KeyCode::Backspace {
+                    self.export_to.pop();
+                } else if let KeyCode::Char(c) = code {
+                    if c.is_control() || mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    {
+                        return;
+                    }
+                    self.export_to.push(c);
+                } else {
+                    return;
+                }
+                self.status = self.export_status();
+            }
+        }
+    }
+
+    /// Write the current view as the snapshot `du -o FILE --max-depth=1`
+    /// would write of its directory, from the scan in memory: no second
+    /// walk. An existing file is left alone. Returns the status line.
+    fn export(&self) -> String {
+        if let Some(why) = self.export_refusal() {
+            return why.into();
+        }
+        let Some(report) = self.view().scan.clone() else {
+            return "nothing to write".into();
+        };
+        if self.export_to.is_empty() {
+            return "no file name; nothing written".into();
+        }
+        let path = crate::util::arg_path(&self.export_to);
+        let shown = crate::util::term_path(&path);
+        if std::fs::symlink_metadata(&path).is_ok() {
+            return format!("'{shown}' exists; nothing written (give a new name)");
+        }
+        let opts = ScanOpts {
+            max_depth: Some(1),
+            ..self.opts.clone()
+        };
+        let now = crate::util::now_epoch();
+        match crate::du_snap::write_file(&path, &report, &opts, now) {
+            Ok(()) => format!(
+                "wrote '{shown}' · {} · du -f or du diff reads it",
+                crate::util::plural(
+                    report.dirs.iter().filter(|d| d.is_dir).count() as u64,
+                    "directory",
+                    "directories"
+                )
+            ),
+            Err(e) => format!("cannot write '{shown}': {e}"),
+        }
+    }
+
     /// Copy the chosen paths, one per line, to the terminal clipboard (`y`).
     fn copy_paths(&mut self) {
         let paths = self.chosen_paths();
@@ -2001,6 +2117,7 @@ impl App {
         match self.mode {
             Mode::Filter => self.on_key_filter(code, mods),
             Mode::Marks => self.on_key_marks(code, mods),
+            Mode::Export => self.on_key_export(code, mods),
             Mode::Info => {
                 if self.keys.resolve_help(code, mods) == Some(Action::QuitHard) {
                     self.quit = true;
@@ -2046,6 +2163,7 @@ impl App {
                         KeyCode::Char('m') => return self.show_marks(),
                         KeyCode::Char('p') => return self.print_and_quit(),
                         KeyCode::Char('y') => return self.copy_paths(),
+                        KeyCode::Char('E') => return self.ask_export(),
                         KeyCode::Char('b') => return self.ask_shell(),
                         KeyCode::Char('v') => return self.view_file(),
                         KeyCode::Char('o') => return self.open_row(),
@@ -2637,6 +2755,11 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             app.keys.display_chords(Action::FilterCommit),
             app.keys.display_chords(Action::FilterCancel)
         ),
+        Mode::Export => format!(
+            "type a file name (a new one)  {} write  {} cancel",
+            app.keys.display_chords(Action::FilterCommit),
+            app.keys.display_chords(Action::FilterCancel)
+        ),
         _ => format!(
             "{}/{} move  {}/→ open  ←/h up  {}r rescan  {} mark  {} help  {} quit",
             app.keys.display_chords(Action::MoveUp),
@@ -2748,6 +2871,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 "i — details of the cursor row (any key closes them)",
                 "m — every mark, from all directories: space unmarks, enter goes there",
                 "p — quit and print the marked paths (or the cursor row) · y — copy them",
+                "E — write this directory as a du snapshot file, for du -f and du diff",
                 if app.read_only {
                     "b — no shell in read-only mode"
                 } else {
@@ -4722,5 +4846,93 @@ mod tests {
             .map(|r| r.path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, ["d", "a", "b", "c"]);
+    }
+
+    /// Press `E`, type `name` and press `key` (Enter writes, Esc cancels).
+    fn export_as(a: &mut App, name: &Path, key: KeyCode) {
+        a.on_key(KeyCode::Char('E'), KeyModifiers::SHIFT);
+        assert_eq!(a.mode, Mode::Export, "{}", a.status);
+        for c in name.to_string_lossy().chars() {
+            a.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        a.on_key(key, KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Browse, "{}", a.status);
+    }
+
+    #[test]
+    fn e_writes_the_view_as_the_snapshot_du_o_writes() {
+        let t = tree("export");
+        let mut a = app(&t);
+        let out = t.0.join("w.snap");
+        export_as(&mut a, &out, KeyCode::Enter);
+        assert!(a.status.starts_with("wrote '"), "{}", a.status);
+        let mut got = crate::du_snap::read(&out).unwrap();
+        // The same directory as du -o FILE --max-depth=1 scans it.
+        let opts = ScanOpts {
+            max_depth: Some(1),
+            ..crate::du_snap::snapshot_opts(ScanOpts::default())
+        };
+        let report = du::scan(&[t.0.join("w")], &opts).unwrap();
+        let mut text = Vec::new();
+        crate::du_snap::write(&report, &opts, got.created, &mut text).unwrap();
+        let mut want = crate::du_snap::parse(&text[..]).unwrap();
+        for snap in [&mut got, &mut want] {
+            snap.dirs.sort_by(|x, y| x.path.cmp(&y.path));
+        }
+        assert_eq!(got.max_depth, Some(1));
+        assert_eq!(got.unreadable, Some(0));
+        assert_eq!(got.roots, want.roots);
+        assert_eq!(got.dirs, want.dirs);
+        let big = t.0.join("w").join("big");
+        assert!(got.dirs.iter().any(|d| d.path == big), "{:?}", got.dirs);
+        let _ = fs::remove_dir_all(&t.0);
+    }
+
+    #[test]
+    fn e_leaves_an_existing_file_alone_and_esc_writes_nothing() {
+        let t = tree("export-refuse");
+        let mut a = app(&t);
+        let taken = t.0.join("taken");
+        fs::write(&taken, b"keep").unwrap();
+        export_as(&mut a, &taken, KeyCode::Enter);
+        assert!(a.status.contains("exists; nothing written"), "{}", a.status);
+        assert_eq!(fs::read(&taken).unwrap(), b"keep");
+        let none = t.0.join("none.snap");
+        export_as(&mut a, &none, KeyCode::Esc);
+        assert_eq!(a.status, "nothing written");
+        assert!(!none.exists());
+        export_as(&mut a, Path::new(""), KeyCode::Enter);
+        assert_eq!(a.status, "no file name; nothing written");
+        let _ = fs::remove_dir_all(&t.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn e_waits_for_a_rescan_once_a_delete_changed_the_sizes() {
+        let t = tree("export-stale");
+        let mut a = app(&t);
+        let stale = "sizes changed since the scan; r rescans, then E writes it";
+        a.select(0);
+        a.open(); // big
+        a.select(0); // inner
+        a.ask_delete();
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(!t.0.join("w/big/inner").exists());
+        a.on_key(KeyCode::Char('E'), KeyModifiers::SHIFT);
+        assert_eq!(a.status, stale);
+        a.back();
+        a.on_key(KeyCode::Char('E'), KeyModifiers::SHIFT);
+        assert_eq!(a.status, stale);
+        assert_eq!(a.mode, Mode::Browse);
+        a.select(0);
+        a.open(); // big again, from the cache
+        assert_eq!(a.cur, t.0.join("w/big"));
+        a.on_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        let out = t.0.join("big.snap");
+        export_as(&mut a, &out, KeyCode::Enter);
+        assert!(a.status.starts_with("wrote '"), "{}", a.status);
+        let snap = crate::du_snap::read(&out).unwrap();
+        assert_eq!(snap.roots[0].path, t.0.join("w/big"));
+        let _ = fs::remove_dir_all(&t.0);
     }
 }
