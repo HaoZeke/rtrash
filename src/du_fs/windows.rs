@@ -134,7 +134,9 @@ impl Dir {
         false
     }
 
-    /// Open the directory at `path`; a symlink or junction is refused.
+    /// Open the directory at `path`. A symlink, a junction, a volume mount
+    /// point or any other reparse point that names another folder is
+    /// refused, so no walk crosses one (see `fileid::is_link`).
     pub fn open(path: &Path) -> io::Result<Dir> {
         let handle = open_handle(path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?;
         let stat = handle_stat(&handle)?;

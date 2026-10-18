@@ -1464,6 +1464,11 @@ A folder that firmlinks join, such as
 shows up at the top and under
 .IR /System/Volumes/Data .
 It is one directory with one inode, so the walk counts it once.
+On Windows the walk never enters a junction, a volume mount point, a
+symlink or any other reparse point that names another folder, with or
+without
+.BR \-x :
+each counts as a link, so no folder counts twice and no loop forms.
 .TP
 .B \-\-include\-kernfs
 Also walk kernel pseudo file systems met below

@@ -238,6 +238,48 @@ fn hard_links_count_once() {
     assert!(text.contains("1 file (+2 hard links), "), "{text}");
 }
 
+/// Windows junctions are not followed (diskus #42, gdu #441). One to a
+/// folder in the tree adds nothing, one back up the tree makes no loop,
+/// and one to another volume is not crossed, with or without -x. On the
+/// CI runners the crate's folder sits on another volume than the temp
+/// dir. `--dupes` sees the file once. `mklink /J` needs no admin rights.
+#[cfg(windows)]
+#[test]
+fn junctions_are_not_followed_or_counted_twice() {
+    if std::env::var_os("WINEPREFIX").is_some() {
+        return;
+    }
+    let t = Tree::new("junctions");
+    t.file("d/real/a.bin", 100_000);
+    let junction = |link: &str, target: &Path| {
+        let out = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(t.root.join(link))
+            .arg(target)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "mklink /J {link}: {err}");
+    };
+    junction("d/again", &t.root.join("d/real"));
+    junction("d/real/up", &t.root.join("d"));
+    junction("d/elsewhere", Path::new(env!("CARGO_MANIFEST_DIR")));
+    for one_fs in [false, true] {
+        let mut args = vec!["--files", "--all-dirs"];
+        if one_fs {
+            args.push("-x");
+        }
+        args.push("d");
+        let j = t.json(&args);
+        let roots = &j[..j.find("\"dirs\"").unwrap()];
+        assert_eq!(field(roots, "apparent"), 100_000, "-x {one_fs}: {j}");
+        assert_eq!(j.matches("a.bin").count(), 1, "-x {one_fs}: {j}");
+        assert!(!j.contains("Cargo.toml"), "-x {one_fs}: {j}");
+    }
+    let j = t.json(&["--dupes", "--min-size=1k", "d"]);
+    assert!(j.contains(r#""total":{"groups":0,"#), "{j}");
+}
+
 #[cfg(unix)]
 #[test]
 fn hard_links_count_once_and_symlinks_are_not_followed() {

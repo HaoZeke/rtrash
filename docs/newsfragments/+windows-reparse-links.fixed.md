@@ -1,0 +1,1 @@
+On Windows, `rtrash du` never enters a reparse point that names another folder. That covers junctions, volume mount points and symlinks, and also Windows Subsystem for Linux (WSL) symlinks, container links and any other such tag. Each counts as a link, so no folder counts twice and no loop forms (diskus #42, gdu #441). Before, the scan took only symlinks and junctions for links.
