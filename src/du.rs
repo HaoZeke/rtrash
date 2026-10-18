@@ -651,6 +651,15 @@ pub fn type_key(name: &[u8]) -> Vec<u8> {
     }
 }
 
+/// The sum of `sizes`, stopping at `u64::MAX` rather than overflowing
+/// (ncdu #278: a corrupt or crafted size near the top wraps a plain sum,
+/// or panics in a debug build), as coreutils du does. Every sum of sizes
+/// in the du code goes through here or `saturating_add`; the precheck
+/// refuses a bare `.sum()` or `+=` on one.
+pub fn size_sum(sizes: impl IntoIterator<Item = u64>) -> u64 {
+    sizes.into_iter().fold(0, u64::saturating_add)
+}
+
 fn add_type(map: &mut TypeMap, name: &[u8], apparent: u64, disk: u64) {
     let e = map.entry(type_key(name)).or_default();
     e.0 = e.0.saturating_add(disk);
@@ -734,10 +743,11 @@ pub fn recycle_bin_on_scanned_drives(report: &Report) -> TrashSummary {
         let (items, _) = crate::win_recycle::list_items_in(std::slice::from_ref(&dir));
         return TrashSummary {
             items: items.len() as u64,
-            bytes: items
-                .iter()
-                .map(|it| crate::win_recycle::recycled_size(Path::new(&it.id)))
-                .sum(),
+            bytes: size_sum(
+                items
+                    .iter()
+                    .map(|it| crate::win_recycle::recycled_size(Path::new(&it.id))),
+            ),
             roots: vec![dir],
             cap: None,
         };
@@ -758,8 +768,8 @@ pub fn recycle_bin_on_scanned_drives(report: &Report) -> TrashSummary {
     };
     for d in drives {
         if let Some((items, bytes)) = crate::win_recycle::query_bin(&d) {
-            t.items += items;
-            t.bytes += bytes;
+            t.items = t.items.saturating_add(items);
+            t.bytes = t.bytes.saturating_add(bytes);
             let q = crate::win_recycle::bin_quota(&d);
             t.cap = match (t.cap, q.max_bytes) {
                 (Some(sum), Some(cap)) => Some(sum.saturating_add(cap)),
@@ -1249,7 +1259,7 @@ fn count_once(
         *base = base.saturating_add(raw);
         return raw;
     }
-    let referenced: u64 = shared.iter().map(|e| e.length).sum();
+    let referenced = size_sum(shared.iter().map(|e| e.length));
     let own = raw.saturating_sub(referenced);
     *base = base.saturating_add(own);
     let mut mine: Vec<(u64, u64, u64)> = shared
@@ -5114,5 +5124,14 @@ mod tests {
         assert_eq!(wide.disk, own(&root.join("wide")), "{wide:?}");
         assert_eq!(wide.apparent, 0, "{wide:?}");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn size_sums_stop_at_the_top_instead_of_wrapping() {
+        let half = u64::MAX / 2 + 1;
+        assert_eq!(size_sum([half, half]), u64::MAX);
+        assert_eq!(size_sum([half, half, 7]), u64::MAX);
+        assert_eq!(size_sum([1, 2, 3]), 6);
+        assert_eq!(size_sum(std::iter::empty()), 0);
     }
 }

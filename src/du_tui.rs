@@ -463,7 +463,7 @@ fn quick_view(dir: &Path) -> io::Result<View> {
             .map_or(0, |d| d.as_secs() as i64);
         let is_dir = m.is_dir();
         #[cfg(unix)]
-        let disk = std::os::unix::fs::MetadataExt::blocks(&m) * 512;
+        let disk = std::os::unix::fs::MetadataExt::blocks(&m).saturating_mul(512);
         #[cfg(not(unix))]
         let disk = m.len();
         let it = Item {
@@ -487,8 +487,8 @@ fn quick_view(dir: &Path) -> io::Result<View> {
     }
     dirs.sort_by(|a, b| a.path.cmp(&b.path));
     sort_rows(&mut files, Sorting::of(SortKey::Disk));
-    let disk = files.iter().map(|f| f.disk).sum();
-    let apparent = files.iter().map(|f| f.apparent).sum();
+    let disk = du::size_sum(files.iter().map(|f| f.disk));
+    let apparent = du::size_sum(files.iter().map(|f| f.apparent));
     dirs.extend(files);
     Ok(View {
         rows: dirs,
@@ -545,11 +545,13 @@ fn scan_roots(
             apparent: view.apparent,
             disk: view.disk,
             mtime: view.rows.iter().map(|r| r.mtime).fold(mtime, i64::max),
-            items: view
-                .rows
-                .iter()
-                .map(|r| if r.is_dir { r.items + 1 } else { 1 })
-                .sum(),
+            items: du::size_sum(view.rows.iter().map(|r| {
+                if r.is_dir {
+                    r.items.saturating_add(1)
+                } else {
+                    1
+                }
+            })),
             artefact: root
                 .file_name()
                 .and_then(|n| du::artefact_kind(&n.to_string_lossy(), |c| root.join(c).exists())),
@@ -580,10 +582,10 @@ fn scan_roots(
             }
         }
     }
-    let disk = rows.iter().map(|r| r.disk).sum();
-    let apparent = rows.iter().map(|r| r.apparent).sum();
+    let disk = du::size_sum(rows.iter().map(|r| r.disk));
+    let apparent = du::size_sum(rows.iter().map(|r| r.apparent));
     sort_rows(&mut rows, sorting);
-    let filtered_out = rows.iter().map(|r| r.filtered_out).sum();
+    let filtered_out = du::size_sum(rows.iter().map(|r| r.filtered_out));
     let view = View {
         rows,
         disk,
@@ -1358,7 +1360,7 @@ impl App {
             self.status = why;
             return;
         }
-        let bytes: u64 = t.iter().map(|r| r.disk).sum();
+        let bytes = du::size_sum(t.iter().map(|r| r.disk));
         let risky = t
             .iter()
             .filter(|r| r.git.as_ref().is_some_and(|(s, _)| s.is_risky()))
@@ -1422,7 +1424,7 @@ impl App {
             watch: watch.clone(),
             pending: t.iter().map(|i| (i.path.clone(), i.apparent)).collect(),
             total: t.len(),
-            left: t.iter().map(|i| i.disk).sum(),
+            left: du::size_sum(t.iter().map(|i| i.disk)),
             group: Vec::new(),
             failed: Vec::new(),
             shown: (0, 0),
@@ -1575,7 +1577,7 @@ impl App {
     }
 
     fn finish_delete(&mut self, d: Deleting) {
-        let disk: u64 = d.group.iter().map(|(_, it)| it.disk).sum();
+        let disk = du::size_sum(d.group.iter().map(|(_, it)| it.disk));
         let n = d.group.len();
         let left = d.pending.len();
         if n > 0 {
@@ -2533,7 +2535,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     };
     // Everything below this directory, as ncdu's Items count: each row,
     // and for a directory also what it holds.
-    let below: u64 = view.rows.iter().map(row_items).sum();
+    let below = du::size_sum(view.rows.iter().map(row_items));
     let items = crate::util::plural(below, "item", "items");
     let marked = app.marked_count();
     let tail = format!(" · {size} · {items} · {entries} · {marked} marked ");
@@ -2687,7 +2689,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             width: w,
             height: h,
         };
-        let total: u64 = app.targets().iter().map(|t| t.disk).sum();
+        let total = du::size_sum(app.targets().iter().map(|t| t.disk));
         f.render_widget(ratatui::widgets::Clear, area);
         f.render_widget(
             Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(

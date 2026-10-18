@@ -73,7 +73,7 @@ impl SharedSet {
 
     /// Bytes the shared extents take on disk, each range counted once.
     pub fn distinct(&self) -> u64 {
-        self.ranges.values().map(|v| union_len(v)).sum()
+        crate::du::size_sum(self.ranges.values().map(|v| union_len(v)))
     }
 }
 
@@ -87,14 +87,14 @@ pub fn union_len(ranges: &[(u64, u64)]) -> u64 {
         cur = match cur {
             Some((cs, ce)) if s <= ce => Some((cs, ce.max(e))),
             Some((cs, ce)) => {
-                total += ce - cs;
+                total = total.saturating_add(ce - cs);
                 Some((s, e))
             }
             None => Some((s, e)),
         };
     }
     if let Some((cs, ce)) = cur {
-        total += ce - cs;
+        total = total.saturating_add(ce - cs);
     }
     total
 }
@@ -113,7 +113,7 @@ pub fn coalesce(ranges: &mut Vec<(u64, u64, u64)>) -> u64 {
         }
     }
     *ranges = out;
-    ranges.iter().map(|&(_, s, e)| e - s).sum()
+    crate::du::size_sum(ranges.iter().map(|&(_, s, e)| e - s))
 }
 
 /// What one file adds to a `--unique` scan.
@@ -543,5 +543,16 @@ mod tests {
             assert!(file_share(&f, disk).unique < disk / 2);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shared_bytes_stop_at_the_top_across_devices() {
+        let half = u64::MAX / 2 + 1;
+        let mut a = SharedSet::default();
+        // Two devices, each with an extent of more than half of u64.
+        a.add(1, &[ext(0, half, true)]);
+        a.add(2, &[ext(0, half, true)]);
+        assert_eq!(a.distinct(), u64::MAX);
+        assert_eq!(a.referenced, u64::MAX);
     }
 }

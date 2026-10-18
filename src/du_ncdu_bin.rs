@@ -196,7 +196,7 @@ impl<R: Read + Seek> Blocks<R> {
             .map_err(|e| bad(format_args!("block {n}: {e}")))?;
         data.shrink_to_fit();
         if !std::mem::replace(&mut self.seen[n], true) {
-            self.loaded_bytes += data.len() as u64;
+            self.loaded_bytes = self.loaded_bytes.saturating_add(data.len() as u64);
         }
         // Make room: drop the least recently used blocks.
         let mut held: usize = self.cache.iter().map(|c| c.2.len()).sum();

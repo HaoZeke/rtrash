@@ -1680,6 +1680,65 @@ def check_doc_gaps():
                               "make it a // comment if it documents nothing")
 
 
+# A size sum in the du code saturates (round 252, ncdu #278): a plain
+# `+`, `+=` or `.sum()` wraps in release and panics in debug when an
+# export or a corrupt stat brings a size near u64::MAX.
+SIZE_NAME = (r"(?:disk|apparent|unique|reclaim|length|bytes|dsize|asize|disk_all|base|freed"
+             r"|size|loaded_bytes|referenced|left|raw|own|total|cum_dsize)")
+SIZE_ADD = re.compile(rf"\b{SIZE_NAME}\s*\+=|\b{SIZE_NAME}\s*\+\s*[\w(]"
+                      rf"|[\w)]\s*\+\s*(?:\w+\.)*{SIZE_NAME}\b(?!\s*\()")
+SIZE_MUL = re.compile(r"\*\s*512\b")
+# `.sum` of anything but lengths in memory (`.len()`), which a usize holds.
+BARE_SUM = re.compile(r"(?<!\.len\(\)\))(?<!\s)\s*\.sum\b(?:::<\w+>)?\(\)")
+SIZE_SUM_CASES = [
+    ("plus-equals", "t.bytes += n;\n", [1]),
+    ("plain plus", "let d = a.disk + b.disk;\n", [1]),
+    ("plus a size", "let d = 4096 + f.dsize;\n", [1]),
+    ("saturating", "t.bytes = t.bytes.saturating_add(n);\n", []),
+    ("count", "n.items += 1;\n", []),
+    ("index", "let at = off + len;\n", []),
+    ("sum", "let d: u64 = rows.iter().map(|r| r.disk).sum();\n", [1]),
+    ("turbofish sum", "let d = v.iter().copied().sum::<u64>();\n", [1]),
+    ("chained sum", "let d = v\n    .iter()\n    .map(|r| r.disk)\n    .sum();\n", [4]),
+    ("len sum", "let n: usize = g.iter().map(|g| g.extras.len()).sum();\n", []),
+    ("chained len sum",
+     "let n: usize = g\n    .iter()\n    .map(|g| g.extras.len())\n    .sum();\n", []),
+    ("size_sum", "let d = du::size_sum(rows.iter().map(|r| r.disk));\n", []),
+    ("blocks", "let d = m.blocks() * 512;\n", [1]),
+    ("blocks saturating", "let d = m.blocks().saturating_mul(512);\n", []),
+    ("comment", "// t.bytes += n;\n", []),
+]
+
+
+def size_sum_lines(text):
+    """Lines of `text` that add, sum or scale a size without saturating."""
+    code = rust_code(text)
+    hits = set()
+    for pat in (SIZE_ADD, SIZE_MUL, BARE_SUM):
+        for m in pat.finditer(code):
+            hits.add(code.count("\n", 0, m.end()) + 1)
+    return sorted(hits)
+
+
+def check_size_sums():
+    """Outside tests, src/du*.rs and src/du_fs/ add sizes with
+    du::size_sum or saturating_add, and scale blocks with saturating_mul,
+    as coreutils du stops at the top; SIZE_SUM_CASES tests the matcher."""
+    for what, text, want in SIZE_SUM_CASES:
+        if size_sum_lines(text) != want:
+            errors.append(f"scripts/precheck.py: size_sum_lines gets SIZE_SUM_CASES '{what}' "
+                          "wrong; the size-sum check is broken")
+    paths = sorted((ROOT / "src").glob("du*.rs")) + sorted((ROOT / "src" / "du_fs").glob("*.rs"))
+    for path in paths:
+        rel = path.relative_to(ROOT).as_posix()
+        raw = path.read_text(encoding="utf-8")
+        skip = test_mod_lines(raw.splitlines())
+        for line in size_sum_lines(raw):
+            if line - 1 not in skip:
+                errors.append(f"{rel}:{line}: adds, sums or scales a size without saturating; "
+                              "use du::size_sum, saturating_add or saturating_mul (ncdu #278)")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -1795,7 +1854,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

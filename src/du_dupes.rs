@@ -352,7 +352,7 @@ pub fn find(files: Vec<File>) -> (Vec<Group>, u64) {
                 ))
             });
             let keep = g.remove(0);
-            let reclaim = g.iter().map(freed).sum();
+            let reclaim = crate::du::size_sum(g.iter().map(freed));
             Group {
                 size: keep.size,
                 keep,
@@ -401,7 +401,7 @@ pub fn to_json(groups: &[Group]) -> String {
         })
         .collect();
     let extras: usize = groups.iter().map(|g| g.extras.len()).sum();
-    let reclaim: u64 = groups.iter().map(|g| g.reclaim).sum();
+    let reclaim = crate::du::size_sum(groups.iter().map(|g| g.reclaim));
     format!(
         r#"{{"groups":[{}],"total":{{"groups":{},"extras":{extras},"reclaim":{reclaim}}}}}"#,
         gs.join(","),
@@ -469,7 +469,7 @@ pub fn replace_extras(groups: &[Group], how: Replace) -> Linked {
         }
         // Partly linked groups free an unknown share; count only whole ones.
         if whole {
-            out.freed += g.reclaim;
+            out.freed = out.freed.saturating_add(g.reclaim);
         }
     }
     out
@@ -756,7 +756,7 @@ pub fn print_text(groups: &[Group], top: usize) {
         }
     }
     let extras: usize = groups.iter().map(|g| g.extras.len()).sum();
-    let reclaim: u64 = groups.iter().map(|g| g.reclaim).sum();
+    let reclaim = crate::du::size_sum(groups.iter().map(|g| g.reclaim));
     println!(
         "Total: {} with {}, {} to free",
         crate::util::plural(groups.len() as u64, "group", "groups"),

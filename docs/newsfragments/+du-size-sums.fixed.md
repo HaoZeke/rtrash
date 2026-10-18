@@ -1,0 +1,1 @@
+A size total in `rtrash du` now stops at the largest 64-bit value (ncdu #278). Coreutils `du` stops the same way. Before, a total could wrap around, or panic in a debug build. Sizes that large come from a corrupt or crafted ncdu export or a broken stat. A plain sum added up the explorer totals, the `--dupes` reclaim, the shared extent count and the Recycle Bin bytes.

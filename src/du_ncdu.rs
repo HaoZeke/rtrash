@@ -1607,4 +1607,21 @@ mod tests {
         write_name(&mut out, b"a\"b\\c\nd\x01e\xffz").unwrap();
         assert_eq!(out, b"{\"name\":\"a\\\"b\\\\c\\nd\\u0001e\xffz\"".to_vec());
     }
+
+    #[test]
+    fn sizes_near_the_top_stop_at_u64_max() {
+        // ncdu #278: an export whose sizes add up past u64.
+        let snap = read(
+            r#"[1,2,{},[{"name":"/r/","dsize":0,"dev":5},
+              {"name":"a","dsize":18446744073709551615,"asize":18446744073709551615},
+              {"name":"b","dsize":4096,"asize":10},
+              [{"name":"d","dsize":9223372036854775808},
+                {"name":"c","dsize":9223372036854775808}]]]"#,
+        );
+        let r = &snap.roots[0];
+        assert_eq!(r.disk, u64::MAX);
+        assert_eq!(r.apparent, u64::MAX);
+        let d = snap.dirs.iter().find(|d| d.path.ends_with("d")).unwrap();
+        assert_eq!(d.disk, u64::MAX, "{d:?}");
+    }
 }
