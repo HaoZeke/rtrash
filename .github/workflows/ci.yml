@@ -242,6 +242,23 @@ jobs:
               "$(rustc --print sysroot)" "${CARGO_HOME:-$HOME/.cargo}/registry/src" "$fixture"
           done
 
+      # Facts for the open macOS -x / question (shortlist 30(a)): device
+      # numbers of / and the firmlinked folders, the mounts, and what
+      # rtrash du -x counts at the top of each volume. It asserts nothing
+      # and cannot fail the job.
+      - name: Report what du -x sees at the macOS root (facts only)
+        continue-on-error: true
+        run: |
+          stat -f '%d %i %N' / /Users /Applications /System/Volumes/Data \
+            /System/Volumes/Data/Users || true
+          mount | grep -E ' on (/|/System/Volumes/Data) ' || true
+          for p in / /System/Volumes/Data; do
+            echo "== rtrash du -x $p, with only Users itself left in"
+            target/release/rtrash du --json --no-git -x '--exclude=/*' '--exclude=!/Users' \
+              '--exclude=/Users/*' "$p" | tr ',' '\n' | grep -E '"(path|disk|files|dirs|excluded)"' \
+              | head -n 10 || true
+          done
+
   macos-finder:
     name: macOS Finder Trash (plain put · list · restore · empty)
     runs-on: macos-latest
