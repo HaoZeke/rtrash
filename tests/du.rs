@@ -238,6 +238,70 @@ fn hard_links_count_once() {
     assert!(text.contains("1 file (+2 hard links), "), "{text}");
 }
 
+/// `root` joined with each `/`-separated part of `rel`, so the result has
+/// native separators only.
+#[cfg(windows)]
+fn native(root: &Path, rel: &str) -> PathBuf {
+    rel.split('/')
+        .fold(root.to_path_buf(), |p, part| p.join(part))
+}
+
+/// Make the junction `link` to `target` with `mklink /J`. cmd reads a `/`
+/// anywhere in an argument as the start of a switch ("Invalid switch"),
+/// so both paths must be native; a `/` in either fails here first. Every
+/// mklink call goes through here (precheck check_mklink_calls).
+#[cfg(windows)]
+fn mklink_junction(link: &Path, target: &Path) {
+    for p in [link, target] {
+        let plain = !p.as_os_str().to_string_lossy().contains('/');
+        assert!(plain, "a mklink path with '/': {}", p.display());
+    }
+    let out = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "mklink /J {}: {err}", link.display());
+}
+
+/// Windows junctions are not followed (diskus #42, gdu #441). One to a
+/// folder in the tree adds nothing, one back up the tree makes no loop,
+/// and one to another volume is not crossed, with or without -x. On the
+/// CI runners the crate's folder sits on another volume than the temp
+/// dir. `--dupes` sees the file once. `mklink /J` needs no admin rights.
+#[cfg(windows)]
+#[test]
+fn junctions_are_not_followed_or_counted_twice() {
+    if std::env::var_os("WINEPREFIX").is_some() {
+        return;
+    }
+    let t = Tree::new("junctions");
+    t.file("d/real/a.bin", 100_000);
+    let d = native(&t.root, "d");
+    mklink_junction(&native(&d, "again"), &native(&d, "real"));
+    mklink_junction(&native(&d, "real/up"), &d);
+    mklink_junction(
+        &native(&d, "elsewhere"),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    );
+    for one_fs in [false, true] {
+        let mut args = vec!["--files", "--all-dirs"];
+        if one_fs {
+            args.push("-x");
+        }
+        args.push("d");
+        let j = t.json(&args);
+        let roots = &j[..j.find("\"dirs\"").unwrap()];
+        assert_eq!(field(roots, "apparent"), 100_000, "-x {one_fs}: {j}");
+        assert_eq!(j.matches("a.bin").count(), 1, "-x {one_fs}: {j}");
+        assert!(!j.contains("Cargo.toml"), "-x {one_fs}: {j}");
+    }
+    let j = t.json(&["--dupes", "--min-size=1k", "d"]);
+    assert!(j.contains(r#""total":{"groups":0,"#), "{j}");
+}
+
 #[cfg(unix)]
 #[test]
 fn hard_links_count_once_and_symlinks_are_not_followed() {

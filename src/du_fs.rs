@@ -396,10 +396,16 @@ mod fileid {
 
     pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
     pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    // winnt.h: the reparse points that work like symlinks. Other tags (cloud
-    // placeholders, deduplicated files) hold data and count as what they are.
+    // winnt.h: a junction or volume mount point, and a symlink.
+    #[cfg(test)]
     pub const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+    #[cfg(test)]
     pub const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+    // winnt.h IsReparseTagNameSurrogate: the tag names another file or
+    // folder, as a junction, a volume mount point, a symlink, a WSL symlink
+    // or a container link does. Other tags (cloud placeholders,
+    // deduplicated files) hold data and count as what they are.
+    const NAME_SURROGATE: u32 = 0x2000_0000;
 
     /// Same layout as `FILE_ID_BOTH_DIR_INFO` in winbase.h.
     #[repr(C)]
@@ -422,9 +428,13 @@ mod fileid {
         pub file_name: [u16; 1],
     }
 
+    /// A reparse point that names another file or folder: the walk counts
+    /// it as a link and never enters it, so a junction or a volume mount
+    /// point is not crossed (diskus #42, gdu #441). This is the test std's
+    /// `FileType::is_symlink` makes, so the `--dupes` walk, reap and the
+    /// Recycle Bin code agree with the scan.
     pub fn is_link(attrs: u32, tag: u32) -> bool {
-        attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0
-            && (tag == IO_REPARSE_TAG_SYMLINK || tag == IO_REPARSE_TAG_MOUNT_POINT)
+        attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && tag & NAME_SURROGATE != 0
     }
 
     pub fn mode_of(attrs: u32, tag: u32) -> u32 {
@@ -787,8 +797,32 @@ mod tests {
         assert_eq!(e.get(2).1, Kind::Other, "junctions are not followed");
         assert!(!j.is_dir() && !j.is_file());
         assert!(e.stat(3).unwrap().is_file());
+        assert!(is_link(junction, IO_REPARSE_TAG_SYMLINK));
         let mut short = Entries::default();
         assert!(!parse(&buf[..buf.len() - 9], 9, &mut short));
+    }
+
+    /// Every reparse tag that names another file or folder is a link, the
+    /// ones winnt.h lists and any other; a tag that holds data is not.
+    #[test]
+    fn reparse_points_that_name_another_folder_are_links() {
+        use fileid::*;
+        let dir = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
+        // Junction, symlink, WSL symlink, container link, an unknown one.
+        for tag in [
+            0xA000_0003,
+            0xA000_000C,
+            0xA000_001D,
+            0xA000_0027,
+            0x2000_00FF,
+        ] {
+            assert!(is_link(dir, tag), "{tag:#x}");
+        }
+        // Cloud placeholder, deduplicated file, NFS special file.
+        for tag in [0x9000_001A, 0x8000_0013, 0x8000_0014] {
+            assert!(!is_link(dir, tag), "{tag:#x}");
+        }
+        assert!(!is_link(FILE_ATTRIBUTE_DIRECTORY, 0xA000_0003));
     }
 
     /// gdu #688: a file whose clusters are not on disk (an online-only
