@@ -2809,6 +2809,33 @@ def check_rank_order():
                           "the same way (gdu #289)")
 
 
+# 34(j): the Compact test asserted only `disk < 1 << 19`, so a du that
+# gave a Compact file a disk use of 0 passed it. In tests/, an assert that
+# puts a disk size below a bound also puts it above 0 (`0 < disk && ..`).
+# DISK_CEILING_CASES tests the matcher.
+DISK_CEILING = re.compile(r"\bassert!\(\s*\w*disk\w*\s*<")
+DISK_CEILING_CASES = [
+    ("ceiling", "        assert!(disk < 1 << 19, \"{name}: disk {disk}: {j}\");", True),
+    ("both", "        assert!(0 < disk && disk < apparent, \"{name}\");", False),
+    ("floor", "        assert!(disk > 0, \"{j}\");", False),
+]
+
+
+def check_disk_floors():
+    """A test assert that caps a disk size also wants it above 0."""
+    for what, line, want in DISK_CEILING_CASES:
+        if bool(DISK_CEILING.search(line)) != want:
+            errors.append(f"scripts/precheck.py: DISK_CEILING gets DISK_CEILING_CASES '{what}' "
+                          "wrong; the disk floor check is broken")
+    for path in sorted((ROOT / "tests").rglob("*.rs")):
+        lines = rust_code(path.read_text(encoding="utf-8")).split("\n")
+        for k, line in enumerate(lines):
+            if DISK_CEILING.search(line):
+                errors.append(f"{path.relative_to(ROOT).as_posix()}:{k + 1}: a disk size checked "
+                              "only against a ceiling passes when du gives 0; assert "
+                              "0 < disk && disk < N")
+
+
 def enclosing_fn(lines, k):
     """The name of the last fn declared at or above 0-based line `k`."""
     for j in range(k, -1, -1):
@@ -3063,7 +3090,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_directorysizes_paths(); check_link_copies(); check_rank_order()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_directorysizes_paths(); check_link_copies(); check_rank_order()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

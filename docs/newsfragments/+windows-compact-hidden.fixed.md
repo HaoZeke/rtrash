@@ -1,0 +1,1 @@
+On Windows, du no longer counts a file that Compact packed (`compact /exe`) as 0 bytes on disk. The folder listing can show such a file as a plain one with no clusters. du now asks the file itself for its packed size, and keeps the listed size if that fails. Sparse files still count what the listing gives.

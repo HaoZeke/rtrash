@@ -389,7 +389,7 @@ impl Dir {
         thread_local! {
             static BUF: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
         }
-        BUF.with(|b| {
+        let (mut out, failed) = BUF.with(|b| {
             let mut buf = b.borrow_mut();
             if buf.len() < LIST_BUF / 8 {
                 buf.resize(LIST_BUF / 8, 0);
@@ -422,7 +422,12 @@ impl Dir {
                     return (out, false);
                 }
             }
-        })
+        });
+        // 34(j): a file the listing shows with no clusters may be one that
+        // Compact packed; the stat by path gives its packed size. A stat
+        // that fails leaves the listed one.
+        out.restat(|name| lstat(&self.path.join(os(name))).ok());
+        (out, failed)
     }
 }
 

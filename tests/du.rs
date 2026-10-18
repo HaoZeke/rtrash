@@ -3234,11 +3234,12 @@ fn trash_dupes_go_to_the_scratch_trash_not_the_system_bin() {
     }
 }
 
-/// gdu #407: a file that file compression or Compact packed counts its
-/// bytes on disk, well below its length. The files hold text of a few
-/// words, which both packers shrink but neither can fit in the file
-/// record. `compact /c` needs no admin rights; `compact /c /exe:lzx`
-/// (Compact, the Windows Overlay Filter) runs where the system has it.
+/// gdu #407 and 34(j): a file that file compression or Compact packed
+/// counts its bytes on disk: more than none, less than its length. The
+/// files hold text of a few words, which both packers shrink but neither
+/// can fit in the file record. `compact /c` needs no admin rights;
+/// `compact /c /exe:lzx` (Compact, the Windows Overlay Filter) runs where
+/// the system has it.
 /// Each run prints `compressed-size:` lines: whether `/exe:lzx` ran, what
 /// each way of asking Windows gave (`du_fs::size_probe`) before any
 /// assert, what compact reports and what du measured. The Windows CI job
@@ -3301,7 +3302,7 @@ fn compressed_files_count_their_disk_use_on_windows() {
         let disk = field(&j[at..], "disk");
         eprintln!("compressed-size: {name} apparent {apparent} disk {disk}");
         assert_eq!(apparent, 1 << 20, "{name}: {j}");
-        assert!(disk < 1 << 19, "{name}: disk {disk}: {j}");
+        assert!(0 < disk && disk < apparent, "{name}: disk {disk}: {j}");
     }
 }
 

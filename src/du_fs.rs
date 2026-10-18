@@ -80,6 +80,11 @@ pub struct Entries {
     /// Stat of each entry when the listing returned one (macOS bulk
     /// reads); empty otherwise.
     stats: Vec<Option<Stat>>,
+    /// 34(j): the entries whose listed stat may miss data that Compact
+    /// packed (`fileid::hides_its_clusters`); [`Entries::restat`] asks
+    /// them again.
+    #[cfg(any(windows, test))]
+    restat: Vec<usize>,
 }
 
 impl Entries {
@@ -109,6 +114,18 @@ impl Entries {
         if self.index.len() > before {
             self.stats.resize(before, None);
             self.stats.push(stat);
+        }
+    }
+
+    /// 34(j): ask `stat` again about each entry the listing marked, and
+    /// keep what it gives. When it gives None, the listed stat stays.
+    #[cfg(any(windows, test))]
+    fn restat(&mut self, mut stat: impl FnMut(&CStr) -> Option<Stat>) {
+        for i in std::mem::take(&mut self.restat) {
+            let got = stat(self.get(i).0);
+            if let (Some(s), Some(slot)) = (got, self.stats.get_mut(i)) {
+                *slot = Some(s);
+            }
         }
     }
 
@@ -395,6 +412,7 @@ mod fileid {
     use std::mem::offset_of;
 
     pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    pub const FILE_ATTRIBUTE_SPARSE_FILE: u32 = 0x200;
     pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
     pub const FILE_ATTRIBUTE_COMPRESSED: u32 = 0x800;
     // winnt.h: a file that Compact packed (the Windows Overlay Filter).
@@ -448,6 +466,24 @@ mod fileid {
     pub fn needs_real_size(attrs: u32, tag: u32) -> bool {
         attrs & FILE_ATTRIBUTE_COMPRESSED != 0
             || (attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && tag == IO_REPARSE_TAG_WOF)
+    }
+
+    /// NTFS can keep a file this short inside its file record, with no
+    /// clusters of its own.
+    pub const NO_CLUSTERS_MIN: i64 = 4096;
+
+    /// 34(j): the Compact filter can hide the reparse point of a packed
+    /// file from a listing. The listing then shows a plain file of `len`
+    /// bytes with no clusters (`alloc` 0), while a stat by path gives the
+    /// packed size. So a file past [`NO_CLUSTERS_MIN`] bytes with no
+    /// clusters gets a stat as well (`Entries::restat`), and the listed
+    /// value stays when that stat fails. A sparse file keeps its listing,
+    /// since its clusters are its disk use. So does a reparse point, which
+    /// [`needs_real_size`] or the stat by path already covers.
+    pub fn hides_its_clusters(attrs: u32, alloc: i64, len: i64) -> bool {
+        alloc == 0
+            && len > NO_CLUSTERS_MIN
+            && attrs & (FILE_ATTRIBUTE_SPARSE_FILE | FILE_ATTRIBUTE_REPARSE_POINT) == 0
     }
 
     pub fn mode_of(attrs: u32, tag: u32) -> u32 {
@@ -580,16 +616,19 @@ mod fileid {
             // For a reparse point the EA size field holds the reparse tag.
             let tag = u32_at(rec, offset_of!(I, ea_size));
             let mode = mode_of(attrs, tag);
+            let mut ask = false;
             let (kind, stat) = if mode == S_IFDIR {
                 (Kind::Dir, None)
             } else if needs_real_size(attrs, tag) {
                 (Kind::Other, None)
             } else {
+                let alloc = i64_at(rec, offset_of!(I, allocation_size));
+                let len = i64_at(rec, offset_of!(I, end_of_file));
+                ask = mode == S_IFREG && hides_its_clusters(attrs, alloc, len);
                 let stat = Stat {
                     mode,
-                    size: i64_at(rec, offset_of!(I, end_of_file)).max(0) as u64,
-                    blocks: (i64_at(rec, offset_of!(I, allocation_size)).max(0) as u64)
-                        .div_ceil(512),
+                    size: len.max(0) as u64,
+                    blocks: (alloc.max(0) as u64).div_ceil(512),
                     // Unknown: the listing has no link count.
                     nlink: 0,
                     ino: i64_at(rec, offset_of!(I, file_id)) as u64,
@@ -598,7 +637,11 @@ mod fileid {
                 };
                 (Kind::Other, Some(stat))
             };
+            let before = out.len();
             out.push_with_stat(name.as_encoded_bytes(), kind, stat);
+            if ask && out.len() > before {
+                out.restat.push(before);
+            }
             if next == 0 {
                 return true;
             }
@@ -922,6 +965,62 @@ mod tests {
             !is_link(wof, IO_REPARSE_TAG_WOF),
             "a Compact file holds data"
         );
+    }
+
+    /// 34(j): the Compact filter may hide the reparse point of a packed
+    /// file, so a listing shows a long file with no clusters. That file is
+    /// asked again and takes the stat it gets; when the stat gives None it
+    /// keeps the listed value. A sparse file, a reparse point and a file
+    /// short enough for its file record are not asked.
+    #[test]
+    fn a_long_file_without_clusters_asks_a_stat_and_keeps_the_listing_on_none() {
+        use fileid::*;
+        use std::mem::offset_of;
+        let sized = |name: &str, attrs: u32, len: i64, last: bool| {
+            let mut r = fileid_record(name, attrs, 0, last);
+            let a = offset_of!(Record, allocation_size);
+            r[a..a + 8].copy_from_slice(&0i64.to_ne_bytes());
+            let l = offset_of!(Record, end_of_file);
+            r[l..l + 8].copy_from_slice(&len.to_ne_bytes());
+            r
+        };
+        let sparse = 0x20 | FILE_ATTRIBUTE_SPARSE_FILE;
+        let cloud = 0x20 | FILE_ATTRIBUTE_REPARSE_POINT;
+        let mut buf = sized("wof.bin", 0x20, 1 << 20, false);
+        buf.extend(sized("hollow.bin", sparse, 8 << 20, false));
+        buf.extend(sized("cloud.bin", cloud, 1 << 20, false));
+        buf.extend(sized("tiny.txt", 0x20, 600, true));
+        let mut e = Entries::default();
+        assert!(parse(&buf, 9, &mut e));
+        let mut asked = Vec::new();
+        e.restat(|name| {
+            asked.push(name.to_string_lossy().into_owned());
+            None
+        });
+        assert_eq!(asked, ["wof.bin"]);
+        let kept = e.stat(0).unwrap();
+        assert_eq!(kept.blocks, 0, "a stat that gives None keeps the listing");
+        assert_eq!(kept.size, 1 << 20);
+        let mut e = Entries::default();
+        assert!(parse(&buf, 9, &mut e));
+        let packed = Stat {
+            blocks: 248,
+            ..kept
+        };
+        e.restat(|_| Some(packed));
+        assert_eq!(e.stat(0).unwrap().blocks, 248);
+        assert_eq!(
+            e.stat(1).unwrap().blocks,
+            0,
+            "a sparse file keeps its listing"
+        );
+        assert_eq!(
+            e.stat(2).unwrap().blocks,
+            0,
+            "a reparse point keeps its listing"
+        );
+        assert_eq!(e.stat(3).unwrap().size, 600);
+        assert!(!hides_its_clusters(0x20, 0, NO_CLUSTERS_MIN));
     }
 
     /// 34(j) size report: `listed` reads one entry back from a listing,
