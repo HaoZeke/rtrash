@@ -3254,6 +3254,42 @@ fn trash_dupes_go_to_the_scratch_trash_not_the_system_bin() {
     }
 }
 
+/// gdu #407: a file that file compression or Compact packed counts its
+/// bytes on disk, well below its length. `compact /c` needs no admin
+/// rights; `compact /c /exe:lzx` (Compact, the Windows Overlay Filter)
+/// runs where the system has it, and the test says so when it does not.
+#[cfg(windows)]
+#[test]
+fn compressed_files_count_their_disk_use_on_windows() {
+    let t = Tree::new("compact");
+    let ntfs = t.file("ntfs.bin", 1 << 20);
+    let wof = t.file("wof.bin", 1 << 20);
+    let compact = |args: &[&str], f: &Path| Command::new("compact").args(args).arg(f).output();
+    let out = compact(&["/c"], &ntfs).expect("run compact");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let packed = compact(&["/c", "/exe:lzx"], &wof).is_ok_and(|o| o.status.success());
+    if !packed {
+        eprintln!("compact /exe:lzx unavailable; checking file compression only");
+    }
+    let j = t.json(&["--no-git", "--files", "-n", "10"]);
+    for (f, on) in [(&ntfs, true), (&wof, packed)] {
+        if !on {
+            continue;
+        }
+        let name = f.file_name().unwrap().to_str().unwrap();
+        let at = j
+            .find(&format!("{name}\",\"type\":\"file\""))
+            .expect("file row");
+        assert_eq!(field(&j[at..], "apparent"), 1 << 20, "{name}: {j}");
+        let disk = field(&j[at..], "disk");
+        assert!(disk < 1 << 19, "{name}: disk {disk}: {j}");
+    }
+}
+
 /// `--dupes` never reads a file whose data a read would fetch, and says
 /// how many it left. The Cloud Files bit (RECALL_ON_DATA_ACCESS, set on
 /// OneDrive online-only files) is kernel-only, so this sets OFFLINE, the

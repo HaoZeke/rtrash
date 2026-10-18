@@ -396,6 +396,9 @@ mod fileid {
 
     pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
     pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    pub const FILE_ATTRIBUTE_COMPRESSED: u32 = 0x800;
+    // winnt.h: a file that Compact packed (the Windows Overlay Filter).
+    pub const IO_REPARSE_TAG_WOF: u32 = 0x8000_0017;
     // winnt.h: a junction or volume mount point, and a symlink.
     #[cfg(test)]
     pub const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
@@ -435,6 +438,16 @@ mod fileid {
     /// Recycle Bin code agree with the scan.
     pub fn is_link(attrs: u32, tag: u32) -> bool {
         attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && tag & NAME_SURROGATE != 0
+    }
+
+    /// gdu #407: a file whose data file compression or Compact packed.
+    /// Its allocation size is not its disk use, so a scan asks the file
+    /// itself: the listing gives no stat for it, and a stat by path reads
+    /// GetCompressedFileSizeW. Every read of an allocation size checks
+    /// this first (precheck check_compressed_sizes).
+    pub fn needs_real_size(attrs: u32, tag: u32) -> bool {
+        attrs & FILE_ATTRIBUTE_COMPRESSED != 0
+            || (attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && tag == IO_REPARSE_TAG_WOF)
     }
 
     pub fn mode_of(attrs: u32, tag: u32) -> u32 {
@@ -494,6 +507,8 @@ mod fileid {
             let mode = mode_of(attrs, tag);
             let (kind, stat) = if mode == S_IFDIR {
                 (Kind::Dir, None)
+            } else if needs_real_size(attrs, tag) {
+                (Kind::Other, None)
             } else {
                 let stat = Stat {
                     mode,
@@ -800,6 +815,38 @@ mod tests {
         assert!(is_link(junction, IO_REPARSE_TAG_SYMLINK));
         let mut short = Entries::default();
         assert!(!parse(&buf[..buf.len() - 9], 9, &mut short));
+    }
+
+    /// gdu #407: a compressed file and a Compact one get no stat from the
+    /// listing, so the walk stats them by path for their real disk use.
+    #[test]
+    fn compressed_files_leave_their_size_to_a_stat() {
+        use fileid::*;
+        let wof = 0x20 | FILE_ATTRIBUTE_REPARSE_POINT;
+        let mut buf = Vec::new();
+        buf.extend(fileid_record("plain.bin", 0x20, 0, false));
+        buf.extend(fileid_record(
+            "ntfs.bin",
+            0x20 | FILE_ATTRIBUTE_COMPRESSED,
+            0,
+            false,
+        ));
+        buf.extend(fileid_record("wof.bin", wof, IO_REPARSE_TAG_WOF, false));
+        // The tag counts only on a reparse point: EA size is a size else.
+        buf.extend(fileid_record("ea.bin", 0x20, IO_REPARSE_TAG_WOF, true));
+        let mut e = Entries::default();
+        assert!(parse(&buf, 9, &mut e));
+        assert_eq!(e.len(), 4);
+        assert!(e.stat(0).is_some());
+        assert_eq!(e.get(1).1, Kind::Other);
+        assert_eq!(e.stat(1), None);
+        assert_eq!(e.get(2).1, Kind::Other);
+        assert_eq!(e.stat(2), None);
+        assert!(e.stat(3).is_some());
+        assert!(
+            !is_link(wof, IO_REPARSE_TAG_WOF),
+            "a Compact file holds data"
+        );
     }
 
     /// Every reparse tag that names another file or folder is a link, the

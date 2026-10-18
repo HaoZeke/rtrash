@@ -7,7 +7,7 @@
 //! Names are kept in the `OsStr` encoding of std, NUL-terminated like the
 //! Unix names, so the walk handles both the same way.
 
-use super::fileid::{mode_of, mtime_of, parse};
+use super::fileid::{mode_of, mtime_of, needs_real_size, parse};
 use super::{Entries, Stat};
 use std::cell::RefCell;
 use std::ffi::{c_void, CStr, OsStr};
@@ -16,14 +16,16 @@ use std::mem::{size_of, MaybeUninit};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 
-use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    GetLastError, SetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FileAttributeTagInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-    FileStandardInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
-    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO, FILE_INFO_BY_HANDLE_CLASS,
-    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_STANDARD_INFO, OPEN_EXISTING,
+    FileStandardInfo, GetCompressedFileSizeW, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO,
+    FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, OPEN_EXISTING,
 };
 
 /// Bytes of the per-thread listing buffer.
@@ -67,7 +69,28 @@ fn info_ex<T>(h: &OwnedHandle, class: FILE_INFO_BY_HANDLE_CLASS) -> io::Result<T
     Ok(unsafe { v.assume_init() })
 }
 
-fn handle_stat(h: &OwnedHandle) -> io::Result<Stat> {
+/// gdu #407: the bytes on disk of a file that NTFS compression or Compact
+/// packed, as Explorer's "Size on disk" shows them. GetCompressedFileSizeW
+/// opens the file through the Compact filter, which a handle opened with
+/// FILE_FLAG_OPEN_REPARSE_POINT skips.
+fn compressed_size(path: &Path) -> Option<u64> {
+    let w = crate::util::win_path(path);
+    let mut high = 0u32;
+    // SAFETY: `w` is NUL-terminated and `high` is a u32 to write.
+    let low = unsafe {
+        SetLastError(0);
+        GetCompressedFileSizeW(w.as_ptr(), &mut high)
+    };
+    // A size whose low half is all ones is also u32::MAX; the error says.
+    if low == u32::MAX && unsafe { GetLastError() } != 0 {
+        return None;
+    }
+    Some(u64::from(high) << 32 | u64::from(low))
+}
+
+/// The stat of the open handle `h`. With `path`, a compressed or Compact
+/// file gets its real disk use ([`compressed_size`]).
+fn handle_stat(h: &OwnedHandle, path: Option<&Path>) -> io::Result<Stat> {
     let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
     // SAFETY: GetFileInformationByHandle fills `info` on success.
     if unsafe { GetFileInformationByHandle(h.as_raw_handle() as _, info.as_mut_ptr()) } == 0 {
@@ -78,10 +101,14 @@ fn handle_stat(h: &OwnedHandle) -> io::Result<Stat> {
     let std_info: FILE_STANDARD_INFO = info_ex(h, FileStandardInfo)?;
     let wt = info.ftLastWriteTime;
     let write = (u64::from(wt.dwHighDateTime) << 32 | u64::from(wt.dwLowDateTime)) as i64;
+    let packed = path
+        .filter(|_| needs_real_size(tag.FileAttributes, tag.ReparseTag))
+        .and_then(compressed_size);
+    let allocated = packed.unwrap_or(std_info.AllocationSize.max(0) as u64);
     Ok(Stat {
         mode: mode_of(tag.FileAttributes, tag.ReparseTag),
         size: std_info.EndOfFile.max(0) as u64,
-        blocks: (std_info.AllocationSize.max(0) as u64).div_ceil(512),
+        blocks: allocated.div_ceil(512),
         nlink: u64::from(std_info.NumberOfLinks),
         ino: u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow),
         dev: u64::from(info.dwVolumeSerialNumber),
@@ -113,7 +140,7 @@ impl Dir {
     /// refused, so no walk crosses one (see `fileid::is_link`).
     pub fn open(path: &Path) -> io::Result<Dir> {
         let handle = open_handle(path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?;
-        let stat = handle_stat(&handle)?;
+        let stat = handle_stat(&handle, None)?;
         if !stat.is_dir() {
             return Err(io::Error::from_raw_os_error(267)); // ERROR_DIRECTORY
         }
@@ -218,7 +245,7 @@ pub fn stat_follow(path: &Path) -> io::Result<Stat> {
 }
 
 pub fn lstat(path: &Path) -> io::Result<Stat> {
-    handle_stat(&open_handle(path, FILE_READ_ATTRIBUTES)?)
+    handle_stat(&open_handle(path, FILE_READ_ATTRIBUTES)?, Some(path))
 }
 
 /// Windows has no descriptor limit to raise.
