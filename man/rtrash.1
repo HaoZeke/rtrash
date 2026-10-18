@@ -354,6 +354,18 @@ and
 .BR policy.in_use .
 The interactive browsers do not scan.
 .TP
+.B \-\-allow\-permanent
+Windows only.
+The shell deletes an item for good, without asking, when its Recycle
+Bin cannot take it.
+Network, removable and optical drives have no bin.
+A bin can also be turned off, or the item can be over the bin's cap.
+When no cap is set, put takes 5% of the drive as the cap.
+That is the least Windows gives a bin.
+Put refuses such an item, leaves it in place and counts it as failed.
+With this option it lets Windows delete it for good, still through
+.BR RTRASH_NO_PERMANENT .
+.TP
 .B \-\-json
 Print one JSON object on stdout:
 \fItrashed\fR (one entry per moved item with \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR)

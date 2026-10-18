@@ -103,14 +103,61 @@ pub fn allowed_in(roots: &[PathBuf], p: &Path) -> bool {
 /// `delete`): it checks the scope first, so no caller can skip it. The
 /// precheck refuses any other call of `trash::delete`. A debug build
 /// under the tests' bin seam moves the path into that folder instead, so
-/// a test never fills the user's Recycle Bin.
+/// a test never fills the user's Recycle Bin. An item the Recycle Bin
+/// cannot take is refused with [`WouldDeleteForGood`].
 #[cfg(windows)]
 pub fn trash_delete(p: &Path) -> io::Result<()> {
+    trash_delete_as(p, false).map(|_| ())
+}
+
+/// [`trash_delete`], where `allow_permanent` (put's `--allow-permanent`)
+/// lets the shell delete for good, through the permanent-delete guard, an
+/// item its Recycle Bin cannot take. The shell does that without asking
+/// or telling (the delete runs with no UI), so the bin is asked first
+/// ([`crate::win_recycle::bin_cannot_take`]). True when the item went to
+/// the bin, false when it was deleted for good.
+#[cfg(windows)]
+pub fn trash_delete_as(p: &Path, allow_permanent: bool) -> io::Result<bool> {
     check(p)?;
+    let abs = std::path::absolute(p)?;
+    let binned = match crate::win_recycle::bin_cannot_take(&abs) {
+        None => true,
+        Some(why) if !allow_permanent => {
+            return Err(io::Error::other(WouldDeleteForGood(why)));
+        }
+        Some(_) => {
+            crate::permanent_guard::gate()?;
+            false
+        }
+    };
     if let Some(dir) = crate::win_recycle::test_bin_dir() {
-        return crate::win_recycle::test_bin_put(&dir, p);
+        return crate::win_recycle::test_bin_put(&dir, p).map(|()| binned);
     }
-    trash::delete(p).map_err(bin_error)
+    trash::delete(p).map_err(bin_error).map(|()| binned)
+}
+
+/// Why the Recycle Bin of an item's drive cannot take it, so that the
+/// shell would delete it for good: no bin on the drive, the bin turned
+/// off, or the item over the bin's cap.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct WouldDeleteForGood(pub String);
+
+#[cfg(windows)]
+impl std::fmt::Display for WouldDeleteForGood {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}, so Windows would delete it for good", self.0)
+    }
+}
+
+#[cfg(windows)]
+impl std::error::Error for WouldDeleteForGood {}
+
+/// Whether `e` is the refusal of [`trash_delete`] for an item the Recycle
+/// Bin cannot take.
+#[cfg(windows)]
+pub fn would_delete_for_good(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|r| r.is::<WouldDeleteForGood>())
 }
 
 /// A Recycle Bin refusal as an error that reads on one line. The `trash`

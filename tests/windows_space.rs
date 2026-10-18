@@ -2,7 +2,8 @@
 //! `restore` takes `--no-space-check`, `trash-stats` reads the Recycle
 //! Bins, `reap --install-timer` makes a Task Scheduler task,
 //! `reap --purge-trash` lists a drive's Recycle Bin oldest first, and `put`
-//! warns when the volume of the Recycle Bin it used is low.
+//! warns when the volume of the Recycle Bin it used is low and refuses an
+//! item over the bin's cap.
 #![cfg(windows)]
 
 mod common;
@@ -690,4 +691,56 @@ fn reap_permanent_removes_a_read_only_entry_and_keeps_the_guards() {
         "the read-only file stayed: {err}"
     );
     let _ = fs::remove_dir_all(&home);
+}
+
+/// A put refuses an item over the Recycle Bin's cap, which the shell would
+/// delete for good without a word, and leaves it in place.
+/// `--allow-permanent` lets it go, unless `RTRASH_NO_PERMANENT` is on. The
+/// cap is the debug-only `RTRASH_TEST_BIN_CAP`, checked under the scratch
+/// bin of `common::rtrash`, so the real bin is not read or changed.
+#[cfg(debug_assertions)]
+#[test]
+fn put_refuses_an_item_over_the_recycle_bin_cap() {
+    let home = common::scratch_dir("bincap", "put");
+    let big = home.join("big.bin");
+    std::fs::write(&big, vec![1u8; 2048]).unwrap();
+    let small = home.join("small.txt");
+    std::fs::write(&small, b"x").unwrap();
+    let put = |extra: &[&str], f: &std::path::Path, guard: bool| {
+        let mut c = common::rtrash(&home);
+        c.arg("put")
+            .args(extra)
+            .arg(f)
+            .env("RTRASH_TEST_BIN_CAP", "1024")
+            .env("RTRASH_IN_USE", "ignore");
+        if guard {
+            c.env("RTRASH_NO_PERMANENT", "1");
+        }
+        c.output().unwrap()
+    };
+    let out = put(&[], &big, false);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("so Windows would delete it for good"), "{err}");
+    assert!(err.contains("--allow-permanent"), "{err}");
+    assert!(big.exists());
+    let out = put(&["--dry-run", "--allow-permanent"], &big, false);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.starts_with("would delete for good '"), "{text}");
+    let out = put(&["--allow-permanent"], &big, true);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(big.exists());
+    let out = put(&["--allow-permanent"], &big, false);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("for good"), "{err}");
+    assert!(!big.exists());
+    let out = put(&[], &small, false);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!small.exists());
+    std::fs::remove_dir_all(&home).unwrap();
 }

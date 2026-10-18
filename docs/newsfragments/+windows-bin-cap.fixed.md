@@ -1,0 +1,1 @@
+On Windows, `rtrash put` asks the Recycle Bin before it moves an item. The shell deletes an item for good, without asking, when the drive has no bin, when the bin is turned off, or when the item is over the bin's cap. Put now refuses such an item and leaves it in place, and `--allow-permanent` lets it go. The du explorer and `reap --trash` refuse it the same way.

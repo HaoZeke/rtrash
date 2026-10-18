@@ -1160,12 +1160,50 @@ def check_test_seams():
 OS_TRASH = re.compile(r"\btrash::(\{[^}]*\b)?delete(_all)?\b")
 
 
+BIN_ASKED_CASES = [
+    ("asked", "pub fn send(p: &Path) {\n    if bin_cannot_take(p).is_some() {}\n"
+     "    trash::delete(p);\n}\n", []),
+    ("not asked", "pub fn send(p: &Path) {\n    check(p)?;\n    trash::delete(p);\n}\n", [3]),
+    ("asked after", "fn send(p: &Path) {\n    trash::delete(p);\n    bin_cannot_take(p);\n}\n",
+     [2]),
+    ("other fn", "fn ask(p: &Path) {\n    bin_cannot_take(p);\n}\n"
+     "fn send(p: &Path) {\n    trash::delete(p);\n}\n", [5]),
+]
+
+
+def unasked_bin_lines(text):
+    """1-based lines of trash::delete calls in a top-level fn that has not
+    called bin_cannot_take before them."""
+    hits, start, asked = [], 0, False
+    for n, line in enumerate(text.split("\n")):
+        if re.match(r"(?:pub(?:\([^)]*\))?\s+)?fn\s", line):
+            start, asked = n, False
+        if "bin_cannot_take(" in line:
+            asked = True
+        if OS_TRASH.search(line) and not (n >= start and asked):
+            hits.append(n + 1)
+    return hits
+
+
 def check_os_trash_scoped():
     """Every hand-off to the OS trash goes through allow_roots::trash_delete,
     which checks RTRASH_ALLOW_ROOTS first (round 182: the Windows du browser
-    called trash::delete directly and skipped the scope)."""
+    called trash::delete directly and skipped the scope). There it asks
+    win_recycle::bin_cannot_take first (round 261): the shell deletes for
+    good, without a word, an item the Recycle Bin cannot take, so put, the
+    du browser and reap --trash would lose it. BIN_ASKED_CASES tests the
+    matcher."""
+    for what, text, want in BIN_ASKED_CASES:
+        if unasked_bin_lines(text) != want:
+            errors.append(f"scripts/precheck.py: unasked_bin_lines gets BIN_ASKED_CASES '{what}' "
+                          "wrong; the Recycle Bin check is broken")
     for path in sorted((ROOT / "src").rglob("*.rs")):
         if path.name == "allow_roots.rs":
+            code = rust_code(path.read_text(encoding="utf-8"))
+            for line in unasked_bin_lines(code):
+                errors.append(f"{path.relative_to(ROOT)}:{line}: trash::delete before "
+                              "win_recycle::bin_cannot_take in its fn; the shell would delete "
+                              "an item the Recycle Bin cannot take for good")
             continue
         for k, line in enumerate(rust_code(path.read_text(encoding="utf-8")).splitlines()):
             if OS_TRASH.search(line):
@@ -2279,7 +2317,10 @@ def check_bin_seam():
             errors.append(f"{path.relative_to(ROOT).as_posix()}:{text.count(chr(10), 0, m.start()) + 1}: "
                           "removes the scratch bin pin; use common::rtrash_real(Real::RecycleBin) "
                           "for the real bin")
-    for rel, fn in (("src/allow_roots.rs", "trash_delete"), ("src/du.rs", "recycle_bin_on_scanned_drives")):
+    for rel, fn in (
+        ("src/allow_roots.rs", "trash_delete_as"),
+        ("src/du.rs", "recycle_bin_on_scanned_drives"),
+    ):
         body = fn_body(rust_code((ROOT / rel).read_text(encoding="utf-8")), fn)
         if "test_bin_dir()" not in body:
             errors.append(f"{rel}: {fn} does not ask win_recycle::test_bin_dir() first; "

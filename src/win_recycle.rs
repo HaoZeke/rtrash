@@ -1241,9 +1241,18 @@ fn tree_files(root: &Path) -> u64 {
 /// Bytes of the files under `root` (or of `root` itself), without
 /// following links, walked with a stack.
 fn tree_bytes(root: &Path) -> u64 {
+    tree_bytes_upto(root, u64::MAX)
+}
+
+/// [`tree_bytes`], with the walk stopped once the total passes `limit`:
+/// the answer is then some total over `limit`.
+fn tree_bytes_upto(root: &Path, limit: u64) -> u64 {
     let mut total = 0u64;
     let mut todo = vec![root.to_path_buf()];
     while let Some(p) = todo.pop() {
+        if total > limit {
+            break;
+        }
         let Ok(md) = std::fs::symlink_metadata(&p) else {
             continue;
         };
@@ -1536,6 +1545,7 @@ mod os {
         let mut in_use: Option<String> = None;
         let mut dry_run = false;
         let mut inspect = false;
+        let mut allow_permanent = false;
         for arg in args {
             if no_more_opts || arg == "-" || !arg.starts_with('-') {
                 files.push(crate::util::arg_path(arg));
@@ -1556,6 +1566,7 @@ mod os {
                 "--plain" => plain = true,
                 "--json" => json = true,
                 "--dry-run" => dry_run = true,
+                "--allow-permanent" => allow_permanent = true,
                 // FreeDesktop options: the Recycle Bin has one place per
                 // drive, so there is nothing to pin or narrow down.
                 "--home-only" => {}
@@ -1587,6 +1598,10 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
       --in-use=WHEN  when another process has a file open (as the
                    Restart Manager reports it): warn (the default),
                    refuse, or ignore
+      --allow-permanent  let Windows delete for good an item its Recycle
+                   Bin cannot take (no bin on the drive, the bin turned
+                   off, or the item over the bin's cap); without it such
+                   an item is refused and left in place
       --trash-dir=PATH, --home-only
                  accepted for script parity; items always go to the
                    Recycle Bin of their drive
@@ -1678,13 +1693,41 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 continue;
             }
             if dry_run {
-                println!("would trash '{}'", crate::util::term_path(&abs));
+                // The question trash_delete asks before it moves: the shell
+                // deletes for good, without a word, what the bin cannot take.
+                let nuke = bin_cannot_take(&abs);
+                if let (Some(why), false) = (&nuke, allow_permanent) {
+                    eprintln!(
+                        "{prog}: cannot trash '{}': {why}, so Windows would delete it for good",
+                        f.display()
+                    );
+                    eprintln!("{prog}: use --allow-permanent to delete it for good");
+                    status = status.max(1);
+                    failed += 1;
+                    continue;
+                }
+                let verb = if nuke.is_some() {
+                    "would delete for good"
+                } else {
+                    "would trash"
+                };
+                println!("{verb} '{}'", crate::util::term_path(&abs));
                 continue;
             }
             let root = test_bin_root().or_else(|| bin_root_of(&abs));
             let bin = verbose.then(|| root.clone()).flatten();
-            match crate::allow_roots::trash_delete(f) {
-                Ok(()) => {
+            match crate::allow_roots::trash_delete_as(f, allow_permanent) {
+                // Gone for good: no bin to name, nothing to undo.
+                Ok(false) => {
+                    eprintln!("{prog}: warning: deleted '{}' for good", f.display());
+                }
+                Err(e) if crate::allow_roots::would_delete_for_good(&e) => {
+                    eprintln!("{prog}: cannot trash '{}': {e}", f.display());
+                    eprintln!("{prog}: use --allow-permanent to delete it for good");
+                    status = status.max(1);
+                    failed += 1;
+                }
+                Ok(true) => {
                     if verbose && !json {
                         println!(
                             "{}",
@@ -3860,6 +3903,111 @@ pub fn bin_status_json(rows: &[BinStatusRow]) -> String {
     crate::status_json::document(&roots, items, bytes)
 }
 
+/// The most one item the Recycle Bin of a volume takes: `MaxCapacity`
+/// when it is set, else 5% of the volume's `total` bytes, the least that
+/// Windows gives a bin by default (true in the second field: no cap is
+/// set). None when neither is known.
+pub fn bin_cap(quota: &BinQuota, total: Option<u64>) -> Option<(u64, bool)> {
+    match quota.max_bytes {
+        Some(cap) => Some((cap, false)),
+        None => total.map(|t| (t / 20, true)),
+    }
+}
+
+/// Why the Recycle Bin of a drive cannot take an item of `size` bytes,
+/// so that the shell would delete it for good without asking: the drive
+/// has no bin (`has_bin` false), the bin is off, or the item is over the
+/// bin's `cap` (from [`bin_cap`]). None when the bin takes it.
+pub fn bin_refusal(
+    has_bin: bool,
+    quota: &BinQuota,
+    cap: Option<(u64, bool)>,
+    size: u64,
+) -> Option<String> {
+    if !has_bin {
+        return Some("its drive has no Recycle Bin (a network, removable or optical drive)".into());
+    }
+    if quota.nuke_on_delete {
+        return Some("the Recycle Bin is turned off on its drive".into());
+    }
+    match cap {
+        Some((0, _)) => {
+            Some("the Recycle Bin of its drive takes nothing (a cap of 0 bytes)".into())
+        }
+        Some((cap, default)) if size > cap => Some(format!(
+            "it is over the {} the Recycle Bin of its drive takes{}",
+            crate::util::format_bytes(cap),
+            if default {
+                " (5% of the drive, the least Windows sets when no cap is set)"
+            } else {
+                ""
+            }
+        )),
+        _ => None,
+    }
+}
+
+/// [`bin_refusal`] for the item at `abs`, from its drive's type, its bin
+/// settings and its size; the walk for the size stops past the cap. In
+/// a test run under [`test_bin_dir`] the real drive is not asked: only
+/// the cap of the debug-only `RTRASH_TEST_BIN_CAP=BYTES` applies.
+#[cfg(windows)]
+pub fn bin_cannot_take(abs: &Path) -> Option<String> {
+    if test_bin_dir().is_some() {
+        let cap = test_bin_cap()?;
+        return bin_refusal(
+            true,
+            &BinQuota::default(),
+            Some((cap, false)),
+            tree_bytes_upto(abs, cap),
+        );
+    }
+    let root = bin_root_of(abs)?;
+    if !drive_has_bin(&root) {
+        return bin_refusal(false, &BinQuota::default(), None, 0);
+    }
+    let quota = bin_quota(&root);
+    if quota.nuke_on_delete {
+        return bin_refusal(true, &quota, None, 0);
+    }
+    let cap = bin_cap(&quota, crate::space::query(&root).ok().map(|s| s.total));
+    let size = cap.map_or(0, |(c, _)| tree_bytes_upto(abs, c));
+    bin_refusal(true, &quota, cap, size)
+}
+
+/// Test seam, in debug builds only: `RTRASH_TEST_BIN_CAP=BYTES` is the
+/// Recycle Bin cap a put checks against under [`test_bin_dir`].
+#[cfg(windows)]
+fn test_bin_cap() -> Option<u64> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var("RTRASH_TEST_BIN_CAP").ok()?.parse().ok()
+}
+
+/// Whether the drive whose root is `root` can have a Recycle Bin. Network,
+/// removable, optical and RAM drives have none: the shell deletes from
+/// them for good. A type Windows cannot tell counts as having one.
+#[cfg(windows)]
+fn drive_has_bin(root: &Path) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_REMOTE: u32 = 4;
+    const DRIVE_CDROM: u32 = 5;
+    const DRIVE_RAMDISK: u32 = 6;
+    let mut w = wide(root.as_os_str());
+    // GetDriveTypeW wants the root with its trailing backslash.
+    if w.len() >= 2 && w[w.len() - 2] != u16::from(b'\\') {
+        w.insert(w.len() - 1, u16::from(b'\\'));
+    }
+    // SAFETY: `w` is NUL-terminated.
+    let t = unsafe { GetDriveTypeW(w.as_ptr()) };
+    !matches!(
+        t,
+        DRIVE_REMOVABLE | DRIVE_REMOTE | DRIVE_CDROM | DRIVE_RAMDISK
+    )
+}
+
 /// The Recycle Bin settings of one volume. A missing `MaxCapacity` means
 /// Windows applies its own default share of the volume.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -4216,6 +4364,61 @@ mod tests {
             nuke_on_delete: false,
         };
         assert!(cap_note(5, &zero).contains("skip"));
+    }
+
+    /// What a put refuses before the shell would delete it for good: no
+    /// bin on the drive, the bin off, a cap of 0, or an item over the cap,
+    /// set or taken as 5% of the drive.
+    #[test]
+    fn bin_refusal_names_each_case_where_the_shell_deletes_for_good() {
+        let mib = 1u64 << 20;
+        let set = BinQuota {
+            max_bytes: Some(mib),
+            nuke_on_delete: false,
+        };
+        assert_eq!(bin_cap(&set, Some(1000 * mib)), Some((mib, false)));
+        assert_eq!(
+            bin_cap(&BinQuota::default(), Some(100 * mib)),
+            Some((5 * mib, true))
+        );
+        assert_eq!(bin_cap(&BinQuota::default(), None), None);
+        let refusal = |has_bin, quota: &BinQuota, size| {
+            bin_refusal(has_bin, quota, bin_cap(quota, Some(100 * mib)), size)
+        };
+        assert!(refusal(false, &set, 1).unwrap().contains("no Recycle Bin"));
+        let off = BinQuota {
+            max_bytes: None,
+            nuke_on_delete: true,
+        };
+        assert!(refusal(true, &off, 1).unwrap().contains("turned off"));
+        let zero = BinQuota {
+            max_bytes: Some(0),
+            nuke_on_delete: false,
+        };
+        assert!(refusal(true, &zero, 0).unwrap().contains("0 bytes"));
+        assert_eq!(refusal(true, &set, mib), None);
+        let over = refusal(true, &set, mib + 1).unwrap();
+        assert!(over.starts_with("it is over the "), "{over}");
+        assert!(!over.contains("5%"), "{over}");
+        assert_eq!(refusal(true, &BinQuota::default(), 5 * mib), None);
+        let default = refusal(true, &BinQuota::default(), 5 * mib + 1).unwrap();
+        assert!(default.contains("5% of the drive"), "{default}");
+    }
+
+    /// The size walk for the cap check stops once the total is over the
+    /// limit, and counts the whole tree when the limit is not reached.
+    #[test]
+    fn tree_bytes_upto_stops_past_the_limit() {
+        let top = std::env::temp_dir().join(format!("rtrash-rp-upto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&top);
+        std::fs::create_dir_all(top.join("a/b")).unwrap();
+        for (name, n) in [("one", 100usize), ("a/two", 200), ("a/b/three", 300)] {
+            std::fs::write(top.join(name), vec![1u8; n]).unwrap();
+        }
+        assert_eq!(tree_bytes_upto(&top, u64::MAX), 600);
+        assert_eq!(tree_bytes(&top), 600);
+        assert!(tree_bytes_upto(&top, 150) > 150);
+        std::fs::remove_dir_all(&top).unwrap();
     }
 
     #[test]
