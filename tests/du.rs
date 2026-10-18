@@ -4740,10 +4740,11 @@ fn du_x_at_the_macos_root_reaches_users_once() {
     }
 }
 
-/// dust #517 and 33(h): with `--open-deleted`, a file this test deletes
-/// while it keeps it open shows in its own JSON key and text line, and
-/// the totals leave it out. Without the option there is no such key.
-#[cfg(target_os = "linux")]
+/// dust #517, 33(h) and 35(b): with `--open-deleted`, a file this test
+/// deletes while it keeps it open shows in its own JSON key and text
+/// line, and the totals leave it out. Without the option there is no
+/// such key. Linux reads /proc and macOS asks libproc.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn deleted_files_still_open_are_reported_apart_from_the_totals() {
     let t = Tree::new("open-deleted");
@@ -4768,11 +4769,11 @@ fn deleted_files_still_open_are_reported_apart_from_the_totals() {
     drop(held);
 }
 
-/// 33(h): only Linux has the figure; elsewhere the scan still runs, a
-/// note says so, and the report has no open_deleted key.
-#[cfg(not(target_os = "linux"))]
+/// 33(h): Windows has no list of open files to read; the scan still
+/// runs, a note says so, and the report has no open_deleted key.
+#[cfg(windows)]
 #[test]
-fn deleted_files_still_open_are_not_reported_off_linux() {
+fn deleted_files_still_open_are_not_reported_on_windows() {
     let t = Tree::new("open-deleted-off");
     t.file("kept.bin", 4096);
     let out = t.du(&["--json", "--no-git", "--open-deleted"]);
@@ -4782,7 +4783,7 @@ fn deleted_files_still_open_are_not_reported_off_linux() {
         String::from_utf8_lossy(&out.stderr)
     );
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("only Linux has"), "{err}");
+    assert!(err.contains("no line for it here"), "{err}");
     let j = String::from_utf8_lossy(&out.stdout);
     assert!(!j.contains("open_deleted"), "{j}");
 }

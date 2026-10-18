@@ -2044,6 +2044,8 @@ are read, and a file counts when it has no name left and sits on the
 file system of a scanned
 .IR PATH ,
 each file once however many hold it.
+On macOS libproc lists the open files of every process, with the same
+rules.
 Without root, rtrash skips other users' processes.
 The line names how many it skipped, so the figure is a lower bound.
 With
@@ -2051,8 +2053,8 @@ With
 the report gains an \fIopen_deleted\fR object of \fIfiles\fR, \fIdisk\fR,
 \fIapparent\fR and \fIunreadable_processes\fR.
 Without the option it has no such key.
-On macOS and Windows a note on standard error says the figure is not
-available, and the report has no such line or key.
+On Windows a note on standard error says the figure is not available,
+and the report has no such line or key.
 Takes no
 .BR \-\-print0 ,
 .BR \-\-pick ,

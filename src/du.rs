@@ -171,8 +171,9 @@ directories appear as one `trash` row and are never printed by --print0.
                           before DATE
       --home-only       consider only the home trash for the trash summary
       --open-deleted    also report the space that deleted files still open
-                          hold on the scanned file systems (Linux /proc; never
-                          in the totals; elsewhere a note says it is missing)
+                          hold on the scanned file systems (Linux /proc,
+                          macOS libproc; never in the totals; on Windows a
+                          note says it is missing)
       --trash-dir=PATH  consider only this trash directory (repeatable)
       --no-git          do not ask git about listed paths
       --include-dirty   with --print0, also print paths whose git state is
@@ -4543,8 +4544,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     };
     if open_deleted && held.is_none() {
         eprintln!(
-            "{prog}: note: --open-deleted reads /proc, which only Linux has; \
-             no line for it here"
+            "{prog}: note: --open-deleted lists open files through /proc on Linux \
+             and libproc on macOS, and this system gave no list; no line for it here"
         );
     }
     if (print0 || pick) && !allow_filtered {

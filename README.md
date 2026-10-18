@@ -361,7 +361,7 @@ Finds what to delete. It walks each `PATH` (default `.`) in parallel and lists t
 | `rtrash du ~/src ~/src/app` | Exits with status 2, as gdu does: the walk of `~/src` counts `~/src/app` already, so the totals, `--json`, `--dupes` and the explorer would count it twice. du scans a repeated `PATH` once and notes it on stderr. Under `-x`, du keeps a `PATH` on another file system, since the outer walk stops at its mount |
 | `rtrash du --no-git` | Skip the git checks |
 | `rtrash du --trash-dir=PATH` / `--home-only` | Limit the trash summary to these trash directories |
-| `rtrash du --open-deleted /var` | One more line under the trash line: the space that deleted files still hold while a process keeps them open, on the scanned file systems. It explains a gap between `df` and `du`, and no total counts it. Linux only (from `/proc`; without root, other users' processes are left out and counted); `--json` adds an `open_deleted` key |
+| `rtrash du --open-deleted /var` | One more line under the trash line: the space that deleted files still hold while a process keeps them open, on the scanned file systems. It explains a gap between `df` and `du`, and no total counts it. Linux (from `/proc`) and macOS (from libproc); without root, other users' processes are left out and counted; `--json` adds an `open_deleted` key |
 | `rtrash du --print0 … \| xargs -0 rtrash put -rf --` | Trash the listed paths |
 | `rtrash du --pick` | Mark rows in the put browser and trash them; rows with git work at risk show `!` |
 | `rtrash du -o base.snap ~/src` | Write a snapshot of every directory total instead of listing (`-` for stdout) |

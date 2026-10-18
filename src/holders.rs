@@ -399,9 +399,114 @@ fn open_deleted_in(
     out
 }
 
-/// 33(h): only Linux lists the descriptors of every process cheaply in
-/// /proc; elsewhere there is nothing to report.
-#[cfg(not(target_os = "linux"))]
+/// 33(h) and 35(b) on macOS: the deleted files still open on the devices
+/// `devs`, from the descriptors that libproc lists for every process.
+/// None when the process list cannot be read.
+#[cfg(target_os = "macos")]
+pub fn open_deleted(devs: &std::collections::HashSet<u64>) -> Option<OpenDeleted> {
+    Some(open_deleted_of(all_pids()?, devs))
+}
+
+/// Every process ID that libproc lists; None when the list fails.
+#[cfg(target_os = "macos")]
+fn all_pids() -> Option<Vec<libc::c_int>> {
+    use std::mem::size_of;
+    // SAFETY: proc_listallpids writes at most `bytes` bytes into `pids`
+    // and returns how many IDs it wrote.
+    unsafe {
+        let n = libc::proc_listallpids(std::ptr::null_mut(), 0);
+        if n <= 0 {
+            return None;
+        }
+        let mut pids = vec![0 as libc::c_int; n as usize * 2 + 64];
+        let bytes = libc::c_int::try_from(pids.len() * size_of::<libc::c_int>()).ok()?;
+        let got = libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes);
+        if got <= 0 {
+            return None;
+        }
+        pids.truncate(got as usize);
+        Some(pids)
+    }
+}
+
+/// [`open_deleted`] over the processes `pids`. A vnode descriptor counts
+/// when its file is a regular one with no name left (link count 0) on
+/// one of `devs`, each (device, inode) once. A process whose descriptors
+/// this user may not list counts as unreadable; one that ended does not.
+#[cfg(target_os = "macos")]
+fn open_deleted_of(pids: Vec<libc::c_int>, devs: &std::collections::HashSet<u64>) -> OpenDeleted {
+    use std::mem::{size_of, zeroed};
+    let mut seen: std::collections::HashSet<(u32, u64)> = std::collections::HashSet::new();
+    let mut out = OpenDeleted::default();
+    // dev_t has 32 bits here; compare those bits however a caller widened
+    // them.
+    let on_devs = |dev: u32| devs.iter().any(|&d| d as u32 == dev);
+    let blank = libc::proc_fdinfo {
+        proc_fd: 0,
+        proc_fdtype: 0,
+    };
+    for pid in pids.into_iter().filter(|&p| p > 0) {
+        let one = size_of::<libc::proc_fdinfo>();
+        // SAFETY: as in `scan`: libproc fills a caller-sized buffer of
+        // plain data and returns the bytes it wrote.
+        let got = unsafe {
+            let need = libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0);
+            if need > 0 {
+                let mut fds = vec![blank; need as usize / one + 16];
+                let cap = libc::c_int::try_from(fds.len() * one).unwrap_or(0);
+                let n =
+                    libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, fds.as_mut_ptr().cast(), cap);
+                fds.truncate(usize::try_from(n).unwrap_or(0) / one);
+                (n > 0).then_some(fds)
+            } else {
+                None
+            }
+        };
+        let Some(fds) = got else {
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                out.unreadable = out.unreadable.saturating_add(1);
+            }
+            continue;
+        };
+        for fd in fds
+            .iter()
+            .filter(|f| f.proc_fdtype == libc::PROX_FDTYPE_VNODE as u32)
+        {
+            // SAFETY: as above; the call fills `vi`, which is plain data.
+            let vi = unsafe {
+                let mut vi: VnodeFdinfoWithPath = zeroed();
+                let sz = size_of::<VnodeFdinfoWithPath>() as libc::c_int;
+                let n = libc::proc_pidfdinfo(
+                    pid,
+                    fd.proc_fd,
+                    PROC_PIDFDVNODEPATHINFO,
+                    (&mut vi as *mut VnodeFdinfoWithPath).cast(),
+                    sz,
+                );
+                (n == sz).then_some(vi)
+            };
+            let Some(vi) = vi else { continue };
+            let st = &vi.pvip.vip_vi.vi_stat;
+            let regular = st.vst_mode & libc::S_IFMT == libc::S_IFREG;
+            if !regular || st.vst_nlink != 0 || !on_devs(st.vst_dev) {
+                continue;
+            }
+            if seen.insert((st.vst_dev, st.vst_ino)) {
+                out.files = out.files.saturating_add(1);
+                // libproc's stat of the open file: no name is left to stat.
+                let blocks = u64::try_from(st.vst_blocks).unwrap_or(0);
+                out.disk = out.disk.saturating_add(blocks.saturating_mul(512));
+                let len = u64::try_from(st.vst_size).unwrap_or(0);
+                out.apparent = out.apparent.saturating_add(len);
+            }
+        }
+    }
+    out
+}
+
+/// 33(h): Windows has no cheap list of every open file; there is nothing
+/// to report.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn open_deleted(_devs: &std::collections::HashSet<u64>) -> Option<OpenDeleted> {
     None
 }
@@ -796,9 +901,10 @@ mod tests {
         assert!(!is_deleted_link(b""));
     }
 
-    /// 33(h): a file this test deletes while it holds it open twice
-    /// counts once, at its length, on its own device only.
-    #[cfg(target_os = "linux")]
+    /// 33(h) and 35(b): a file this test deletes while it holds it open
+    /// twice counts once, at its length, on its own device only. Linux
+    /// reads /proc/self; macOS asks libproc about this process.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_deleted_file_held_open_here_is_counted() {
         use std::os::unix::fs::MetadataExt;
@@ -811,17 +917,29 @@ mod tests {
         let dev = held.metadata().unwrap().dev();
         std::fs::remove_file(&file).unwrap();
         let devs = std::collections::HashSet::from([dev]);
-        let me = || std::iter::once(PathBuf::from("/proc/self"));
-        let got = open_deleted_in(me(), &devs);
+        let got = held_here(&devs);
         assert!(got.files >= 1, "{got:?}");
         assert!(got.apparent >= 1 << 20, "{got:?}");
         // Two descriptors, one file: counted once.
         assert!(got.apparent < 2 << 20, "{got:?}");
         let other = std::collections::HashSet::from([dev.wrapping_add(1)]);
-        assert_eq!(open_deleted_in(me(), &other).files, 0);
+        assert_eq!(held_here(&other).files, 0);
         assert!(open_deleted(&devs).is_some_and(|all| all.apparent >= 1 << 20));
         drop((held, again));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The deleted files this process holds open on `devs`.
+    #[cfg(target_os = "linux")]
+    fn held_here(devs: &std::collections::HashSet<u64>) -> OpenDeleted {
+        open_deleted_in(std::iter::once(PathBuf::from("/proc/self")), devs)
+    }
+
+    /// The deleted files this process holds open on `devs` (libproc).
+    #[cfg(target_os = "macos")]
+    fn held_here(devs: &std::collections::HashSet<u64>) -> OpenDeleted {
+        let me = libc::c_int::try_from(std::process::id()).unwrap();
+        open_deleted_of(vec![me], devs)
     }
 
     #[cfg(unix)]
