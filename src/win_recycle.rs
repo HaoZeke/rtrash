@@ -215,14 +215,34 @@ pub fn restore_payload(payload: &Path, dest: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Copy a file or directory tree; links copy as links where the system
-/// allows, else as their targets' content. A list of the pairs still to
-/// copy stands in for recursion, so a deep folder cannot overflow the
-/// 1 MiB main-thread stack Windows gives.
+/// Copy a file or directory tree for a restore to another volume. A link
+/// arrives as a link to the same target ([`copy_link`]), never as a copy
+/// of what it names (34(i)): a junction copied through would duplicate
+/// its target or fail half way. A link of a kind rtrash cannot make again
+/// stops the copy before it starts ([`remakeable_links`]), and a copy
+/// that fails part way leaves nothing behind at `dst`. A list of the
+/// pairs still to copy stands in for recursion, so a deep folder cannot
+/// overflow the 1 MiB main-thread stack Windows gives.
 fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    remakeable_links(src)?;
+    let was_there = std::fs::symlink_metadata(dst).is_ok();
+    let copied = copy_tree_pairs(src, dst);
+    if copied.is_err() && !was_there {
+        // remove_dir_all removes a link without entering it.
+        let _ = std::fs::remove_dir_all(dst).or_else(|_| std::fs::remove_file(dst));
+    }
+    copied
+}
+
+/// The walk of [`copy_tree`]: each folder made, each file copied and
+/// each link made again.
+fn copy_tree_pairs(src: &Path, dst: &Path) -> std::io::Result<()> {
     let mut todo = vec![(src.to_path_buf(), dst.to_path_buf())];
     while let Some((src, dst)) = todo.pop() {
-        if std::fs::symlink_metadata(&src)?.is_dir() {
+        let meta = std::fs::symlink_metadata(&src)?;
+        if meta.is_symlink() {
+            copy_link(&src, &dst)?;
+        } else if meta.is_dir() {
             std::fs::create_dir(&dst)?;
             for e in std::fs::read_dir(&src)? {
                 let e = e?;
@@ -233,6 +253,195 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Every link in the tree at `src` is one [`copy_link`] can make again;
+/// else the error names the first other one. Links are not entered.
+fn remakeable_links(src: &Path) -> std::io::Result<()> {
+    let mut todo = vec![src.to_path_buf()];
+    while let Some(p) = todo.pop() {
+        let meta = std::fs::symlink_metadata(&p)?;
+        if meta.is_symlink() {
+            if !can_remake_link(&p) {
+                return Err(std::io::Error::other(format!(
+                    "'{}' is a link of a kind rtrash cannot make on another volume \
+                     (only junctions and symbolic links); restore it by hand",
+                    crate::util::err_path(&p)
+                )));
+            }
+        } else if meta.is_dir() {
+            for e in std::fs::read_dir(&p)? {
+                todo.push(e?.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Unix (the WSL view of the bin): every link is a symlink.
+#[cfg(unix)]
+fn can_remake_link(_link: &Path) -> bool {
+    true
+}
+
+/// Unix: `dst` as a symlink to what `src` names.
+#[cfg(unix)]
+fn copy_link(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)
+}
+
+/// Windows: a junction to a folder, or a symbolic link. A volume mount
+/// point (a junction to `\\?\Volume{..}`) names a volume, not a folder;
+/// it and every other link kind are refused.
+#[cfg(windows)]
+fn can_remake_link(link: &Path) -> bool {
+    !matches!(link_kind(link), LinkKind::Other)
+}
+
+/// Windows: `dst` as a link of the kind of `src` to the same target. A
+/// junction needs no rights; a symbolic link needs the right to make one
+/// (Developer Mode or an administrator), and its error says so.
+#[cfg(windows)]
+fn copy_link(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let target = std::fs::read_link(src)?;
+    match link_kind(src) {
+        LinkKind::Junction => make_junction(dst, &target),
+        LinkKind::SymlinkDir => std::os::windows::fs::symlink_dir(&target, dst),
+        LinkKind::SymlinkFile => std::os::windows::fs::symlink_file(&target, dst),
+        LinkKind::Other => Err(std::io::Error::other(format!(
+            "'{}' is a link of a kind rtrash cannot make on another volume",
+            crate::util::err_path(src)
+        ))),
+    }
+}
+
+/// The kinds of link [`copy_link`] tells apart.
+#[cfg(windows)]
+enum LinkKind {
+    Junction,
+    SymlinkDir,
+    SymlinkFile,
+    Other,
+}
+
+// winnt.h: a junction or volume mount point, and a symbolic link.
+#[cfg(windows)]
+const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+#[cfg(windows)]
+const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+
+/// What kind of link `link` is, by its reparse tag: the tag decides which
+/// link to make again, while std's `is_symlink` (the name-surrogate bit,
+/// as du_fs::fileid::is_link) decides that it is a link.
+#[cfg(windows)]
+fn link_kind(link: &Path) -> LinkKind {
+    use std::os::windows::fs::FileTypeExt;
+    let Ok(meta) = std::fs::symlink_metadata(link) else {
+        return LinkKind::Other;
+    };
+    match reparse_tag(link) {
+        Some(IO_REPARSE_TAG_MOUNT_POINT) => match std::fs::read_link(link) {
+            Ok(t) if !names_a_volume(&t) => LinkKind::Junction,
+            _ => LinkKind::Other,
+        },
+        Some(IO_REPARSE_TAG_SYMLINK) if meta.file_type().is_symlink_dir() => LinkKind::SymlinkDir,
+        Some(IO_REPARSE_TAG_SYMLINK) => LinkKind::SymlinkFile,
+        _ => LinkKind::Other,
+    }
+}
+
+/// Whether a junction target is a volume (`\\?\Volume{..}\`), as a volume
+/// mount point names one.
+#[cfg(windows)]
+fn names_a_volume(target: &Path) -> bool {
+    let t = target.to_string_lossy().to_ascii_lowercase();
+    t.starts_with(r"\\?\volume{") || t.starts_with(r"\??\volume{")
+}
+
+/// The reparse tag of `p`, which is a reparse point.
+#[cfg(windows)]
+fn reparse_tag(p: &Path) -> Option<u32> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_TAG_INFO,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    };
+    let f = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(p)
+        .ok()?;
+    let mut info = std::mem::MaybeUninit::<FILE_ATTRIBUTE_TAG_INFO>::uninit();
+    // SAFETY: the buffer holds exactly one FILE_ATTRIBUTE_TAG_INFO.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            f.as_raw_handle() as _,
+            FileAttributeTagInfo,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    // SAFETY: the call succeeded, so it filled `info`.
+    Some(unsafe { info.assume_init() }.ReparseTag)
+}
+
+/// The REPARSE_DATA_BUFFER of a junction to the folder `target`: the
+/// tag, the data length, then the `\??\` name the system follows and the
+/// plain name it prints, each NUL-terminated.
+#[cfg(windows)]
+fn junction_data(target: &Path) -> std::io::Result<Vec<u8>> {
+    // read_link gives `\\?\C:\..`; a raw `\??\C:\..` comes back plain too.
+    let raw = target.to_string_lossy();
+    let plain = match raw.strip_prefix(r"\??\") {
+        Some(rest) => PathBuf::from(rest),
+        None => crate::util::plain_path(target),
+    };
+    let mut nt = std::ffi::OsString::from(r"\??\");
+    nt.push(plain.as_os_str());
+    let sub = crate::util::win_text(&nt);
+    let print = crate::util::win_text(plain.as_os_str());
+    let sub_len = (sub.len() - 1) * 2;
+    let print_len = (print.len() - 1) * 2;
+    let names = (sub.len() + print.len()) * 2;
+    let too_long = || std::io::Error::other("the junction target is too long");
+    let data_len = u16::try_from(8 + names).map_err(|_| too_long())?;
+    let mut buf = Vec::with_capacity(8 + usize::from(data_len));
+    buf.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    buf.extend_from_slice(&data_len.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    for v in [0, sub_len, sub_len + 2, print_len] {
+        buf.extend_from_slice(&(v as u16).to_le_bytes());
+    }
+    for u in sub.iter().chain(&print) {
+        buf.extend_from_slice(&u.to_le_bytes());
+    }
+    Ok(buf)
+}
+
+/// A junction at `link` (which must not exist) to the folder `target`,
+/// as `mklink /J` makes one: an empty folder that gets the reparse data.
+#[cfg(windows)]
+fn make_junction(link: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+    let data = junction_data(target)?;
+    std::fs::create_dir(link)?;
+    let set = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(link)
+        .and_then(|f| crate::du_dupes::fsctl(&f, FSCTL_SET_REPARSE_POINT, &data, &mut []));
+    if set.is_err() {
+        let _ = std::fs::remove_dir(link);
+    }
+    set
 }
 
 /// A Recycle Bin item a scan listed, checked again just before rtrash
@@ -4729,6 +4938,50 @@ mod tests {
         assert_eq!(std::fs::read(dst.join("top.txt")).unwrap(), b"t");
         assert_eq!(std::fs::read(dst.join("a/b/c/leaf.txt")).unwrap(), b"leaf");
         assert!(dst.join("a/empty").is_dir());
+        std::fs::remove_dir_all(&top).unwrap();
+    }
+
+    /// 34(i): the copy makes a symlink again, to the same target, and
+    /// does not copy what it names.
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_makes_a_symlink_again() {
+        let top = std::env::temp_dir().join(format!("rtrash-rp-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&top);
+        let src = top.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::os::unix::fs::symlink("target-name", src.join("link")).unwrap();
+        let dst = top.join("dst");
+        copy_tree(&src, &dst).unwrap();
+        let link = dst.join("link");
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("target-name"));
+        std::fs::remove_dir_all(&top).unwrap();
+    }
+
+    /// 34(i): the copy makes a junction again, to the same folder, and does
+    /// not copy what it names; a volume mount point is not one to make.
+    #[cfg(windows)]
+    #[test]
+    fn copy_tree_makes_a_junction_again() {
+        let top = std::env::temp_dir().join(format!("rtrash-rp-junction-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&top);
+        let target = top.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("t.txt"), b"t").unwrap();
+        let src = top.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        make_junction(&src.join("link"), &target).unwrap();
+        let dst = top.join("dst");
+        copy_tree(&src, &dst).unwrap();
+        let link = dst.join("link");
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(
+            std::fs::canonicalize(&link).unwrap(),
+            std::fs::canonicalize(&target).unwrap()
+        );
+        assert!(names_a_volume(Path::new(r"\\?\Volume{12-ab}\")));
+        assert!(!names_a_volume(&target));
         std::fs::remove_dir_all(&top).unwrap();
     }
 

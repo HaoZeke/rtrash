@@ -286,26 +286,6 @@ fn native(root: &Path, rel: &str) -> PathBuf {
         .fold(root.to_path_buf(), |p, part| p.join(part))
 }
 
-/// Make the junction `link` to `target` with `mklink /J`. cmd reads a `/`
-/// anywhere in an argument as the start of a switch ("Invalid switch"),
-/// so both paths must be native; a `/` in either fails here first. Every
-/// mklink call goes through here (precheck check_mklink_calls).
-#[cfg(windows)]
-fn mklink_junction(link: &Path, target: &Path) {
-    for p in [link, target] {
-        let plain = !p.as_os_str().to_string_lossy().contains('/');
-        assert!(plain, "a mklink path with '/': {}", p.display());
-    }
-    let out = Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
-        .arg(link)
-        .arg(target)
-        .output()
-        .unwrap();
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "mklink /J {}: {err}", link.display());
-}
-
 /// Windows junctions are not followed (diskus #42, gdu #441). One to a
 /// folder in the tree adds nothing, one back up the tree makes no loop,
 /// and one to another volume is not crossed, with or without -x. On the
@@ -320,9 +300,9 @@ fn junctions_are_not_followed_or_counted_twice() {
     let t = Tree::new("junctions");
     t.file("d/real/a.bin", 100_000);
     let d = native(&t.root, "d");
-    mklink_junction(&native(&d, "again"), &native(&d, "real"));
-    mklink_junction(&native(&d, "real/up"), &d);
-    mklink_junction(
+    common::mklink_junction(&native(&d, "again"), &native(&d, "real"));
+    common::mklink_junction(&native(&d, "real/up"), &d);
+    common::mklink_junction(
         &native(&d, "elsewhere"),
         Path::new(env!("CARGO_MANIFEST_DIR")),
     );

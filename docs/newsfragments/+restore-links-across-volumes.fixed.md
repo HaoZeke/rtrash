@@ -1,0 +1,1 @@
+On Windows, rtrash now makes each junction and symbolic link in an item again when it restores the item to another volume. It used to copy through a link, or stop half way on a junction. Any other kind of link stops the restore before it copies anything.

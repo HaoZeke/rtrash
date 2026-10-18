@@ -2770,6 +2770,10 @@ On Windows an item moves back within its volume, but one whose original
 path is on another volume than its Recycle Bin is copied, so the same
 byte rules apply to that volume before anything is restored; a volume
 mounted on a folder counts apart from the drive above it.
+In that copy a junction or a symbolic link in the item arrives as a link
+to the same target, never as a copy of what it names.
+Any other kind of link, such as a volume mount point, stops the restore
+before it copies anything.
 .TP
 .B \-\-newest\-first
 List the most recently trashed item first (default in the interactive browser).
