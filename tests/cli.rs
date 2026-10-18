@@ -2122,6 +2122,38 @@ fn list_status_and_rm_filter_by_size() {
 }
 
 #[test]
+fn size_units_in_any_case_filter_alike() {
+    let sb = Sandbox::new("size-units");
+    fs::write(sb.work().join("big"), vec![1u8; 64 * 1024]).unwrap();
+    fs::write(sb.work().join("small"), b"x").unwrap();
+    assert!(sb.run(&["put", "big", "small"]).status.success());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let listed = |size: &str| -> Vec<String> {
+        let flag = format!("--larger-than={size}");
+        let out = sb.run(&["list", &pin, &flag]);
+        assert!(out.status.success(), "{size}: {}", stderr_of(&out));
+        stdout_of(&out)
+            .lines()
+            .map(|l| l.rsplit(['/', '\\']).next().unwrap_or("").to_string())
+            .collect()
+    };
+    let upper = listed("32K");
+    assert_eq!(upper, ["big"]);
+    // Every spelling of 32 KiB keeps the same rows.
+    for size in ["32k", "32kb", "32KB", "32kib", "32KiB", "32768", "3.2768e4"] {
+        assert_eq!(listed(size), upper, "{size}");
+    }
+    for bad in ["32kbb", "32iB", "32X"] {
+        let flag = format!("--larger-than={bad}");
+        assert_eq!(
+            sb.run(&["list", &pin, &flag]).status.code(),
+            Some(2),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
 fn restore_cwd_only_skips_items_outside_cwd() {
     let sb = Sandbox::new("restore-cwd");
     let in_work = sb.touch("local.txt");

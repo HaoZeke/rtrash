@@ -1739,6 +1739,81 @@ def check_size_sums():
                               "use du::size_sum, saturating_add or saturating_mul (ncdu #278)")
 
 
+# Every SIZE option reads its value with filters::parse_size (round 255,
+# dust #629), so 5mb, 5MB and 5MiB mean one size everywhere. A unit letter
+# matched by hand, a B or iB suffix stripped or compared, or a lookup
+# string of unit letters anywhere else is an error. util::parse_block_size
+# is the one exception: block sizes follow coreutils, where KB is 1000.
+SIZE_UNIT = r"(?:[KMGTP](?:i?[Bb])?|[kmgtp]i?[Bb]|[Ii]?[Bb])"
+SIZE_ARG_PATS = [
+    re.compile(r"(?<![A-Za-z(])b?'[KMGTP]'\s*(?:\|\s*b?'[A-Za-z]'\s*)*=>"),
+    re.compile(r'"' + SIZE_UNIT + r'"\s*(?:\|\s*"[A-Za-z]{1,3}"\s*)*=>'),
+    re.compile(r"(?:strip_suffix|ends_with|eq_ignore_ascii_case|trim_end_matches)\(\s*"
+               r'(?:"(?:[KMGTPkmgtp]?i?[Bb]|[KMGTPkmgtp])"|b?\'[KMGTPkmgtpBb]\')'),
+    re.compile(r'"(?:KMG|kmg)'),
+]
+SIZE_ARG_CASES = [
+    ("unit arm", "        'M' => 1 << 20,\n", [1]),
+    ("unit arms joined", "        'K' | 'k' => 1024,\n", [1]),
+    ("byte unit arm", "        b'G' => 1 << 30,\n", [1]),
+    ("suffix arm", '        "MiB" | "MB" => 1 << 20,\n', [1]),
+    ("suffix stripped", '    let t = t.strip_suffix("iB").unwrap_or(t);\n', [1]),
+    ("byte suffix", "    if v.ends_with('B') {\n", [1]),
+    ("letter lookup", '    let p = "KMGTPE".find(c)?;\n', [1]),
+    ("key char", "        KeyCode::Char('G') => self.last(),\n", []),
+    ("minutes", '        "m" | "min" => 60,\n', []),
+    ("escape", "        't' => out.push('\\t'),\n", []),
+    ("parse_size call", "    let n = crate::filters::parse_size(v)?;\n", []),
+    ("comment", "    // 'M' => 1 << 20,\n", []),
+]
+
+
+def size_arg_lines(text, skip=()):
+    """Lines of `text` (0-based numbers in `skip` left out) that parse a
+    size unit by hand. Comment lines are left out."""
+    hits = []
+    for n, line in enumerate(text.split("\n")):
+        if n in skip or line.lstrip().startswith("//"):
+            continue
+        if any(p.search(line) for p in SIZE_ARG_PATS):
+            hits.append(n + 1)
+    return hits
+
+
+def fn_lines(lines, name):
+    """0-based line numbers of the top-level fn `name`, through its
+    closing brace at the start of a line."""
+    for k, line in enumerate(lines):
+        if re.match(r"pub(?:\([a-z]+\))? fn " + name + r"\b|fn " + name + r"\b", line):
+            j = k
+            while j < len(lines) and lines[j] != "}":
+                j += 1
+            return set(range(k, j + 1))
+    return set()
+
+
+def check_size_args():
+    """Outside tests, only src/filters.rs reads a size unit (parse_size,
+    for every SIZE option and variable), and util::parse_block_size reads
+    the coreutils block sizes; SIZE_ARG_CASES tests the matcher."""
+    for what, text, want in SIZE_ARG_CASES:
+        if size_arg_lines(text) != want:
+            errors.append(f"scripts/precheck.py: size_arg_lines gets SIZE_ARG_CASES '{what}' "
+                          "wrong; the size-argument check is broken")
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        if rel == "src/filters.rs":
+            continue
+        raw = path.read_text(encoding="utf-8")
+        lines = raw.split("\n")
+        skip = test_mod_lines(lines)
+        if rel == "src/util.rs":
+            skip |= fn_lines(lines, "parse_block_size")
+        for line in size_arg_lines(raw, skip):
+            errors.append(f"{rel}:{line}: reads a size unit by hand; parse SIZE values with "
+                          "filters::parse_size so every option takes the same units (dust #629)")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -1854,7 +1929,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

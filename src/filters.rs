@@ -44,33 +44,58 @@ pub fn join_spaced(args: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Parse a size such as `500M`, `10G`, `1.5GiB`, `64k` or `123` (bytes).
-/// Units are powers of 1024; a trailing `B` or `iB` is optional.
+/// Parse a SIZE argument. Every option and variable that takes a size
+/// reads it here, so `5mb` means the same everywhere (precheck
+/// `check_size_args` keeps it so): `--larger-than`, `--smaller-than`,
+/// `empty --max-size`, `du --min-size`, the size part of `--until-free`
+/// and of reap targets, `RTRASH_MAX_SIZE`, `RTRASH_MIN_FREE`,
+/// `RTRASH_WARN_SIZE`, `RTRASH_EXTENT_MIN` and their config keys.
+///
+/// A number, then an optional unit: K, M, G, T or P in any case, alone or
+/// followed by `B` or `iB` in any case. Every unit is a power of 1024, so
+/// `5M`, `5MB`, `5mb` and `5MiB` all mean 5 MiB (5242880 bytes). For a
+/// power of 1000, write the bytes (`5000000` or `5e6`). The number may
+/// have a fraction or an exponent (`1.5G`, `1e3`), and a fraction of a
+/// byte is dropped. Whole numbers are read exactly, past 2^53 too.
+/// Spaces around the number and before the unit are allowed (`5 M`).
+/// A negative number, an unknown unit, `iB` with no unit letter and a
+/// size past 2^64 - 1 give `None`.
 pub fn parse_size(s: &str) -> Option<u64> {
-    let t = s.trim();
-    let t = t
-        .strip_suffix("iB")
-        .or_else(|| t.strip_suffix('B'))
-        .unwrap_or(t);
-    let (num, mult) = match t.char_indices().last() {
-        Some((i, c)) if c.is_ascii_alphabetic() => {
-            let m: u64 = match c.to_ascii_uppercase() {
-                'K' => 1 << 10,
-                'M' => 1 << 20,
-                'G' => 1 << 30,
-                'T' => 1 << 40,
-                _ => return None,
-            };
-            (&t[..i], m)
-        }
-        _ => (t, 1),
+    let lower = s.trim().to_ascii_lowercase();
+    let (body, binary) = match lower.strip_suffix("ib") {
+        Some(b) => (b, true),
+        None => (lower.strip_suffix('b').unwrap_or(&lower), false),
     };
-    let v: f64 = num.trim().parse().ok()?;
+    let (num, mult) = match body.char_indices().last() {
+        Some((i, c)) if c.is_ascii_alphabetic() => (&body[..i], size_unit(c)?),
+        // `iB` names a binary unit, so it needs the unit letter.
+        _ if binary => return None,
+        _ => (body, 1),
+    };
+    let num = num.trim();
+    if let Ok(n) = num.parse::<u64>() {
+        return n.checked_mul(mult);
+    }
+    let v: f64 = num.parse().ok()?;
     if !v.is_finite() || v < 0.0 {
         return None;
     }
+    // `u64::MAX as f64` is 2^64 itself, one past the largest size.
     let bytes = v * mult as f64;
-    (bytes <= u64::MAX as f64).then_some(bytes as u64)
+    (bytes < u64::MAX as f64).then_some(bytes as u64)
+}
+
+/// The bytes one unit letter of a SIZE stands for (lowercase).
+fn size_unit(c: char) -> Option<u64> {
+    let power = match c {
+        'k' => 1,
+        'm' => 2,
+        'g' => 3,
+        't' => 4,
+        'p' => 5,
+        _ => return None,
+    };
+    Some(1u64 << (10 * power))
 }
 
 /// `--larger-than` and `--smaller-than`: bounds, both exclusive, on an
@@ -251,6 +276,49 @@ impl AgeFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_units_take_any_case_and_are_all_binary() {
+        let mib = 5u64 << 20;
+        let cases: [(&str, Option<u64>); 33] = [
+            ("123", Some(123)),
+            ("123b", Some(123)),
+            ("64k", Some(64 << 10)),
+            ("5M", Some(mib)),
+            ("5m", Some(mib)),
+            ("5MB", Some(mib)),
+            ("5mb", Some(mib)),
+            ("5Mb", Some(mib)),
+            ("5MiB", Some(mib)),
+            ("5mib", Some(mib)),
+            ("5MIB", Some(mib)),
+            (" 5 M ", Some(mib)),
+            ("10kib", Some(10 << 10)),
+            ("1.5G", Some(3 << 29)),
+            ("1.5gb", Some(3 << 29)),
+            ("2TB", Some(2 << 40)),
+            ("1P", Some(1 << 50)),
+            ("1e3", Some(1000)),
+            ("1E3", Some(1000)),
+            ("1e3k", Some(1000 << 10)),
+            ("0.5", Some(0)),
+            ("9007199254740993", Some(9_007_199_254_740_993)),
+            ("18446744073709551615", Some(u64::MAX)),
+            ("16384P", None),
+            ("18446744073709551616", None),
+            ("5iB", None),
+            ("kb", None),
+            ("5X", None),
+            ("5bb", None),
+            ("5M B", None),
+            ("-1G", None),
+            ("inf", None),
+            ("", None),
+        ];
+        for (text, want) in cases {
+            assert_eq!(parse_size(text), want, "{text:?}");
+        }
+    }
 
     #[test]
     fn spaced_flags_join_their_value() {

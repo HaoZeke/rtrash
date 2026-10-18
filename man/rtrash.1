@@ -449,8 +449,27 @@ It overrides
 .TP
 .BI \-\-max\-size =SIZE
 Remove items until the trash directories in scope, taken together, fit in
+.IR SIZE .
+Every option and variable that takes a
 .I SIZE
-(bytes, or with a K, M, G or T suffix in powers of 1024).
+reads it one way.
+Write bytes, or a count with a unit: K, M, G, T or P in any case,
+alone or with B or iB after it in any case.
+Each unit is a power of 1024, the binary prefixes of the International
+Electrotechnical Commission (IEC), so
+.BR 5M ", " 5MB ", " 5mb " and " 5MiB
+all mean 5 MiB, 5242880 bytes.
+For powers of 1000 (SI), write the bytes:
+.B 5000000
+or
+.BR 5e6 .
+The number may have a fraction or an exponent
+.RB ( 1.5G ", " 1e3 ),
+and the size rounds down to a whole byte.
+The block sizes of
+.B du
+differ: they follow coreutils, where KB is 1000 (see
+.BR RTRASH_BLOCK_SIZE ).
 With
 .IR DAYS ,
 the age cut runs first.
@@ -4335,6 +4354,11 @@ prints 121 for 123456 bytes), and a leading unit letter adds the unit
 prints 121K).
 K, M, G, T, P and E are powers of 1024, and KB or MB (with a B) are
 powers of 1000.
+That is the coreutils rule for block sizes alone: a
+.I SIZE
+such as
+.B "empty \-\-max\-size=5MB"
+reads MB as MiB.
 .B human\-readable
 keeps the default units and
 .B si
