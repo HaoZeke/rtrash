@@ -217,9 +217,11 @@ pub fn query(path: &Path) -> io::Result<Space> {
 #[cfg(unix)]
 pub fn tree_need(src: &Path, meta: &std::fs::Metadata) -> io::Result<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
-    let size = |m: &std::fs::Metadata| m.blocks().saturating_mul(512).max(m.len());
+    // A copy writes the whole length even where the source packs or skips
+    // it, so the need is the larger of the two.
+    let size = |p: &Path, m: &std::fs::Metadata| crate::du_fs::disk_bytes(p, m).max(m.len());
     let mut seen = std::collections::HashSet::new();
-    let (mut bytes, mut inodes) = (size(meta), 1u64);
+    let (mut bytes, mut inodes) = (size(src, meta), 1u64);
     if !meta.is_dir() {
         return Ok((bytes, inodes));
     }
@@ -231,7 +233,7 @@ pub fn tree_need(src: &Path, meta: &std::fs::Metadata) -> io::Result<(u64, u64)>
             if !m.is_dir() && m.nlink() > 1 && !seen.insert((m.dev(), m.ino())) {
                 continue;
             }
-            bytes = bytes.saturating_add(size(&m));
+            bytes = bytes.saturating_add(size(&e.path(), &m));
             inodes += 1;
             if m.is_dir() {
                 stack.push(e.path());

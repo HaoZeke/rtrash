@@ -61,6 +61,25 @@ impl Stat {
     }
 }
 
+/// 35(a): the bytes on disk of the file at `path`, whose metadata is
+/// `meta`, as the du walk counts them. On Unix that is its 512-byte
+/// blocks. On Windows it is the disk use [`lstat`] gives, which knows
+/// compressed, Compact, sparse and online-only files; when that stat
+/// fails it is the length. Every size count outside the walk reads this
+/// (precheck check_disk_reads), so reap, empty and the trash totals agree
+/// with du.
+#[cfg(unix)]
+pub fn disk_bytes(_path: &std::path::Path, meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.blocks().saturating_mul(512)
+}
+
+/// See the Unix [`disk_bytes`].
+#[cfg(windows)]
+pub fn disk_bytes(path: &std::path::Path, meta: &std::fs::Metadata) -> u64 {
+    lstat(path).map_or(meta.len(), |st| st.sizes().1)
+}
+
 /// What the directory entry says about its type before any stat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
@@ -965,6 +984,22 @@ mod tests {
             !is_link(wof, IO_REPARSE_TAG_WOF),
             "a Compact file holds data"
         );
+    }
+
+    /// 35(a): a size count outside the walk gives a file the disk use that
+    /// du's own stat gives it.
+    #[test]
+    fn disk_bytes_match_the_stat_du_takes() {
+        let dir = std::env::temp_dir().join(format!("rtrash-dufs-{}-disk", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("data.bin");
+        std::fs::write(&f, [7u8; 64 * 1024]).unwrap();
+        let meta = std::fs::symlink_metadata(&f).unwrap();
+        let st = lstat(&f).unwrap();
+        assert_eq!(disk_bytes(&f, &meta), st.sizes().1);
+        assert!(disk_bytes(&f, &meta) > 0, "{st:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 34(j): the Compact filter may hide the reparse point of a packed

@@ -1795,7 +1795,7 @@ impl<'a> DirSizes<'a> {
         };
         if !meta.is_dir() {
             // One stat answers for a file, a symlink or a special file.
-            return meta.blocks().saturating_mul(512);
+            return crate::du_fs::disk_bytes(&payload, &meta);
         }
         if let Some(size) = self.cached_dir(name) {
             return size;
@@ -1820,7 +1820,8 @@ impl<'a> DirSizes<'a> {
     /// Payload plus `.trashinfo` bytes for one entry.
     pub fn entry_bytes(&self, name: &str) -> u64 {
         let info = join_info(&self.trash.info(), name);
-        let info_sz = fs::symlink_metadata(&info).map_or(0, |m| m.blocks().saturating_mul(512));
+        let info_sz =
+            fs::symlink_metadata(&info).map_or(0, |m| crate::du_fs::disk_bytes(&info, &m));
         self.payload_bytes(name).saturating_add(info_sz)
     }
 

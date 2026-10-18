@@ -1215,10 +1215,8 @@ pub(crate) fn restore_one_to(
         // record, as the trash counted them.
         let size = match (size, total) {
             (None, Some(_)) => {
-                let info_sz = fs::symlink_metadata(&info_path).map_or(0, |m| {
-                    use std::os::unix::fs::MetadataExt;
-                    m.blocks().saturating_mul(512)
-                });
+                let info_sz = fs::symlink_metadata(&info_path)
+                    .map_or(0, |m| crate::du_fs::disk_bytes(&info_path, &m));
                 Some(crate::fastdelete::disk_usage(dest).saturating_add(info_sz))
             }
             (s, _) => s,

@@ -183,10 +183,7 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
                 removed += 1;
                 continue;
             }
-            let sz = fs::symlink_metadata(&path).map_or(0, |m| {
-                use std::os::unix::fs::MetadataExt;
-                m.blocks().saturating_mul(512)
-            });
+            let sz = fs::symlink_metadata(&path).map_or(0, |m| crate::du_fs::disk_bytes(&path, &m));
             match crate::permanent_guard::remove_record(&path) {
                 Ok(()) => {
                     if opts.verbose && !opts.json {

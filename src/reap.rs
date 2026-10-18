@@ -609,7 +609,7 @@ fn kind_reason(ft: &fs::FileType) -> Option<&'static str> {
 fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Walk {
     let mut w = Walk {
         newest: g.age_by.unwrap_or(ctx.age_by).newest(top),
-        bytes: plat::bytes(top),
+        bytes: plat::bytes(entry, top),
         inodes: 1,
         keep: None,
     };
@@ -664,7 +664,7 @@ fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Wal
             if w.newest > g.cutoff {
                 return w;
             }
-            w.bytes += plat::bytes(&m);
+            w.bytes += plat::bytes(&p, &m);
             w.inodes += 1;
             if m.is_dir() {
                 stack.push(p);
@@ -867,8 +867,9 @@ mod plat {
     pub fn uid(m: &fs::Metadata) -> u32 {
         m.uid()
     }
-    pub fn bytes(m: &fs::Metadata) -> u64 {
-        m.blocks() * 512
+    /// The bytes on disk of `p`, as du counts them.
+    pub fn bytes(p: &Path, m: &fs::Metadata) -> u64 {
+        crate::du_fs::disk_bytes(p, m)
     }
     /// False for a further name of a file already counted.
     pub fn first_link(m: &fs::Metadata, seen: &mut std::collections::HashSet<(u64, u64)>) -> bool {
@@ -988,8 +989,10 @@ mod plat {
     pub fn uid(_m: &fs::Metadata) -> u32 {
         0
     }
-    pub fn bytes(m: &fs::Metadata) -> u64 {
-        m.len()
+    /// The bytes on disk of `p`, as du counts them: a compressed, Compact,
+    /// sparse or online-only file counts what it takes, not its length.
+    pub fn bytes(p: &Path, m: &fs::Metadata) -> u64 {
+        crate::du_fs::disk_bytes(p, m)
     }
     /// Windows hard links are rare enough to count each name.
     pub fn first_link(
@@ -2281,7 +2284,7 @@ fn unique_bytes(
         if !plat::first_link(&m, &mut seen) {
             continue;
         }
-        let disk = plat::bytes(&m);
+        let disk = plat::bytes(&p, &m);
         if m.is_dir() {
             total = total.saturating_add(disk);
             if let Ok(rd) = fs::read_dir(&p) {

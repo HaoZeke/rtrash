@@ -391,7 +391,7 @@ fn open_deleted_in(
             }
             if seen.insert((m.dev(), m.ino())) {
                 out.files = out.files.saturating_add(1);
-                out.disk = out.disk.saturating_add(m.blocks().saturating_mul(512));
+                out.disk = out.disk.saturating_add(crate::du_fs::disk_bytes(&link, &m));
                 out.apparent = out.apparent.saturating_add(m.len());
             }
         }

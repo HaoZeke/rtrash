@@ -2836,6 +2836,55 @@ def check_disk_floors():
                               "0 < disk && disk < N")
 
 
+# 35(a): reap on Windows counted each file at its length, so a cache of
+# packed or online-only files counted in full while du gave what it takes
+# (gdu #407 and #688). Each size count outside the du walk reads
+# du_fs::disk_bytes, which agrees with the walk on every system. In src/
+# outside du*.rs, du_fs/ and test modules, a read of `.blocks()` or of
+# `st_blocks` is refused unless its fn is in DISK_READ_FNS, with a reason.
+# DISK_READ_CASES tests the matcher.
+DISK_READ = re.compile(r"\.blocks\(\)|\bst_blocks\b")
+DISK_READ_FNS = {
+    # Copy hints: the blocks of the source tell a sparse copy apart.
+    ("src/trashdir.rs", "copy_file_at"),
+    ("src/trashdir.rs", "copy_file_data"),
+    # The descriptor walk past PATH_MAX holds a raw fstatat result, whose
+    # blocks are what disk_bytes gives on Unix.
+    ("src/fastdelete.rs", "deep_usage"),
+    # The RTRASH_TEST_FS seam (debug builds) keeps the count its tests set.
+    ("src/space.rs", "disk_bytes"),
+}
+DISK_READ_CASES = [
+    ("method", "    let own = meta.blocks().saturating_mul(512);", True),
+    ("raw", "        let own = (st.st_blocks as u64).saturating_mul(512);", True),
+    ("helper", "    let own = crate::du_fs::disk_bytes(path, &meta);", False),
+    ("field", "    let n = st.blocks;", False),
+]
+
+
+def check_disk_reads():
+    """Size counts outside the du walk read du_fs::disk_bytes."""
+    for what, line, want in DISK_READ_CASES:
+        if bool(DISK_READ.search(line)) != want:
+            errors.append(f"scripts/precheck.py: DISK_READ gets DISK_READ_CASES '{what}' wrong; "
+                          "the disk read check is broken")
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        if rel.startswith("src/du"):
+            continue
+        raw = path.read_text(encoding="utf-8")
+        skip = test_mod_lines(raw.split("\n"))
+        lines = rust_code(raw).split("\n")
+        for k, line in enumerate(lines):
+            if k in skip or not DISK_READ.search(line):
+                continue
+            if (rel, enclosing_fn(lines, k)) in DISK_READ_FNS:
+                continue
+            errors.append(f"{rel}:{k + 1}: a size count that reads blocks itself; use "
+                          "du_fs::disk_bytes, which counts packed and online-only Windows files "
+                          "as du does (35(a))")
+
+
 def enclosing_fn(lines, k):
     """The name of the last fn declared at or above 0-based line `k`."""
     for j in range(k, -1, -1):
@@ -3090,7 +3139,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_directorysizes_paths(); check_link_copies(); check_rank_order()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

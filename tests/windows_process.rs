@@ -167,3 +167,51 @@ fn reap_profiles_work_with_windows_paths() {
     assert!(!old.exists());
     let _ = fs::remove_dir_all(&root);
 }
+
+/// 35(a): reap counts what a file takes on disk, as du does. A log that
+/// `compact /c` packed counts more than nothing and less than its length.
+#[test]
+fn reap_counts_a_compressed_file_at_its_disk_use() {
+    let root = sandbox("reap-compact");
+    let dir = root.join("cache");
+    fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("build.log");
+    let line = b"alpha beta gamma delta disk trash size packed\n";
+    fs::write(&log, line.repeat((1 << 20) / line.len() + 1)).unwrap();
+    let out = std::process::Command::new("compact")
+        .arg("/c")
+        .arg(&log)
+        .output()
+        .expect("run compact");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    stale(&log);
+    let len = fs::metadata(&log).unwrap().len();
+    let d = dir.to_str().unwrap();
+    let out = run(
+        &root,
+        &[
+            "reap",
+            "--older-than=1h",
+            "--age-by=m",
+            "--dry-run",
+            "--json",
+            d,
+        ],
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let t = text(&out);
+    let at = t.find("build.log").unwrap_or_else(|| panic!("no row: {t}"));
+    let bytes: u64 = t[at..]
+        .split("\"bytes\":")
+        .nth(1)
+        .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no bytes: {t}"));
+    eprintln!("reap-compact: build.log length {len} bytes {bytes}");
+    assert!(0 < bytes && bytes < len, "length {len}: {t}");
+    let _ = fs::remove_dir_all(&root);
+}

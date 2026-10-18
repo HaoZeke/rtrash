@@ -791,7 +791,7 @@ fn usage_in(path: &Path, seen: &Seen, depth: usize) -> u64 {
         Ok(m) => m,
         Err(_) => return 0,
     };
-    let own = meta.blocks().saturating_mul(512);
+    let own = crate::du_fs::disk_bytes(path, &meta);
     if !meta.is_dir() {
         let repeat = counted_before(seen, meta.nlink(), meta.dev(), meta.ino());
         return if repeat { 0 } else { own };

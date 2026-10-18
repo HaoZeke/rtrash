@@ -1,0 +1,1 @@
+On Windows, `reap` now counts the space a file takes on disk, as `du` does. A compressed, Compact, sparse or online-only file used to count its full length, so reap overstated what a cache would free.
