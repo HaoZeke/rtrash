@@ -2116,6 +2116,7 @@ fn dupes_out(prog: &str, paths: &[PathBuf], opts: &ScanOpts, min_size: u64, out:
             one_file_system: opts.one_file_system,
             include_kernfs: opts.include_kernfs,
         },
+        opts.filter.as_deref(),
     );
     let (groups, cloud) = crate::du_dupes::find(files);
     // On stderr, so --json and --print0 stay as they were.
@@ -2327,8 +2328,9 @@ const PROBE_COLD_PER_CALL: std::time::Duration = std::time::Duration::from_micro
 /// Whether the metadata under `path` looks uncached: time a listing of
 /// `path` and a few of its subdirectories and the stat of some entries.
 /// Walks that wait on the disk go faster with more threads in flight
-/// than there are CPUs; cached walks go slower, so this decides.
-fn looks_cold(path: &Path) -> bool {
+/// than there are CPUs; cached walks go slower, so this decides. It
+/// opens no subdirectory that `filter` leaves out (see [`probe_opens`]).
+fn looks_cold(path: &Path, filter: Option<&du_filter::Filter>) -> bool {
     use std::time::{Duration, Instant};
     let Ok(dir) = du_fs::Dir::open(path) else {
         return false;
@@ -2357,7 +2359,7 @@ fn looks_cold(path: &Path) -> bool {
             timed(&mut || st = dir.stat_at(name).ok());
         }
         let is_dir = kind == du_fs::Kind::Dir || st.is_some_and(|m| m.is_dir());
-        if !is_dir || subdirs == PROBE_SUBDIRS {
+        if !is_dir || subdirs == PROBE_SUBDIRS || !probe_opens(filter, path, name) {
             continue;
         }
         subdirs += 1;
@@ -2379,6 +2381,16 @@ fn looks_cold(path: &Path) -> bool {
         return false;
     }
     (spent - slowest) / (calls - 1) >= PROBE_COLD_PER_CALL
+}
+
+/// Whether the cold-cache probe may open the subdirectory `name` of the
+/// scan root `dir`. Not one the filters leave out: opening an excluded
+/// folder is what brings up the macOS privacy prompts (dust #546). The
+/// probe reads no `.gitignore`, so under `--gitignore` it opens none.
+fn probe_opens(filter: Option<&du_filter::Filter>, dir: &Path, name: &CStr) -> bool {
+    filter.is_none_or(|f| {
+        !f.gitignore && !f.excluded(f.root_chain.as_deref(), dir, name.to_bytes(), true)
+    })
 }
 
 /// Threads for a walk that waits on the disk: three per CPU, as diskus
@@ -4175,7 +4187,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         let first = paths.first()?;
         let first = absolute(first).ok()?;
-        looks_cold(&first).then(cold_threads)
+        let filter = opts.filter.as_deref().filter(|s| s.is_active());
+        let filter = filter.map(|s| du_filter::Filter::new(s, &first));
+        looks_cold(&first, filter.as_ref()).then(cold_threads)
     });
     let scanned = scan_on(&paths, &opts, prefetch.as_ref(), threads);
     // From here a Ctrl-C ends the process again.
@@ -4637,7 +4651,26 @@ mod tests {
     fn cold_walks_get_three_threads_per_cpu_up_to_64() {
         let cpus = std::thread::available_parallelism().map_or(4, |n| n.get());
         assert_eq!(cold_threads(), (cpus * 3).min(64));
-        assert!(!looks_cold(Path::new("/nonexistent-rtrash-probe")));
+        assert!(!looks_cold(Path::new("/nonexistent-rtrash-probe"), None));
+    }
+
+    #[test]
+    fn the_cold_probe_opens_no_excluded_folder() {
+        let root = Path::new("/home/u");
+        let spec = du_filter::Spec {
+            patterns: vec!["Library".into()],
+            ..Default::default()
+        };
+        let f = du_filter::Filter::new(&spec, root);
+        assert!(!probe_opens(Some(&f), root, c"Library"));
+        assert!(probe_opens(Some(&f), root, c"Music"));
+        assert!(probe_opens(None, root, c"Library"));
+        let spec = du_filter::Spec {
+            gitignore: true,
+            ..Default::default()
+        };
+        let f = du_filter::Filter::new(&spec, root);
+        assert!(!probe_opens(Some(&f), root, c"Music"));
     }
 
     #[test]

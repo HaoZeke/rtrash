@@ -2328,6 +2328,59 @@ fn ncdu_exports_count_read_errors_as_unreadable() {
     );
 }
 
+/// An excluded folder is never opened or looked into (dust #546, pdu
+/// #134: the macOS privacy prompts). A scan, `--dupes` and an ncdu export
+/// leave a locked excluded folder alone, with nothing unreadable and no
+/// warning, and `--dupes` finds no copy in an excluded folder. Unix only
+/// (a mode of 000 does not lock a folder on Windows); as root the folder
+/// stays readable, and the test checks only the `--dupes` filter.
+#[cfg(unix)]
+#[test]
+fn an_excluded_folder_is_never_opened() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Tree::new("exclude-shut");
+    t.file("d/keep/a.bin", 5_000);
+    t.file("d/keep/b.bin", 5_000);
+    t.file("d/copies/c.bin", 5_000);
+    t.file("d/Private/x.bin", 5_000);
+    let all = t.json(&["--dupes", "--min-size=1k", "d"]);
+    assert!(all.contains(r#""total":{"groups":1,"extras":3,"#), "{all}");
+    let some = t.json(&["--dupes", "--min-size=1k", "--exclude=copies", "d"]);
+    assert!(
+        some.contains(r#""total":{"groups":1,"extras":2,"#),
+        "{some}"
+    );
+    let shut = t.root.join("d/Private");
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+    let locked = fs::read_dir(&shut).is_err();
+    let ex = "--exclude=Private";
+    let seen = t.du(&["--json", "--no-git", "d"]);
+    let scan = t.du(&["--json", "--no-git", ex, "d"]);
+    let dupes = t.du(&["--dupes", "--json", "--min-size=1k", ex, "d"]);
+    let export = t.du(&[ex, "--ncdu=ex.json", "d"]);
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o755)).unwrap();
+    if !locked {
+        eprintln!("root reads every folder; skipping");
+        return;
+    }
+    let text = |o: &Output| String::from_utf8_lossy(&o.stdout).into_owned();
+    let err = |o: &Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    // Without the filter the scan reaches the folder and cannot read it.
+    assert_eq!(field(&text(&seen), "unreadable"), 1, "{}", text(&seen));
+    for o in [&scan, &dupes, &export] {
+        assert_eq!(o.status.code(), Some(0), "{}", err(o));
+        assert!(!err(o).contains("Private"), "{}", err(o));
+    }
+    assert_eq!(field(&text(&scan), "unreadable"), 0, "{}", text(&scan));
+    let found = text(&dupes);
+    assert!(
+        found.contains(r#""total":{"groups":1,"extras":2,"#),
+        "{found}"
+    );
+    let back = t.du(&["-f", "ex.json", "--strict", "--json"]);
+    assert_eq!(back.status.code(), Some(0), "{}", err(&back));
+}
+
 /// rtrash's own ncdu exports, JSON and binary, of a tree with a locked
 /// folder read back with the scan's unreadable count, mark and `--strict`
 /// status, and `du diff` against a clean export names the change. Unix

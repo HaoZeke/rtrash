@@ -2006,6 +2006,8 @@ then by a full hash.
 Hard links to one inode count once; shared reflink extents free nothing.
 The oldest file in each group is kept (ties go to the shortest path).
 Trash directories are skipped.
+What the filters leave out (\fB\-\-exclude\fR, \fB\-\-gitignore\fR and the rest)
+is skipped too, and an excluded folder is never opened.
 Cloud placeholders are never read, since reading one downloads it:
 on Windows a file marked
 .B FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS

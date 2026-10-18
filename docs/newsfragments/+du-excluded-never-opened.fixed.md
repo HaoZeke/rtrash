@@ -1,0 +1,1 @@
+`rtrash du` no longer opens a folder that the filters leave out. Opening an excluded folder such as `~/Library` brought up macOS privacy prompts (dust #546). The cold-cache probe at the start of a scan used to open it, and `--dupes` ignored `--exclude`, `--gitignore` and the other filters. Both now skip what the filters leave out.

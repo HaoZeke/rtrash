@@ -2300,6 +2300,79 @@ def check_missing_looks():
                               "crate::util::is_gone or crate::util::look")
 
 
+# A du walk decides on an entry before it opens it: an excluded folder is
+# never opened or looked into, since opening one is what brings up the
+# macOS privacy prompts (dust #546, pdu #134). The cold-cache probe and
+# the --dupes walk opened excluded folders until round 262. Each fn in
+# src/du*.rs that opens a directory asks the filters in the same fn
+# (FILTER_ASKS), or is in UNFILTERED_OPENS with the reason it may open.
+DIR_OPEN = re.compile(r"(?<![\w])(?:read_dir|open_child|Dir::open|Dir::open_follow)\(")
+FILTER_ASKS = re.compile(r"(?<![\w])(?:excluded|probe_opens)\(")
+UNFILTERED_OPENS = {
+    ("src/du.rs", "enter"): "opens a child that stat_entries let through, or a PATH as named",
+    ("src/du_dupes.rs", "enters"): "read_level asks the filters first; this opens only a "
+                                   "directory on another file system, to tell a kernfs",
+    ("src/du_tui.rs", "quick_view"): "lists the directory on screen, which the scan entered",
+}
+UNFILTERED_OPEN_CASES = [
+    ("opens unasked", "fn w(d: &Dir) {\n    let c = d.open_child(n);\n}\n", [("w", 2)]),
+    ("asks first", "fn w(d: &Dir) {\n    if f.excluded(c, p, n, true) {\n        return;\n    }\n"
+                   "    let c = d.open_child(n);\n}\n", []),
+    ("by path", "fn w(d: &Path) {\n    for e in fs::read_dir(d) {}\n}\n", [("w", 2)]),
+    ("nested apart", "fn w() {\n    fn v() {\n        excluded(x);\n    }\n"
+                     "    let d = Dir::open(p);\n}\n", [("w", 5)]),
+    ("comment", "fn w() {\n    // read_dir(d) here\n}\n", []),
+]
+
+
+def unfiltered_open_lines(text, skip=()):
+    """(fn, line) of each fn that opens a directory and asks no filter, by
+    the first open; nested fns apart. Comment lines and 0-based `skip` are
+    left out."""
+    stack, seen = [], {}
+    for n, line in enumerate(text.split("\n")):
+        m = re.match(r"(\s*)(?:pub(?:\([a-z]+\))? )?(?:unsafe )?fn (\w+)", line)
+        if m and not line.rstrip().endswith(";"):
+            stack.append((m.group(2), m.group(1) + "}", n + 1))
+            seen[stack[-1]] = [None, False]
+            continue
+        if stack and line == stack[-1][1]:
+            stack.pop()
+            continue
+        if not stack or n in skip or line.lstrip().startswith("//"):
+            continue
+        key = stack[-1]
+        if DIR_OPEN.search(line) and seen[key][0] is None:
+            seen[key][0] = n + 1
+        if FILTER_ASKS.search(line):
+            seen[key][1] = True
+    return [(k[0], first) for k, (first, asks) in seen.items() if first and not asks]
+
+
+def check_filtered_opens():
+    """No du walk opens a directory before the filters decide on it: each
+    fn in src/du*.rs that opens one asks the filters, or is in
+    UNFILTERED_OPENS. UNFILTERED_OPEN_CASES tests the matcher."""
+    for what, text, want in UNFILTERED_OPEN_CASES:
+        if unfiltered_open_lines(text) != want:
+            errors.append(f"scripts/precheck.py: unfiltered_open_lines gets UNFILTERED_OPEN_CASES "
+                          f"'{what}' wrong; the filtered-open check is broken")
+    found = set()
+    for path in sorted((ROOT / "src").glob("du*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        raw = path.read_text(encoding="utf-8")
+        skip = test_mod_lines(raw.split("\n"))
+        for fn, line in unfiltered_open_lines(rust_code(raw), skip):
+            found.add((rel, fn))
+            if (rel, fn) not in UNFILTERED_OPENS:
+                errors.append(f"{rel}:{line}: {fn} opens a directory without asking the filters, "
+                              "so an excluded folder gets opened (macOS privacy prompts); ask "
+                              "Filter::excluded first, or add it to UNFILTERED_OPENS with why")
+    for rel, fn in sorted(set(UNFILTERED_OPENS) - found):
+        errors.append(f"scripts/precheck.py: UNFILTERED_OPENS names {rel} {fn}, which no longer "
+                      "opens a directory unasked; remove it")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -2418,7 +2491,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_directorysizes_paths()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

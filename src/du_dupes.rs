@@ -22,9 +22,11 @@ use std::fs;
 use std::hash::Hasher;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 
+use crate::du_filter::{self, Chain};
 use crate::du_fs;
 
 /// Bytes read from each end of a file for the partial pass.
@@ -127,8 +129,8 @@ fn home_trash_id() -> Option<(u64, u64)> {
 }
 
 /// Every regular file at or below `roots`, links not followed, outside
-/// trash directories.
-pub fn walk(roots: &[PathBuf], opts: Opts) -> Vec<File> {
+/// trash directories and what the filters of `spec` leave out.
+pub fn walk(roots: &[PathBuf], opts: Opts, spec: Option<&du_filter::Spec>) -> Vec<File> {
     let home = home_trash_id();
     roots
         .par_iter()
@@ -150,9 +152,41 @@ pub fn walk(roots: &[PathBuf], opts: Opts) -> Vec<File> {
             if !st.is_dir() {
                 return Vec::new();
             }
-            walk_dir(r, st.dev, opts, home)
+            let abs = crate::du::absolute(r).unwrap_or_else(|_| r.clone());
+            let filter = spec.filter(|s| s.is_active());
+            let filter = filter.map(|s| du_filter::Filter::new(s, &abs));
+            let w = Walk {
+                root: r,
+                abs: &abs,
+                root_dev: st.dev,
+                opts,
+                home,
+                filter: filter.as_ref(),
+            };
+            walk_dir(&w)
         })
         .collect()
+}
+
+/// One root of a walk, with what each directory of it is checked against.
+struct Walk<'a> {
+    root: &'a Path,
+    /// `root` made absolute, as the filters match paths.
+    abs: &'a Path,
+    root_dev: u64,
+    opts: Opts,
+    home: Option<(u64, u64)>,
+    filter: Option<&'a du_filter::Filter>,
+}
+
+impl Walk<'_> {
+    /// `dir`, a directory at or below the root, as the filters see it.
+    fn absolute(&self, dir: &Path) -> PathBuf {
+        match dir.strip_prefix(self.root) {
+            Ok(rel) if !rel.as_os_str().is_empty() => self.abs.join(rel),
+            _ => self.abs.to_path_buf(),
+        }
+    }
 }
 
 fn file_of(path: &Path, st: &du_fs::Stat, opts: Opts) -> Option<File> {
@@ -172,13 +206,16 @@ fn file_of(path: &Path, st: &du_fs::Stat, opts: Opts) -> Option<File> {
 /// directories of a level are read in parallel, and the next level is the
 /// subdirectories they hold. Nothing recurses, so a deep tree cannot
 /// overflow a walk thread's stack (pdu #243, diskus #27).
-fn walk_dir(root: &Path, root_dev: u64, opts: Opts, home: Option<(u64, u64)>) -> Vec<File> {
+fn walk_dir(w: &Walk<'_>) -> Vec<File> {
     let mut files = Vec::new();
-    let mut level = vec![root.to_path_buf()];
+    let mut level = vec![(
+        w.root.to_path_buf(),
+        w.filter.and_then(|f| f.root_chain.clone()),
+    )];
     while !level.is_empty() {
-        let read: Vec<(Vec<File>, Vec<PathBuf>)> = level
+        let read: Vec<(Vec<File>, Vec<Subdir>)> = level
             .par_iter()
-            .map(|d| read_level(d, root_dev, opts, home))
+            .map(|(d, chain)| read_level(w, d, chain.as_ref()))
             .collect();
         level = Vec::new();
         for (found, subdirs) in read {
@@ -189,30 +226,52 @@ fn walk_dir(root: &Path, root_dev: u64, opts: Opts, home: Option<(u64, u64)>) ->
     files
 }
 
+/// A directory the walk enters next, with the ignore rules that reach it.
+type Subdir = (PathBuf, Option<Arc<Chain>>);
+
 /// The files directly in `dir`, and the subdirectories the walk enters
-/// next: not trash directories, nor other file systems with
-/// `one_file_system`, nor proc, sysfs and the like unless asked.
-fn read_level(
-    dir: &Path,
-    root_dev: u64,
-    opts: Opts,
-    home: Option<(u64, u64)>,
-) -> (Vec<File>, Vec<PathBuf>) {
+/// next: not what the filters leave out, nor trash directories, nor other
+/// file systems with `one_file_system`, nor proc, sysfs and the like
+/// unless asked. The filters decide on each entry from the listing, so
+/// an excluded folder is never opened or looked into (dust #546).
+fn read_level(w: &Walk<'_>, dir: &Path, chain: Option<&Arc<Chain>>) -> (Vec<File>, Vec<Subdir>) {
     let Ok(rd) = fs::read_dir(dir) else {
         return (Vec::new(), Vec::new());
     };
+    let entries: Vec<fs::DirEntry> = rd.flatten().collect();
     let mut files = Vec::new();
     let mut subdirs = Vec::new();
-    for e in rd.flatten() {
+    let mut filter = None;
+    if let Some(f) = w.filter {
+        let has = |n: &str| entries.iter().any(|e| e.file_name() == n);
+        // A tagged cache below the root is left out whole, as in a scan.
+        if f.exclude_caches
+            && dir != w.root
+            && has("CACHEDIR.TAG")
+            && du_filter::has_cachedir_tag(dir)
+        {
+            return (files, subdirs);
+        }
+        let abs = w.absolute(dir);
+        let chain = f.chain_for(chain, &abs, has(".git"), has(".gitignore"));
+        filter = Some((f, abs, chain));
+    }
+    for e in entries {
         let Ok(t) = e.file_type() else { continue };
+        let name = e.file_name();
+        if let Some((f, abs, chain)) = &filter {
+            if f.excluded(chain.as_deref(), abs, name.as_encoded_bytes(), t.is_dir()) {
+                continue;
+            }
+        }
         let p = e.path();
         if t.is_dir() {
-            if !trash_dir(&e.file_name(), &p, home) && enters(&p, root_dev, opts) {
-                subdirs.push(p);
+            if !trash_dir(&name, &p, w.home) && enters(&p, w.root_dev, w.opts) {
+                subdirs.push((p, filter.as_ref().and_then(|x| x.2.clone())));
             }
         } else if t.is_file() {
             if let Ok(st) = du_fs::lstat(&p) {
-                let f = file_of(&p, &st, opts);
+                let f = file_of(&p, &st, w.opts);
                 // The listing has the attributes already, at no cost.
                 #[cfg(windows)]
                 let f = f.map(|mut f| {
@@ -820,7 +879,7 @@ mod tests {
             one_file_system: false,
             include_kernfs: false,
         };
-        let (groups, cloud) = find(walk(std::slice::from_ref(&t), opts));
+        let (groups, cloud) = find(walk(std::slice::from_ref(&t), opts, None));
         assert_eq!(cloud, 0);
         assert_eq!(groups.len(), 2, "{groups:?}");
         let big_g = groups.iter().find(|g| g.size == 20_000).unwrap();
@@ -854,7 +913,7 @@ mod tests {
             one_file_system: false,
             include_kernfs: false,
         };
-        let (groups, _) = find(walk(std::slice::from_ref(&t), opts));
+        let (groups, _) = find(walk(std::slice::from_ref(&t), opts, None));
         assert_eq!(groups.len(), 1, "{groups:?}");
         fs::remove_dir_all(&t).unwrap();
     }
@@ -907,7 +966,7 @@ mod tests {
             one_file_system: false,
             include_kernfs: false,
         };
-        let mut files = walk(std::slice::from_ref(&t), opts);
+        let mut files = walk(std::slice::from_ref(&t), opts, None);
         assert!(files.iter().all(|f| !f.cloud), "{files:?}");
         for f in &mut files {
             let name = f.path.file_name().unwrap().to_string_lossy();
