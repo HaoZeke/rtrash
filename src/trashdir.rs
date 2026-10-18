@@ -1362,7 +1362,7 @@ pub fn directorysizes_rewrite(
             format!("{} {} {enc}\n", l.size, l.mtime)
         })
         .collect();
-    atomic_write(&path, body.as_bytes())
+    crate::file_replace::write_own(&path, body.as_bytes())
 }
 
 /// The raw bytes of trash entry `name`, as [`SizeLine::name`] holds them.
@@ -1551,31 +1551,6 @@ pub fn files_child_reclaim_bytes(trash: &TrashDir, path: &Path) -> u64 {
             DirSizes::load(trash).payload_bytes(&crate::util::str_from_os_ref(name))
         }
         _ => crate::fastdelete::disk_usage(path),
-    }
-}
-
-/// Write `data` to `path` via a same-dir temp file and rename (atomic on POSIX).
-pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let tmp = parent.join(format!(
-        ".{}.tmp.{}",
-        path.file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "rtrash".into()),
-        std::process::id()
-    ));
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-    }
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
     }
 }
 

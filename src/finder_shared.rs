@@ -9,7 +9,6 @@
 //! sit in the trash under the names the log gives.
 
 use std::fs;
-use std::io::Write;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
@@ -301,11 +300,7 @@ pub fn log_batch(batch: &str, items: &[(String, PathBuf, PathBuf)]) {
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-    let written = fs::File::create(&tmp).and_then(|mut f| f.write_all(body.as_bytes()));
-    if written.is_ok() {
-        let _ = fs::rename(&tmp, &path);
-    }
+    let _ = crate::file_replace::write_own(&path, body.as_bytes());
 }
 
 /// Put runs whose items still sit in the trash, newest first.

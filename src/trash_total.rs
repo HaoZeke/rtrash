@@ -111,7 +111,7 @@ pub fn stored(dir: &TrashDir) -> Option<(u64, u64, bool)> {
 /// user cannot write simply goes without a total.
 pub fn store(dir: &TrashDir, bytes: u64, items: u64) {
     if let Some(s) = stamp(dir) {
-        let _ = crate::trashdir::atomic_write(
+        let _ = crate::file_replace::write_own(
             &path(dir),
             format!("v1 {bytes} {items} {s}\n").as_bytes(),
         );

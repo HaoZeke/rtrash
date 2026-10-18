@@ -2335,7 +2335,8 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         if let Some(d) = p.parent() {
             let _ = std::fs::create_dir_all(d);
         }
-        let _ = std::fs::write(&p, crate::budget::last_put_text(since, moved));
+        let text = crate::budget::last_put_text(since, moved);
+        let _ = crate::file_replace::write_own(&p, text.as_bytes());
     }
 
     /// With a trash budget (`RTRASH_MAX_SIZE` or `policy.max_size`), trim

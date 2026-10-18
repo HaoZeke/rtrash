@@ -1328,7 +1328,10 @@ fn directorysizes_atomic_rewrite_survives_put() {
     let leftovers: Vec<_> = fs::read_dir(sb.trash())
         .unwrap()
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.contains(".tmp.") || name.ends_with(".tmp")
+        })
         .collect();
     assert!(
         leftovers.is_empty(),

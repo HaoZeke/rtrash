@@ -613,7 +613,7 @@ fn install_task(prog: &str, exe: &Path, args: &[String], every: i64, dry_run: bo
             let written = path
                 .parent()
                 .map_or(Ok(()), std::fs::create_dir_all)
-                .and_then(|_| std::fs::write(&path, bytes));
+                .and_then(|_| crate::file_replace::write_whole(&path, &bytes));
             if let Err(e) = written {
                 eprintln!("{prog}: cannot write {}: {e}", path.display());
                 return 1;
@@ -683,7 +683,7 @@ pub fn install(prog: &str, args: &[String], every: i64, dry_run: bool) -> i32 {
         let write = path
             .parent()
             .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(path, body));
+            .and_then(|()| crate::file_replace::write_whole(path, body.as_bytes()));
         if let Err(e) = write {
             eprintln!("{prog}: cannot write '{}': {e}", path.display());
             return 1;

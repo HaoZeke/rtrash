@@ -2107,7 +2107,7 @@ fn ncdu_out(
     let written = if out.as_os_str() == "-" {
         write(&mut io::stdout().lock(), None)
     } else {
-        crate::du_snap::replace_file(out, write)
+        crate::file_replace::replace_file(out, write)
     };
     let done = match written {
         Ok(d) => d,

@@ -65,7 +65,7 @@ fn save(dir: &TrashDir, map: &Trees, answer: Option<(u64, u128)>) {
     lines.sort();
     let head = answer.map_or("v1".to_string(), |(n, s)| format!("v1 {n} {s}"));
     let body = format!("{head}\n{}\n", lines.join("\n"));
-    let _ = crate::trashdir::atomic_write(&dir.root.join(FILE), body.as_bytes());
+    let _ = crate::file_replace::write_own(&dir.root.join(FILE), body.as_bytes());
 }
 
 fn mtime_ns(p: &Path) -> Option<u128> {

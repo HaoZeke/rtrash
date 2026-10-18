@@ -41,6 +41,7 @@ pub mod empty;
 pub mod empty_tui;
 #[cfg(unix)]
 pub mod fastdelete;
+pub mod file_replace;
 pub mod filters;
 #[cfg(unix)]
 pub mod finder;

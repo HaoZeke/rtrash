@@ -119,7 +119,7 @@ fn write_file(
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, data)?;
+        crate::file_replace::write_whole(path, data.as_bytes())?;
     }
     Ok(())
 }

@@ -225,7 +225,7 @@ fn store(trash: &Path, t: &Total) {
             Some(i) => format!("v2 {} {} {i} {s}\n", t.bytes, t.items),
             None => format!("v1 {} {} {s}\n", t.bytes, t.items),
         };
-        let _ = crate::trashdir::atomic_write(&p, line.as_bytes());
+        let _ = crate::file_replace::write_own(&p, line.as_bytes());
     }
 }
 

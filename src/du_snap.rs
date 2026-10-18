@@ -45,6 +45,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use crate::du::{self, Item, Report, RootTotals, ScanOpts, SortKey};
+use crate::file_replace::replace_file;
 use crate::util::{format_bytes, json_escape, url_decode, url_encode};
 
 const MAGIC: &str = "# rtrash du snapshot 1";
@@ -224,83 +225,9 @@ pub fn write(report: &Report, opts: &ScanOpts, created: i64, w: impl Write) -> i
     w.flush()
 }
 
-/// Write a snapshot to `path` with [`replace_file`].
+/// Write a snapshot to `path` whole, with [`replace_file`].
 pub fn write_file(path: &Path, report: &Report, opts: &ScanOpts, created: i64) -> io::Result<()> {
     replace_file(path, |w, _| write(report, opts, created, w))
-}
-
-/// Write `path` whole or not at all, for snapshots and ncdu exports:
-/// `fill` writes into a new file beside it, which is flushed to disk and
-/// renamed over `path`. A full disk, a crash or a failed scan leaves the
-/// file that was there (or none), never a cut-off one. A path that names
-/// no regular file (a pipe, `/dev/stdout`, a symlink) is written in
-/// place, as before, since a rename would replace the link or device
-/// itself. `fill` is also handed the path of the new file, so an export
-/// that scans the directory it is written to can leave that file out.
-pub fn replace_file<T>(
-    path: &Path,
-    fill: impl FnOnce(&mut dyn Write, Option<&Path>) -> io::Result<T>,
-) -> io::Result<T> {
-    if fs::symlink_metadata(path).is_ok_and(|m| !m.file_type().is_file()) {
-        let mut w = io::BufWriter::new(fs::File::create(path)?);
-        let done = fill(&mut w, None)?;
-        w.flush()?;
-        return Ok(done);
-    }
-    let tmp = temp_beside(path);
-    let f = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-    {
-        // Left by a run that crashed with this process id.
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            fs::remove_file(&tmp)?;
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)?
-        }
-        other => other?,
-    };
-    let done = fill_and_rename(f, &tmp, path, fill);
-    if done.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    done
-}
-
-/// The body of [`replace_file`]: `fill` into `f`, opened at `tmp`, then
-/// `tmp` over `path`.
-fn fill_and_rename<T>(
-    f: fs::File,
-    tmp: &Path,
-    path: &Path,
-    fill: impl FnOnce(&mut dyn Write, Option<&Path>) -> io::Result<T>,
-) -> io::Result<T> {
-    let mut w = io::BufWriter::new(f);
-    let done = fill(&mut w, Some(tmp))?;
-    let f = w.into_inner().map_err(io::IntoInnerError::into_error)?;
-    f.sync_all()?;
-    drop(f);
-    // A file written over keeps its mode.
-    if let Ok(m) = fs::metadata(path) {
-        fs::set_permissions(tmp, m.permissions())?;
-    }
-    fs::rename(tmp, path)?;
-    Ok(done)
-}
-
-/// `.NAME.PID.tmp` in the directory of `path`.
-fn temp_beside(path: &Path) -> PathBuf {
-    let name = path
-        .file_name()
-        .map_or_else(|| "snapshot".into(), |n| n.to_string_lossy());
-    let dir = match path.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d,
-        _ => Path::new("."),
-    };
-    dir.join(format!(".{name}.{}.tmp", std::process::id()))
 }
 
 fn bad(line: usize, what: &str) -> io::Error {
@@ -870,6 +797,7 @@ pub fn run_diff(prog: &str, args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_replace::temp_beside;
 
     fn item(p: &str, disk: u64) -> Item {
         Item {

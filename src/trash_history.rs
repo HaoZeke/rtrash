@@ -52,10 +52,7 @@ pub fn append(path: &Path, event: &str, bytes: u64, items: u64) {
         if let Ok(body) = fs::read_to_string(path) {
             let lines: Vec<&str> = body.lines().collect();
             let keep = lines[lines.len() / 2..].join("\n") + "\n";
-            let tmp = path.with_extension("tmp");
-            if fs::write(&tmp, keep).is_ok() {
-                let _ = fs::rename(&tmp, path);
-            }
+            let _ = crate::file_replace::write_own(path, keep.as_bytes());
         }
     }
     if let Some(dir) = path.parent() {
