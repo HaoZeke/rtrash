@@ -246,6 +246,33 @@ pub fn arg_path(s: &str) -> std::path::PathBuf {
     os_from_str(s).into()
 }
 
+/// The plain form of the verbatim Windows path `s`: `\\?\C:\x` reads
+/// `C:\x` and `\\?\UNC\srv\share\x` reads `\\srv\share\x`, the forms
+/// users type and the Recycle Bin records. None when `s` is not verbatim,
+/// or has no plain form, as a volume GUID path (`\\?\Volume{..}\`).
+pub fn verbatim_to_plain(s: &str) -> Option<String> {
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return Some(format!(r"\\{rest}"));
+    }
+    let rest = s.strip_prefix(r"\\?\")?;
+    let b = rest.as_bytes();
+    let drive = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
+    drive.then(|| rest.to_string())
+}
+
+/// `p` without the verbatim prefix that `fs::canonicalize` gives and a
+/// user may type on Windows ([`verbatim_to_plain`]), so paths print, match
+/// and are recorded in one form. Elsewhere `p` comes back as it is: there
+/// `\\?\` is an ordinary name.
+pub fn plain_path(p: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(windows) {
+        if let Some(s) = p.to_str().and_then(verbatim_to_plain) {
+            return s.into();
+        }
+    }
+    p.to_path_buf()
+}
+
 /// A name kept by [`str_from_os`] as text for people and JSON: stray bytes
 /// show as U+FFFD, like a lossy path.
 pub fn show_name(name: &str) -> String {
@@ -799,6 +826,23 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn verbatim_paths_have_a_plain_form_only_on_a_drive_or_share() {
+        let p = verbatim_to_plain;
+        assert_eq!(p(r"\\?\C:\Users\me").as_deref(), Some(r"C:\Users\me"));
+        assert_eq!(p(r"\\?\UNC\srv\share\x").as_deref(), Some(r"\\srv\share\x"));
+        assert_eq!(p(r"\\?\Volume{1}\x"), None);
+        assert_eq!(p(r"C:\plain"), None);
+        assert_eq!(p("/home/me"), None);
+        let typed = std::path::Path::new(r"\\?\C:\Users\me");
+        let want = if cfg!(windows) {
+            r"C:\Users\me"
+        } else {
+            r"\\?\C:\Users\me"
+        };
+        assert_eq!(plain_path(typed), std::path::PathBuf::from(want));
+    }
 
     #[test]
     fn si_units_use_powers_of_1000() {

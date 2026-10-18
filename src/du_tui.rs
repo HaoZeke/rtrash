@@ -2712,7 +2712,7 @@ fn explorer_roots(prog: &str, roots: &[PathBuf]) -> Result<Vec<PathBuf>, i32> {
     let mut seen: Vec<PathBuf> = Vec::new();
     for given in roots {
         let root = match given.canonicalize() {
-            Ok(p) => p,
+            Ok(p) => crate::util::plain_path(&p),
             Err(e) => {
                 eprintln!("{prog}: cannot access '{}': {e}", given.display());
                 return Err(1);

@@ -96,6 +96,7 @@ fn decode_utf16le_path(bytes: &[u8]) -> Option<PathBuf> {
     if let Some(n) = units.iter().position(|&u| u == 0) {
         units.truncate(n);
     }
+    plain_units(&mut units);
     if units.is_empty() {
         return None;
     }
@@ -113,6 +114,32 @@ fn decode_utf16le_path(bytes: &[u8]) -> Option<PathBuf> {
     #[cfg(not(windows))]
     {
         String::from_utf16(&units).ok().map(PathBuf::from)
+    }
+}
+
+/// A record's path without a verbatim prefix, as
+/// [`crate::util::verbatim_to_plain`] reads it, on the UTF-16 units so a
+/// name that is not valid text keeps every unit, on any host.
+fn plain_units(units: &mut Vec<u16>) {
+    let starts = |p: &str| {
+        units.len() >= p.len()
+            && units
+                .iter()
+                .copied()
+                .zip(p.encode_utf16())
+                .all(|(a, b)| a == b)
+    };
+    let unc = starts(r"\\?\UNC\");
+    let drive = starts(r"\\?\")
+        && units
+            .get(4)
+            .is_some_and(|&c| u8::try_from(c).is_ok_and(|b| b.is_ascii_alphabetic()))
+        && units.get(5) == Some(&u16::from(b':'));
+    if unc {
+        // `\\?\UNC\srv` keeps its first two units: `\\srv`.
+        units.drain(2..8);
+    } else if drive {
+        units.drain(..4);
     }
 }
 
@@ -603,7 +630,8 @@ pub fn test_bin_dir() -> Option<PathBuf> {
 pub fn test_bin_put(dir: &Path, p: &Path) -> io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
-    let original = std::path::absolute(p)?;
+    // The plain form, as the shell records it, even for a `\\?\` operand.
+    let original = crate::util::plain_path(&std::path::absolute(p)?);
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -1557,7 +1585,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 continue;
             }
             let abs = std::fs::canonicalize(f)
-                .map(|p| strip_verbatim(&p))
+                .map(|p| crate::util::plain_path(&p))
                 .unwrap_or_else(|_| f.clone());
             if let Some(snap) = &snap {
                 let holds = snap.under(f);
@@ -1595,7 +1623,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     // volume GUID.
                     moved.push(
                         std::path::absolute(f)
-                            .map(|p| strip_verbatim(&p))
+                            .map(|p| crate::util::plain_path(&p))
                             .unwrap_or_else(|_| abs.clone()),
                     );
                     if let Some(r) = root {
@@ -1689,15 +1717,6 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             .collect()
     }
 
-    /// `C:\\...` for a verbatim `\\?\C:\\...` path from canonicalize.
-    fn strip_verbatim(p: &Path) -> PathBuf {
-        let s = p.to_string_lossy();
-        match s.strip_prefix(r"\\?\") {
-            Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
-            _ => p.to_path_buf(),
-        }
-    }
-
     /// What Windows `list --sort` orders by, as on FreeDesktop.
     #[derive(Clone, Copy)]
     enum ListSort {
@@ -1721,9 +1740,10 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
     /// path, which no original path starts with. A directory that is gone
     /// keeps only its absolute form.
     fn dir_forms(dir: &Path) -> Vec<PathBuf> {
-        let mut dirs = vec![std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())];
+        let abs = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let mut dirs = vec![crate::util::plain_path(&abs)];
         if let Ok(c) = std::fs::canonicalize(dir) {
-            dirs.push(strip_verbatim(&c));
+            dirs.push(crate::util::plain_path(&c));
         }
         dirs
     }
@@ -1736,7 +1756,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut forms = vec![abs.to_path_buf()];
         let parent = abs.parent().and_then(|p| std::fs::canonicalize(p).ok());
         if let (Some(dir), Some(name)) = (parent, abs.file_name()) {
-            forms.push(strip_verbatim(&dir).join(name));
+            forms.push(crate::util::plain_path(&dir).join(name));
         }
         forms
     }
@@ -1747,7 +1767,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             return Err("--directory needs a non-empty DIR".into());
         }
         let d = crate::util::arg_path(v);
-        Ok(std::path::absolute(&d).unwrap_or(d))
+        Ok(crate::util::plain_path(
+            &std::path::absolute(&d).unwrap_or(d),
+        ))
     }
 
     pub fn list_run(prog: &str, args: &[String]) -> i32 {
@@ -2531,7 +2553,9 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                     }
                     let d = crate::util::arg_path(d);
                     // A relative --to counts from here, as the shell would.
-                    to = Some(std::path::absolute(&d).unwrap_or(d));
+                    to = Some(crate::util::plain_path(
+                        &std::path::absolute(&d).unwrap_or(d),
+                    ));
                 }
                 a if crate::budget::PathMatch::parse(a).is_some() => {
                     match crate::budget::PathMatch::parse(a) {
@@ -2762,6 +2786,7 @@ Without PATH, print a numbered list and read an index from stdin.
             Some(t) => {
                 let mounts = super::volume_mounts();
                 let abs = std::path::absolute(t).unwrap_or_else(|_| t.clone());
+                let abs = crate::util::plain_path(&abs);
                 let want: Vec<PathBuf> = path_forms(&abs)
                     .iter()
                     .map(|p| key_of(p, &mounts))
@@ -3989,6 +4014,28 @@ mod tests {
         assert_eq!(meta.delete_filetime, ft);
         assert_eq!(meta.original, PathBuf::from(r"C:\Users\me\doc.txt"));
         assert_eq!(filetime_to_unix_epoch(ft), 86_400);
+    }
+
+    #[test]
+    fn records_drop_verbatim_and_keep_long_paths() {
+        let read = |orig: &str| {
+            let buf = encode_recycle_i_v2(Path::new(orig), 1, FILETIME_UNIX_EPOCH);
+            parse_recycle_i(&buf).expect("parse").original
+        };
+        assert_eq!(read(r"\\?\C:\a\b.txt"), PathBuf::from(r"C:\a\b.txt"));
+        assert_eq!(
+            read(r"\\?\UNC\srv\share\c"),
+            PathBuf::from(r"\\srv\share\c")
+        );
+        assert_eq!(read(r"\\srv\share\d"), PathBuf::from(r"\\srv\share\d"));
+        // A volume GUID path has no plain form.
+        let guid = r"\\?\Volume{0b1c}\e";
+        assert_eq!(read(guid), PathBuf::from(guid));
+        // Version 2 counts its units, so a path past MAX_PATH reads whole.
+        let d = "d".repeat(60);
+        let long = format!(r"C:\{d}\{d}\{d}\{d}\{d}\f.txt");
+        assert!(long.len() > 300);
+        assert_eq!(read(&long), PathBuf::from(&long));
     }
 
     /// Hand-built records in the on-disk layout, not via the encoder, so

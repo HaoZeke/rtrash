@@ -2249,7 +2249,8 @@ pub(crate) fn absolute(p: &Path) -> io::Result<PathBuf> {
     }
     let parent = match p.parent() {
         Some(d) if !d.as_os_str().is_empty() => canonical(d)?,
-        _ => std::env::current_dir()?,
+        // A verbatim current directory prints in its plain form too.
+        _ => crate::util::plain_path(&std::env::current_dir()?),
     };
     Ok(parent.join(p.file_name().unwrap_or_default()))
 }
@@ -2264,20 +2265,7 @@ fn canonical(p: &Path) -> io::Result<PathBuf> {
 #[cfg(windows)]
 fn canonical(p: &Path) -> io::Result<PathBuf> {
     let c = fs::canonicalize(p)?;
-    Ok(strip_verbatim(&c))
-}
-
-#[cfg(any(windows, test))]
-fn strip_verbatim(p: &Path) -> PathBuf {
-    let s = p.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{rest}"));
-    }
-    match s.strip_prefix(r"\\?\") {
-        // Only a drive path has a plain form: `C:\...`.
-        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => PathBuf::from(rest),
-        _ => p.to_path_buf(),
-    }
+    Ok(crate::util::plain_path(&c))
 }
 
 /// Entries the cold-cache probe stats, and subdirectories it lists.
@@ -4515,15 +4503,6 @@ mod tests {
             assert_eq!(row.disk, m.blocks() * 512);
         }
         let _ = fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn verbatim_prefix_is_dropped_only_where_a_plain_form_exists() {
-        let p = |s: &str| strip_verbatim(Path::new(s));
-        assert_eq!(p(r"\\?\C:\Users\me"), PathBuf::from(r"C:\Users\me"));
-        assert_eq!(p(r"\\?\UNC\srv\share\x"), PathBuf::from(r"\\srv\share\x"));
-        assert_eq!(p(r"\\?\Volume{1}\x"), PathBuf::from(r"\\?\Volume{1}\x"));
-        assert_eq!(p("/home/me"), PathBuf::from("/home/me"));
     }
 
     #[test]

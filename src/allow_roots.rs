@@ -35,24 +35,9 @@ pub fn roots() -> Option<Vec<PathBuf>> {
         std::env::split_paths(&v)
             .filter(|p| !p.as_os_str().is_empty())
             .filter_map(|p| std::fs::canonicalize(p).ok())
-            .map(|p| plain(&p))
+            .map(|p| crate::util::plain_path(&p))
             .collect(),
     )
-}
-
-/// A canonical Windows path without its verbatim prefix: `\\?\C:\x` reads
-/// `C:\x` and `\\?\UNC\srv\x` reads `\\srv\x`. Other paths are unchanged.
-fn plain(p: &Path) -> PathBuf {
-    if cfg!(windows) {
-        let s = p.to_string_lossy();
-        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-            return PathBuf::from(format!(r"\\{rest}"));
-        }
-        if let Some(rest) = s.strip_prefix(r"\\?\") {
-            return PathBuf::from(rest);
-        }
-    }
-    p.to_path_buf()
 }
 
 /// Where `p` sits on disk: its nearest existing ancestor canonicalized,
@@ -75,7 +60,7 @@ pub fn resolve(p: &Path) -> Option<PathBuf> {
         tail.push(name.to_os_string());
         base = parent;
     }
-    let mut out = plain(&std::fs::canonicalize(base).ok()?);
+    let mut out = crate::util::plain_path(&std::fs::canonicalize(base).ok()?);
     for part in tail.iter().rev() {
         out.push(part);
     }
@@ -233,12 +218,18 @@ mod tests {
 
     #[test]
     fn verbatim_prefixes_drop_on_windows() {
+        let plain = crate::util::plain_path;
         let p = plain(Path::new(r"\\?\C:\Users\me"));
         if cfg!(windows) {
             assert_eq!(p, PathBuf::from(r"C:\Users\me"));
             assert_eq!(
                 plain(Path::new(r"\\?\UNC\srv\share")),
                 PathBuf::from(r"\\srv\share")
+            );
+            // A volume GUID path has no plain form and stays whole.
+            assert_eq!(
+                plain(Path::new(r"\\?\Volume{1}\x")),
+                PathBuf::from(r"\\?\Volume{1}\x")
             );
         } else {
             assert_eq!(p, PathBuf::from(r"\\?\C:\Users\me"));

@@ -1,0 +1,132 @@
+//! Windows paths past MAX_PATH (260 characters) and verbatim `\\?\`
+//! operands through put, list, restore, rm and du, on the scratch Recycle
+//! Bin of `common::rtrash`. Every path prints and is recorded without the
+//! verbatim prefix, as users type it and the shell records it.
+#![cfg(windows)]
+
+mod common;
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Output;
+
+/// A scratch home in its long, plain form. %TEMP% may be a short 8.3 name
+/// such as `RUNNER~1`, and canonicalize gives the verbatim form.
+fn home(tag: &str) -> PathBuf {
+    let dir = fs::canonicalize(common::scratch_dir("winpaths", tag)).unwrap();
+    let text = s(&dir);
+    PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
+}
+
+fn s(p: &Path) -> String {
+    p.to_str().unwrap().to_string()
+}
+
+/// `p` as a JSON string body: each backslash doubled.
+fn json(p: &str) -> String {
+    p.replace('\\', r"\\")
+}
+
+/// A directory below `home` whose path runs past 300 characters.
+fn deep_dir(home: &Path) -> PathBuf {
+    let mut d = home.to_path_buf();
+    for i in 0..5 {
+        d.push(format!("{i}-{}", "d".repeat(60)));
+    }
+    fs::create_dir_all(&d).unwrap();
+    assert!(d.as_os_str().len() > 300, "{}", d.display());
+    d
+}
+
+fn run(home: &Path, args: &[&str]) -> Output {
+    common::rtrash(home)
+        .args(args)
+        .current_dir(home)
+        .output()
+        .unwrap()
+}
+
+fn text(o: &Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    )
+}
+
+fn ok(o: &Output) -> String {
+    assert!(o.status.success(), "{}", text(o));
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+#[test]
+fn put_list_rm_and_restore_reach_a_file_past_max_path() {
+    let home = home("deep-file");
+    let f = deep_dir(&home).join("leaf-deep.txt");
+    fs::write(&f, "deep").unwrap();
+    let path = s(&f);
+    ok(&run(&home, &["put", &path]));
+    assert!(!f.exists(), "put left {path}");
+    let shown = ok(&run(&home, &["list"]));
+    assert!(shown.lines().any(|l| l.ends_with(&path)), "{shown}");
+    assert!(!shown.contains(r"\\?\"), "{shown}");
+    let matched = ok(&run(&home, &["rm", "-n", "leaf-deep.txt"]));
+    assert_eq!(matched.trim_end(), path, "{matched}");
+    ok(&run(&home, &["restore", &path]));
+    assert_eq!(fs::read_to_string(&f).unwrap(), "deep");
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_directory_with_paths_past_max_path_goes_and_comes_back_whole() {
+    let home = home("deep-dir");
+    let top = home.join("tree");
+    let f = deep_dir(&top).join("leaf.txt");
+    fs::write(&f, "leaf").unwrap();
+    let du = run(&home, &["du", "--json", "--files", "-n", "100", &s(&top)]);
+    let scan = common::du_scan(ok(&du));
+    assert!(scan.contains(&json(&s(&f))), "{scan}");
+    ok(&run(&home, &["put", &s(&top)]));
+    assert!(!top.exists(), "put left the tree");
+    ok(&run(&home, &["restore", &s(&top)]));
+    assert_eq!(fs::read_to_string(&f).unwrap(), "leaf");
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn verbatim_operands_are_recorded_and_shown_plain() {
+    let home = home("verbatim");
+    let f = home.join("verb.txt");
+    fs::write(&f, "v").unwrap();
+    let plain = s(&f);
+    let verbatim = format!(r"\\?\{plain}");
+    ok(&run(&home, &["put", &verbatim]));
+    assert!(!f.exists(), "put left {plain}");
+    let dir = format!(r"--directory=\\?\{}", s(&home));
+    let shown = ok(&run(&home, &["list", &dir]));
+    assert!(shown.lines().any(|l| l.ends_with(&plain)), "{shown}");
+    assert!(!shown.contains(r"\\?\"), "{shown}");
+    let back = ok(&run(&home, &["restore", "--json", &verbatim]));
+    let want = format!("\"restored_to\":\"{}\"", json(&plain));
+    assert!(back.contains(&want), "{back}");
+    assert_eq!(fs::read_to_string(&f).unwrap(), "v");
+
+    // --to takes a verbatim directory and restores to its plain form.
+    let dest = home.join("dest");
+    fs::create_dir_all(&dest).unwrap();
+    ok(&run(&home, &["put", &plain]));
+    let to = format!(r"--to=\\?\{}", s(&dest));
+    let moved = ok(&run(&home, &["restore", "--json", &to, &plain]));
+    let want = format!("\"restored_to\":\"{}\"", json(&s(&dest.join("verb.txt"))));
+    assert!(moved.contains(&want), "{moved}");
+
+    // du names a verbatim operand's rows in the plain form.
+    let sub = home.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("in.txt"), "in").unwrap();
+    let operand = format!(r"\\?\{}", s(&sub));
+    let du = run(&home, &["du", "--json", "--files", "-n", "100", &operand]);
+    let scan = common::du_scan(ok(&du));
+    assert!(scan.contains(&json(&s(&sub.join("in.txt")))), "{scan}");
+    let _ = fs::remove_dir_all(&home);
+}

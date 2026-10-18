@@ -31,12 +31,15 @@ use windows_sys::Win32::Storage::FileSystem::{
 const LIST_BUF: usize = 64 * 1024;
 
 /// `path` as a NUL-terminated wide string. Long paths get the verbatim
-/// prefix, which lifts the 260-character limit.
+/// prefix, which lifts the 260-character limit. A path that has one
+/// already, or a `\\.\` device path, is left as it is: read as a share,
+/// `\\.\C:\dir` would become `\\?\UNC\.\C:\dir`.
 fn wide(path: &Path) -> Vec<u16> {
     let s: Vec<u16> = path.as_os_str().encode_wide().collect();
     let bs = u16::from(b'\\');
     let mut out = Vec::with_capacity(s.len() + 9);
-    let verbatim = s.starts_with(&[bs, bs, u16::from(b'?'), bs]);
+    let verbatim = s.starts_with(&[bs, bs, u16::from(b'?'), bs])
+        || s.starts_with(&[bs, bs, u16::from(b'.'), bs]);
     if s.len() >= 248 && !verbatim && path.is_absolute() {
         if s.starts_with(&[bs, bs]) {
             out.extend(r"\\?\UNC".encode_utf16());
