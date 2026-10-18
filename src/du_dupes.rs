@@ -627,7 +627,7 @@ fn as_bytes_mut<T>(v: &mut T) -> &mut [u8] {
 }
 
 #[cfg(windows)]
-fn fsctl(f: &fs::File, code: u32, input: &[u8], out: &mut [u8]) -> std::io::Result<()> {
+pub(crate) fn fsctl(f: &fs::File, code: u32, input: &[u8], out: &mut [u8]) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     let mut got = 0u32;
     let ptr = |b: &[u8]| {

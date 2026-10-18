@@ -464,8 +464,16 @@ fn quick_view(dir: &Path) -> io::Result<View> {
         let is_dir = m.is_dir();
         #[cfg(unix)]
         let disk = std::os::unix::fs::MetadataExt::blocks(&m).saturating_mul(512);
+        // The listing gives only the length, which is not disk use: an
+        // online-only OneDrive file (gdu #688), a sparse or a compressed
+        // one takes less. The scan counts the allocated size; so does
+        // this row, so it keeps its size when the scan's arrive.
         #[cfg(not(unix))]
-        let disk = m.len();
+        let disk = if is_dir {
+            0
+        } else {
+            crate::du_fs::lstat(&e.path()).map_or(m.len(), |s| s.sizes().1)
+        };
         let it = Item {
             path: e.path(),
             is_dir,
@@ -4607,5 +4615,34 @@ mod tests {
             "cannot trash 'x': in use by vim"
         );
         assert_eq!(crate::put::why("rtrash", &[]), "not trashed");
+    }
+
+    /// gdu #688: an online-only OneDrive file has its full length and no
+    /// clusters. A sparse file with nothing written has the same shape.
+    /// Its row shows the allocated size in the quick view as in the scan,
+    /// so the size does not jump once the scan is in. Windows only.
+    #[cfg(windows)]
+    #[test]
+    fn quick_view_rows_show_the_allocated_size_on_windows() {
+        use windows_sys::Win32::System::Ioctl::FSCTL_SET_SPARSE;
+        let t = tree("hollow");
+        let w = t.0.join("w");
+        let f = w.join("hollow.bin");
+        let file = fs::File::create(&f).unwrap();
+        crate::du_dupes::fsctl(&file, FSCTL_SET_SPARSE, &[], &mut []).unwrap();
+        file.set_len(8 << 20).unwrap();
+        drop(file);
+        let allocated = crate::du_fs::lstat(&f).unwrap().sizes().1;
+        assert!(allocated < 1 << 20, "a sparse file took {allocated} bytes");
+        let quick = quick_view(&w).unwrap();
+        let q = quick.rows.iter().find(|r| r.path == f).cloned();
+        let q = q.expect("hollow.bin in the quick view");
+        assert_eq!(q.apparent, 8 << 20, "{q:?}");
+        assert_eq!(q.disk, allocated, "{q:?}");
+        let a = app(&t);
+        let it = a.rows().iter().find(|r| r.path == f).cloned();
+        let it = it.expect("hollow.bin in the scan");
+        assert_eq!(it.disk, q.disk, "{it:?}");
+        let _ = fs::remove_dir_all(&t.0);
     }
 }

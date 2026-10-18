@@ -790,4 +790,32 @@ mod tests {
         let mut short = Entries::default();
         assert!(!parse(&buf[..buf.len() - 9], 9, &mut short));
     }
+
+    /// gdu #688: a file whose clusters are not on disk (an online-only
+    /// OneDrive file, or a sparse one as here) keeps its length as the
+    /// apparent size and its allocated size, near 0, as disk use, both in
+    /// the directory listing and in a stat of the file. Windows only.
+    #[cfg(windows)]
+    #[test]
+    fn a_hollow_file_counts_its_clusters_not_its_length() {
+        use windows_sys::Win32::System::Ioctl::FSCTL_SET_SPARSE;
+        let dir = std::env::temp_dir().join(format!("rtrash-dufs-{}-hollow", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("hollow.bin");
+        let file = std::fs::File::create(&f).unwrap();
+        crate::du_dupes::fsctl(&file, FSCTL_SET_SPARSE, &[], &mut []).unwrap();
+        file.set_len(8 << 20).unwrap();
+        drop(file);
+        let st = lstat(&f).unwrap();
+        assert_eq!(st.size, 8 << 20);
+        assert!(st.sizes().1 < 1 << 20, "{st:?}");
+        let (e, failed) = Dir::open(&dir).unwrap().entries();
+        assert!(!failed);
+        let i = (0..e.len()).find(|&i| e.get(i).0.to_bytes() == b"hollow.bin");
+        let listed = e.stat(i.expect("hollow.bin listed")).unwrap();
+        assert_eq!(listed.size, st.size);
+        assert_eq!(listed.sizes().1, st.sizes().1, "{listed:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
