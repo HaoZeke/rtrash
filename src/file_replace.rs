@@ -3,8 +3,10 @@
 //! disk and renamed over it. A full disk, a crash or a fill that fails
 //! leaves the file that was there (or none), never a cut-off one.
 //!
-//! Appends (a history line, a shell profile block) and reservations
-//! with `create_new` are not whole-file writes and stay where they are.
+//! `scripts/precheck.py` refuses `fs::write`, `File::create` and
+//! `.truncate(true)` anywhere else outside tests. Appends (a history
+//! line, a shell profile block) and reservations with `create_new` are
+//! not whole-file writes and stay where they are.
 
 use std::fs;
 use std::io::{self, Write};

@@ -1048,6 +1048,37 @@ def check_copy_then_remove():
                       "the rule no longer matches src and needs updating")
 
 
+WHOLE_WRITE = re.compile(r"\bfs::write\s*\(|\bFile::create\s*\(|\.truncate\s*\(\s*true\s*\)")
+
+
+def check_whole_file_writes():
+    """A file rtrash writes whole goes through src/file_replace.rs, which
+    writes a temporary beside it, syncs it and renames it over the file,
+    so a failed write never leaves a cut-off file in place (dua 2.46 kept
+    a flame graph when its export failed; round 237). Outside that module
+    and outside tests, fs::write, File::create and .truncate(true) are
+    refused. Appends and create_new reservations are not whole writes."""
+    hits = 0
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        text = rust_code(path.read_text(encoding="utf-8"))
+        found = list(WHOLE_WRITE.finditer(text))
+        hits += len(found)
+        if rel == "src/file_replace.rs" or not found:
+            continue
+        skip = test_mod_lines(text.splitlines())
+        for m in found:
+            line = text.count("\n", 0, m.start()) + 1
+            if line - 1 in skip:
+                continue
+            errors.append(f"{rel}:{line}: writes a file whole in place; use file_replace::write_whole "
+                          "(a file the user asked for) or write_own (a file rtrash keeps), which "
+                          "write a temporary and rename it, so a failed write leaves the old file")
+    if not hits:
+        errors.append("precheck whole-file-write check matched nothing in src; "
+                      "the rule no longer matches src and needs updating")
+
+
 def check_volume_trash_owner():
     """A fn outside the test modules that names this user's volume trash,
     `.Trash-{uid}`, asks `user_trash_problem` (or `ensure_user_trash`,
@@ -1245,7 +1276,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_key_reads(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_directorysizes_paths()
     check_long_lines(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
