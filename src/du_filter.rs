@@ -412,6 +412,9 @@ pub struct Filter {
     pub gitignore: bool,
     /// Ignore rules from the repository that encloses the scan root.
     pub root_chain: Option<Arc<Chain>>,
+    /// Git ignores the scan root, or a directory above it in its
+    /// repository, so `--gitignore` leaves out all it holds.
+    root_ignored: bool,
     regex_out: Vec<regex_lite::Regex>,
     regex_in: Vec<regex_lite::Regex>,
 }
@@ -428,16 +431,15 @@ fn compile(list: &[String]) -> Vec<regex_lite::Regex> {
 
 impl Filter {
     pub fn new(spec: &Spec, root: &Path) -> Filter {
-        let root_chain = if spec.gitignore {
-            crate::du_git::enclosing_repo(root).map(|repo| enclosing_chain(&repo, root))
-        } else {
-            None
-        };
+        let enclosing = spec.gitignore.then(|| ignored_from_above(root)).flatten();
+        let root_ignored = enclosing.as_ref().is_some_and(|e| e.1);
+        let root_chain = enclosing.map(|e| e.0);
         Filter {
             cli: spec.rules_for(root),
             exclude_caches: spec.exclude_caches,
             gitignore: spec.gitignore,
             root_chain,
+            root_ignored,
             regex_out: compile(&spec.regex_out),
             regex_in: compile(&spec.regex_in),
         }
@@ -445,6 +447,9 @@ impl Filter {
 
     /// Whether entry `name` of directory `dir` is left out.
     pub fn excluded(&self, chain: Option<&Chain>, dir: &Path, name: &[u8], is_dir: bool) -> bool {
+        if self.root_ignored {
+            return true;
+        }
         if !self.cli.is_empty() && self.cli.decide(dir, name, is_dir) == Some(true) {
             return true;
         }
@@ -521,29 +526,58 @@ fn repo_base_chain(repo: &Path) -> Arc<Chain> {
 }
 
 /// Rules from `repo` down to the parent of `root`, for a scan that starts
-/// inside a repository.
-fn enclosing_chain(repo: &Path, root: &Path) -> Arc<Chain> {
+/// inside a repository, and whether those rules leave `root` out: it, or
+/// a directory on the way to it, is excluded by the rules above it. Git
+/// never opens an excluded directory, so no rule below one, not even a
+/// `!` pattern, brings back what is inside (`build/` then
+/// `!build/keep.txt` keeps nothing).
+fn enclosing_chain(repo: &Path, root: &Path) -> (Arc<Chain>, bool) {
     let mut chain = repo_base_chain(repo);
-    let mut dir = repo.to_path_buf();
-    let rel: Vec<_> = root
-        .parent()
-        .and_then(|p| p.strip_prefix(repo).ok())
-        .map(|r| r.components().collect())
+    let names: Vec<_> = root
+        .strip_prefix(repo)
+        .map(|r| r.components().map(|c| c.as_os_str().to_owned()).collect())
         .unwrap_or_default();
-    let mut steps = vec![dir.clone()];
-    for c in rel {
-        dir.push(c.as_os_str());
-        steps.push(dir.clone());
-    }
-    for d in steps {
-        if let Ok(text) = read_text(&d.join(".gitignore")) {
-            let r = Rules::new(d, &text);
-            if !r.is_empty() {
-                chain = Chain::push(Some(chain), r);
+    let push_dir = |chain: Arc<Chain>, d: &Path| match read_text(&d.join(".gitignore")) {
+        Ok(text) => {
+            let r = Rules::new(d.to_path_buf(), &text);
+            if r.is_empty() {
+                chain
+            } else {
+                Chain::push(Some(chain), r)
             }
         }
+        Err(_) => chain,
+    };
+    if names.is_empty() {
+        return (push_dir(chain, repo), false);
     }
-    chain
+    // Each directory from `repo` down to the parent of `root` adds its
+    // ignore file, then decides on the next name on the way.
+    let mut dir = repo.to_path_buf();
+    let mut left_out = false;
+    for (i, name) in names.iter().enumerate() {
+        chain = push_dir(chain, &dir);
+        let is_dir = i + 1 < names.len() || root.is_dir();
+        left_out |= chain.decide(&dir, name.as_encoded_bytes(), is_dir) == Some(true);
+        dir.push(name);
+    }
+    (chain, left_out)
+}
+
+/// The rules above `root` in its repository and whether they leave
+/// `root` out, or `None` outside any repository. A `root` that is a
+/// repository of its own starts afresh, so nothing above it counts.
+fn ignored_from_above(root: &Path) -> Option<(Arc<Chain>, bool)> {
+    let repo = crate::du_git::enclosing_repo(root)?;
+    let (chain, left_out) = enclosing_chain(&repo, root);
+    let own_repo = root.join(".git").symlink_metadata().is_ok();
+    Some((chain, left_out && !own_repo))
+}
+
+/// Whether `--gitignore` leaves out all of `root`: git ignores it, or a
+/// directory above it in its repository.
+pub fn git_ignores(root: &Path) -> bool {
+    ignored_from_above(root).is_some_and(|e| e.1)
 }
 
 /// Whether `dir` holds a valid `CACHEDIR.TAG`.
@@ -679,6 +713,41 @@ mod tests {
             sub.decide(Path::new("/r/s"), b"other.dat", false),
             Some(true)
         );
+    }
+
+    /// No `!` rule brings back what an excluded directory holds, so a
+    /// scan root below one is left out whole; a repository of its own
+    /// there starts afresh, as git sees it.
+    #[test]
+    fn a_root_below_an_excluded_directory_is_left_out() {
+        let d = std::env::temp_dir().join(format!("rtrash-filter-above-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        for sub in [
+            ".git",
+            "build/keep",
+            "build/lib/.git",
+            "sub/deep",
+            "sub/other",
+        ] {
+            fs::create_dir_all(d.join(sub)).unwrap();
+        }
+        let rules = "build/\n!build/keep/\n/sub/*\n!/sub/deep/\n";
+        fs::write(d.join(".gitignore"), rules).unwrap();
+        assert!(git_ignores(&d.join("build")));
+        assert!(git_ignores(&d.join("build/keep")));
+        assert!(!git_ignores(&d.join("build/lib")));
+        assert!(git_ignores(&d.join("sub/other")));
+        assert!(!git_ignores(&d.join("sub/deep")));
+        assert!(!git_ignores(&d.join("sub")));
+        let spec = Spec {
+            gitignore: true,
+            ..Spec::default()
+        };
+        let f = Filter::new(&spec, &d.join("build/keep"));
+        assert!(f.excluded(None, &d.join("build/keep"), b"a.txt", false));
+        let f = Filter::new(&spec, &d.join("sub/deep"));
+        assert!(!f.excluded(None, &d.join("sub/deep"), b"a.txt", false));
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

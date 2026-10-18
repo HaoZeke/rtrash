@@ -1799,6 +1799,19 @@ applied only inside git repositories. A nested repository starts afresh,
 as in git. A
 .B core.excludesFile
 set elsewhere is not read.
+A
+.B !
+pattern re-includes what an earlier one left out, and the last pattern
+that matches decides, as in git. Nothing comes back from inside an
+excluded directory, which is never opened:
+.B build/
+then
+.B !build/keep.txt
+keeps nothing.
+A
+.I PATH
+below an excluded directory, or excluded itself, lists nothing, with a
+note on standard error.
 .TP
 .B \-\-artefacts
 List only regenerable build artefacts and caches.

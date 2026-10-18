@@ -145,7 +145,8 @@ directories appear as one `trash` row and are never printed by --print0.
                           leading dot (same as --exclude='.*')
       --gitignore       leave out what git ignores: .gitignore files,
                           .git/info/exclude and ~/.config/git/ignore, inside
-                          git repositories
+                          git repositories; a ! rule brings nothing back
+                          from inside an excluded directory, as in git
       --dirs            list directories only
       --files           list files only
       --older-than=AGE  only list entries whose newest modification is more
@@ -3761,6 +3762,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 eprintln!("{prog}: {e}");
                 return 2;
             }
+        }
+    }
+    // Git never opens an excluded directory, so no `!` rule brings back
+    // what is inside: say so rather than show an empty listing unexplained.
+    if !dupes && from_file.is_none() && opts.filter.as_ref().is_some_and(|f| f.gitignore) {
+        for p in paths
+            .iter()
+            .filter(|p| absolute(p).is_ok_and(|a| du_filter::git_ignores(&a)))
+        {
+            let shown = crate::util::err_path(p);
+            eprintln!("{prog}: git ignores '{shown}'; --gitignore leaves out all of it");
         }
     }
     if (trash_dupes || link_dupes || clone_dupes) && !dupes {

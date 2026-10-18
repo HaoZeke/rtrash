@@ -1461,6 +1461,92 @@ fn gitignore_follows_git_rules_inside_repositories() {
     );
 }
 
+/// `!` patterns follow git: the last rule that matches decides, and
+/// nothing inside an excluded directory comes back, whatever a later rule
+/// says. Each file is checked against a table, and against
+/// `git check-ignore` when git is there. A PATH below an excluded
+/// directory lists nothing and says why.
+#[test]
+fn gitignore_negation_matches_git_check_ignore() {
+    let t = Tree::new("gitignore-negation");
+    let repo = t.root.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let have_git = git_ok();
+    if have_git {
+        git(&repo, &["init", "-q"]);
+    } else {
+        fs::create_dir_all(repo.join(".git")).unwrap();
+    }
+    let rules = "build/\n!build/keep.txt\n*.log\n!keep.log\n/sub/*\n!/sub/deep/\n\
+                 logs/**\n!logs/k/\n!logs/k/keep.txt\n";
+    fs::write(repo.join(".gitignore"), rules).unwrap();
+    // Whether each file counts (git leaves it untracked, not ignored).
+    let table = [
+        ("build/keep.txt", false),
+        ("build/a.o", false),
+        ("keep.log", true),
+        ("x.log", false),
+        ("sub/keep.txt", false),
+        ("sub/deep/keep.txt", true),
+        ("sub/deep/x.txt", false),
+        ("sub/deep/a.o", true),
+        ("logs/top.txt", false),
+        ("logs/k/keep.txt", true),
+        ("logs/k/other.txt", false),
+        ("a/build/keep.txt", false),
+        ("all/want.bin", true),
+        ("all/x.bin", false),
+        ("all/d/want.bin", true),
+        ("all/d/no.bin", false),
+        ("src/main.rs", true),
+    ];
+    for (i, (rel, _)) in table.iter().enumerate() {
+        t.file(&format!("repo/{rel}"), 1000 * (i + 1));
+    }
+    fs::write(repo.join("sub/deep/.gitignore"), "*.txt\n!keep.txt\n").unwrap();
+    fs::write(
+        repo.join("all/.gitignore"),
+        "*\n!.gitignore\n!*/\n!want.bin\n",
+    )
+    .unwrap();
+
+    let j = t.json(&["--no-git", "--gitignore", "--files", "-n", "100", &s(&repo)]);
+    let files = paths_in(&j, "files");
+    for (rel, kept) in table {
+        let listed = files.contains(&s(&repo.join(rel)));
+        assert_eq!(listed, kept, "{rel}: {j}");
+        if have_git {
+            let out = Command::new("git")
+                .args(["check-ignore", "-q", rel])
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                // No global ignore file of the machine running the test.
+                .env("HOME", &t.root)
+                .env("XDG_CONFIG_HOME", t.root.join(".cfg"))
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code() == Some(1), kept, "git check-ignore {rel}");
+        }
+    }
+
+    // build/ is excluded, so its ! rule keeps nothing, even as the PATH.
+    let build = s(&repo.join("build"));
+    let out = t.du(&["--json", "--no-git", "--gitignore", "--files", &build]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--gitignore leaves out all of it"), "{err}");
+    let j = String::from_utf8(out.stdout).unwrap();
+    assert!(paths_in(&j, "files").is_empty(), "{j}");
+    assert_eq!(field(&j, "files"), 0, "{j}");
+    // logs/k is brought back, so a scan of it keeps its rules.
+    let k = s(&repo.join("logs/k"));
+    let out = t.du(&["--json", "--no-git", "--gitignore", "--files", &k]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("git ignores"), "{err}");
+    let files = paths_in(&String::from_utf8(out.stdout).unwrap(), "files");
+    assert_eq!(files, [s(&repo.join("logs/k/keep.txt"))]);
+}
+
 fn git_ok() -> bool {
     Command::new("git")
         .arg("--version")
