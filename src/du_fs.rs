@@ -441,13 +441,122 @@ mod fileid {
     }
 
     /// gdu #407: a file whose data file compression or Compact packed.
-    /// Its allocation size is not its disk use, so a scan asks the file
-    /// itself: the listing gives no stat for it, and a stat by path reads
-    /// GetCompressedFileSizeW. Every read of an allocation size checks
-    /// this first (precheck check_compressed_sizes).
-    pub fn needs_real_size(attrs: u32, tag: u32) -> bool {
+    /// Its allocation size `alloc` is not its disk use, so a scan asks the
+    /// file itself: the listing gives no stat for it, and the stat by path
+    /// reads the packed size. Every read of an allocation size checks this
+    /// first (precheck check_compressed_sizes). 34(j): the Compact filter
+    /// can hide the reparse point of a packed file from a listing, which
+    /// then shows a file of `len` bytes with no clusters at all; a file
+    /// past [`NO_CLUSTERS_MIN`] bytes like that is asked too.
+    pub fn needs_real_size(attrs: u32, tag: u32, alloc: i64, len: i64) -> bool {
         attrs & FILE_ATTRIBUTE_COMPRESSED != 0
-            || (attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && tag == IO_REPARSE_TAG_WOF)
+            || is_wof(attrs, tag)
+            || (alloc == 0 && len > NO_CLUSTERS_MIN)
+    }
+
+    /// The length past which a file with no clusters keeps its data
+    /// elsewhere: NTFS keeps a small file inside its file record (at most
+    /// a few KiB), so only a longer one with none is packed or sparse.
+    pub const NO_CLUSTERS_MIN: i64 = 4096;
+
+    /// What a listing says of one entry ([`listed`]): attributes, EA size
+    /// or reparse tag, allocation size and length.
+    pub type Listed = (u32, u32, i64, i64);
+
+    /// A file that Compact (`compact /exe`) packed: a reparse point of the
+    /// Windows Overlay Filter.
+    pub fn is_wof(attrs: u32, tag: u32) -> bool {
+        attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && tag == IO_REPARSE_TAG_WOF
+    }
+
+    /// 34(j): the stream where Compact keeps the packed data. The main
+    /// stream of such a file is sparse with no clusters, so its allocation
+    /// size and GetCompressedFileSizeW both give 0.
+    pub const WOF_STREAM: &str = ":WofCompressedData:$DATA";
+
+    // FILE_STREAM_INFO: NextEntryOffset, StreamNameLength (bytes),
+    // StreamSize, StreamAllocationSize, then the name.
+    pub const STREAM_NEXT: usize = 0;
+    pub const STREAM_NAME_LEN: usize = 4;
+    pub const STREAM_ALLOC: usize = 16;
+    pub const STREAM_NAME: usize = 24;
+
+    /// The (name, allocation) of each FILE_STREAM_INFO record in `buf`;
+    /// none when a record runs past `buf`.
+    pub fn stream_records(buf: &[u8]) -> Option<Vec<(String, u64)>> {
+        let mut off = 0usize;
+        let mut out = Vec::new();
+        loop {
+            let rec = buf.get(off..)?;
+            if rec.len() < STREAM_NAME {
+                return None;
+            }
+            let next = u32_at(rec, STREAM_NEXT) as usize;
+            let name_len = u32_at(rec, STREAM_NAME_LEN) as usize;
+            let name = rec.get(STREAM_NAME..STREAM_NAME + name_len)?;
+            let units: Vec<u16> = name
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_ne_bytes(*c))
+                .collect();
+            let alloc = i64_at(rec, STREAM_ALLOC).max(0) as u64;
+            out.push((String::from_utf16_lossy(&units), alloc));
+            if next == 0 {
+                return Some(out);
+            }
+            off = off.checked_add(next)?;
+        }
+    }
+
+    /// 34(j): the disk use of a Compact file from the FILE_STREAM_INFO
+    /// records in `buf`, the allocation of all its streams together. None
+    /// when no record names [`WOF_STREAM`] or a record runs past `buf`.
+    pub fn wof_streams_size(buf: &[u8]) -> Option<u64> {
+        let streams = stream_records(buf)?;
+        let packed = streams
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(WOF_STREAM));
+        let total = streams
+            .iter()
+            .fold(0u64, |sum, (_, alloc)| sum.saturating_add(*alloc));
+        packed.then_some(total)
+    }
+
+    /// What the listing in `buf` says of the entry `name`: attributes, the
+    /// EA size field (the reparse tag of a reparse point), allocation size
+    /// and length. For the size diagnostics of 34(j).
+    pub fn listed(buf: &[u8], name: &str) -> Option<Listed> {
+        type I = Record;
+        let name_at = offset_of!(I, file_name);
+        let mut off = 0usize;
+        loop {
+            let rec = buf.get(off..)?;
+            if rec.len() < name_at {
+                return None;
+            }
+            let next = u32_at(rec, offset_of!(I, next_entry_offset)) as usize;
+            let name_len = u32_at(rec, offset_of!(I, file_name_length)) as usize;
+            let raw = rec.get(name_at..name_at + name_len)?;
+            let units: Vec<u16> = raw
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_ne_bytes(*c))
+                .collect();
+            if String::from_utf16_lossy(&units) == name {
+                return Some((
+                    u32_at(rec, offset_of!(I, file_attributes)),
+                    u32_at(rec, offset_of!(I, ea_size)),
+                    i64_at(rec, offset_of!(I, allocation_size)),
+                    i64_at(rec, offset_of!(I, end_of_file)),
+                ));
+            }
+            if next == 0 {
+                return None;
+            }
+            off = off.checked_add(next)?;
+        }
     }
 
     pub fn mode_of(attrs: u32, tag: u32) -> u32 {
@@ -507,7 +616,12 @@ mod fileid {
             let mode = mode_of(attrs, tag);
             let (kind, stat) = if mode == S_IFDIR {
                 (Kind::Dir, None)
-            } else if needs_real_size(attrs, tag) {
+            } else if needs_real_size(
+                attrs,
+                tag,
+                i64_at(rec, offset_of!(I, allocation_size)),
+                i64_at(rec, offset_of!(I, end_of_file)),
+            ) {
                 (Kind::Other, None)
             } else {
                 let stat = Stat {
@@ -847,6 +961,83 @@ mod tests {
             !is_link(wof, IO_REPARSE_TAG_WOF),
             "a Compact file holds data"
         );
+    }
+
+    /// 34(j): the listing may hide the reparse point of a Compact file and
+    /// show a long file with no clusters; that file gets no stat either.
+    /// A small file kept inside its file record, with no clusters too,
+    /// keeps its stat. `listed` reads back what the listing says.
+    #[test]
+    fn a_long_file_without_clusters_leaves_its_size_to_a_stat() {
+        use fileid::*;
+        use std::mem::offset_of;
+        let sized = |name: &str, alloc: i64, len: i64, last: bool| {
+            let mut r = fileid_record(name, 0x20, 0, last);
+            let a = offset_of!(Record, allocation_size);
+            r[a..a + 8].copy_from_slice(&alloc.to_ne_bytes());
+            let l = offset_of!(Record, end_of_file);
+            r[l..l + 8].copy_from_slice(&len.to_ne_bytes());
+            r
+        };
+        let mut buf = sized("hidden.bin", 0, 1 << 20, false);
+        buf.extend(sized("tiny.txt", 0, 600, true));
+        let mut e = Entries::default();
+        assert!(parse(&buf, 9, &mut e));
+        assert_eq!(e.stat(0), None);
+        assert!(e.stat(1).is_some());
+        assert_eq!(listed(&buf, "hidden.bin"), Some((0x20, 0, 0, 1 << 20)));
+        assert_eq!(listed(&buf, "none.bin"), None);
+    }
+
+    /// One FILE_STREAM_INFO record, padded to 8 bytes.
+    fn stream_record(name: &str, alloc: i64, last: bool) -> Vec<u8> {
+        use fileid::*;
+        let units: Vec<u16> = name.encode_utf16().collect();
+        let mut r = vec![0u8; STREAM_NAME + units.len() * 2];
+        r[STREAM_NAME_LEN..STREAM_NAME_LEN + 4]
+            .copy_from_slice(&((units.len() * 2) as u32).to_ne_bytes());
+        r[STREAM_ALLOC..STREAM_ALLOC + 8].copy_from_slice(&alloc.to_ne_bytes());
+        for (i, u) in units.iter().enumerate() {
+            let at = STREAM_NAME + 2 * i;
+            r[at..at + 2].copy_from_slice(&u.to_ne_bytes());
+        }
+        while !r.len().is_multiple_of(8) {
+            r.push(0);
+        }
+        if !last {
+            let n = r.len() as u32;
+            // NextEntryOffset leads the record (STREAM_NEXT is 0).
+            r[..4].copy_from_slice(&n.to_ne_bytes());
+        }
+        r
+    }
+
+    /// 34(j): a Compact file uses the clusters of its packed stream; its
+    /// sparse main stream has none. A listing without the packed stream,
+    /// or cut short, gives no size.
+    #[test]
+    fn a_compact_file_counts_the_clusters_of_its_packed_stream() {
+        use fileid::*;
+        let mut buf = stream_record("::$DATA", 0, false);
+        buf.extend(stream_record(":wofcompresseddata:$DATA", 8192, false));
+        buf.extend(stream_record(":Zone.Identifier:$DATA", 0, true));
+        assert_eq!(wof_streams_size(&buf), Some(8192));
+        let names: Vec<String> = stream_records(&buf)
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "::$DATA",
+                ":wofcompresseddata:$DATA",
+                ":Zone.Identifier:$DATA"
+            ]
+        );
+        let plain = stream_record("::$DATA", 4096, true);
+        assert_eq!(wof_streams_size(&plain), None);
+        assert_eq!(wof_streams_size(&buf[..buf.len() - 9]), None);
     }
 
     /// Every reparse tag that names another file or folder is a link, the

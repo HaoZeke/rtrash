@@ -2432,7 +2432,7 @@ def check_mount_table_reads():
 # surrogate for a link (round 263; diskus #42, gdu #441). Code outside the
 # tests tells a link by du_fs::fileid::is_link, the name-surrogate bit,
 # and names no IO_REPARSE_TAG_* constant but where one is declared. One fn
-# names a tag that holds data, not a link: fileid::needs_real_size, which
+# names a tag that stores file data, not a link: fileid::is_wof, which
 # tells a Compact file by IO_REPARSE_TAG_WOF (gdu #407; REPARSE_TAG_DATA).
 REPARSE_TAG_USE = re.compile(r"\bIO_REPARSE_TAG_\w+")
 REPARSE_TAG_DECL = re.compile(r"^\s*(?:pub(?:\([a-z]+\))? )?const IO_REPARSE_TAG_\w+\s*:")
@@ -2444,7 +2444,7 @@ REPARSE_TAG_CASES = [
 ]
 
 
-REPARSE_TAG_DATA = {"needs_real_size"}
+REPARSE_TAG_DATA = {"is_wof"}
 
 
 def reparse_tag_line(line):
@@ -2603,7 +2603,17 @@ def check_win_paths():
 # or Compact (WOF) packed is not its disk use. du_fs::fileid::needs_real_size
 # says which files those are; GetCompressedFileSizeW gives their real size.
 # A function that reads an allocation size and never asks it counts such a
-# file at its full size. ALLOC_CASES tests the matcher.
+# file at its full size. ALLOC_CASES tests the matcher. ALLOC_PACKED names
+# the fns that read the allocation of a packed stream itself, which is
+# the real size, or what the Compact filter shows: du_fs windows wof_size
+# and filter_view_size (34(j)). It also names the fns that only report a
+# listing or the sizes for a test: fileid listed and windows size_probe.
+ALLOC_PACKED = {
+    ("src/du_fs/windows.rs", "wof_size"),
+    ("src/du_fs/windows.rs", "filter_view_size"),
+    ("src/du_fs/windows.rs", "size_probe"),
+    ("src/du_fs.rs", "listed"),
+}
 ALLOC_READ = re.compile(r"\bAllocationSize\b|\ballocation_size\s*\)")
 ALLOC_CASES = [
     ("std", "    let mut allocated = std_info.AllocationSize.max(0) as u64;", True),
@@ -2640,6 +2650,8 @@ def check_compressed_sizes():
                 continue
             if "needs_real_size(" in enclosing_fn_text(lines, k):
                 continue
+            if (rel, enclosing_fn(lines, k)) in ALLOC_PACKED:
+                continue
             errors.append(f"{rel}:{k + 1}: an allocation size read without needs_real_size counts "
                           "a compressed or Compact file at its full size; check "
                           "du_fs::fileid::needs_real_size and use GetCompressedFileSizeW")
@@ -2657,6 +2669,34 @@ LOCK_CALL_CASES = [
     ("setlkw", "    libc::fcntl(fd, libc::F_SETLKW, &fl);", True),
     ("flag", "    Self::acquire_flags(root, libc::LOCK_EX, at)", False),
 ]
+
+
+# 34(j): the Compact test asserted only `disk < 1 << 19`, so a du that
+# gave a Compact file a disk use of 0 passed it. In tests/, an assert that
+# puts a disk size below a bound also puts it above 0 (`0 < disk && ..`).
+# DISK_CEILING_CASES tests the matcher.
+DISK_CEILING = re.compile(r"\bassert!\(\s*\w*disk\w*\s*<")
+DISK_CEILING_CASES = [
+    ("ceiling", "        assert!(disk < 1 << 19, \"{name}: disk {disk}: {j}\");", True),
+    ("both", "        assert!(0 < disk && disk < apparent, \"{name}\");", False),
+    ("floor", "        assert!(disk > 0, \"{j}\");", False),
+]
+
+
+def check_disk_floors():
+    """A test assert that caps a disk size also wants it above 0."""
+    for what, line, want in DISK_CEILING_CASES:
+        if bool(DISK_CEILING.search(line)) != want:
+            errors.append(f"scripts/precheck.py: DISK_CEILING gets DISK_CEILING_CASES '{what}' "
+                          "wrong; the disk floor check is broken")
+    for path in sorted((ROOT / "tests").rglob("*.rs")):
+        lines = rust_code(path.read_text(encoding="utf-8")).split("\n")
+        for k, line in enumerate(lines):
+            if DISK_CEILING.search(line):
+                errors.append(f"{path.relative_to(ROOT).as_posix()}:{k + 1}: a disk size checked "
+                              "only against a ceiling passes when du gives 0; assert "
+                              "0 < disk && disk < N")
+
 
 
 def enclosing_fn(lines, k):
@@ -2912,7 +2952,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_directorysizes_paths()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

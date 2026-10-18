@@ -7,7 +7,10 @@
 //! Names are kept in the `OsStr` encoding of std, NUL-terminated like the
 //! Unix names, so the walk handles both the same way.
 
-use super::fileid::{mode_of, mtime_of, needs_real_size, parse};
+use super::fileid::{
+    is_wof, listed, mode_of, mtime_of, needs_real_size, parse, stream_records, wof_streams_size,
+    Listed, FILE_ATTRIBUTE_REPARSE_POINT,
+};
 use super::{Entries, Stat};
 use std::cell::RefCell;
 use std::ffi::{c_void, CStr, OsStr};
@@ -20,12 +23,13 @@ use windows_sys::Win32::Foundation::{
     GetLastError, SetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FileAttributeTagInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-    FileStandardInfo, GetCompressedFileSizeW, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_TAG_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO,
-    FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, OPEN_EXISTING,
+    CreateFileW, FileAttributeTagInfo, FileCompressionInfo, FileIdBothDirectoryInfo,
+    FileIdBothDirectoryRestartInfo, FileStandardInfo, FileStreamInfo, GetCompressedFileSizeW,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_COMPRESSION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO, FILE_INFO_BY_HANDLE_CLASS,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_STANDARD_INFO, OPEN_EXISTING,
 };
 
 /// Bytes of the per-thread listing buffer.
@@ -33,6 +37,21 @@ const LIST_BUF: usize = 64 * 1024;
 
 /// Open `path` itself, never what a reparse point names.
 fn open_handle(path: &Path, access: u32) -> io::Result<OwnedHandle> {
+    open_with(
+        path,
+        access,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+}
+
+/// 34(j): open the file `path` for its attributes as other programs see
+/// it, through the Compact filter, which a FILE_FLAG_OPEN_REPARSE_POINT
+/// open skips. Only for a Compact file or one that is no reparse point.
+fn open_seen(path: &Path) -> io::Result<OwnedHandle> {
+    open_with(path, FILE_READ_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS)
+}
+
+fn open_with(path: &Path, access: u32, flags: u32) -> io::Result<OwnedHandle> {
     let w = crate::util::win_path(path);
     // SAFETY: `w` is NUL-terminated; a valid returned handle is ours.
     let h = unsafe {
@@ -42,7 +61,7 @@ fn open_handle(path: &Path, access: u32) -> io::Result<OwnedHandle> {
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            flags,
             std::ptr::null_mut(),
         )
     };
@@ -70,11 +89,14 @@ fn info_ex<T>(h: &OwnedHandle, class: FILE_INFO_BY_HANDLE_CLASS) -> io::Result<T
 }
 
 /// gdu #407: the bytes on disk of a file that NTFS compression or Compact
-/// packed, as Explorer's "Size on disk" shows them. GetCompressedFileSizeW
-/// opens the file through the Compact filter, which a handle opened with
-/// FILE_FLAG_OPEN_REPARSE_POINT skips.
+/// packed, as Explorer's "Size on disk" shows them, by GetCompressedFileSizeW
+/// on `path` ([`compressed_size_wide`]).
 fn compressed_size(path: &Path) -> Option<u64> {
-    let w = crate::util::win_path(path);
+    compressed_size_wide(&crate::util::win_path(path)).ok()
+}
+
+/// GetCompressedFileSizeW on the NUL-terminated wide path `w`.
+fn compressed_size_wide(w: &[u16]) -> io::Result<u64> {
     let mut high = 0u32;
     // SAFETY: `w` is NUL-terminated and `high` is a u32 to write.
     let low = unsafe {
@@ -83,13 +105,86 @@ fn compressed_size(path: &Path) -> Option<u64> {
     };
     // A size whose low half is all ones is also u32::MAX; the error says.
     if low == u32::MAX && unsafe { GetLastError() } != 0 {
-        return None;
+        return Err(io::Error::last_os_error());
     }
-    Some(u64::from(high) << 32 | u64::from(low))
+    Ok(u64::from(high) << 32 | u64::from(low))
 }
 
-/// The stat of the open handle `h`. With `path`, a compressed or Compact
-/// file gets its real disk use ([`compressed_size`]).
+/// The FILE_STREAM_INFO records of the open file `h`, as bytes.
+fn stream_list(h: &OwnedHandle) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u64; 2048];
+    // SAFETY: the buffer is 8-byte aligned and writable for its full
+    // length.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            h.as_raw_handle() as _,
+            FileStreamInfo,
+            buf.as_mut_ptr() as *mut c_void,
+            (buf.len() * 8) as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(buf.iter().flat_map(|w| w.to_ne_bytes()).collect())
+}
+
+/// 34(j): what the Compact filter says of the file `path`: its
+/// compressed size (FileCompressionInfo), else its allocation size, both
+/// read through the filter ([`open_seen`]).
+fn filter_view_size(path: &Path) -> Option<u64> {
+    let h = open_seen(path).ok()?;
+    let packed = info_ex::<FILE_COMPRESSION_INFO>(&h, FileCompressionInfo)
+        .map(|c| c.CompressedFileSize.max(0) as u64)
+        .ok()
+        .filter(|&n| n > 0);
+    packed.or_else(|| {
+        let std_info: FILE_STANDARD_INFO = info_ex(&h, FileStandardInfo).ok()?;
+        Some(std_info.AllocationSize.max(0) as u64)
+    })
+}
+
+/// 34(j): the disk use of a Compact file from its own streams: the
+/// allocation of all of them, `WofCompressedData` among them, from the
+/// stream list of `h`; failing that, that stream opened by name.
+fn wof_size(h: &OwnedHandle, path: Option<&Path>) -> Option<u64> {
+    if let Some(n) = stream_list(h).ok().and_then(|b| wof_streams_size(&b)) {
+        return Some(n);
+    }
+    let mut named = path?.as_os_str().to_os_string();
+    named.push(":WofCompressedData");
+    let stream = open_handle(Path::new(&named), FILE_READ_ATTRIBUTES).ok()?;
+    let info: FILE_STANDARD_INFO = info_ex(&stream, FileStandardInfo).ok()?;
+    Some(info.AllocationSize.max(0) as u64)
+}
+
+/// The disk use of a file that [`needs_real_size`] names. Each way of
+/// asking is tried in turn, and the first that gives more than 0 wins:
+/// GetCompressedFileSizeW by `path` (what compact.exe reports), the view
+/// through the Compact filter ([`filter_view_size`]), then the streams
+/// ([`wof_size`]). A reparse point that is not a Compact one (a cloud
+/// placeholder) is asked by path only, so nothing opens what it names.
+fn packed_size(h: &OwnedHandle, attrs: u32, tag: u32, path: Option<&Path>) -> Option<u64> {
+    let by_path = path.and_then(compressed_size);
+    if by_path.is_some_and(|n| n > 0) {
+        return by_path;
+    }
+    if attrs & FILE_ATTRIBUTE_REPARSE_POINT != 0 && !is_wof(attrs, tag) {
+        return by_path;
+    }
+    let seen = path.and_then(filter_view_size);
+    if seen.is_some_and(|n| n > 0) {
+        return seen;
+    }
+    let own = wof_size(h, path);
+    if own.is_some_and(|n| n > 0) {
+        return own;
+    }
+    by_path.or(seen).or(own)
+}
+
+/// The stat of the open handle `h`. A compressed or Compact file gets
+/// its real disk use ([`packed_size`]); `path` is the name of `h`.
 fn handle_stat(h: &OwnedHandle, path: Option<&Path>) -> io::Result<Stat> {
     let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
     // SAFETY: GetFileInformationByHandle fills `info` on success.
@@ -101,19 +196,166 @@ fn handle_stat(h: &OwnedHandle, path: Option<&Path>) -> io::Result<Stat> {
     let std_info: FILE_STANDARD_INFO = info_ex(h, FileStandardInfo)?;
     let wt = info.ftLastWriteTime;
     let write = (u64::from(wt.dwHighDateTime) << 32 | u64::from(wt.dwLowDateTime)) as i64;
-    let packed = path
-        .filter(|_| needs_real_size(tag.FileAttributes, tag.ReparseTag))
-        .and_then(compressed_size);
-    let allocated = packed.unwrap_or(std_info.AllocationSize.max(0) as u64);
+    let (attrs, rtag) = (tag.FileAttributes, tag.ReparseTag);
+    let (alloc, len) = (std_info.AllocationSize, std_info.EndOfFile);
+    let packed = if needs_real_size(attrs, rtag, alloc, len) {
+        packed_size(h, attrs, rtag, path)
+    } else {
+        None
+    };
     Ok(Stat {
         mode: mode_of(tag.FileAttributes, tag.ReparseTag),
-        size: std_info.EndOfFile.max(0) as u64,
-        blocks: allocated.div_ceil(512),
+        size: len.max(0) as u64,
+        blocks: packed.unwrap_or(alloc.max(0) as u64).div_ceil(512),
         nlink: u64::from(std_info.NumberOfLinks),
         ino: u64::from(info.nFileIndexHigh) << 32 | u64::from(info.nFileIndexLow),
         dev: u64::from(info.dwVolumeSerialNumber),
         mtime: mtime_of(write),
     })
+}
+
+/// What the listing of the folder `dir` says of its entry `name`
+/// ([`listed`]): attributes, EA size or reparse tag, allocation size and
+/// length.
+fn listing_of(dir: &Path, name: &str) -> io::Result<Option<Listed>> {
+    let h = open_handle(dir, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?;
+    let mut buf = vec![0u64; LIST_BUF / 8];
+    let mut class = FileIdBothDirectoryRestartInfo;
+    loop {
+        // SAFETY: the buffer is 8-byte aligned and writable for its full
+        // length.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                h.as_raw_handle() as _,
+                class,
+                buf.as_mut_ptr() as *mut c_void,
+                (buf.len() * 8) as u32,
+            )
+        };
+        class = FileIdBothDirectoryInfo;
+        if ok == 0 {
+            return match unsafe { GetLastError() } {
+                ERROR_NO_MORE_FILES => Ok(None),
+                _ => Err(io::Error::last_os_error()),
+            };
+        }
+        let bytes: Vec<u8> = buf.iter().flat_map(|w| w.to_ne_bytes()).collect();
+        if let Some(found) = listed(&bytes, name) {
+            return Ok(Some(found));
+        }
+    }
+}
+
+/// 34(j) diagnostics for the Windows du test, which prints them before it
+/// asserts: what each way of asking gives for the file `path`, one line
+/// each, then the disk use du takes. It only reads.
+pub fn size_probe(path: &Path) -> Vec<String> {
+    let err = |e: io::Error| format!("error {}", e.raw_os_error().unwrap_or(-1));
+    let mut out = Vec::new();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dir = path.parent().unwrap_or(Path::new("."));
+    out.push(match listing_of(dir, &name) {
+        Ok(Some((a, ea, alloc, len))) => {
+            format!("listing: attrs {a:#x} ea/tag {ea:#x} alloc {alloc} len {len}")
+        }
+        Ok(None) => "listing: no entry".to_string(),
+        Err(e) => format!("listing: {}", err(e)),
+    });
+    let handles = [
+        (
+            "reparse-point open",
+            open_handle(path, FILE_READ_ATTRIBUTES),
+        ),
+        ("filter open", open_seen(path)),
+    ];
+    for (what, h) in handles {
+        let h = match h {
+            Ok(h) => h,
+            Err(e) => {
+                out.push(format!("{what}: {}", err(e)));
+                continue;
+            }
+        };
+        out.push(
+            match info_ex::<FILE_ATTRIBUTE_TAG_INFO>(&h, FileAttributeTagInfo) {
+                Ok(t) => format!(
+                    "{what}: attrs {:#x} tag {:#x}",
+                    t.FileAttributes, t.ReparseTag
+                ),
+                Err(e) => format!("{what}: tag info {}", err(e)),
+            },
+        );
+        out.push(match info_ex::<FILE_STANDARD_INFO>(&h, FileStandardInfo) {
+            Ok(i) => format!(
+                "{what}: standard alloc {} len {}",
+                i.AllocationSize, i.EndOfFile
+            ),
+            Err(e) => format!("{what}: standard {}", err(e)),
+        });
+        out.push(
+            match info_ex::<FILE_COMPRESSION_INFO>(&h, FileCompressionInfo) {
+                Ok(c) => format!(
+                    "{what}: compression size {} format {}",
+                    c.CompressedFileSize, c.CompressionFormat
+                ),
+                Err(e) => format!("{what}: compression {}", err(e)),
+            },
+        );
+        out.push(match stream_list(&h) {
+            Ok(b) => match stream_records(&b) {
+                Some(streams) => format!("{what}: streams {streams:?}"),
+                None => format!("{what}: streams cut short"),
+            },
+            Err(e) => format!("{what}: streams {}", err(e)),
+        });
+    }
+    let mut named = path.as_os_str().to_os_string();
+    named.push(":WofCompressedData");
+    let stream = Path::new(&named);
+    let opens = [
+        (
+            "reparse-point open",
+            open_handle(stream, FILE_READ_ATTRIBUTES),
+        ),
+        ("filter open", open_seen(stream)),
+    ];
+    for (what, s) in opens {
+        out.push(
+            match s.and_then(|s| info_ex::<FILE_STANDARD_INFO>(&s, FileStandardInfo)) {
+                Ok(i) => format!(
+                    "by-name stream, {what}: alloc {} len {}",
+                    i.AllocationSize, i.EndOfFile
+                ),
+                Err(e) => format!("by-name stream, {what}: {}", err(e)),
+            },
+        );
+    }
+    let plain = crate::util::win_path(path);
+    out.push(match compressed_size_wide(&plain) {
+        Ok(n) => format!("GetCompressedFileSizeW by path: {n}"),
+        Err(e) => format!("GetCompressedFileSizeW by path: {}", err(e)),
+    });
+    if let Ok(abs) = std::path::absolute(path) {
+        let mut verbatim = std::ffi::OsString::from(r"\\?\");
+        verbatim.push(crate::util::plain_path(&abs).as_os_str());
+        let w = crate::util::win_path(Path::new(&verbatim));
+        out.push(match compressed_size_wide(&w) {
+            Ok(n) => format!("GetCompressedFileSizeW verbatim: {n}"),
+            Err(e) => format!("GetCompressedFileSizeW verbatim: {}", err(e)),
+        });
+    }
+    out.push(match lstat(path) {
+        Ok(st) => format!(
+            "du lstat: blocks {} = {} bytes",
+            st.blocks,
+            st.blocks.saturating_mul(512)
+        ),
+        Err(e) => format!("du lstat: {}", err(e)),
+    });
+    out
 }
 
 /// An open directory.
@@ -227,6 +469,17 @@ impl Dir {
         })
     }
 }
+
+// The stream parser reads FILE_STREAM_INFO at its own offsets.
+const _: () = {
+    use super::fileid::{STREAM_ALLOC, STREAM_NAME, STREAM_NAME_LEN, STREAM_NEXT};
+    use std::mem::offset_of;
+    use windows_sys::Win32::Storage::FileSystem::FILE_STREAM_INFO;
+    assert!(offset_of!(FILE_STREAM_INFO, NextEntryOffset) == STREAM_NEXT);
+    assert!(offset_of!(FILE_STREAM_INFO, StreamNameLength) == STREAM_NAME_LEN);
+    assert!(offset_of!(FILE_STREAM_INFO, StreamAllocationSize) == STREAM_ALLOC);
+    assert!(offset_of!(FILE_STREAM_INFO, StreamName) == STREAM_NAME);
+};
 
 // The parser reads records through its own mirror of the struct.
 const _: () = {
