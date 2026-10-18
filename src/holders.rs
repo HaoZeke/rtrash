@@ -530,7 +530,7 @@ pub fn alive(pid: u32) -> bool {
 #[cfg(windows)]
 mod win {
     use super::{base_name, Hold};
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::os::windows::ffi::OsStringExt;
     use std::path::{Path, PathBuf};
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_MORE_DATA, ERROR_SUCCESS};
     use windows_sys::Win32::System::RestartManager::{
@@ -608,12 +608,7 @@ mod win {
         }
         let wide: Vec<Vec<u16>> = files
             .iter()
-            .map(|f| {
-                f.as_os_str()
-                    .encode_wide()
-                    .chain(std::iter::once(0))
-                    .collect()
-            })
+            .map(|f| crate::util::win_path(f.as_path()))
             .collect();
         let ptrs: Vec<*const u16> = wide.iter().map(|w| w.as_ptr()).collect();
         let me = std::process::id();

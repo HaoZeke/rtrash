@@ -27,7 +27,10 @@
 //! `home`, and clears the guard variables a developer may have set. A
 //! test that must reach the real trash calls `rtrash_real` and names why.
 //! Round 231 went red on Windows when a parallel test's put filled the
-//! real bin that another test's du summary read.
+//! real bin that another test's du summary read. On Windows it also pins
+//! `LOCALAPPDATA`, where the last-put record and the bin history live:
+//! round 267 went red when a parallel test's put rewrote the shared
+//! last-put record between another test's put and its `empty`.
 //!
 //! Every test that compares two `du --json` outputs compares them through
 //! `du_scan`, which cuts off the live trash summary: it counts the trash
@@ -264,11 +267,15 @@ pub fn du_row(text: &str, name: &str) -> String {
 /// `home/.config`, `RTRASH_MACOS_TRASH` is `freedesktop` (plain commands
 /// on macOS would otherwise go to the Finder Trash),
 /// `RTRASH_TEST_BIN_DIR` is [`test_bin`]`(home)` (Windows puts and the
-/// du trash summary use that folder, not the system Recycle Bin), and the
+/// du trash summary use that folder, not the system Recycle Bin),
+/// `LOCALAPPDATA` is [`local_app_data`]`(home)` on Windows, and the
 /// guard and config variables are cleared. Set anything else on the
 /// result; a later `.env` wins.
 pub fn rtrash(home: &Path) -> Command {
     let mut c = Command::new(bin());
+    if cfg!(windows) {
+        c.env("LOCALAPPDATA", local_app_data(home));
+    }
     c.env("HOME", home)
         .env("USERPROFILE", home)
         .env("XDG_DATA_HOME", home.join("xdg"))
@@ -289,6 +296,13 @@ pub fn rtrash(home: &Path) -> Command {
         c.env_remove(var);
     }
     c
+}
+
+/// The `LOCALAPPDATA` that [`rtrash`] gives a Windows run under `home`.
+/// The last-put record that `empty` and `restore --last` read lives
+/// there, so a parallel test's put cannot replace it.
+pub fn local_app_data(home: &Path) -> PathBuf {
+    home.join("localappdata")
 }
 
 /// The scratch Recycle Bin [`rtrash`] gives a Windows run under `home`.

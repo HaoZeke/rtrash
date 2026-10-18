@@ -1,0 +1,1 @@
+On Windows, rm and empty now remove a read-only file whose path runs past 260 characters. Every Win32 call that takes a path now gets the long form of a deep path, so the Recycle Bin and disk-space lookups work there too (dua #410 and #406).

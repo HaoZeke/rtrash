@@ -164,6 +164,14 @@ drop control characters when they draw. Rows under the
 .B trash\-list
 name quote such a name instead, as trash-cli does (see
 .BR list ).
+.PP
+On Windows a path may run past 260 characters (MAX_PATH).
+put, list, restore, rm, empty and du all take such a path.
+Each call rtrash makes to Windows gets the long form of a path of 248
+characters or more, the one with the
+.B \e\e?\e
+prefix, as Rust's own file calls do.
+Messages and the Recycle Bin record show the path as typed.
 .SS PROMPTS
 Every question on the command line
 .RB ( "put \-i" ,

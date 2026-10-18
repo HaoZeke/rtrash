@@ -273,6 +273,56 @@ pub fn plain_path(p: &std::path::Path) -> std::path::PathBuf {
     p.to_path_buf()
 }
 
+/// Windows: paths from this many UTF-16 units on get the verbatim prefix
+/// in [`win_path`]. CreateDirectoryW stops at 248, short of MAX_PATH.
+#[cfg(windows)]
+pub const WIN_LONG: usize = 248;
+
+/// Windows: `path` as the NUL-terminated wide string a Win32 call takes
+/// (dua #410 and #406). From [`WIN_LONG`] units on, the path gets the
+/// verbatim prefix (`\\?\C:\..`, `\\?\UNC\srv\..`), which lifts the
+/// 260-character limit, as std does for its own calls. It is made absolute
+/// first: a verbatim path skips the handling of `..`, `.` and `/`. A path
+/// that is verbatim already, or a `\\.\` device path, stays as it is.
+/// Every Win32 call that takes a path converts it here (precheck
+/// check_win_paths).
+#[cfg(windows)]
+pub fn win_path(path: &std::path::Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    let units = |p: &std::path::Path| -> Vec<u16> { p.as_os_str().encode_wide().collect() };
+    let (bs, colon) = (u16::from(b'\\'), u16::from(b':'));
+    let mut s = units(path);
+    let verbatim = s.starts_with(&[bs, bs, u16::from(b'?'), bs])
+        || s.starts_with(&[bs, bs, u16::from(b'.'), bs]);
+    let mut out = Vec::with_capacity(s.len() + 9);
+    if s.len() >= WIN_LONG && !verbatim {
+        if let Ok(abs) = std::path::absolute(path) {
+            s = units(&abs);
+        }
+        if s.starts_with(&[bs, bs]) {
+            out.extend(r"\\?\UNC".encode_utf16());
+            out.extend_from_slice(&s[1..]);
+        } else if s.get(1) == Some(&colon) {
+            out.extend(r"\\?\".encode_utf16());
+            out.extend_from_slice(&s);
+        } else {
+            out.extend_from_slice(&s);
+        }
+    } else {
+        out.extend_from_slice(&s);
+    }
+    out.push(0);
+    out
+}
+
+/// Windows: `s` as a NUL-terminated wide string, for a Win32 call that
+/// takes a name that is not a path (a registry key or value name).
+#[cfg(windows)]
+pub fn win_text(s: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    s.encode_wide().chain(Some(0)).collect()
+}
+
 /// Why an item that a scan of the Finder Trash or a Recycle Bin named was
 /// left alone when the time came to act on it: the check made just before
 /// the action found it gone, or found another item in its place (round
@@ -854,6 +904,33 @@ pub fn is_missing(e: &io::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// dua #410 and #406: a long path gets the verbatim prefix in its
+    /// absolute form, with its `/` and `..` resolved; a short one, a
+    /// verbatim one and a device path stay as they are.
+    #[cfg(windows)]
+    #[test]
+    fn win_paths_take_the_verbatim_form_from_win_long_units() {
+        use super::{win_path, win_text, WIN_LONG};
+        use std::path::Path;
+        let text = |w: Vec<u16>| String::from_utf16(&w[..w.len() - 1]).unwrap();
+        assert_eq!(text(win_path(Path::new(r"C:\short"))), r"C:\short");
+        let deep = "d".repeat(WIN_LONG);
+        let long = format!(r"C:\top/{deep}\x\..\leaf");
+        assert_eq!(
+            text(win_path(Path::new(&long))),
+            format!(r"\\?\C:\top\{deep}\leaf")
+        );
+        let share = format!(r"\\srv\share\{deep}");
+        assert_eq!(
+            text(win_path(Path::new(&share))),
+            format!(r"\\?\UNC\srv\share\{deep}")
+        );
+        for kept in [format!(r"\\?\C:\{deep}"), format!(r"\\.\C:\{deep}")] {
+            assert_eq!(text(win_path(Path::new(&kept))), kept);
+        }
+        assert_eq!(text(win_text("Key".as_ref())), "Key");
+    }
+
     /// A missing path and a path below a file are gone; a path that is
     /// there is not, and (on Unix, not as root) neither is one below a
     /// folder that denies search.
