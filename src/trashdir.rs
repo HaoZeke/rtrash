@@ -584,6 +584,9 @@ pub fn resolve_dirs_opts(pins: &[PathBuf], home_only: bool) -> Vec<TrashDir> {
     if pins.is_empty() {
         return if home_only { home_only_dirs() } else { all() };
     }
+    // A trash pinned twice, however spelled, is one trash: a command that
+    // locks every root at once would otherwise wait on its own lock.
+    let mut seen = HashSet::new();
     pins.iter()
         .filter_map(|p| {
             let td = TrashDir::from_root(p).ok()?;
@@ -595,6 +598,10 @@ pub fn resolve_dirs_opts(pins: &[PathBuf], home_only: bool) -> Vec<TrashDir> {
                 return None;
             }
             Some(td)
+        })
+        .filter(|td| match fs::metadata(&td.root) {
+            Ok(m) => seen.insert((m.dev(), m.ino())),
+            Err(_) => true,
         })
         .collect()
 }
@@ -768,22 +775,37 @@ pub fn uid_name(uid: u32) -> String {
 
 /// Exclusive per-trash-root lock (flock on `root/.rtrash.lock`) so put and empty
 /// cannot interleave a half-written pair under the same root.
+///
+/// flock is per open file, so a thread that takes a lock it already holds
+/// waits for itself forever. A debug build panics instead, naming where
+/// the lock was first taken, so a test fails at once rather than hanging
+/// until the runner kills it.
 pub struct TrashLock {
     _file: fs::File,
+    #[cfg(debug_assertions)]
+    _held: held::Mark,
 }
 
 impl TrashLock {
     /// Blocking exclusive lock for the critical section of put/empty.
+    #[track_caller]
     pub fn acquire(root: &Path) -> io::Result<Self> {
-        Self::acquire_flags(root, libc::LOCK_EX)
+        Self::acquire_flags(root, libc::LOCK_EX, std::panic::Location::caller())
     }
 
-    /// Non-blocking attempt (tests).
+    /// Non-blocking attempt (tests). It fails, and never panics, on a
+    /// lock this thread holds.
+    #[track_caller]
     pub fn try_acquire(root: &Path) -> io::Result<Self> {
-        Self::acquire_flags(root, libc::LOCK_EX | libc::LOCK_NB)
+        let at = std::panic::Location::caller();
+        Self::acquire_flags(root, libc::LOCK_EX | libc::LOCK_NB, at)
     }
 
-    fn acquire_flags(root: &Path, flags: i32) -> io::Result<Self> {
+    fn acquire_flags(
+        root: &Path,
+        flags: i32,
+        at: &'static std::panic::Location<'static>,
+    ) -> io::Result<Self> {
         fs::create_dir_all(root)?;
         let path = root.join(".rtrash.lock");
         let file = fs::OpenOptions::new()
@@ -792,12 +814,84 @@ impl TrashLock {
             .read(true)
             .write(true)
             .open(&path)?;
+        // Before the flock, which would never return.
+        #[cfg(debug_assertions)]
+        let mark = {
+            let meta = file.metadata()?;
+            let blocking = flags & libc::LOCK_NB == 0;
+            held::Mark::take((meta.dev(), meta.ino()), root, blocking, at)
+        };
+        #[cfg(not(debug_assertions))]
+        let _ = at;
         use std::os::unix::io::AsRawFd;
         let rc = unsafe { libc::flock(file.as_raw_fd(), flags) };
         if rc != 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(TrashLock { _file: file })
+        Ok(TrashLock {
+            _file: file,
+            #[cfg(debug_assertions)]
+            _held: mark,
+        })
+    }
+}
+
+/// Debug builds: the trash locks this thread holds, by lock file (device
+/// and inode, however the root was spelled), with where each was taken.
+#[cfg(debug_assertions)]
+mod held {
+    use std::cell::RefCell;
+    use std::panic::Location;
+    use std::path::Path;
+
+    type Held = Vec<((u64, u64), &'static Location<'static>)>;
+
+    thread_local! {
+        static HELD: RefCell<Held> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// This thread's claim on one lock file, given up when dropped.
+    pub(super) struct Mark(Option<(u64, u64)>);
+
+    impl Mark {
+        /// Claim lock file `id` of `root` for a lock taken at `at`. A
+        /// blocking take of a file this thread holds panics; a
+        /// non-blocking one claims nothing, since its flock fails anyway.
+        pub(super) fn take(
+            id: (u64, u64),
+            root: &Path,
+            blocking: bool,
+            at: &'static Location<'static>,
+        ) -> Mark {
+            let first = HELD.with(|h| h.borrow().iter().find(|(i, _)| *i == id).map(|(_, l)| *l));
+            match (first, blocking) {
+                (Some(first), true) => panic!(
+                    "this thread already holds the trash lock on '{}', taken at {first}; \
+                     taking it again at {at} would wait forever",
+                    root.display()
+                ),
+                (Some(_), false) => Mark(None),
+                (None, _) => {
+                    HELD.with(|h| h.borrow_mut().push((id, at)));
+                    Mark(Some(id))
+                }
+            }
+        }
+    }
+
+    impl Drop for Mark {
+        fn drop(&mut self) {
+            let Some(id) = self.0 else {
+                return;
+            };
+            // At thread exit the list may be gone already.
+            let _ = HELD.try_with(|h| {
+                let mut h = h.borrow_mut();
+                if let Some(k) = h.iter().position(|(i, _)| *i == id) {
+                    h.remove(k);
+                }
+            });
+        }
     }
 }
 
@@ -4502,5 +4596,34 @@ proc /proc proc rw 0 0
         let lines = fs::read_to_string(&sizes).unwrap_or_default();
         assert!(lines.contains(&name), "{lines}");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A second blocking lock of a root this thread holds panics in a
+    /// debug build and names both call sites, instead of waiting forever;
+    /// try_acquire only fails, and the lock is free again once dropped
+    /// (round 245).
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_second_lock_of_a_held_root_panics_instead_of_waiting() {
+        let (root, td) = put_trash("relock-panic");
+        let (other_root, other) = put_trash("relock-other");
+        let held = TrashLock::acquire(&td.root).unwrap();
+        // Another root is another lock.
+        drop(TrashLock::acquire(&other.root).unwrap());
+        assert!(TrashLock::try_acquire(&td.root).is_err());
+        // The same root spelled another way is still the same lock file.
+        let spelled = td.root.join("files").join("..");
+        let again = std::panic::catch_unwind(|| TrashLock::acquire(&spelled).map(drop));
+        let payload = again.expect_err("a second lock must panic, not return");
+        let msg = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(msg.contains("already holds the trash lock"), "{msg}");
+        assert!(msg.contains("trashdir.rs"), "{msg}");
+        drop(held);
+        drop(TrashLock::acquire(&td.root).unwrap());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&other_root);
     }
 }

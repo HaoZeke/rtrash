@@ -8609,3 +8609,20 @@ fn rm_keeps_an_item_that_took_the_name_while_it_asked() {
     assert_eq!(fs::read(sb.trash().join("files/a.o")).unwrap(), b"second");
     assert!(sb.trash().join("info/a.o.trashinfo").is_file());
 }
+
+/// A trash pinned twice, however spelled, is one trash: a prune locks it
+/// once and counts its items once. Before, the second lock of the same
+/// root waited forever on the first (round 245).
+#[test]
+fn a_trash_pinned_twice_is_emptied_once() {
+    let sb = Sandbox::new("pin-twice");
+    sb.touch("a.o");
+    assert!(sb.run(&["put", "a.o"]).status.success());
+    let one = format!("--trash-dir={}", sb.trash().display());
+    let two = format!("--trash-dir={}", sb.trash().join("files/..").display());
+    let out = sb.run(&["empty", &one, &two, "--max-size=0", "--json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let json = stdout_of(&out);
+    assert!(json.contains("\"removed\":1,"), "{json}");
+    assert!(!sb.trash().join("files/a.o").exists());
+}
