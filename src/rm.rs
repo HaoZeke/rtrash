@@ -364,8 +364,6 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         if !hit {
             continue;
         }
-        let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
-        let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
         let sz = size_of(entry);
         if !size.keeps(sz) {
             continue;
@@ -387,6 +385,19 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             removed += 1;
             continue;
         }
+        // Under the trash lock, and only if it is still the item read
+        // above: one that left the trash while rm asked, and whose name a
+        // put gave to another item, stays. One already gone is skipped.
+        let held = match entry.relock() {
+            Ok(held) => held,
+            Err(list::Relock::Gone) => continue,
+            Err(why) => {
+                eprintln!("{prog}: {}", crate::util::err_text(&why.reason(entry)));
+                status = 1;
+                continue;
+            }
+        };
+        let (payload, info_path) = (held.payload(), held.record());
         if let Err(e) = crate::permanent_guard::remove(&payload) {
             eprintln!(
                 "{prog}: cannot remove '{}': {e}",
@@ -432,6 +443,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         matched_paths.push(entry.original.to_string_lossy().into_owned());
         removed += 1;
         drop(section);
+        drop(held);
         crate::interrupt::test_seam("after-item");
     }
 

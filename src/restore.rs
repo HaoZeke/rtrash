@@ -1108,6 +1108,17 @@ pub(crate) fn restore_one_to(
             return Err(format!("cannot restore to '{}': no parent", dest.display()));
         }
     };
+    // From here on the trash is read under its lock, and only the item
+    // read before is restored: one that left the trash meanwhile, and
+    // whose name a put gave to another item, stays. A put to this trash
+    // waits until the restore is done.
+    let held = entry.relock().map_err(|why| why.reason(entry))?;
+    if held.gone() {
+        return Err(format!(
+            "trash payload missing for '{}' (stale .trashinfo?)",
+            crate::util::show_name(&entry.name)
+        ));
+    }
     if let Err(e) = fs::create_dir_all(parent) {
         return Err(format!("cannot create '{}': {e}", parent.display()));
     }
@@ -1154,7 +1165,7 @@ pub(crate) fn restore_one_to(
         return Err(unstage(err, &staged, &src));
     }
 
-    let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
+    let info_path = held.record();
     // Test seam, debug builds only: store a total here as if another
     // process had measured the trash while this restore ran.
     if cfg!(debug_assertions) {
@@ -1170,7 +1181,6 @@ pub(crate) fn restore_one_to(
     }
     {
         // Under the lock, so a put cannot add to the total in between.
-        let _lock = trashdir::TrashLock::acquire(&entry.dir.root).ok();
         let total = crate::trash_total::cached(&entry.dir);
         // A total stored by another process while this restore ran was
         // not sized up front; size the item where it now lives, plus its
@@ -1189,7 +1199,7 @@ pub(crate) fn restore_one_to(
             Ok(()) => {
                 // What is left of a payload that could not all go keeps
                 // its bytes in the trash, so the total is measured again.
-                let exact = _lock.is_some() && left.is_none();
+                let exact = left.is_none();
                 if let (Some((b, n)), Some(sz), true) = (total, size, exact) {
                     crate::trash_total::store(
                         &entry.dir,
@@ -1363,5 +1373,42 @@ mod tests {
         assert_eq!(paths(&v), ["/t/x", "/t/y"]);
         order_entries(&mut v, true);
         assert_eq!(paths(&v), ["/t/y", "/t/x"]);
+    }
+
+    /// A restore acts only on the item its entry read: once another item
+    /// took the name in the trash, it restores nothing and leaves that
+    /// item and its record in place (round 244).
+    #[test]
+    fn restore_leaves_an_item_that_took_the_name_after_the_scan() {
+        let root = std::env::temp_dir().join(format!("rtrash-retaken-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let trash = TrashDir {
+            root: root.join("Trash"),
+            topdir: None,
+        };
+        trash.ensure().unwrap();
+        let out = root.join("out");
+        fs::create_dir(&out).unwrap();
+        let dest = out.join("a.txt");
+        let record = trash.info().join("a.txt.trashinfo");
+        let body = |batch: &str| {
+            format!(
+                "[Trash Info]\nPath={}\nDeletionDate=2026-01-02T03:04:05\nX-Rtrash-Batch={batch}\n",
+                dest.display()
+            )
+        };
+        fs::write(trash.files().join("a.txt"), b"old").unwrap();
+        fs::write(&record, body("1-1")).unwrap();
+        let seen = list::collect(std::slice::from_ref(&trash));
+        assert_eq!(seen.len(), 1);
+        // Between the scan and the restore, another item takes the name.
+        fs::write(trash.files().join("a.txt"), b"new").unwrap();
+        fs::write(&record, body("2-2")).unwrap();
+        let err = restore_one_to(&seen[0], &dest, false).unwrap_err();
+        assert!(err.contains("changed in the trash"), "{err}");
+        assert!(!dest.exists());
+        assert_eq!(fs::read(trash.files().join("a.txt")).unwrap(), b"new");
+        assert!(record.exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 }

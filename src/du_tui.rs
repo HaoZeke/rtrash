@@ -218,15 +218,15 @@ mod bin {
         let Ok(dir) = crate::trashdir::TrashDir::from_root(&t.trash_dir) else {
             return false;
         };
-        let entry = crate::list::Entry {
-            date: None,
-            epoch: 0,
-            original: t.original.clone(),
-            name: t.name.clone(),
-            dir,
-            batch: None,
+        // The record as it reads now, and only if this run's put wrote
+        // it: an item that took the name since stays in the trash. The
+        // restore checks the record again under the trash lock.
+        let Some(entry) = crate::list::entry_named(&dir, &t.name)
+            .filter(|e| e.batch.as_deref() == Some(crate::info::batch_id()))
+        else {
+            return false;
         };
-        crate::restore::restore_one(&entry, false).is_ok()
+        crate::restore::restore_one_to(&entry, &t.original, false).is_ok()
     }
 }
 

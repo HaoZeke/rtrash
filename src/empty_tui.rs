@@ -55,13 +55,27 @@ pub fn permanently_remove_entries(
     let mut succeeded = Vec::with_capacity(entries.len());
     let mut bytes = 0u64;
     for entry in entries {
-        let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
-        let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
         if dry_run {
             bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes(&entry.dir, &entry.name));
             succeeded.push(true);
             continue;
         }
+        // The browser read the trash when it opened. Under the trash lock,
+        // an item that left it since, and whose name a put gave to another
+        // item, stays; one already gone counts as removed.
+        let held = match entry.relock() {
+            Ok(held) => held,
+            Err(crate::list::Relock::Gone) => {
+                succeeded.push(true);
+                continue;
+            }
+            Err(why) => {
+                eprintln!("{prog}: {}", why.reason(entry));
+                succeeded.push(false);
+                continue;
+            }
+        };
+        let (payload, info_path) = (held.payload(), held.record());
         // A total current before this removal stays current after it: the
         // item's size (from the directorysizes cache where valid) and its
         // one count come off.
@@ -615,5 +629,32 @@ mod tests {
         app.status = "purge 1 item?".into();
         let text = crate::tui_term::render_text(80, 12, |f| ui(f, &mut app));
         assert!(text.contains("purge 1 item?"), "{text}");
+    }
+
+    /// The browser read the trash when it opened: an item that took the
+    /// name of one marked since then stays (round 244).
+    #[test]
+    fn removing_entries_spares_a_reused_name() {
+        let root = std::env::temp_dir().join(format!("rtrash-tui-retaken-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("info")).unwrap();
+        std::fs::create_dir_all(root.join("files")).unwrap();
+        let record = root.join("info/x.trashinfo");
+        let body = |batch: &str| format!("[Trash Info]\nPath=/x\nX-Rtrash-Batch={batch}\n");
+        std::fs::write(root.join("files/x"), "old").unwrap();
+        std::fs::write(&record, body("1-1")).unwrap();
+        let dir = TrashDir::from_root(&root).unwrap();
+        let seen = crate::list::collect(std::slice::from_ref(&dir));
+        assert_eq!(seen.len(), 1);
+        std::fs::write(root.join("files/x"), "new").unwrap();
+        std::fs::write(&record, body("2-2")).unwrap();
+        let r = permanently_remove_entries("rtrash", &[&seen[0]], false);
+        assert_eq!(r.succeeded, vec![false]);
+        assert_eq!(
+            std::fs::read_to_string(root.join("files/x")).unwrap(),
+            "new"
+        );
+        assert!(record.exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

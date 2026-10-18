@@ -78,6 +78,104 @@ impl Entry {
     pub fn missing(&self) -> bool {
         fs::symlink_metadata(crate::util::join_name(&self.dir.files(), &self.name)).is_err()
     }
+
+    /// Lock this entry's trash and check the entry again: what a scan
+    /// read may be stale by the time anything acts on it. The record must
+    /// read as the scan read it (same original path, deletion date and put
+    /// batch), or for an orphan still be missing with its payload there.
+    /// In between, the item may have left the trash and a put may have
+    /// given its name to another item, which an action on the old scan
+    /// would hit instead. A record whose payload is gone passes: rm takes
+    /// such a record, and restore refuses it through [`Locked::gone`].
+    pub fn relock(&self) -> Result<Locked<'_>, Relock> {
+        let lock = trashdir::TrashLock::acquire(&self.dir.root).map_err(Relock::Lock)?;
+        let held = Locked {
+            entry: self,
+            _lock: lock,
+        };
+        if fs::symlink_metadata(held.record()).is_ok() {
+            let same = read_entry(&self.dir, &held.record(), &self.name, Pathless::Keep).is_ok_and(
+                |now| {
+                    now.original == self.original
+                        && now.date == self.date
+                        && now.batch == self.batch
+                },
+            );
+            return if same { Ok(held) } else { Err(Relock::Changed) };
+        }
+        let orphan = self.date.is_none() && self.batch.is_none();
+        match (held.gone(), orphan) {
+            (true, _) => Err(Relock::Gone),
+            // An orphan, read as one, is still one.
+            (false, true) => Ok(held),
+            (false, false) => Err(Relock::Changed),
+        }
+    }
+}
+
+/// Why [`Entry::relock`] handed back no [`Locked`] entry.
+#[derive(Debug)]
+pub enum Relock {
+    /// The trash lock could not be taken.
+    Lock(std::io::Error),
+    /// The item left the trash: its record and payload are both gone.
+    Gone,
+    /// The record no longer reads as the scan read it.
+    Changed,
+}
+
+impl Relock {
+    /// Why nothing was done to `entry`, for an error line.
+    pub fn reason(&self, entry: &Entry) -> String {
+        let name = crate::util::show_name(&entry.name);
+        match self {
+            Relock::Lock(e) => format!("cannot lock trash '{}': {e}", entry.dir.root.display()),
+            Relock::Gone => format!("'{name}' is no longer in the trash"),
+            Relock::Changed => format!(
+                "'{name}' changed in the trash after it was read (another item now has \
+                 its name); left as it is"
+            ),
+        }
+    }
+}
+
+/// An entry checked again with its trash locked, by [`Entry::relock`]
+/// alone: the record a scan saw is still there (for an orphan, its
+/// payload), so what is done through this is done to that item. The lock
+/// stays until this is dropped, so no put, rm or empty of that trash runs
+/// in between.
+pub struct Locked<'a> {
+    entry: &'a Entry,
+    _lock: trashdir::TrashLock,
+}
+
+impl<'a> Locked<'a> {
+    /// The entry, as checked.
+    pub fn entry(&self) -> &'a Entry {
+        self.entry
+    }
+
+    /// The item's payload under `files/`.
+    pub fn payload(&self) -> PathBuf {
+        crate::util::join_name(&self.entry.dir.files(), &self.entry.name)
+    }
+
+    /// The item's record under `info/`.
+    pub fn record(&self) -> PathBuf {
+        crate::util::join_info(&self.entry.dir.info(), &self.entry.name)
+    }
+
+    /// Whether the payload is gone from `files/`, read under the lock.
+    pub fn gone(&self) -> bool {
+        fs::symlink_metadata(self.payload()).is_err()
+    }
+}
+
+/// The entry that record `name` in `dir` makes as it reads now, or `None`
+/// when the record is missing or cannot be read.
+pub fn entry_named(dir: &TrashDir, name: &str) -> Option<Entry> {
+    let record = crate::util::join_info(&dir.info(), name);
+    read_entry(dir, &record, name, Pathless::Keep).ok()
 }
 
 /// Every item the records in `dirs` name, oldest first. A record that
@@ -1381,5 +1479,52 @@ mod tests {
         assert!(s.contains("\"deletion_date\":\"2020-01-02T03:04:05\""));
         assert!(s.contains("\"original\":\"/tmp/x\""));
         assert!(s.ends_with(']'));
+    }
+
+    /// relock hands back an entry only while its record reads as the scan
+    /// read it, and holds the trash lock while it is kept (round 244).
+    #[test]
+    fn relock_refuses_an_entry_whose_name_another_item_took() {
+        let root = std::env::temp_dir().join(format!("rtrash-relock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("info")).unwrap();
+        fs::create_dir_all(root.join("files")).unwrap();
+        let record = root.join("info/a.txt.trashinfo");
+        let body = |batch: &str| {
+            format!(
+                "[Trash Info]\nPath=/tmp/a.txt\nDeletionDate=2026-01-02T03:04:05\n\
+                 X-Rtrash-Batch={batch}\n"
+            )
+        };
+        fs::write(root.join("files/a.txt"), b"old").unwrap();
+        fs::write(&record, body("1-1")).unwrap();
+        fs::write(root.join("files/stray"), b"s").unwrap();
+        let dirs = [TrashDir {
+            root: root.clone(),
+            topdir: None,
+        }];
+        let seen = collect(&dirs);
+        let strays = orphans(&dirs);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(strays.len(), 1);
+        let held = seen[0].relock().unwrap();
+        assert_eq!(held.payload(), root.join("files/a.txt"));
+        assert!(trashdir::TrashLock::try_acquire(&root).is_err());
+        drop(held);
+        assert!(strays[0].relock().is_ok());
+        // Another put took the name: the same path and second, its own batch.
+        fs::write(&record, body("2-2")).unwrap();
+        assert!(matches!(seen[0].relock(), Err(Relock::Changed)));
+        // A record whose payload went still passes, for rm to take.
+        fs::write(&record, body("1-1")).unwrap();
+        fs::remove_file(root.join("files/a.txt")).unwrap();
+        assert!(seen[0].relock().unwrap().gone());
+        // Record and payload both went.
+        fs::remove_file(&record).unwrap();
+        assert!(matches!(seen[0].relock(), Err(Relock::Gone)));
+        // An orphan that gained a record is another item.
+        fs::write(root.join("info/stray.trashinfo"), body("3-3")).unwrap();
+        assert!(matches!(strays[0].relock(), Err(Relock::Changed)));
+        let _ = fs::remove_dir_all(&root);
     }
 }
