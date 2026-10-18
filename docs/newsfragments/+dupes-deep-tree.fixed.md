@@ -1,0 +1,1 @@
+`rtrash du --dupes` walks a tree one level at a time. A chain of directories thousands of levels deep used to overflow a walk thread's stack and abort the run. On Windows, a restore of a deep folder from the Recycle Bin to another volume no longer recurses either.

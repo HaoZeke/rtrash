@@ -216,19 +216,23 @@ pub fn restore_payload(payload: &Path, dest: &Path) -> std::io::Result<()> {
 }
 
 /// Copy a file or directory tree; links copy as links where the system
-/// allows, else as their targets' content.
+/// allows, else as their targets' content. A list of the pairs still to
+/// copy stands in for recursion, so a deep folder cannot overflow the
+/// 1 MiB main-thread stack Windows gives.
 fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
-    let meta = std::fs::symlink_metadata(src)?;
-    if meta.is_dir() {
-        std::fs::create_dir(dst)?;
-        for e in std::fs::read_dir(src)? {
-            let e = e?;
-            copy_tree(&e.path(), &dst.join(e.file_name()))?;
+    let mut todo = vec![(src.to_path_buf(), dst.to_path_buf())];
+    while let Some((src, dst)) = todo.pop() {
+        if std::fs::symlink_metadata(&src)?.is_dir() {
+            std::fs::create_dir(&dst)?;
+            for e in std::fs::read_dir(&src)? {
+                let e = e?;
+                todo.push((e.path(), dst.join(e.file_name())));
+            }
+        } else {
+            std::fs::copy(&src, &dst)?;
         }
-        Ok(())
-    } else {
-        std::fs::copy(src, dst).map(|_| ())
     }
+    Ok(())
 }
 
 /// A Recycle Bin item a scan listed, checked again just before rtrash
@@ -4463,6 +4467,26 @@ mod tests {
         restore_payload(&payload, &dest).unwrap();
         assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"a");
         assert!(!payload.exists());
+        std::fs::remove_dir_all(&top).unwrap();
+    }
+
+    /// The copy for a restore to another volume, which keeps a list of
+    /// the pairs left instead of recursing: each level and file arrives.
+    #[test]
+    fn copy_tree_copies_every_level_of_a_folder() {
+        let top = std::env::temp_dir().join(format!("rtrash-rp-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&top);
+        let src = top.join("src");
+        let deep = src.join("a/b/c");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(src.join("top.txt"), b"t").unwrap();
+        std::fs::write(deep.join("leaf.txt"), b"leaf").unwrap();
+        std::fs::create_dir(src.join("a/empty")).unwrap();
+        let dst = top.join("dst");
+        copy_tree(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(dst.join("top.txt")).unwrap(), b"t");
+        assert_eq!(std::fs::read(dst.join("a/b/c/leaf.txt")).unwrap(), b"leaf");
+        assert!(dst.join("a/empty").is_dir());
         std::fs::remove_dir_all(&top).unwrap();
     }
 

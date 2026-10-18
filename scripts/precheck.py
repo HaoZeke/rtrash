@@ -2037,6 +2037,79 @@ def check_mount_probes():
                               "#605), so probe each or add it to MOUNT_NAMES_ONLY with a reason")
 
 
+# A fn that reads a directory and calls itself grows the stack once per
+# level, so a deep tree can overflow it: du --dupes walked that way on
+# rayon's 2 MiB stacks (round 260; pdu #243, diskus #27). Each one left has
+# a bound on its depth, named here.
+BOUNDED_WALKS = {
+    ("src/fastdelete.rs", "usage_in"): "USAGE_PATH_DEPTH levels, then deep_usage by descriptor",
+    ("src/list.rs", "walk"): "the --depth the user asked for",
+    ("src/win_recycle.rs", "write_tree_below"): "the --depth the user asked for",
+    ("src/reap_profiles.rs", "walk"): "one level per component of the profile's pattern",
+    ("src/reap_profiles.rs", "star"): "max levels for each ** of the pattern",
+}
+DIR_READ = re.compile(r"(?<![\w])(?:read_dir|readdir|read_dirfd_entries|Dir::open|openat_dir)\(")
+RECURSIVE_WALK_CASES = [
+    ("recursive", "fn w(d: &Path) {\n    for e in fs::read_dir(d) {\n        w(&e);\n    }\n}\n",
+     [("w", 1)]),
+    ("by method", "    fn w(&self) {\n        let r = read_dir(p);\n        self.w();\n    }\n",
+     [("w", 1)]),
+    ("looped", "fn w(d: &Path) {\n    let mut todo = vec![d];\n"
+     "    while let Some(d) = todo.pop() {\n        fs::read_dir(d);\n    }\n}\n", []),
+    ("no read", "fn f(n: u32) -> u32 {\n    f(n - 1)\n}\n", []),
+    ("other fn", "fn walk_dir(d: &Path) {\n    read_dir(d);\n    my_walk_dir(d);\n}\n", []),
+    ("comment", "fn w(d: &Path) {\n    read_dir(d);\n    // w(d) once did this\n}\n", []),
+]
+
+
+def recursive_walk_lines(text, skip=()):
+    """(fn, line) of each fn that both reads a directory and calls itself,
+    by name or through self or Self, nested fns apart. Comment lines and
+    0-based `skip` are left out."""
+    stack, seen = [], {}
+    for n, line in enumerate(text.split("\n")):
+        m = re.match(r"(\s*)(?:pub(?:\([a-z]+\))? )?(?:unsafe )?fn (\w+)", line)
+        if m and not line.rstrip().endswith(";"):
+            stack.append((m.group(2), m.group(1) + "}", n + 1))
+            seen[stack[-1]] = [False, False]
+            continue
+        if stack and line == stack[-1][1]:
+            stack.pop()
+            continue
+        if not stack or n in skip or line.lstrip().startswith("//"):
+            continue
+        key = stack[-1]
+        if re.search(rf"(?<![\w])(?:Self::|self\.)?{key[0]}\(", line):
+            seen[key][0] = True
+        if DIR_READ.search(line):
+            seen[key][1] = True
+    return [(k[0], k[2]) for k, (calls, reads) in seen.items() if calls and reads]
+
+
+def check_bounded_walks():
+    """No directory walk recurses without a bound on its depth: one that
+    reads a directory and calls itself is in BOUNDED_WALKS with its bound,
+    or keeps a list of what is left instead. RECURSIVE_WALK_CASES tests the
+    matcher."""
+    for what, text, want in RECURSIVE_WALK_CASES:
+        if recursive_walk_lines(text) != want:
+            errors.append(f"scripts/precheck.py: recursive_walk_lines gets RECURSIVE_WALK_CASES "
+                          f"'{what}' wrong; the bounded-walk check is broken")
+    found = set()
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        raw = path.read_text(encoding="utf-8")
+        for fn, line in recursive_walk_lines(raw, test_mod_lines(raw.split("\n"))):
+            found.add((rel, fn))
+            if (rel, fn) not in BOUNDED_WALKS:
+                errors.append(f"{rel}:{line}: {fn} reads a directory and calls itself, so a deep "
+                              "tree can overflow the stack; walk with a list of what is left, or "
+                              "add it to BOUNDED_WALKS with the bound on its depth")
+    for rel, fn in sorted(set(BOUNDED_WALKS) - found):
+        errors.append(f"scripts/precheck.py: BOUNDED_WALKS names {rel} {fn}, which no longer "
+                      "recurses through directories; remove it")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -2152,7 +2225,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

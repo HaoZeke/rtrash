@@ -168,9 +168,38 @@ fn file_of(path: &Path, st: &du_fs::Stat, opts: Opts) -> Option<File> {
     })
 }
 
-fn walk_dir(dir: &Path, root_dev: u64, opts: Opts, home: Option<(u64, u64)>) -> Vec<File> {
+/// Every file below the directory `root`, one level at a time: the
+/// directories of a level are read in parallel, and the next level is the
+/// subdirectories they hold. Nothing recurses, so a deep tree cannot
+/// overflow a walk thread's stack (pdu #243, diskus #27).
+fn walk_dir(root: &Path, root_dev: u64, opts: Opts, home: Option<(u64, u64)>) -> Vec<File> {
+    let mut files = Vec::new();
+    let mut level = vec![root.to_path_buf()];
+    while !level.is_empty() {
+        let read: Vec<(Vec<File>, Vec<PathBuf>)> = level
+            .par_iter()
+            .map(|d| read_level(d, root_dev, opts, home))
+            .collect();
+        level = Vec::new();
+        for (found, subdirs) in read {
+            files.extend(found);
+            level.extend(subdirs);
+        }
+    }
+    files
+}
+
+/// The files directly in `dir`, and the subdirectories the walk enters
+/// next: not trash directories, nor other file systems with
+/// `one_file_system`, nor proc, sysfs and the like unless asked.
+fn read_level(
+    dir: &Path,
+    root_dev: u64,
+    opts: Opts,
+    home: Option<(u64, u64)>,
+) -> (Vec<File>, Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(dir) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut files = Vec::new();
     let mut subdirs = Vec::new();
@@ -178,7 +207,7 @@ fn walk_dir(dir: &Path, root_dev: u64, opts: Opts, home: Option<(u64, u64)>) -> 
         let Ok(t) = e.file_type() else { continue };
         let p = e.path();
         if t.is_dir() {
-            if !trash_dir(&e.file_name(), &p, home) {
+            if !trash_dir(&e.file_name(), &p, home) && enters(&p, root_dev, opts) {
                 subdirs.push(p);
             }
         } else if t.is_file() {
@@ -197,23 +226,19 @@ fn walk_dir(dir: &Path, root_dev: u64, opts: Opts, home: Option<(u64, u64)>) -> 
             }
         }
     }
-    let deeper: Vec<File> = subdirs
-        .par_iter()
-        .flat_map(|d| {
-            let other_fs = du_fs::lstat(d).is_ok_and(|s| s.dev != root_dev);
-            if other_fs && opts.one_file_system {
-                return Vec::new();
-            }
-            // As a scan does: proc, sysfs and the like stay out.
-            let kernfs = || du_fs::Dir::open(d).is_ok_and(|x| x.is_kernfs());
-            if other_fs && !opts.include_kernfs && kernfs() {
-                return Vec::new();
-            }
-            walk_dir(d, root_dev, opts, home)
-        })
-        .collect();
-    files.extend(deeper);
-    files
+    (files, subdirs)
+}
+
+/// Whether the walk goes into the subdirectory `d` of a root on
+/// `root_dev`.
+fn enters(d: &Path, root_dev: u64, opts: Opts) -> bool {
+    let other_fs = du_fs::lstat(d).is_ok_and(|s| s.dev != root_dev);
+    if other_fs && opts.one_file_system {
+        return false;
+    }
+    // As a scan does: proc, sysfs and the like stay out.
+    let kernfs = || du_fs::Dir::open(d).is_ok_and(|x| x.is_kernfs());
+    !(other_fs && !opts.include_kernfs && kernfs())
 }
 
 /// One file per inode: the other names become its link count.
@@ -810,6 +835,28 @@ mod tests {
         let j = to_json(&groups);
         assert!(j.contains(r#""total":{"groups":2,"extras":2,"#), "{j}");
         let _ = fs::remove_dir_all(&t);
+    }
+
+    /// A chain of directories as deep as `PATH_MAX` allows, with a pair of
+    /// equal files at the bottom. The walk used to recurse once per level
+    /// on rayon's 2 MiB stacks, which a chain of 2000 levels overflows.
+    #[cfg(unix)]
+    #[test]
+    fn a_deep_chain_is_walked_to_the_bottom() {
+        let t = tree("deep");
+        let room = libc::PATH_MAX as usize - t.as_os_str().len() - 64;
+        let bottom = t.join("d/".repeat(room / 2));
+        fs::create_dir_all(&bottom).unwrap();
+        fs::write(bottom.join("x"), vec![3u8; 4096]).unwrap();
+        fs::write(bottom.join("y"), vec![3u8; 4096]).unwrap();
+        let opts = Opts {
+            min_size: 1,
+            one_file_system: false,
+            include_kernfs: false,
+        };
+        let (groups, _) = find(walk(std::slice::from_ref(&t), opts));
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        fs::remove_dir_all(&t).unwrap();
     }
 
     /// The attribute and flag bits that mean a read downloads the data,
