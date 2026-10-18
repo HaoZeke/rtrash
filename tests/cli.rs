@@ -4470,6 +4470,81 @@ fn a_home_trash_on_another_device_takes_files_its_volume_cannot() {
     let _ = fs::remove_dir_all(&xdg);
 }
 
+/// glib #1640: a home trash that is a symlink to a folder elsewhere. Put,
+/// list, restore and empty all work through the link, which stays a link,
+/// and trashing the link or the folder holding it is refused.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_home_trash_works_through_the_link() {
+    let sb = Sandbox::new("trash-link");
+    let real = sb.root.join("disk/Trash");
+    fs::create_dir_all(&real).unwrap();
+    fs::create_dir_all(sb.root.join("xdg")).unwrap();
+    std::os::unix::fs::symlink(&real, sb.trash()).unwrap();
+    let a = sb.touch("a.txt");
+    let out = sb.run(&["put", "a.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(names_in(&real.join("files")), vec!["a.txt".to_string()]);
+    let listed = stdout_of(&sb.run(&["list"]));
+    assert!(listed.contains(&a.display().to_string()), "{listed}");
+    let back = sb.run(&["restore", "a.txt"]);
+    assert!(back.status.success(), "{}", stderr_of(&back));
+    assert!(a.exists());
+    assert!(sb.run(&["put", "a.txt"]).status.success());
+    let emptied = sb.run(&["empty", "--home-only", "--all"]);
+    assert!(emptied.status.success(), "{}", stderr_of(&emptied));
+    assert_eq!(names_in(&real.join("files")), Vec::<String>::new());
+    for target in [sb.trash(), sb.root.join("xdg")] {
+        let name = target.display().to_string();
+        let out = sb.run(&["put", "-r", &name]);
+        assert_eq!(out.status.code(), Some(1), "{name}: {}", stderr_of(&out));
+        let err = stderr_of(&out);
+        assert!(
+            err.contains("it contains the trash directory"),
+            "{name}: {err}"
+        );
+        let link = fs::symlink_metadata(sb.trash()).unwrap();
+        assert!(link.file_type().is_symlink(), "{name}");
+    }
+}
+
+/// glib #1640: a home trash symlinked to another file system keeps its
+/// items there, so a file from that file system goes to the home trash
+/// by a rename, not to a new trash at the top of that file system.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_home_trash_linked_to_another_device_takes_files_from_there() {
+    let sb = Sandbox::new("trash-link-device");
+    let Some(real) = other_device_dir(&sb.root, "linked-trash") else {
+        eprintln!("no second file system here; skipping");
+        return;
+    };
+    let Some(near) = other_device_dir(&sb.root, "linked-files") else {
+        eprintln!("no second file system here; skipping");
+        let _ = fs::remove_dir_all(&real);
+        return;
+    };
+    fs::create_dir_all(sb.root.join("xdg")).unwrap();
+    std::os::unix::fs::symlink(&real, sb.trash()).unwrap();
+    let f = near.join("near.txt");
+    fs::write(&f, b"near").unwrap();
+    let uid = unsafe { libc::getuid() };
+    let volume_trash = mount_top(&f).join(format!(".Trash-{uid}"));
+    let had_volume_trash = fs::symlink_metadata(&volume_trash).is_ok();
+    let name = f.display().to_string();
+    let out = sb.run(&["put", &name]);
+    let made = !had_volume_trash && fs::symlink_metadata(&volume_trash).is_ok();
+    if made {
+        // Only what this run made goes; a trash that was there stays.
+        let _ = fs::remove_dir_all(&volume_trash);
+    }
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!made, "put made {}", volume_trash.display());
+    assert_eq!(names_in(&real.join("files")), vec!["near.txt".to_string()]);
+    let _ = fs::remove_dir_all(&real);
+    let _ = fs::remove_dir_all(&near);
+}
+
 /// trash-cli #427: a put to another file system copies, then removes the
 /// original, so a tree it cannot wholly remove ends up half gone. rtrash
 /// refuses before it copies: a read-only directory deep inside, a parent

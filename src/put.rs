@@ -1007,6 +1007,25 @@ mod json_tests {
         let _ = fs::remove_dir_all(&t);
     }
 
+    /// glib #1640: a symlinked `Trash` is the trash under its own name too.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_trash_is_the_trash_by_its_link_name() {
+        let t = std::env::temp_dir().join(format!("rtrash-overlap-link-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&t);
+        fs::create_dir_all(t.join("disk/Trash/files")).unwrap();
+        fs::create_dir_all(t.join("xdg")).unwrap();
+        let t = t.canonicalize().unwrap();
+        let link = t.join("xdg/Trash");
+        std::os::unix::fs::symlink(t.join("disk/Trash"), &link).unwrap();
+        assert_eq!(trash_overlap(&link, &link), Some(Overlap::Contains));
+        assert_eq!(
+            trash_overlap(&t.join("xdg"), &link),
+            Some(Overlap::Contains)
+        );
+        let _ = fs::remove_dir_all(&t);
+    }
+
     #[test]
     fn summary_json_lists_items_and_failures() {
         let t = Trashed {

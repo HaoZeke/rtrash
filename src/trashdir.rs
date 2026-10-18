@@ -171,12 +171,15 @@ pub(crate) enum Overlap {
 }
 
 /// Whether `abs` (absolute, its parent resolved) is, contains or sits inside
-/// the trash at `root`, compared with the trash's symlinks resolved.
+/// the trash at `root`, compared both as named and with the trash's
+/// symlinks resolved. A `Trash` that is a symlink (glib #1640) is the trash
+/// by either name: trashing the link would move it into the trash it
+/// points at, and the next put would make a new, empty home trash.
 pub(crate) fn trash_overlap(abs: &Path, root: &Path) -> Option<Overlap> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    if root.starts_with(abs) {
+    let real = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if real.starts_with(abs) || root.starts_with(abs) {
         Some(Overlap::Contains)
-    } else if abs.starts_with(&root) {
+    } else if abs.starts_with(&real) || abs.starts_with(root) {
         Some(Overlap::Inside)
     } else {
         None
@@ -228,6 +231,16 @@ fn resolve_parent(path: &Path) -> PathBuf {
 
 fn dev_of(path: &Path) -> Option<u64> {
     fs::symlink_metadata(path).ok().map(|m| m.dev())
+}
+
+/// The device the home trash at `root` keeps its items on: where `root`
+/// leads when it exists, so a `Trash` symlinked to another disk counts as
+/// that disk (glib #1640), else the deepest existing ancestor's.
+fn home_dev(root: &Path) -> Option<u64> {
+    fs::metadata(root)
+        .ok()
+        .map(|m| m.dev())
+        .or_else(|| dev_of_deepest_existing(root))
 }
 
 /// Device of the deepest existing ancestor (the fs the path would land on).
@@ -529,7 +542,7 @@ pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
         root: home_trash(),
         topdir: None,
     };
-    if dev_of_deepest_existing(&home.root) == Some(dev) {
+    if home_dev(&home.root) == Some(dev) {
         ensure_home(&home)?;
         return Ok(home);
     }
