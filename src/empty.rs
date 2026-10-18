@@ -124,6 +124,12 @@ fn dangling_records(dir: &TrashDir) -> Vec<std::ffi::OsString> {
 fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
     let found: Vec<Vec<std::ffi::OsString>> = dirs.iter().map(dangling_records).collect();
     let count = found.iter().map(|f| f.len() as u64).sum::<u64>();
+    #[cfg(test)]
+    {
+        if let Some(f) = tests::AFTER_COUNT.take() {
+            f();
+        }
+    }
     if !opts.dry_run && count > 0 {
         if crate::allow_roots::roots().is_some() {
             let scoped: Vec<(PathBuf, Option<PathBuf>)> = dirs
@@ -1080,7 +1086,8 @@ mod tests {
 
     thread_local! {
         /// Set by a test: run once on this thread after an empty has
-        /// counted the trash, and asked about it, and before it locks it.
+        /// counted the trash, and asked about it, and before it locks it;
+        /// for `--dangling`, after it has found the dangling records.
         pub(super) static AFTER_COUNT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
             const { std::cell::RefCell::new(None) };
     }
@@ -1131,6 +1138,32 @@ mod tests {
         for kept in ["files/b", "info/b.trashinfo", "files/c", "info/c.trashinfo"] {
             assert!(root.join(kept).exists(), "{kept} went");
         }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `--dangling` reads the records again under the lock and takes only
+    /// those it counted: one whose payload came back since the count stays,
+    /// and so does one that dangles only since then (round 246).
+    #[test]
+    fn dangling_takes_only_the_records_it_counted() {
+        let root = old_trash("dangling-late", &["gone", "back", "kept"]);
+        for name in ["gone", "back"] {
+            fs::remove_file(root.join("files").join(name)).unwrap();
+        }
+        let r = root.clone();
+        AFTER_COUNT.set(Some(Box::new(move || {
+            fs::write(r.join("files/back"), b"back").unwrap();
+            fs::remove_file(r.join("files/kept")).unwrap();
+        })));
+        let argv = [
+            "--dangling".to_string(),
+            format!("--trash-dir={}", root.display()),
+        ];
+        assert_eq!(run_inner("rtrash", &argv), 0);
+        assert!(AFTER_COUNT.take().is_none(), "the hook never ran");
+        assert!(!root.join("info/gone.trashinfo").exists());
+        assert!(root.join("info/back.trashinfo").exists());
+        assert!(root.join("info/kept.trashinfo").exists());
         let _ = fs::remove_dir_all(&root);
     }
 
