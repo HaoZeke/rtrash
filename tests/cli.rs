@@ -8569,41 +8569,19 @@ fn a_terminal_gets_the_rm_question_and_a_no_keeps_it() {
 /// (round 244).
 #[test]
 fn rm_keeps_an_item_that_took_the_name_while_it_asked() {
-    use std::io::Read;
-
     let (sb, pin) = trashed_a_o("rm-retaken");
-    let mut child = common::rtrash(&sb.root)
-        .args(["rm", &pin, "-i", "a.o"])
-        .current_dir(sb.work())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn rtrash");
-    let mut err = child.stderr.take().expect("stderr");
-    let mut seen = Vec::new();
-    let mut byte = [0u8; 1];
+    let mut cmd = common::rtrash(&sb.root);
+    cmd.args(["rm", &pin, "-i", "a.o"]).current_dir(sb.work());
+    let mut rm = common::Asking::spawn(&mut cmd);
     // rm has read the trash once it asks.
-    while !seen.ends_with(b"(y/N) ") {
-        let n = err.read(&mut byte).unwrap();
-        assert_eq!(n, 1, "rm ended first: {}", String::from_utf8_lossy(&seen));
-        seen.push(byte[0]);
-    }
+    rm.wait_for("(y/N) ");
     // Meanwhile another run takes the item out, and a put gives its name
     // to another item.
     assert!(sb.run(&["rm", &pin, "-y", "a.o"]).status.success());
     fs::write(sb.work().join("a.o"), b"second").unwrap();
     assert!(sb.run(&["put", "a.o"]).status.success());
     assert_eq!(fs::read(sb.trash().join("files/a.o")).unwrap(), b"second");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(b"y\n")
-        .unwrap();
-    let mut rest = String::new();
-    err.read_to_string(&mut rest).unwrap();
-    let status = child.wait().unwrap();
+    let (status, rest) = rm.answer("y\n");
     assert!(!status.success(), "{rest}");
     assert!(rest.contains("changed in the trash"), "{rest}");
     assert_eq!(fs::read(sb.trash().join("files/a.o")).unwrap(), b"second");

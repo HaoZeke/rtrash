@@ -32,14 +32,21 @@
 //! Every test that compares two `du --json` outputs compares them through
 //! `du_scan`, which cuts off the live trash summary: it counts the trash
 //! as it is at that moment, not the scan.
+//!
+//! Every test that waits for a run to ask on stderr runs it through
+//! `Asking`. A question that never comes then fails the test after
+//! `PROMPT_WAIT` and names what the run wrote, where a blocking read
+//! would hang the whole binary until CI kills it.
 #![allow(dead_code)]
 
 use std::fmt::Debug;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// A fresh, empty directory under the system temp dir, named
 /// `rtrash-{prefix}-{pid}-{n}-{tag}`, unique to this call.
@@ -319,4 +326,107 @@ pub enum Real {
 pub fn rtrash_real(why: Real) -> Command {
     let _ = why;
     Command::new(bin())
+}
+
+/// How long [`Asking`] waits for a question, or for the run to end after
+/// the answer. Far above any healthy run on a loaded runner; it only
+/// turns a hang into a failure.
+pub const PROMPT_WAIT: Duration = Duration::from_secs(60);
+
+/// A run that asks on stderr. The test waits for the question, acts while
+/// the run waits on it, then answers. A thread reads stderr, so a wait
+/// can give up after [`PROMPT_WAIT`]; the run is then killed and the test
+/// fails with what the run wrote.
+pub struct Asking {
+    child: Child,
+    chunks: Receiver<Vec<u8>>,
+    err: Vec<u8>,
+}
+
+impl Asking {
+    /// Spawn `cmd` with stdin and stderr piped and stdout discarded.
+    pub fn spawn(cmd: &mut Command) -> Asking {
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn rtrash");
+        let mut err = child.stderr.take().expect("stderr");
+        let (tx, chunks) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match err.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        Asking {
+            child,
+            chunks,
+            err: Vec::new(),
+        }
+    }
+
+    /// Wait until stderr ends with `question`. The test fails when the run
+    /// ends first or [`PROMPT_WAIT`] passes.
+    pub fn wait_for(&mut self, question: &str) {
+        let deadline = Instant::now() + PROMPT_WAIT;
+        while !self.err.ends_with(question.as_bytes()) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.chunks.recv_timeout(left) {
+                Ok(chunk) => self.err.extend_from_slice(&chunk),
+                Err(RecvTimeoutError::Timeout) => self.fail(&format!("no {question:?} in time")),
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.fail(&format!("the run ended before {question:?}"))
+                }
+            }
+        }
+    }
+
+    /// Write `line` to stdin, close it and wait for the run to end: its
+    /// exit status and all it wrote to stderr. The test fails when the
+    /// run is still going after [`PROMPT_WAIT`].
+    pub fn answer(mut self, line: &str) -> (ExitStatus, String) {
+        if let Some(mut stdin) = self.child.stdin.take() {
+            let _ = stdin.write_all(line.as_bytes());
+        }
+        let deadline = Instant::now() + PROMPT_WAIT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.chunks.recv_timeout(left) {
+                Ok(chunk) => self.err.extend_from_slice(&chunk),
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => self.fail("the run did not end after the answer"),
+            }
+        }
+        let status = self.child.wait().expect("wait for rtrash");
+        (status, String::from_utf8_lossy(&self.err).into_owned())
+    }
+
+    fn fail(&mut self, why: &str) -> ! {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        panic!(
+            "{why}; stderr so far: {}",
+            String::from_utf8_lossy(&self.err)
+        );
+    }
+}
+
+impl Drop for Asking {
+    /// A test that fails between the question and the answer leaves no
+    /// run behind.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
