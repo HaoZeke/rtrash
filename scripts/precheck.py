@@ -1974,6 +1974,69 @@ def check_chain_totals():
                       "carry or put_row so every field of Totals moves together")
 
 
+# Functions that hand out every mount point, or every user's home, which
+# may sit on a network share whose server is gone (glib #605). A fn that
+# calls one looks at what it gets through mount_probe::probe or
+# probe_typed, which give up after RTRASH_MOUNT_WAIT, or is listed here with
+# the reason it needs no probe.
+MOUNT_LISTERS = re.compile(r"(?<![\w])(mount_points|mounts_from_table|user_homes)\(")
+MOUNT_PROBE = re.compile(r"(?<![\w])probe(?:_typed)?\(")
+MOUNT_NAMES_ONLY = {
+    ("src/list.rs", "run"): "list --volumes prints the mount points and looks at none",
+    ("src/du_dev.rs", "devices"): "it hands the mounts to measure, which probes each",
+}
+MOUNT_PROBE_CASES = [
+    ("probed", "fn all() {\n    for mp in mount_points() {\n        probe(&mp, f);\n    }\n}\n",
+     []),
+    ("bare", "fn all() {\n    for mp in mount_points() {\n        mp.is_dir();\n    }\n}\n",
+     [("all", 2)]),
+    ("homes", "fn h() {\n    for h in user_homes() {\n        h.exists();\n    }\n}\n",
+     [("h", 2)]),
+    ("definition", "fn mount_points() -> Vec<PathBuf> {\n    Vec::new()\n}\n", []),
+    ("comment", "fn f() {\n    // mount_points() is not called\n}\n", []),
+]
+
+
+def unprobed_mount_lines(text, skip=()):
+    """(fn, line) pairs that call a mount lister in a fn that never calls
+    probe or probe_typed. Comment lines and 0-based `skip` are left out."""
+    calls, probed, owner, end = [], set(), None, None
+    for n, line in enumerate(text.split("\n")):
+        m = re.match(r"(\s*)(?:pub(?:\([a-z]+\))? )?fn (\w+)", line)
+        if m and (owner is None or len(m.group(1)) <= len(end) - 1):
+            owner, end = m.group(2), m.group(1) + "}"
+            continue
+        if owner is not None and line == end:
+            owner = None
+            continue
+        if n in skip or line.lstrip().startswith("//"):
+            continue
+        if MOUNT_PROBE.search(line):
+            probed.add(owner)
+        if MOUNT_LISTERS.search(line):
+            calls.append((owner, n + 1))
+    return [(fn, n) for fn, n in calls if fn not in probed]
+
+
+def check_mount_probes():
+    """Every look at the mounts, or at every user's home, goes through
+    mount_probe::probe or probe_typed, so a dead network share cannot hang
+    list, empty, status or du --devices (glib #605). MOUNT_PROBE_CASES tests
+    the matcher."""
+    for what, text, want in MOUNT_PROBE_CASES:
+        if unprobed_mount_lines(text) != want:
+            errors.append(f"scripts/precheck.py: unprobed_mount_lines gets MOUNT_PROBE_CASES "
+                          f"'{what}' wrong; the mount-probe check is broken")
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        raw = path.read_text(encoding="utf-8")
+        for fn, line in unprobed_mount_lines(raw, test_mod_lines(raw.split("\n"))):
+            if (rel, fn) not in MOUNT_NAMES_ONLY:
+                errors.append(f"{rel}:{line}: {fn} lists the mounts or homes without "
+                              "mount_probe::probe; a dead network share would hang it (glib "
+                              "#605), so probe each or add it to MOUNT_NAMES_ONLY with a reason")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -2089,7 +2152,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

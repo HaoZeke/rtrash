@@ -520,7 +520,9 @@ pub fn trashes() -> Vec<PathBuf> {
         .chain(extra)
     {
         let t = root.join(".Trashes").join(uid.to_string());
-        if t.is_dir() && !out.contains(&t) {
+        // A dead network share must not hang the scan (glib #605).
+        let here = crate::mount_probe::probe(&t, |t| t.is_dir()).unwrap_or(false);
+        if here && !out.contains(&t) {
             out.push(t);
         }
     }

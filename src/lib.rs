@@ -57,6 +57,8 @@ pub mod info;
 pub mod interrupt;
 #[cfg(unix)]
 pub mod list;
+#[cfg(unix)]
+pub mod mount_probe;
 pub mod permanent_guard;
 #[cfg(unix)]
 pub mod put;

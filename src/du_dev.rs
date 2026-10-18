@@ -104,7 +104,9 @@ fn measure(mounts: Vec<Mount>) -> Vec<Device> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for m in mounts {
-        let Ok((size, used, avail, dev)) = space(&m.mount) else {
+        // A dead network share must not hang the table (glib #605).
+        let measured = crate::mount_probe::probe_typed(&m.mount, &m.fstype, space);
+        let Some(Ok((size, used, avail, dev))) = measured else {
             continue;
         };
         if size == 0 || !seen.insert(dev) {

@@ -663,7 +663,9 @@ pub fn all() -> Vec<TrashDir> {
     }
     let uid = uid();
     for mp in mount_points() {
-        for cand in volume_trashes_of(&mp, uid) {
+        // A dead network share must not hang the scan (glib #605).
+        let found = crate::mount_probe::probe(&mp, move |mp| volume_trashes_of(mp, uid));
+        for cand in found.unwrap_or_default() {
             if seen.insert(cand.clone()) {
                 out.push(TrashDir {
                     root: cand,
@@ -696,10 +698,16 @@ pub fn all_users() -> Vec<TrashDir> {
         push(td.root, td.topdir);
     }
     for home in user_homes() {
-        push(resolve_parent(&home.join(".local/share/Trash")), None);
+        // Homes on a network share answer within the probe's wait or not
+        // at all (glib #605).
+        let trash = home.join(".local/share/Trash");
+        if let Some(root) = crate::mount_probe::probe(&trash, resolve_parent) {
+            push(root, None);
+        }
     }
     for mp in mount_points() {
-        for root in volume_user_trashes(&mp) {
+        let found = crate::mount_probe::probe(&mp, volume_user_trashes);
+        for root in found.unwrap_or_default() {
             push(root, Some(mp.clone()));
         }
     }
@@ -1075,7 +1083,7 @@ pub fn mount_points() -> Vec<PathBuf> {
 /// Each mount point in an fstab/mounts-style table once, in table order,
 /// with the type of the mount in view there: a later mount on the same
 /// point hides the earlier one. Nothing is filtered out.
-fn mount_table(content: &str) -> Vec<(PathBuf, String)> {
+pub(crate) fn mount_table(content: &str) -> Vec<(PathBuf, String)> {
     let mut out: Vec<(PathBuf, String)> = Vec::new();
     for line in content.lines() {
         let mut fields = line.split_whitespace();

@@ -4352,6 +4352,19 @@ and
 map; smaller files count as unique.
 The default is 64K.
 .TP
+.B RTRASH_MOUNT_WAIT
+Seconds, such as 3 or 0.5, that a look at a network mount (NFS, SMB,
+sshfs and the like) may take when
+.BR list ,
+.BR empty ,
+.B status
+or
+.B du \-\-devices
+go through every mount.
+A mount that does not answer in time is skipped with a warning, so a
+dead server cannot hang them.
+The default is 3.
+.TP
 .B RTRASH_REAP_ROOTS
 A path list like
 .B PATH

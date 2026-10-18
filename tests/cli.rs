@@ -4545,6 +4545,43 @@ fn a_home_trash_linked_to_another_device_takes_files_from_there() {
     let _ = fs::remove_dir_all(&near);
 }
 
+/// glib #605: a mount that never answers, as a hard NFS mount of a dead
+/// server does, is skipped with a warning once `RTRASH_MOUNT_WAIT` runs
+/// out, so list, status, empty and du --devices still finish. The
+/// debug-only seam `RTRASH_TEST_STALL_MOUNT` makes every look at `/` hang.
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[test]
+fn a_mount_that_never_answers_is_skipped_in_time() {
+    let sb = Sandbox::new("stalled-mount");
+    let a = sb.touch("a.txt");
+    assert!(sb.run(&["put", "a.txt"]).status.success());
+    let env = [
+        ("RTRASH_TEST_STALL_MOUNT", "/"),
+        ("RTRASH_MOUNT_WAIT", "0.2"),
+    ];
+    let runs: [&[&str]; 4] = [
+        &["list"],
+        &["status"],
+        &["empty", "--dry-run", "--all"],
+        &["du", "--devices"],
+    ];
+    for args in runs {
+        let start = std::time::Instant::now();
+        let out = sb.run_env(args, &env);
+        let took = start.elapsed();
+        let err = stderr_of(&out);
+        assert!(out.status.success(), "{args:?}: {err}");
+        assert!(err.contains("skipping"), "{args:?}: {err}");
+        assert!(err.contains("'/'"), "{args:?}: {err}");
+        assert!(
+            took < std::time::Duration::from_secs(30),
+            "{args:?}: {took:?}"
+        );
+    }
+    let listed = stdout_of(&sb.run_env(&["list"], &env));
+    assert!(listed.contains(&a.display().to_string()), "{listed}");
+}
+
 /// trash-cli #427: a put to another file system copies, then removes the
 /// original, so a tree it cannot wholly remove ends up half gone. rtrash
 /// refuses before it copies: a read-only directory deep inside, a parent
