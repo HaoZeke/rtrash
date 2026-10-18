@@ -2198,17 +2198,35 @@ fn info_lines(it: &Item, whole: u64, pending: bool, now: i64) -> Vec<String> {
     out
 }
 
-/// `lines` broken into rows of at most `width` characters.
+/// Terminal columns `s` takes as ratatui draws it: two for a wide
+/// character (CJK, most emoji), none for a combining mark (dua #415).
+fn cols(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
+/// [`cols`] of one character.
+fn char_cols(c: char) -> usize {
+    cols(c.encode_utf8(&mut [0u8; 4]))
+}
+
+/// `lines` broken into rows of at most `width` columns. A character
+/// wider than a whole row gets a row of its own.
 fn hard_wrap(lines: &[String], width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
     for l in lines {
-        let chars: Vec<char> = l.chars().collect();
-        if chars.is_empty() {
-            out.push(String::new());
+        let (mut row, mut used) = (String::new(), 0);
+        for c in l.chars() {
+            let w = char_cols(c);
+            if used + w > width && !row.is_empty() {
+                out.push(std::mem::take(&mut row));
+                used = 0;
+            }
+            row.push(c);
+            used += w;
         }
-        for row in chars.chunks(width) {
-            out.push(row.iter().collect());
+        if !row.is_empty() || l.is_empty() {
+            out.push(row);
         }
     }
     out
@@ -2275,17 +2293,32 @@ fn osc52(text: &str) -> String {
     format!("\x1b]52;c;{}\x07", base64(text.as_bytes()))
 }
 
-/// `s` cut to at most `max` characters by dropping its start, marked
-/// with `…`, so the end of a path stays readable.
+/// `s` cut to at most `max` columns by dropping its start, marked with
+/// `…`, so the end of a path stays readable. Columns, not characters:
+/// a wide character takes two, so a CJK or emoji path still fits.
 fn fit_left(s: &str, max: usize) -> String {
-    let n = s.chars().count();
-    if n <= max {
+    if cols(s) <= max {
         return s.to_string();
     }
     if max == 0 {
         return String::new();
     }
-    let keep: String = s.chars().skip(n - (max - 1)).collect();
+    // From the end, as much as fits beside the `…`.
+    let mut keep = Vec::new();
+    let mut used = 1;
+    for c in s.chars().rev() {
+        let w = char_cols(c);
+        if used + w > max {
+            break;
+        }
+        used += w;
+        keep.push(c);
+    }
+    // A combining mark whose base was cut would sit on the `…`.
+    while keep.last().is_some_and(|&c| char_cols(c) == 0) {
+        keep.pop();
+    }
+    let keep: String = keep.iter().rev().collect();
     format!("…{keep}")
 }
 
@@ -2506,7 +2539,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let tail = format!(" · {size} · {items} · {entries} · {marked} marked ");
     let room = (chunks[0].width as usize)
         .saturating_sub(2)
-        .saturating_sub(tail.chars().count() + 1);
+        .saturating_sub(cols(&tail) + 1);
     let place = if is_top_of_roots(&app.cur) {
         crate::util::plural(app.roots.len() as u64, "directory", "directories")
     } else {
@@ -2635,7 +2668,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     if i == app.marks_at { ">" } else { " " },
                     format_bytes(it.disk)
                 );
-                let room = (w.saturating_sub(2) as usize).saturating_sub(head.chars().count());
+                let room = (w.saturating_sub(2) as usize).saturating_sub(cols(&head));
                 let line = Line::from(format!(
                     "{head}{}",
                     fit_left(&crate::util::term_path(&it.path), room)
@@ -4011,6 +4044,21 @@ mod tests {
     fn hard_wrap_breaks_by_character() {
         let l = vec!["abcdefg".to_string(), String::new(), "xy".to_string()];
         assert_eq!(hard_wrap(&l, 3), ["abc", "def", "g", "", "xy"]);
+    }
+
+    #[test]
+    fn wide_characters_take_two_columns_when_cut_and_wrapped() {
+        // Four CJK characters take eight columns: cut to five, the end
+        // that fits beside the mark stays.
+        assert_eq!(fit_left("漢字漢字", 5), "…漢字");
+        assert_eq!(fit_left("ab漢字", 4), "…字");
+        assert_eq!(fit_left("漢字", 4), "漢字");
+        assert_eq!(fit_left("/p/📦box", 6), "…📦box");
+        // A combining mark never sits alone after the mark.
+        assert_eq!(fit_left("ab\u{301}", 1), "…");
+        let l = vec!["漢字漢".to_string(), "a漢b".to_string()];
+        assert_eq!(hard_wrap(&l, 4), ["漢字", "漢", "a漢b"]);
+        assert_eq!(hard_wrap(&["漢".to_string()], 1), ["漢"]);
     }
 
     #[cfg(unix)]
