@@ -472,6 +472,81 @@ mod fileid {
         i64::from_ne_bytes(b[at..at + 8].try_into().unwrap())
     }
 
+    /// What a listing says of one entry ([`listed`]): attributes, EA size
+    /// or reparse tag, allocation size and length.
+    pub type Listed = (u32, u32, i64, i64);
+
+    /// What the listing in `buf` says of the entry `name`, for the size
+    /// report of 34(j). None when no record has that name or a record runs
+    /// past `buf`.
+    pub fn listed(buf: &[u8], name: &str) -> Option<Listed> {
+        type I = Record;
+        let name_at = offset_of!(I, file_name);
+        let mut off = 0usize;
+        loop {
+            let rec = buf.get(off..)?;
+            if rec.len() < name_at {
+                return None;
+            }
+            let next = u32_at(rec, offset_of!(I, next_entry_offset)) as usize;
+            let name_len = u32_at(rec, offset_of!(I, file_name_length)) as usize;
+            let raw = rec.get(name_at..name_at.checked_add(name_len)?)?;
+            if utf16_text(raw) == name {
+                return Some((
+                    u32_at(rec, offset_of!(I, file_attributes)),
+                    u32_at(rec, offset_of!(I, ea_size)),
+                    i64_at(rec, offset_of!(I, allocation_size)),
+                    i64_at(rec, offset_of!(I, end_of_file)),
+                ));
+            }
+            if next == 0 {
+                return None;
+            }
+            off = off.checked_add(next)?;
+        }
+    }
+
+    // FILE_STREAM_INFO: NextEntryOffset, StreamNameLength (bytes),
+    // StreamSize, StreamAllocationSize, then the name. du_fs windows
+    // checks these offsets at compile time.
+    pub const STREAM_NEXT: usize = 0;
+    pub const STREAM_NAME_LEN: usize = 4;
+    pub const STREAM_ALLOC: usize = 16;
+    pub const STREAM_NAME: usize = 24;
+
+    /// The name and allocation size of each FILE_STREAM_INFO record in
+    /// `buf`, for the size report of 34(j). None when a record runs past
+    /// `buf`.
+    pub fn stream_records(buf: &[u8]) -> Option<Vec<(String, i64)>> {
+        let mut off = 0usize;
+        let mut out = Vec::new();
+        loop {
+            let rec = buf.get(off..)?;
+            if rec.len() < STREAM_NAME {
+                return None;
+            }
+            let next = u32_at(rec, STREAM_NEXT) as usize;
+            let name_len = u32_at(rec, STREAM_NAME_LEN) as usize;
+            let name = rec.get(STREAM_NAME..STREAM_NAME.checked_add(name_len)?)?;
+            out.push((utf16_text(name), i64_at(rec, STREAM_ALLOC)));
+            if next == 0 {
+                return Some(out);
+            }
+            off = off.checked_add(next)?;
+        }
+    }
+
+    /// The UTF-16 bytes `raw` as text; a lone surrogate reads U+FFFD.
+    fn utf16_text(raw: &[u8]) -> String {
+        let units: Vec<u16> = raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_ne_bytes(*c))
+            .collect();
+        String::from_utf16_lossy(&units)
+    }
+
     /// Parse the `FILE_ID_BOTH_DIR_INFO` records of one fill. Returns false
     /// when a record runs past the buffer.
     pub fn parse(buf: &[u8], dev: u64, out: &mut Entries) -> bool {
@@ -847,6 +922,58 @@ mod tests {
             !is_link(wof, IO_REPARSE_TAG_WOF),
             "a Compact file holds data"
         );
+    }
+
+    /// 34(j) size report: `listed` reads one entry back from a listing,
+    /// and gives None for a missing name or a cut listing.
+    #[test]
+    fn a_listing_entry_reads_back_by_name() {
+        use fileid::*;
+        let mut buf = fileid_record("plain.bin", 0x20, 0, false);
+        buf.extend(fileid_record("wof.bin", 0x420, IO_REPARSE_TAG_WOF, true));
+        let got = listed(&buf, "wof.bin");
+        assert_eq!(got, Some((0x420, IO_REPARSE_TAG_WOF, 4096, 1234)));
+        assert_eq!(listed(&buf, "none.bin"), None);
+        assert_eq!(listed(&buf[..buf.len() - 4], "wof.bin"), None);
+    }
+
+    /// One FILE_STREAM_INFO record, padded to 8 bytes.
+    fn stream_record(name: &str, alloc: i64, last: bool) -> Vec<u8> {
+        use fileid::*;
+        let units: Vec<u16> = name.encode_utf16().collect();
+        let mut r = vec![0u8; STREAM_NAME + units.len() * 2];
+        let len = (units.len() * 2) as u32;
+        r[STREAM_NAME_LEN..STREAM_NAME_LEN + 4].copy_from_slice(&len.to_ne_bytes());
+        r[STREAM_ALLOC..STREAM_ALLOC + 8].copy_from_slice(&alloc.to_ne_bytes());
+        for (i, u) in units.iter().enumerate() {
+            let at = STREAM_NAME + 2 * i;
+            r[at..at + 2].copy_from_slice(&u.to_ne_bytes());
+        }
+        while !r.len().is_multiple_of(8) {
+            r.push(0);
+        }
+        if !last {
+            let n = r.len() as u32;
+            r[STREAM_NEXT..STREAM_NEXT + 4].copy_from_slice(&n.to_ne_bytes());
+        }
+        r
+    }
+
+    /// 34(j) size report: `stream_records` gives each stream name with its
+    /// allocation, and None for a cut list.
+    #[test]
+    fn stream_records_give_each_name_and_allocation() {
+        use fileid::*;
+        let mut buf = stream_record("::$DATA", 0, false);
+        buf.extend(stream_record(":WofCompressedData:$DATA", 8192, true));
+        let got = stream_records(&buf);
+        let want = vec![
+            ("::$DATA".to_string(), 0),
+            (":WofCompressedData:$DATA".to_string(), 8192),
+        ];
+        assert_eq!(got, Some(want));
+        assert_eq!(stream_records(&buf[..buf.len() - 10]), None);
+        assert_eq!(stream_records(&[]), None);
     }
 
     /// Every reparse tag that names another file or folder is a link, the

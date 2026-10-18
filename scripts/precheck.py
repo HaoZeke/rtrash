@@ -2610,7 +2610,11 @@ def check_win_paths():
 # or Compact (WOF) packed is not its disk use. du_fs::fileid::needs_real_size
 # says which files those are; GetCompressedFileSizeW gives their real size.
 # A function that reads an allocation size and never asks it counts such a
-# file at its full size. ALLOC_CASES tests the matcher.
+# file at its full size. ALLOC_CASES tests the matcher. ALLOC_REPORT names
+# the fns that only report sizes and count nothing: the 34(j) size report
+# (du_fs windows size_probe) and the listing entry it prints (fileid
+# listed).
+ALLOC_REPORT = {("src/du_fs/windows.rs", "size_probe"), ("src/du_fs.rs", "listed")}
 ALLOC_READ = re.compile(r"\bAllocationSize\b|\ballocation_size\s*\)")
 ALLOC_CASES = [
     ("std", "    let mut allocated = std_info.AllocationSize.max(0) as u64;", True),
@@ -2646,6 +2650,8 @@ def check_compressed_sizes():
             if k in skip or not ALLOC_READ.search(line):
                 continue
             if "needs_real_size(" in enclosing_fn_text(lines, k):
+                continue
+            if (rel, enclosing_fn(lines, k)) in ALLOC_REPORT:
                 continue
             errors.append(f"{rel}:{k + 1}: an allocation size read without needs_real_size counts "
                           "a compressed or Compact file at its full size; check "

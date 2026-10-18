@@ -3235,17 +3235,33 @@ fn trash_dupes_go_to_the_scratch_trash_not_the_system_bin() {
 }
 
 /// gdu #407: a file that file compression or Compact packed counts its
-/// bytes on disk, well below its length. `compact /c` needs no admin
-/// rights; `compact /c /exe:lzx` (Compact, the Windows Overlay Filter)
-/// runs where the system has it. Each run prints one `compressed-size:`
-/// line per file with what it measured and whether `/exe:lzx` ran; the
-/// Windows CI job runs this test with `--nocapture` so the lines show.
+/// bytes on disk, well below its length. The files hold text of a few
+/// words, which both packers shrink but neither can fit in the file
+/// record. `compact /c` needs no admin rights; `compact /c /exe:lzx`
+/// (Compact, the Windows Overlay Filter) runs where the system has it.
+/// Each run prints `compressed-size:` lines: whether `/exe:lzx` ran, what
+/// each way of asking Windows gave (`du_fs::size_probe`) before any
+/// assert, what compact reports and what du measured. The Windows CI job
+/// runs this test with `--nocapture` so the lines show.
 #[cfg(windows)]
 #[test]
 fn compressed_files_count_their_disk_use_on_windows() {
     let t = Tree::new("compact");
-    let ntfs = t.file("ntfs.bin", 1 << 20);
-    let wof = t.file("wof.bin", 1 << 20);
+    let words = [
+        "alpha ", "beta ", "gamma ", "delta ", "disk ", "trash ", "size ", "packed ",
+    ];
+    let mut text = Vec::with_capacity(1 << 20);
+    let mut x = 0x2545_f491_u32;
+    while text.len() < 1 << 20 {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        text.extend_from_slice(words[(x >> 28) as usize % words.len()].as_bytes());
+    }
+    text.truncate(1 << 20);
+    let ntfs = t.file("ntfs.bin", 0);
+    let wof = t.file("wof.bin", 0);
+    for f in [&ntfs, &wof] {
+        fs::write(f, &text).unwrap();
+    }
     let compact = |args: &[&str], f: &Path| Command::new("compact").args(args).arg(f).output();
     let out = compact(&["/c"], &ntfs).expect("run compact");
     assert!(
@@ -3258,6 +3274,20 @@ fn compressed_files_count_their_disk_use_on_windows() {
         eprintln!("compact /exe:lzx unavailable; checking file compression only");
     }
     eprintln!("compressed-size: compact /exe:lzx ran: {packed}");
+    // Every probe line prints before any assert, so a failing run still
+    // says what each way of asking gave for both files.
+    for f in [&ntfs, &wof] {
+        let name = f.file_name().unwrap_or_default().to_string_lossy();
+        for line in rtrash::du_fs::size_probe(f) {
+            eprintln!("compressed-size: probe {name} {line}");
+        }
+        if let Ok(o) = compact(&[], f) {
+            let said = String::from_utf8_lossy(&o.stdout);
+            for line in said.lines().filter(|l| l.contains(&*name)) {
+                eprintln!("compressed-size: compact says {}", line.trim());
+            }
+        }
+    }
     let j = t.json(&["--no-git", "--files", "-n", "10"]);
     for (f, on) in [(&ntfs, true), (&wof, packed)] {
         if !on {

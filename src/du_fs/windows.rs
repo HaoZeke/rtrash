@@ -7,7 +7,10 @@
 //! Names are kept in the `OsStr` encoding of std, NUL-terminated like the
 //! Unix names, so the walk handles both the same way.
 
-use super::fileid::{mode_of, mtime_of, needs_real_size, parse};
+use super::fileid::{
+    listed, mode_of, mtime_of, needs_real_size, parse, stream_records, Listed, STREAM_ALLOC,
+    STREAM_NAME, STREAM_NAME_LEN, STREAM_NEXT,
+};
 use super::{Entries, Stat};
 use std::cell::RefCell;
 use std::ffi::{c_void, CStr, OsStr};
@@ -20,12 +23,13 @@ use windows_sys::Win32::Foundation::{
     GetLastError, SetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FileAttributeTagInfo, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo,
-    FileStandardInfo, GetCompressedFileSizeW, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_TAG_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO,
-    FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, OPEN_EXISTING,
+    CreateFileW, FileAttributeTagInfo, FileCompressionInfo, FileIdBothDirectoryInfo,
+    FileIdBothDirectoryRestartInfo, FileStandardInfo, FileStreamInfo, GetCompressedFileSizeW,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_COMPRESSION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_BOTH_DIR_INFO, FILE_INFO_BY_HANDLE_CLASS,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_STREAM_INFO, OPEN_EXISTING,
 };
 
 /// Bytes of the per-thread listing buffer.
@@ -33,6 +37,15 @@ const LIST_BUF: usize = 64 * 1024;
 
 /// Open `path` itself, never what a reparse point names.
 fn open_handle(path: &Path, access: u32) -> io::Result<OwnedHandle> {
+    open_with(
+        path,
+        access,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+}
+
+/// Open `path` with the CreateFileW flags `flags`, sharing it fully.
+fn open_with(path: &Path, access: u32, flags: u32) -> io::Result<OwnedHandle> {
     let w = crate::util::win_path(path);
     // SAFETY: `w` is NUL-terminated; a valid returned handle is ours.
     let h = unsafe {
@@ -42,7 +55,7 @@ fn open_handle(path: &Path, access: u32) -> io::Result<OwnedHandle> {
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            flags,
             std::ptr::null_mut(),
         )
     };
@@ -115,6 +128,191 @@ fn handle_stat(h: &OwnedHandle, path: Option<&Path>) -> io::Result<Stat> {
         mtime: mtime_of(write),
     })
 }
+
+/// GetCompressedFileSizeW on the NUL-terminated wide path `w`, with the
+/// error when it fails. For the size report.
+fn compressed_size_wide(w: &[u16]) -> io::Result<u64> {
+    let mut high = 0u32;
+    // SAFETY: `w` is NUL-terminated and `high` is a u32 to write.
+    let low = unsafe {
+        SetLastError(0);
+        GetCompressedFileSizeW(w.as_ptr(), &mut high)
+    };
+    if low == u32::MAX && unsafe { GetLastError() } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(u64::from(high) << 32 | u64::from(low))
+}
+
+/// The FILE_STREAM_INFO records of the open file `h`, as bytes.
+fn stream_list(h: &OwnedHandle) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u64; 2048];
+    // SAFETY: the buffer is 8-byte aligned and writable for its full
+    // length.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            h.as_raw_handle() as _,
+            FileStreamInfo,
+            buf.as_mut_ptr() as *mut c_void,
+            (buf.len() * 8) as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(buf.iter().flat_map(|w| w.to_ne_bytes()).collect())
+}
+
+/// What the listing of the folder `dir` says of its entry `name`
+/// ([`listed`]), or None when no fill names it.
+fn listing_of(dir: &Path, name: &str) -> io::Result<Option<Listed>> {
+    let h = open_handle(dir, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)?;
+    let mut buf = vec![0u64; LIST_BUF / 8];
+    let mut class = FileIdBothDirectoryRestartInfo;
+    loop {
+        // SAFETY: the buffer is 8-byte aligned and writable for its full
+        // length.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                h.as_raw_handle() as _,
+                class,
+                buf.as_mut_ptr() as *mut c_void,
+                (buf.len() * 8) as u32,
+            )
+        };
+        class = FileIdBothDirectoryInfo;
+        if ok == 0 {
+            if unsafe { GetLastError() } == ERROR_NO_MORE_FILES {
+                return Ok(None);
+            }
+            return Err(io::Error::last_os_error());
+        }
+        let bytes: Vec<u8> = buf.iter().flat_map(|w| w.to_ne_bytes()).collect();
+        if let Some(found) = listed(&bytes, name) {
+            return Ok(Some(found));
+        }
+    }
+}
+
+/// An error as its Windows code, for the size report.
+fn code(e: io::Error) -> String {
+    format!("error {}", e.raw_os_error().unwrap_or(-1))
+}
+
+/// 34(j) size report for the Windows du test, which prints it before its
+/// asserts: what each way of asking Windows gives for the file `path`,
+/// one line each, then the stat du takes. It only reads, never panics,
+/// and gives each failure as its error code. Two opens are asked: one
+/// with FILE_FLAG_OPEN_REPARSE_POINT, as du opens, and one without, so
+/// the Compact filter is in the path.
+pub fn size_probe(path: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    out.push(match listing_of(dir, &name) {
+        Ok(Some((a, ea, alloc, len))) => {
+            format!("listing: attrs {a:#x} ea/tag {ea:#x} alloc {alloc} len {len}")
+        }
+        Ok(None) => "listing: no entry".to_string(),
+        Err(e) => format!("listing: {}", code(e)),
+    });
+    let mut stream = path.as_os_str().to_os_string();
+    stream.push(":WofCompressedData");
+    let stream = PathBuf::from(stream);
+    let reparse = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT;
+    let opens = [
+        ("reparse-point open", reparse),
+        ("filter open", FILE_FLAG_BACKUP_SEMANTICS),
+    ];
+    for (what, flags) in opens {
+        let h = match open_with(path, FILE_READ_ATTRIBUTES, flags) {
+            Ok(h) => h,
+            Err(e) => {
+                out.push(format!("{what}: {}", code(e)));
+                continue;
+            }
+        };
+        out.push(
+            match info_ex::<FILE_ATTRIBUTE_TAG_INFO>(&h, FileAttributeTagInfo) {
+                Ok(t) => format!(
+                    "{what}: attrs {:#x} tag {:#x}",
+                    t.FileAttributes, t.ReparseTag
+                ),
+                Err(e) => format!("{what}: tag info {}", code(e)),
+            },
+        );
+        out.push(match info_ex::<FILE_STANDARD_INFO>(&h, FileStandardInfo) {
+            Ok(i) => format!(
+                "{what}: standard alloc {} len {}",
+                i.AllocationSize, i.EndOfFile
+            ),
+            Err(e) => format!("{what}: standard {}", code(e)),
+        });
+        out.push(
+            match info_ex::<FILE_COMPRESSION_INFO>(&h, FileCompressionInfo) {
+                Ok(c) => format!(
+                    "{what}: compression size {} format {}",
+                    c.CompressedFileSize, c.CompressionFormat
+                ),
+                Err(e) => format!("{what}: compression {}", code(e)),
+            },
+        );
+        out.push(match stream_list(&h).map(|b| stream_records(&b)) {
+            Ok(Some(streams)) => format!("{what}: streams {streams:?}"),
+            Ok(None) => format!("{what}: streams cut short"),
+            Err(e) => format!("{what}: streams {}", code(e)),
+        });
+        let by_name = open_with(&stream, FILE_READ_ATTRIBUTES, flags)
+            .and_then(|s| info_ex::<FILE_STANDARD_INFO>(&s, FileStandardInfo));
+        out.push(match by_name {
+            Ok(i) => format!(
+                "{what}: by-name stream alloc {} len {}",
+                i.AllocationSize, i.EndOfFile
+            ),
+            Err(e) => format!("{what}: by-name stream {}", code(e)),
+        });
+    }
+    out.push(match compressed_size_wide(&crate::util::win_path(path)) {
+        Ok(n) => format!("GetCompressedFileSizeW by path: {n}"),
+        Err(e) => format!("GetCompressedFileSizeW by path: {}", code(e)),
+    });
+    match std::path::absolute(path) {
+        Ok(abs) => {
+            let mut verbatim = std::ffi::OsString::from(r"\\?\");
+            verbatim.push(crate::util::plain_path(&abs).as_os_str());
+            let w = crate::util::win_path(Path::new(&verbatim));
+            out.push(match compressed_size_wide(&w) {
+                Ok(n) => format!("GetCompressedFileSizeW verbatim: {n}"),
+                Err(e) => format!("GetCompressedFileSizeW verbatim: {}", code(e)),
+            });
+        }
+        Err(e) => out.push(format!("GetCompressedFileSizeW verbatim: {}", code(e))),
+    }
+    out.push(match lstat(path) {
+        Ok(st) => format!(
+            "du stat: blocks {} = {} bytes",
+            st.blocks,
+            st.blocks.saturating_mul(512)
+        ),
+        Err(e) => format!("du stat: {}", code(e)),
+    });
+    out
+}
+
+// The stream report reads FILE_STREAM_INFO at its own offsets.
+const _: () = {
+    use std::mem::offset_of;
+    assert!(offset_of!(FILE_STREAM_INFO, NextEntryOffset) == STREAM_NEXT);
+    assert!(offset_of!(FILE_STREAM_INFO, StreamNameLength) == STREAM_NAME_LEN);
+    assert!(offset_of!(FILE_STREAM_INFO, StreamAllocationSize) == STREAM_ALLOC);
+    assert!(offset_of!(FILE_STREAM_INFO, StreamName) == STREAM_NAME);
+};
 
 /// An open directory.
 #[derive(Debug)]
