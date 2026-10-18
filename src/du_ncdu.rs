@@ -11,7 +11,6 @@
 //! path being built, never the whole document, and it walks without
 //! recursion, so exports of deep trees read like any other.
 
-use std::collections::HashSet;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -418,7 +417,8 @@ impl<R: BufRead> Lexer<R> {
 /// below the root, with totals counted as `rtrash du` counts them.
 /// Disk use includes directories' own blocks, apparent size counts file
 /// lengths only, and a hard-linked file (same `dev` and `ino`, `nlink`
-/// above 1) counts once, where it first appears. Excluded entries add
+/// above 1) counts once, at the path a scan counts it at
+/// ([`crate::du::credits_first`]). Excluded entries add
 /// nothing and show in the root's excluded count.
 pub fn parse(r: impl BufRead) -> io::Result<Snapshot> {
     let mut lx = Lexer { r, pos: 0 };
@@ -500,7 +500,9 @@ pub(crate) const READ_ERROR_REASON: &str = "marked read_error in the ncdu export
 pub(crate) struct Builder {
     root: RootTotals,
     dirs: Vec<Item>,
-    seen: HashSet<(u64, u64)>,
+    /// Hard-linked files, added at the path they count at by
+    /// [`Builder::finish`].
+    links: crate::du::LinkCredit<Linked>,
     /// Path of the innermost open directory.
     path: Vec<u8>,
     stack: Vec<Frame>,
@@ -535,7 +537,7 @@ impl Builder {
         let mut b = Builder {
             root,
             dirs: Vec::new(),
-            seen: HashSet::new(),
+            links: crate::du::LinkCredit::new(),
             path,
             stack: vec![open_dir(top, 0, 0)],
             sep,
@@ -590,8 +592,17 @@ impl Builder {
             return;
         }
         let dev = f.dev.unwrap_or(p.dev);
-        if (f.nlink > 1 || f.hlnkc) && !self.seen.insert((dev, f.ino)) {
-            self.root.links += 1;
+        if f.nlink > 1 || f.hlnkc {
+            // Counted once the tree is read, at the path a scan would
+            // count it at, whichever of its paths the export wrote first.
+            let linked = Linked {
+                rows: self.stack.iter().filter_map(|fr| fr.row).collect(),
+                disk: f.dsize,
+                apparent: f.asize,
+                mtime: f.mtime,
+            };
+            let at = bytes_path(self.child_path(&f.name));
+            self.links.see((dev, f.ino), at, linked);
             return;
         }
         self.root.files += 1;
@@ -677,6 +688,19 @@ impl Builder {
     /// at all; when it does not, the count is unknown, not 0.
     pub(crate) fn finish(mut self, created: i64, records_errors: bool) -> Snapshot {
         self.unread.sort();
+        self.root.links += self.links.extra;
+        for l in self.links.into_credits() {
+            self.root.files += 1;
+            self.root.disk = self.root.disk.saturating_add(l.disk);
+            self.root.apparent = self.root.apparent.saturating_add(l.apparent);
+            for &i in &l.rows {
+                let row = &mut self.dirs[i];
+                row.disk = row.disk.saturating_add(l.disk);
+                row.apparent = row.apparent.saturating_add(l.apparent);
+                row.items = row.items.saturating_add(1);
+                row.mtime = row.mtime.max(l.mtime);
+            }
+        }
         Snapshot {
             created,
             max_depth: None,
@@ -691,6 +715,15 @@ impl Builder {
             },
         }
     }
+}
+
+/// A hard-linked file in [`Builder`]: the rows of the directories above
+/// the path it counts at, and what it adds to each.
+struct Linked {
+    rows: Vec<usize>,
+    disk: u64,
+    apparent: u64,
+    mtime: i64,
 }
 
 fn open_dir(info: &Info, path_len: usize, parent_dev: u64) -> Frame {
@@ -1360,6 +1393,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_hard_link_counts_at_its_first_path_in_either_export_order() {
+        // gdu #439: the size goes to the first path in order (/r/a/b/x
+        // before /r/a/y), as in a scan, whichever name the export has first.
+        let deep = r#"[{"name":"b","dsize":0},
+            {"name":"x","dsize":4096,"asize":900,"ino":7,"nlink":2}]"#;
+        let flat = r#"{"name":"y","dsize":4096,"asize":900,"ino":7,"nlink":2}"#;
+        for (first, second) in [(deep, flat), (flat, deep)] {
+            let snap = read(&format!(
+                r#"[1,2,{{}},[{{"name":"/r","dsize":0}},
+                  [{{"name":"a","dsize":0}},{first},{second}]]]"#
+            ));
+            let b = row(&snap, "/r/a/b");
+            assert_eq!((b.disk, b.apparent, b.items), (4096, 900, 1), "{first}");
+            assert_eq!(snap.roots[0].links, 1, "{first}");
+        }
+    }
+
     /// `read_error` counts on the root, on files and on directories, but
     /// not below an excluded directory; the paths come sorted, the first
     /// [`crate::du::UNREAD_KEPT`] kept, and the totals stay as before.
@@ -1558,6 +1609,35 @@ mod tests {
         assert_eq!(snap.roots[0].disk, scan.roots[0].disk);
         assert_eq!(snap.roots[0].apparent, scan.roots[0].apparent);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_export_reads_back_links_at_the_path_a_scan_counts() {
+        use std::fs;
+        // gdu #439: whichever name holds the data first and whichever the
+        // export writes first, the export read back and the scan give the
+        // size to the first path in order, so every row matches.
+        let cases = [("a/f", "a/b/f-link"), ("a/b/f", "a/f-link")];
+        for (i, (data, link)) in cases.into_iter().enumerate() {
+            let root = tmp(&format!("links{i}"));
+            fs::create_dir_all(root.join("a/b")).unwrap();
+            fs::write(root.join(data), vec![1u8; 50_000]).unwrap();
+            fs::hard_link(root.join(data), root.join(link)).unwrap();
+            let (_, snap, scan) = roundtrip(&root, None);
+            let rows = |dirs: &[Item]| {
+                let mut v: Vec<_> = dirs
+                    .iter()
+                    .map(|d| (d.path.clone(), d.disk, d.apparent, d.mtime))
+                    .collect();
+                v.sort();
+                v
+            };
+            assert_eq!(rows(&snap.dirs), rows(&scan.dirs), "{data} and {link}");
+            let ab = snap.dirs.iter().find(|d| d.path.ends_with("a/b"));
+            assert_eq!(ab.map(|d| d.apparent), Some(50_000), "{data} and {link}");
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 
     #[cfg(unix)]

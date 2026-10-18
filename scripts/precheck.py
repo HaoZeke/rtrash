@@ -2505,6 +2505,55 @@ def check_trash_root_sets():
                           "so use trashdir::RootSet::first (device and inode)")
 
 
+# gdu #439: the du walk threads meet the links of a file in any order, so
+# the first sighting gave a different folder the file's size from run to
+# run, and an ncdu export read back gave it to whichever link it wrote
+# first. du::credits_first is the one rule: Ctx::counts_here applies it in
+# a scan and du::LinkCredit to a saved tree (du_ncdu::Builder). A link
+# dedupe anywhere else in src/du*.rs (first_link, an inode set insert)
+# decides by order again. LINK_CREDIT_OK names the deciders and the inode
+# sets that credit no folder size. LINK_CREDIT_CASES tests the matcher.
+LINK_CREDIT = re.compile(r"\.first_link\s*\(|\bseen\.insert\s*\([^)]*\bino\b"
+                         r"|\.(?:insert|entry)\s*\(\s*\([^)]*\bino\b")
+LINK_CREDIT_OK = {
+    ("src/du.rs", "counts_here"), ("src/du.rs", "first_link"),
+    ("src/du.rs", "insert"),  # LinkSet::insert, behind first_link
+    ("src/du.rs", "see"),  # LinkClaims::see, the scan's claims
+    ("src/du_dupes.rs", "one_per_inode"),  # groups names; no sizes
+    ("src/du_ncdu_bin.rs", "leaf"),  # ncdu's own per-directory sizes
+}
+LINK_CREDIT_CASES = [
+    ("ctx", "        let first = ctx.first_link(&m);", True),
+    ("set", "        self.seen.first_link(st)", True),
+    ("pair", "        if linked && !self.seen.insert((dev, f.ino)) {", True),
+    ("follow", "            m.ino == 0 || ctx.seen.insert(m.dev, m.ino)", True),
+    ("entry", "        let l = links.entry((st.dev, st.ino)).or_insert(0);", True),
+    ("routed", "            ctx.counts_here(&m, || path.join(du_fs::os(name)))", False),
+    ("device", "        if size == 0 || !seen.insert(dev) {", False),
+]
+
+
+def check_link_credit():
+    """In src/du*.rs, only du::credits_first decides which link counts."""
+    for what, line, want in LINK_CREDIT_CASES:
+        if bool(LINK_CREDIT.search(line)) != want:
+            errors.append(f"scripts/precheck.py: LINK_CREDIT gets LINK_CREDIT_CASES '{what}' "
+                          "wrong; the link-credit check is broken")
+    for path in sorted((ROOT / "src").glob("du*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        raw = path.read_text(encoding="utf-8")
+        skip = test_mod_lines(raw.split("\n"))
+        lines = rust_code(raw).split("\n")
+        for k, line in enumerate(lines):
+            if k in skip or not LINK_CREDIT.search(line):
+                continue
+            if (rel, enclosing_fn(lines, k)) in LINK_CREDIT_OK:
+                continue
+            errors.append(f"{rel}:{k + 1}: a hard link counted where it is met first goes to "
+                          "whichever path came first; use Ctx::counts_here in a scan or "
+                          "du::LinkCredit for a saved tree (du::credits_first)")
+
+
 # trash-cli #354: a blocking flock hangs without a word behind a long empty
 # or a process stuck on a dead mount. The trash lock waits in
 # trashdir::wait_for_lock, which names the trash after a second and gives up
@@ -2773,7 +2822,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_directorysizes_paths()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

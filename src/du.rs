@@ -856,6 +856,13 @@ impl LinkSet {
 
     const SHARDS: usize = 16;
 
+    /// The shard of file `(dev, ino)`, for this set and [`LinkClaims`].
+    fn shard(dev: u64, ino: u64) -> usize {
+        // Fibonacci hashing: inode numbers often share their low bits.
+        let h = (ino ^ dev.rotate_left(32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        (h >> 60) as usize % Self::SHARDS
+    }
+
     fn new() -> Self {
         LinkSet {
             shards: (0..Self::SHARDS).map(|_| Mutex::default()).collect(),
@@ -864,13 +871,122 @@ impl LinkSet {
 
     /// Record the file; returns whether it was new.
     fn insert(&self, dev: u64, ino: u64) -> bool {
-        // Fibonacci hashing: inode numbers often share their low bits.
-        let h = (ino ^ dev.rotate_left(32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        let shard = &self.shards[(h >> 60) as usize % Self::SHARDS];
-        shard
+        self.shards[Self::shard(dev, ino)]
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert((dev, ino))
+    }
+}
+
+/// Whether a hard-linked file met at paths `a` and `b` counts at `a`
+/// rather than `b` (gdu #439): the first of its paths in `Path` order,
+/// name by name. A scan ([`Ctx::counts_here`]) and every reader of a saved
+/// tree ([`LinkCredit`], for ncdu exports) pick by this one rule, so a
+/// tree read back has the totals of the scan that wrote it.
+pub(crate) fn credits_first(a: &Path, b: &Path) -> bool {
+    a < b
+}
+
+/// The hard-linked files of a saved tree, read one entry at a time: for
+/// each, the path it counts at by [`credits_first`] and what it adds
+/// there. `du_ncdu::Builder` adds those once the whole tree is read.
+pub(crate) struct LinkCredit<T> {
+    files: HashMap<(u64, u64), (PathBuf, T)>,
+    /// Further names of files already met.
+    pub(crate) extra: u64,
+}
+
+impl<T> LinkCredit<T> {
+    pub(crate) fn new() -> Self {
+        LinkCredit {
+            files: HashMap::new(),
+            extra: 0,
+        }
+    }
+
+    /// Note file `id` met at `at`, adding `what` there: it replaces the
+    /// earlier sighting when `at` comes first.
+    pub(crate) fn see(&mut self, id: (u64, u64), at: PathBuf, what: T) {
+        match self.files.entry(id) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert((at, what));
+            }
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                self.extra += 1;
+                if credits_first(&at, &o.get().0) {
+                    o.insert((at, what));
+                }
+            }
+        }
+    }
+
+    /// What each file adds at the path it counts at.
+    pub(crate) fn into_credits(self) -> impl Iterator<Item = T> {
+        self.files.into_values().map(|(_, what)| what)
+    }
+}
+
+/// Where each file with several hard links was met (gdu #439): the
+/// smallest of its paths, and whether its count fell there. The walk
+/// threads meet links in any order, so the first sighting moves between
+/// runs. Once a walk ends, [`LinkClaims::settled`] says whether every
+/// count fell on the smallest path; when one did not, the walk runs again
+/// with that path fixed for each file ([`Ctx::decided`]).
+struct LinkClaims {
+    shards: Vec<Mutex<HashMap<(u64, u64), Claim>>>,
+}
+
+/// One linked file in [`LinkClaims`].
+struct Claim {
+    smallest: PathBuf,
+    /// Whether the sighting that took the count was at `smallest`.
+    counted_there: bool,
+}
+
+impl LinkClaims {
+    fn new() -> Self {
+        LinkClaims {
+            shards: (0..LinkSet::SHARDS).map(|_| Mutex::default()).collect(),
+        }
+    }
+
+    /// Record a sighting of file `(dev, ino)` at `at`; `counted` is
+    /// whether this sighting took the file's count. Each path is met once.
+    fn see(&self, dev: u64, ino: u64, at: PathBuf, counted: bool) {
+        let mut map = self.shards[LinkSet::shard(dev, ino)]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match map.entry((dev, ino)) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(Claim {
+                    smallest: at,
+                    counted_there: counted,
+                });
+            }
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                let claim = o.get_mut();
+                if credits_first(&at, &claim.smallest) {
+                    claim.smallest = at;
+                    claim.counted_there = counted;
+                } else if counted {
+                    claim.counted_there = false;
+                }
+            }
+        }
+    }
+
+    /// `None` when each linked file counted at its smallest path, else the
+    /// smallest path of every linked file, for a walk that counts there.
+    fn settled(self) -> Option<HashMap<(u64, u64), PathBuf>> {
+        let claims: Vec<((u64, u64), Claim)> = self
+            .shards
+            .into_iter()
+            .flat_map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
+            .collect();
+        if claims.iter().all(|(_, c)| c.counted_there) {
+            return None;
+        }
+        Some(claims.into_iter().map(|(id, c)| (id, c.smallest)).collect())
     }
 }
 
@@ -881,6 +997,12 @@ struct Ctx<'a> {
     root_dev: u64,
     /// Multiply-linked files already counted.
     seen: LinkSet,
+    /// Where this walk met each file with several links.
+    claims: LinkClaims,
+    /// For a second walk: the one path at which each linked file counts.
+    decided: Option<&'a HashMap<(u64, u64), PathBuf>>,
+    /// On a second walk, the files met at their path in `decided`.
+    met: AtomicU64,
     /// Directories entered so far, so one met again is walked once: a
     /// bind mount on the same device on Unix, and with `-L` a symlink
     /// loop or a second link to a directory.
@@ -1002,6 +1124,39 @@ impl Ctx<'_> {
     /// the file counts on its own rather than as a copy of every other.
     fn first_link(&self, st: &du_fs::Stat) -> bool {
         self.seen.first_link(st)
+    }
+
+    /// [`Ctx::first_link`] for the file `st` met at `at`, with the count of
+    /// a file of several links held to one path: on a second walk the one
+    /// [`Ctx::decided`] names, else the first sighting, noted in
+    /// [`Ctx::claims`]. A file whose link count is unknown (0) counts at
+    /// its first sighting. Every count of a file in the walk goes through
+    /// here (precheck check_link_credit).
+    fn counts_here(&self, st: &du_fs::Stat, at: impl FnOnce() -> PathBuf) -> bool {
+        // -L: a file reached through links counts once, at its first
+        // sighting; any file may be reached twice, and a path for each
+        // would cost too much.
+        if self.opts.follow {
+            return st.ino == 0 || self.seen.insert(st.dev, st.ino);
+        }
+        if st.nlink <= 1 || st.ino == 0 {
+            return self.first_link(st);
+        }
+        let at = at();
+        if let Some(d) = self.decided {
+            if let Some(smallest) = d.get(&(st.dev, st.ino)) {
+                let here = *smallest == at;
+                if here {
+                    self.met.fetch_add(1, Ordering::Relaxed);
+                }
+                return here;
+            }
+        }
+        let first = self.first_link(st);
+        if self.decided.is_none() {
+            self.claims.see(st.dev, st.ino, at, first);
+        }
+        first
     }
 
     fn key(&self, apparent: u64, disk: u64, items: u64, mtime: i64) -> u64 {
@@ -1352,11 +1507,7 @@ fn stat_entries(
             out.subdirs.push((i, Some(m)));
             continue;
         }
-        let first = if opts.follow {
-            m.ino == 0 || ctx.seen.insert(m.dev, m.ino)
-        } else {
-            ctx.first_link(&m)
-        };
+        let first = ctx.counts_here(&m, || path.join(du_fs::os(name)));
         if !first {
             ctx.links.fetch_add(1, Ordering::Relaxed);
             continue;
@@ -1870,11 +2021,15 @@ fn scan_pooled(
                 p.repo(&repo);
             }
         }
-        let ctx = Ctx {
+        let decided;
+        let new_ctx = |decided| Ctx {
             opts,
             prefetch,
             root_dev: meta.dev,
             seen: LinkSet::new(),
+            claims: LinkClaims::new(),
+            decided,
+            met: AtomicU64::new(0),
             dirs_seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
             unread: Mutex::new(Vec::new()),
@@ -1897,18 +2052,49 @@ fn scan_pooled(
             types: Default::default(),
             snapshots: Default::default(),
         };
+        let mut ctx = new_ctx(None);
         let (apparent, disk, disk_all, unique, artefact) = if meta.is_dir() {
-            enter(
-                &ctx,
-                None,
-                &abs,
-                Some(meta),
-                0,
-                true,
-                ctx.filter.as_ref().and_then(|f| f.root_chain.as_ref()),
-            )
-            .map(|n| (n.apparent, n.disk, n.disk_all, n.unique, n.artefact))
-            .unwrap_or((0, 0, 0, 0, None))
+            let walk = |ctx: &Ctx<'_>| {
+                let chain = ctx.filter.as_ref().and_then(|f| f.root_chain.as_ref());
+                enter(ctx, None, &abs, Some(meta), 0, true, chain)
+            };
+            let live = opts.control.as_deref();
+            let before = live.map(|c| {
+                (
+                    c.files.load(Ordering::Relaxed),
+                    c.disk.load(Ordering::Relaxed),
+                )
+            });
+            let mut node = walk(&ctx);
+            // gdu #439: a linked file counted at whichever path a thread
+            // met first; walk again with each one held to its smallest
+            // path, so every run gives each folder the same total. A
+            // stopped scan keeps what it has, and the live counters start
+            // over for the second walk. A stop during that walk keeps the
+            // first.
+            let claims = std::mem::replace(&mut ctx.claims, LinkClaims::new());
+            let settled = if live.is_some_and(ScanControl::stopped) {
+                None
+            } else {
+                claims.settled()
+            };
+            if let Some(d) = settled {
+                if let (Some(c), Some((files, disk))) = (live, before) {
+                    c.files.store(files, Ordering::Relaxed);
+                    c.disk.store(disk, Ordering::Relaxed);
+                }
+                decided = d;
+                let second = new_ctx(Some(&decided));
+                let again = walk(&second);
+                // A file that went, or a directory two names show (walked
+                // once, under either), leaves a fixed path unmet and its
+                // file uncounted: keep the first walk then.
+                if second.met.load(Ordering::Relaxed) == decided.len() as u64 {
+                    (ctx, node) = (second, again);
+                }
+            }
+            node.map(|n| (n.apparent, n.disk, n.disk_all, n.unique, n.artefact))
+                .unwrap_or((0, 0, 0, 0, None))
         } else {
             ctx.files.fetch_add(1, Ordering::Relaxed);
             let (a, raw) = meta.sizes();

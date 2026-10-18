@@ -1359,6 +1359,17 @@ more than one hard link counts once, in the sizes and in the file count,
 so files plus directories match
 .BR "du \-\-inodes \-s" ;
 the total names the extra links.
+Such a file counts in the directory of the first of its paths in sorted
+order.
+Each directory then shows the same total on every run, whatever the
+thread count. When the walk threads first met some file at a later path, the
+walk runs a second time to put it there.
+With
+.BR \-L ,
+a file met again through a symlink counts where a walk thread first
+meets it.
+On Windows, where the listing gives no link count, a file counts where a
+walk thread first meets it.
 On Unix a directory met a second time with the same device and inode, as a
 bind mount on the same file system shows it, is walked once, under the name
 met first; one
@@ -2234,8 +2245,9 @@ List the largest directories from a snapshot instead of scanning.
 JSON export compressed with \fBncdu \-c\fR (ncdu 2.7 and later), or the
 binary export of ncdu 2.6 and later, \fBncdu \-O\fR, told
 apart by its first bytes, whatever the file is named): its totals are counted as a scan counts them,
-with each hard link counted once (when the export records inodes)
-and excluded entries left out.
+with each hard link counted once (when the export records inodes),
+in the directory of the first of its paths in sorted order whatever
+order the export lists them in, and excluded entries left out.
 gdu exports carry no directory sizes or inodes, so their totals can be lower or higher.
 An export written without \fBncdu \-e\fR has no modification times: AGE reads \-
 and the JSON \fImtime\fR is null.

@@ -1,0 +1,1 @@
+A file with two or more hard links now counts in du toward the directory of the first of its paths in sorted order, in a scan and in an ncdu export read with `du -f`. Before, it counted wherever a walk thread met it first, so on a tree of rsnapshot links the folder sizes changed from run to run (gdu #439).

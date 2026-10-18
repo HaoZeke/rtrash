@@ -238,6 +238,46 @@ fn hard_links_count_once() {
     assert!(text.contains("1 file (+2 hard links), "), "{text}");
 }
 
+#[test]
+fn hard_links_credit_the_same_folder_on_every_run() {
+    // gdu #439: the walk threads meet the links of a file in any order,
+    // and the folder of the first sighting used to get its size. The
+    // Windows listing gives no link count, so a file there still counts
+    // where it is met first (see Ctx::counts_here).
+    if cfg!(windows) {
+        return;
+    }
+    let t = Tree::new("linkcredit");
+    let folders = 24;
+    let mut want = vec![0u64; folders];
+    for k in 0..48 {
+        let len = 1000 + k;
+        let at: Vec<usize> = [0, 7, 13].into_iter().map(|o| (k + o) % folders).collect();
+        let first = t.file(&format!("p{:02}/l{k:02}.bin", at[0]), len);
+        for d in &at[1..] {
+            let link = t.root.join(format!("p{d:02}/l{k:02}.bin"));
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            fs::hard_link(&first, link).unwrap();
+        }
+        // Each folder name has the same length, so the smallest path is
+        // in the folder with the smallest number.
+        want[*at.iter().min().unwrap()] += len as u64;
+    }
+    let args = ["--no-git", "-n", "100", "--apparent", "--threads", "8"];
+    let j = t.json(&args);
+    assert_eq!(field(&j, "links"), 96, "{j}");
+    for (d, w) in want.iter().enumerate() {
+        let row = j
+            .find(&format!("p{d:02}\",\"type\":\"dir\""))
+            .expect("folder row");
+        assert_eq!(field(&j[row..], "apparent"), *w, "p{d:02}: {j}");
+    }
+    for run in 1..7 {
+        let again = t.json(&args);
+        assert_eq!(common::du_scan(&again), common::du_scan(&j), "run {run}");
+    }
+}
+
 /// `root` joined with each `/`-separated part of `rel`, so the result has
 /// native separators only.
 #[cfg(windows)]

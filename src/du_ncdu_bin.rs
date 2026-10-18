@@ -1240,8 +1240,8 @@ mod tests {
         assert_eq!(r.path, Path::new("/r"));
         assert_eq!((r.files, r.links, r.dirs, r.excluded), (2, 1, 2, 1));
         assert_eq!(r.disk, 4096 + 4096 + 4096 + 8192);
-        // Read in the order written, the link candidate in /r comes
-        // before its second name in /r/d, so /r is charged for it.
+        // The link candidate /r/again comes before its second name
+        // /r/d/f2 in path order, so /r is charged for it.
         let d = row(&snap, "/r/d");
         assert_eq!((d.disk, d.apparent, d.items), (4096 + 4096, 10, 1));
         assert_eq!(d.mtime, 1_700_000_000);
@@ -1505,10 +1505,12 @@ mod tests {
             read(&bin).unwrap(),
             crate::du_ncdu::parse(&json[..]).unwrap(),
         );
-        // Each format charges the file to the directory walked first.
+        // Each format charges the file to the first of its paths in
+        // order, a/l, as a scan does.
         assert_eq!(rows(&a), rows(&b));
-        let charged = a.dirs.iter().filter(|d| d.disk > 40_000).count();
-        assert_eq!(charged, 1, "{:?}", a.dirs);
+        let charged: Vec<_> = a.dirs.iter().filter(|d| d.disk > 40_000).collect();
+        assert_eq!(charged.len(), 1, "{:?}", a.dirs);
+        assert!(charged[0].path.ends_with("a"), "{:?}", a.dirs);
         let _ = fs::remove_dir_all(&root);
     }
 
