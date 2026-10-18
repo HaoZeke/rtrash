@@ -7516,6 +7516,40 @@ fn put_reports_a_file_it_cannot_reach_as_denied_not_missing() {
     assert!(!err.contains("No such file"), "{err}");
 }
 
+/// Debug builds on Linux only: with the mount table unreadable, as
+/// Termux may make it (trash-cli #348), put, list and restore still use
+/// the home trash without a word, and `du --devices` lists the file
+/// systems it can find with one note saying the list is partial.
+/// `RTRASH_TEST_NO_MOUNTS` fails every read of the table.
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[test]
+fn an_unreadable_mount_table_leaves_the_home_trash_working() {
+    let sb = Sandbox::new("no-mounts");
+    let f = sb.touch("nm-file");
+    let deny = [("RTRASH_TEST_NO_MOUNTS", "1")];
+    let out = sb.run_env(&["put", "nm-file"], &deny);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stderr_of(&out), "");
+    assert!(!f.exists());
+    assert!(sb.trash().join("files/nm-file").exists());
+    let out = sb.run_env(&["list"], &deny);
+    assert!(stdout_of(&out).contains("nm-file"), "{}", stderr_of(&out));
+    assert_eq!(stderr_of(&out), "");
+    let out = sb.run_env(&["restore", "nm-file"], &deny);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(f.exists());
+    let out = sb.run_env(&["du", "--devices"], &deny);
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert_eq!(
+        err.matches("cannot read the mount table").count(),
+        1,
+        "{err}"
+    );
+    assert!(err.contains("/proc/self/mounts"), "{err}");
+    assert!(!stdout_of(&out).is_empty(), "{err}");
+}
+
 /// `empty --dangling` keeps the limits `status --check --fix` keeps for
 /// the same records: `RTRASH_NO_PERMANENT`, `RTRASH_MAX_PERMANENT` (and
 /// `--max-count`) and `RTRASH_ALLOW_ROOTS` each refuse the run whole with

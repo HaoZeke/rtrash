@@ -1,0 +1,1 @@
+rtrash works where the mount table cannot be read, as on Termux (trash-cli #348). A trash command then finds the volume of a path by its device. Before, it took every path for one on `/`. Without the table, `rtrash du --devices` lists the file systems of `/`, the home directory and the current directory. One note says that the list is partial.

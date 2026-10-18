@@ -127,8 +127,39 @@ fn measure(mounts: Vec<Mount>) -> Vec<Device> {
 /// The mounted file systems, sorted by mount point.
 #[cfg(target_os = "linux")]
 pub fn devices() -> io::Result<Vec<Device>> {
-    let table = std::fs::read_to_string("/proc/self/mounts")?;
+    let table = crate::trashdir::read_mount_table()?;
     Ok(sorted(measure(mounts_from_table(&table))))
+}
+
+/// Linux without a readable mount table (Termux and other Android
+/// sandboxes, trash-cli #348): the file systems of `/`, the home directory
+/// and the current directory, each found by its device, and a note that
+/// says the list is partial. Elsewhere the error stands.
+#[cfg(target_os = "linux")]
+fn without_table(prog: &str, e: io::Error) -> io::Result<Vec<Device>> {
+    eprintln!(
+        "{prog}: cannot read the mount table ({e}); listing only the file systems of /, \
+         the home directory and the current directory"
+    );
+    let mut at = vec![PathBuf::from("/")];
+    at.extend(crate::util::home_dir());
+    at.extend(std::env::current_dir().ok());
+    let mounts = at
+        .iter()
+        .map(PathBuf::as_path)
+        .filter_map(crate::trashdir::mount_top_by_walk)
+        .map(|mount| Mount {
+            source: String::new(),
+            mount,
+            fstype: String::new(),
+        })
+        .collect();
+    Ok(sorted(measure(mounts)))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn without_table(_prog: &str, e: io::Error) -> io::Result<Vec<Device>> {
+    Err(e)
 }
 
 #[cfg(target_os = "macos")]
@@ -214,8 +245,9 @@ pub fn devices() -> io::Result<Vec<Device>> {
 }
 
 /// [`devices`], or in debug builds the one fake file system
-/// `RTRASH_TEST_FS` describes, so tests see known numbers.
-pub fn listed() -> io::Result<Vec<Device>> {
+/// `RTRASH_TEST_FS` describes, so tests see known numbers. On Linux
+/// without a mount table, a partial list (see [`without_table`]).
+pub fn listed(prog: &str) -> io::Result<Vec<Device>> {
     match crate::space::test_fs() {
         Some((mount, s)) => Ok(vec![Device {
             source: "rtrash-test".into(),
@@ -225,7 +257,7 @@ pub fn listed() -> io::Result<Vec<Device>> {
             used: s.total.saturating_sub(s.avail),
             avail: s.avail,
         }]),
-        None => devices(),
+        None => devices().or_else(|e| without_table(prog, e)),
     }
 }
 

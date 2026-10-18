@@ -263,10 +263,12 @@ pub fn volume_top_of_path(path: &Path) -> Option<PathBuf> {
     #[cfg(target_os = "linux")]
     {
         if crate::platform::volume_trash_discovery() {
-            return match fs::read_to_string("/proc/self/mounts") {
-                Ok(table) => volume_top_from_table(path, &table),
-                Err(_) => Some(PathBuf::from("/")),
-            };
+            if let Ok(table) = read_mount_table() {
+                return volume_top_from_table(path, &table);
+            }
+            // Termux and other Android sandboxes may deny the table
+            // (trash-cli #348): the st_dev walk below finds the volume as
+            // it does where there is no table.
         }
     }
     let dev = dev_of(path).or_else(|| dev_of_deepest_existing(path));
@@ -1068,7 +1070,8 @@ pub fn mount_points() -> Vec<PathBuf> {
     }
     #[cfg(target_os = "linux")]
     {
-        let Ok(content) = fs::read_to_string("/proc/self/mounts") else {
+        // Without the table (Termux, trash-cli #348) only `/` is known.
+        let Ok(content) = read_mount_table() else {
             return vec![PathBuf::from("/")];
         };
         mount_points_from_table(&content)
@@ -1078,6 +1081,27 @@ pub fn mount_points() -> Vec<PathBuf> {
         // No /proc: home-only discovery; st_dev walk remains available for select.
         Vec::new()
     }
+}
+
+/// The mount table, `/proc/self/mounts`, the one place rtrash reads it.
+/// Termux and other Android sandboxes may deny it (trash-cli #348), and
+/// elsewhere than Linux it is missing: every caller falls back on the
+/// error. Debug builds fail the read under `RTRASH_TEST_NO_MOUNTS`, so
+/// tests can reach those fallbacks.
+pub fn read_mount_table() -> io::Result<String> {
+    const TABLE: &str = "/proc/self/mounts";
+    if cfg!(debug_assertions) && std::env::var_os("RTRASH_TEST_NO_MOUNTS").is_some() {
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        return Err(io::Error::new(denied.kind(), format!("{TABLE}: {denied}")));
+    }
+    fs::read_to_string(TABLE).map_err(|e| io::Error::new(e.kind(), format!("{TABLE}: {e}")))
+}
+
+/// The top of the mount `path` is on, by a walk up while the device stays
+/// the same: for when the mount table cannot be read.
+#[cfg(target_os = "linux")]
+pub(crate) fn mount_top_by_walk(path: &Path) -> Option<PathBuf> {
+    Some(mount_top_of_by_dev(path, dev_of(path)?))
 }
 
 /// Each mount point in an fstab/mounts-style table once, in table order,

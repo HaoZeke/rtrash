@@ -2066,7 +2066,7 @@ fn devices_out(
         return 2;
     }
     set_text_units(prog, si, si_flag, false, true);
-    match crate::du_dev::listed() {
+    match crate::du_dev::listed(prog) {
         Ok(devs) if json => println!("{}", crate::du_dev::json(&devs)),
         Ok(devs) => print!("{}", crate::du_dev::table(&devs)),
         Err(e) => {

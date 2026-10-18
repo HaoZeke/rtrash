@@ -2163,6 +2163,15 @@ pseudo file systems, file systems with no blocks and second mounts of one
 device (bind mounts) are left out.
 On Windows the fixed and removable drives are listed, with their labels,
 then each volume mounted on a folder.
+On Linux, when the mount table
+.I /proc/self/mounts
+cannot be read (Termux and other Android sandboxes may deny it), only the
+file systems of
+.IR / ,
+the home directory and the current directory are listed, without type or
+device, and one line on standard error says so.
+The trash commands then find the volume of a path by its device, as on
+systems without the table, and say nothing.
 With
 .BR \-\-json ,
 one object with a \fIdevices\fR array of \fImount\fR, \fIdevice\fR, \fItype\fR,

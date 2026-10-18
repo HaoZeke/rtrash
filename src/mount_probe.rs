@@ -62,7 +62,7 @@ pub fn wait() -> Duration {
 pub fn fs_type_of(path: &Path) -> String {
     static TABLE: std::sync::OnceLock<Vec<(PathBuf, String)>> = std::sync::OnceLock::new();
     let table = TABLE.get_or_init(|| {
-        std::fs::read_to_string("/proc/self/mounts")
+        crate::trashdir::read_mount_table()
             .map(|t| crate::trashdir::mount_table(&t))
             .unwrap_or_default()
     });
