@@ -474,6 +474,123 @@ def check_long_lines(base):
             warnings.append(f"{f}: added line of {len(line) - 1} columns; rustfmt will rewrap it")
 
 
+# A struct that gains a field breaks every literal and pattern of it that
+# names its fields one by one and has no `..`. The box cannot compile, and
+# round 260 sent a RowCtx field that broke two literals in tui-only tests.
+STRUCT_DEF = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?struct\s+(\w+)(?:<[^{;()]*>)?\s*\{")
+TYPE_BEFORE = re.compile(r"(?:\bstruct|\bimpl|\bfor|\benum|->)\s*"
+                         r"(?:&(?:'\w+\s+)?(?:mut\s+)?)?(?:[\w:]*::)?$")
+FIELD_DEF = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:(?!:)")
+STRUCT_FIELD_CASES = [
+    ("plain", "struct A {\n    x: u8,\n    pub y: Vec<u8>,\n}\n", {"A": {"x", "y"}}),
+    ("generic", "pub(crate) struct B<'a> {\n    /// doc: not a field\n    z: &'a str,\n}\n",
+     {"B": {"z"}}),
+    ("nested", "struct C {\n    f: fn(a: u8),\n    g: Option<D>,\n}\n", {"C": {"f", "g"}}),
+    ("tuple", "struct T(u8);\nstruct U;\n", {}),
+    ("twice", "struct E {\n    a: u8,\n}\nmod m {\n    struct E {\n        b: u8,\n    }\n}\n",
+     {"E": None}),
+]
+LITERAL_DRIFT_CASES = [
+    ("listed", "let c = Ctx {\n    a: 1,\n    b,\n};\n", []),
+    ("missing", "let c = Ctx {\n    a: 1,\n};\n", [1]),
+    ("filled", "let c = Ctx {\n    a: 1,\n    ..Ctx::plain()\n};\n", []),
+    ("pattern rest", "let Ctx { a, .. } = c;\n", []),
+    ("pattern", "let &Ctx { a } = c;\n", [1]),
+    ("path", "x(m::Ctx { a: S { b: 1 } });\n", [1]),
+    ("declarations", "struct Ctx {\n    a: u8,\n}\nimpl Ctx {\n}\nimpl T for Ctx {\n}\n"
+     "fn f() -> Ctx {\n    g()\n}\n", []),
+    ("comment", "// Ctx { a } here\n", []),
+    ("ref return", "fn f(&self) -> &Ctx {\n    &self.c\n}\nfn g(&mut self) -> &'a mut Ctx {\n"
+     "    &mut self.c\n}\n", []),
+    ("other name", "let c = MyCtx {\n    a: 1,\n};\n", []),
+]
+
+
+def brace_body(text, open_at):
+    """The text between the `{` at `open_at` and its match, with nested
+    braces and their contents left out."""
+    depth, out = 0, []
+    for c in text[open_at:]:
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        elif depth == 1:
+            out.append(c)
+    return "".join(out)
+
+
+def struct_fields(text):
+    """{name: field names} of the structs with braces in `text`; a name
+    defined twice maps to None, as the literals cannot be told apart."""
+    out = {}
+    for m in STRUCT_DEF.finditer(text):
+        fields = set(FIELD_DEF.findall(brace_body(text, m.end() - 1)))
+        out[m.group(1)] = None if m.group(1) in out else fields
+    return out
+
+
+def literal_drift_lines(text, name, fields):
+    """1-based lines of `name { ... }` literals or patterns that name their
+    fields one by one, with no `..`, and leave out one of `fields`."""
+    hits = []
+    for m in re.finditer(rf"(?<![\w])(?:\w+::)*{name}\s*\{{", text):
+        head = text[text.rfind("\n", 0, m.start()) + 1:m.start()]
+        if head.lstrip().startswith("//") or TYPE_BEFORE.search(head):
+            continue
+        body = brace_body(text, m.end() - 1)
+        if ".." in body:
+            continue
+        if any(not re.search(rf"(?<![\w.]){f}\b", body) for f in fields):
+            hits.append(text.count("\n", 0, m.start()) + 1)
+    return hits
+
+
+def check_struct_field_drift(base):
+    """For each struct in src that gains fields in the range, every literal
+    or pattern of it in src or tests names the new fields or has a `..`.
+    The box cannot compile, so this catches what cargo would refuse
+    (E0063, E0027). STRUCT_FIELD_CASES and LITERAL_DRIFT_CASES test it."""
+    for what, text, want in STRUCT_FIELD_CASES:
+        if struct_fields(text) != want:
+            errors.append(f"scripts/precheck.py: struct_fields gets STRUCT_FIELD_CASES '{what}' "
+                          "wrong; the field-drift check is broken")
+    for what, text, want in LITERAL_DRIFT_CASES:
+        if literal_drift_lines(text, "Ctx", {"a", "b"}) != want:
+            errors.append(f"scripts/precheck.py: literal_drift_lines gets LITERAL_DRIFT_CASES "
+                          f"'{what}' wrong; the field-drift check is broken")
+    if not base:
+        return
+    changed = subprocess.run(["git", "diff", "--name-only", base, "--", "src"], cwd=ROOT,
+                             capture_output=True, text=True).stdout.split()
+    files = sorted((ROOT / "src").rglob("*.rs")) + sorted((ROOT / "tests").rglob("*.rs"))
+    texts = {p.relative_to(ROOT).as_posix(): p.read_text(encoding="utf-8") for p in files}
+    now = {}
+    for rel, text in texts.items():
+        if rel.startswith("src/"):
+            for name, fields in struct_fields(text).items():
+                now[name] = None if name in now else fields
+    added = {}
+    for rel in changed:
+        if not rel.endswith(".rs") or rel not in texts:
+            continue
+        old = subprocess.run(["git", "show", f"{base}:{rel}"], cwd=ROOT,
+                             capture_output=True, text=True)
+        if old.returncode != 0:
+            continue
+        for name, fields in struct_fields(old.stdout).items():
+            if fields is not None and now.get(name) and now[name] - fields:
+                added[name] = now[name] - fields
+    for name, new in sorted(added.items()):
+        for rel, text in texts.items():
+            for line in literal_drift_lines(text, name, new):
+                errors.append(f"{rel}:{line}: {name} gained {', '.join(sorted(new))} in this range, "
+                              "but this literal or pattern names neither it nor a `..`; cargo "
+                              "would refuse it (E0063 or E0027)")
+
+
 # A conventional-commit prefix: `feat(du): ...`, `fix: ...`, `ci!: ...`.
 # Subjects here are plain sentences that start with a capital (round 209).
 TYPED_SUBJECT = re.compile(r"^[a-z][a-z0-9-]*(?:\([^)]*\))?!?:\s")
@@ -2226,7 +2343,7 @@ def main():
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_directorysizes_paths()
-    check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
+    check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
