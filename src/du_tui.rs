@@ -219,18 +219,8 @@ mod bin {
         match done {
             Ok(Some(ticket)) => Ok(ticket),
             Ok(None) => Err("gone, with no trash record to undo".into()),
-            Err(_) => Err(why(prog, &said)),
+            Err(_) => Err(put::why(prog, &said)),
         }
-    }
-
-    /// The reason among what put said for an item it did not trash: the
-    /// first line that is no warning or note, without the program name.
-    pub fn why(prog: &str, said: &[String]) -> String {
-        let head = format!("{prog}: ");
-        said.iter()
-            .map(|l| l.strip_prefix(head.as_str()).unwrap_or(l.as_str()))
-            .find(|l| !l.starts_with("warning: ") && !l.starts_with("note: "))
-            .map_or_else(|| "not trashed".to_string(), str::to_string)
     }
 
     pub fn untrash(t: &Ticket) -> bool {
@@ -4562,7 +4552,10 @@ mod tests {
             "rtrash: cannot trash 'x': in use by vim".to_string(),
             "rtrash: use --in-use=warn to trash it anyway".to_string(),
         ];
-        assert_eq!(bin::why("rtrash", &said), "cannot trash 'x': in use by vim");
-        assert_eq!(bin::why("rtrash", &[]), "not trashed");
+        assert_eq!(
+            crate::put::why("rtrash", &said),
+            "cannot trash 'x': in use by vim"
+        );
+        assert_eq!(crate::put::why("rtrash", &[]), "not trashed");
     }
 }

@@ -34,6 +34,10 @@ pub struct RemoveBatchResult {
     /// (or counted in dry-run).
     pub succeeded: Vec<bool>,
     pub reclaim_bytes: u64,
+    /// Why each entry that stayed did, one `prog: ...` line apiece in input
+    /// order. Nothing is printed while the browser owns the terminal: it
+    /// shows the last line and prints them all once it has closed.
+    pub reasons: Vec<String>,
 }
 
 impl RemoveBatchResult {
@@ -54,6 +58,7 @@ pub fn permanently_remove_entries(
 ) -> RemoveBatchResult {
     let mut succeeded = Vec::with_capacity(entries.len());
     let mut bytes = 0u64;
+    let mut reasons = Vec::new();
     for entry in entries {
         if dry_run {
             bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes(&entry.dir, &entry.name));
@@ -70,7 +75,7 @@ pub fn permanently_remove_entries(
                 continue;
             }
             Err(why) => {
-                eprintln!("{prog}: {}", why.reason(entry));
+                reasons.push(format!("{prog}: {}", why.reason(entry)));
                 succeeded.push(false);
                 continue;
             }
@@ -86,7 +91,10 @@ pub fn permanently_remove_entries(
         crate::trash_total::forget(&entry.dir);
         crate::trash_total::touched(&entry.dir);
         if let Err(e) = crate::permanent_guard::remove(&payload) {
-            eprintln!("{prog}: cannot remove '{}': {e}", payload.display());
+            reasons.push(format!(
+                "{prog}: cannot remove '{}': {e}",
+                payload.display()
+            ));
             succeeded.push(false);
             continue;
         }
@@ -94,7 +102,10 @@ pub fn permanently_remove_entries(
         let _section = crate::interrupt::critical();
         if let Err(e) = std::fs::remove_file(&info_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("{prog}: cannot remove '{}': {e}", info_path.display());
+                reasons.push(format!(
+                    "{prog}: cannot remove '{}': {e}",
+                    info_path.display()
+                ));
                 succeeded.push(false);
                 continue;
             }
@@ -108,6 +119,7 @@ pub fn permanently_remove_entries(
     RemoveBatchResult {
         succeeded,
         reclaim_bytes: bytes,
+        reasons,
     }
 }
 
@@ -135,6 +147,9 @@ struct App<'a> {
     dry_run: bool,
     viewport_rows: usize,
     keys: Keymap,
+    /// Why entries stayed, as [`RemoveBatchResult::reasons`] gave them;
+    /// printed on stderr once the browser has closed.
+    said: Vec<String>,
 }
 
 impl<'a> App<'a> {
@@ -162,6 +177,7 @@ impl<'a> App<'a> {
             dry_run,
             viewport_rows: 10,
             keys,
+            said: Vec::new(),
         };
         app.refilter_query(&app.filter.clone());
         app
@@ -269,6 +285,10 @@ impl<'a> App<'a> {
         } else {
             format!("removed {ok} · fail {fail} · {} left", self.entries.len())
         };
+        if let Some(last) = result.reasons.last() {
+            self.status = format!("{} · {}", self.status, crate::util::term_text(last));
+        }
+        self.said.extend(result.reasons);
     }
 
     fn on_key(&mut self, code: KeyCode, mods: KeyModifiers) {
@@ -568,6 +588,10 @@ pub fn run(prog: &str, entries: Vec<&Entry>, dry_run: bool) -> i32 {
         Ok(())
     })();
     tui_term::leave(&mut terminal);
+    // Printing while the browser owned the screen would have drawn over it.
+    for line in &app.said {
+        eprintln!("{}", crate::util::err_text(line));
+    }
     if let Err(e) = result {
         eprintln!("{prog}: tui error: {e}");
         return 1;
@@ -654,6 +678,37 @@ mod tests {
             std::fs::read_to_string(root.join("files/x")).unwrap(),
             "new"
         );
+        assert!(record.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The browser holds stderr while it owns the terminal, so a purge
+    /// that leaves an entry says why in the status line, and the reason
+    /// waits to be printed once the browser closes.
+    #[test]
+    fn a_purge_that_leaves_an_entry_says_why_in_the_status_line() {
+        let root = std::env::temp_dir().join(format!("rtrash-tui-why-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("info")).unwrap();
+        std::fs::create_dir_all(root.join("files")).unwrap();
+        let record = root.join("info/x.trashinfo");
+        let body = |batch: &str| format!("[Trash Info]\nPath=/x\nX-Rtrash-Batch={batch}\n");
+        std::fs::write(root.join("files/x"), "old").unwrap();
+        std::fs::write(&record, body("1-1")).unwrap();
+        let dir = TrashDir::from_root(&root).unwrap();
+        let seen = crate::list::collect(std::slice::from_ref(&dir));
+        // Another item takes the name while the browser is open.
+        std::fs::write(root.join("files/x"), "new").unwrap();
+        std::fs::write(&record, body("2-2")).unwrap();
+        let mut app = App::new("rtrash", vec![&seen[0]], false);
+        app.do_purge();
+        assert!(
+            app.status
+                .starts_with("removed 0 · fail 1 · 1 left · rtrash: 'x' changed in the trash"),
+            "{}",
+            app.status
+        );
+        assert_eq!(app.said.len(), 1);
         assert!(record.exists());
         let _ = std::fs::remove_dir_all(&root);
     }

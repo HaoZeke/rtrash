@@ -247,7 +247,10 @@ impl App {
 
     fn do_put(&mut self) {
         let paths = self.targets();
-        let code = put_selection(&self.prog, &paths, self.recursive, self.force);
+        // put writes why a path stayed to stderr, which the browser holds
+        // while it owns the terminal; the status line shows it instead.
+        let (code, said) =
+            put::heard(|| put_selection(&self.prog, &paths, self.recursive, self.force));
         if self.fixed {
             prune_missing(&mut self.rows);
             self.sel.clear();
@@ -261,7 +264,11 @@ impl App {
         self.status = if code == 0 {
             format!("put ok · {} paths left in view", self.rows.len())
         } else {
-            format!("put exit {code} · {} paths left", self.rows.len())
+            format!(
+                "put exit {code} · {} paths left · {}",
+                self.rows.len(),
+                crate::util::term_text(&put::why(&self.prog, &said))
+            )
         };
     }
 
@@ -586,5 +593,30 @@ mod tests {
         app.status = "trash 1 item (1 may lose work)?".into();
         let text = crate::tui_term::render_text(80, 12, |f| ui(f, &mut app));
         assert!(text.contains("trash 1 item (1 may lose work)?"), "{text}");
+    }
+
+    /// A put that fails says why in the status line, not only on the held
+    /// stderr. The path never exists, so no trash is touched.
+    #[test]
+    fn a_failed_put_says_why_in_the_status_line() {
+        let base = std::env::temp_dir().join(format!("rtrash-puttui-why-{}", std::process::id()));
+        let missing = base.join("missing");
+        let rows = vec![PathRow {
+            path: missing.clone(),
+            is_dir: false,
+            label: None,
+            warn: false,
+        }];
+        let mut app = App::new("rtrash", base, rows);
+        app.fixed = true;
+        app.do_put();
+        assert!(
+            app.status.ends_with(&format!(
+                " · cannot remove '{}': No such file or directory",
+                missing.display()
+            )),
+            "{}",
+            app.status
+        );
     }
 }

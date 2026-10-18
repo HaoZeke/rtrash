@@ -1,0 +1,1 @@
+The empty browser (`empty -i`) and the put browser now show in their status line why an entry stayed, as the restore browser and the du explorer do. Before, the reason waited in the held stderr until the browser closed. The empty browser still prints every reason once it has closed.

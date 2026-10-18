@@ -663,6 +663,17 @@ pub fn heard<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
     (out, said)
 }
 
+/// The reason among what [`heard`] collected for an item put did not
+/// trash: the first line that is no warning or note, without the
+/// program name.
+pub fn why(prog: &str, said: &[String]) -> String {
+    let head = format!("{prog}: ");
+    said.iter()
+        .map(|l| l.strip_prefix(head.as_str()).unwrap_or(l.as_str()))
+        .find(|l| !l.starts_with("warning: ") && !l.starts_with("note: "))
+        .map_or_else(|| "not trashed".to_string(), str::to_string)
+}
+
 /// Trash one path. `Ok(None)` means nothing moved without an error (missing
 /// file under `-f`, or a declined prompt).
 pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Trashed>, i32> {

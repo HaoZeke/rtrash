@@ -1343,6 +1343,48 @@ def check_lock_rechecks():
                       "without relock; drop the entry")
 
 
+# The browsers hold stderr while they own the terminal, so what an action
+# there says must reach the screen. A fn in these files may print only when
+# it runs before the browser starts or after it has closed.
+BROWSER_FILES = ("src/du_tui.rs", "src/empty_tui.rs", "src/put_tui.rs", "src/restore_tui.rs")
+BROWSER_PRINTERS = {
+    ("src/du_tui.rs", "explorer_roots"): "checks the roots before the explorer starts",
+    ("src/du_tui.rs", "run"): "before enter and after leave",
+    ("src/empty_tui.rs", "run"): "before enter, and the held reasons after leave",
+    ("src/put_tui.rs", "run"): "before enter and after leave",
+    ("src/put_tui.rs", "run_rows"): "before enter and after leave",
+    ("src/restore_tui.rs", "run"): "before enter, and the held log after leave",
+    ("src/restore_tui.rs", "restore_single"): "one match restores without a browser",
+}
+BROWSER_PRINT = re.compile(r"\be?print(?:ln)?!")
+
+
+def check_browser_prints():
+    """A browser action shows what it says in the browser (round 248: the
+    empty browser printed why an entry stayed onto held stderr). Only the
+    fns in BROWSER_PRINTERS print; stale entries are errors."""
+    starts = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)")
+    printers = set()
+    for rel in BROWSER_FILES:
+        text = rust_code((ROOT / rel).read_text(encoding="utf-8"))
+        skip = test_mod_lines(text.splitlines())
+        found = list(starts.finditer(text))
+        cuts = [m.start() for m in found] + [len(text)]
+        for m, a, b in zip(found, cuts, cuts[1:]):
+            line = text.count("\n", 0, a) + 1
+            if line - 1 in skip or not BROWSER_PRINT.search(text[a:b]):
+                continue
+            key = (rel, m.group(1))
+            printers.add(key)
+            if key not in BROWSER_PRINTERS:
+                errors.append(f"{rel}:{line}: {key[1]} prints while a browser may own the "
+                              "terminal; put the text in the status line or a held log, or "
+                              "list it in BROWSER_PRINTERS with a reason")
+    for rel, fn in sorted(set(BROWSER_PRINTERS) - printers):
+        errors.append(f"BROWSER_PRINTERS lists {fn} in {rel}, which prints nothing; drop "
+                      "the entry")
+
+
 def check_put_says():
     """put_one writes its messages through `say!`, never `eprintln!`, so the
     du explorer's delete, which listens with put::heard, shows why a row
@@ -1676,7 +1718,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
