@@ -1,0 +1,1 @@
+On macOS, `rtrash du -x /` now says on stderr that it counts the read-only system volume only. Firmlinks such as `/Users` and `/Applications` lead onto `/System/Volumes/Data`, the volume to scan for the data. A Btrfs CI test also checks that totals with and without `-x` match coreutils `du -s` across a subvolume.

@@ -4361,3 +4361,41 @@ fn gitignore_matches_git_status_on_seeded_trees() {
         assert_eq!(got, want, "seed {seed}, rules {rules:?}");
     }
 }
+
+/// macOS only: `/` is the system volume, and firmlinks such as /Users
+/// lead onto the data volume, another device. Under -x the walk leaves
+/// /Users out without opening it and says where the data lives. The
+/// filters keep the walk to /Users, so the run stays short.
+#[cfg(target_os = "macos")]
+#[test]
+fn x_on_the_macos_root_leaves_the_data_volume_out_and_says_so() {
+    use std::os::unix::fs::MetadataExt;
+    let root = fs::symlink_metadata("/").unwrap();
+    let users = fs::symlink_metadata("/Users").unwrap();
+    assert_ne!(root.dev(), users.dev(), "/Users is on the system volume");
+    let t = Tree::new("macos-x");
+    let flags = [
+        "--json",
+        "--no-git",
+        "-x",
+        "--exclude=/*",
+        "--exclude=!/Users",
+        "/",
+    ];
+    let out = t.du(&flags);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{err}");
+    assert!(
+        err.contains("note: -x / counts the macOS system volume only"),
+        "{err}"
+    );
+    let j = String::from_utf8(out.stdout).unwrap();
+    // The root alone: /Users is on another device, the rest filtered.
+    assert_eq!(field(&j, "files"), 0, "{j}");
+    assert_eq!(field(&j, "dirs"), 1, "{j}");
+    assert_eq!(field(&j, "disk"), root.blocks() * 512, "{j}");
+    // -x on any other PATH gets no note.
+    let out = t.du(&["--json", "--no-git", "-x", "."]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!err.contains("system volume"), "{err}");
+}

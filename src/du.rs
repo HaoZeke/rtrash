@@ -4322,6 +4322,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if !opts.shared_once {
         note_snapshots(prog, &report.snapshots);
     }
+    note_macos_root(prog, opts.one_file_system, &report.roots);
     if report.too_deep > 0 {
         eprintln!(
             "{prog}: {} past {} levels or {} KiB of path counted without their contents",
@@ -4349,6 +4350,22 @@ fn floor_rows(report: &mut Report, floor: u64, apparent: bool) {
     let size = |it: &Item| if apparent { it.apparent } else { it.disk };
     report.dirs.retain(|it| size(it) >= floor);
     report.files.retain(|it| size(it) >= floor);
+}
+
+/// macOS: `/` is the read-only system volume, and firmlinks such as
+/// /Users and /Applications lead onto the data volume, another device
+/// (ncdu #153, gdu #639). Under -x a scan of `/` leaves all of that out,
+/// as `du -x /` does there, so say where the data lives.
+fn note_macos_root(prog: &str, one_file_system: bool, roots: &[RootTotals]) {
+    if cfg!(target_os = "macos")
+        && one_file_system
+        && roots.iter().any(|r| r.path == Path::new("/"))
+    {
+        eprintln!(
+            "{prog}: note: -x / counts the macOS system volume only; /Users, /Applications \
+             and the other firmlinked folders are on /System/Volumes/Data (scan that with -x)"
+        );
+    }
 }
 
 /// Name the read-only btrfs snapshots a scan counted in full, up to

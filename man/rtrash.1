@@ -1412,6 +1412,21 @@ snapshots met (the first 10) unless
 .B \-\-shared
 counts their shared extents once, and the JSON object lists them all in
 \fIsnapshots\fR.
+On macOS
+.I /
+is the read-only system volume and firmlinks such as
+.I /Users
+and
+.I /Applications
+lead onto the data volume, so
+.B "rtrash du \-x /"
+counts the system volume only, as
+.B "du \-x /"
+does there, and says so on stderr; scan
+.I /System/Volumes/Data
+with
+.B \-x
+for the data.
 .TP
 .B \-\-include\-kernfs
 Also walk kernel pseudo file systems met below
