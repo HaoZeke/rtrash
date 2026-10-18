@@ -258,6 +258,7 @@ export extern "rtrash du" [
     --since: string  # only list entries modified at or after DATE
     --until: string  # only list entries whose newest modification is
     --home-only  # consider only the home trash for the trash summary
+    --open-deleted  # also report the space that deleted files still open
     --trash-dir: string  # consider only this trash directory (repeatable)
     --no-git  # do not ask git about listed paths
     --include-dirty  # with --print0, also print paths whose git state is

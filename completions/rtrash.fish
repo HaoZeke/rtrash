@@ -166,6 +166,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l max-age
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l since -d 'only entries modified at or after DATE' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l until -d 'only entries last modified before DATE' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l home-only -d 'only the home trash in the trash summary'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l open-deleted -d 'also report space held by deleted files still open'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l trash-dir -d 'only this trash directory in the summary' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-git -d 'do not ask git about listed paths'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l include-dirty -d 'with --print0, also print rows with git work at risk'

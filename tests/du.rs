@@ -4738,3 +4738,61 @@ fn du_x_at_the_macos_root_reaches_users_once() {
         }
     }
 }
+
+/// dust #517 and 33(h): with `--open-deleted`, a file this test deletes
+/// while it keeps it open shows in its own JSON key and text line, and
+/// the totals leave it out. Without the option there is no such key.
+#[cfg(target_os = "linux")]
+#[test]
+fn deleted_files_still_open_are_reported_apart_from_the_totals() {
+    let t = Tree::new("open-deleted");
+    t.file("kept.bin", 4096);
+    let gone = t.file("gone.bin", 1 << 20);
+    let held = fs::File::open(&gone).unwrap();
+    fs::remove_file(&gone).unwrap();
+    let j = t.json(&["--no-git", "--open-deleted"]);
+    let at = j.find("\"open_deleted\":").expect("an open_deleted key");
+    assert!(field(&j[at..], "files") >= 1, "{j}");
+    assert!(field(&j[at..], "apparent") >= 1 << 20, "{j}");
+    // The first apparent size is the total of the root.
+    assert!(field(&j, "apparent") < 1 << 20, "{j}");
+    let plain = t.json(&["--no-git"]);
+    assert!(!plain.contains("open_deleted"), "{plain}");
+    let out = t.du(&["--no-git", "--open-deleted"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("Held by deleted files still open on these file systems:"),
+        "{text}"
+    );
+    drop(held);
+}
+
+/// 33(h): only Linux has the figure; elsewhere the scan still runs, a
+/// note says so, and the report has no open_deleted key.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn deleted_files_still_open_are_not_reported_off_linux() {
+    let t = Tree::new("open-deleted-off");
+    t.file("kept.bin", 4096);
+    let out = t.du(&["--json", "--no-git", "--open-deleted"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("only Linux has"), "{err}");
+    let j = String::from_utf8_lossy(&out.stdout);
+    assert!(!j.contains("open_deleted"), "{j}");
+}
+
+/// 33(h): `--open-deleted` adds a line under the totals, so a mode with
+/// no totals refuses it.
+#[test]
+fn open_deleted_needs_a_listing() {
+    let t = Tree::new("open-deleted-modes");
+    for mode in ["--print0", "--dupes", "--stacks", "--devices"] {
+        let out = t.du(&["--open-deleted", mode]);
+        assert_eq!(out.status.code(), Some(2), "{mode}");
+    }
+}

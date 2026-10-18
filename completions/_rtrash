@@ -189,6 +189,7 @@ du_opts=(
   '--since=[only entries modified at or after DATE]:DATE:'
   '--until=[only entries last modified before DATE]:DATE:'
   '--home-only[only the home trash in the trash summary]'
+  '--open-deleted[also report space held by deleted files still open]'
   '--trash-dir=[only this trash directory in the summary]:path:_files -/'
   '--no-git[do not ask git about listed paths]'
   '--include-dirty[with --print0, also print rows with git work at risk]'

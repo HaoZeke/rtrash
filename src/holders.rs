@@ -314,6 +314,98 @@ fn live_path(p: PathBuf) -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(b)))
 }
 
+/// dust #517 and 33(h): what files that were deleted but are still open
+/// hold on some file systems. The space returns only when the last
+/// process closes them, which explains a gap between df and du.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OpenDeleted {
+    /// Deleted files, each (device, inode) once however many hold it.
+    pub files: u64,
+    /// Their allocated bytes (`st_blocks * 512`).
+    pub disk: u64,
+    /// Their lengths.
+    pub apparent: u64,
+    /// Processes whose descriptors could not be read (another user's,
+    /// without root), so the figures are lower bounds.
+    pub unreadable: u64,
+}
+
+/// Does the descriptor link `target` name a file deleted since it was
+/// opened? The kernel marks such a link ` (deleted)`; a socket or pipe
+/// (`socket:[N]`) is no path at all.
+#[cfg(any(target_os = "linux", test))]
+pub fn is_deleted_link(target: &[u8]) -> bool {
+    target.first() == Some(&b'/') && target.ends_with(b" (deleted)")
+}
+
+/// 33(h): the deleted files still open on the devices `devs`, from the
+/// descriptor links of every process in /proc. A link marked deleted
+/// counts when its file has no name left (link count 0) and lies on one
+/// of `devs`. None when /proc cannot be read.
+#[cfg(target_os = "linux")]
+pub fn open_deleted(devs: &std::collections::HashSet<u64>) -> Option<OpenDeleted> {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = std::fs::read_dir("/proc").ok()?;
+    let procs = dir.flatten().filter_map(|entry| {
+        let name = entry.file_name();
+        let pid = !name.is_empty() && name.as_bytes().iter().all(u8::is_ascii_digit);
+        pid.then(|| entry.path())
+    });
+    Some(open_deleted_in(procs, devs))
+}
+
+/// [`open_deleted`] over the process folders `procs` (`/proc/PID`).
+#[cfg(target_os = "linux")]
+fn open_deleted_in(
+    procs: impl Iterator<Item = PathBuf>,
+    devs: &std::collections::HashSet<u64>,
+) -> OpenDeleted {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    let mut seen: std::collections::HashSet<(u64, u64)> = std::collections::HashSet::new();
+    let mut out = OpenDeleted::default();
+    for proc_dir in procs {
+        let fds = match std::fs::read_dir(proc_dir.join("fd")) {
+            Ok(fds) => fds,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                out.unreadable = out.unreadable.saturating_add(1);
+                continue;
+            }
+            // The process ended since the listing.
+            Err(_) => continue,
+        };
+        for fd in fds.flatten() {
+            let link = fd.path();
+            let Ok(target) = std::fs::read_link(&link) else {
+                continue;
+            };
+            if !is_deleted_link(target.as_os_str().as_bytes()) {
+                continue;
+            }
+            // The metadata of the open file itself, through the link.
+            let Ok(m) = std::fs::metadata(&link) else {
+                continue;
+            };
+            if !m.is_file() || m.nlink() != 0 || !devs.contains(&m.dev()) {
+                continue;
+            }
+            if seen.insert((m.dev(), m.ino())) {
+                out.files = out.files.saturating_add(1);
+                out.disk = out.disk.saturating_add(m.blocks().saturating_mul(512));
+                out.apparent = out.apparent.saturating_add(m.len());
+            }
+        }
+    }
+    out
+}
+
+/// 33(h): only Linux lists the descriptors of every process cheaply in
+/// /proc; elsewhere there is nothing to report.
+#[cfg(not(target_os = "linux"))]
+pub fn open_deleted(_devs: &std::collections::HashSet<u64>) -> Option<OpenDeleted> {
+    None
+}
+
 #[cfg(target_os = "macos")]
 const SUPPORTED: bool = true;
 
@@ -694,6 +786,43 @@ fn scan(_s: &mut Snapshot) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 33(h): only a path the kernel marked deleted counts.
+    #[test]
+    fn a_deleted_mark_on_a_path_names_a_deleted_file() {
+        assert!(is_deleted_link(b"/tmp/a.log (deleted)"));
+        assert!(!is_deleted_link(b"/tmp/a.log"));
+        assert!(!is_deleted_link(b"socket:[123] (deleted)"));
+        assert!(!is_deleted_link(b""));
+    }
+
+    /// 33(h): a file this test deletes while it holds it open twice
+    /// counts once, at its length, on its own device only.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_deleted_file_held_open_here_is_counted() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("rtrash-open-deleted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("held.bin");
+        std::fs::write(&file, vec![b'x'; 1 << 20]).unwrap();
+        let held = std::fs::File::open(&file).unwrap();
+        let again = std::fs::File::open(&file).unwrap();
+        let dev = held.metadata().unwrap().dev();
+        std::fs::remove_file(&file).unwrap();
+        let devs = std::collections::HashSet::from([dev]);
+        let me = || std::iter::once(PathBuf::from("/proc/self"));
+        let got = open_deleted_in(me(), &devs);
+        assert!(got.files >= 1, "{got:?}");
+        assert!(got.apparent >= 1 << 20, "{got:?}");
+        // Two descriptors, one file: counted once.
+        assert!(got.apparent < 2 << 20, "{got:?}");
+        let other = std::collections::HashSet::from([dev.wrapping_add(1)]);
+        assert_eq!(open_deleted_in(me(), &other).files, 0);
+        assert!(open_deleted(&devs).is_some_and(|all| all.apparent >= 1 << 20));
+        drop((held, again));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[cfg(unix)]
     #[test]

@@ -170,6 +170,9 @@ directories appear as one `trash` row and are never printed by --print0.
       --until=DATE      only list entries whose newest modification is
                           before DATE
       --home-only       consider only the home trash for the trash summary
+      --open-deleted    also report the space that deleted files still open
+                          hold on the scanned file systems (Linux /proc; never
+                          in the totals; elsewhere a note says it is missing)
       --trash-dir=PATH  consider only this trash directory (repeatable)
       --no-git          do not ask git about listed paths
       --include-dirty   with --print0, also print paths whose git state is
@@ -715,14 +718,65 @@ pub struct TrashSummary {
     pub cap: Option<u64>,
 }
 
-/// Summarize the trash dirs that live on the same device as any scan root.
+/// The devices of the scan roots of `report`.
 #[cfg(unix)]
-pub fn trash_on_scanned_devices(dirs: &[TrashDir], report: &Report) -> TrashSummary {
-    let devs: HashSet<u64> = report
+fn scanned_devices(report: &Report) -> HashSet<u64> {
+    report
         .roots
         .iter()
         .filter_map(|r| fs::symlink_metadata(&r.path).ok().map(|m| m.dev()))
-        .collect();
+        .collect()
+}
+
+/// 33(h) `--open-deleted`: what deleted files still open hold on the
+/// devices of the scan roots. None where the system cannot say.
+#[cfg(unix)]
+fn open_deleted_on(report: &Report) -> Option<crate::holders::OpenDeleted> {
+    crate::holders::open_deleted(&scanned_devices(report))
+}
+
+#[cfg(windows)]
+fn open_deleted_on(_report: &Report) -> Option<crate::holders::OpenDeleted> {
+    None
+}
+
+/// The `--open-deleted` line under the trash line. The space is not in
+/// any total: no name is left to count it under.
+fn open_deleted_line(h: &crate::holders::OpenDeleted) -> String {
+    let partial = if h.unreadable > 0 {
+        format!(
+            "; {} not readable, so this is a lower bound",
+            plural(h.unreadable, "process", "processes")
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "Held by deleted files still open on these file systems: {} on disk, {} apparent, \
+         in {} (not in the totals{partial})",
+        format_bytes(h.disk),
+        format_bytes(h.apparent),
+        plural(h.files, "file", "files")
+    )
+}
+
+/// The `open_deleted` key of `--json` with `--open-deleted`; no key
+/// without it, so other reports keep their shape.
+fn open_deleted_json(h: Option<&crate::holders::OpenDeleted>) -> String {
+    h.map(|h| {
+        format!(
+            ",\"open_deleted\":{{\"files\":{},\"disk\":{},\"apparent\":{},\
+             \"unreadable_processes\":{}}}",
+            h.files, h.disk, h.apparent, h.unreadable
+        )
+    })
+    .unwrap_or_default()
+}
+
+/// Summarize the trash dirs that live on the same device as any scan root.
+#[cfg(unix)]
+pub fn trash_on_scanned_devices(dirs: &[TrashDir], report: &Report) -> TrashSummary {
+    let devs = scanned_devices(report);
     let same: Vec<TrashDir> = dirs
         .iter()
         .filter(|d| {
@@ -2813,7 +2867,7 @@ fn trash_json(t: &TrashSummary) -> String {
 
 /// JSON form of a report (one object; arrays of roots, dirs and files).
 pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
-    report_json_with(r, trash, Some(r.unreadable), None)
+    report_json_with(r, trash, Some(r.unreadable), None, None)
 }
 
 /// [`report_json`] with the unreadable count given, `null` when unknown
@@ -2823,6 +2877,7 @@ fn report_json_with(
     trash: &TrashSummary,
     unreadable: Option<u64>,
     targets: Option<&Targets>,
+    held: Option<&crate::holders::OpenDeleted>,
 ) -> String {
     let roots: Vec<String> = r
         .roots
@@ -2916,13 +2971,15 @@ fn report_json_with(
             .collect();
         format!("{too_deep},\"snapshots\":[{}]", rows.join(","))
     };
+    // The open_deleted key, when there is one, comes last.
+    let trash_and_held = trash_json(trash) + &open_deleted_json(held);
     format!(
         "{{\"roots\":[{}],\"dirs\":[{}],\"files\":[{}],\"unreadable\":{}{unread}{too_deep}{shared}{partial}{types},\"trash\":{}}}",
         roots.join(","),
         dirs.join(","),
         files.join(","),
         unreadable.map_or_else(|| "null".to_string(), |n| n.to_string()),
-        trash_json(trash)
+        trash_and_held
     )
 }
 
@@ -3633,6 +3690,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut ncdu: Option<PathBuf> = None;
     let mut ncdu_binary = false;
     let mut devices = false;
+    let mut open_deleted = false;
     let mut dupes = false;
     let mut trash_dupes = false;
     let mut link_dupes = false;
@@ -3897,6 +3955,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--dirs" => only_dirs = true,
                 "--files" => only_files = true,
                 "--devices" => devices = true,
+                "--open-deleted" => open_deleted = true,
                 "--json" => json = true,
                 "--print0" => print0 = true,
                 "--dupes" => dupes = true,
@@ -4049,6 +4108,25 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             );
             return 2;
         }
+    }
+    // 33(h): the line goes under the totals of a listing; the other modes
+    // print no totals to put it under.
+    if open_deleted
+        && (print0
+            || pick
+            || interactive
+            || dupes
+            || devices
+            || stacks
+            || ncdu.is_some()
+            || output.is_some()
+            || from_file.is_some())
+    {
+        eprintln!(
+            "{prog}: --open-deleted adds a line under the totals of a scan; it takes no \
+             --print0, --pick, -i, --dupes, --devices, --stacks, --ncdu, -o or -f"
+        );
+        return 2;
     }
     // Without -L the walk lists only regular files and directories, so no
     // row is a link; a snapshot keeps paths, not the links on disk now.
@@ -4284,7 +4362,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         let trash = TrashSummary::default();
         if json {
-            println!("{}", report_json_with(&report, &trash, known, None));
+            println!("{}", report_json_with(&report, &trash, known, None, None));
         } else {
             print_table(
                 &format!("{} in {}", opts.sort.title("directories"), file.display()),
@@ -4450,6 +4528,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let trash = trash_on_scanned_devices(&trash_dirs, &report);
     #[cfg(windows)]
     let trash = recycle_bin_on_scanned_drives(&report);
+    let held = if open_deleted {
+        open_deleted_on(&report)
+    } else {
+        None
+    };
+    if open_deleted && held.is_none() {
+        eprintln!(
+            "{prog}: note: --open-deleted reads /proc, which only Linux has; \
+             no line for it here"
+        );
+    }
     if (print0 || pick) && !allow_filtered {
         let held = hold_filtered(&mut report.dirs);
         if held > 0 {
@@ -4472,7 +4561,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let targets = show_targets.then(|| link_targets(&report));
     if json {
         let unreadable = Some(report.unreadable);
-        let j = report_json_with(&report, &trash, unreadable, targets.as_ref());
+        let j = report_json_with(&report, &trash, unreadable, targets.as_ref(), held.as_ref());
         println!("{j}");
     } else if print0 {
         let mut out = io::stdout().lock();
@@ -4576,6 +4665,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             println!("Partial scan: stopped by Ctrl-C, so sizes are lower bounds");
         }
         print_trash(&trash);
+        if let Some(h) = &held {
+            println!("{}", open_deleted_line(h));
+        }
     }
     warn_unread(prog, &report);
     if !opts.shared_once {
@@ -4787,7 +4879,7 @@ mod tests {
         let plain = tree_lines(&r, SortKey::Disk, 20, false, &TREE_ASCII, None);
         assert!(plain.iter().all(|l| !l.contains(" -> ")), "{plain:?}");
         let none = TrashSummary::default();
-        let j = report_json_with(&r, &none, Some(0), Some(&targets));
+        let j = report_json_with(&r, &none, Some(0), Some(&targets), None);
         assert_eq!(j.matches("\"target\":").count(), 2, "{j}");
         assert!(!report_json(&r, &none).contains("\"target\""));
         let _ = fs::remove_dir_all(&base);
