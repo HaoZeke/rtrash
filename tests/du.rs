@@ -2,7 +2,8 @@
 //!
 //! These run on Windows too. A few stay Unix only: sparse files (NTFS does
 //! not make them by default), symlinks (they need a privilege there), the
-//! GNU du parity check, and the FreeDesktop trash row.
+//! GNU du parity check, and the FreeDesktop trash row. One is macOS only:
+//! what -x sees at the root.
 
 mod common;
 
@@ -4359,5 +4360,84 @@ fn gitignore_matches_git_status_on_seeded_trees() {
             .collect();
         got.sort_unstable();
         assert_eq!(got, want, "seed {seed}, rules {rules:?}");
+    }
+}
+
+/// The dev and inode numbers of `p`, as `stat` gives them.
+#[cfg(target_os = "macos")]
+fn dev_ino(p: &str) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::metadata(p).unwrap();
+    (m.dev(), m.ino())
+}
+
+/// macOS joins the read-only system volume and the data volume of one
+/// APFS volume group at /, and both report one device number. So -x / does
+/// not stop at /System/Volumes/Data. /Users there and at the top is one
+/// directory (a firmlink), and the walk counts it once. Only the folders on
+/// the way to Users are let in, so the scan stays small.
+#[cfg(target_os = "macos")]
+#[test]
+fn du_x_at_the_macos_root_reaches_users_once() {
+    let t = Tree::new("macos-root");
+    let data = "/System/Volumes/Data";
+    let root = dev_ino("/");
+    let users = dev_ino("/Users");
+    eprintln!(
+        "dev, ino: / {root:?}, /Users {users:?}, {data} {:?}",
+        dev_ino(data)
+    );
+    assert_eq!(
+        dev_ino(data).0,
+        root.0,
+        "the data volume shares the root's device"
+    );
+    assert_eq!(
+        dev_ino(&format!("{data}/Users")),
+        users,
+        "one Users under two names"
+    );
+    let only_users = ["--exclude=/*", "--exclude=!/Users", "--exclude=/Users/*"];
+    let both = [
+        "--exclude=/*",
+        "--exclude=!/Users",
+        "--exclude=!/System",
+        "--exclude=/System/*",
+        "--exclude=!/System/Volumes",
+        "--exclude=/System/Volumes/*",
+        "--exclude=!/System/Volumes/Data",
+        "--exclude=/System/Volumes/Data/*",
+        "--exclude=!/System/Volumes/Data/Users",
+        "--exclude=/Users/*",
+        "--exclude=/System/Volumes/Data/Users/*",
+    ];
+    // The root and Users; with both names, also System, Volumes and Data.
+    let cases: [(&str, &[&str], u64); 3] = [
+        ("/", &only_users, 2),
+        (data, &only_users, 2),
+        ("/", &both, 5),
+    ];
+    for bulk in ["1", "0"] {
+        for (path, filters, dirs) in cases {
+            let mut args = vec!["--json", "--no-git", "-x"];
+            args.extend_from_slice(filters);
+            args.push(path);
+            let out = t.du_env(&args, &[("RTRASH_DU_BULK", bulk)]);
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let j = String::from_utf8(out.stdout).unwrap();
+            eprintln!(
+                "RTRASH_DU_BULK={bulk} du -x {path}, {} filters: {j}",
+                filters.len()
+            );
+            assert_eq!(
+                field(&j, "dirs"),
+                dirs,
+                "RTRASH_DU_BULK={bulk} {path} {filters:?}"
+            );
+        }
     }
 }

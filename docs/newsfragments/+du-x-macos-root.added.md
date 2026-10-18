@@ -1,0 +1,1 @@
+The manual says what `rtrash du -x /` covers on macOS. There one device number covers the system and data volumes of the Apple File System (APFS) volume group, so it walks both. A firmlinked folder such as `/Users`, met at the top and under `/System/Volumes/Data`, counts once. A macOS CI test checks this with `getattrlistbulk` reads and with plain `stat`.

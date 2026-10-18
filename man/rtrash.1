@@ -1424,6 +1424,15 @@ snapshots met (the first 10) unless
 .B \-\-shared
 counts their shared extents once, and the JSON object lists them all in
 \fIsnapshots\fR.
+On macOS one device number covers the read-only system volume and the
+data volume of the Apple File System (APFS) volume group, so
+.B "\-x /"
+walks both.
+A folder that firmlinks join, such as
+.IR /Users ,
+shows up at the top and under
+.IR /System/Volumes/Data .
+It is one directory with one inode, so the walk counts it once.
 .TP
 .B \-\-include\-kernfs
 Also walk kernel pseudo file systems met below
