@@ -110,7 +110,34 @@ pub fn trash_delete(p: &Path) -> io::Result<()> {
     if let Some(dir) = crate::win_recycle::test_bin_dir() {
         return crate::win_recycle::test_bin_put(&dir, p);
     }
-    trash::delete(p).map_err(|e| io::Error::other(e.to_string()))
+    trash::delete(p).map_err(bin_error)
+}
+
+/// A Recycle Bin refusal as an error that reads on one line. The `trash`
+/// crate prints its errors in their debug form ("Error during a `trash`
+/// operation: Os { code: ..., description: ... }"), which the du explorer
+/// would show in its status line. A Win32 code becomes that OS error, so
+/// the text is the system's own message and callers can tell its kind.
+#[cfg(windows)]
+fn bin_error(e: trash::Error) -> io::Error {
+    match e {
+        // HRESULT_FROM_WIN32: facility 7 carries a Win32 error code.
+        trash::Error::Os { code, .. } if (code as u32) >> 16 == 0x8007 => {
+            io::Error::from_raw_os_error((code as u32 & 0xffff) as i32)
+        }
+        trash::Error::Os { description, .. } => io::Error::other(
+            description
+                .trim_start_matches("windows error: ")
+                .to_string(),
+        ),
+        trash::Error::TargetedRoot => io::Error::other("a drive root cannot go to the Recycle Bin"),
+        trash::Error::CouldNotAccess { .. } => {
+            io::Error::new(io::ErrorKind::NotFound, "missing, or access is denied")
+        }
+        trash::Error::CanonicalizePath { .. } => io::Error::other("cannot resolve the path"),
+        trash::Error::Unknown { description } => io::Error::other(description),
+        e => io::Error::other(e.to_string()),
+    }
 }
 
 /// The error a primitive returns for a path outside the scope.
@@ -246,5 +273,36 @@ mod tests {
         }
         let kept = resolve(&gone.join("x")).unwrap();
         assert!(kept.ends_with(Path::new("rtrash-allow-roots-no-such-dir").join("x")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recycle_bin_errors_read_as_the_system_message() {
+        let in_use = trash::Error::Os {
+            code: 0x8007_0020_u32 as i32,
+            description: "windows error: in use (0x80070020)".into(),
+        };
+        assert_eq!(bin_error(in_use).raw_os_error(), Some(32));
+        let other = trash::Error::Os {
+            code: 0x8000_4005_u32 as i32,
+            description: "windows error: Unspecified error (0x80004005)".into(),
+        };
+        assert_eq!(
+            bin_error(other).to_string(),
+            "Unspecified error (0x80004005)"
+        );
+        let aborted = trash::Error::Unknown {
+            description: "Some operations were aborted".into(),
+        };
+        assert_eq!(
+            bin_error(aborted).to_string(),
+            "Some operations were aborted"
+        );
+        let gone = trash::Error::CouldNotAccess {
+            target: "C:\\gone".into(),
+        };
+        assert_eq!(bin_error(gone).kind(), std::io::ErrorKind::NotFound);
+        let root = bin_error(trash::Error::TargetedRoot).to_string();
+        assert!(!root.contains("operation"), "{root}");
     }
 }
