@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write};
+use std::io;
 
 /// Percent-encode a byte string for a `.trashinfo` `Path=` value.
 /// Unreserved characters (RFC 3986) and `/` pass through; everything else,
@@ -347,20 +347,6 @@ pub fn url_decode_bytes(b: &[u8]) -> Vec<u8> {
         i += 1;
     }
     out
-}
-
-/// Print `prompt` to stderr and read one line from stdin; true on y/Y.
-pub fn confirm(prompt: &str) -> bool {
-    eprint!("{prompt}");
-    io::stderr().flush().ok();
-    let mut line = String::new();
-    if io::stdin().lock().read_line(&mut line).is_err() {
-        return false;
-    }
-    matches!(
-        line.trim_start().as_bytes().first(),
-        Some(b'y') | Some(b'Y')
-    )
 }
 
 /// `1 item`, `2 items`: a count with its noun in the right number.

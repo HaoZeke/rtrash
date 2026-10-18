@@ -511,12 +511,9 @@ pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
 /// the ways to go on.
 fn confirm_whole(prog: &str, total: usize) -> bool {
     if crate::util::stdin_is_tty() {
-        use std::io::Write;
-        eprint!("Permanently delete all {total} items in the Windows Recycle Bin? (y/N) ");
-        let _ = std::io::stderr().flush();
-        let mut line = String::new();
-        let _ = std::io::stdin().read_line(&mut line);
-        return matches!(line.trim(), "y" | "Y" | "yes" | "Yes");
+        return crate::answer::ask(&format!(
+            "Permanently delete all {total} items in the Windows Recycle Bin? (y/N) "
+        ));
     }
     eprintln!("{prog}: refusing to empty the whole Windows Recycle Bin ({total} items)");
     eprintln!("{prog}: pass --all to remove everything, or scope it (DAYS, --older-than=AGE, or rm MATCH)");

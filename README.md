@@ -488,6 +488,10 @@ Does **not** restore.
 On a terminal it names the matches (the first 10, with sizes) and asks once before it deletes, as `rm -I` does and as trash-cli #383 asks of `trash-rm`. Only `y` or `yes` goes on. A script, whose stdin or stderr is not a terminal, is never asked, so pipelines and cron jobs work as before. `-i`/`--interactive` asks even then, with the reply read from stdin. `-y`/`--yes` and `-f`/`--force` never ask, and the last of the three wins.
 Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-i`/`--interactive`, `-y`/`--yes`, `-f`/`--force` (no question, and mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).
 
+### Prompts
+
+Every question rtrash asks on the command line (`put -i`, `put --inspect`, `empty -i`, `rm -i`, the guards before a whole-trash empty) reads its answer the same way. Only `y` or `yes`, in any case and with blanks around it, goes on. Anything else is a no: `n`, `yolo`, an empty line, and the end of input. A pipe answers like a terminal, so `echo n | rtrash empty -i` keeps the trash (trash-cli #333). Unlike `rm -i`, an answer that merely starts with `y` is a no. The numbered pick of `restore` reads its line the same way.
+
 ## FreeDesktop durability notes
 
 Previously deferred items are implemented in the shipped put/empty path:

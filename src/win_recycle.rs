@@ -1493,7 +1493,7 @@ mod os {
             ("file", size)
         };
         let shown = crate::util::term_path(f);
-        crate::util::confirm(&format!("{prog}: remove {kind} '{shown}' ({what})? "))
+        crate::answer::ask(&format!("{prog}: remove {kind} '{shown}' ({what})? "))
     }
 
     /// Files below `dir` (not directories), without following links.
@@ -3028,10 +3028,9 @@ Without PATH, print a numbered list and read an index from stdin.
         if util::stdin_is_tty() {
             eprint!("{ask} [0..{}]: ", matches.len() - 1);
         }
-        let mut line = String::new();
-        if std::io::stdin().read_line(&mut line).is_err() {
+        let Ok(line) = crate::answer::read_reply() else {
             return 1;
-        }
+        };
         if line.trim().is_empty() && trash_cli {
             println!("No files were restored");
             return 0;

@@ -9,6 +9,7 @@
 //! FreeDesktop path when the `python` feature is enabled (Unix).
 
 pub mod allow_roots;
+pub mod answer;
 pub mod listfmt;
 pub mod platform;
 pub mod util;

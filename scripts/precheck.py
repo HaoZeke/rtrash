@@ -1603,6 +1603,36 @@ def check_key_reads():
                           "tui_term::next_key so the keys every browser shares are handled")
 
 
+# A prompt reads its answer through src/answer.rs (round 251): stdin read
+# line by line, or a yes matched by hand, anywhere else is an error.
+PROMPT_READ = re.compile(r"stdin\(\)\s*(?:\.lock\(\)\s*)?\.(?:read_line|lines)\b")
+YES_MATCH = re.compile(r'"(?:y|Y|yes|Yes|YES)"\s*\|\s*"(?:y|Y|yes|Yes|YES)"'
+                       r"|Some\(b'[yY]'\)")
+
+
+def check_prompt_answers():
+    """Every prompt (empty, rm, restore, put -i, the wsl and budget guards)
+    reads its answer with answer::ask or answer::read_reply, so a yes means
+    the same everywhere: y or yes in any case, and anything else, a piped n
+    or the end of input included, is a no (trash-cli #333). src/answer.rs
+    alone reads stdin by the line or spells out what a yes is."""
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        if rel == "src/answer.rs":
+            continue
+        raw = path.read_text(encoding="utf-8")
+        skip = test_mod_lines(raw.splitlines())
+        for pat, keep, what in ((PROMPT_READ, False, "reads stdin by the line"),
+                                (YES_MATCH, True, "matches a yes by hand")):
+            text = rust_code(raw, strings=keep)
+            for m in pat.finditer(text):
+                line = text.count("\n", 0, m.start()) + 1
+                if line - 1 in skip:
+                    continue
+                errors.append(f"{rel}:{line}: {what}; read prompt answers with answer::ask "
+                              "or answer::read_reply so every prompt parses them alike")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -1718,7 +1748,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

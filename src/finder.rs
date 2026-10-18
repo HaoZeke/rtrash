@@ -813,8 +813,8 @@ fn pick<'a>(
     if o.path_scope && crate::util::stdin_is_tty() {
         eprint!("What file to restore [0..{}]: ", list.len() - 1);
     }
-    let mut line = String::new();
-    let read = std::io::stdin().read_line(&mut line);
+    let read = crate::answer::read_reply();
+    let line = read.as_deref().unwrap_or_default();
     if read.is_ok() && line.trim().is_empty() && o.path_scope {
         println!("No files were restored");
         return Err(0);
@@ -823,7 +823,7 @@ fn pick<'a>(
         eprintln!("{prog}: provide an index 0..{} on stdin", list.len() - 1);
         return Err(1);
     }
-    match crate::restore::parse_selection(&line, list.len()) {
+    match crate::restore::parse_selection(line, list.len()) {
         Ok(idx) => Ok(idx.into_iter().map(|k| list[k]).collect()),
         Err(e) => {
             eprintln!("{prog}: invalid selection: {e}");

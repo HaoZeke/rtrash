@@ -4,8 +4,8 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use crate::answer::ask as confirm;
 use crate::trashdir::{self, trash_overlap, Overlap};
-use crate::util::confirm;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Interactive {

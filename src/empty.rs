@@ -249,12 +249,7 @@ fn confirm(seen: &[trashdir::Seen]) -> bool {
         let (size, n) = holds(s);
         eprintln!("    - {} ({size}, {n})", s.dir().root.display());
     }
-    eprint!("Proceed? (y/N) ");
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line).is_err() {
-        return false;
-    }
-    matches!(line.trim(), "y" | "Y" | "yes" | "Yes")
+    crate::answer::ask("Proceed? (y/N) ")
 }
 
 /// What a trash's payload directory takes on disk and how many items the
@@ -406,10 +401,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
             let size = crate::util::format_bytes(bytes);
             let items = crate::util::plural(n, "item", "items");
-            eprint!("Would empty the Finder Trash ({size}, {items}). Proceed? (y/N) ");
-            let mut line = String::new();
-            let _ = io::stdin().read_line(&mut line);
-            if !matches!(line.trim(), "y" | "Y" | "yes" | "Yes") {
+            let ask = format!("Would empty the Finder Trash ({size}, {items}). Proceed? (y/N) ");
+            if !crate::answer::ask(&ask) {
                 return 0;
             }
         }

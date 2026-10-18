@@ -1,0 +1,1 @@
+One parser now reads every prompt answer. A `y` or `yes` in any case goes on, and anything else is a no, from a pipe too, so `echo n | rtrash empty -i` keeps the trash (trash-cli #333). For `put -i` and `put --inspect`, an answer that merely starts with `y` is now a no. A precheck rule keeps prompts from reading stdin or matching a yes themselves.

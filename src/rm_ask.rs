@@ -6,7 +6,6 @@
 //! even then (reading the answer from stdin); `-f` and `-y` never ask.
 //! The last of the three on the command line wins, as with rm(1).
 
-use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Matches named before the question; the rest are counted.
@@ -75,12 +74,6 @@ pub fn prompt(matches: &[(String, u64)]) -> String {
     text
 }
 
-/// Whether `reply` says yes: `y` or `yes` in any case. Anything else,
-/// an empty line and end of input included, is a no.
-pub fn is_yes(reply: &str) -> bool {
-    matches!(reply.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-}
-
 /// Ask about `matches` on stderr and read the reply from stdin. True to
 /// go on. With no match there is nothing to ask: stderr says so. A no
 /// says that nothing was removed.
@@ -89,10 +82,7 @@ pub fn confirm(prog: &str, matches: &[(String, u64)]) -> bool {
         eprintln!("{prog}: no trashed item matches");
         return true;
     }
-    eprint!("{}", prompt(matches));
-    let _ = io::stderr().flush();
-    let mut reply = String::new();
-    let yes = io::stdin().lock().read_line(&mut reply).is_ok() && is_yes(&reply);
+    let yes = crate::answer::ask(&prompt(matches));
     if !yes {
         eprintln!("{prog}: nothing removed");
     }
@@ -125,15 +115,5 @@ mod tests {
         assert!(text.contains("  ... and 2 more\n"), "{text}");
         assert!(text.ends_with("(y/N) "), "{text}");
         assert!(text.contains("Permanently remove 12 items ("), "{text}");
-    }
-
-    #[test]
-    fn only_y_or_yes_is_a_yes() {
-        for yes in ["y\n", "Y", " yes\n", "YES"] {
-            assert!(is_yes(yes), "{yes:?}");
-        }
-        for no in ["", "\n", "n", "no", "yess", "y please"] {
-            assert!(!is_yes(no), "{no:?}");
-        }
     }
 }

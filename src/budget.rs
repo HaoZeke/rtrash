@@ -145,14 +145,9 @@ pub fn guard_ok(prog: &str, total: usize, foreign: usize) -> bool {
         return true;
     }
     if crate::util::stdin_is_tty() {
-        use std::io::Write;
-        eprint!(
+        return crate::answer::ask(&format!(
             "Permanently delete all {total} items, {foreign} of them not from the latest put? (y/N) "
-        );
-        let _ = std::io::stderr().flush();
-        let mut line = String::new();
-        let _ = std::io::stdin().read_line(&mut line);
-        return matches!(line.trim(), "y" | "Y" | "yes" | "Yes");
+        ));
     }
     eprintln!(
         "{prog}: refusing to empty the whole trash: {foreign} of {total} items are not from the latest put"

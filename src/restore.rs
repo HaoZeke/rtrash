@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::list;
@@ -647,11 +647,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             eprint!("What file to restore [0..{}]: ", matches.len() - 1);
             io::stderr().flush().ok();
         }
-        let mut line = String::new();
-        if io::stdin().lock().read_line(&mut line).is_err() {
+        let Ok(line) = crate::answer::read_reply() else {
             eprintln!("{prog}: failed to read selection from stdin");
             return 1;
-        }
+        };
         if line.trim().is_empty() && trash_cli {
             println!("No files were restored");
             return 0;

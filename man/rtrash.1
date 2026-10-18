@@ -158,6 +158,21 @@ drop control characters when they draw. Rows under the
 .B trash\-list
 name quote such a name instead, as trash-cli does (see
 .BR list ).
+.SS PROMPTS
+Every question on the command line
+.RB ( "put \-i" ,
+.BR "put \-\-inspect" ,
+.BR "empty \-i" ,
+.BR "rm \-i" ,
+and the guards before a whole-trash empty) reads its answer the same way.
+Only y or yes, in any case and with blanks around it, goes on.
+Anything else is a no: n, an empty line, the end of input, and an answer
+that merely starts with y, which
+.BR rm (1)
+would take.
+A pipe answers like a terminal, so
+.B "echo n | rtrash empty \-i"
+keeps the trash.
 .SH GLOBAL OPTIONS
 When
 .B rtrash
@@ -391,7 +406,8 @@ shows its path in the trash.
 .TP
 .BR \-i ", " \-\-interactive
 List the trash directories in scope and ask before emptying them, as
-trash-cli does; any answer but y keeps them.
+trash-cli does; any answer but y or yes keeps them (see
+.BR PROMPTS ).
 It skips the TUI.
 .TP
 .BR \-f ", " \-\-force

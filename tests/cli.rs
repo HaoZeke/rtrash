@@ -8629,3 +8629,29 @@ fn empty_i_leaves_an_item_put_after_the_question() {
     assert!(sb.trash().join("files/b.o").is_file());
     assert!(sb.trash().join("info/b.o.trashinfo").is_file());
 }
+
+/// Every prompt reads its answer through answer::ask, so a yes is `y` or
+/// `yes` in any case, and anything else is a no, from a pipe as from a
+/// terminal (trash-cli #333). put -i used to take any answer that starts
+/// with y.
+#[test]
+fn prompts_take_only_y_or_yes_even_from_a_pipe() {
+    let sb = Sandbox::new("answers");
+    sb.touch("a.o");
+    for no in ["yolo\n", "y please\n", "\n", ""] {
+        sb.run_with_stdin(&["put", "-i", "a.o"], no);
+        assert!(sb.work().join("a.o").exists(), "{no:?}");
+    }
+    let out = sb.run_with_stdin(&["put", "-i", "a.o"], " YES \n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.work().join("a.o").exists());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    for no in ["n\n", "yolo\n", ""] {
+        let out = sb.run_with_stdin(&["empty", "-i", &pin], no);
+        assert!(stderr_of(&out).contains("Proceed? (y/N) "), "{no:?}");
+        assert!(sb.trash().join("files/a.o").exists(), "{no:?}");
+    }
+    let out = sb.run_with_stdin(&["empty", "-i", &pin], "Y\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.trash().join("files/a.o").exists());
+}
