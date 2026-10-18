@@ -11,9 +11,12 @@
 //! A delete runs in the background too, as in dua 2.45: its rows go to
 //! the trash one at a time on a thread of their own, each leaves the
 //! views as it goes, and the status line counts the rows and bytes left,
-//! and the bytes copied of a row that crosses file systems. Quitting
-//! stops the delete: a copy in progress ends and its part copied goes,
-//! so that row stays whole where it was, with the rows not yet started.
+//! and the bytes copied of a row that crosses file systems. A row that
+//! stays says why in the status line, and `e` lists every one. Marks
+//! wait while it runs, as do the keys that would act on its rows.
+//! Quitting stops the delete: a copy in progress ends and its part
+//! copied goes, so that row stays whole where it was, with the rows not
+//! yet started.
 //!
 //! Given several directories (`du -i a b`, as `dua i a b`), the explorer
 //! opens on a view of its own above them, one row per directory, kept in
@@ -124,8 +127,8 @@ impl Sorting {
 /// Rows trashed by one delete, with what is needed to put them back.
 type UndoGroup = Vec<(bin::Ticket, Item)>;
 
-/// One row a delete got to: its ticket, or `None` when it stayed.
-type Trashed = (Item, Option<bin::Ticket>);
+/// One row a delete got to: its ticket, or why it stayed.
+type Trashed = (Item, Result<bin::Ticket, String>);
 
 /// A delete in progress: the rows go to the trash on a thread of their
 /// own (inline in tests) and come back one at a time through `rx`.
@@ -140,7 +143,8 @@ struct Deleting {
     /// Disk use of the rows not yet done.
     left: u64,
     group: UndoGroup,
-    failed: usize,
+    /// Rows that stayed, with why.
+    failed: Vec<(PathBuf, String)>,
     /// Rows done and bytes copied when the status line last showed them.
     shown: (usize, u64),
 }
@@ -170,7 +174,7 @@ fn trash_rows(
         let done = bin::trash(prog, &item.path, pin, watch);
         // Before the send, so the count never shows against the next row.
         watch.copied.store(0, Ordering::Relaxed);
-        if done.is_none() && watch.stop.load(Ordering::Relaxed) {
+        if done.is_err() && watch.stop.load(Ordering::Relaxed) {
             return;
         }
         if tx.send((item, done)).is_err() {
@@ -190,14 +194,15 @@ mod bin {
     /// What a delete left behind, enough to undo it.
     pub type Ticket = put::Trashed;
 
-    /// Trash `path`. A copy across file systems counts its bytes into
-    /// `watch` and ends, undone, once `watch.stop` is set.
+    /// Trash `path`, or say why it stays. A copy across file systems
+    /// counts its bytes into `watch` and ends, undone, once `watch.stop`
+    /// is set.
     pub fn trash(
         prog: &str,
         path: &Path,
         pin: Option<&PathBuf>,
         watch: &super::Watch,
-    ) -> Option<Ticket> {
+    ) -> Result<Ticket, String> {
         let opts = put::Opts {
             recursive: true,
             force: true,
@@ -209,9 +214,23 @@ mod bin {
             stop: watch.stop.clone(),
             copied: watch.copied.clone(),
         };
-        crate::interrupt::watched(&scoped, || put::put_one(prog, path, &opts))
-            .ok()
-            .flatten()
+        let (done, said) =
+            put::heard(|| crate::interrupt::watched(&scoped, || put::put_one(prog, path, &opts)));
+        match done {
+            Ok(Some(ticket)) => Ok(ticket),
+            Ok(None) => Err("gone, with no trash record to undo".into()),
+            Err(_) => Err(why(prog, &said)),
+        }
+    }
+
+    /// The reason among what put said for an item it did not trash: the
+    /// first line that is no warning or note, without the program name.
+    pub fn why(prog: &str, said: &[String]) -> String {
+        let head = format!("{prog}: ");
+        said.iter()
+            .map(|l| l.strip_prefix(head.as_str()).unwrap_or(l.as_str()))
+            .find(|l| !l.starts_with("warning: ") && !l.starts_with("note: "))
+            .map_or_else(|| "not trashed".to_string(), str::to_string)
     }
 
     pub fn untrash(t: &Ticket) -> bool {
@@ -243,10 +262,10 @@ mod bin {
         path: &Path,
         _pin: Option<&PathBuf>,
         _watch: &super::Watch,
-    ) -> Option<Ticket> {
+    ) -> Result<Ticket, String> {
         crate::allow_roots::trash_delete(path)
-            .ok()
             .map(|()| path.to_path_buf())
+            .map_err(|e| format!("cannot trash '{}': {e}", path.display()))
     }
 
     pub fn untrash(original: &Ticket) -> bool {
@@ -307,6 +326,8 @@ struct App {
     jobs: HashMap<PathBuf, Job>,
     /// The delete in progress, if any (one at a time).
     deleting: Option<Deleting>,
+    /// Rows the last delete left in place, with why (`e` lists them).
+    failures: Vec<(PathBuf, String)>,
     /// The current row order (`s`, `n`, `C` and `M` change it).
     sorting: Sorting,
     /// The size `s` sorts by and rows show: apparent under `--apparent`.
@@ -776,6 +797,7 @@ impl App {
             background: false,
             jobs: HashMap::new(),
             deleting: None,
+            failures: Vec::new(),
         }
     }
 
@@ -1412,9 +1434,10 @@ impl App {
             total: t.len(),
             left: t.iter().map(|i| i.disk).sum(),
             group: Vec::new(),
-            failed: 0,
+            failed: Vec::new(),
             shown: (0, 0),
         });
+        self.failures.clear();
         let (prog, pin) = (self.prog.clone(), self.trash_pin.clone());
         let work = move || trash_rows(&prog, t, pin.as_ref(), &watch, &tx);
         if self.background {
@@ -1456,11 +1479,11 @@ impl App {
             d.pending.retain(|(p, _)| *p != item.path);
             d.left = d.left.saturating_sub(item.disk);
             match done {
-                Some(ticket) => {
+                Ok(ticket) => {
                     self.drop_row(&item);
                     d.group.push((ticket, item));
                 }
-                None => d.failed += 1,
+                Err(why) => d.failed.push((item.path, why)),
             }
         }
         if any {
@@ -1474,7 +1497,7 @@ impl App {
         // A new row done or a new chunk copied moves the status line;
         // otherwise a refusal shown meanwhile stays readable.
         let now = (
-            d.group.len() + d.failed,
+            d.group.len() + d.failed.len(),
             d.watch.copied.load(Ordering::Relaxed),
         );
         let moved = now != d.shown;
@@ -1521,7 +1544,7 @@ impl App {
         let Some(d) = &mut self.deleting else {
             return;
         };
-        let done = d.group.len() + d.failed;
+        let done = d.group.len() + d.failed.len();
         let copied = d.watch.copied.load(Ordering::Relaxed);
         d.shown = (done, copied);
         // The row in hand is copying across file systems.
@@ -1534,6 +1557,10 @@ impl App {
             ),
             _ => String::new(),
         };
+        let failing = match d.failed.len() {
+            0 => String::new(),
+            f => format!("; {f} failed (e shows why)"),
+        };
         self.status = if d.watch.stop.load(Ordering::Relaxed) {
             format!(
                 "stopping: {done} of {} done; a copy in progress is undone",
@@ -1541,7 +1568,7 @@ impl App {
             )
         } else {
             format!(
-                "trashing: {done} of {} done, {} left{copying} · q stops",
+                "trashing: {done} of {} done, {} left{copying}{failing} · q stops",
                 d.total,
                 format_bytes(d.left)
             )
@@ -1564,7 +1591,7 @@ impl App {
         if n > 0 {
             self.undo.push(d.group);
         }
-        if n == 0 && d.failed == 0 && left > 0 {
+        if n == 0 && d.failed.is_empty() && left > 0 {
             self.status = format!("stopped; nothing trashed, {left} left in place");
             return;
         }
@@ -1573,13 +1600,33 @@ impl App {
         } else {
             String::new()
         };
-        self.status = match d.failed {
-            0 => format!(
+        self.status = match d.failed.first() {
+            None => format!(
                 "trashed {n} item(s), {}{stopped} · u undo",
                 format_bytes(disk)
             ),
-            f => format!("trashed {n}, {f} failed{stopped} · u undo"),
+            Some((path, why)) => format!(
+                "trashed {n}, {} failed ({}: {why}){stopped} · e why · u undo",
+                d.failed.len(),
+                crate::util::term_path(Path::new(path.file_name().unwrap_or_default()))
+            ),
         };
+        self.failures = d.failed;
+    }
+
+    /// List the rows the delete left in place and why (`e`), in the info
+    /// panel: the running delete's so far, else the last one's.
+    fn show_failures(&mut self) {
+        let failed = self.deleting.as_ref().map_or(&self.failures, |d| &d.failed);
+        if failed.is_empty() {
+            self.status = "no row failed in the last delete".into();
+            return;
+        }
+        self.info = failed
+            .iter()
+            .map(|(path, why)| format!("{}: {why}", crate::util::term_path(path)))
+            .collect();
+        self.mode = Mode::Info;
     }
 
     /// Restore the most recent delete of this session.
@@ -1854,6 +1901,10 @@ impl App {
 
     /// Show the cursor file in the pager (`v`, as in gdu).
     fn view_file(&mut self) {
+        if let Some(gone) = self.selected().and_then(|it| self.being_trashed(&it.path)) {
+            self.status = format!("'{}' is being trashed", crate::util::term_path(&gone));
+            return;
+        }
         match self.selected() {
             Some(it) if !it.is_dir => self.hand_off = Some(HandOff::Pager(it.path.clone())),
             Some(_) => self.status = "v shows files; o opens a directory".into(),
@@ -1878,6 +1929,10 @@ impl App {
             self.status = "nothing to open".into();
             return;
         };
+        if let Some(gone) = self.being_trashed(&path) {
+            self.status = format!("'{}' is being trashed", crate::util::term_path(&gone));
+            return;
+        }
         let name = self.opener[0].to_string_lossy().into_owned();
         let spawned = std::process::Command::new(&self.opener[0])
             .args(&self.opener[1..])
@@ -1961,6 +2016,7 @@ impl App {
                         }
                         KeyCode::Char('d') | KeyCode::Delete => return self.ask_delete(),
                         KeyCode::Char('u') => return self.undo_last(),
+                        KeyCode::Char('e') => return self.show_failures(),
                         KeyCode::Char('r') => return self.refresh(),
                         KeyCode::Char('s') => return self.sort_by(Order::Key(self.size_key)),
                         KeyCode::Char('S') => return self.toggle_size(),
@@ -2001,6 +2057,11 @@ impl App {
                     Some(Action::PageUp) => self.page(false),
                     Some(Action::First) => self.select(0),
                     Some(Action::Last) => self.select(usize::MAX),
+                    // Marks wait for a running delete: its rows leave the
+                    // views as it goes, and a mark must not land on another.
+                    Some(Action::ToggleMark | Action::MarkAll) if self.deleting.is_some() => {
+                        self.status = "a delete is running; mark once it is done".into();
+                    }
                     Some(Action::ToggleMark) => {
                         if let Some(i) = self.list_state.selected() {
                             self.sel.toggle(i);
@@ -2628,7 +2689,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 if app.read_only {
                     "r — rescan this directory"
                 } else {
-                    "u — undo the last delete · r — rescan this directory"
+                    "u — undo the last delete · e — why rows of it stayed · r — rescan"
                 },
                 "s n C M — sort by size, name, items or newest change; again reverses",
                 "S — show apparent sizes instead of disk use, or back",
@@ -2895,7 +2956,7 @@ mod tests {
         drop(tx);
         let sent: Vec<Trashed> = rx.iter().collect();
         assert_eq!(sent.len(), 3);
-        assert!(sent.iter().all(|(_, ticket)| ticket.is_some()));
+        assert!(sent.iter().all(|(_, ticket)| ticket.is_ok()));
         assert!(!t.0.join("w/big").exists() && !t.0.join("w/file").exists());
     }
 
@@ -2911,7 +2972,7 @@ mod tests {
             total: 1,
             left: row.disk,
             group: Vec::new(),
-            failed: 0,
+            failed: Vec::new(),
             shown: (0, 0),
         });
         (tx, watch)
@@ -2977,14 +3038,14 @@ mod tests {
         let watch = Watch::default();
         watch.stop.store(true, Ordering::Relaxed);
         let big = t.0.join("w/big");
-        assert!(bin::trash("rtrash", &big, Some(&pin), &watch).is_none());
+        assert!(bin::trash("rtrash", &big, Some(&pin), &watch).is_err());
         assert_eq!(fs::read(big.join("inner/blob")).unwrap().len(), 200_000);
         assert_eq!(fs::read(big.join("side")).unwrap().len(), 30_000);
         let in_trash = fs::read_dir(pin.join("files")).map_or(0, |d| d.count());
         assert_eq!(in_trash, 0);
         // Unstopped, the same call copies it and counts the bytes.
         watch.stop.store(false, Ordering::Relaxed);
-        assert!(bin::trash("rtrash", &big, Some(&pin), &watch).is_some());
+        assert!(bin::trash("rtrash", &big, Some(&pin), &watch).is_ok());
         assert!(!big.exists());
         assert_eq!(watch.copied.load(Ordering::Relaxed), 230_000);
         let _ = fs::remove_dir_all(&pin);
@@ -4418,5 +4479,90 @@ mod tests {
         assert!(t.0.join("w/small").exists());
         assert_eq!(a.rows().len(), 2);
         assert_eq!(a.view().disk, top_before - side_disk);
+    }
+
+    #[test]
+    fn a_row_that_stays_says_why_and_e_lists_it() {
+        let t = tree("whyfail");
+        let mut a = app(&t);
+        let big = a.rows()[0].clone();
+        let (tx, _watch) = held_delete(&mut a, &big);
+        let why = "cannot trash 'big': Permission denied".to_string();
+        tx.send((big.clone(), Err(why))).unwrap();
+        a.poll_delete();
+        assert!(
+            a.status.ends_with("; 1 failed (e shows why) · q stops"),
+            "{}",
+            a.status
+        );
+        a.on_key(KeyCode::Char('e'), KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Info);
+        assert!(a.info[0].ends_with("big: cannot trash 'big': Permission denied"));
+        a.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        drop(tx);
+        a.poll_delete();
+        assert!(a.deleting.is_none());
+        assert_eq!(
+            a.status,
+            "trashed 0, 1 failed (big: cannot trash 'big': Permission denied) · e why · u undo"
+        );
+        assert_eq!(names(&a), ["big", "file", "small"]);
+        // The list stays for the last delete.
+        a.on_key(KeyCode::Char('e'), KeyModifiers::NONE);
+        assert_eq!(a.info.len(), 1);
+    }
+
+    #[test]
+    fn marks_and_the_keys_on_a_queued_row_wait_for_the_delete() {
+        let t = tree("waitdel");
+        let mut a = app(&t);
+        // Rows: big, file, small. The delete holds file.
+        let file = a.rows()[1].clone();
+        let (_tx, _watch) = held_delete(&mut a, &file);
+        a.select(1);
+        a.on_key(KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(a.status, "a delete is running; mark once it is done");
+        assert_eq!(a.marked_count(), 0);
+        a.on_key(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert!(a.status.ends_with("' is being trashed"), "{}", a.status);
+        assert_eq!(a.hand_off, None);
+        a.opener = vec!["/nonexistent/rtrash-opener".into()];
+        a.on_key(KeyCode::Char('o'), KeyModifiers::NONE);
+        assert!(a.status.ends_with("' is being trashed"), "{}", a.status);
+        // No row has failed yet, so e has nothing to list.
+        a.on_key(KeyCode::Char('e'), KeyModifiers::NONE);
+        assert_eq!(a.status, "no row failed in the last delete");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_trash_shows_what_put_said() {
+        let t = tree("putsaid");
+        let mut a = app(&t);
+        // A file where the trash should be: put cannot make files/ there.
+        fs::write(t.0.join("Trash"), b"not a folder").unwrap();
+        a.select(1);
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(
+            a.status
+                .starts_with("trashed 0, 1 failed (file: cannot trash '"),
+            "{}",
+            a.status
+        );
+        assert!(t.0.join("w/file").is_file());
+        assert_eq!(a.failures.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn why_skips_warnings_and_the_program_name() {
+        let said = [
+            "rtrash: warning: 'x' is in use by vim".to_string(),
+            "rtrash: cannot trash 'x': in use by vim".to_string(),
+            "rtrash: use --in-use=warn to trash it anyway".to_string(),
+        ];
+        assert_eq!(bin::why("rtrash", &said), "cannot trash 'x': in use by vim");
+        assert_eq!(bin::why("rtrash", &[]), "not trashed");
     }
 }

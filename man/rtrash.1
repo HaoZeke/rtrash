@@ -2204,12 +2204,19 @@ A mark inside a marked directory goes with that directory.
 The rows go to the trash in the background, one at a time, as in dua.
 The status line counts the rows done and the bytes left, and each row
 leaves the list as it goes.
-While a delete runs, a queued directory does not open, and
+While a delete runs, a queued directory does not open, a queued row
+does not go to the pager or its program
+.RB ( v ,
+.BR o ),
+and marking (Space and mark-all),
 .BR d ,
 .B u
 and
 .B r
 wait for it.
+A row that stays says why in the status line, and
+.B e
+lists every such row of the running or last delete with its reason.
 .B q
 or Ctrl-C stops the delete, then quits: a row partway through a copy to
 another file system goes back whole, its part copied removed, and stays

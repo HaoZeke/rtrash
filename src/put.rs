@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
@@ -628,23 +629,57 @@ fn describe(meta: &fs::Metadata, path: &Path) -> &'static str {
     }
 }
 
+thread_local! {
+    /// What [`put_one`] has said on this thread while [`heard`] listens.
+    static HEARD: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+/// A message of [`put_one`]: on stderr as always, and kept for [`heard`]
+/// when it listens on this thread.
+fn say(args: std::fmt::Arguments) {
+    let text = args.to_string();
+    HEARD.with(|h| {
+        if let Some(said) = h.borrow_mut().as_mut() {
+            said.push(text.clone());
+        }
+    });
+    eprintln!("{text}");
+}
+
+/// `eprintln!` for [`put_one`], through [`say`].
+macro_rules! say {
+    ($($arg:tt)*) => {
+        say(format_args!($($arg)*))
+    };
+}
+
+/// Run `f` and return, with its result, every message `put_one` wrote
+/// on this thread meanwhile. The du explorer shows them in its status
+/// line, where stderr cannot reach while it owns the terminal.
+pub fn heard<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    let outer = HEARD.with(|h| h.replace(Some(Vec::new())));
+    let out = f();
+    let said = HEARD.with(|h| h.replace(outer)).unwrap_or_default();
+    (out, said)
+}
+
 /// Trash one path. `Ok(None)` means nothing moved without an error (missing
 /// file under `-f`, or a declined prompt).
 pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Trashed>, i32> {
     let name = path.as_os_str().to_string_lossy();
     if let Err(e) = crate::allow_roots::check(path) {
-        eprintln!("{prog}: cannot trash: {e}");
+        say!("{prog}: cannot trash: {e}");
         return Err(2);
     }
 
     if opts.preserve_root && path == Path::new("/") {
-        eprintln!("{prog}: it is dangerous to operate recursively on '/'");
-        eprintln!("{prog}: use --no-preserve-root to override this failsafe");
+        say!("{prog}: it is dangerous to operate recursively on '/'");
+        say!("{prog}: use --no-preserve-root to override this failsafe");
         return Err(1);
     }
     // As typed: `Path::file_name` reads `d/.` as `d`, which would trash d.
     if crate::safety::is_dot_operand(path) {
-        eprintln!("{prog}: refusing to remove '.' or '..' directory: skipping '{name}'");
+        say!("{prog}: refusing to remove '.' or '..' directory: skipping '{name}'");
         return Err(1);
     }
 
@@ -654,11 +689,11 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             if opts.force {
                 return Ok(None);
             }
-            eprintln!("{prog}: cannot remove '{name}': No such file or directory");
+            say!("{prog}: cannot remove '{name}': No such file or directory");
             return Err(1);
         }
         Err(e) => {
-            eprintln!("{prog}: cannot remove '{name}': {e}");
+            say!("{prog}: cannot remove '{name}': {e}");
             return Err(1);
         }
     };
@@ -668,7 +703,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
     if meta.is_dir() && crate::safety::typed_last(path).1 {
         let bare: PathBuf = path.components().collect();
         if fs::symlink_metadata(bare).is_ok_and(|m| m.file_type().is_symlink()) {
-            eprintln!(
+            say!(
                 "{prog}: cannot remove '{name}': it is a symlink to a directory; \
                  give it without the trailing slash to trash the link"
             );
@@ -678,17 +713,17 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
 
     if meta.is_dir() && !opts.recursive {
         if !opts.empty_dirs {
-            eprintln!("{prog}: cannot remove '{name}': Is a directory");
+            say!("{prog}: cannot remove '{name}': Is a directory");
             return Err(1);
         }
         match fs::read_dir(path).map(|mut d| d.next().is_some()) {
             Ok(true) => {
-                eprintln!("{prog}: cannot remove '{name}': Directory not empty");
+                say!("{prog}: cannot remove '{name}': Directory not empty");
                 return Err(1);
             }
             Ok(false) => {}
             Err(e) => {
-                eprintln!("{prog}: cannot remove '{name}': {e}");
+                say!("{prog}: cannot remove '{name}': {e}");
                 return Err(1);
             }
         }
@@ -716,33 +751,33 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
     let abs = match trashdir::abs_nofollow(path) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{prog}: cannot remove '{name}': {e}");
+            say!("{prog}: cannot remove '{name}': {e}");
             return Err(1);
         }
     };
     if let Some(pat) = crate::safety::protected_by(&abs, protected()) {
-        eprintln!("{prog}: skipping protected path '{name}' (safe-rm list entry '{pat}')");
+        say!("{prog}: skipping protected path '{name}' (safe-rm list entry '{pat}')");
         return Err(1);
     }
     if let Some(pat) = crate::safety::protected_by(&abs, config_protected()) {
-        eprintln!("{prog}: skipping protected path '{name}' (config protect.paths entry '{pat}')");
+        say!("{prog}: skipping protected path '{name}' (config protect.paths entry '{pat}')");
         return Err(1);
     }
     if opts.preserve_root && meta.is_dir() {
         if crate::safety::is_home(&abs) {
-            eprintln!("{prog}: refusing to remove your home directory '{name}'");
-            eprintln!("{prog}: use --no-preserve-root to override this failsafe");
+            say!("{prog}: refusing to remove your home directory '{name}'");
+            say!("{prog}: use --no-preserve-root to override this failsafe");
             return Err(1);
         }
         if crate::safety::is_mount_root(&abs, &meta) {
-            eprintln!("{prog}: skipping '{name}', since it is a mount point");
-            eprintln!("{prog}: use --no-preserve-root to override this failsafe");
+            say!("{prog}: skipping '{name}', since it is a mount point");
+            say!("{prog}: use --no-preserve-root to override this failsafe");
             return Err(1);
         }
     }
     if meta.is_dir() {
         if let Some(state) = crate::safety::risky_repo_state(&abs) {
-            eprintln!(
+            say!(
                 "{prog}: warning: '{name}' contains a git repository with {} work; `rtrash undo` brings it back",
                 state.as_str()
             );
@@ -753,11 +788,11 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         if !holds.is_empty() {
             let who = crate::holders::describe(&holds);
             if opts.in_use == InUse::Refuse {
-                eprintln!("{prog}: cannot trash '{name}': in use by {who}");
-                eprintln!("{prog}: use --in-use=warn to trash it anyway");
+                say!("{prog}: cannot trash '{name}': in use by {who}");
+                say!("{prog}: use --in-use=warn to trash it anyway");
                 return Err(1);
             }
-            eprintln!("{prog}: warning: '{name}' is in use by {who}");
+            say!("{prog}: warning: '{name}' is in use by {who}");
         }
     }
     if opts.dry_run {
@@ -778,13 +813,13 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                 Ok(None)
             }
             Err(e) => {
-                eprintln!("{prog}: cannot trash '{name}' to the Windows Recycle Bin: {e}");
+                say!("{prog}: cannot trash '{name}' to the Windows Recycle Bin: {e}");
                 Err(1)
             }
         };
     }
     if opts.trash_pin.is_none() && !opts.quiet && crate::wsl::hint_due(&abs) {
-        eprintln!(
+        say!(
             "{prog}: note: '{name}' is on a Windows drive; RTRASH_WSL_RECYCLE=1 sends such files to the Windows Recycle Bin (=0 hides this note)"
         );
     }
@@ -804,7 +839,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                 }))
             }
             Err(e) => {
-                eprintln!("{prog}: cannot trash '{name}': {e}");
+                say!("{prog}: cannot trash '{name}': {e}");
                 Err(1)
             }
         };
@@ -812,7 +847,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
     let trash = match resolve_put_trash(opts, &abs, &meta) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("{prog}: cannot trash '{name}': {e}");
+            say!("{prog}: cannot trash '{name}': {e}");
             return Err(1);
         }
     };
@@ -820,14 +855,14 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
     // item already in the trash would be trashed again, its info lost.
     match trash_overlap(&abs, &trash.root) {
         Some(Overlap::Contains) => {
-            eprintln!(
+            say!(
                 "{prog}: cannot trash '{name}': it contains the trash directory '{}' it would move into",
                 trash.root.display()
             );
             return Err(1);
         }
         Some(Overlap::Inside) => {
-            eprintln!(
+            say!(
                 "{prog}: cannot trash '{name}': it is inside the trash directory '{}'; `rtrash rm` or `rtrash empty` deletes trashed items",
                 trash.root.display()
             );
@@ -857,7 +892,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             }))
         }
         Err(e) => {
-            eprintln!("{prog}: cannot trash '{name}': {e}");
+            say!("{prog}: cannot trash '{name}': {e}");
             Err(1)
         }
     }

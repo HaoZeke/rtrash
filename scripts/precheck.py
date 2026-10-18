@@ -1343,6 +1343,25 @@ def check_lock_rechecks():
                       "without relock; drop the entry")
 
 
+def check_put_says():
+    """put_one writes its messages through `say!`, never `eprintln!`, so the
+    du explorer's delete, which listens with put::heard, shows why a row
+    stayed (round 247: stderr is held while the explorer owns the
+    terminal, and a failed row only counted)."""
+    rel = "src/put.rs"
+    text = rust_code((ROOT / rel).read_text(encoding="utf-8"))
+    m = re.search(r"(?m)^pub\(crate\) fn put_one\(", text)
+    if not m:
+        errors.append(f"{rel}: put_one not found; update check_put_says")
+        return
+    end = re.search(r"(?m)^}", text[m.start():])
+    body = text[m.start():m.start() + (end.end() if end else len(text))]
+    for k in re.finditer(r"\beprintln!", body):
+        line = text.count("\n", 0, m.start() + k.start()) + 1
+        errors.append(f"{rel}:{line}: put_one writes with eprintln!; use say! so the du "
+                      "explorer can show the message (put::heard)")
+
+
 def check_scan_rechecks():
     """A fn that removes or restores a Finder Trash or Recycle Bin item
     checks it again just before, or is listed in SCAN_ACTORS with a reason
@@ -1657,7 +1676,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
