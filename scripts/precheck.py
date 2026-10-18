@@ -645,6 +645,178 @@ def check_stale_cases():
                           f"gave {got!r}, not {want!r}; the stale-string check is broken")
 
 
+# A diff hunk can add lines between an unchanged outer attribute and the
+# item it was on. The new lines then take the attribute, and that item
+# loses it. Round 240 put a new test under an existing
+# `#[cfg(all(unix, feature = "tui"))]`, and the old test, now built
+# everywhere, failed to find pick_rows on Windows and without features.
+HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def attr_depth(text):
+    """How many `[` stay open at the end of `text` (strings and comments
+    are not told apart, which attributes rarely need)."""
+    return text.count("[") - text.count("]")
+
+
+def harmless_run(run):
+    """Added lines that leave the item below with its attributes: only
+    attributes, comments and blank lines."""
+    depth = 0
+    for text in run:
+        t = text.strip()
+        if depth > 0:
+            depth += attr_depth(t)
+            continue
+        if not t or t.startswith("//"):
+            continue
+        if t.startswith("#[") and not t.startswith("#!["):
+            depth = attr_depth(t)
+            continue
+        return False
+    return True
+
+
+def split_attribute_hits(diff, mutant=None):
+    """(file, line, attribute) for each run of added lines that a diff
+    puts between an unchanged outer attribute and its item. A run of
+    attributes or comments alone is fine, and so is a run that ends with
+    the very attributes above it: git drew a correct insertion one item
+    early. `mutant` breaks one rule on purpose, for the self-test."""
+    opens = ("#[", "#![") if mutant == "inner" else ("#[",)
+    hits = []
+    path, line = None, 0
+    stack, opened, depth = [], [], 0
+    run, run_stack = [], []
+
+    def flush():
+        nonlocal run, run_stack
+        if run and run_stack:
+            attrs = [t.strip() for _, t in run_stack if t.strip()]
+            tail = [t.strip() for t in run if t.strip()][-len(attrs):]
+            shifted = mutant != "no-shift" and tail == attrs
+            harmless = mutant != "any-run" and harmless_run(run)
+            if not shifted and not harmless:
+                at, text = next((n, t) for n, t in reversed(run_stack)
+                                if t.strip().startswith(opens))
+                hits.append((path, at, text.strip()))
+        run, run_stack = [], []
+
+    for raw in diff.splitlines():
+        if raw.startswith("+++ "):
+            flush()
+            path = raw[6:] if raw.startswith("+++ b/") else raw[4:]
+            stack, opened, depth = [], [], 0
+            continue
+        if raw.startswith("--- ") or raw.startswith("diff ") or raw.startswith("index "):
+            continue
+        m = HUNK.match(raw)
+        if m:
+            flush()
+            line, stack, opened, depth = int(m.group(1)), [], [], 0
+            continue
+        if raw.startswith("\\"):
+            continue
+        kind, text = raw[:1], raw[1:]
+        if kind == "+":
+            if not run:
+                run_stack = list(stack) if not opened and any(
+                    t.strip().startswith(opens) for _, t in stack) else []
+            run.append(text)
+            line += 1
+            continue
+        flush()
+        if kind == "-":
+            stack, opened, depth = [], [], 0
+            continue
+        if kind != " ":
+            continue
+        t = text.strip()
+        if opened:
+            opened.append((line, text))
+            depth += attr_depth(t)
+            if depth <= 0:
+                stack += opened
+                opened = []
+        elif t.startswith(opens):
+            d = attr_depth(t)
+            if d > 0 and mutant != "single-line":
+                opened, depth = [(line, text)], d
+            elif t.endswith("]"):
+                stack.append((line, text))
+            else:
+                stack = []
+        elif stack and (not t or t.startswith("//")):
+            stack.append((line, text))
+        else:
+            stack = []
+        line += 1
+    flush()
+    return hits
+
+
+def hunk(*lines, at=10):
+    """A one-file diff of `lines`, each with its ' ', '+' or '-' mark."""
+    return "\n".join(["+++ b/src/x.rs", f"@@ -{at},9 +{at},9 @@", *lines]) + "\n"
+
+
+# Known cases for split_attribute_hits: (what, diff, the lines it flags).
+SPLIT_CASES = [
+    ("round 240: a test added under an existing cfg",
+     hunk("     #[cfg(all(unix, feature = \"tui\"))]", "+    #[test]", "+    fn new() {}",
+          "+", "     #[test]", "     fn old() {}"), [10]),
+    ("a test added above the attribute",
+     hunk("     }", "+    #[test]", "+    fn new() {}", "+", "     #[cfg(unix)]",
+          "     #[test]"), []),
+    ("git draws a correct insertion one item early",
+     hunk("     #[cfg(unix)]", "+    #[test]", "+    fn new() {}", "+    ",
+          "+    #[cfg(unix)]", "     #[test]", "     fn old() {}"), []),
+    ("an attribute added to the item",
+     hunk("     #[cfg(unix)]", "+    #[allow(dead_code)]", "     fn old() {}"), []),
+    ("a cfg over several lines",
+     hunk(" #[cfg(any(", "     unix,", "     windows", " ))]", "+fn new() {}", " fn old() {}"),
+     [10]),
+    ("the item itself replaced",
+     hunk(" #[cfg(unix)]", "-fn old() {}", "+fn new() {}"), []),
+    ("an inner attribute covers the whole module",
+     hunk(" #![cfg(unix)]", "+use std::fs;", " use std::io;"), []),
+    ("an attribute and its item on one line",
+     hunk(" #[cfg(unix)] use std::fs;", "+use std::io;"), []),
+    ("a doc comment between the cfg and the item",
+     hunk(" #[cfg(unix)]", " /// Old.", "+fn new() {}", " fn old() {}"), [10]),
+    ("cfg_attr",
+     hunk(" #[cfg_attr(test, allow(dead_code))]", "+fn new() {}", " fn old() {}"), [10]),
+]
+SPLIT_MUTANTS = ["no-shift", "any-run", "single-line", "inner"]
+
+
+def check_split_cases():
+    """The rule meets every case, and each broken matcher misses one."""
+    def failures(mutant):
+        return [what for what, diff, want in SPLIT_CASES
+                if [n for _, n, _ in split_attribute_hits(diff, mutant)] != want]
+    for what in failures(None):
+        errors.append(f"scripts/precheck.py: split_attribute_hits gets SPLIT_CASES '{what}' "
+                      "wrong; the attribute check is broken")
+    for mutant in SPLIT_MUTANTS:
+        if not failures(mutant):
+            errors.append(f"scripts/precheck.py: SPLIT_CASES no longer catch the '{mutant}' "
+                          "mutant of split_attribute_hits; add a case that does")
+
+
+def check_split_attributes(base):
+    """Under `--base`, lines a diff adds between an unchanged attribute
+    and the item it was on (round 240)."""
+    if not base:
+        return
+    diff = subprocess.run(["git", "diff", base, "--", "*.rs"], cwd=ROOT,
+                          capture_output=True, text=True).stdout
+    for path, line, attr in split_attribute_hits(diff):
+        errors.append(f"{path}:{line}: lines added between the unchanged `{attr}` and the "
+                      "item it was on; they take the attribute and that item loses it. "
+                      "Put the new lines above the attribute.")
+
+
 def base_rust_files(base):
     """{path: text} of every .rs file under src and tests at `base`, or
     None when git cannot read it."""
@@ -1364,9 +1536,9 @@ def main():
     if "--commit-msg" in sys.argv:
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
-    check_rust_code(); check_stale_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
+    check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_directorysizes_paths()
-    check_long_lines(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
+    check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
