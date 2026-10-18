@@ -1277,9 +1277,33 @@ LOCKED_REMOVERS = {
     ("src/empty.rs", "empty_one"): "runs with the lock held, scans under it and checks "
                                    "each item against trashdir::Seen",
     ("src/retention.rs", "remove_entry"): "prune lists the items under the locks it holds",
-    ("src/wsl_bin.rs", "remove_entry"): "the Windows Recycle Bin has no trash lock",
+    ("src/wsl_bin.rs", "remove_entry"): "the Windows Recycle Bin has no trash lock; "
+                                        "BinEntry::recheck reads the record again first",
 }
 TAKES_LOCK = re.compile(r"\bTrashLock::(?:try_)?acquire\(")
+
+# The Finder Trash and the Recycle Bin have no trash lock. A fn that
+# removes or restores one of their items checks it again just before:
+# finder_shared::Entry::checked, win_recycle::recheck_item (rechecked) or
+# recheck_bin_item (BinEntry::recheck). Else it is listed here with why.
+SCAN_ACTORS = {
+    ("src/finder.rs", "move_back_inner"): "removes the restore destination under --force; "
+                                          "the item itself comes from a checked caller",
+    ("src/finder_shared.rs", "undo"): "acts on the put log, not on a scan: it restores what "
+                                      "sits under each logged name when it runs",
+    ("src/win_recycle.rs", "check_bins"): "status --check --fix removes the $I records it "
+                                          "just found dangling or bad, with no wait between",
+    ("src/win_recycle.rs", "prune_after_put"): "the budget trim of a put purges right after "
+                                               "its own listing, with no question between",
+    ("src/win_recycle.rs", "purge_oldest_on"): "reap --purge-trash purges right after its own "
+                                               "listing, with no question between",
+}
+# Removal or restore primitives of those trashes, wherever they are
+# called, and permanent removal inside their modules.
+SCAN_ACT = re.compile(r"(?<!fn )\b(?:move_back|purge_all|restore_payload)\s*\(")
+SCAN_FILES = {"src/finder.rs", "src/finder_shared.rs", "src/win_recycle.rs", "src/wsl_bin.rs"}
+SCAN_REMOVE = re.compile(r"\bpermanent_guard::remove\s*\(")
+SCAN_RECHECK = re.compile(r"\.checked\(\)|\brecheck\w*\s*\(")
 
 
 def check_lock_rechecks():
@@ -1317,6 +1341,38 @@ def check_lock_rechecks():
     for rel, fn in sorted(set(LOCKED_REMOVERS) - removers):
         errors.append(f"LOCKED_REMOVERS lists {fn} in {rel}, which removes no listed item "
                       "without relock; drop the entry")
+
+
+def check_scan_rechecks():
+    """A fn that removes or restores a Finder Trash or Recycle Bin item
+    checks it again just before, or is listed in SCAN_ACTORS with a reason
+    (round 246: rm, restore and empty there acted on a scan made before a
+    question, and Finder gives a freed name to the next item)."""
+    starts = re.compile(r"(?m)^[ \t]*(?:pub(?:\([^)]*\))?\s+)?fn\s+(\w+)")
+    actors = set()
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        text = rust_code(path.read_text(encoding="utf-8"))
+        skip = test_mod_lines(text.splitlines())
+        found = list(starts.finditer(text))
+        cuts = [m.start() for m in found] + [len(text)]
+        for m, a, b in zip(found, cuts, cuts[1:]):
+            line = text.count("\n", 0, a) + 1
+            body, key = text[a:b], (rel, m.group(1))
+            if line - 1 in skip:
+                continue
+            acts = SCAN_ACT.search(body) or (rel in SCAN_FILES and SCAN_REMOVE.search(body))
+            if not acts or SCAN_RECHECK.search(body):
+                continue
+            actors.add(key)
+            if key not in SCAN_ACTORS:
+                errors.append(f"{rel}:{line}: {key[1]} removes or restores a Finder Trash or "
+                              "Recycle Bin item without checking it again; use "
+                              "finder_shared::Entry::checked or win_recycle::recheck_item, or "
+                              "list it in SCAN_ACTORS with a reason")
+    for rel, fn in sorted(set(SCAN_ACTORS) - actors):
+        errors.append(f"SCAN_ACTORS lists {fn} in {rel}, which acts on no Finder Trash or "
+                      "Recycle Bin item without a check; drop the entry")
 
 
 DOT_BY_NAME = re.compile(r'Some\(\s*"\.\.?"\s*\)|OsStr::new\(\s*"\.\.?"\s*\)')
@@ -1601,7 +1657,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

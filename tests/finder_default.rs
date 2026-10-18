@@ -1433,3 +1433,32 @@ fn status_check_explains_the_finder_trash_has_no_records() {
         assert!(b.finder().join("fk-a").exists(), "{args:?}");
     }
 }
+
+#[test]
+fn finder_rm_keeps_an_item_that_took_the_name_while_it_asked() {
+    let b = Box_::new("rm-retaken");
+    fs::write(b.work().join("a.o"), b"first").unwrap();
+    let o = b.run(&["put", "a.o"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let mut cmd = common::rtrash_real(common::Real::Finder);
+    cmd.args(["rm", "-i", "a.o"])
+        .current_dir(b.work())
+        .env("HOME", &b.root)
+        .env("XDG_DATA_HOME", b.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", b.root.join(".config"))
+        .env("RTRASH_MACOS_TRASH", "finder")
+        .env("RTRASH_OSASCRIPT", b.root.join("osascript"))
+        .env("XDG_STATE_HOME", b.root.join("state"))
+        .env_remove("RTRASH_MAX_PERMANENT")
+        .env_remove("RTRASH_ALLOW_ROOTS");
+    let mut rm = common::Asking::spawn(&mut cmd);
+    // rm has read the Finder Trash once it asks.
+    rm.wait_for("(y/N) ");
+    // Meanwhile Finder gives the name to another item.
+    fs::write(b.root.join("a.o.new"), b"second").unwrap();
+    fs::rename(b.root.join("a.o.new"), b.finder().join("a.o")).unwrap();
+    let (status, rest) = rm.answer("y\n");
+    assert!(!status.success(), "{rest}");
+    assert!(rest.contains("changed in the trash"), "{rest}");
+    assert_eq!(fs::read(b.finder().join("a.o")).unwrap(), b"second");
+}

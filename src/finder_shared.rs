@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::finder::{self, Item};
 use crate::restore::Conflict;
-use crate::util::{url_decode, url_encode};
+use crate::util::{url_decode, url_encode, Stale};
 
 /// One Finder Trash item as the shared commands see it.
 #[derive(Debug, Clone)]
@@ -28,22 +28,70 @@ pub struct Entry {
     /// Trash time as `YYYY-MM-DDTHH:MM:SS`, from the item's change time.
     pub date: String,
     pub epoch: i64,
+    /// The item as the scan saw it, for [`Entry::checked`]; None when it
+    /// could not be read then.
+    id: Option<ItemId>,
+}
+
+/// Device, inode and change time of a Finder item: a new item that got
+/// the name, or even the inode, of a removed one still differs.
+type ItemId = (u64, u64, i64, i64);
+
+fn item_id(m: &fs::Metadata) -> ItemId {
+    use std::os::unix::fs::MetadataExt;
+    (m.dev(), m.ino(), m.ctime(), m.ctime_nsec())
 }
 
 impl Entry {
+    /// The item `name` in `trash` as it is now, its date and identity read
+    /// from the item itself; `original` is its Put Back place.
+    fn scanned(trash: &Path, name: String, original: Option<PathBuf>) -> Entry {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::symlink_metadata(trash.join(&name)).ok();
+        let epoch = meta.as_ref().map_or(0, |m| m.ctime());
+        // Shown, listed and matched in NFC; `original` keeps the bytes
+        // Finder recorded, so a restore lands on exactly that path.
+        let shown = nfc_path(&original.clone().unwrap_or_else(|| trash.join(&name)));
+        Entry {
+            trash: trash.to_path_buf(),
+            date: crate::info::local_string(epoch),
+            epoch,
+            shown,
+            original,
+            name,
+            id: meta.as_ref().map(item_id),
+        }
+    }
+
     pub fn path(&self) -> PathBuf {
         self.trash.join(&self.name)
     }
 
+    /// The item's path, checked again just before rtrash acts on it: what
+    /// sits there is still the item the scan saw. Finder gives a freed name
+    /// to the next item, so a run that waited on a question would otherwise
+    /// remove or restore another one (round 246). Every rm, restore and
+    /// empty of a listed item takes its path from here.
+    pub fn checked(&self) -> Result<PathBuf, Stale> {
+        let path = self.path();
+        match fs::symlink_metadata(&path) {
+            Err(_) => Err(Stale::Gone),
+            Ok(m) if Some(item_id(&m)) == self.id => Ok(path),
+            Ok(_) => Err(Stale::Changed),
+        }
+    }
+
     /// Move the item to `dest`; an existing `dest` stops it unless `force`.
+    /// An item that [`Entry::checked`] does not pass stays.
     pub fn restore_to(&self, dest: &Path, force: bool) -> Result<(), String> {
+        let src = self.checked().map_err(|s| s.reason(&self.name))?;
         if !force && dest.symlink_metadata().is_ok() {
             return Err(format!(
                 "refusing to overwrite existing '{}' (use -f to force)",
                 dest.display()
             ));
         }
-        finder::move_back(&self.path(), dest, force)
+        finder::move_back(&src, dest, force)
     }
 }
 
@@ -146,31 +194,23 @@ pub fn under(path: &Path, dir: &Path) -> bool {
 }
 
 fn from_items(trash: &Path) -> std::io::Result<Vec<Entry>> {
-    use std::os::unix::fs::MetadataExt;
-    let items: Vec<Item> = match finder::items(trash) {
-        Ok(i) => i,
+    let mut out = match entries_in(trash) {
+        Ok(v) => v,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let mut out: Vec<Entry> = items
-        .into_iter()
-        .map(|i| {
-            let epoch = fs::symlink_metadata(trash.join(&i.name)).map_or(0, |m| m.ctime());
-            // Shown, listed and matched in NFC; `original` keeps the bytes
-            // Finder recorded, so a restore lands on exactly that path.
-            let shown = nfc_path(&i.original.clone().unwrap_or_else(|| trash.join(&i.name)));
-            Entry {
-                trash: trash.to_path_buf(),
-                date: crate::info::local_string(epoch),
-                epoch,
-                shown,
-                original: i.original,
-                name: i.name,
-            }
-        })
-        .collect();
     out.sort_by(|a, b| a.epoch.cmp(&b.epoch).then_with(|| a.name.cmp(&b.name)));
     Ok(out)
+}
+
+/// Every item in the Finder trash `trash`, in name order, each with what
+/// [`Entry::checked`] needs; a trash that cannot be read is the error.
+pub(crate) fn entries_in(trash: &Path) -> std::io::Result<Vec<Entry>> {
+    let items: Vec<Item> = finder::items(trash)?;
+    Ok(items
+        .into_iter()
+        .map(|i| Entry::scanned(trash, i.name, i.original))
+        .collect())
 }
 
 /// Age and size filters over Finder items: the age counts from the time an
@@ -678,15 +718,27 @@ pub fn rm(
     }
     for e in hits {
         let path_s = e.shown.to_string_lossy();
-        let m = crate::finder_total::measure_item(&e.path());
+        // After the question: the item must still be the one listed. One
+        // already gone needs nothing done; another in its place stays.
+        let path = match e.checked() {
+            Ok(p) => p,
+            Err(_) if dry_run => e.path(),
+            Err(Stale::Gone) => continue,
+            Err(s) => {
+                eprintln!("{prog}: {}", s.reason(&e.name));
+                status = 1;
+                continue;
+            }
+        };
+        let m = crate::finder_total::measure_item(&path);
         let sz = m.0;
         if dry_run {
             if !json {
                 println!("{}", crate::util::term_path(&e.shown));
             }
-        } else if let Err(err) = crate::permanent_guard::remove(&e.path()) {
+        } else if let Err(err) = crate::permanent_guard::remove(&path) {
             crate::finder_total::uncarried(&e.trash);
-            eprintln!("{prog}: cannot remove '{}': {err}", e.path().display());
+            eprintln!("{prog}: cannot remove '{}': {err}", path.display());
             status = 1;
             continue;
         } else {
@@ -802,14 +854,7 @@ mod tests {
         fs::create_dir_all(&trash).unwrap();
         fs::write(trash.join("f"), b"old").unwrap();
         fs::write(base.join("f"), b"taken").unwrap();
-        let e = Entry {
-            trash: trash.clone(),
-            name: "f".into(),
-            original: Some(base.join("f")),
-            shown: base.join("f"),
-            date: "2026-01-01T00:00:00".into(),
-            epoch: 0,
-        };
+        let e = Entry::scanned(&trash, "f".into(), Some(base.join("f")));
         assert!(e.restore(false).is_err());
         assert_eq!(fs::read(base.join("f")).unwrap(), b"taken");
         assert_eq!(e.restore(true).unwrap().0, base.join("f"));
@@ -819,6 +864,26 @@ mod tests {
             ..e
         };
         assert!(none.missing());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn restore_to_leaves_an_item_that_took_the_name() {
+        let base = std::env::temp_dir().join(format!("rtrash-took-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let trash = base.join(".Trash");
+        fs::create_dir_all(&trash).unwrap();
+        fs::write(trash.join("a.o"), "listed").unwrap();
+        let e = Entry::scanned(&trash, "a.o".into(), Some(base.join("a.o")));
+        // A later item takes the freed name before the restore runs.
+        fs::write(base.join("next"), "later").unwrap();
+        fs::rename(base.join("next"), trash.join("a.o")).unwrap();
+        let err = e.restore_to(&base.join("a.o"), false).unwrap_err();
+        assert!(err.contains("changed in the trash"), "{err}");
+        assert!(fs::symlink_metadata(base.join("a.o")).is_err());
+        fs::remove_file(trash.join("a.o")).unwrap();
+        let err = e.restore_to(&base.join("a.o"), false).unwrap_err();
+        assert!(err.contains("no longer in the trash"), "{err}");
         let _ = fs::remove_dir_all(&base);
     }
 }

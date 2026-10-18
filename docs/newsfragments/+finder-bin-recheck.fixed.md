@@ -1,0 +1,1 @@
+rm, restore and empty now check each Finder Trash or Recycle Bin item again right before acting on it, on macOS, on Windows and in the Windows Subsystem for Linux. An item that took the name of a listed one while rtrash waited for an answer stays put. The run names it, and rm and restore exit 1.

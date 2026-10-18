@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ds_store;
 use crate::restore::Conflict;
-use crate::util::json_escape;
+use crate::util::{json_escape, Stale};
 
 const HELP: &str = "\
 Usage: {prog} put [-v] [-f] FILE...
@@ -301,14 +301,14 @@ fn restore(prog: &str, args: &[String]) -> i32 {
         Ok(t) => t,
         Err(c) => return c,
     };
-    let items = match items(&trash) {
+    let items = match crate::finder_shared::entries_in(&trash) {
         Ok(i) => i,
         Err(e) => {
             eprintln!("{prog}: cannot read '{}': {e}", trash.display());
             return 1;
         }
     };
-    let mut chosen: Vec<&Item> = Vec::new();
+    let mut chosen: Vec<&crate::finder_shared::Entry> = Vec::new();
     let mut failed = 0usize;
     if all {
         chosen.extend(items.iter().filter(|i| i.original.is_some()));
@@ -321,7 +321,7 @@ fn restore(prog: &str, args: &[String]) -> i32 {
                     .is_some_and(|o| crate::finder_shared::same_path(o, &crate::util::arg_path(w)))
         });
         match hit {
-            Some(i) if !chosen.contains(&i) => chosen.push(i),
+            Some(i) if !chosen.iter().any(|c| std::ptr::eq(*c, i)) => chosen.push(i),
             Some(_) => {}
             None => {
                 eprintln!("{prog}: no item named '{w}' in '{}'", trash.display());
@@ -334,7 +334,7 @@ fn restore(prog: &str, args: &[String]) -> i32 {
     if let Some(code) = crate::allow_roots::refuse_outside(prog, &dests) {
         return code;
     }
-    let mut done: Vec<(&Item, PathBuf)> = Vec::new();
+    let mut done: Vec<(&crate::finder_shared::Entry, PathBuf)> = Vec::new();
     let mut skipped = 0usize;
     for item in chosen {
         let Some(dest) = item.original.clone() else {
@@ -360,7 +360,8 @@ fn restore(prog: &str, args: &[String]) -> i32 {
             }
             (_, c) => (dest, c == Conflict::Overwrite),
         };
-        match move_back(&trash.join(&item.name), &dest, force) {
+        // Checked again first: another item may have taken the name.
+        match item.restore_to(&dest, force) {
             Ok(()) => {
                 if !json {
                     println!("restored '{}'", crate::util::term_path(&dest));
@@ -1126,9 +1127,13 @@ pub fn prune_after_put(prog: &str, moved: &[(PathBuf, String)], quiet: bool) {
         let picked = crate::budget::trim_after_put(&rows, &mine, max, policy);
         let mut n = 0u64;
         for i in picked {
-            let (path, _, b) = &rows[i];
-            let inodes = 1 + crate::trash_stats::count_inodes(path);
-            match crate::permanent_guard::remove(path) {
+            let (_, _, b) = &rows[i];
+            // An item that changed since the listing stays.
+            let Ok(path) = here[i].checked() else {
+                continue;
+            };
+            let inodes = 1 + crate::trash_stats::count_inodes(&path);
+            match crate::permanent_guard::remove(&path) {
                 Ok(()) => {
                     crate::finder_total::carry(trash, (*b, inodes), false);
                     n += 1;
@@ -1169,7 +1174,12 @@ pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u
         if left == (0, 0) {
             break;
         }
-        let path = e.path();
+        // An item that changed since the listing stays.
+        let path = match e.checked() {
+            Ok(p) => p,
+            Err(_) if dry_run => e.path(),
+            Err(_) => continue,
+        };
         let b = crate::fastdelete::disk_usage(&path);
         let inodes = 1 + crate::trash_stats::count_inodes(&path);
         if !dry_run {
@@ -1219,8 +1229,19 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
         }
     }
     for (e, b) in picked {
+        // After the count and any question: the item must still be the
+        // one listed. One already gone needs nothing done; another in its
+        // place stays, and the run says so.
+        let path = match e.checked() {
+            Ok(p) => p,
+            Err(_) if dry_run => e.path(),
+            Err(Stale::Gone) => continue,
+            Err(s) => {
+                eprintln!("{prog}: {}", s.reason(&e.name));
+                continue;
+            }
+        };
         bytes += b;
-        let path = e.path();
         if dry_run {
             if !json {
                 println!("would remove {}", crate::util::term_path(&e.shown));

@@ -273,6 +273,32 @@ pub fn plain_path(p: &std::path::Path) -> std::path::PathBuf {
     p.to_path_buf()
 }
 
+/// Why an item that a scan of the Finder Trash or a Recycle Bin named was
+/// left alone when the time came to act on it: the check made just before
+/// the action found it gone, or found another item in its place (round
+/// 246). The FreeDesktop trash has `list::Relock` for this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stale {
+    /// The item left the trash.
+    Gone,
+    /// Another item, or a changed one, sits where the scan saw it.
+    Changed,
+}
+
+impl Stale {
+    /// Why nothing was done to the item shown as `shown`, for an error
+    /// line; the words of `list::Relock::reason`.
+    pub fn reason(self, shown: &str) -> String {
+        match self {
+            Stale::Gone => format!("'{shown}' is no longer in the trash"),
+            Stale::Changed => format!(
+                "'{shown}' changed in the trash after it was read (another item now has \
+                 its name); left as it is"
+            ),
+        }
+    }
+}
+
 /// A name kept by [`str_from_os`] as text for people and JSON: stray bytes
 /// show as U+FFFD, like a lossy path.
 pub fn show_name(name: &str) -> String {

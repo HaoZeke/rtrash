@@ -263,7 +263,9 @@ mod bin {
         else {
             return false;
         };
-        crate::win_recycle::restore_payload(std::path::Path::new(&item.id), original).is_ok()
+        // Only the item as listed: another may have taken its name.
+        crate::win_recycle::recheck_item(&item).is_ok()
+            && crate::win_recycle::restore_payload(std::path::Path::new(&item.id), original).is_ok()
     }
 }
 

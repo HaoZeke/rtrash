@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::win_recycle::{restore_payload, scan_bin_dir};
+use crate::win_recycle::{recheck_bin_item, restore_payload, scan_bin_dir};
 
 /// One Recycle Bin item as WSL sees it.
 #[derive(Debug, Clone)]
@@ -27,6 +27,17 @@ pub struct BinEntry {
     pub deleted: i64,
     /// Size the `$I` record gives, in bytes.
     pub size: u64,
+}
+
+impl BinEntry {
+    /// This item, checked again just before rtrash acts on it: the record
+    /// beside its payload must still give the original path and deletion
+    /// time the scan read (round 246).
+    fn recheck(&self) -> Result<(), crate::util::Stale> {
+        recheck_bin_item(&self.payload, self.deleted, |o| {
+            o.to_string_lossy() == self.original
+        })
+    }
 }
 
 /// `C:\a\b` as `ROOT/c/a/b`; none for a share or anything else that is
@@ -205,6 +216,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             status = 1;
             continue;
         };
+        // Another item may have taken the payload's name since the scan.
+        if let Err(s) = it.recheck() {
+            eprintln!("{prog}: {}", s.reason(&it.local.to_string_lossy()));
+            status = 1;
+            continue;
+        }
         if std::fs::symlink_metadata(&it.local).is_ok() {
             if !force {
                 eprintln!(
@@ -507,9 +524,11 @@ fn confirm_whole(prog: &str, total: usize) -> bool {
 }
 
 /// Delete one item: the payload (a file or a whole tree), then its record,
-/// so a failure leaves the record that still names the payload.
+/// so a failure leaves the record that still names the payload. An item
+/// that [`BinEntry::recheck`] does not pass stays.
 fn remove_entry(it: &BinEntry) -> std::io::Result<()> {
-    std::fs::symlink_metadata(&it.payload)?;
+    it.recheck()
+        .map_err(|s| std::io::Error::other(s.reason(&it.local.to_string_lossy())))?;
     crate::permanent_guard::remove(&it.payload)?;
     // The payload is gone: its $I record goes too before a Ctrl-C acts.
     let _section = crate::interrupt::critical();

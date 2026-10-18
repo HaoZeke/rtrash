@@ -231,6 +231,49 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
 }
 
+/// A Recycle Bin item a scan listed, checked again just before rtrash
+/// acts on it (round 246). Its `$R` payload must still be there, and its
+/// `$I` record must still give the deletion time `deleted` and an original
+/// path that `same_original` accepts. Gone when either file is gone;
+/// Changed when the record reads otherwise, so another item took the
+/// payload's name. rm, restore and empty on Windows, and the WSL view of
+/// the bin, check each item here.
+pub fn recheck_bin_item(
+    payload: &Path,
+    deleted: i64,
+    same_original: impl Fn(&Path) -> bool,
+) -> Result<(), crate::util::Stale> {
+    use crate::util::Stale;
+    if std::fs::symlink_metadata(payload).is_err() {
+        return Err(Stale::Gone);
+    }
+    let Some(index) = index_file_for(payload) else {
+        return Err(Stale::Changed);
+    };
+    if std::fs::symlink_metadata(&index).is_err() {
+        return Err(Stale::Gone);
+    }
+    match read_bin_index(&index) {
+        IndexRead::Record(meta)
+            if filetime_to_unix_epoch(meta.delete_filetime) == deleted
+                && same_original(&meta.original) =>
+        {
+            Ok(())
+        }
+        _ => Err(Stale::Changed),
+    }
+}
+
+/// [`recheck_bin_item`] for an item that [`list_items_in`] built: the
+/// record must give the parent and name it gave then.
+#[cfg(windows)]
+pub(crate) fn recheck_item(it: &trash::TrashItem) -> Result<(), crate::util::Stale> {
+    recheck_bin_item(Path::new(&it.id), it.time_deleted, |o| {
+        o.file_name().unwrap_or_default() == std::ffi::OsStr::new(&it.name)
+            && o.parent().unwrap_or(Path::new("")) == it.original_parent.as_path()
+    })
+}
+
 /// One Recycle Bin item read from its `$I` record, paired with its `$R`
 /// payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1376,6 +1419,26 @@ mod os {
             .unwrap_or_else(|| it.original_path())
     }
 
+    /// The items of `items` that [`super::recheck_item`] passes just before
+    /// rtrash acts on them, and how many changed. A changed item is named
+    /// on stderr; one already gone is dropped quietly.
+    fn rechecked(prog: &str, items: Vec<TrashItem>) -> (Vec<TrashItem>, usize) {
+        let mut changed = 0usize;
+        let kept: Vec<TrashItem> = items
+            .into_iter()
+            .filter(|it| match super::recheck_item(it) {
+                Ok(()) => true,
+                Err(crate::util::Stale::Gone) => false,
+                Err(s) => {
+                    eprintln!("{prog}: {}", s.reason(&original_of(it).to_string_lossy()));
+                    changed += 1;
+                    false
+                }
+            })
+            .collect();
+        (kept, changed)
+    }
+
     /// `list --depth=N`: what a deleted folder's `$R` payload holds, N
     /// levels down, indented by level, folders with a trailing `\`, names
     /// in order; links are not followed. A file or depth 0 prints nothing.
@@ -2259,6 +2322,12 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 items.push(rest[i].clone());
             }
         }
+        // The guard may have asked: act only on items still as listed.
+        let items = if dry_run {
+            items
+        } else {
+            rechecked(prog, items).0
+        };
         let n = items.len() as u64;
         let summary = |bytes_of: &[TrashItem]| {
             let bytes = bytes_of
@@ -3017,6 +3086,8 @@ Without PATH, print a numbered list and read an index from stdin.
         }
         fn restore(&self, force: bool) -> Result<(PathBuf, Vec<String>), String> {
             let dest = &self.original;
+            // Another item may have taken the payload's name since the scan.
+            super::recheck_item(&self.item).map_err(|s| s.reason(&dest.to_string_lossy()))?;
             if dest.symlink_metadata().is_ok() {
                 if !force {
                     return Err(format!(
@@ -3219,6 +3290,12 @@ Without PATH, print a numbered list and read an index from stdin.
         }
         let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
         for (it, orig, dest) in plan {
+            // Another item may have taken the payload's name since the scan.
+            if let Err(s) = super::recheck_item(it) {
+                eprintln!("{prog}: {}", s.reason(&orig.to_string_lossy()));
+                failed += 1;
+                continue;
+            }
             if o.conflict == Conflict::Overwrite && dest.symlink_metadata().is_ok() {
                 let gone = crate::permanent_guard::remove(&dest);
                 if let Err(e) = gone {
@@ -3605,19 +3682,6 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             .collect();
         // Size last: only the matches need their `$I` read.
         let matched = filters.apply(matched, |it| it.time_deleted, item_size);
-        // Taken before the purge: the `$R` payloads are gone after it.
-        let summary = json.then(|| {
-            let names: Vec<String> = matched
-                .iter()
-                .map(|it| original_of(it).to_string_lossy().into_owned())
-                .collect();
-            let sum = crate::filters::RmSummary {
-                dry_run,
-                removed: matched.len() as u64,
-                bytes: matched.iter().map(item_size).sum(),
-            };
-            (sum, names)
-        });
         if !dry_run {
             // RTRASH_ALLOW_ROOTS: rm deletes only items trashed from there.
             let origins: Vec<PathBuf> = matched.iter().map(original_of).collect();
@@ -3638,6 +3702,25 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                 return 0;
             }
         }
+        // After the question: act only on items still as listed.
+        let (matched, changed) = if dry_run {
+            (matched, 0)
+        } else {
+            rechecked(prog, matched)
+        };
+        // Taken before the purge: the `$R` payloads are gone after it.
+        let summary = json.then(|| {
+            let names: Vec<String> = matched
+                .iter()
+                .map(|it| original_of(it).to_string_lossy().into_owned())
+                .collect();
+            let sum = crate::filters::RmSummary {
+                dry_run,
+                removed: matched.len() as u64,
+                bytes: matched.iter().map(item_size).sum(),
+            };
+            (sum, names)
+        });
         if !json && (dry_run || verbose) {
             for it in &matched {
                 println!("{}", crate::util::term_path(&original_of(it)));
@@ -3650,7 +3733,7 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             1
         } else {
             match os_limited::purge_all(matched) {
-                Ok(()) => 0,
+                Ok(()) => i32::from(changed > 0),
                 Err(e) => {
                     eprintln!("{prog}: purge failed: {}", err_msg(e));
                     1
@@ -4702,6 +4785,28 @@ mod tests {
         let got = scan_bin_dir(&dir);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].payload, r);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn recheck_bin_item_reads_the_record_again() {
+        use crate::util::Stale;
+        let dir = std::env::temp_dir().join(format!("rtrash-binre-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ft = FILETIME_UNIX_EPOCH + 50 * 10_000_000;
+        let rec = |orig: &str| encode_recycle_i_v2(Path::new(orig), 1, ft);
+        let payload = dir.join("$RAB12CD.txt");
+        std::fs::write(&payload, b"x").unwrap();
+        std::fs::write(dir.join("$IAB12CD.txt"), rec(r"C:\a.txt")).unwrap();
+        let was_a = |o: &Path| o == Path::new(r"C:\a.txt");
+        assert_eq!(recheck_bin_item(&payload, 50, was_a), Ok(()));
+        assert_eq!(recheck_bin_item(&payload, 51, was_a), Err(Stale::Changed));
+        // Another item took the name: its record gives another original.
+        std::fs::write(dir.join("$IAB12CD.txt"), rec(r"C:\b.txt")).unwrap();
+        assert_eq!(recheck_bin_item(&payload, 50, was_a), Err(Stale::Changed));
+        std::fs::remove_file(&payload).unwrap();
+        assert_eq!(recheck_bin_item(&payload, 50, was_a), Err(Stale::Gone));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
