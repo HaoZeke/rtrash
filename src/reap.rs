@@ -2104,6 +2104,7 @@ pub(crate) fn purge_oldest(
             protect_batch: None,
             gone_before: None,
             free_inodes: 0,
+            only: None,
         };
         let total = prune(prog, one, &opts(u64::MAX)).left;
         let max = total.saturating_sub(left.0);

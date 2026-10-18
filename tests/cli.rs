@@ -8604,3 +8604,28 @@ fn a_trash_pinned_twice_is_emptied_once() {
     assert!(json.contains("\"removed\":1,"), "{json}");
     assert!(!sb.trash().join("files/a.o").exists());
 }
+
+/// What `empty -i` deletes is what it counted when it asked: an item put
+/// while it waits for the yes stays, with its record, and the run says
+/// so. The question is the barrier between the two runs (round 245).
+#[test]
+fn empty_i_leaves_an_item_put_after_the_question() {
+    let sb = Sandbox::new("empty-asked");
+    sb.touch("a.o");
+    assert!(sb.run(&["put", "a.o"]).status.success());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let mut cmd = common::rtrash(&sb.root);
+    cmd.args(["empty", "-i", &pin]).current_dir(sb.work());
+    let mut empty = common::Asking::spawn(&mut cmd);
+    // empty has counted the trash once it asks.
+    empty.wait_for("Proceed? (y/N) ");
+    sb.touch("b.o");
+    assert!(sb.run(&["put", "b.o"]).status.success());
+    let (status, err) = empty.answer("y\n");
+    assert!(status.success(), "{err}");
+    assert!(err.contains(", 1 item)"), "{err}");
+    assert!(err.contains("left 1 item that came into"), "{err}");
+    assert!(!sb.trash().join("files/a.o").exists());
+    assert!(sb.trash().join("files/b.o").is_file());
+    assert!(sb.trash().join("info/b.o.trashinfo").is_file());
+}

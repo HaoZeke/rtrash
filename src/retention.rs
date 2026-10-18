@@ -90,6 +90,10 @@ pub struct Prune<'a> {
     /// Inodes the removed items must free besides the byte budget (0 for
     /// none); each item's inodes are then counted.
     pub free_inodes: u64,
+    /// What an empty counted in each of the `dirs`, in the same order: an
+    /// item it did not count still counts toward the budget but is never
+    /// removed (round 245). `None` takes any item.
+    pub only: Option<&'a [trashdir::Seen]>,
 }
 
 /// Bring the trash roots in `dirs`, taken together, under `p.max` bytes.
@@ -135,7 +139,11 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
             } else {
                 0
             },
-            protected: p.protect_batch.is_some() && e.batch.as_deref() == p.protect_batch,
+            protected: (p.protect_batch.is_some() && e.batch.as_deref() == p.protect_batch)
+                || p.only.is_some_and(|seen| {
+                    let name = crate::util::os_from_str(&e.name);
+                    !seen.get(ri).is_some_and(|s| s.saw_item(&name))
+                }),
             name: e.name,
         }));
         sizes.write_back_locked();

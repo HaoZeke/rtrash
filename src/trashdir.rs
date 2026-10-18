@@ -773,6 +773,83 @@ pub fn uid_name(uid: u32) -> String {
     uid.to_string()
 }
 
+/// Identity of a payload: device, inode and change time, so a new item
+/// that got the inode and name of a removed one still differs.
+type PayloadId = (u64, u64, i64, i64);
+
+fn payload_id(path: &Path) -> Option<PayloadId> {
+    let m = fs::symlink_metadata(path).ok()?;
+    Some((m.dev(), m.ino(), m.ctime(), m.ctime_nsec()))
+}
+
+/// What a command counted in one trash before it took the lock: each
+/// payload in files/ with its identity, and each name in info/. Under the
+/// lock it acts only on what it counted, so an item put after the count,
+/// or after the user said yes to it, stays (round 245).
+pub struct Seen {
+    dir: TrashDir,
+    files: HashMap<OsString, PayloadId>,
+    info: HashSet<OsString>,
+}
+
+impl Seen {
+    /// Count `dir` now.
+    pub fn take(dir: &TrashDir) -> Seen {
+        let files_dir = dir.files();
+        let files = fs::read_dir(&files_dir)
+            .map(|r| {
+                r.flatten()
+                    .filter_map(|e| Some((e.file_name(), payload_id(&e.path())?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let info = fs::read_dir(dir.info())
+            .map(|r| r.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        Seen {
+            dir: dir.clone(),
+            files,
+            info,
+        }
+    }
+
+    /// The trash that was counted.
+    pub fn dir(&self) -> &TrashDir {
+        &self.dir
+    }
+
+    /// How many payloads the count found, which is the item count an
+    /// empty reports.
+    pub fn items(&self) -> u64 {
+        self.files.len() as u64
+    }
+
+    /// The payload `name` in files/ is the one counted.
+    pub fn saw_payload(&self, name: &OsStr) -> bool {
+        self.files
+            .get(name)
+            .is_some_and(|id| payload_id(&self.dir.files().join(name)) == Some(*id))
+    }
+
+    /// The item `name` is as counted: its payload is the counted one, or
+    /// there was none then and is none now; and a record it has now was
+    /// counted too.
+    pub fn saw_item(&self, name: &OsStr) -> bool {
+        if payload_id(&self.dir.files().join(name)) != self.files.get(name).copied() {
+            return false;
+        }
+        let mut rec = name.to_os_string();
+        rec.push(".trashinfo");
+        self.info.contains(&rec) || fs::symlink_metadata(self.dir.info().join(&rec)).is_err()
+    }
+
+    /// The name `rec` in info/ was counted. The record of a payload that
+    /// came later may have a counted name; check the payload for that.
+    pub fn saw_record(&self, rec: &OsStr) -> bool {
+        self.info.contains(rec)
+    }
+}
+
 /// Exclusive per-trash-root lock (flock on `root/.rtrash.lock`) so put and empty
 /// cannot interleave a half-written pair under the same root.
 ///

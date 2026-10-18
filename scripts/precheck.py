@@ -1260,10 +1260,11 @@ def check_record_sections():
 # lock is held (round 244). A new site needs an entry saying so.
 LOCK_SITES = {
     ("src/empty.rs", "empty_dangling"): "reads the dangling records again; only counted ones go",
-    ("src/empty.rs", "run_inner"): "empty_one scans under the lock; the counts before only "
-                                   "refuse early, and permanent_guard caps each removal",
+    ("src/empty.rs", "run_inner"): "empty_one scans under the lock and takes only what "
+                                   "trashdir::Seen counted before it (round 245)",
     ("src/list.rs", "relock"): "reads the record again; only a Locked entry is acted on",
-    ("src/retention.rs", "prune"): "locks every root before it lists and sizes the items",
+    ("src/retention.rs", "prune"): "locks every root before it lists and sizes the items; "
+                                   "Prune.only spares what an empty did not count",
     ("src/trash_check.rs", "run"): "scans again and keeps what changed (tests::AFTER_SCAN)",
     ("src/trashdir.rs", "trash_move"): "takes the name and writes the record under the lock",
     ("src/trashdir.rs", "record_dir_size"): "writes only for the record it sized "
@@ -1273,7 +1274,8 @@ LOCK_SITES = {
 # A fn that removes a payload and its record acts on a listed item. It
 # takes the item through list::Entry::relock, unless it is listed here.
 LOCKED_REMOVERS = {
-    ("src/empty.rs", "empty_one"): "runs with the lock held and scans under it",
+    ("src/empty.rs", "empty_one"): "runs with the lock held, scans under it and checks "
+                                   "each item against trashdir::Seen",
     ("src/retention.rs", "remove_entry"): "prune lists the items under the locks it holds",
     ("src/wsl_bin.rs", "remove_entry"): "the Windows Recycle Bin has no trash lock",
 }

@@ -232,11 +232,16 @@ fn unscoped(opts: &Opts) -> bool {
         && !opts.dry_run
 }
 
-fn confirm(dirs: &[TrashDir]) -> bool {
+/// Count every trash in `dirs`, for an empty to act on later.
+fn count(dirs: &[TrashDir]) -> Vec<trashdir::Seen> {
+    dirs.iter().map(trashdir::Seen::take).collect()
+}
+
+fn confirm(seen: &[trashdir::Seen]) -> bool {
     eprintln!("Would empty the following trash directories:");
-    for d in dirs {
-        let (size, n) = holds(&d.files());
-        eprintln!("    - {} ({size}, {n})", d.root.display());
+    for s in seen {
+        let (size, n) = holds(s);
+        eprintln!("    - {} ({size}, {n})", s.dir().root.display());
     }
     eprint!("Proceed? (y/N) ");
     let mut line = String::new();
@@ -246,12 +251,12 @@ fn confirm(dirs: &[TrashDir]) -> bool {
     matches!(line.trim(), "y" | "Y" | "yes" | "Yes")
 }
 
-/// What a trash's payload directory takes on disk and how many items sit
-/// at its top, as `12.0 KiB` and `3 items`, for the `-i` prompt.
-fn holds(files: &std::path::Path) -> (String, String) {
-    let n = fs::read_dir(files).map_or(0, |d| d.flatten().count()) as u64;
-    let size = crate::util::format_bytes(crate::fastdelete::disk_usage(files));
-    (size, crate::util::plural(n, "item", "items"))
+/// What a trash's payload directory takes on disk and how many items the
+/// count found at its top, as `12.0 KiB` and `3 items`, for the `-i`
+/// prompt.
+fn holds(seen: &trashdir::Seen) -> (String, String) {
+    let size = crate::util::format_bytes(crate::fastdelete::disk_usage(&seen.dir().files()));
+    (size, crate::util::plural(seen.items(), "item", "items"))
 }
 
 fn usage_err(prog: &str, msg: &str) -> i32 {
@@ -437,8 +442,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         return empty_dangling(prog, &dirs, &opts);
     }
 
-    if opts.interactive && !opts.dry_run {
-        if !confirm(&dirs) {
+    // What the run counts is all it may remove: an item put after the
+    // count, or after the yes to it, stays. A question counts first.
+    let asked = (opts.interactive && !opts.dry_run).then(|| count(&dirs));
+    if let Some(seen) = &asked {
+        if !confirm(seen) {
             return 0;
         }
         opts.plain = true;
@@ -454,6 +462,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         entries.extend(list::orphans(&dirs));
         let refs: Vec<&list::Entry> = entries.iter().collect();
         return crate::empty_tui::run(prog, refs, opts.dry_run);
+    }
+
+    // Counted before the guard and the cap count, so what they allow is
+    // what can go.
+    let seen = asked.unwrap_or_else(|| count(&dirs));
+    #[cfg(test)]
+    {
+        if let Some(f) = tests::AFTER_COUNT.take() {
+            f();
+        }
     }
 
     if !opts.interactive && unscoped(&opts) {
@@ -497,6 +515,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                     protect_batch: None,
                     gone_before: cutoff,
                     free_inodes: 0,
+                    only: Some(seen.as_slice()),
                 },
             )
             .removed;
@@ -510,10 +529,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     if !opts.dry_run {
         crate::interrupt::stop_then_quit();
     }
-    for dir in dirs.iter().filter(|_| age_pass) {
+    for seen in seen.iter().filter(|_| age_pass) {
         if crate::interrupt::requested() {
             break;
         }
+        let dir = seen.dir();
         // Exclusive lock for this trash root so put cannot interleave a half pair.
         let _lock = match trashdir::TrashLock::acquire(&dir.root) {
             Ok(l) => l,
@@ -524,7 +544,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
         };
         empty_one(
-            prog, dir, cutoff, &opts, &removed, &bytes, &errors, &failures,
+            prog, seen, cutoff, &opts, &removed, &bytes, &errors, &failures,
         );
     }
 
@@ -540,6 +560,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 protect_batch: None,
                 gone_before: cutoff,
                 free_inodes: 0,
+                only: Some(seen.as_slice()),
             },
         );
         removed.fetch_add(done.removed, Ordering::Relaxed);
@@ -691,10 +712,12 @@ fn fail(failures: &Failures, errors: &AtomicU64, path: PathBuf, e: &io::Error) {
         .push((path, e.to_string()));
 }
 
+/// Empty the trash `seen` counted, under its lock, taking only the items
+/// it counted.
 #[allow(clippy::too_many_arguments)]
 fn empty_one(
     prog: &str,
-    dir: &TrashDir,
+    seen: &trashdir::Seen,
     cutoff: Option<i64>,
     opts: &Opts,
     removed: &AtomicU64,
@@ -702,6 +725,7 @@ fn empty_one(
     errors: &AtomicU64,
     failures: &Failures,
 ) {
+    let dir = seen.dir();
     let info_dir = dir.info();
     let files_dir = dir.files();
     if !opts.dry_run {
@@ -715,10 +739,14 @@ fn empty_one(
             full_empty_dry_run(dir, opts, removed, bytes);
         } else {
             let before = errors.load(Ordering::Relaxed);
-            full_empty_wipe(prog, dir, opts, removed, errors, failures);
+            let left = full_empty_wipe(prog, seen, opts, removed, errors, failures);
             // An empty that took everything leaves a known total; one that
-            // failed somewhere or stopped leaves it stale for the next reader.
-            if errors.load(Ordering::Relaxed) == before && !crate::interrupt::requested() {
+            // failed somewhere, stopped or left new items leaves it stale
+            // for the next reader.
+            if errors.load(Ordering::Relaxed) == before
+                && !crate::interrupt::requested()
+                && left == 0
+            {
                 crate::trash_total::store(dir, 0, 0);
             } else {
                 crate::trash_total::forget(dir);
@@ -728,6 +756,8 @@ fn empty_one(
     }
 
     let mut kept_names: Vec<String> = Vec::new();
+    // Items that came after the count, or took the name of one it counted.
+    let mut late = 0u64;
     let mut victims: Vec<(PathBuf, Option<PathBuf>, PathBuf)> = Vec::new(); // (target, info, display)
 
     if let Ok(entries) = fs::read_dir(&info_dir) {
@@ -750,6 +780,12 @@ fn empty_one(
                     )
                 }
             };
+            // Under the lock, only an item that the count saw.
+            if take && !seen.saw_item(&crate::util::os_from_str(name)) {
+                late += 1;
+                kept_names.push(name.to_string());
+                continue;
+            }
             if take {
                 // -v names the original path, as trash-cli users asked.
                 let shown = if opts.verbose {
@@ -784,6 +820,8 @@ fn empty_one(
             }
         }
     }
+
+    report_late(prog, dir, late);
 
     let sizes = trashdir::DirSizes::load(dir);
     // A total current before this pass loses what the pass takes.
@@ -880,6 +918,17 @@ fn empty_one(
     }
 }
 
+/// Say on stderr that `late` items in `dir`, put after the count, stayed.
+fn report_late(prog: &str, dir: &TrashDir, late: u64) {
+    if late > 0 {
+        eprintln!(
+            "{prog}: left {} that came into '{}' after the count; empty again to take them",
+            crate::util::plural(late, "item", "items"),
+            dir.root.display()
+        );
+    }
+}
+
 /// The original path a `.trashinfo` records, resolved against its trash.
 fn original_of(dir: &TrashDir, info_path: &std::path::Path) -> Option<PathBuf> {
     let raw = info::read_bounded(info_path, info::RECORD_CAP).ok()?;
@@ -926,23 +975,41 @@ fn full_empty_dry_run(dir: &TrashDir, opts: &Opts, removed: &AtomicU64, bytes: &
 }
 
 /// Full empty: wipe `files/` and `info/`. Skip expensive pre-scans unless
-/// verbose (count comes from the wipe itself).
+/// verbose (count comes from the wipe itself). Only what `seen` counted
+/// goes; the return is how many items came after the count and stayed.
 fn full_empty_wipe(
     prog: &str,
-    dir: &TrashDir,
+    seen: &trashdir::Seen,
     opts: &Opts,
     removed: &AtomicU64,
     errors: &AtomicU64,
     failures: &Failures,
-) {
+) -> u64 {
+    let dir = seen.dir();
     let info_dir = dir.info();
     let files_dir = dir.files();
+    // A payload put after the count, or in the place of one it counted,
+    // stays with its record; so does a record put after the count. The
+    // trash is locked, so the names looked up once here stay true.
+    let names: Vec<std::ffi::OsString> = fs::read_dir(&files_dir)
+        .map(|r| r.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    let late_names: std::collections::HashSet<&std::ffi::OsStr> = names
+        .iter()
+        .map(|n| n.as_os_str())
+        .filter(|n| !seen.saw_payload(n))
+        .collect();
+    let late = |name: &std::ffi::OsStr| late_names.contains(name);
+    let late_record = |rec: &std::ffi::OsStr| !seen.saw_record(rec);
 
     // Verbose still lists intended removals before delete (stable UX),
     // by original path where a record names one.
     if opts.verbose {
         if let Ok(entries) = fs::read_dir(&files_dir) {
-            for entry in entries.flatten() {
+            for entry in entries
+                .flatten()
+                .filter(|e| !late(e.file_name().as_os_str()))
+            {
                 let mut info = entry.file_name();
                 info.push(".trashinfo");
                 let shown = original_of(dir, &info_dir.join(info)).unwrap_or_else(|| entry.path());
@@ -954,14 +1021,17 @@ fn full_empty_wipe(
     // A payload that cannot go stays, with its .trashinfo; the rest of the
     // trash still empties, and the failures are reported at the end.
     // The whole trash goes at once, so the cap takes every item or none.
-    let items = fs::read_dir(&files_dir).map_or(0, |r| r.count() as u64);
-    if let Err(e) = crate::permanent_guard::gate_many(items) {
+    let mut kept: Vec<String> = late_names
+        .iter()
+        .map(|n| crate::util::str_from_os_ref(n))
+        .collect();
+    let left = kept.len() as u64;
+    if let Err(e) = crate::permanent_guard::gate_many(names.len() as u64 - left) {
         eprintln!("{prog}: {e}");
         errors.fetch_add(1, Ordering::Relaxed);
-        return;
+        return left;
     }
-    let (wf, wi) = crate::fastdelete::wipe_two_parallel(&files_dir, &info_dir);
-    let mut kept: Vec<String> = Vec::new();
+    let (wf, wi) = crate::fastdelete::wipe_two_parallel(&files_dir, &info_dir, late, late_record);
     match wf {
         Ok(w) => {
             // Top-level `files/` children ≈ trashed items (incl. orphans).
@@ -981,7 +1051,7 @@ fn full_empty_wipe(
                 dir.root.display()
             );
             errors.fetch_add(1, Ordering::Relaxed);
-            return;
+            return left;
         }
     }
     match wi {
@@ -994,6 +1064,8 @@ fn full_empty_wipe(
     }
 
     prune_directorysizes(dir, &kept);
+    report_late(prog, dir, left);
+    left
 }
 
 /// Rewrite the spec's `directorysizes` cache keeping only surviving entries;
@@ -1005,6 +1077,80 @@ fn prune_directorysizes(dir: &TrashDir, kept: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Set by a test: run once on this thread after an empty has
+        /// counted the trash, and asked about it, and before it locks it.
+        pub(super) static AFTER_COUNT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// A trash under the temp dir holding one item per name, all trashed
+    /// in 2001 so that any age cut takes them.
+    fn old_trash(tag: &str, names: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("rtrash-empty-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("files")).unwrap();
+        fs::create_dir_all(root.join("info")).unwrap();
+        for name in names {
+            put_old(&root, name);
+        }
+        root
+    }
+
+    /// Put an item `name` into the trash at `root`, trashed in 2001. A
+    /// payload already there gives way to a new file, which never gets
+    /// its inode: the new file exists before the old one goes.
+    fn put_old(root: &std::path::Path, name: &str) {
+        let new = root.join(format!("{name}.new"));
+        fs::write(&new, name).unwrap();
+        fs::rename(&new, root.join("files").join(name)).unwrap();
+        let record = format!("[Trash Info]\nPath=/tmp/{name}\nDeletionDate=2001-01-01T00:00:00\n");
+        fs::write(root.join("info").join(format!("{name}.trashinfo")), record).unwrap();
+    }
+
+    /// Empty the trash at `root` with `args`, while the hook, between the
+    /// count and the lock, puts a new item `c` and a new payload under the
+    /// counted name `b`. Both must stay with their records; `a` goes.
+    fn empty_with_late_items(tag: &str, args: &[&str]) {
+        let root = old_trash(tag, &["a", "b"]);
+        let r = root.clone();
+        AFTER_COUNT.set(Some(Box::new(move || {
+            put_old(&r, "c");
+            put_old(&r, "b");
+        })));
+        let mut argv = vec![
+            "--plain".to_string(),
+            format!("--trash-dir={}", root.display()),
+        ];
+        argv.extend(args.iter().map(|a| a.to_string()));
+        assert_eq!(run_inner("rtrash", &argv), 0);
+        assert!(AFTER_COUNT.take().is_none(), "the hook never ran");
+        assert!(!root.join("files/a").exists());
+        assert!(!root.join("info/a.trashinfo").exists());
+        for kept in ["files/b", "info/b.trashinfo", "files/c", "info/c.trashinfo"] {
+            assert!(root.join(kept).exists(), "{kept} went");
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A full empty takes only what it counted before the lock (round 245).
+    #[test]
+    fn a_full_empty_spares_what_came_after_its_count() {
+        empty_with_late_items("late-full", &[]);
+    }
+
+    /// So does an age cut: the late items are as old as the cut asks.
+    #[test]
+    fn an_age_cut_keeps_late_items_as_old_as_the_cut() {
+        empty_with_late_items("late-age", &["1"]);
+    }
+
+    /// And a size budget: the late items count toward it but stay.
+    #[test]
+    fn a_size_budget_counts_late_items_but_never_picks_them() {
+        empty_with_late_items("late-size", &["--max-size=0"]);
+    }
 
     #[test]
     fn failure_report_lists_each_item_with_its_reason() {

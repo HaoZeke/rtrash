@@ -925,10 +925,19 @@ fn wipe_children_with(
 /// stayed behind, so a payload that could not go keeps its record instead
 /// of turning into an orphan. Both roots are always tried.
 ///
+/// A payload that `keep` names stays, with its record, and so does a
+/// record that `keep_record` names: an empty leaves what it never counted
+/// (round 245).
+///
 /// The first Ctrl-C stops the wipe before the next payload; see
 /// [`wipe_pair`].
-pub fn wipe_two_parallel(files: &Path, info: &Path) -> (io::Result<Wipe>, io::Result<Wipe>) {
-    wipe_pair(files, info, crate::interrupt::requested)
+pub fn wipe_two_parallel(
+    files: &Path,
+    info: &Path,
+    keep: impl Fn(&OsStr) -> bool + Sync,
+    keep_record: impl Fn(&OsStr) -> bool + Sync,
+) -> (io::Result<Wipe>, io::Result<Wipe>) {
+    wipe_pair(files, info, crate::interrupt::requested, keep, keep_record)
 }
 
 /// [`wipe_two_parallel`], asking `stop` before each payload. Each
@@ -941,33 +950,30 @@ fn wipe_pair(
     files: &Path,
     info: &Path,
     stop: impl Fn() -> bool + Sync,
+    keep: impl Fn(&OsStr) -> bool + Sync,
+    keep_record: impl Fn(&OsStr) -> bool + Sync,
 ) -> (io::Result<Wipe>, io::Result<Wipe>) {
     let info_fd = open_dir_nofollow(info);
     let records = std::sync::atomic::AtomicU64::new(0);
-    let ra = wipe_children_with(
-        files,
-        |_| false,
-        stop,
-        |name| {
-            let Ok(Some(fd)) = &info_fd else {
-                return;
-            };
-            let mut rec = name.to_os_string();
-            rec.push(".trashinfo");
-            let Ok(rec_c) = CString::new(rec.as_bytes()) else {
-                return;
-            };
-            let section = crate::interrupt::critical();
-            // SAFETY: unlinkat(2) on a NUL-terminated name in an open dir. A
-            // record that will not go is left to the info/ pass below, which
-            // reports it.
-            if unsafe { libc::unlinkat(fd.as_raw_fd(), rec_c.as_ptr(), 0) } == 0 {
-                records.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            drop(section);
-            crate::interrupt::test_seam("after-item");
-        },
-    );
+    let ra = wipe_children_with(files, &keep, stop, |name| {
+        let Ok(Some(fd)) = &info_fd else {
+            return;
+        };
+        let mut rec = name.to_os_string();
+        rec.push(".trashinfo");
+        let Ok(rec_c) = CString::new(rec.as_bytes()) else {
+            return;
+        };
+        let section = crate::interrupt::critical();
+        // SAFETY: unlinkat(2) on a NUL-terminated name in an open dir. A
+        // record that will not go is left to the info/ pass below, which
+        // reports it.
+        if unsafe { libc::unlinkat(fd.as_raw_fd(), rec_c.as_ptr(), 0) } == 0 {
+            records.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        drop(section);
+        crate::interrupt::test_seam("after-item");
+    });
     let taken = records.load(std::sync::atomic::Ordering::Relaxed);
     if matches!(&ra, Ok(w) if !w.not_reached.is_empty()) {
         let rb = Wipe {
@@ -989,7 +995,16 @@ fn wipe_pair(
         // files/ unreadable: keep every record.
         Err(_) => return (ra, Ok(Wipe::default())),
     };
-    let rb = wipe_children_except(info, |n| kept.contains(n)).map(|mut w| {
+    // The record of a payload kept on purpose stays with it.
+    let kept_payload = |n: &OsStr| {
+        n.as_bytes()
+            .strip_suffix(b".trashinfo")
+            .is_some_and(|stem| keep(OsStr::from_bytes(stem)))
+    };
+    let rb = wipe_children_except(info, |n| {
+        kept.contains(n) || kept_payload(n) || keep_record(n)
+    })
+    .map(|mut w| {
         w.removed += taken;
         w
     });
@@ -1105,7 +1120,7 @@ mod tests {
             fs::write(info.join(format!("{n}.trashinfo")), b"x").unwrap();
         }
         FAIL.lock().unwrap().push(stuck.clone().into());
-        let (wf, wi) = wipe_two_parallel(&files, &info);
+        let (wf, wi) = wipe_two_parallel(&files, &info, |_| false, |_| false);
         FAIL.lock().unwrap().retain(|n| n != stuck.as_str());
         let (wf, wi) = (wf.unwrap(), wi.unwrap());
         assert_eq!(wf.removed, 2);
@@ -1385,7 +1400,7 @@ mod tests {
             fs::write(a.join(format!("f{i}")), b"x").unwrap();
             fs::write(b.join(format!("g{i}")), b"y").unwrap();
         }
-        let (wa, wb) = wipe_two_parallel(&a, &b);
+        let (wa, wb) = wipe_two_parallel(&a, &b, |_| false, |_| false);
         assert_eq!(wa.unwrap().removed, 20);
         assert_eq!(wb.unwrap().removed, 20);
         assert!(fs::read_dir(&a).unwrap().next().is_none());
@@ -1410,7 +1425,13 @@ mod tests {
         fs::write(info.join("stray.txt"), b"x").unwrap();
         // The first three payloads asked about go; every later one stays.
         let asked = AtomicU64::new(0);
-        let (wf, wi) = wipe_pair(&files, &info, || asked.fetch_add(1, Ordering::SeqCst) >= 3);
+        let (wf, wi) = wipe_pair(
+            &files,
+            &info,
+            || asked.fetch_add(1, Ordering::SeqCst) >= 3,
+            |_| false,
+            |_| false,
+        );
         let (wf, wi) = (wf.unwrap(), wi.unwrap());
         assert_eq!(wf.removed, 3);
         assert_eq!(wf.not_reached.len(), 61);

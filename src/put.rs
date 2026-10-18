@@ -425,6 +425,7 @@ fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
                 protect_batch: Some(crate::info::batch_id()),
                 gone_before: None,
                 free_inodes: 0,
+                only: None,
             },
         );
         if done.removed > 0 && !quiet {
