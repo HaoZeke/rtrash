@@ -4165,3 +4165,172 @@ fn gitignore_reads_info_exclude_through_a_git_file() {
         }
     }
 }
+
+/// Round 239's differential check against git, with fixed seeds: each
+/// seed builds a small repository with random ignore files, and the files
+/// `--gitignore` keeps must be exactly the untracked ones `git status`
+/// lists. Skipped without git.
+#[cfg(unix)]
+#[test]
+fn gitignore_matches_git_status_on_seeded_trees() {
+    if !git_ok() {
+        return;
+    }
+    // splitmix64, so each seed builds the same tree on every run.
+    struct Seeded(u64);
+
+    impl Seeded {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^= z >> 31;
+            (z % n as u64) as usize
+        }
+
+        // `k` distinct entries of `pool`, in the order drawn.
+        fn sample<'a>(&mut self, pool: &[&'a str], k: usize) -> Vec<&'a str> {
+            let mut idx: Vec<usize> = (0..pool.len()).collect();
+            (0..k)
+                .map(|i| {
+                    let j = i + self.below(idx.len() - i);
+                    idx.swap(i, j);
+                    pool[idx[i]]
+                })
+                .collect()
+        }
+    }
+
+    const POOL: &[&str] = &[
+        "build/",
+        "!build/keep.txt",
+        "*",
+        "!*/",
+        "!keep.txt",
+        "/sub/*",
+        "!/sub/deep/",
+        "*.log",
+        "!x.log",
+        "a/**",
+        "!a/b/",
+        "**/c",
+        "a/**/keep.txt",
+        "/a",
+        "!/a/b",
+        "b/*",
+        "!b/c/",
+        "!/a",
+        "c/",
+        "!c/",
+        "*.o",
+        "!a.o",
+        "**",
+        "!**/",
+        "sub/",
+        "!sub/deep/keep.txt",
+        "a/b",
+        "!a/b/keep.txt",
+        "/*",
+        "!/a/",
+        "**/keep.txt",
+        "!**/x.log",
+        "deep",
+        "!deep/",
+        "[ab]/",
+        "![a]/c",
+        "?.o",
+        "*.tx?",
+        "\\!x",
+        "sub/**/",
+        "/a/b/",
+        "!a/**/c/",
+        "a/**/c",
+        "**/b/**",
+        "!**/b/*.o",
+        "b/**/*.log",
+        "*/c",
+        "!*/c/",
+        "/**/keep.txt",
+        "a/*/c/",
+        "x.log ",
+        "x.log\\ ",
+        "#x.log",
+        "[!a].o",
+        "[a-c]/",
+        "**/*.o",
+        "!/**/a.o",
+        "*/",
+        "!*.log",
+        "a/b/**",
+        "!a/b/c/**",
+        "/b",
+        "!b",
+        "**/",
+        "a/",
+        "!a/c",
+    ];
+    const DIRS: &[&str] = &[
+        "a", "a/b", "a/b/c", "b", "b/c", "c", "sub", "sub/deep", "build", "a/c",
+    ];
+    const FILES: &[&str] = &["keep.txt", "x.log", "a.o", "b.o", "!x"];
+    for seed in 0..48u64 {
+        let t = Tree::new(&format!("gitignore-seed-{seed}"));
+        let repo = t.root.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        let mut rng = Seeded(seed);
+        let mut rules = Vec::new();
+        for d in std::iter::once("").chain(DIRS.iter().copied()) {
+            let dir = repo.join(d);
+            fs::create_dir_all(&dir).unwrap();
+            for f in FILES {
+                if rng.below(2) == 0 {
+                    fs::write(dir.join(f), "x").unwrap();
+                }
+            }
+            // A .gitignore in nine of ten roots, two of ten subdirectories.
+            let odds = if d.is_empty() { 9 } else { 2 };
+            if rng.below(10) < odds {
+                let k = 1 + rng.below(5);
+                let pats = rng.sample(POOL, k);
+                fs::write(dir.join(".gitignore"), pats.join("\n") + "\n").unwrap();
+                rules.push(format!("{d}: {pats:?}"));
+            }
+        }
+        let out = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=all", "-z"])
+            .current_dir(&repo)
+            .env("HOME", &t.root)
+            .env("XDG_CONFIG_HOME", t.root.join(".cfg"))
+            .envs(no_host_git_config(&t.root))
+            .env_remove("GIT_CONFIG_COUNT")
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let status = String::from_utf8(out.stdout).unwrap();
+        let mut want: Vec<&str> = status
+            .split('\0')
+            .filter_map(|e| e.strip_prefix("?? "))
+            .collect();
+        want.sort_unstable();
+        let j = t.json(&[
+            "--no-git",
+            "--gitignore",
+            "--files",
+            "-n",
+            "1000",
+            &s(&repo),
+        ]);
+        let top = format!("{}/", s(&repo));
+        let listed = paths_in(&j, "files");
+        let mut got: Vec<&str> = listed
+            .iter()
+            .filter_map(|p| p.strip_prefix(&top))
+            .filter(|p| !p.starts_with(".git/"))
+            .collect();
+        got.sort_unstable();
+        assert_eq!(got, want, "seed {seed}, rules {rules:?}");
+    }
+}
