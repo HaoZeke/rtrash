@@ -692,6 +692,24 @@ fn snapshots_cannot_rank_by_items() {
 }
 
 #[test]
+fn a_snapshot_lists_but_does_not_drive_print0() {
+    // A snapshot can be stale, so nothing is trashed or printed for a
+    // pipe from it; -i browses it read-only instead (ncdu #247).
+    let t = Tree::new("snap-print0");
+    t.file("a/x", 10);
+    let out = t.du(&["-o", "s.snap"]);
+    assert!(out.status.success());
+    let o = t.du(&["-f", "s.snap", "--print0"]);
+    assert_eq!(o.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&o.stderr).into_owned();
+    assert!(
+        err.contains("a snapshot can be stale, so --file cannot drive --print0 or --pick"),
+        "{err}"
+    );
+    assert!(o.stdout.is_empty(), "{:?}", o.stdout);
+}
+
+#[test]
 fn print0_and_text_output() {
     let t = Tree::new("print0");
     let f = t.file("d/f.bin", 50_000);

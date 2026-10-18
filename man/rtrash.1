@@ -2216,8 +2216,27 @@ without the count (an older snapshot or a gdu export, which marks none)
 shows null for
 \fIunreadable\fR in the JSON.
 A snapshot can be stale, so it cannot drive
-.BR \-\-print0 ,
-.BR \-\-pick " or " \-\-interactive .
+.BR \-\-print0 " or " \-\-pick .
+With
+.BR \-\-interactive ,
+the explorer browses the file instead of a scan, as ncdu #247 asks: one
+view per directory the file records, opened from it with no walk, so
+the directories need not exist any more.
+It is read-only:
+.BR d ", " u ", " b ", " r " and " E
+explain instead of acting, and the title says
+.BR "(snapshot, read-only)" .
+A snapshot records directories, not files, so a view lists the
+directories below it, and its size, from the file, can be more than its
+rows add up to.
+An rtrash snapshot records no item counts, so its item counts cover
+only the directories listed; an ncdu export records them.
+A snapshot written with
+.B \-\-max\-depth
+shows nothing below that depth.
+Two or more roots open on a view of their own, as with
+.B "du \-i A B" ;
+roots one inside the other exit 2.
 .TP
 .B \-\-stacks
 Print folded stacks instead of listing: one line per directory, its path

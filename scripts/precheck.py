@@ -1350,6 +1350,8 @@ BROWSER_FILES = ("src/du_tui.rs", "src/empty_tui.rs", "src/put_tui.rs", "src/res
 BROWSER_PRINTERS = {
     ("src/du_tui.rs", "explorer_roots"): "checks the roots before the explorer starts",
     ("src/du_tui.rs", "run"): "before enter and after leave",
+    ("src/du_tui.rs", "run_snapshot"): "an unbrowsable snapshot, before enter",
+    ("src/du_tui.rs", "drive"): "before enter and after leave",
     ("src/empty_tui.rs", "run"): "before enter, and the held reasons after leave",
     ("src/put_tui.rs", "run"): "before enter and after leave",
     ("src/put_tui.rs", "run_rows"): "before enter and after leave",
@@ -1863,6 +1865,65 @@ def check_report_literals():
                           "field so a new one must be set here too")
 
 
+# Which functions of src/du_tui.rs may call each walk. Every walk the
+# explorer starts goes through App::walk, App::quick or App::spawn_with,
+# which refuse while it browses a snapshot (du -f FILE -i).
+EXPLORER_WALKS = {
+    "scan_any": {"walk", "spawn_with", "new_in"},
+    "quick_any": {"quick", "start"},
+    "scan_roots": {"scan_any"},
+    "scan_view": {"scan_any", "scan_roots"},
+    "quick_roots": {"quick_any"},
+    "quick_view": {"quick_any"},
+    "du::scan": {"scan_view"},
+}
+WALK_CALL = re.compile(r"(?<![\w:])(du::scan|scan_any|quick_any|scan_roots|scan_view|"
+                       r"quick_roots|quick_view)\(")
+EXPLORER_WALK_CASES = [
+    ("gated", "    fn walk(&self) {\n        scan_any(d, r)\n    }\n", []),
+    ("ungated", "    fn go(&mut self) {\n        let v = scan_any(d, r);\n    }\n", [2]),
+    ("quick", "    fn back(&mut self) {\n        quick_view(d)\n    }\n", [2]),
+    ("definition", "fn scan_view(dir: &Path) -> V {\n    du::scan(&[d], &o)\n}\n", []),
+    ("comment", "    fn go(&mut self) {\n        // scan_any(d) is not called\n    }\n", []),
+]
+
+
+def explorer_walk_lines(text, skip=()):
+    """Lines that call a walk from a function EXPLORER_WALKS does not
+    allow it in. Comment lines and 0-based numbers in `skip` are left out."""
+    hits, owner, end = [], None, None
+    lines = text.split("\n")
+    for n, line in enumerate(lines):
+        m = re.match(r"(\s*)(?:pub(?:\([a-z]+\))? )?fn (\w+)", line)
+        if m and (owner is None or len(m.group(1)) <= len(end) - 1):
+            owner, end = m.group(2), m.group(1) + "}"
+            continue
+        if owner is not None and line == end:
+            owner = None
+            continue
+        if n in skip or line.lstrip().startswith("//"):
+            continue
+        for call in WALK_CALL.findall(line):
+            if owner not in EXPLORER_WALKS[call]:
+                hits.append(n + 1)
+    return hits
+
+
+def check_explorer_walks():
+    """The explorer walks only through App::walk, App::quick and
+    App::spawn_with (and the scanners those call), so browsing a snapshot
+    walks nothing; EXPLORER_WALK_CASES tests the matcher."""
+    for what, text, want in EXPLORER_WALK_CASES:
+        if explorer_walk_lines(text) != want:
+            errors.append(f"scripts/precheck.py: explorer_walk_lines gets EXPLORER_WALK_CASES '{what}' "
+                          "wrong; the explorer-walk check is broken")
+    path = ROOT / "src" / "du_tui.rs"
+    raw = path.read_text(encoding="utf-8")
+    for line in explorer_walk_lines(raw, test_mod_lines(raw.split("\n"))):
+        errors.append(f"src/du_tui.rs:{line}: walks outside App::walk, App::quick and "
+                      "App::spawn_with; go through them so du -f FILE -i never scans (ncdu #247)")
+
+
 # Bare rtrash runs allowed per test file. Empty since round 188: every test
 # goes through common::rtrash or common::rtrash_real.
 UNPINNED_LEFT: dict[str, int] = {}
@@ -1978,7 +2039,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_directorysizes_paths()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_directorysizes_paths()
     check_long_lines(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

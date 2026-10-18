@@ -216,7 +216,8 @@ directories appear as one `trash` row and are never printed by --print0.
                           hide dot names (.), print paths and quit (p) or
                           copy them (y), open a shell there (b), page a
                           file (v) or open a row with its program (o); rows
-                          show git state and artefact kind
+                          show git state and artefact kind; with -f, browse
+                          the file's directories, read-only, with no scan
       --no-delete       with -i, browse only: d, u and b do nothing
       --si              show sizes in powers of 1000 (kB, MB, GB)
       --no-prefix       show sizes as plain byte counts, for sort -n and
@@ -4019,10 +4020,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     // --show-relative-size weighs rows as the ranking does.
     let apparent_share = opts.sort == SortKey::Apparent;
     if let Some(file) = &from_file {
-        if print0 || pick || interactive {
-            eprintln!(
-                "{prog}: a snapshot can be stale; --file lists it but cannot drive --print0, --pick or --interactive"
-            );
+        if print0 || pick {
+            eprintln!("{prog}: a snapshot can be stale, so --file cannot drive --print0 or --pick");
             return 2;
         }
         let snap = match crate::du_snap::read(file) {
@@ -4039,6 +4038,15 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         if opts.sort == SortKey::Items {
             eprintln!("{prog}: snapshots do not record item counts; --sort=items needs a scan");
             return 2;
+        }
+        #[cfg(feature = "tui")]
+        if interactive {
+            // The explorer reads Ctrl-C as a key.
+            crate::du_interrupt::uninstall();
+            if crate::du_interrupt::pressed() {
+                return 130;
+            }
+            return crate::du_tui::run_snapshot(prog, file, &snap, opts);
         }
         let known = snap.unreadable;
         let mut report = crate::du_snap::to_report(snap, opts.sort, opts.top);

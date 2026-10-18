@@ -315,6 +315,9 @@ struct App {
     undo: Vec<UndoGroup>,
     /// `--no-delete`: browse only; `d` and `u` explain instead of acting.
     read_only: bool,
+    /// `du -f FILE -i`: the snapshot or ncdu export being browsed. Every
+    /// view comes from it, read-only, and nothing is walked ([`App::walk`]).
+    snapshot: Option<PathBuf>,
     /// `--allow-filtered`: a directory that holds entries the filters
     /// left out may be trashed, and they go with it.
     allow_filtered: bool,
@@ -714,6 +717,80 @@ fn quick_roots(roots: &[PathBuf]) -> View {
     }
 }
 
+/// The views of a snapshot or ncdu export (`du -f FILE -i`), all built
+/// at once from its records: one per directory, and above two or more
+/// roots one of them all. A view's rows are the directories recorded
+/// below it. A snapshot holds no files, so a view's size, its record's,
+/// can be more than its rows add up to.
+fn snapshot_views(snap: &crate::du_snap::Snapshot, sorting: Sorting) -> HashMap<PathBuf, View> {
+    let blank = |disk: u64, apparent: u64| View {
+        rows: Vec::new(),
+        disk,
+        apparent,
+        cursor: 0,
+        scanning: false,
+        partial: false,
+        stash: Vec::new(),
+        unread: Vec::new(),
+        filtered_out: 0,
+        scan: None,
+    };
+    let mut views: HashMap<PathBuf, View> = HashMap::new();
+    for r in &snap.roots {
+        views.insert(r.path.clone(), blank(r.disk, r.apparent));
+    }
+    let dirs = || snap.dirs.iter().filter(|d| d.is_dir);
+    for d in dirs() {
+        views
+            .entry(d.path.clone())
+            .or_insert_with(|| blank(d.disk, d.apparent));
+    }
+    let is_root = |p: &Path| snap.roots.iter().any(|r| r.path == p);
+    for d in dirs().filter(|d| !is_root(&d.path)) {
+        if let Some(v) = d.path.parent().and_then(|p| views.get_mut(p)) {
+            v.rows.push(d.clone());
+        }
+    }
+    for (dir, v) in views.iter_mut() {
+        sort_rows(&mut v.rows, sorting);
+        v.unread = snap
+            .unread
+            .iter()
+            .filter(|(p, _)| p.starts_with(dir))
+            .cloned()
+            .collect();
+    }
+    if snap.roots.len() > 1 {
+        let mut rows: Vec<Item> = snap
+            .roots
+            .iter()
+            .map(|r| Item {
+                path: r.path.clone(),
+                is_dir: true,
+                apparent: r.apparent,
+                disk: r.disk,
+                mtime: 0,
+                // The root's files and directories, itself left out.
+                items: r.files.saturating_add(r.dirs).saturating_sub(1),
+                artefact: r.artefact,
+                repos: Vec::new(),
+                git: None,
+                unique: None,
+                filtered_out: 0,
+            })
+            .collect();
+        sort_rows(&mut rows, sorting);
+        let mut top = blank(
+            du::size_sum(rows.iter().map(|r| r.disk)),
+            du::size_sum(rows.iter().map(|r| r.apparent)),
+        );
+        top.rows = rows;
+        top.unread = snap.unread.clone();
+        views.insert(PathBuf::new(), top);
+    }
+    views
+}
+
 /// [`scan_view`] of `dir`, or [`scan_roots`] for the view above them.
 fn scan_any(
     dir: &Path,
@@ -842,6 +919,46 @@ impl App {
         Ok(app)
     }
 
+    /// A read-only explorer over the snapshot or ncdu export `snap`, read
+    /// from `file`: every view comes from its records, and nothing is
+    /// walked. Errors name why it cannot be browsed.
+    fn from_snapshot(
+        prog: &str,
+        file: &Path,
+        snap: &crate::du_snap::Snapshot,
+        opts: ScanOpts,
+    ) -> Result<Self, String> {
+        let roots: Vec<PathBuf> = snap.roots.iter().map(|r| r.path.clone()).collect();
+        if roots.is_empty() {
+            return Err("records no directory to browse".into());
+        }
+        for (i, a) in roots.iter().enumerate() {
+            if let Some(b) = roots[..i]
+                .iter()
+                .find(|b| a.starts_with(b) || b.starts_with(a))
+            {
+                return Err(format!(
+                    "records '{}' and '{}', one inside the other",
+                    b.display(),
+                    a.display()
+                ));
+            }
+        }
+        let mut views = snapshot_views(snap, Sorting::of(opts.sort));
+        let top = Self::top_of(&roots);
+        let view = views.remove(&top).ok_or("records no top directory")?;
+        let mut app = Self::with_view(prog, roots, opts, false, view);
+        app.cache.extend(views);
+        app.read_only = true;
+        app.snapshot = Some(file.to_path_buf());
+        app.status = format!(
+            "browsing '{}' · read-only · {} entries",
+            crate::util::term_path(file),
+            app.rows().len()
+        );
+        Ok(app)
+    }
+
     /// The key of the top view of `roots`.
     fn top_of(roots: &[PathBuf]) -> PathBuf {
         match roots {
@@ -896,6 +1013,7 @@ impl App {
             keys,
             undo: Vec::new(),
             read_only: false,
+            snapshot: None,
             allow_filtered: false,
             background: false,
             jobs: HashMap::new(),
@@ -904,12 +1022,44 @@ impl App {
         }
     }
 
+    /// Why nothing may be walked: the explorer is on a snapshot.
+    fn no_walk(&self) -> Option<io::Error> {
+        self.snapshot.as_ref().map(|f| {
+            io::Error::other(format!(
+                "browsing the snapshot '{}'; nothing is scanned",
+                crate::util::term_path(f)
+            ))
+        })
+    }
+
+    /// Scan `dir` inline. Every walk the explorer makes goes through
+    /// here, [`App::quick`] or [`App::spawn_with`], which refuse on a
+    /// snapshot (precheck explorer-walk check).
+    fn walk(&self, dir: &Path) -> io::Result<Scanned> {
+        if let Some(e) = self.no_walk() {
+            return Err(e);
+        }
+        scan_any(dir, &self.roots, &self.opts, self.git, self.sorting)
+    }
+
+    /// The quick listing of `dir`, as [`App::walk`] guards it.
+    fn quick(&self, dir: &Path) -> io::Result<View> {
+        if let Some(e) = self.no_walk() {
+            return Err(e);
+        }
+        quick_any(dir, &self.roots)
+    }
+
     /// Start a background scan of `dir`.
     fn spawn(&mut self, dir: PathBuf, refresh: bool) {
         self.spawn_with(dir, refresh, Arc::new(ScanControl::default()));
     }
 
     fn spawn_with(&mut self, dir: PathBuf, refresh: bool, control: Arc<ScanControl>) {
+        if let Some(e) = self.no_walk() {
+            self.status = e.to_string();
+            return;
+        }
         let opts = ScanOpts {
             control: Some(control.clone()),
             ..self.opts.clone()
@@ -1125,7 +1275,7 @@ impl App {
             v.cursor = cursor;
         }
         if !self.cache.contains_key(&dir) && self.background {
-            match quick_any(&dir, &self.roots) {
+            match self.quick(&dir) {
                 Ok(v) => {
                     self.cache.insert(dir.clone(), v);
                     self.spawn(dir.clone(), false);
@@ -1137,7 +1287,7 @@ impl App {
             }
         }
         if !self.cache.contains_key(&dir) {
-            match scan_any(&dir, &self.roots, &self.opts, self.git, self.sorting) {
+            match self.walk(&dir) {
                 Ok((v, below)) => {
                     self.cache.insert(dir.clone(), v);
                     self.take_below(below);
@@ -1190,6 +1340,11 @@ impl App {
 
     /// Rescan the current directory and carry the size change up the chain.
     fn refresh(&mut self) {
+        if self.snapshot.is_some() {
+            self.status =
+                "browsing a snapshot: nothing to rescan; du -i scans the directory".into();
+            return;
+        }
         if self.deleting.is_some() {
             self.status = "a delete is running; rescan once it is done".into();
             return;
@@ -1211,7 +1366,7 @@ impl App {
             self.status = "rescanning…".into();
             return;
         }
-        let (fresh, below) = match scan_any(&cur, &self.roots, &self.opts, self.git, self.sorting) {
+        let (fresh, below) = match self.walk(&cur) {
             Ok(r) => r,
             Err(e) => {
                 self.status = format!("cannot scan '{}': {e}", cur.display());
@@ -1985,7 +2140,9 @@ impl App {
     /// Why `E` cannot write the current view, if it cannot.
     fn export_refusal(&self) -> Option<&'static str> {
         let v = self.view();
-        if v.scanning {
+        if self.snapshot.is_some() {
+            Some("browsing a snapshot: du -f reads it as it is; nothing to write")
+        } else if v.scanning {
             Some("still scanning this directory; E writes it once the scan is done")
         } else if v.partial {
             Some("the scan was stopped; r rescans in full, then E writes it")
@@ -2811,7 +2968,13 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         ))
         .block(Block::default().borders(Borders::ALL).title(format!(
             "rtrash du{} · by {}{}{}{}",
-            if app.read_only { " (read-only)" } else { "" },
+            if app.snapshot.is_some() {
+                " (snapshot, read-only)"
+            } else if app.read_only {
+                " (read-only)"
+            } else {
+                ""
+            },
             app.sorting.label(),
             if apparent && app.sorting.order != Order::Key(SortKey::Apparent) {
                 " · apparent sizes"
@@ -2856,14 +3019,16 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             app.keys.display_chords(Action::FilterCancel)
         ),
         _ => format!(
-            "{}/{} move  {}/→ open  ←/h up  {}r rescan  {} mark  {} help  {} quit",
+            "{}/{} move  {}/→ open  ←/h up  {}{} mark  {} help  {} quit",
             app.keys.display_chords(Action::MoveUp),
             app.keys.display_chords(Action::MoveDown),
             app.keys.display_chords(Action::Action),
-            if app.read_only {
+            if app.snapshot.is_some() {
                 ""
+            } else if app.read_only {
+                "r rescan  "
             } else {
-                "d trash  u undo  "
+                "d trash  u undo  r rescan  "
             },
             app.keys.display_chords(Action::ToggleMark),
             app.keys.display_chords(Action::Help),
@@ -2956,7 +3121,9 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 } else {
                     "d delete — move to the trash (asks first; runs in the background)"
                 },
-                if app.read_only {
+                if app.snapshot.is_some() {
+                    "r E — off: a snapshot is browsed as it is, with no walk"
+                } else if app.read_only {
                     "r — rescan this directory"
                 } else {
                     "u — undo the last delete · e — why rows of it stayed · r — rescan"
@@ -3100,6 +3267,30 @@ pub fn run(
             return 1;
         }
     };
+    drive(prog, &mut app)
+}
+
+/// Browse the snapshot or ncdu export `snap`, read from `file`, with no
+/// walk (`du -f FILE -i`): read-only, and `r` and `E` explain instead of
+/// acting. Returns the process exit code.
+pub fn run_snapshot(
+    prog: &str,
+    file: &Path,
+    snap: &crate::du_snap::Snapshot,
+    opts: ScanOpts,
+) -> i32 {
+    match App::from_snapshot(prog, file, snap, opts) {
+        Ok(mut app) => drive(prog, &mut app),
+        Err(why) => {
+            eprintln!("{prog}: cannot browse '{}': {why}", file.display());
+            2
+        }
+    }
+}
+
+/// Run `app` in the terminal until it quits, then print what `p` asked
+/// for. Returns the process exit code.
+fn drive(prog: &str, app: &mut App) -> i32 {
     let mut terminal = match tui_term::enter() {
         Ok(t) => t,
         Err(e) => {
@@ -3107,7 +3298,7 @@ pub fn run(
             return 1;
         }
     };
-    let result = event_loop(&mut terminal, &mut app);
+    let result = event_loop(&mut terminal, app);
     tui_term::leave(&mut terminal);
     if let Err(e) = result {
         eprintln!("{prog}: tui error: {e}");
@@ -5141,6 +5332,83 @@ mod tests {
         assert_eq!(a.status, "restored 1 item(s)");
         assert_eq!(count(&a, "big"), 3);
         assert_eq!(view_items(a.view()), 8);
+        let _ = fs::remove_dir_all(&t.0);
+    }
+
+    /// `du -o FILE` of `dirs` written to `file`, then read back.
+    fn snapshot_of(dirs: &[PathBuf], file: &Path) -> crate::du_snap::Snapshot {
+        let opts = crate::du_snap::snapshot_opts(ScanOpts::default());
+        let report = du::scan(dirs, &opts).unwrap();
+        crate::du_snap::write_file(file, &report, &opts, 7).unwrap();
+        crate::du_snap::read(file).unwrap()
+    }
+
+    #[test]
+    fn a_snapshot_is_browsed_read_only_with_no_walk() {
+        let t = tree("snapbrowse");
+        let file = t.0.join("w.snap");
+        let snap = snapshot_of(&[t.0.join("w")], &file);
+        // The tree goes away: every view has to come from the file.
+        fs::remove_dir_all(t.0.join("w")).unwrap();
+        let mut a = App::from_snapshot("rtrash", &file, &snap, ScanOpts::default()).unwrap();
+        assert!(a.read_only);
+        assert!(a.status.starts_with("browsing '"), "{}", a.status);
+        // Directories only, as the snapshot records them, largest first.
+        assert_eq!(names(&a), ["big", "small"]);
+        assert_eq!(a.view().disk, snap.roots[0].disk);
+        a.select(0);
+        a.open();
+        assert_eq!(a.cur, t.0.join("w/big"));
+        assert_eq!(names(&a), ["inner"]);
+        a.select(0);
+        a.open(); // inner holds no directory
+        assert_eq!(a.cur, t.0.join("w/big/inner"));
+        assert!(a.rows().is_empty());
+        a.back();
+        a.back();
+        assert_eq!(a.cur, t.0.join("w"));
+        a.on_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(a.status.contains("nothing to rescan"), "{}", a.status);
+        a.on_key(KeyCode::Char('E'), KeyModifiers::SHIFT);
+        assert_eq!(a.mode, Mode::Browse);
+        assert!(a.status.starts_with("browsing a snapshot"), "{}", a.status);
+        a.select(0);
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Browse);
+        assert!(a.status.contains("read-only"), "{}", a.status);
+        assert!(a.jobs.is_empty());
+        assert!(a.walk(&t.0.join("w")).is_err());
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("rtrash du (snapshot, read-only)"), "{text}");
+        assert!(!text.contains("r rescan"), "{text}");
+        let _ = fs::remove_dir_all(&t.0);
+    }
+
+    #[test]
+    fn a_snapshot_of_two_roots_opens_on_a_view_of_both() {
+        let t = tree("snaproots");
+        let (big, small) = (t.0.join("w/big"), t.0.join("w/small"));
+        let file = t.0.join("roots.snap");
+        let snap = snapshot_of(&[small, big.clone()], &file);
+        let mut a = App::from_snapshot("rtrash", &file, &snap, ScanOpts::default()).unwrap();
+        assert!(is_top_of_roots(&a.cur));
+        assert_eq!(names(&a), ["big", "small"]);
+        // big holds side, inner and inner/blob, as a scan counts them.
+        assert_eq!(a.rows()[0].items, 3);
+        let total = du::size_sum(snap.roots.iter().map(|r| r.disk));
+        assert_eq!(a.view().disk, total);
+        a.select(0);
+        a.open();
+        assert_eq!(a.cur, big);
+        assert_eq!(names(&a), ["inner"]);
+        a.back();
+        assert!(is_top_of_roots(&a.cur));
+        // Roots one inside the other cannot share a top view.
+        let nested = snapshot_of(&[t.0.join("w"), big], &t.0.join("nested.snap"));
+        let why = App::from_snapshot("rtrash", &file, &nested, ScanOpts::default())
+            .err()
+            .unwrap();
+        assert!(why.contains("one inside the other"), "{why}");
         let _ = fs::remove_dir_all(&t.0);
     }
 }
