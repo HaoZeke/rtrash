@@ -4386,6 +4386,16 @@ and
 map; smaller files count as unique.
 The default is 64K.
 .TP
+.B RTRASH_LOCK_WAIT
+The wait for the lock of a trash, in seconds such as 30 or 0.5.
+A command waits this long while another process has the lock.
+put, empty, rm and restore take that lock before they change a trash.
+After a second of waiting, a note on standard error names the trash.
+When the time runs out, the command changes nothing in that trash and
+fails with an error that names the wait.
+0 does not wait at all.
+The default is 120.
+.TP
 .B RTRASH_MOUNT_WAIT
 Seconds, such as 3 or 0.5, that a look at a network mount (NFS, SMB,
 sshfs and the like) may take when

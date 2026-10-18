@@ -617,6 +617,54 @@ fn a_restore_that_cannot_place_the_item_leaves_it_in_the_trash() {
     assert!(left.is_empty(), "{left:?}");
 }
 
+/// trash-cli #354: put waits for a trash lock another process has. After
+/// a second it names the trash; past `RTRASH_LOCK_WAIT` it gives up with
+/// an error and leaves the file where it was. A lock let go in time lets
+/// the put through.
+#[test]
+fn put_waits_for_the_trash_lock_with_a_note_and_a_bound() {
+    use std::os::unix::io::AsRawFd;
+    let sb = Sandbox::new("lock-wait");
+    fs::create_dir_all(sb.trash().join("files")).unwrap();
+    fs::create_dir_all(sb.trash().join("info")).unwrap();
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(sb.trash().join(".rtrash.lock"))
+        .unwrap();
+    let rc = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+    assert_eq!(rc, 0);
+    let kept = sb.touch("kept.txt");
+    let out = sb.run_env(&["put", "kept.txt"], &[("RTRASH_LOCK_WAIT", "1.5")]);
+    let err = stderr_of(&out);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("waiting for the trash lock on"), "{err}");
+    assert!(err.contains("RTRASH_LOCK_WAIT sets the wait"), "{err}");
+    assert!(kept.exists(), "{err}");
+    let moved = sb.touch("moved.txt");
+    let mut child = common::rtrash(&sb.root)
+        .args(["put", "moved.txt"])
+        .current_dir(sb.work())
+        .env("RTRASH_LOCK_WAIT", "60")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Let go of the lock once the put says it waits for it.
+    let stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut lines = std::io::BufRead::lines(stderr).map(Result::unwrap);
+    let note = lines.find(|l| l.contains("waiting for the trash lock on"));
+    assert!(note.is_some(), "no note before the put ended");
+    drop(lock);
+    let rest: Vec<String> = lines.collect();
+    let status = child.wait().unwrap();
+    let err = rest.join("\n");
+    assert!(status.success(), "{err}");
+    assert!(!moved.exists(), "{err}");
+}
+
 /// What `rtrash ARGS` shows on a terminal, through script(1), in `sb`;
 /// `None` without script(1). `args` is shell text, so a name with control
 /// characters can come from printf.

@@ -887,7 +887,8 @@ pub struct TrashLock {
 }
 
 impl TrashLock {
-    /// Blocking exclusive lock for the critical section of put/empty.
+    /// Exclusive lock for the critical section of put/empty. It waits for
+    /// another process at most [`lock_wait`] (see [`wait_for_lock`]).
     #[track_caller]
     pub fn acquire(root: &Path) -> io::Result<Self> {
         Self::acquire_flags(root, libc::LOCK_EX, std::panic::Location::caller())
@@ -923,16 +924,86 @@ impl TrashLock {
         };
         #[cfg(not(debug_assertions))]
         let _ = at;
-        use std::os::unix::io::AsRawFd;
-        let rc = unsafe { libc::flock(file.as_raw_fd(), flags) };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
+        if flags & libc::LOCK_NB == 0 {
+            wait_for_lock(&file, root)?;
+        } else {
+            use std::os::unix::io::AsRawFd;
+            let rc = unsafe { libc::flock(file.as_raw_fd(), flags) };
+            if rc != 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
         Ok(TrashLock {
             _file: file,
             #[cfg(debug_assertions)]
             _held: mark,
         })
+    }
+}
+
+/// How long a blocking [`TrashLock::acquire`] waits for another process
+/// to let go of the lock: `RTRASH_LOCK_WAIT` seconds (fractions allowed,
+/// at most a day; 0 does not wait), else 120.
+pub fn lock_wait() -> std::time::Duration {
+    static WAIT: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+    *WAIT.get_or_init(|| {
+        std::env::var("RTRASH_LOCK_WAIT")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|s| (0.0..=86_400.0).contains(s))
+            .map(std::time::Duration::from_secs_f64)
+            .unwrap_or(std::time::Duration::from_secs(120))
+    })
+}
+
+/// A wait for the trash lock longer than this names the trash on stderr.
+const LOCK_NOTE_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Take the exclusive flock of `file`, the lock file of `root`, polling
+/// (trash-cli #354: a blocking flock hung without a word behind a long
+/// empty or a process stuck on a dead mount). After [`LOCK_NOTE_AFTER`]
+/// it says once which trash it waits for. After [`lock_wait`], or on
+/// Ctrl-C, it gives up with an error, so the caller changes nothing.
+fn wait_for_lock(file: &fs::File, root: &Path) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let wait = lock_wait();
+    let start = std::time::Instant::now();
+    let mut noted = false;
+    loop {
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::EWOULDBLOCK) => {}
+            Some(libc::EINTR) => continue,
+            _ => return Err(e),
+        }
+        let waited = start.elapsed();
+        if waited >= wait {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "another process kept the trash lock for {} s (RTRASH_LOCK_WAIT sets the wait)",
+                    wait.as_secs_f64()
+                ),
+            ));
+        }
+        if crate::interrupt::requested() {
+            return Err(io::Error::other(
+                "stopped by Ctrl-C while waiting for the trash lock",
+            ));
+        }
+        if !noted && waited >= LOCK_NOTE_AFTER {
+            noted = true;
+            eprintln!(
+                "rtrash: note: waiting for the trash lock on '{}', which another process has",
+                crate::util::err_path(root)
+            );
+        }
+        let step = std::time::Duration::from_millis(if noted { 100 } else { 20 });
+        std::thread::sleep(step.min(wait.saturating_sub(waited)));
     }
 }
 

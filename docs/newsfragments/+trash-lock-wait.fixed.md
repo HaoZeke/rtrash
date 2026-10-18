@@ -1,0 +1,1 @@
+A command that waits for the lock of a trash another process has now says which trash it waits for after a second. After `RTRASH_LOCK_WAIT` seconds (120 by default; 0 does not wait) it gives up with an error and changes nothing there. Before, put and empty could wait without a word for good behind a process stuck on a dead mount (trash-cli #354).
