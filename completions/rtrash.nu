@@ -261,6 +261,7 @@ export extern "rtrash du" [
     --trash-dir: string  # consider only this trash directory (repeatable)
     --no-git  # do not ask git about listed paths
     --include-dirty  # with --print0, also print paths whose git state is
+    --allow-filtered  # with --print0, --pick or -i, also offer directories
     --json  # emit a JSON object (scripts)
     --print0  # print the listed paths, NUL-separated, for
     --output(-o): string  # write a snapshot of every directory total (to

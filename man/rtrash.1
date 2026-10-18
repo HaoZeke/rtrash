@@ -1353,6 +1353,15 @@ A bare repository is one row, and it reads
 .B unpushed
 when no remote has its commits.
 .PP
+Filters such as \fB\-\-exclude\fR, \fB\-\-gitignore\fR and \fB\-\-type\fR
+leave entries out of the sizes, but trashing a directory takes all of it.
+So \fB\-\-print0\fR, \fB\-\-pick\fR and the explorer never offer a
+directory that holds entries the filters left out: \fB\-\-print0\fR and
+\fB\-\-pick\fR drop such rows and count them on stderr, and the explorer
+refuses to trash one and names it, unless \fB\-\-allow\-filtered\fR is given.
+Age and size filters only choose which rows are listed; every size stays
+whole, so they hide nothing.
+.PP
 The closing summary reports the trash on the scanned file systems.
 Trashed files keep their space until
 .B rtrash empty
@@ -1978,6 +1987,12 @@ With
 .BR \-\-print0 ,
 also print rows whose git state is dirty, unpushed or unknown.
 .TP
+.B \-\-allow\-filtered
+With
+.BR \-\-print0 ", " \-\-pick " or " \-i ,
+also offer directories that hold entries the filters left out.
+Trashing one takes those entries too.
+.TP
 .B \-\-json
 Emit one JSON object
 (\fIroots\fR, \fIdirs\fR, \fIfiles\fR, \fIunreadable\fR); each root has
@@ -1985,6 +2000,8 @@ Emit one JSON object
 \fIdirs\fR and \fIartefact\fR; each listed entry has
 \fIpath\fR, \fItype\fR, \fIdisk\fR, \fIapparent\fR, \fImtime\fR, \fIartefact\fR
 (a tag or null), \fIgit\fR and \fIgit_repo\fR (state and deciding repository, or null).
+A directory that holds entries the filters left out adds \fIfiltered_out\fR,
+their count.
 A scan stopped by Ctrl-C adds \fIpartial\fR: true.
 The walk enters at most 4096 levels and paths of up to 32 KiB; a
 directory past either counts with its own blocks but not its contents,

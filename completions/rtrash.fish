@@ -169,6 +169,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l home-on
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l trash-dir -d 'only this trash directory in the summary' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l no-git -d 'do not ask git about listed paths'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l include-dirty -d 'with --print0, also print rows with git work at risk'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l allow-filtered -d 'with --print0, --pick or -i, also offer directories the filters hid entries in'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l json -d 'emit a JSON object'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l print0 -d 'print listed paths NUL-separated'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l dupes -d 'list groups of files with the same contents'

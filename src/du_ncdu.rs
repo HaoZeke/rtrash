@@ -638,6 +638,7 @@ impl Builder {
                 repos: Vec::new(),
                 git: None,
                 unique: None,
+                filtered_out: 0,
             });
         }
         self.stack.push(fr);

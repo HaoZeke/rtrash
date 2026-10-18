@@ -3903,3 +3903,102 @@ fn the_explorer_refuses_a_path_inside_another() {
     assert_eq!(status.code(), Some(2), "{err}");
     assert!(err.contains("'a/b' is inside 'a'"), "{err}");
 }
+
+/// The NUL-separated paths of a --print0 run, sorted.
+fn print0_paths(out: &Output) -> Vec<String> {
+    let mut paths: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_owned)
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// A tree whose `mixed` directory holds `.iso` files next to others,
+/// and whose `keep` directory holds none.
+fn mixed_tree(tag: &str) -> (Tree, PathBuf, PathBuf) {
+    let t = Tree::new(tag);
+    t.file("keep/a.bin", 50_000);
+    t.file("mixed/b.bin", 60_000);
+    t.file("mixed/c.iso", 70_000);
+    t.file("mixed/sub/d.iso", 20_000);
+    t.file("mixed/sub/e.bin", 10_000);
+    let (keep, mixed) = (t.root.join("keep"), t.root.join("mixed"));
+    (t, keep, mixed)
+}
+
+#[test]
+fn print0_leaves_out_a_directory_the_filters_hid_entries_in() {
+    let (t, keep, mixed) = mixed_tree("print0filtered");
+    let args = ["--no-git", "--dirs", "--print0", "-n", "1"];
+    // Unfiltered, the largest directory is printed.
+    let out = t.du(&args);
+    assert!(out.status.success());
+    assert_eq!(print0_paths(&out), [s(&mixed)]);
+    // Under --exclude it would take the .iso files unseen: it stays out,
+    // and stderr says why.
+    let mut filtered = args.to_vec();
+    filtered.push("--exclude=*.iso");
+    let out = t.du(&filtered);
+    assert!(out.status.success());
+    assert_eq!(print0_paths(&out), Vec::<String>::new());
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        err.contains("left out 1 directory holding entries the filters hide"),
+        "{err}"
+    );
+    // A directory the filters hid nothing in is still printed.
+    let mut wide = filtered.clone();
+    wide.extend(["-n", "5"]);
+    let out = t.du(&wide);
+    assert_eq!(print0_paths(&out), [s(&keep)]);
+    // --allow-filtered prints it again.
+    filtered.push("--allow-filtered");
+    let out = t.du(&filtered);
+    assert_eq!(print0_paths(&out), [s(&mixed)]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(!err.contains("left out"), "{err}");
+}
+
+#[test]
+fn age_and_size_filters_leave_print0_rows_whole() {
+    let (t, _, mixed) = mixed_tree("print0whole");
+    // These only choose rows: every size stays whole, so nothing is hidden.
+    let args = ["--no-git", "--dirs", "--print0", "-n", "1"];
+    for extra in ["--min-size=1", "--newer-than=1d"] {
+        let mut a = args.to_vec();
+        a.push(extra);
+        let out = t.du(&a);
+        assert_eq!(print0_paths(&out), [s(&mixed)], "{extra}");
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(!err.contains("left out"), "{extra}: {err}");
+    }
+}
+
+#[test]
+fn json_counts_entries_the_filters_left_out() {
+    let (t, keep, mixed) = mixed_tree("jsonfiltered");
+    let sub = mixed.join("sub");
+    let j = t.json(&["--no-git", "--dirs", "--all-dirs", "--exclude=*.iso"]);
+    assert_eq!(field(row(&j, &s(&mixed)), "filtered_out"), 2);
+    assert_eq!(field(row(&j, &s(&sub)), "filtered_out"), 1);
+    assert!(!row(&j, &s(&keep)).contains("filtered_out"), "{j}");
+    // Without a filter no row carries the key.
+    let j = t.json(&["--no-git", "--dirs", "--all-dirs"]);
+    assert!(!row(&j, &s(&mixed)).contains("filtered_out"), "{j}");
+}
+
+#[test]
+fn a_cache_left_out_whole_counts_once_in_its_parent() {
+    let (t, _, mixed) = mixed_tree("cachefiltered");
+    t.file("mixed/cache/x.bin", 5_000);
+    t.file("mixed/cache/y.bin", 5_000);
+    fs::write(
+        mixed.join("cache/CACHEDIR.TAG"),
+        "Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    let j = t.json(&["--no-git", "--dirs", "--exclude-caches"]);
+    assert_eq!(field(row(&j, &s(&mixed)), "filtered_out"), 1);
+}

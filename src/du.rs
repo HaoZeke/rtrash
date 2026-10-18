@@ -44,6 +44,12 @@ unknown and unpushed rows unless --include-dirty is given. Paths inside
 .git or a bare repository are never listed; a bare repository is one row,
 and it reads unpushed when no remote has its commits.
 
+Filters such as --exclude, --gitignore and --type leave entries out of
+the sizes, but trashing a directory takes all of it. So --print0, --pick
+and the explorer never offer a directory that holds entries the filters
+left out, unless --allow-filtered is given. Age and size filters only
+choose rows; every size stays whole.
+
 The closing summary shows the trash on the scanned file systems: trashed
 files still take space there until `rtrash empty` removes them (preview
 with `rtrash empty -n`, keep recent items with `rtrash empty DAYS`). Trash
@@ -165,6 +171,9 @@ directories appear as one `trash` row and are never printed by --print0.
       --no-git          do not ask git about listed paths
       --include-dirty   with --print0, also print paths whose git state is
                           dirty, unpushed or unknown
+      --allow-filtered  with --print0, --pick or -i, also offer directories
+                          that hold entries the filters left out (trashing
+                          one takes those too)
       --json            emit a JSON object (scripts)
       --print0          print the listed paths, NUL-separated, for
                           `xargs -0 rtrash put -rf --`
@@ -443,6 +452,9 @@ pub struct Item {
     pub git: Option<(GitState, PathBuf)>,
     /// Allocated bytes no other file shares (`--unique` scans only).
     pub unique: Option<u64>,
+    /// Entries below a directory that the filters left out (0 without
+    /// a filter). Trashing the directory takes them too.
+    pub filtered_out: u64,
 }
 
 impl Item {
@@ -992,6 +1004,11 @@ struct Node {
     listable: bool,
     /// Artefact kind (`cargo-target`, `trash`, ...), if any.
     artefact: Option<&'static str>,
+    /// Entries below this directory that the filters left out.
+    filtered_out: u64,
+    /// The filters left this directory out whole (a tagged cache): it
+    /// adds nothing to its parent but one entry left out.
+    left_out: bool,
 }
 
 /// At most this many repo roots are remembered per directory.
@@ -1093,6 +1110,8 @@ fn enter(
             repos: Vec::new(),
             listable: false,
             artefact: None,
+            filtered_out: 0,
+            left_out: false,
         }
     };
     if depth > ctx.depth_limit || path.as_os_str().len() > MAX_PATH_BYTES {
@@ -1191,6 +1210,8 @@ struct Stats {
     /// an entry of unknown type).
     subdirs: Vec<(usize, Option<du_fs::Stat>)>,
     candidates: Vec<FileCandidate>,
+    /// Entries the filters left out.
+    filtered_out: u64,
 }
 
 /// `--shared`: add a file of `raw` allocated bytes with `shared`
@@ -1242,6 +1263,7 @@ fn stat_entries(
         files: 0,
         subdirs: Vec::new(),
         candidates: Vec::new(),
+        filtered_out: 0,
     };
     let filter = ctx.filter.as_ref();
     let excluded = |name: &CStr, is_dir: bool| {
@@ -1258,6 +1280,7 @@ fn stat_entries(
             && kind != du_fs::Kind::Unknown
             && excluded(name, kind == du_fs::Kind::Dir)
         {
+            out.filtered_out += 1;
             continue;
         }
         // A directory gets its stat from its own descriptor once open.
@@ -1284,6 +1307,7 @@ fn stat_entries(
             }
         }
         if filter.is_some() && kind == du_fs::Kind::Unknown && excluded(name, m.is_dir()) {
+            out.filtered_out += 1;
             continue;
         }
         if m.is_dir() {
@@ -1388,6 +1412,8 @@ fn walk_dir(
         repos: Vec::new(),
         listable: false,
         artefact: None,
+        filtered_out: 0,
+        left_out: false,
     };
     let (entries, failed) = dir.entries();
     let list_files = listing && !opts.artefacts_only && opts.top > 0;
@@ -1417,7 +1443,10 @@ fn walk_dir(
             && du_filter::has_cachedir_tag(path)
         {
             ctx.excluded.fetch_add(1, Ordering::Relaxed);
-            return None;
+            return Some(Node {
+                left_out: true,
+                ..node
+            });
         }
         chain = f.chain_for(chain.as_ref(), path, has_dot_git, has_gitignore);
     }
@@ -1466,6 +1495,7 @@ fn walk_dir(
         node.unique = node.unique.saturating_add(p.unique);
         node.mtime = node.mtime.max(p.mtime);
         node.items += p.files;
+        node.filtered_out += p.filtered_out;
         subdirs.extend(p.subdirs);
         candidates.extend(p.candidates);
     }
@@ -1527,6 +1557,7 @@ fn walk_dir(
                 repos: Vec::new(),
                 git: None,
                 unique: opts.unique.then_some(c.unique),
+                filtered_out: 0,
             });
             if !kept {
                 break;
@@ -1560,6 +1591,11 @@ fn walk_dir(
 
     let mut largest_child = 0u64;
     for child in children.into_iter().flatten() {
+        if child.left_out {
+            node.filtered_out += 1;
+            continue;
+        }
+        node.filtered_out += child.filtered_out;
         let k = ctx.key(child.apparent, child.disk, child.items, child.mtime);
         if child.listable && opts.min_size.is_none_or(|floor| k >= floor) {
             largest_child = largest_child.max(k);
@@ -1670,6 +1706,7 @@ impl Node {
             repos: self.repos.clone(),
             git: None,
             unique: ctx.opts.unique.then_some(self.unique),
+            filtered_out: self.filtered_out,
         });
     }
 }
@@ -1866,6 +1903,7 @@ fn scan_pooled(
                     repos: Vec::new(),
                     git: None,
                     unique: opts.unique.then_some(u),
+                    filtered_out: 0,
                 });
             }
             (a, d, raw, u, None)
@@ -2402,6 +2440,16 @@ fn unique_json(u: Option<u64>) -> String {
     u.map(|u| format!(",\"unique\":{u}")).unwrap_or_default()
 }
 
+/// `,"filtered_out":N` on a directory that holds entries the filters
+/// left out; nothing otherwise, so unfiltered output keeps its shape.
+fn filtered_json(n: u64) -> String {
+    if n > 0 {
+        format!(",\"filtered_out\":{n}")
+    } else {
+        String::new()
+    }
+}
+
 fn item_json(it: &Item) -> String {
     let git_state = it.git.as_ref().map(|(s, _)| s.as_str());
     let git_repo = it
@@ -2414,7 +2462,7 @@ fn item_json(it: &Item) -> String {
         if it.is_dir { "dir" } else { "file" },
         it.disk,
         it.apparent,
-        unique_json(it.unique),
+        unique_json(it.unique) + &filtered_json(it.filtered_out),
         if it.mtime == MTIME_UNKNOWN {
             "null".to_string()
         } else {
@@ -3087,6 +3135,15 @@ pub fn pick_rows(report: &Report) -> Vec<crate::put_tui::PathRow> {
         .collect()
 }
 
+/// Drop the directory rows that hold entries the filters left out, for
+/// --print0 and --pick: trashing one would take the hidden entries too.
+/// Returns how many went.
+fn hold_filtered(dirs: &mut Vec<Item>) -> usize {
+    let before = dirs.len();
+    dirs.retain(|it| it.filtered_out == 0);
+    before - dirs.len()
+}
+
 /// Keep the stricter of two age cutoffs, so the age options combine
 /// in any order.
 fn tighten(cut: &mut Option<i64>, new: i64, pick: fn(i64, i64) -> i64) {
@@ -3302,6 +3359,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut home_only = false;
     let mut trash_pins: Vec<PathBuf> = Vec::new();
     let mut include_dirty = false;
+    let mut allow_filtered = false;
     let mut pick = false;
     let mut interactive = false;
     let mut no_delete = false;
@@ -3588,6 +3646,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     trash_pins.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
                 }
                 "--include-dirty" => include_dirty = true,
+                "--allow-filtered" => allow_filtered = true,
                 "--pick" => pick = true,
                 "-i" | "--interactive" => interactive = true,
                 "--no-delete" => no_delete = true,
@@ -4013,7 +4072,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     #[cfg(feature = "tui")]
     if interactive {
-        return crate::du_tui::run(prog, &paths, opts, use_git, read_only);
+        return crate::du_tui::run(prog, &paths, opts, use_git, read_only, allow_filtered);
     }
     opts.control = Some(stop);
     // Git probes run beside the walk. Under --no-git, or without git on
@@ -4097,6 +4156,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let trash = trash_on_scanned_devices(&trash_dirs, &report);
     #[cfg(windows)]
     let trash = recycle_bin_on_scanned_drives(&report);
+    if (print0 || pick) && !allow_filtered {
+        let held = hold_filtered(&mut report.dirs);
+        if held > 0 {
+            eprintln!(
+                "{prog}: left out {} holding entries the filters hide; trashing one \
+                 takes those too (--allow-filtered offers them)",
+                plural(held as u64, "directory", "directories")
+            );
+        }
+    }
     #[cfg(all(unix, feature = "tui"))]
     if pick {
         let title = report
@@ -4325,6 +4394,7 @@ mod tests {
             repos: Vec::new(),
             git: None,
             unique: None,
+            filtered_out: 0,
         }
     }
 
@@ -4796,6 +4866,19 @@ mod tests {
         assert!(trash_json(&t).ends_with(&format!(",\"cap\":{}}}", 4u64 << 30)));
         t.cap = Some(0);
         assert_eq!(cap_suffix(&t), "");
+    }
+
+    #[test]
+    fn hold_filtered_keeps_whole_directories() {
+        let mut held = item("/w/held", 9, 9);
+        held.is_dir = true;
+        held.filtered_out = 3;
+        let mut whole = item("/w/whole", 8, 8);
+        whole.is_dir = true;
+        let mut dirs = vec![held, whole];
+        assert_eq!(hold_filtered(&mut dirs), 1);
+        let left: Vec<&Path> = dirs.iter().map(|d| d.path.as_path()).collect();
+        assert_eq!(left, [Path::new("/w/whole")]);
     }
 
     #[cfg(all(unix, feature = "tui"))]

@@ -58,6 +58,8 @@ struct View {
     /// them; rows on or above one get the table's `unreadable` or
     /// `incomplete` mark.
     unread: Vec<(PathBuf, String)>,
+    /// Entries below this view's directory that the filters left out.
+    filtered_out: u64,
 }
 
 /// A scan running in the background.
@@ -295,6 +297,9 @@ struct App {
     undo: Vec<UndoGroup>,
     /// `--no-delete`: browse only; `d` and `u` explain instead of acting.
     read_only: bool,
+    /// `--allow-filtered`: a directory that holds entries the filters
+    /// left out may be trashed, and they go with it.
+    allow_filtered: bool,
     /// Scan in the background (the terminal session); tests scan inline.
     background: bool,
     jobs: HashMap<PathBuf, Job>,
@@ -405,11 +410,11 @@ fn scan_view(dir: &Path, opts: &ScanOpts, git: bool, sorting: Sorting) -> io::Re
     if git {
         du::annotate_git(&mut report);
     }
-    let (disk, apparent) = report
+    let (disk, apparent, filtered_out) = report
         .roots
         .first()
-        .map(|r| (r.disk, r.apparent))
-        .unwrap_or((0, 0));
+        .map(|r| (r.disk, r.apparent, r.excluded))
+        .unwrap_or((0, 0, 0));
     let mut rows: Vec<Item> = report
         .dirs
         .into_iter()
@@ -426,6 +431,7 @@ fn scan_view(dir: &Path, opts: &ScanOpts, git: bool, sorting: Sorting) -> io::Re
         partial: report.partial,
         stash: Vec::new(),
         unread: report.unread,
+        filtered_out,
     })
 }
 
@@ -458,6 +464,7 @@ fn quick_view(dir: &Path) -> io::Result<View> {
             repos: Vec::new(),
             git: None,
             unique: None,
+            filtered_out: 0,
         };
         if is_dir {
             dirs.push(it);
@@ -479,6 +486,7 @@ fn quick_view(dir: &Path) -> io::Result<View> {
         partial: false,
         stash: Vec::new(),
         unread: Vec::new(),
+        filtered_out: 0,
     })
 }
 
@@ -535,6 +543,7 @@ fn scan_roots(
             repos,
             git: None,
             unique: None,
+            filtered_out: view.filtered_out,
         });
         partial |= view.partial;
         below.push((root.clone(), view));
@@ -561,6 +570,7 @@ fn scan_roots(
     let disk = rows.iter().map(|r| r.disk).sum();
     let apparent = rows.iter().map(|r| r.apparent).sum();
     sort_rows(&mut rows, sorting);
+    let filtered_out = rows.iter().map(|r| r.filtered_out).sum();
     let view = View {
         rows,
         disk,
@@ -570,6 +580,7 @@ fn scan_roots(
         partial,
         stash: Vec::new(),
         unread,
+        filtered_out,
     };
     Ok((view, below))
 }
@@ -590,6 +601,7 @@ fn quick_roots(roots: &[PathBuf]) -> View {
             repos: Vec::new(),
             git: None,
             unique: None,
+            filtered_out: 0,
         })
         .collect();
     View {
@@ -601,6 +613,7 @@ fn quick_roots(roots: &[PathBuf]) -> View {
         partial: false,
         stash: Vec::new(),
         unread: Vec::new(),
+        filtered_out: 0,
     }
 }
 
@@ -757,6 +770,7 @@ impl App {
             keys,
             undo: Vec::new(),
             read_only: false,
+            allow_filtered: false,
             background: false,
             jobs: HashMap::new(),
             deleting: None,
@@ -1284,6 +1298,30 @@ impl App {
         self.batch().into_iter().filter(|r| !is_trash(r)).collect()
     }
 
+    /// Why `t` cannot be trashed: a directory in it holds entries the
+    /// filters left out, which its trash would take unseen. Nothing goes
+    /// then, unless `--allow-filtered` was given.
+    fn filtered_refusal(&self, t: &[Item]) -> Option<String> {
+        if self.allow_filtered {
+            return None;
+        }
+        let held: Vec<&Item> = t.iter().filter(|r| r.filtered_out > 0).collect();
+        let first = held.first()?;
+        let name = first.path.file_name().map_or_else(
+            || first.path.display().to_string(),
+            |n| n.to_string_lossy().into(),
+        );
+        let others = match held.len() {
+            1 => String::new(),
+            n => format!(", as do {} more", n - 1),
+        };
+        Some(format!(
+            "'{name}' holds {} the filters hide{others}; nothing was trashed \
+             (--allow-filtered trashes them too)",
+            crate::util::plural(first.filtered_out, "entry", "entries")
+        ))
+    }
+
     fn ask_delete(&mut self) {
         if self.read_only {
             self.status = "read-only (--no-delete): nothing gets trashed".into();
@@ -1300,6 +1338,10 @@ impl App {
         let t = self.targets();
         if t.is_empty() {
             self.status = "nothing to trash".into();
+            return;
+        }
+        if let Some(why) = self.filtered_refusal(&t) {
+            self.status = why;
             return;
         }
         let bytes: u64 = t.iter().map(|r| r.disk).sum();
@@ -1340,6 +1382,10 @@ impl App {
             return;
         }
         let t = self.targets();
+        if let Some(why) = self.filtered_refusal(&t) {
+            self.status = why;
+            return;
+        }
         // RTRASH_ALLOW_ROOTS: every row is checked before the first one
         // goes, so a refused delete trashes nothing.
         if let Some(roots) = &self.scope {
@@ -2697,13 +2743,24 @@ fn explorer_roots(prog: &str, roots: &[PathBuf]) -> Result<Vec<PathBuf>, i32> {
 
 /// Run the explorer on `roots`: one directory, or several under a view
 /// of their own. Returns the process exit code.
-pub fn run(prog: &str, roots: &[PathBuf], opts: ScanOpts, git: bool, read_only: bool) -> i32 {
+pub fn run(
+    prog: &str,
+    roots: &[PathBuf],
+    opts: ScanOpts,
+    git: bool,
+    read_only: bool,
+    allow_filtered: bool,
+) -> i32 {
     let seen = match explorer_roots(prog, roots) {
         Ok(r) => r,
         Err(code) => return code,
     };
     let mut app = match App::start(prog, seen, opts, git) {
-        Ok(a) => App { read_only, ..a },
+        Ok(a) => App {
+            read_only,
+            allow_filtered,
+            ..a
+        },
         Err(e) => {
             eprintln!("{prog}: cannot scan: {e}");
             return 1;
@@ -3320,6 +3377,7 @@ mod tests {
             repos: Vec::new(),
             git: Some((crate::du_git::GitState::Dirty, PathBuf::from("/x"))),
             unique: None,
+            filtered_out: 0,
         };
         let s = row_text(&it, true, 1024, SortKey::Disk);
         assert!(s.starts_with("[x]!"), "{s}");
@@ -3344,6 +3402,7 @@ mod tests {
             repos: Vec::new(),
             git: None,
             unique: None,
+            filtered_out: 0,
         };
         let text = |share: Share, pending: bool| {
             let ctx = RowCtx {
@@ -3395,6 +3454,7 @@ mod tests {
             repos: Vec::new(),
             git: None,
             unique: None,
+            filtered_out: 0,
         };
         // 7 + 2 + 1 = 10 items: many small files, one big folder, a file.
         let many = row("many", true, 100, 6);
@@ -3502,6 +3562,7 @@ mod tests {
             repos: Vec::new(),
             git: None,
             unique: None,
+            filtered_out: 0,
         };
         let text = |row: &Item, unread: &du::Unread| {
             let ctx = RowCtx {
@@ -3804,6 +3865,7 @@ mod tests {
             repos: Vec::new(),
             git: None,
             unique: None,
+            filtered_out: 0,
         };
         let mut rows = vec![row("b", 5), row("C", 9), row("a", 1)];
         let order = |rows: &[Item]| -> Vec<String> {
@@ -3848,6 +3910,7 @@ mod tests {
             repos: Vec::new(),
             git: Some((crate::du_git::GitState::Dirty, PathBuf::from("/no/such"))),
             unique: Some(100),
+            filtered_out: 0,
         };
         let text = info_lines(&it, 1024, false, now).join("\n");
         assert!(text.contains("kind      directory, cargo-target"), "{text}");
@@ -4066,6 +4129,63 @@ mod tests {
         assert_eq!(names(&a), ["small"]);
         a.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(names(&a), ["big", "file", "small"]);
+    }
+
+    /// [`ScanOpts`] that leave out every entry named `side`.
+    fn without_side() -> ScanOpts {
+        let spec = crate::du_filter::Spec {
+            patterns: vec!["side".into()],
+            ..Default::default()
+        };
+        ScanOpts {
+            filter: Some(Arc::new(spec)),
+            ..ScanOpts::default()
+        }
+    }
+
+    const BIG_REFUSED: &str = "'big' holds 1 entry the filters hide; nothing was trashed \
+                               (--allow-filtered trashes them too)";
+
+    // Deletes go to the real Recycle Bin on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn filtered_entries_block_a_trash_unless_allowed() {
+        let t = tree("hiddenbelow");
+        let mut a = App::new("rtrash", t.0.join("w"), without_side(), false).unwrap();
+        a.trash_pin = Some(t.0.join("Trash"));
+        assert_eq!(names(&a), ["big", "file", "small"]);
+        // big holds `side`, which the filter hides: d explains and asks
+        // nothing.
+        a.select(0);
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Browse);
+        assert_eq!(a.status, BIG_REFUSED);
+        assert!(t.0.join("w/big/side").exists());
+        // small hides nothing and goes as before.
+        a.select(2);
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(!t.0.join("w/small").exists());
+        // --allow-filtered: big asks, then goes with `side`.
+        a.allow_filtered = true;
+        a.select(0);
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(a.mode, Mode::Confirm);
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(!t.0.join("w/big").exists());
+    }
+
+    #[test]
+    fn a_root_the_filters_hid_entries_in_is_refused_too() {
+        let t = tree("hiddenroot");
+        let roots = vec![t.0.join("w/big"), t.0.join("w/small")];
+        let mut a = App::new_in("rtrash", roots, without_side(), false).unwrap();
+        a.trash_pin = Some(t.0.join("Trash"));
+        assert_eq!(names(&a), ["big", "small"]);
+        a.select(0);
+        a.on_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert_eq!(a.status, BIG_REFUSED);
+        assert_eq!(a.mode, Mode::Browse);
     }
 
     #[test]

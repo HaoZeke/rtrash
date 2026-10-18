@@ -419,6 +419,7 @@ pub fn parse(mut r: impl BufRead) -> io::Result<Snapshot> {
                     repos: Vec::new(),
                     git: None,
                     unique: None,
+                    filtered_out: 0,
                 });
             }
             // Records from a newer writer: skip, so old readers keep working.
@@ -811,6 +812,7 @@ mod tests {
             repos: Vec::new(),
             git: None,
             unique: None,
+            filtered_out: 0,
         }
     }
 

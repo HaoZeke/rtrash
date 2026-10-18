@@ -192,6 +192,7 @@ du_opts=(
   '--trash-dir=[only this trash directory in the summary]:path:_files -/'
   '--no-git[do not ask git about listed paths]'
   '--include-dirty[with --print0, also print rows with git work at risk]'
+  '--allow-filtered[with --print0, --pick or -i, also offer directories the filters hid entries in]'
   '--json[emit a JSON object]'
   '--print0[print listed paths NUL-separated]'
   '--dupes[list groups of files with the same contents]'
