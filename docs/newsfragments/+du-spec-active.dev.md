@@ -1,0 +1,1 @@
+`du_filter::Spec::is_active` now names every field of `Spec`, with no `..`, so a new filter field does not build until it is listed there. A unit test sets each filter field alone and wants the spec active, and wants the default and a lone base inactive.

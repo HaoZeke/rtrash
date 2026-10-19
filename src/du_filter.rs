@@ -426,13 +426,27 @@ pub struct Spec {
 }
 
 impl Spec {
+    /// Whether any field asks to leave something out. Every field is
+    /// named, with no `..`, so a new filter field does not build until it
+    /// is listed here; one that is_active missed would be parsed and then
+    /// ignored, as opts.filter stays None (36 c).
     pub fn is_active(&self) -> bool {
-        !self.patterns.is_empty()
-            || !self.rsync.is_empty()
-            || self.exclude_caches
-            || self.gitignore
-            || !self.regex_out.is_empty()
-            || !self.regex_in.is_empty()
+        let Spec {
+            patterns,
+            rsync,
+            exclude_caches,
+            gitignore,
+            regex_out,
+            regex_in,
+            // Where anchored patterns start; it leaves nothing out alone.
+            base: _,
+        } = self;
+        !patterns.is_empty()
+            || !rsync.is_empty()
+            || *exclude_caches
+            || *gitignore
+            || !regex_out.is_empty()
+            || !regex_in.is_empty()
     }
 
     /// Patterns relative to `root`. An absolute pattern under `root` is
@@ -750,6 +764,48 @@ mod tests {
         assert!(extensions("iso,", "--type").is_err());
         assert!(extensions("a/b", "--exclude-type").is_err());
         assert_eq!(keep_only(&["iso".into()]), ["*", "!*/", "!*.iso"]);
+    }
+
+    /// 36(c): each filter field alone makes a Spec active, and the
+    /// default and a lone base do not.
+    #[test]
+    fn each_filter_field_alone_makes_a_spec_active() {
+        assert!(!Spec::default().is_active());
+        let base = Spec {
+            base: Some(PathBuf::from("/b")),
+            ..Default::default()
+        };
+        assert!(!base.is_active());
+        let patterns = Spec {
+            patterns: vec!["*.iso".into()],
+            ..Default::default()
+        };
+        assert!(patterns.is_active());
+        let rsync = Spec {
+            rsync: rsync_rules("- *.iso").unwrap(),
+            ..Default::default()
+        };
+        assert!(rsync.is_active());
+        let caches = Spec {
+            exclude_caches: true,
+            ..Default::default()
+        };
+        assert!(caches.is_active());
+        let gitignore = Spec {
+            gitignore: true,
+            ..Default::default()
+        };
+        assert!(gitignore.is_active());
+        let regex_out = Spec {
+            regex_out: vec!["x".into()],
+            ..Default::default()
+        };
+        assert!(regex_out.is_active());
+        let regex_in = Spec {
+            regex_in: vec!["x".into()],
+            ..Default::default()
+        };
+        assert!(regex_in.is_active());
     }
 
     #[test]
