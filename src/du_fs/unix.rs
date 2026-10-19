@@ -79,6 +79,11 @@ const KERNFS_MAGIC: [u32; 12] = [
     0xf97c_ff8c,
 ];
 
+/// `statfs` magic of the file systems whose listings give each file its
+/// own inode number: ext2/3/4, XFS, btrfs, tmpfs, F2FS.
+#[cfg(target_os = "linux")]
+const TRUE_INO_MAGIC: [u32; 5] = [0xef53, 0x5846_5342, BTRFS_MAGIC, 0x0102_1994, 0xf2f5_2010];
+
 const OPEN_DIR: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
 
@@ -148,6 +153,28 @@ impl Dir {
             }
             let kind = unsafe { s.assume_init() }.f_type as u32;
             KERNFS_MAGIC.contains(&kind)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    /// True when the inode numbers this directory's listing gives its
+    /// regular files are the ones their stat gives: Linux on ext2/3/4,
+    /// XFS, btrfs, tmpfs and F2FS. Not overlayfs, FUSE or network file
+    /// systems, whose listings may number entries their own way.
+    /// Elsewhere it is always false.
+    pub fn lists_true_inodes(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            let mut s = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: fstatfs fills `s` on success; it is read only then.
+            if unsafe { libc::fstatfs(self.fd.as_raw_fd(), s.as_mut_ptr()) } != 0 {
+                return false;
+            }
+            let kind = unsafe { s.assume_init() }.f_type as u32;
+            TRUE_INO_MAGIC.contains(&kind)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -311,7 +338,14 @@ fn parse_dirents(buf: &[u8], out: &mut Entries) {
         let d_type = buf[off + 18];
         let rec = &buf[off + 19..off + reclen];
         let len = rec.iter().position(|b| *b == 0).unwrap_or(rec.len());
-        out.push(&rec[..len], kind_of(d_type));
+        let ino = if d_type == libc::DT_REG {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&buf[off..off + 8]);
+            u64::from_ne_bytes(b)
+        } else {
+            0
+        };
+        out.push_with_ino(&rec[..len], kind_of(d_type), ino);
         off += reclen;
     }
 }
@@ -441,6 +475,41 @@ mod tests {
             }
         }
         out
+    }
+
+    /// The inode number getdents64 gives a regular file is the one its
+    /// fstatat gives; directories and symlinks get none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn listed_inodes_of_regular_files_match_their_stat() {
+        let root = std::env::temp_dir().join(format!("rtrash-du-ino-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("a.txt"), b"hello").unwrap();
+        fs::hard_link(root.join("a.txt"), root.join("b.txt")).unwrap();
+        std::os::unix::fs::symlink("a.txt", root.join("link")).unwrap();
+        for i in 0..50 {
+            fs::write(root.join(format!("f{i:02}")), b"x").unwrap();
+        }
+        let d = Dir::open(&root).unwrap();
+        let (e, failed) = d.entries();
+        assert!(!failed);
+        let mut files = 0;
+        for i in 0..e.len() {
+            let (name, _) = e.get(i);
+            let st = d.stat_at(name).unwrap();
+            match e.file_ino(i) {
+                Some(ino) => {
+                    assert!(st.is_file(), "{name:?}");
+                    assert_eq!(ino, st.ino, "{name:?}");
+                    files += 1;
+                }
+                // A file system that reports no type leaves it unknown.
+                None => assert!(!st.is_file() || e.get(i).1 == Kind::Unknown, "{name:?}"),
+            }
+        }
+        assert!(files == 52 || files == 0, "{files}");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

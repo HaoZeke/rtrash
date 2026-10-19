@@ -1013,6 +1013,19 @@ struct Claim {
     smallest: PathBuf,
     /// Whether the sighting that took the count was at `smallest`.
     counted_there: bool,
+    /// The file's stat, for a second walk ([`Fixed::stat`]).
+    stat: du_fs::Stat,
+}
+
+/// Where a second walk counts a linked file ([`Ctx::decided`]).
+struct Fixed {
+    /// The smallest of its paths.
+    at: PathBuf,
+    /// Its stat from the first walk. The second walk takes it for an
+    /// entry whose listed inode number names this file
+    /// ([`du_fs::Dir::lists_true_inodes`]), so it stats no linked file
+    /// again.
+    stat: du_fs::Stat,
 }
 
 impl LinkClaims {
@@ -1022,17 +1035,18 @@ impl LinkClaims {
         }
     }
 
-    /// Record a sighting of file `(dev, ino)` at `at`; `counted` is
-    /// whether this sighting took the file's count. Each path is met once.
-    fn see(&self, dev: u64, ino: u64, at: PathBuf, counted: bool) {
-        let mut map = self.shards[LinkSet::shard(dev, ino)]
+    /// Record a sighting of file `st` at `at`; `counted` is whether this
+    /// sighting took the file's count. Each path is met once.
+    fn see(&self, st: &du_fs::Stat, at: PathBuf, counted: bool) {
+        let mut map = self.shards[LinkSet::shard(st.dev, st.ino)]
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        match map.entry((dev, ino)) {
+        match map.entry((st.dev, st.ino)) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(Claim {
                     smallest: at,
                     counted_there: counted,
+                    stat: *st,
                 });
             }
             std::collections::hash_map::Entry::Occupied(mut o) => {
@@ -1048,8 +1062,9 @@ impl LinkClaims {
     }
 
     /// `None` when each linked file counted at its smallest path, else the
-    /// smallest path of every linked file, for a walk that counts there.
-    fn settled(self) -> Option<HashMap<(u64, u64), PathBuf>> {
+    /// smallest path and stat of every linked file, for a walk that counts
+    /// there.
+    fn settled(self) -> Option<HashMap<(u64, u64), Fixed>> {
         let claims: Vec<((u64, u64), Claim)> = self
             .shards
             .into_iter()
@@ -1058,7 +1073,11 @@ impl LinkClaims {
         if claims.iter().all(|(_, c)| c.counted_there) {
             return None;
         }
-        Some(claims.into_iter().map(|(id, c)| (id, c.smallest)).collect())
+        let fixed = |c: Claim| Fixed {
+            at: c.smallest,
+            stat: c.stat,
+        };
+        Some(claims.into_iter().map(|(id, c)| (id, fixed(c))).collect())
     }
 }
 
@@ -1072,11 +1091,14 @@ struct Ctx<'a> {
     /// Where this walk met each file with several links.
     claims: LinkClaims,
     /// For a second walk: the one path at which each linked file counts.
-    decided: Option<&'a HashMap<(u64, u64), PathBuf>>,
+    decided: Option<&'a HashMap<(u64, u64), Fixed>>,
     /// On a second walk, the files met at their path in `decided`.
     met: AtomicU64,
     /// Directory descriptors held open as parents.
     fds: FdBudget,
+    /// A second walk may take a linked file's stat by the inode number
+    /// its listing gives ([`listed_inodes_usable`]).
+    ino_reuse: bool,
     /// Whether the scan reads anything below a PATH: rows, or file types
     /// by name. When it does not (`-s`, `-n 0`), a linked file may count
     /// at any of its paths, since a PATH's total is the same either way,
@@ -1224,8 +1246,8 @@ impl Ctx<'_> {
         }
         let at = at();
         if let Some(d) = self.decided {
-            if let Some(smallest) = d.get(&(st.dev, st.ino)) {
-                let here = *smallest == at;
+            if let Some(fixed) = d.get(&(st.dev, st.ino)) {
+                let here = fixed.at == at;
                 if here {
                     self.met.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1234,7 +1256,7 @@ impl Ctx<'_> {
         }
         let first = self.first_link(st);
         if self.decided.is_none() {
-            self.claims.see(st.dev, st.ino, at, first);
+            self.claims.see(st, at, first);
         }
         first
     }
@@ -1345,6 +1367,41 @@ impl Drop for FdHold<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+/// Whether a second walk below `root` may take a linked file's stat by
+/// the inode number its listing gives. A regular file bind-mounted over
+/// another lists the hidden file's number, so a mount point below `root`
+/// that is not a directory turns it off for the scan, and so does a mount
+/// table or a mount point that cannot be read. Linux only: no other
+/// listing gives the numbers.
+fn listed_inodes_usable(root: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let (Ok(table), Ok(root)) = (crate::trashdir::read_mount_table(), fs::canonicalize(root))
+        else {
+            return false;
+        };
+        no_file_mounts_below(&table, &root, |mp| {
+            fs::metadata(mp).ok().map(|m| m.is_dir())
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = root;
+        false
+    }
+}
+
+/// Whether every mount point of mount table `table` below `root` (not
+/// `root` itself) is a directory. `is_dir` is None for one that cannot
+/// be stat-ed, which counts as not.
+#[cfg(target_os = "linux")]
+fn no_file_mounts_below(table: &str, root: &Path, is_dir: impl Fn(&Path) -> Option<bool>) -> bool {
+    crate::trashdir::mount_table(table)
+        .iter()
+        .filter(|(mp, _)| mp.starts_with(root) && mp != root)
+        .all(|(mp, _)| is_dir(mp) == Some(true))
 }
 
 /// The soft cap on this process's open files, if there is one.
@@ -1600,7 +1657,7 @@ fn count_once(
 /// subdirectories and the files big enough for the list.
 fn stat_entries(
     ctx: &Ctx<'_>,
-    dir: &du_fs::Dir,
+    (dir, reuse): (&du_fs::Dir, Option<u64>),
     entries: &du_fs::Entries,
     range: std::ops::Range<usize>,
     depth: usize,
@@ -1644,7 +1701,15 @@ fn stat_entries(
             out.subdirs.push((i, None));
             continue;
         }
-        let mut m = match entries.stat(i) {
+        // A second walk reuses the first one's stat of a linked file,
+        // found by the inode number the listing gave (`reuse` is then
+        // the directory's device).
+        let known = || {
+            let ino = entries.file_ino(i)?;
+            let fixed = ctx.decided?.get(&(reuse?, ino))?;
+            Some(fixed.stat)
+        };
+        let mut m = match entries.stat(i).or_else(known) {
             Some(m) => m,
             None => match dir.stat_at(name) {
                 Ok(m) => m,
@@ -1812,10 +1877,13 @@ fn walk_dir(
             p.repo(path);
         }
     }
+    // A second walk takes the first one's stats of linked files where the
+    // listing's inode numbers are the files' own.
+    let reuse = (ctx.ino_reuse && dir.lists_true_inodes()).then_some(st.dev);
     let stat_chunk = |range: std::ops::Range<usize>| {
         stat_entries(
             ctx,
-            &dir,
+            (&dir, reuse),
             &entries,
             range,
             depth,
@@ -2209,6 +2277,7 @@ fn scan_pooled(
             met: AtomicU64::new(0),
             rows: opts.top > 0 || opts.types,
             fds: FdBudget::new(rayon::current_num_threads()),
+            ino_reuse: decided.is_some() && listed_inodes_usable(&abs),
             dirs_seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
             unread: Mutex::new(Vec::new()),
@@ -5278,6 +5347,38 @@ mod tests {
         };
         let f = du_filter::Filter::new(&spec, root);
         assert!(!probe_opens(Some(&f), root, c"Music"));
+    }
+
+    /// A file bind-mounted below a PATH turns the inode-number reuse off,
+    /// and so does a mount point that cannot be stat-ed; mounts of
+    /// directories, the PATH's own mount and mounts elsewhere do not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_mount_below_the_root_turns_listed_inodes_off() {
+        let table = "/dev/sda1 / ext4 rw 0 0\n\
+                     /dev/sda1 /data/scan ext4 rw 0 0\n\
+                     /dev/sdb1 /data/scan/sub ext4 rw 0 0\n\
+                     /dev/sda1 /data/scan/sub/file.txt ext4 rw,bind 0 0\n\
+                     /dev/sdc1 /data/scan\\040two ext4 rw 0 0\n\
+                     /dev/sdd1 /data/other/dir ext4 rw 0 0\n";
+        let dirs = |mp: &Path| match mp.to_str() {
+            Some("/data/scan/sub/file.txt") => Some(false),
+            Some("/data/other/dir") => None,
+            _ => Some(true),
+        };
+        let usable = |root: &str| no_file_mounts_below(table, Path::new(root), dirs);
+        assert!(!usable("/data/scan"), "a file mount below");
+        assert!(!usable("/data/scan/sub"), "a file mount below");
+        assert!(!usable("/"), "a file mount below");
+        assert!(usable("/data/scan/sub/file.txt"), "its own mount only");
+        // "/data/scan two" is not below "/data/scan two/x" nor "/data/scan".
+        assert!(usable("/data/scan two/x"));
+        assert!(usable("/srv"), "no mount below");
+        assert!(
+            !usable("/data/other"),
+            "a mount point that cannot be stat-ed"
+        );
+        assert!(usable("/data/other/dir"), "its own mount only");
     }
 
     #[test]

@@ -328,6 +328,12 @@ impl Dir {
         false
     }
 
+    /// The Windows listing gives each entry its stat, so no inode number
+    /// is ever looked up.
+    pub fn lists_true_inodes(&self) -> bool {
+        false
+    }
+
     /// Windows has no btrfs snapshots.
     pub fn is_readonly_snapshot(&self) -> bool {
         false

@@ -317,6 +317,51 @@ fn totals_only_scans_count_each_linked_file_once() {
     }
 }
 
+#[test]
+fn linked_files_list_at_their_smallest_path_with_their_own_sizes() {
+    // A second walk takes each linked file's stat from the first one,
+    // found by the inode number the listing gives (Linux). Every file
+    // row must still show its own size at its smallest path, every run.
+    if cfg!(windows) {
+        return;
+    }
+    let t = Tree::new("linkrows");
+    let mut total = 0u64;
+    let mut want = Vec::new();
+    for k in 0..40usize {
+        let len = 2000 + 37 * k;
+        let first = t.file(&format!("b{:02}/f{k:02}.bin", k % 5), len);
+        for d in ["a", "c"] {
+            let link = t.root.join(format!("{d}{:02}/f{k:02}.bin", (k + 1) % 5));
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            fs::hard_link(&first, link).unwrap();
+        }
+        // "a.." sorts before "b.." and "c..", so the file counts there.
+        let at = t.root.join(format!("a{:02}/f{k:02}.bin", (k + 1) % 5));
+        want.push((at, len as u64));
+        total += len as u64;
+    }
+    t.file("solo/plain.bin", 5000);
+    total += 5000;
+    let args = [
+        "--no-git",
+        "--files",
+        "-n",
+        "200",
+        "--apparent",
+        "--threads",
+        "8",
+    ];
+    for run in 0..5 {
+        let j = t.json(&args);
+        assert_eq!(field(&j, "apparent"), total, "run {run}: {j}");
+        assert_eq!(field(&j, "links"), 80, "run {run}: {j}");
+        for (at, len) in &want {
+            assert_eq!(field(row(&j, &s(at)), "apparent"), *len, "run {run}: {j}");
+        }
+    }
+}
+
 /// `root` joined with each `/`-separated part of `rel`, so the result has
 /// native separators only.
 #[cfg(windows)]

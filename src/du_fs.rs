@@ -99,6 +99,9 @@ pub struct Entries {
     /// Stat of each entry when the listing returned one (macOS bulk
     /// reads); empty otherwise.
     stats: Vec<Option<Stat>>,
+    /// The inode number the listing gave each regular file (Linux
+    /// `getdents64`), 0 for other entries; empty when it gave none.
+    inos: Vec<u64>,
     /// 34(j): the entries whose listed stat may miss data that Compact
     /// packed (`fileid::hides_its_clusters`); [`Entries::restat`] asks
     /// them again.
@@ -136,6 +139,18 @@ impl Entries {
         }
     }
 
+    /// Add an entry along with the inode number its listing gave, 0 for
+    /// none.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn push_with_ino(&mut self, name: &[u8], kind: Kind, ino: u64) {
+        let before = self.index.len();
+        self.push(name, kind);
+        if self.index.len() > before {
+            self.inos.resize(before, 0);
+            self.inos.push(ino);
+        }
+    }
+
     /// 34(j): ask `stat` again about each entry the listing marked, and
     /// keep what it gives. When it gives None, the listed stat stays.
     #[cfg(any(windows, test))]
@@ -151,6 +166,12 @@ impl Entries {
     /// Stat of entry `i` if the listing returned one.
     pub fn stat(&self, i: usize) -> Option<Stat> {
         self.stats.get(i).copied().flatten()
+    }
+
+    /// The inode number the listing gave entry `i`, a regular file. Only
+    /// [`Dir::lists_true_inodes`] makes it the number its stat would give.
+    pub fn file_ino(&self, i: usize) -> Option<u64> {
+        self.inos.get(i).copied().filter(|&n| n != 0)
     }
 
     /// Name and kind of entry `i`.
