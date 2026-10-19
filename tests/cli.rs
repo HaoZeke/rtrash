@@ -758,7 +758,7 @@ fn messages_scrub_control_characters_on_a_terminal() {
     ];
     for args in &cases {
         let Some(out) = on_a_terminal(&sb, args) else {
-            eprintln!("skipping: no script(1) to give rtrash a terminal");
+            common::skip("skipping: no script(1) to give rtrash a terminal");
             return;
         };
         assert!(out.contains(shown), "{args}: {out:?}");
@@ -772,7 +772,7 @@ fn messages_scrub_control_characters_on_a_terminal() {
 #[test]
 fn restore_errors_scrub_control_characters_on_a_terminal() {
     if !Path::new("/usr/bin/script").exists() {
-        eprintln!("skipping: no script(1) to give rtrash a terminal");
+        common::skip("skipping: no script(1) to give rtrash a terminal");
         return;
     }
     let sb = Sandbox::new("restore-scrub");
@@ -1259,7 +1259,7 @@ fn put_warns_before_trashing_a_repo_with_unsaved_work() {
             .output()
     };
     if !git(&["init", "-q"]).is_ok_and(|o| o.status.success()) {
-        eprintln!("git unavailable; skipping");
+        common::skip("git unavailable; skipping");
         return;
     }
     fs::write(repo.join("f"), b"x").unwrap();
@@ -1576,7 +1576,9 @@ fn empty_without_pin_clears_home_trash() {
     let listed = stdout_of(&sb.run(&["list"]));
     let root = sb.root.display().to_string();
     if let Some(foreign) = listed.lines().find(|l| !l.contains(&root)) {
-        eprintln!("skipping: a bare empty would remove the host's '{foreign}'");
+        common::skip(&format!(
+            "skipping: a bare empty would remove the host's '{foreign}'"
+        ));
         return;
     }
     // Bare empty (no pin) must clear this sandbox home trash via XDG_DATA_HOME.
@@ -4488,7 +4490,7 @@ fn list_all_users_adds_the_owner_and_stays_read_only() {
 #[test]
 fn list_scrubs_control_characters_on_a_terminal() {
     if !Path::new("/usr/bin/script").exists() {
-        eprintln!("skipping: no script(1) to give rtrash a terminal");
+        common::skip("skipping: no script(1) to give rtrash a terminal");
         return;
     }
     let sb = Sandbox::new("scrub");
@@ -4583,7 +4585,7 @@ impl Drop for Binds {
 fn a_trash_seen_through_two_bind_mounts_counts_once() {
     use std::os::unix::fs::PermissionsExt;
     if !as_root(&["true"]) {
-        eprintln!("sudo unavailable; skipping");
+        common::skip("sudo unavailable; skipping");
         return;
     }
     let _global = global_state();
@@ -4641,7 +4643,7 @@ fn a_trash_seen_through_two_bind_mounts_counts_once() {
 #[test]
 fn put_and_empty_follow_volumes_mounted_inside_volumes() {
     if !as_root(&["true"]) {
-        eprintln!("sudo unavailable; skipping");
+        common::skip("sudo unavailable; skipping");
         return;
     }
     let _global = global_state();
@@ -4784,7 +4786,7 @@ fn a_home_trash_on_another_device_takes_files_its_volume_cannot() {
     let _global = global_state();
     let sb = Sandbox::new("xdg-other-device");
     let Some(xdg) = other_device_dir(&sb.root, "xdg") else {
-        eprintln!("no second file system here; skipping");
+        common::skip("no second file system here; skipping");
         return;
     };
     let top = mount_top(&sb.root);
@@ -4794,7 +4796,10 @@ fn a_home_trash_on_another_device_takes_files_its_volume_cannot() {
     let writable = unsafe { libc::access(c_top.as_ptr(), libc::W_OK) } == 0;
     let present = |name: String| fs::symlink_metadata(top.join(name)).is_ok();
     if writable || present(".Trash".into()) || present(format!(".Trash-{uid}")) {
-        eprintln!("{} may hold a trash of ours; skipping", top.display());
+        common::skip(&format!(
+            "{} may hold a trash of ours; skipping",
+            top.display()
+        ));
         let _ = fs::remove_dir_all(&xdg);
         return;
     }
@@ -4864,11 +4869,11 @@ fn a_home_trash_linked_to_another_device_takes_files_from_there() {
     let _global = global_state();
     let sb = Sandbox::new("trash-link-device");
     let Some(real) = other_device_dir(&sb.root, "linked-trash") else {
-        eprintln!("no second file system here; skipping");
+        common::skip("no second file system here; skipping");
         return;
     };
     let Some(near) = other_device_dir(&sb.root, "linked-files") else {
-        eprintln!("no second file system here; skipping");
+        common::skip("no second file system here; skipping");
         let _ = fs::remove_dir_all(&real);
         return;
     };
@@ -4943,11 +4948,11 @@ fn put_across_devices_refuses_what_it_could_only_half_remove() {
     use std::os::unix::fs::PermissionsExt;
     let sb = Sandbox::new("xdev-unremovable");
     let Some(other) = other_device_dir(&sb.root, "unremovable") else {
-        eprintln!("no second file system here; skipping");
+        common::skip("no second file system here; skipping");
         return;
     };
     if unsafe { libc::geteuid() } == 0 {
-        eprintln!("root may remove every case here; skipping");
+        common::skip("root may remove every case here; skipping");
         let _ = fs::remove_dir_all(&other);
         return;
     }
@@ -4969,7 +4974,7 @@ fn put_across_devices_refuses_what_it_could_only_half_remove() {
     if sticky {
         cases.push(("st", "st/s/g"));
     } else {
-        eprintln!("sudo -n chown failed; sticky case skipped");
+        common::skip("sudo -n chown failed; sticky case skipped");
     }
     let pin = format!("--trash-dir={}", other.display());
     for (op, keep) in cases {
@@ -4997,7 +5002,7 @@ fn put_across_devices_refuses_what_it_could_only_half_remove() {
 fn put_across_devices_refuses_a_tree_with_an_immutable_file() {
     let sb = Sandbox::new("xdev-immutable");
     let Some(other) = other_device_dir(&sb.root, "immutable") else {
-        eprintln!("no second file system here; skipping");
+        common::skip("no second file system here; skipping");
         return;
     };
     let w = sb.work();
@@ -5008,7 +5013,7 @@ fn put_across_devices_refuses_a_tree_with_an_immutable_file() {
         fs::write(&f, b"x").unwrap();
         let path = f.to_str().unwrap();
         if !as_root(&["chattr", set, path]) {
-            eprintln!("chattr {set} failed here; {dir} case skipped");
+            common::skip(&format!("chattr {set} failed here; {dir} case skipped"));
             continue;
         }
         let out = sb.run(&["put", "-r", &pin, dir]);
@@ -5088,7 +5093,7 @@ fn copies_across_devices_keep_posix_acls() {
     fs::create_dir_all(dir.join("sub")).unwrap();
     let (rw, rwx) = (acl_bytes(6), acl_bytes(7));
     if !set(&file, "system.posix_acl_access", &rw) {
-        eprintln!("no POSIX ACLs on this file system; skipping");
+        common::skip("no POSIX ACLs on this file system; skipping");
         let _ = fs::remove_dir_all(&other);
         return;
     }
@@ -5150,7 +5155,7 @@ fn copies_across_devices_keep_posix_acls() {
 #[test]
 fn copies_across_volumes_keep_macos_acls() {
     let Some(volume) = std::env::var_os("RTRASH_TEST_OTHER_VOLUME") else {
-        eprintln!("RTRASH_TEST_OTHER_VOLUME unset; skipping");
+        common::skip("RTRASH_TEST_OTHER_VOLUME unset; skipping");
         return;
     };
     let sb = Sandbox::new("mac-acl");
@@ -7825,7 +7830,7 @@ fn empty_dangling_keeps_records_whose_payload_cannot_be_reached() {
     use std::os::unix::fs::PermissionsExt;
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } == 0 {
-        eprintln!("root searches every folder; skipping");
+        common::skip("root searches every folder; skipping");
         return;
     }
     let sb = Sandbox::new("dangling-shut");
@@ -7848,7 +7853,7 @@ fn put_reports_a_file_it_cannot_reach_as_denied_not_missing() {
     use std::os::unix::fs::PermissionsExt;
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } == 0 {
-        eprintln!("root searches every folder; skipping");
+        common::skip("root searches every folder; skipping");
         return;
     }
     let sb = Sandbox::new("put-denied");

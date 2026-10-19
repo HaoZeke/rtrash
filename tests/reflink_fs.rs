@@ -91,7 +91,7 @@ fn num(json: &str, after: &str, key: &str) -> u64 {
 #[test]
 fn du_unique_and_shared_see_a_reflink_copy_as_one() {
     let Some(dir) = cloned_pair("du") else {
-        eprintln!("RTRASH_REFLINK_DIR unset; skipping");
+        common::skip("RTRASH_REFLINK_DIR unset; skipping");
         return;
     };
     let mib2 = 2u64 << 20;
@@ -154,7 +154,7 @@ fn compressed_pair(tag: &str) -> Option<PathBuf> {
 #[test]
 fn compressed_extents_count_once_at_their_uncompressed_size() {
     let Some(dir) = compressed_pair("zstd") else {
-        eprintln!("RTRASH_COMPRESS_DIR unset; skipping");
+        common::skip("RTRASH_COMPRESS_DIR unset; skipping");
         return;
     };
     let mib8 = 8u64 << 20;
@@ -191,7 +191,7 @@ fn compressed_extents_count_once_at_their_uncompressed_size() {
 #[test]
 fn reap_shared_frees_little_for_a_reflink_copy() {
     let Some(dir) = cloned_pair("reap") else {
-        eprintln!("RTRASH_REFLINK_DIR unset; skipping");
+        common::skip("RTRASH_REFLINK_DIR unset; skipping");
         return;
     };
     let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
@@ -236,7 +236,7 @@ fn reap_shared_frees_little_for_a_reflink_copy() {
 #[test]
 fn dupes_credit_a_reflink_copy_with_nothing_freed() {
     let Some(dir) = cloned_pair("dupes") else {
-        eprintln!("RTRASH_REFLINK_DIR unset; skipping");
+        common::skip("RTRASH_REFLINK_DIR unset; skipping");
         return;
     };
     let ok = Command::new("cp")
@@ -274,7 +274,7 @@ fn dupes_credit_a_reflink_copy_with_nothing_freed() {
 fn clone_dupes_share_the_extents_and_keep_each_mode() {
     use std::os::unix::fs::PermissionsExt;
     let Some(dir) = cloned_pair("clone") else {
-        eprintln!("RTRASH_REFLINK_DIR unset; skipping");
+        common::skip("RTRASH_REFLINK_DIR unset; skipping");
         return;
     };
     let copy = dir.join("copy.bin");
@@ -336,11 +336,11 @@ fn btrfs(args: &[&OsStr]) {
 #[test]
 fn du_names_read_only_btrfs_snapshots_and_x_leaves_them_out() {
     let Some(dir) = cloned_pair("snap") else {
-        eprintln!("RTRASH_REFLINK_DIR unset; skipping");
+        common::skip("RTRASH_REFLINK_DIR unset; skipping");
         return;
     };
     if !on_btrfs(&dir) {
-        eprintln!("RTRASH_REFLINK_DIR is not on btrfs; skipping");
+        common::skip("RTRASH_REFLINK_DIR is not on btrfs; skipping");
         let _ = fs::remove_dir_all(&dir);
         return;
     }
@@ -432,11 +432,11 @@ fn gnu_du(dir: &Path, flags: &[&str]) -> u64 {
 #[test]
 fn du_x_totals_match_gnu_du_x_across_a_btrfs_subvolume() {
     let Some(dir) = cloned_pair("xdev") else {
-        eprintln!("RTRASH_REFLINK_DIR unset; skipping");
+        common::skip("RTRASH_REFLINK_DIR unset; skipping");
         return;
     };
     if !on_btrfs(&dir) {
-        eprintln!("RTRASH_REFLINK_DIR is not on btrfs; skipping");
+        common::skip("RTRASH_REFLINK_DIR is not on btrfs; skipping");
         let _ = fs::remove_dir_all(&dir);
         return;
     }
@@ -498,7 +498,7 @@ fn du_x_totals_match_gnu_du_x_across_a_btrfs_subvolume() {
 fn a_bind_mount_on_the_same_device_counts_once() {
     use std::os::unix::fs::MetadataExt;
     let Some(base) = std::env::var_os("RTRASH_BIND_DIR").map(PathBuf::from) else {
-        eprintln!("RTRASH_BIND_DIR unset; skipping");
+        common::skip("RTRASH_BIND_DIR unset; skipping");
         return;
     };
     let (src, dst) = (base.join("src"), base.join("dst"));

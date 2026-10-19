@@ -920,7 +920,7 @@ fn unpaired_surrogate_names_survive_the_recycle_bin() {
         .collect();
     let f = m.join(std::ffi::OsString::from_wide(&units));
     if let Err(e) = fs::write(&f, b"surrogate") {
-        eprintln!("skipped: the volume refused the name: {e}");
+        common::skip(&format!("skipped: the volume refused the name: {e}"));
         return;
     }
     let out = cmd(&lad).arg("put").arg(&f).output().unwrap();

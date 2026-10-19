@@ -1,0 +1,1 @@
+Skip notes now reach the CI log. `common::skip` prints the reason and also appends it to the file `RTRASH_SKIP_LOG` names. The Linux check, Windows and macOS jobs print that file after the tests, even when every test passes.

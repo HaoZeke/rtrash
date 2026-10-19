@@ -223,7 +223,7 @@ fn a_restore_across_volumes_makes_a_junction_again() {
     let away = Path::new(env!("CARGO_TARGET_TMPDIR")).join(home.file_name().unwrap());
     let drive = |p: &Path| s(p).chars().next().map(|c| c.to_ascii_lowercase());
     if drive(&away) == drive(&home) {
-        eprintln!("CARGO_TARGET_TMPDIR shares a volume with the temp dir; skipping");
+        common::skip("CARGO_TARGET_TMPDIR shares a volume with the temp dir; skipping");
         let _ = fs::remove_dir_all(&home);
         return;
     }

@@ -3420,6 +3420,45 @@ def check_global_state():
                           "without `let _global = global_state();`; tests run in parallel")
 
 
+# cargo test and nextest hide the stderr of a passing test, so a skip
+# note printed with eprintln! never reaches a CI log (round 276 could
+# not tell whether the rsync half ran on Windows and macOS). A skipping
+# test calls tests/common skip, which also writes the note to the
+# RTRASH_SKIP_LOG file CI prints. The check takes an eprintln! whose
+# format string has "skip" in it, in any case.
+SKIP_NOTE = re.compile(r'\beprintln!\(\s*"((?:[^"\\]|\\.)*)"', re.S)
+SKIP_NOTE_CASES = [
+    ("plain", '    eprintln!("sudo unavailable; skipping");\n', [1]),
+    ("args", 'let a = 1;\n    eprintln!("chattr {set} failed; {dir} case skipped");\n', [2]),
+    ("split", '    eprintln!(\n        "{} may hold a trash; Skipping",\n'
+     '        top.display()\n    );\n', [1]),
+    ("helper", '    common::skip("sudo unavailable; skipping");\n', []),
+    ("other note", '    eprintln!("dev, ino: {root:?}");\n', []),
+    ("comment", '    // eprintln!("x; skipping");\n', []),
+]
+
+
+def skip_note_lines(text):
+    """Lines of `text` (comments left out) with an eprintln! skip note."""
+    code = rust_code(text, strings=True)
+    return [code.count("\n", 0, m.start()) + 1 for m in SKIP_NOTE.finditer(code)
+            if "skip" in m.group(1).lower()]
+
+
+def check_skip_notes():
+    """No test prints a skip note with eprintln!; it calls common::skip,
+    and the matcher meets every SKIP_NOTE_CASES case."""
+    for what, text, want in SKIP_NOTE_CASES:
+        if skip_note_lines(text) != want:
+            errors.append(f"scripts/precheck.py: skip_note_lines gets SKIP_NOTE_CASES "
+                          f"'{what}' wrong; the skip-note check is broken")
+    for path in sorted((ROOT / "tests").glob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        for line in skip_note_lines(path.read_text(encoding="utf-8")):
+            errors.append(f"{rel}:{line}: a skip note printed with eprintln! is hidden on a "
+                          "passing test; call common::skip(why), which CI's skip log shows")
+
+
 def check_du_df_audit():
     """`scripts/du-df-audit.py --self-test` passes: its df parser, the
     rule for which mounts -x walks, the expected rows and the bounds,
@@ -3460,7 +3499,7 @@ def main():
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers(); check_pair_refusals()
     check_long_lines(base); check_struct_field_drift(base); check_call_arity(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
-    check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains(); check_global_state(); check_du_df_audit()
+    check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains(); check_global_state(); check_skip_notes(); check_du_df_audit()
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
     for w in warnings:

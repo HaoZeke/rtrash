@@ -479,7 +479,7 @@ fn fish_completion_offers_the_right_words() {
     };
     let Some(shells) = run("rtrash completions ") else {
         require_shell("fish");
-        eprintln!("fish not installed; skipping");
+        common::skip("fish not installed; skipping");
         return;
     };
     assert_eq!(
@@ -604,7 +604,7 @@ fn nu_script_is_embedded_and_parses() {
     );
     let Ok(run) = Command::new("nu").args(["-n", "-c", &prog]).output() else {
         require_shell("nu");
-        eprintln!("nu not installed; skipping");
+        common::skip("nu not installed; skipping");
         return;
     };
     assert!(
@@ -691,7 +691,7 @@ fn powershell_script_is_embedded_and_completes() {
         // CI installs pwsh on every runner, so a missing one there is a
         // broken job, not a reason to pass quietly.
         require_shell("pwsh");
-        eprintln!("pwsh not installed; skipping");
+        common::skip("pwsh not installed; skipping");
         return;
     };
     assert!(
@@ -839,7 +839,7 @@ fn elvish_script_is_embedded_and_completes() {
     let _ = fs::remove_dir_all(&dir);
     let Ok(run) = run else {
         require_shell("elvish");
-        eprintln!("elvish not installed; skipping");
+        common::skip("elvish not installed; skipping");
         return;
     };
     assert!(

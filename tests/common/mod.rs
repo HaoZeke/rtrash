@@ -40,6 +40,13 @@
 //! `Asking`. A question that never comes then fails the test after
 //! `PROMPT_WAIT` and names what the run wrote, where a blocking read
 //! would hang the whole binary until CI kills it.
+//!
+//! Every test that skips itself, or a case, says why through `skip`.
+//! Both `cargo test` and `cargo nextest` hide the stderr of a passing
+//! test, so an `eprintln!` alone never reaches a CI log. Round 276 could
+//! not tell from the Windows and macOS logs whether the rsync half ran.
+//! `skip` also adds the note to the file `RTRASH_SKIP_LOG` names, which
+//! CI prints after the tests.
 #![allow(dead_code)]
 
 use std::fmt::Debug;
@@ -137,6 +144,33 @@ pub fn wait_for_later_second(
 /// Readings [`wait_for_later_second`] takes before it gives up: at 20 ms
 /// a nap, 10 s or more of waiting on a tick that comes within a second.
 pub const SECOND_POLLS: usize = 500;
+
+/// Print why a test, or a case of one, is skipped, on stderr. When
+/// `RTRASH_SKIP_LOG` names a file, also append one line to it: the test
+/// binary, the thread name (libtest names the thread after the test)
+/// and `why`. A failed write prints its error on stderr; the test goes
+/// on.
+pub fn skip(why: &str) {
+    eprintln!("{why}");
+    let Some(log) = std::env::var_os("RTRASH_SKIP_LOG") else {
+        return;
+    };
+    let exe = std::env::current_exe().unwrap_or_default();
+    let stem = exe.file_stem().unwrap_or_default().to_string_lossy();
+    // Cargo names a test binary NAME-HASH.
+    let bin = stem.rsplit_once('-').map_or(&*stem, |(name, _)| name);
+    let current = std::thread::current();
+    let test = current.name().unwrap_or("?");
+    let line = format!("{bin} {test}: {why}\n");
+    let wrote = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+    if let Err(e) = wrote {
+        eprintln!("RTRASH_SKIP_LOG {}: {e}", Path::new(&log).display());
+    }
+}
 
 /// The end of each stderr line naming a path outside `RTRASH_ALLOW_ROOTS`.
 pub const OUTSIDE: &str = "is outside RTRASH_ALLOW_ROOTS";

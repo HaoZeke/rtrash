@@ -1123,7 +1123,7 @@ fn rsync3() -> Option<String> {
         std::env::var_os("RTRASH_REQUIRE_RSYNC").is_none(),
         "RTRASH_REQUIRE_RSYNC is set but rsync 3 is not on PATH: {text:?}"
     );
-    eprintln!("rsync 3 not on PATH; skipping the rsync half");
+    common::skip("rsync 3 not on PATH; skipping the rsync half");
     None
 }
 
@@ -2667,7 +2667,7 @@ fn an_excluded_folder_is_never_opened() {
     let export = t.du(&[ex, "--ncdu=ex.json", "d"]);
     fs::set_permissions(&shut, fs::Permissions::from_mode(0o755)).unwrap();
     if !locked {
-        eprintln!("root reads every folder; skipping");
+        common::skip("root reads every folder; skipping");
         return;
     }
     let text = |o: &Output| String::from_utf8_lossy(&o.stdout).into_owned();

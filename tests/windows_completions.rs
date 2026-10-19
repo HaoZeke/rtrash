@@ -124,7 +124,7 @@ fn pwsh_completes_the_windows_options() {
         .output();
     let _ = std::fs::remove_dir_all(&dir);
     let Ok(run) = run else {
-        eprintln!("pwsh not installed; skipping");
+        common::skip("pwsh not installed; skipping");
         return;
     };
     assert!(
