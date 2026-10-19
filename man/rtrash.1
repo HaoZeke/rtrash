@@ -2391,6 +2391,17 @@ shows null for
 \fIunreadable\fR in the JSON.
 A snapshot can be stale, so it cannot drive
 .BR \-\-print0 " or " \-\-pick .
+A snapshot or export records totals and no walk, so no filter can
+change them:
+.B \-f
+takes no
+.BR \-\-exclude ", " \-X ", " \-\-filter\-from ", " \-\-type ,
+.BR \-\-exclude\-type ", " \-\-exclude\-regex ", " \-\-include\-regex ,
+.BR \-\-no\-hidden ", " \-\-gitignore " or " \-\-exclude\-caches ,
+and exits 2 when one is given.
+The same filters set in the configuration file are defaults, so
+.B \-f
+reads the file as usual with them.
 With
 .BR \-\-interactive ,
 the explorer browses the file instead of a scan, as ncdu #247 asks: one

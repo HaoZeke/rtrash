@@ -3727,6 +3727,22 @@ fn stacks_out(prog: &str, roots: &[RootTotals], dirs: &[Item], apparent: bool) -
 /// refusal of two flags lives here and nowhere else; precheck refuses an
 /// "it takes no" message elsewhere in du.rs, and the test
 /// `every_pair_in_the_conflict_table_is_refused` runs each pair.
+/// The flags that filter what a scan walks. A snapshot read with -f holds
+/// totals, not a walk, so it takes none of them (36 b). The config keys
+/// that set filters stay quiet with -f, since they are defaults.
+pub const SCAN_FILTERS: &[&str] = &[
+    "--exclude",
+    "--exclude-from",
+    "--filter-from",
+    "--type",
+    "--exclude-type",
+    "--exclude-regex",
+    "--include-regex",
+    "--no-hidden",
+    "--gitignore",
+    "--exclude-caches",
+];
+
 pub const MODE_CONFLICTS: &[(&str, &str, &[&str])] = &[
     (
         "--json",
@@ -3856,10 +3872,11 @@ pub const MODE_CONFLICTS: &[(&str, &str, &[&str])] = &[
             "--types",
         ],
     ),
+    ("--filter-from", "filters what a scan walks", &["--devices"]),
     (
-        "--filter-from",
-        "filters what a scan walks",
-        &["-f", "--devices"],
+        "-f",
+        "reads saved totals, which no filter can change",
+        SCAN_FILTERS,
     ),
     (
         "-f",
@@ -3923,7 +3940,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut ncdu: Option<PathBuf> = None;
     let mut ncdu_binary = false;
     let mut devices = false;
-    let mut filter_from = false;
+    // The filter flags given on the command line, by long name.
+    let mut filter_flags: Vec<&str> = Vec::new();
     let mut open_deleted = false;
     let mut dupes = false;
     let mut trash_dupes = false;
@@ -4082,6 +4100,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 Ok(exts) => keep_types.extend(exts),
                 Err(e) => bail!(e),
             }
+            filter_flags.push("--type");
         } else if let Some(v) = take_value(args, &mut i, arg, "--exclude-type", None) {
             match v.and_then(|v| du_filter::extensions(v, "--exclude-type")) {
                 Ok(exts) => filter
@@ -4089,6 +4108,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     .extend(exts.iter().map(|e| format!("*.{e}"))),
                 Err(e) => bail!(e),
             }
+            filter_flags.push("--exclude-type");
         } else if let Some(v) = take_value(args, &mut i, arg, "--collapse", None) {
             match v {
                 Ok("") => bail!("--collapse: empty name"),
@@ -4100,17 +4120,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 Ok(r) => filter.regex_out.push(r.as_str().into()),
                 Err(e) => bail!(format!("--exclude-regex: {e}")),
             }
+            filter_flags.push("--exclude-regex");
         } else if let Some(v) = take_value(args, &mut i, arg, "--include-regex", None) {
             match v.and_then(du_filter::path_regex) {
                 Ok(r) => filter.regex_in.push(r.as_str().into()),
                 Err(e) => bail!(format!("--include-regex: {e}")),
             }
+            filter_flags.push("--include-regex");
         } else if let Some(v) = take_value(args, &mut i, arg, "--exclude", None) {
             match v {
                 Ok(v) if du_filter::Pattern::parse(v).is_some() => filter.patterns.push(v.into()),
                 Ok(v) => bail!(format!("--exclude: empty pattern '{v}'")),
                 Err(e) => bail!(e),
             }
+            filter_flags.push("--exclude");
         } else if let Some((v, nul)) = path_list_arg(args, &mut i, arg) {
             let v = match v {
                 Ok(v) => v,
@@ -4133,6 +4156,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 }
                 Err(e) => bail!(e),
             }
+            filter_flags.push("--exclude-from");
         } else if let Some(v) = take_value(args, &mut i, arg, "--filter-from", None) {
             match v.map(|v| (v, du_filter::read_rsync_file(&crate::util::arg_path(v)))) {
                 Ok((_, Ok(Ok(rules)))) => filter.rsync.extend(rules),
@@ -4143,7 +4167,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 }
                 Err(e) => bail!(e),
             }
-            filter_from = true;
+            filter_flags.push("--filter-from");
         } else if let Some(v) = take_value(args, &mut i, arg, "--older-than", None)
             .or_else(|| take_value(args, &mut i, arg, "--min-age", None))
         {
@@ -4194,11 +4218,20 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--inodes" => opts.sort = SortKey::Items,
                 "--all-dirs" => opts.all_dirs = true,
                 "--artefacts" => opts.artefacts_only = true,
-                "--exclude-caches" => filter.exclude_caches = true,
+                "--exclude-caches" => {
+                    filter.exclude_caches = true;
+                    filter_flags.push("--exclude-caches");
+                }
                 // gdu's --no-hidden: a dot name at any depth, in order
                 // with --exclude so a later !pattern can bring one back.
-                "--no-hidden" => filter.patterns.push(".*".to_string()),
-                "--gitignore" => filter.gitignore = true,
+                "--no-hidden" => {
+                    filter.patterns.push(".*".to_string());
+                    filter_flags.push("--no-hidden");
+                }
+                "--gitignore" => {
+                    filter.gitignore = true;
+                    filter_flags.push("--gitignore");
+                }
                 "--dirs" => only_dirs = true,
                 "--files" => only_files = true,
                 "--devices" => devices = true,
@@ -4278,8 +4311,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         "--shared" => opts.shared_once,
         "--types" => opts.types,
         "--ratio" => ratio,
-        "--filter-from" => filter_from,
-        _ => false,
+        other => filter_flags.contains(&other),
     };
     let ncdu_flag = if ncdu_binary {
         "--ncdu-binary"

@@ -4854,6 +4854,12 @@ fn every_pair_in_the_conflict_table_is_refused() {
             "--ncdu" => vec!["--ncdu=out.json".into()],
             "--min-size" => vec!["--min-size=1k".into()],
             "--filter-from" => vec!["--filter-from=rules".into()],
+            "--exclude-from" => vec!["--exclude-from=rules".into()],
+            "--exclude" => vec!["--exclude=*.tmp".into()],
+            "--type" => vec!["--type=bin".into()],
+            "--exclude-type" => vec!["--exclude-type=tmp".into()],
+            "--exclude-regex" => vec!["--exclude-regex=x".into()],
+            "--include-regex" => vec!["--include-regex=x".into()],
             other => vec![other.into()],
         }
     };
@@ -4880,6 +4886,34 @@ fn every_pair_in_the_conflict_table_is_refused() {
     assert_eq!(pairs, want);
     assert!(!t.root.join("out.snap").exists());
     assert!(!t.root.join("out.json").exists());
+}
+
+/// 36(b): saved totals have no walk to filter, so -f refuses each filter
+/// flag instead of printing the whole table as if it were filtered. The
+/// filters that the config file sets are defaults, and -f still runs.
+#[test]
+fn a_snapshot_read_refuses_filter_flags_but_not_config_filters() {
+    let t = Tree::new("snap-filters");
+    t.file("a/x.iso", 300_000);
+    t.file("b/y.bin", 100_000);
+    assert!(t.du(&["--no-git", "-o", "s.snap"]).status.success());
+    let out = t.du(&["-f", "s.snap", "--exclude=*.iso"]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("-f reads saved totals, which no filter can change; it takes no --exclude,"),
+        "{err}"
+    );
+    fs::create_dir_all(t.root.join(".cfg/rtrash")).unwrap();
+    fs::write(
+        t.root.join(".cfg/rtrash/config.toml"),
+        "[du]\nexclude = [\"*.iso\"]\ngitignore = true\nexclude_caches = true\n\
+         exclude_regex = [\"zzz\"]\ninclude_regex = [\"y\"]\n",
+    )
+    .unwrap();
+    let out = t.du(&["-f", "s.snap", "--json"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
 }
 
 /// 35(d), gdu #294 and #265: `--ratio` adds a RATIO column and a ratio to
