@@ -2307,15 +2307,9 @@ fn set_text_units(prog: &str, si: bool, si_flag: bool, raw: bool, env: bool) {
 }
 
 /// `du --devices`: the mounted file systems, as text or JSON.
-fn devices_out(
-    prog: &str,
-    paths: &[PathBuf],
-    json: bool,
-    (si, si_flag): (bool, bool),
-    other_mode: bool,
-) -> i32 {
-    if !paths.is_empty() || other_mode {
-        eprintln!("{prog}: --devices lists every mounted file system; it takes no PATH and no other mode but --json");
+fn devices_out(prog: &str, paths: &[PathBuf], json: bool, (si, si_flag): (bool, bool)) -> i32 {
+    if !paths.is_empty() {
+        eprintln!("{prog}: --devices lists every mounted file system and reads no PATH");
         return 2;
     }
     set_text_units(prog, si, si_flag, false, true);
@@ -3666,6 +3660,155 @@ fn stacks_out(prog: &str, roots: &[RootTotals], dirs: &[Item], apparent: bool) -
     }
 }
 
+/// 35(e): the flags of `du` that do not go together, one row per flag:
+/// the flag, what it does, and the flags it takes none of. `run` checks
+/// the table right after reading the arguments, and refuses the first
+/// row that matches with exit 2 and a message that names both flags. A
+/// refusal of two flags lives here and nowhere else; precheck refuses an
+/// "it takes no" message elsewhere in du.rs, and the test
+/// `every_pair_in_the_conflict_table_is_refused` runs each pair.
+pub const MODE_CONFLICTS: &[(&str, &str, &[&str])] = &[
+    (
+        "--json",
+        "prints a JSON report",
+        &["--print0", "--pick", "-i"],
+    ),
+    ("--print0", "prints paths for xargs -0", &["--pick", "-i"]),
+    ("--pick", "picks rows to trash from a list", &["-i"]),
+    (
+        "--tree",
+        "prints the table as a tree",
+        &["--json", "--print0", "-s", "--types"],
+    ),
+    ("-s", "prints the totals only", &["--skip-total"]),
+    (
+        "--no-prefix",
+        "is for printed sizes, and the explorer keeps its units",
+        &["-i"],
+    ),
+    (
+        "-L",
+        "only reports, since a followed link lists its target's size under its own name",
+        &["--print0", "--pick", "-i", "--ncdu"],
+    ),
+    (
+        "--open-deleted",
+        "adds a line under the totals of a scan",
+        &[
+            "--print0",
+            "--pick",
+            "-i",
+            "--dupes",
+            "--devices",
+            "--stacks",
+            "--ncdu",
+            "-o",
+            "-f",
+        ],
+    ),
+    (
+        "--min-size",
+        "floors the listed rows",
+        &[
+            "-i",
+            "--pick",
+            "-o",
+            "--stacks",
+            "--ncdu",
+            "--types",
+            "--devices",
+        ],
+    ),
+    (
+        "--devices",
+        "lists every mounted file system",
+        &[
+            "--ncdu", "-o", "-f", "--stacks", "--print0", "--pick", "-i", "--unique", "--shared",
+            "--types",
+        ],
+    ),
+    (
+        "--dupes",
+        "finds duplicate files",
+        &["--ncdu", "-o", "-f", "--stacks", "--pick", "-i", "--types"],
+    ),
+    (
+        "--trash-dupes",
+        "trashes the extra copies",
+        &["--link-dupes", "--clone-dupes", "--json", "--print0"],
+    ),
+    (
+        "--link-dupes",
+        "hard-links the extra copies",
+        &["--clone-dupes", "--json", "--print0"],
+    ),
+    (
+        "--clone-dupes",
+        "clones the extra copies",
+        &["--json", "--print0"],
+    ),
+    (
+        "-o",
+        "writes a snapshot",
+        &["-f", "--json", "--print0", "--pick", "-i"],
+    ),
+    (
+        "--ncdu",
+        "writes an ncdu export",
+        &[
+            "-o", "-f", "--stacks", "--json", "--print0", "--pick", "-i", "--unique", "--shared",
+            "--types",
+        ],
+    ),
+    (
+        "--stacks",
+        "prints folded stacks",
+        &["-o", "--json", "--print0", "--pick", "-i"],
+    ),
+    (
+        "--unique",
+        "adds a column to a live listing",
+        &["-f", "-o", "--stacks", "-i"],
+    ),
+    (
+        "--shared",
+        "changes the sizes of a live listing",
+        &["-f", "-o", "--stacks", "-i", "--types"],
+    ),
+    (
+        "--types",
+        "lists file types from a live scan",
+        &["-f", "-o", "--stacks", "--print0", "--pick", "-i"],
+    ),
+    (
+        "-f",
+        "reads a snapshot, which can be stale",
+        &["--print0", "--pick"],
+    ),
+];
+
+/// The refusal of the first row of [`MODE_CONFLICTS`] whose flag and one
+/// of whose other flags `given` reports. `ncdu_flag` is the spelling of
+/// --ncdu on the command line (`--ncdu` or `--ncdu-binary`).
+fn mode_conflict(given: &dyn Fn(&str) -> bool, ncdu_flag: &str) -> Option<String> {
+    MODE_CONFLICTS.iter().find_map(|&(flag, does, others)| {
+        let hit = given(flag) && others.iter().any(|&o| given(o));
+        hit.then(|| {
+            let shown = if flag == "--ncdu" { ncdu_flag } else { flag };
+            format!("{shown} {does}; it takes no {}", or_list(others))
+        })
+    })
+}
+
+/// `a`, `a or b`, `a, b or c`.
+fn or_list(items: &[&str]) -> String {
+    match items.split_last() {
+        Some((last, [])) => (*last).to_string(),
+        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 pub fn run(prog: &str, args: &[String]) -> i32 {
     if args.first().map(String::as_str) == Some("diff") {
         return crate::du_snap::run_diff(prog, &args[1..]);
@@ -4014,28 +4157,50 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     // The SHARE column and the bars weigh rows the same way.
     let want_share = relative || bars;
+    let given = |flag: &str| match flag {
+        "--json" => json,
+        "--print0" => print0,
+        "--pick" => pick,
+        "-i" => interactive,
+        "--tree" => tree.is_some(),
+        "-s" => summarize,
+        "--skip-total" => skip_total,
+        "--no-prefix" => raw_bytes,
+        "-L" => opts.follow,
+        "--open-deleted" => open_deleted,
+        // --dupes reads --min-size as its own floor.
+        "--min-size" => min_size.is_some() && !dupes,
+        "--devices" => devices,
+        "--dupes" => dupes,
+        "--trash-dupes" => trash_dupes,
+        "--link-dupes" => link_dupes,
+        "--clone-dupes" => clone_dupes,
+        "-o" => output.is_some(),
+        "--ncdu" => ncdu.is_some(),
+        "-f" => from_file.is_some(),
+        "--stacks" => stacks,
+        "--unique" => opts.unique,
+        "--shared" => opts.shared_once,
+        "--types" => opts.types,
+        _ => false,
+    };
+    let ncdu_flag = if ncdu_binary {
+        "--ncdu-binary"
+    } else {
+        "--ncdu"
+    };
+    if let Some(refusal) = mode_conflict(&given, ncdu_flag) {
+        eprintln!("{prog}: {refusal}");
+        return 2;
+    }
     // A floor on listed rows covers the table, --json, --tree and
     // --print0 of a scan, and -f. A snapshot (-o) records every total for
     // du diff, so it takes none; the rest are not covered yet.
     if min_size.is_some() && !dupes {
-        if interactive
-            || pick
-            || output.is_some()
-            || stacks
-            || ncdu.is_some()
-            || opts.types
-            || devices
-        {
-            eprintln!(
-                "{prog}: --min-size floors the listed rows; it takes no \
-                 -i, --pick, -o, --stacks, --ncdu, --types or --devices"
-            );
-            return 2;
-        }
         if !matches!(opts.sort, SortKey::Disk | SortKey::Apparent) {
             eprintln!(
-                "{prog}: --min-size compares disk use, or apparent size with --apparent; \
-                 it takes no --sort=items or --sort=mtime"
+                "{prog}: --min-size compares disk use, or apparent size with --apparent, \
+                 so --sort=items and --sort=mtime do not apply"
             );
             return 2;
         }
@@ -4049,17 +4214,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     // The --top of each tree folder; the scan itself keeps every row.
     let tree_top = opts.top;
     if let Some(depth) = tree {
-        if json || print0 || summarize || opts.types {
-            eprintln!("{prog}: --tree prints the table; drop --json, --print0, -s or --types");
-            return 2;
-        }
         opts.max_depth = Some(opts.max_depth.map_or(depth, |m| m.min(depth)));
         opts.all_dirs = true;
         opts.top = TREE_ROWS;
-    }
-    if summarize && skip_total {
-        eprintln!("{prog}: give --summarize or --skip-total, not both");
-        return 2;
     }
     if !keep_types.is_empty() {
         // First, so every --exclude and --exclude-type still applies.
@@ -4082,19 +4239,6 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if only_files && !only_dirs {
         want_dirs = false;
     }
-    if [json, print0, pick, interactive]
-        .iter()
-        .filter(|b| **b)
-        .count()
-        > 1
-    {
-        eprintln!("{prog}: --json, --print0, --pick and --interactive are mutually exclusive");
-        return 2;
-    }
-    if raw_bytes && interactive {
-        eprintln!("{prog}: --no-prefix is for printed sizes; the explorer keeps units");
-        return 2;
-    }
     if pick && !pick_available() {
         eprintln!("{prog}: --pick needs a terminal and the tui feature");
         return 2;
@@ -4103,38 +4247,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: --interactive needs a terminal and the tui feature");
         return 2;
     }
-    if opts.follow {
-        if cfg!(windows) {
-            eprintln!("{prog}: --follow-symlinks is not supported on Windows");
-            return 2;
-        }
-        // A followed link lists the target's size under the link's name;
-        // trashing that name would remove only the link.
-        if print0 || pick || interactive || ncdu.is_some() {
-            eprintln!(
-                "{prog}: --follow-symlinks only reports; it does not combine with \
-                 --print0, --pick, --interactive or --ncdu"
-            );
-            return 2;
-        }
-    }
-    // 33(h): the line goes under the totals of a listing; the other modes
-    // print no totals to put it under.
-    if open_deleted
-        && (print0
-            || pick
-            || interactive
-            || dupes
-            || devices
-            || stacks
-            || ncdu.is_some()
-            || output.is_some()
-            || from_file.is_some())
-    {
-        eprintln!(
-            "{prog}: --open-deleted adds a line under the totals of a scan; it takes no \
-             --print0, --pick, -i, --dupes, --devices, --stacks, --ncdu, -o or -f"
-        );
+    if opts.follow && cfg!(windows) {
+        eprintln!("{prog}: --follow-symlinks is not supported on Windows");
         return 2;
     }
     // Without -L the walk lists only regular files and directories, so no
@@ -4147,22 +4261,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 2;
     }
     if devices {
-        return devices_out(
-            prog,
-            &paths,
-            json,
-            (si, si_flag),
-            ncdu.is_some()
-                || output.is_some()
-                || from_file.is_some()
-                || stacks
-                || print0
-                || pick
-                || interactive
-                || opts.unique
-                || opts.shared_once
-                || opts.types,
-        );
+        return devices_out(prog, &paths, json, (si, si_flag));
     }
     if paths.is_empty() && listed {
         eprintln!("{prog}: the path list names nothing to scan");
@@ -4205,24 +4304,6 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         return 2;
     }
     if dupes {
-        if ncdu.is_some()
-            || output.is_some()
-            || from_file.is_some()
-            || stacks
-            || pick
-            || interactive
-            || opts.types
-            || [json || print0, trash_dupes, link_dupes, clone_dupes]
-                .iter()
-                .filter(|&&b| b)
-                .count()
-                > 1
-        {
-            eprintln!(
-                "{prog}: --dupes takes one of --json, --print0, --trash-dupes, --link-dupes or --clone-dupes, with -x, -n and --min-size"
-            );
-            return 2;
-        }
         set_text_units(prog, si, si_flag, raw_bytes, true);
         let act = if trash_dupes {
             DupesAct::Trash
@@ -4266,61 +4347,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     read_only |= no_delete;
     #[cfg(not(feature = "tui"))]
     let _ = read_only;
-    if output.is_some() && (from_file.is_some() || json || print0 || pick || interactive) {
-        eprintln!("{prog}: --output writes a snapshot; it takes no other output mode");
-        return 2;
-    }
     if let Some(out) = &ncdu {
-        let flag = if ncdu_binary {
-            "--ncdu-binary"
-        } else {
-            "--ncdu"
-        };
-        if output.is_some()
-            || from_file.is_some()
-            || stacks
-            || json
-            || print0
-            || pick
-            || interactive
-            || opts.unique
-            || opts.shared_once
-            || opts.types
-        {
-            eprintln!("{prog}: {flag} writes an ncdu export; it takes no other output mode");
-            return 2;
-        }
         if paths.len() > 1 {
-            eprintln!("{prog}: {flag} exports one PATH");
+            eprintln!("{prog}: {ncdu_flag} exports one PATH");
             return 2;
         }
         return ncdu_out(prog, &paths[0], out, ncdu_binary, &opts, now, strict);
-    }
-    if stacks && (output.is_some() || json || print0 || pick || interactive) {
-        eprintln!("{prog}: --stacks prints folded stacks; it takes no other output mode");
-        return 2;
-    }
-    if opts.unique && (from_file.is_some() || output.is_some() || stacks || interactive) {
-        eprintln!(
-            "{prog}: --unique adds a column to a live listing; it takes no -f, -o, --stacks or -i"
-        );
-        return 2;
-    }
-    if opts.shared_once
-        && (from_file.is_some() || output.is_some() || stacks || interactive || opts.types)
-    {
-        eprintln!(
-            "{prog}: --shared changes the sizes of a live listing; it takes no -f, -o, --stacks, -i or --types"
-        );
-        return 2;
-    }
-    if opts.types
-        && (from_file.is_some() || output.is_some() || stacks || print0 || pick || interactive)
-    {
-        eprintln!(
-            "{prog}: --types lists file types from a live scan; it takes no -f, -o, --stacks, --print0, --pick or -i"
-        );
-        return 2;
     }
     if opts.types && opts.sort == SortKey::Mtime {
         eprintln!("{prog}: --types ranks by disk use, --apparent size or --sort=items");
@@ -4333,10 +4365,6 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     // --show-relative-size weighs rows as the ranking does.
     let apparent_share = opts.sort == SortKey::Apparent;
     if let Some(file) = &from_file {
-        if print0 || pick {
-            eprintln!("{prog}: a snapshot can be stale, so --file cannot drive --print0 or --pick");
-            return 2;
-        }
         let snap = match crate::du_snap::read(file) {
             Ok(s) => s,
             Err(e) => {
@@ -5551,5 +5579,30 @@ mod tests {
         assert_eq!(size_sum([half, half, 7]), u64::MAX);
         assert_eq!(size_sum([1, 2, 3]), 6);
         assert_eq!(size_sum(std::iter::empty()), 0);
+    }
+
+    /// 35(e): no row of the conflict table refuses its own flag or names
+    /// a flag twice, and the message lists the others as prose.
+    #[test]
+    fn the_conflict_table_names_each_flag_once_per_row() {
+        for &(flag, _, others) in MODE_CONFLICTS {
+            assert!(!others.contains(&flag), "{flag}");
+            let mut sorted = others.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), others.len(), "{flag}");
+        }
+        assert_eq!(or_list(&["-i"]), "-i");
+        assert_eq!(or_list(&["-o", "-f"]), "-o or -f");
+        assert_eq!(or_list(&["-o", "-f", "-i"]), "-o, -f or -i");
+        let given = |flag: &str| flag == "--ncdu" || flag == "--json";
+        let refusal = mode_conflict(&given, "--ncdu-binary");
+        let want = "--ncdu-binary writes an ncdu export; it takes no -o, -f, --stacks, --json, \
+                    --print0, --pick, -i, --unique, --shared or --types";
+        assert_eq!(refusal.as_deref(), Some(want));
+        assert_eq!(
+            mode_conflict(&|flag: &str| flag == "--json", "--ncdu"),
+            None
+        );
     }
 }

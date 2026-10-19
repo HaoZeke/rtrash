@@ -1356,6 +1356,16 @@ gives \fIold_unreadable\fR and \fInew_unreadable\fR (null when unknown).
 To scan a directory named diff, write
 .BR "rtrash du ./diff" .
 .PP
+Two flags that do not go together exit 2, with a message that names
+both: for example
+.B \-\-json
+with
+.BR \-\-print0 ,
+or
+.B \-o
+with
+.BR \-f .
+.PP
 Find what to delete. Walk each
 .I PATH
 (default the current directory) in parallel and list the largest

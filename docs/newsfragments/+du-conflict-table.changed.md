@@ -1,0 +1,1 @@
+When two `du` flags do not go together, the message now always names both: it says what the first flag does and lists every flag it refuses, as in `--stacks prints folded stacks; it takes no -o, --json, --print0, --pick or -i`. All such refusals come from one table, and one test runs every pair in it.

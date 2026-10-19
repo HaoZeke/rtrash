@@ -787,7 +787,7 @@ fn a_snapshot_lists_but_does_not_drive_print0() {
     assert_eq!(o.status.code(), Some(2));
     let err = String::from_utf8_lossy(&o.stderr).into_owned();
     assert!(
-        err.contains("a snapshot can be stale, so --file cannot drive --print0 or --pick"),
+        err.contains("-f reads a snapshot, which can be stale; it takes no --print0 or --pick"),
         "{err}"
     );
     assert!(o.stdout.is_empty(), "{:?}", o.stdout);
@@ -4797,4 +4797,42 @@ fn open_deleted_needs_a_listing() {
         let out = t.du(&["--open-deleted", mode]);
         assert_eq!(out.status.code(), Some(2), "{mode}");
     }
+}
+
+/// 35(e): each pair in du's conflict table exits 2, with a message that
+/// names both flags. A new mode adds its row to `du::MODE_CONFLICTS`, and
+/// this test then runs its pairs too. No pair reaches a scan or a write.
+#[test]
+fn every_pair_in_the_conflict_table_is_refused() {
+    let t = Tree::new("conflict-table");
+    t.file("a.bin", 4096);
+    // The flags that take a value get one; -f names no file, since the
+    // refusal comes before any read.
+    let args = |flag: &str| -> Vec<String> {
+        match flag {
+            "-o" => vec!["-o".into(), "out.snap".into()],
+            "-f" => vec!["-f".into(), "missing.snap".into()],
+            "--ncdu" => vec!["--ncdu=out.json".into()],
+            "--min-size" => vec!["--min-size=1k".into()],
+            other => vec![other.into()],
+        }
+    };
+    let mut pairs = 0;
+    for &(flag, _, others) in rtrash::du::MODE_CONFLICTS {
+        for &other in others {
+            let mut a = args(flag);
+            a.extend(args(other));
+            let a: Vec<&str> = a.iter().map(String::as_str).collect();
+            let out = t.du(&a);
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "{a:?}: {err}");
+            assert!(err.contains("it takes no"), "{a:?}: {err}");
+            assert!(err.contains(flag), "{a:?}: {err}");
+            assert!(err.contains(other), "{a:?}: {err}");
+            pairs += 1;
+        }
+    }
+    assert!(pairs > 80, "{pairs}");
+    assert!(!t.root.join("out.snap").exists());
+    assert!(!t.root.join("out.json").exists());
 }

@@ -2944,6 +2944,37 @@ def check_listing_parsers():
                       "for every system; it compares each listing stat with lstat (35(c))")
 
 
+# 35(e): du refused its flag pairs in sixteen hand-written checks, and a
+# new mode had to be added to each one, with a test per pair. Now each pair
+# is a row of du::MODE_CONFLICTS, which du::mode_conflict reads, and one
+# test runs every row. In src/du.rs outside comments and tests, a refusal
+# phrase (PAIR_REFUSAL) outside mode_conflict is refused.
+# PAIR_REFUSAL_CASES tests the matcher.
+PAIR_REFUSAL = re.compile(r"it takes no|mutually exclusive|does not combine with|, not both")
+PAIR_REFUSAL_CASES = [
+    ("takes", '    "{prog}: --stacks prints folded stacks; it takes no -o"', True),
+    ("exclusive", '    eprintln!("{prog}: --json and --pick are mutually exclusive");', True),
+    ("both", '    eprintln!("{prog}: give -s or --skip-total, not both");', True),
+    ("path", '    eprintln!("{prog}: --devices lists file systems and reads no PATH");', False),
+]
+
+
+def check_pair_refusals():
+    """du refuses a pair of flags only through its conflict table."""
+    for what, line, want in PAIR_REFUSAL_CASES:
+        if bool(PAIR_REFUSAL.search(line)) != want:
+            errors.append(f"scripts/precheck.py: PAIR_REFUSAL gets PAIR_REFUSAL_CASES '{what}' "
+                          "wrong; the pair refusal check is broken")
+    raw = (ROOT / "src/du.rs").read_text(encoding="utf-8").split("\n")
+    skip = test_mod_lines(raw)
+    for k, line in enumerate(raw):
+        if k in skip or line.lstrip().startswith("//") or not PAIR_REFUSAL.search(line):
+            continue
+        if enclosing_fn(raw, k) != "mode_conflict":
+            errors.append(f"src/du.rs:{k + 1}: a refusal of two flags written by hand; add a row "
+                          "to du::MODE_CONFLICTS, which the every-pair test runs (35(e))")
+
+
 def enclosing_fn(lines, k):
     """The name of the last fn declared at or above 0-based line `k`."""
     for j in range(k, -1, -1):
@@ -3198,7 +3229,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers(); check_pair_refusals()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
