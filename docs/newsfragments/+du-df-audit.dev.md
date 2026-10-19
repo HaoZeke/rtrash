@@ -1,0 +1,1 @@
+CI scans `/` with `rtrash du -x` now, on Linux and macOS. It checks the total against the used space that `df` gives. On Linux the two agree within 1% (or 512 MiB). The macOS bound is wide, from 50% to 150% of the system and data volumes together, since Apple File System clones and local snapshots count differently. The step prints both numbers first, so the log records them.

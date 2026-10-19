@@ -64,6 +64,10 @@ jobs:
           echo hi > "$fixture/d/e/f"
           scripts/du-smoke.sh target/release/rtrash "$(rustc --print sysroot)" "${CARGO_HOME:-$HOME/.cargo}/registry/src" "$fixture"
 
+      - name: du -x / against df (35(f))
+        timeout-minutes: 15
+        run: python3 scripts/du-df-audit.py target/release/rtrash
+
   musl-clippy:
     name: clippy · x86_64 musl
     runs-on: ubuntu-latest
@@ -266,6 +270,10 @@ jobs:
             RTRASH_DU_BULK=$bulk scripts/du-smoke.sh target/release/rtrash \
               "$(rustc --print sysroot)" "${CARGO_HOME:-$HOME/.cargo}/registry/src" "$fixture"
           done
+
+      - name: du -x / against df (35(f))
+        timeout-minutes: 15
+        run: python3 scripts/du-df-audit.py target/release/rtrash
 
   macos-finder:
     name: macOS Finder Trash (plain put · list · restore · empty)
