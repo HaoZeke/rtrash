@@ -591,6 +591,97 @@ def check_struct_field_drift(base):
                               "would refuse it (E0063 or E0027)")
 
 
+
+FN_DEF = re.compile(r"\bfn\s+(\w+)\s*(?:<[^>{]*>)?\s*\(")
+
+
+def fn_arities(text):
+    """{name: parameter counts} of the fns in `text` that take no self,
+    read from code that rust_code has cleaned. A name defined on two cfg
+    branches maps to the counts of both."""
+    out = {}
+    for m in FN_DEF.finditer(text):
+        params = [a for a in call_args(text, m.end()) if a]
+        if not (params and re.fullmatch(r"&?('\w+\s+)?(mut\s+)?self(\s*:.*)?", params[0], re.S)):
+            out.setdefault(m.group(1), set()).add(len(params))
+    return out
+
+
+def arity_call_lines(text, name, counts):
+    """(line, args) of each call of free fn `name` in cleaned `text` whose
+    argument count is in none of `counts`. A method call (`.name(`) and the
+    definition (`fn name(`) are not calls of it."""
+    # A closure or Fn parameter of that name shadows the fn in its file.
+    if re.search(rf"\blet\s+(mut\s+)?{name}\s*=\s*(move\s*)?\||\b{name}\s*:\s*&?\s*(dyn|impl)\s+Fn",
+                 text):
+        return []
+    hits = []
+    for m in re.finditer(rf"(?<![\w.]){name}\s*(?:::<[^>()]*>)?\s*\(", text):
+        head = text[max(0, m.start() - 80):m.start()]
+        # `fn name(` defines it; `Type::name(` may be a method with self.
+        if re.search(r"\bfn\s+$", head) or re.search(r"\b[A-Z]\w*(<[^<>]*>)?::$", head):
+            continue
+        args = call_args(text, m.end())
+        if args and not args[-1]:
+            args = args[:-1]
+        if len(args) not in counts:
+            hits.append((text.count("\n", 0, m.start()) + 1, len(args)))
+    return hits
+
+
+CALL_ARITY_CASES = [
+    ("same", "fn f(a: u8, b: u8) {}\nfn g() { f(1, 2); }\n", []),
+    ("missed", "fn f(a: u8, b: u8) {}\nfn g() { m::f(1); }\n", [(2, 1)]),
+    ("method", "fn f(a: u8, b: u8) {}\nfn g() { x.f(1); }\n", []),
+    ("nested", "fn f(a: u8, b: u8) {}\nfn g() { f(h(1, 2), [3, 4],); }\n", []),
+    ("type path", "fn g() { Item::f(&x, 1, 2); }\n", []),
+    ("closure", "fn g() { let f = |a| a; f(1); }\n", []),
+]
+
+
+def check_call_arity(base):
+    """For each free fn whose parameter count changes in its own file in
+    the range, every call of its name in src or tests, on every cfg
+    branch, passes a count that some fn of that name takes now. The box
+    cannot compile; round 270 changed plat::bytes to take a path and
+    missed one of its three callers (E0061 on every target). Calls are
+    matched by name only, so a call is flagged only when no fn of that
+    name in the tree takes its count. CALL_ARITY_CASES test it."""
+    for what, text, want in CALL_ARITY_CASES:
+        if arity_call_lines(text, "f", {2}) != want:
+            errors.append(f"scripts/precheck.py: arity_call_lines gets CALL_ARITY_CASES '{what}' "
+                          "wrong; the call-arity check is broken")
+    if not base:
+        return
+    old = base_rust_files(base)
+    if old is None:
+        return
+    files = sorted((ROOT / "src").rglob("*.rs")) + sorted((ROOT / "tests").rglob("*.rs"))
+    texts = {p.relative_to(ROOT).as_posix(): rust_code(p.read_text(encoding="utf-8"))
+             for p in files}
+    now = {rel: fn_arities(text) for rel, text in texts.items()}
+    # A fn whose own file gives it a new count is changed; the calls of
+    # its name then need a count that some fn of that name takes now.
+    changed = set()
+    for rel, text in old.items():
+        if rel in now:
+            for name, free in fn_arities(rust_code(text)).items():
+                new = now[rel].get(name, set())
+                if new and free != new:
+                    changed.add(name)
+    takes = {}
+    for arities in now.values():
+        for name, counts in arities.items():
+            takes.setdefault(name, set()).update(counts)
+    for name in sorted(changed):
+        for rel, text in texts.items():
+            for line, got in arity_call_lines(text, name, takes[name]):
+                want = " or ".join(str(n) for n in sorted(takes[name]))
+                errors.append(f"{rel}:{line}: {name} changed its parameters in this range and "
+                              f"takes {want} argument(s), but this call passes {got}; cargo "
+                              "would refuse it (E0061)")
+
+
 # A conventional-commit prefix: `feat(du): ...`, `fix: ...`, `ci!: ...`.
 # Subjects here are plain sentences that start with a capital (round 209).
 TYPED_SUBJECT = re.compile(r"^[a-z][a-z0-9-]*(?:\([^)]*\))?!?:\s")
@@ -3230,7 +3321,7 @@ def main():
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers(); check_pair_refusals()
-    check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
+    check_long_lines(base); check_struct_field_drift(base); check_call_arity(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:
         check_rustfmt()

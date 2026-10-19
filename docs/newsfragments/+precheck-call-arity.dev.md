@@ -1,0 +1,1 @@
+The precheck script now checks call arity. When a free fn gets a new parameter count, the check reads each call of its name in src and tests, on every cfg branch. It flags a call that passes a count no fn of that name takes. Round 270 missed one caller of a changed fn, and no CI target built. On that range the check names the missed call and nothing else.
