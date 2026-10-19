@@ -1075,6 +1075,11 @@ struct Ctx<'a> {
     decided: Option<&'a HashMap<(u64, u64), PathBuf>>,
     /// On a second walk, the files met at their path in `decided`.
     met: AtomicU64,
+    /// Whether the scan reads anything below a PATH: rows, or file types
+    /// by name. When it does not (`-s`, `-n 0`), a linked file may count
+    /// at any of its paths, since a PATH's total is the same either way,
+    /// so no claims are kept and no second walk runs.
+    rows: bool,
     /// Directories entered so far, so one met again is walked once: a
     /// bind mount on the same device on Unix, and with `-L` a symlink
     /// loop or a second link to a directory.
@@ -1202,8 +1207,9 @@ impl Ctx<'_> {
     /// a file of several links held to one path: on a second walk the one
     /// [`Ctx::decided`] names, else the first sighting, noted in
     /// [`Ctx::claims`]. A file whose link count is unknown (0) counts at
-    /// its first sighting. Every count of a file in the walk goes through
-    /// here (precheck check_link_credit).
+    /// its first sighting, and so does every file when nothing below a
+    /// PATH is read ([`Ctx::rows`]). Every count of a file in the walk goes
+    /// through here (precheck check_link_credit).
     fn counts_here(&self, st: &du_fs::Stat, at: impl FnOnce() -> PathBuf) -> bool {
         // -L: a file reached through links counts once, at its first
         // sighting; any file may be reached twice, and a path for each
@@ -1211,7 +1217,7 @@ impl Ctx<'_> {
         if self.opts.follow {
             return st.ino == 0 || self.seen.insert(st.dev, st.ino);
         }
-        if st.nlink <= 1 || st.ino == 0 {
+        if st.nlink <= 1 || st.ino == 0 || !self.rows {
             return self.first_link(st);
         }
         let at = at();
@@ -2103,6 +2109,7 @@ fn scan_pooled(
             claims: LinkClaims::new(),
             decided,
             met: AtomicU64::new(0),
+            rows: opts.top > 0 || opts.types,
             dirs_seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
             unread: Mutex::new(Vec::new()),
@@ -2144,7 +2151,8 @@ fn scan_pooled(
             // path, so every run gives each folder the same total. A
             // stopped scan keeps what it has, and the live counters start
             // over for the second walk. A stop during that walk keeps the
-            // first.
+            // first. A scan that reads no rows keeps no claims, so it
+            // walks once.
             let claims = std::mem::replace(&mut ctx.claims, LinkClaims::new());
             let settled = if live.is_some_and(ScanControl::stopped) {
                 None

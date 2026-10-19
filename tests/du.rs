@@ -278,6 +278,45 @@ fn hard_links_credit_the_same_folder_on_every_run() {
     }
 }
 
+#[test]
+fn totals_only_scans_count_each_linked_file_once() {
+    // A scan that lists no rows (-s, -n 0) keeps no claims and walks the
+    // tree once (bench1: the second walk doubled the stats on a tree of
+    // links); each PATH total still counts every linked file once.
+    if cfg!(windows) && std::env::var_os("WINEPREFIX").is_some() {
+        return;
+    }
+    let t = Tree::new("linktotals");
+    let mut apparent = 0u64;
+    for k in 0..64 {
+        let len = 1000 + k;
+        let first = t.file(&format!("huge/e{k:02}.bin"), len);
+        let link = t.root.join(format!("linked/g{:02}/l{k:02}.bin", k % 8));
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        fs::hard_link(&first, link).unwrap();
+        apparent += len as u64;
+    }
+    let roots = |j: &str| j[..j.find("\"dirs\"").unwrap()].to_string();
+    let listed = roots(&t.json(&["--no-git", "-n", "100", "--threads", "8"]));
+    assert_eq!(field(&listed, "apparent"), apparent, "{listed}");
+    for only in [&["-s"][..], &["-n", "0"][..]] {
+        let mut args = vec!["--no-git", "--threads", "8"];
+        args.extend_from_slice(only);
+        for run in 0..4 {
+            let r = roots(&t.json(&args));
+            for key in ["disk", "apparent", "files", "links"] {
+                assert_eq!(
+                    field(&r, key),
+                    field(&listed, key),
+                    "{only:?} run {run}: {r}"
+                );
+            }
+            assert_eq!(field(&r, "files"), 64, "{only:?}: {r}");
+            assert_eq!(field(&r, "links"), 64, "{only:?}: {r}");
+        }
+    }
+}
+
 /// `root` joined with each `/`-separated part of `rel`, so the result has
 /// native separators only.
 #[cfg(windows)]

@@ -1,0 +1,1 @@
+`rtrash du -s` and `-n 0` walk a tree with hard links once. With no rows to show, a linked file may count at any of its paths. The second walk, which pins each file to its first path in name order, no longer runs there. On the bench1 tree of 200,000 files and 200,000 hard links, that walk made half the stat calls.
