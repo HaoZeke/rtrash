@@ -1209,6 +1209,58 @@ fn put_gives_the_same_answer_with_or_without_a_trailing_slash() {
     }
 }
 
+/// trash-cli #427 and #434 lost the files of a directory they could not
+/// move. On one file system put renames, and a rename needs a parent
+/// that allows deleting: put refuses a directory and a file in a
+/// read-only parent.
+/// Linux also needs write access to a directory to give it a new parent,
+/// so a read-only directory is refused there too. Every file stays, and
+/// the trash gets no payload and no record. Root may move all of these,
+/// so the test needs an ordinary user.
+#[test]
+fn put_refuses_what_it_cannot_move_and_keeps_every_file() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        common::skip("root may move every case here; skipping");
+        return;
+    }
+    let sb = Sandbox::new("put-unmovable");
+    let w = sb.work();
+    let chmod = |p: &Path, m: u32| fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+    fs::create_dir_all(w.join("p/d")).unwrap();
+    sb.touch("p/d/f");
+    sb.touch("p/x");
+    fs::create_dir_all(w.join("ro/sub")).unwrap();
+    sb.touch("ro/f");
+    sb.touch("ro/sub/g");
+    chmod(&w.join("p"), 0o555);
+    chmod(&w.join("ro"), 0o555);
+    let mut cases = vec![("p/d", "p/d/f"), ("p/x", "p/x")];
+    if cfg!(target_os = "linux") {
+        cases.push(("ro", "ro/sub/g"));
+    }
+    for (op, keep) in cases {
+        let out = sb.run(&["put", "-r", op]);
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(1), "{op}: {err}");
+        let want = format!("cannot trash '{op}': Permission denied");
+        assert!(err.contains(&want), "{op}: {err}");
+        assert!(w.join(keep).exists(), "{op}: {keep} is gone");
+        assert_eq!(
+            names_in(&sb.trash().join("files")),
+            Vec::<String>::new(),
+            "{op}"
+        );
+        assert_eq!(
+            names_in(&sb.trash().join("info")),
+            Vec::<String>::new(),
+            "{op}"
+        );
+    }
+    chmod(&w.join("p"), 0o755);
+    chmod(&w.join("ro"), 0o755);
+}
+
 #[cfg(unix)]
 #[test]
 fn put_skips_safe_rm_paths_and_refuses_home() {
@@ -5028,8 +5080,9 @@ fn a_mount_that_never_answers_is_skipped_in_time() {
 /// trash-cli #427: a put to another file system copies, then removes the
 /// original, so a tree it cannot wholly remove ends up half gone. rtrash
 /// refuses before it copies: a read-only directory deep inside, a parent
-/// that does not allow deleting (for a directory and for a file), and
-/// another user's file in another user's sticky directory. Each stays
+/// that does not allow deleting (for a directory and for a file), a
+/// read-only directory itself, and another user's file in another user's
+/// sticky directory. Each stays
 /// whole and the trash stays empty. Root may remove all of these, so the
 /// test needs an ordinary user; the sticky case also needs `sudo -n`.
 #[cfg(target_os = "linux")]
@@ -5055,7 +5108,15 @@ fn put_across_devices_refuses_what_it_could_only_half_remove() {
     fs::write(w.join("p/d/f"), b"x").unwrap();
     fs::write(w.join("p/x"), b"x").unwrap();
     chmod(&w.join("p"), 0o555);
-    let mut cases = vec![("deep", "deep/a/ro/f"), ("p/d", "p/d/f"), ("p/x", "p/x")];
+    fs::create_dir_all(w.join("top/sub")).unwrap();
+    fs::write(w.join("top/sub/g"), b"x").unwrap();
+    chmod(&w.join("top"), 0o555);
+    let mut cases = vec![
+        ("deep", "deep/a/ro/f"),
+        ("p/d", "p/d/f"),
+        ("p/x", "p/x"),
+        ("top", "top/sub/g"),
+    ];
     fs::create_dir_all(w.join("st/s")).unwrap();
     fs::write(w.join("st/s/g"), b"x").unwrap();
     chmod(&w.join("st/s"), 0o1777);
@@ -5076,6 +5137,7 @@ fn put_across_devices_refuses_what_it_could_only_half_remove() {
     }
     chmod(&w.join("deep/a/ro"), 0o755);
     chmod(&w.join("p"), 0o755);
+    chmod(&w.join("top"), 0o755);
     if sticky {
         as_root(&["rm", "-rf", s.to_str().unwrap()]);
     }
