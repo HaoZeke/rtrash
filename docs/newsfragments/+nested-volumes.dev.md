@@ -1,0 +1,1 @@
+The man page now says that one `rtrash empty` covers the home trash and this user's trash on every mounted volume, and that a volume mounted inside another keeps a trash at its own top folder. A Linux test mounts three nested tmpfs volumes and checks put, list, empty and restore across them. The du man page notes that the macOS system du counts firmlinked folders twice.

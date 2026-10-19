@@ -414,6 +414,18 @@ is missing or unreadable has no known age, so
 keeps it, as trash-cli does; a full
 .B empty
 removes it.
+.PP
+One run covers the home trash and this user's trash on every mounted
+volume, whatever the current folder (trash-cli #129).
+Nobody needs to run it once per mount point.
+Each volume mounted inside another, such as a dataset of the Z file
+system (ZFS), keeps a trash at its own top folder, and
+.B put
+sends each file there.
+.B \-\-home\-only
+and
+.B \-\-trash\-dir
+narrow the run.
 .TP
 .BR \-n ", " \-\-dry\-run
 Report what would be removed without removing anything; also prints
@@ -1505,6 +1517,11 @@ A folder that firmlinks join, such as
 shows up at the top and under
 .IR /System/Volumes/Data .
 It is one directory with one inode, so the walk counts it once.
+The system
+.B "du \-x \-s /"
+counts such a folder twice.
+On a macOS CI runner it gave about 440 GB where rtrash gave 232 GB, and
+df of the two volumes agreed with rtrash within 0.6%.
 On Windows the walk never enters a junction, a volume mount point, a
 symlink or any other reparse point that names another folder, with or
 without

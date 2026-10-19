@@ -4521,8 +4521,8 @@ fn as_root(args: &[&str]) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Bind mounts made with [`as_root`], undone (lazily) when dropped, before
-/// the sandbox that holds them goes.
+/// Mounts made with [`as_root`], undone (lazily, the last made first) when
+/// dropped, before the sandbox that holds them goes.
 #[cfg(target_os = "linux")]
 struct Binds(Vec<PathBuf>);
 
@@ -4587,6 +4587,132 @@ fn a_trash_seen_through_two_bind_mounts_counts_once() {
         stderr_of(&restore)
     );
     drop(binds);
+}
+
+/// trashy #48 and #117, trash-cli #129: volumes mounted inside volumes,
+/// as ZFS datasets and drives under /run/media are. put takes each file
+/// to the trash at the top of its own mount, never the one around it, and
+/// never fails with EXDEV; a home trash on a nested mount takes the files
+/// of that mount. One list or empty reaches every volume trash, whatever
+/// the current folder, --home-only and --trash-dir narrow it, and restore
+/// puts a file back at the top of its volume.
+#[cfg(target_os = "linux")]
+#[test]
+fn put_and_empty_follow_volumes_mounted_inside_volumes() {
+    if !as_root(&["true"]) {
+        eprintln!("sudo unavailable; skipping");
+        return;
+    }
+    let sb = Sandbox::new("nested-mounts");
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let vol = sb.root.join("vol");
+    let inner = vol.join("inner");
+    let local = vol.join(".local");
+    let opts = format!("size=16m,mode=0755,uid={uid},gid={gid}");
+    let mut mounts = Binds(Vec::new());
+    // Each mount comes before the folder for the next, which is inside it.
+    for m in [&vol, &inner, &local] {
+        fs::create_dir_all(m).unwrap();
+        let at = m.to_str().unwrap();
+        let ok = as_root(&["mount", "-t", "tmpfs", "-o", &opts, "tmpfs", at]);
+        assert!(ok, "sudo -n mount -t tmpfs failed for {at}");
+        mounts.0.push(m.clone());
+    }
+    let xdg = local.join("share");
+    fs::create_dir_all(&xdg).unwrap();
+    let env = [("XDG_DATA_HOME", xdg.to_str().unwrap())];
+    let names = [
+        "rtrash-mnt-top.txt",
+        "rtrash-mnt-nest.txt",
+        "rtrash-mnt-near.txt",
+    ];
+    let top = vol.join(names[0]);
+    let nest = inner.join("deep").join(names[1]);
+    let near = local.join(names[2]);
+    fs::create_dir_all(inner.join("deep")).unwrap();
+    for f in [&top, &nest, &near] {
+        fs::write(f, b"x").unwrap();
+    }
+    let put = sb.run_env(
+        &[
+            "put",
+            top.to_str().unwrap(),
+            nest.to_str().unwrap(),
+            near.to_str().unwrap(),
+        ],
+        &env,
+    );
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let vol_trash = vol.join(format!(".Trash-{uid}"));
+    let inner_trash = inner.join(format!(".Trash-{uid}"));
+    let home_trash = xdg.join("Trash");
+    assert_eq!(
+        names_in(&vol_trash.join("files")),
+        vec![names[0].to_string()]
+    );
+    assert_eq!(
+        names_in(&inner_trash.join("files")),
+        vec![names[1].to_string()]
+    );
+    assert_eq!(
+        names_in(&home_trash.join("files")),
+        vec![names[2].to_string()]
+    );
+    assert!(!local.join(format!(".Trash-{uid}")).exists());
+    let record = fs::read_to_string(
+        inner_trash
+            .join("info")
+            .join(format!("{}.trashinfo", names[1])),
+    )
+    .unwrap();
+    assert!(
+        record.contains("\nPath=deep/rtrash-mnt-nest.txt\n"),
+        "{record}"
+    );
+
+    let count = |out: &Output, name: &str| stdout_of(out).matches(name).count();
+    let list = sb.run_env(&["list"], &env);
+    let home_list = sb.run_env(&["list", "--home-only"], &env);
+    let dry = sb.run_env(&["empty", "--dry-run", "--verbose"], &env);
+    let home_dry = sb.run_env(&["empty", "--dry-run", "--verbose", "--home-only"], &env);
+    for (i, name) in names.iter().enumerate() {
+        let home = usize::from(i == 2);
+        assert_eq!(count(&list, name), 1, "{name}: {}", stdout_of(&list));
+        assert_eq!(count(&dry, name), 1, "{name}: {}", stdout_of(&dry));
+        assert_eq!(
+            count(&home_list, name),
+            home,
+            "{name}: {}",
+            stdout_of(&home_list)
+        );
+        assert_eq!(
+            count(&home_dry, name),
+            home,
+            "{name}: {}",
+            stdout_of(&home_dry)
+        );
+    }
+
+    // A pinned empty clears that volume trash alone.
+    let pin = format!("--trash-dir={}", inner_trash.display());
+    let out = sb.run_env(&["empty", &pin], &env);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(names_in(&inner_trash.join("files")).is_empty());
+    assert_eq!(
+        names_in(&vol_trash.join("files")),
+        vec![names[0].to_string()]
+    );
+    assert_eq!(
+        names_in(&home_trash.join("files")),
+        vec![names[2].to_string()]
+    );
+
+    // trashy #117: the file goes back to the top of its own volume.
+    let restore = sb.run_env(&["restore", &format!("--name={}", names[0])], &env);
+    assert!(restore.status.success(), "{}", stderr_of(&restore));
+    assert!(top.exists(), "{}", stderr_of(&restore));
+    assert!(names_in(&vol_trash.join("files")).is_empty());
+    drop(mounts);
 }
 
 /// The mount point `path` is on: the longest one above it in
