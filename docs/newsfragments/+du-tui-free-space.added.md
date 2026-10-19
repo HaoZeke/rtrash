@@ -1,0 +1,1 @@
+The `du -i` title now ends with the room left on the file system of the current directory and its share, such as `48.2 GiB free (9%)`, as ncdu #77 asks. It shows only when the whole path fits beside it. None shows for a snapshot, for the view above two or more directories, or on a network file system.

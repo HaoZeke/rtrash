@@ -352,6 +352,13 @@ struct App {
     hand_off: Option<HandOff>,
     /// Program and arguments `o` opens a row with (tests set their own).
     opener: Vec<std::ffi::OsString>,
+    /// The room left on the file system of a view, by the view's path
+    /// (ncdu #77): read when the view changes, and again after a
+    /// delete, an undo or a rescan. `None` inside when it can't be read.
+    free: Option<(PathBuf, Option<crate::space::Space>)>,
+    /// How the free space of a view is read: [`free_space`], or a fixed
+    /// value in tests, so a title never depends on the host's disk.
+    free_of: fn(&Path) -> Option<crate::space::Space>,
 }
 
 /// A program the explorer hands the terminal to.
@@ -1045,6 +1052,8 @@ impl App {
             jobs: HashMap::new(),
             deleting: None,
             failures: Vec::new(),
+            free: None,
+            free_of: free_space,
         }
     }
 
@@ -1239,6 +1248,23 @@ impl App {
         })
     }
 
+    /// The title's free-space text for the current view, such as
+    /// `48.2 GiB free (9%)`. It gives None for a snapshot, for the view
+    /// above two or more roots, on a network file system, and when the
+    /// file system can't be read.
+    fn free_here(&mut self) -> Option<String> {
+        if self.snapshot.is_some() || is_top_of_roots(&self.cur) {
+            return None;
+        }
+        if self.free.as_ref().is_none_or(|(p, _)| *p != self.cur) {
+            self.free = Some((self.cur.clone(), (self.free_of)(&self.cur)));
+        }
+        self.free
+            .as_ref()
+            .and_then(|(_, s)| s.as_ref())
+            .map(free_text)
+    }
+
     fn view(&self) -> &View {
         &self.cache[&self.cur]
     }
@@ -1380,6 +1406,7 @@ impl App {
             self.status = "still scanning this directory".into();
             return;
         }
+        self.free = None;
         if self.background {
             // The parents never took a stopped view's sizes, so a rescan
             // of one replaces it instead of carrying a change upward.
@@ -1758,6 +1785,7 @@ impl App {
         if any {
             let at = self.list_state.selected().unwrap_or(0);
             self.select(at);
+            self.free = None;
         }
         if finished {
             self.finish_delete(d);
@@ -1942,6 +1970,7 @@ impl App {
         }
         let at = self.list_state.selected().unwrap_or(0);
         self.select(at);
+        self.free = None;
         self.status = match failed {
             0 => format!("restored {back} item(s)"),
             f => format!("restored {back}, {f} failed (path taken again?)"),
@@ -2497,6 +2526,50 @@ impl App {
     }
 }
 
+/// The room left on the file system of `dir`, for [`App::free_here`].
+/// A network file system is left out: its statvfs can hang on a dead
+/// server, and a probe's warning would write over the explorer.
+#[cfg(unix)]
+fn free_space(dir: &Path) -> Option<crate::space::Space> {
+    if crate::mount_probe::is_network_fs(&crate::mount_probe::fs_type_of(dir)) {
+        return None;
+    }
+    crate::space::query(dir).ok()
+}
+
+/// The room left on the volume of `dir`, for [`App::free_here`].
+#[cfg(not(unix))]
+fn free_space(dir: &Path) -> Option<crate::space::Space> {
+    crate::space::query(dir).ok()
+}
+
+/// `48.2 GiB free (9%)`: what this user may still write, and its share
+/// of the file system.
+fn free_text(s: &crate::space::Space) -> String {
+    format!("{} free ({}%)", format_bytes(s.avail), s.avail_percent())
+}
+
+/// The explorer's title in a box `width` columns wide: `place`, then
+/// `tail` with the sizes, counts and markers. The tail always fits; a
+/// long path gives way from the left, as in ncdu. `free` ranks lowest:
+/// it comes last, and only when the whole path fits beside it, so a
+/// narrow screen drops it before it cuts the path.
+fn title_text(width: u16, place: &str, tail: &str, free: Option<&str>) -> String {
+    // The box's corners take two columns and the leading space one.
+    let room = |tail: &str| {
+        (width as usize)
+            .saturating_sub(2)
+            .saturating_sub(cols(tail) + 1)
+    };
+    if let Some(free) = free {
+        let with = format!("{tail}· {free} ");
+        if cols(place) <= room(&with) {
+            return format!(" {place}{with}");
+        }
+    }
+    format!(" {}{tail}", fit_left(place, room(tail)))
+}
+
 /// Whether the file name of `it` starts with a dot.
 fn is_dot_name(it: &Item) -> bool {
     it.path
@@ -2967,6 +3040,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .split(f.area());
     app.viewport_rows = chunks[1].height.saturating_sub(2) as usize;
     app.ensure_scroll();
+    let free = app.free_here();
     let sort = app.shown();
     let apparent = app.size_key == SortKey::Apparent;
     let view = app.view();
@@ -2980,8 +3054,6 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         ),
         None => format!("{}{stopped}", format_bytes(whole)),
     };
-    // Sizes, counts and markers always fit; a long path gives way from
-    // the left, as in ncdu.
     let entries = if !app.narrowed() {
         format!("{} entries", view.rows.len())
     } else {
@@ -2995,15 +3067,12 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     let items = crate::util::plural(below, "item", "items");
     let marked = app.marked_count();
     let tail = format!(" · {size} · {items} · {entries} · {marked} marked ");
-    let room = (chunks[0].width as usize)
-        .saturating_sub(2)
-        .saturating_sub(cols(&tail) + 1);
     let place = if is_top_of_roots(&app.cur) {
         crate::util::plural(app.roots.len() as u64, "directory", "directories")
     } else {
         app.cur.display().to_string()
     };
-    let title = format!(" {}{tail}", fit_left(&place, room));
+    let title = title_text(chunks[0].width, &place, &tail, free.as_deref());
     let ctx = RowCtx {
         // By items, the share columns measure items, as gdu's bars do.
         whole: if sort == SortKey::Items { below } else { whole },
@@ -3418,7 +3487,22 @@ mod tests {
     fn app(t: &Tree) -> App {
         let mut a = App::new("rtrash", t.0.join("w"), ScanOpts::default(), false).unwrap();
         a.trash_pin = Some(t.0.join("Trash"));
+        a.free_of = no_free;
         a
+    }
+
+    /// No free space to show, so a title never depends on the host's disk.
+    fn no_free(_: &Path) -> Option<crate::space::Space> {
+        None
+    }
+
+    /// A file system with 1 GiB of 4 GiB free, whatever the host has.
+    fn quarter_free(_: &Path) -> Option<crate::space::Space> {
+        Some(crate::space::Space {
+            total: 4 << 30,
+            avail: 1 << 30,
+            ..Default::default()
+        })
     }
 
     fn names(a: &App) -> Vec<String> {
@@ -4345,6 +4429,51 @@ mod tests {
         assert!(title.chars().count() <= 70, "{title}");
     }
 
+    /// At 70 columns, a free space placed after the size pushed `0 marked`
+    /// off the title (round 281). It ranks lowest now: on the same screen
+    /// every other part stays and the free space goes.
+    #[test]
+    fn a_narrow_title_drops_the_free_space_first() {
+        let t = tree("narrowfree");
+        let mut a = app(&t);
+        a.free_of = quarter_free;
+        let deep = t.0.join("w").join("d".repeat(60)).join("e".repeat(60));
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("f"), b"x").unwrap();
+        a.go(deep.clone(), None);
+        a.cache.get_mut(&deep).unwrap().partial = true;
+        let text = tui_term::render_text(70, 14, |f| ui(f, &mut a));
+        let tail = "(partial) · 1 item · 1 entries · 0 marked";
+        assert!(text.contains(tail), "{text}");
+        assert!(text.contains("…eeee"), "{text}");
+        assert!(!text.contains(" free ("), "{text}");
+        let _ = fs::remove_dir_all(&t.0);
+    }
+
+    /// With room for the whole path, the free space follows the markers.
+    #[test]
+    fn a_wide_title_ends_with_the_free_space() {
+        let t = tree("widefree");
+        let mut a = app(&t);
+        a.free_of = quarter_free;
+        let text = tui_term::render_text(200, 14, |f| ui(f, &mut a));
+        let free = format!("0 marked · {} free (25%) ", format_bytes(1 << 30));
+        assert!(text.contains(&free), "{text}");
+        let _ = fs::remove_dir_all(&t.0);
+    }
+
+    #[test]
+    fn the_free_space_shows_only_beside_the_whole_path() {
+        let tail = " · 9 B · 1 item · 1 entries · 0 marked ";
+        let free = "1 B free (1%)";
+        // " /p" + tail + "· 1 B free (1%) " + two corners.
+        let fits = (3 + cols(tail) + 2 + cols(free) + 1 + 2) as u16;
+        let wide = title_text(fits, "/p", tail, Some(free));
+        assert_eq!(wide, format!(" /p{tail}· {free} "));
+        let narrow = title_text(fits - 1, "/p", tail, Some(free));
+        assert_eq!(narrow, format!(" /p{tail}"));
+    }
+
     #[test]
     fn q_stops_a_scan_first_and_quits_next() {
         let t = tree("stopkey");
@@ -4953,6 +5082,7 @@ mod tests {
         let roots = dirs.iter().map(|d| t.0.join(d)).collect();
         let mut a = App::new_in("rtrash", roots, ScanOpts::default(), false).unwrap();
         a.trash_pin = Some(t.0.join("Trash"));
+        a.free_of = no_free;
         a
     }
 
@@ -5255,6 +5385,37 @@ mod tests {
         assert_eq!(names(&a), ["big", "file", "small"]);
         assert_eq!(a.list_state.selected(), Some(1));
         let _ = fs::remove_dir_all(&t.0);
+    }
+
+    /// ncdu #77: the title names the room left on the view's file
+    /// system. It is read once per view, kept while the view stays, and
+    /// read again after a delete. Unix only, as above.
+    #[cfg(unix)]
+    #[test]
+    fn the_title_shows_the_free_space_of_the_view() {
+        let t = tree("free");
+        let mut a = app(&t);
+        a.free_of = quarter_free;
+        let line = a.free_here().unwrap();
+        assert_eq!(line, format!("{} free (25%)", format_bytes(1 << 30)));
+        let kept = a.free.as_ref().map(|(p, _)| p.clone());
+        assert_eq!(kept, Some(t.0.join("w")));
+        a.select(1); // file
+        a.ask_delete();
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(a.free.is_none());
+        assert!(a.free_here().is_some());
+        let _ = fs::remove_dir_all(&t.0);
+    }
+
+    #[test]
+    fn free_text_gives_the_bytes_left_and_their_share() {
+        let s = crate::space::Space {
+            total: 1000,
+            avail: 250,
+            ..Default::default()
+        };
+        assert_eq!(free_text(&s), format!("{} free (25%)", format_bytes(250)));
     }
 
     #[test]

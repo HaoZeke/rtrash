@@ -2589,6 +2589,16 @@ Pressed again, or with no scan running, the key quits.
 order the rows by size, name, item count and newest change, in every
 directory; the key of the current order reverses it.
 The window title names the order.
+After the marked count, the title shows the room left on the file
+system of the current directory and its share, such as
+.BR "48.2 GiB free (9%)" ,
+as ncdu #77 asks.
+It ranks lowest: it shows only when the whole path fits beside it, so a
+narrow terminal drops it before it cuts the path.
+It is read once for each directory opened and again after a delete, an
+undo or a rescan.
+None shows for a snapshot, for the view above two or more directories,
+or on a network file system.
 .B S
 switches sizes, bars and totals between disk use and apparent size,
 and back; a size order follows the switch.
