@@ -1,0 +1,1 @@
+`rtrash config --default` showed `trash = ""` for `macos.trash`, which names neither choice. It now shows the value the system uses when the key is unset: `"finder"` on macOS, `"freedesktop"` elsewhere, so uncommenting the line changes nothing.

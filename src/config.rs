@@ -560,6 +560,9 @@ pub fn template() -> String {
             let _ = write!(out, "\n[{s}]\n");
         }
         let example = match (*s, *k, kind) {
+            // The value this system uses when the key is unset.
+            ("macos", "trash", _) if cfg!(target_os = "macos") => "\"finder\"".to_string(),
+            ("macos", "trash", _) => "\"freedesktop\"".to_string(),
             ("du", "sort", _) => "\"disk\"".to_string(),
             ("du", "top", _) => "20".to_string(),
             ("du", "threads", _) => "8".to_string(),
@@ -759,6 +762,16 @@ paths = ["/srv/da\"ta", "\u00e9"]
         let c = Config::parse(&uncommented, None);
         assert!(c.warnings.is_empty(), "{:?}\n{uncommented}", c.warnings);
         assert_eq!(c.int("du", "top"), Some(20));
+        // An example is a value the key takes, never an empty string, and
+        // macos.trash shows this system's default, so uncommenting it
+        // changes nothing.
+        assert!(!t.contains("= \"\""), "{t}");
+        let system = if cfg!(target_os = "macos") {
+            "finder"
+        } else {
+            "freedesktop"
+        };
+        assert_eq!(c.str("macos", "trash"), Some(system));
         assert_eq!(Config::parse(&t, None), Config::default());
     }
 }
