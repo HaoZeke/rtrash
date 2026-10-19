@@ -6738,6 +6738,8 @@ fn trash_stats_history_records_each_change_rtrash_makes() {
 }
 
 /// A file in `dir` whose access and modification times are a day old.
+/// The reap tests that call it run on Linux and macOS only.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn stale_file(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);
     fs::write(&p, b"old").unwrap();
@@ -7410,6 +7412,8 @@ fn reap_profiles_take_triton_and_jax_caches() {
     assert!(entry.contains(" ago\""), "{entry}");
 }
 
+/// `p` as a quoted JSON string, for the Linux and macOS reap tests.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn json_path(p: &Path) -> String {
     format!("\"{}\"", p.display())
 }

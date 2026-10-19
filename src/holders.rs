@@ -58,7 +58,9 @@ pub fn describe(holds: &[Hold]) -> String {
     parts.join(", ")
 }
 
-/// The file name of a path given as bytes or text.
+/// The file name of a path given as bytes or text, for the scanners of
+/// Linux, macOS and Windows.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn base_name(p: &Path) -> Option<String> {
     p.file_name().map(|f| f.to_string_lossy().into_owned())
 }
@@ -71,6 +73,10 @@ pub struct Snapshot {
     pub unreadable: usize,
     /// False where rtrash has no way to list holders.
     pub supported: bool,
+    /// Paths outside these trees are dropped (none are when it is
+    /// empty); only the Linux and macOS scanners and the Windows query
+    /// read it.
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     roots: Vec<PathBuf>,
     /// Read memory maps (Linux only; libproc gives none).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -95,19 +101,23 @@ impl Snapshot {
         let mut s = Snapshot {
             supported: SUPPORTED,
             maps,
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             roots: roots.iter().map(|r| resolve(r)).collect(),
             ..Snapshot::default()
         };
+        // No scanner here, so nothing found needs narrowing.
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        let _ = roots;
         scan(&mut s);
         s
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn wanted(&self, path: &Path) -> bool {
         self.roots.is_empty() || self.roots.iter().any(|r| path.starts_with(r))
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn add(&mut self, hold: Hold) {
         if !self.wanted(&hold.path) {
             return;

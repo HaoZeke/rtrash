@@ -866,7 +866,9 @@ pub fn parse_selection(line: &str, len: usize) -> Result<Vec<usize>, String> {
 
 /// What a look at a path finds, without following a final link.
 pub enum Look {
-    There(std::fs::Metadata),
+    /// Boxed: a `Metadata` is 224 bytes on FreeBSD, and the other
+    /// variants are a word (clippy::large_enum_variant).
+    There(Box<std::fs::Metadata>),
     /// The system says nothing is there: [`is_missing`].
     Gone,
     /// Something may be there, but the look failed: a parent that
@@ -881,7 +883,7 @@ pub enum Look {
 /// dangling. The precheck refuses `metadata(..).is_err()` elsewhere.
 pub fn look(path: &std::path::Path) -> Look {
     match std::fs::symlink_metadata(path) {
-        Ok(m) => Look::There(m),
+        Ok(m) => Look::There(Box::new(m)),
         Err(e) if is_missing(&e) => Look::Gone,
         Err(e) => Look::Unreachable(e),
     }

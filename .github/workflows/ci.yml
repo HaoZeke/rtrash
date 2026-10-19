@@ -114,6 +114,27 @@ jobs:
       - name: Clippy (musl, no TUI feature, tests included)
         run: cargo clippy --locked --all-targets --target x86_64-unknown-linux-musl --no-default-features -- -D warnings
 
+  # FreeBSD has no runner here; type checking from Linux catches the
+  # cfg(unix) code that only Linux and macOS use (round 278 probe).
+  freebsd-clippy:
+    name: clippy · x86_64 FreeBSD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-unknown-freebsd
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (FreeBSD)
+        run: cargo clippy --locked --all-targets --target x86_64-unknown-freebsd -- -D warnings
+
+      - name: Clippy (FreeBSD, no TUI feature, tests included)
+        run: cargo clippy --locked --all-targets --target x86_64-unknown-freebsd --no-default-features -- -D warnings
+
   reflink:
     name: reflink · ${{ matrix.fs }}
     runs-on: ubuntu-latest

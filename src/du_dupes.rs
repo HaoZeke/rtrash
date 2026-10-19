@@ -769,7 +769,9 @@ fn clone_file(_from: &Path, _to: &Path) -> std::io::Result<()> {
     ))
 }
 
-#[cfg(unix)]
+/// The errno of a refused clone, said as the missing reflink support it
+/// means, for the Linux and Apple [`clone_file`].
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 fn clone_error(e: std::io::Error) -> std::io::Error {
     match e.raw_os_error() {
         Some(libc::EOPNOTSUPP | libc::EINVAL | libc::EXDEV | libc::ENOTTY) => {

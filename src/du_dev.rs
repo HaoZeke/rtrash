@@ -74,8 +74,9 @@ pub fn mounts_from_table(content: &str) -> Vec<Mount> {
 }
 
 /// Size, use and free space of the file system at `mount`, and its
-/// device number (to drop bind mounts).
-#[cfg(unix)]
+/// device number (to drop bind mounts). Linux and macOS read a mount
+/// table for [`measure`]; other Unix systems list no devices.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn space(mount: &std::path::Path) -> io::Result<(u64, u64, u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
@@ -99,7 +100,7 @@ fn space(mount: &std::path::Path) -> io::Result<(u64, u64, u64, u64)> {
 }
 
 /// Keep the mounts with blocks, once per device, measured.
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn measure(mounts: Vec<Mount>) -> Vec<Device> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -260,6 +261,8 @@ pub fn listed(prog: &str) -> io::Result<Vec<Device>> {
     }
 }
 
+/// `v` in mount point order, for each `devices` that lists any.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn sorted(mut v: Vec<Device>) -> Vec<Device> {
     v.sort_by(|a, b| a.mount.cmp(&b.mount));
     v

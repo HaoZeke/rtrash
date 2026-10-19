@@ -1407,6 +1407,364 @@ def check_cfg_helpers():
                           "and is dead code elsewhere (cross-clippy fails); give it the same cfg")
 
 
+# Round 280: tests/cli.rs stale_file and json_path had no cfg beyond the
+# file's cfg(unix), and every caller was cfg(target_os = "linux") or
+# cfg(any(target_os = "linux", target_os = "macos")), so FreeBSD clippy
+# found them dead. check_cfg_helpers compares cfg text and missed that.
+# This check evaluates each cfg on every target cross-clippy lints, in
+# both feature sets. It marks what is live as rustc does. Roots are
+# tests, main, pub items, trait methods and items allowed to be dead;
+# liveness flows from them along references, so a helper called only by
+# a dead helper is dead too. An unknown cfg is true on a caller and false
+# on the item, so the check stays quiet about what it cannot read. Names
+# match by text, so a same-named local or method can hide a dead item,
+# never invent one. Fields and enum variants are not judged.
+CFG_TARGETS = {
+    "x86_64-unknown-linux-gnu": ("linux", "unix", "gnu", "unknown"),
+    "x86_64-unknown-linux-musl": ("linux", "unix", "musl", "unknown"),
+    "aarch64-apple-darwin": ("macos", "unix", "", "apple"),
+    "x86_64-pc-windows-gnu": ("windows", "windows", "gnu", "pc"),
+    "x86_64-unknown-freebsd": ("freebsd", "unix", "", "unknown"),
+}
+CFG_FEATURES = {"default features": {"tui"}, "no default features": set()}
+CFG_TOKEN = re.compile(r'(?P<str>(?:br|r|cr)(?P<h>#*)".*?"(?P=h)|b?"(?:[^"\\]|\\.)*")'
+                       r"|(?P<id>[A-Za-z_][A-Za-z0-9_]*)|(?P<ws>\s+)|(?P<p>.)", re.S)
+CFG_FMT_ARG = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)[}:]")
+CFG_ITEMS = {"fn", "struct", "enum", "impl", "mod", "trait", "const", "static", "type", "use",
+             "union", "macro_rules", "extern"}
+
+
+def cfg_tokens(code):
+    out, line = [], 1
+    for m in CFG_TOKEN.finditer(code):
+        kind = "str" if m.group("str") else m.lastgroup
+        if kind != "ws":
+            out.append((kind, m.group(0), line))
+        line += m.group(0).count("\n")
+    return out
+
+
+def cfg_close(tk, i):
+    """The index of the bracket that closes the one at `i`."""
+    depth = 0
+    for j in range(i, len(tk)):
+        if tk[j][0] == "p" and tk[j][1] in "([{":
+            depth += 1
+        elif tk[j][0] == "p" and tk[j][1] in ")]}":
+            depth -= 1
+            if depth == 0:
+                return j
+    return len(tk) - 1
+
+
+def cfg_pred(words, i):
+    """Parse one cfg predicate from attribute words at `i`."""
+    w = words[i]
+    if w in ("all", "any", "not") and i + 1 < len(words) and words[i + 1] == "(":
+        i, args = i + 2, []
+        while i < len(words) and words[i] != ")":
+            a, i = cfg_pred(words, i)
+            args.append(a)
+            if i < len(words) and words[i] == ",":
+                i += 1
+        return (w, args), i + 1
+    if i + 2 < len(words) and words[i + 1] == "=":
+        return ("kv", w, words[i + 2].strip('"')), i + 3
+    return ("flag", w), i + 1
+
+
+def cfg_eval(p, env):
+    """True, False, or None for a cfg this check cannot read."""
+    if p[0] in ("all", "any"):
+        vs = [cfg_eval(a, env) for a in p[1]]
+        stop = p[0] == "any"
+        return stop if stop in vs else (None if None in vs else not stop)
+    if p[0] == "not":
+        v = cfg_eval(p[1][0], env)
+        return None if v is None else not v
+    if p[0] == "flag":
+        return env.get(p[1])
+    if p[1] == "feature":
+        return p[2] in env["features"]
+    return env[p[1]] == p[2] if p[1] in env else None
+
+
+def cfg_all(preds, env):
+    vs = [cfg_eval(p, env) for p in preds]
+    return False if False in vs else (None if None in vs else True)
+
+
+def cfg_text(p):
+    if p[0] in ("all", "any", "not"):
+        return f"{p[0]}({', '.join(cfg_text(a) for a in p[1])})"
+    return f'{p[1]} = "{p[2]}"' if p[0] == "kv" else p[1]
+
+
+def cfg_header(tk, i):
+    """(item keyword, its index, visibility) for an item that starts at `i`."""
+    vis, j, n = None, i, len(tk)
+    while j < n:
+        w = tk[j][1]
+        if w == "pub":
+            vis = "pub"
+            if j + 1 < n and tk[j + 1][1] == "(":
+                vis, j = "pub(..)", cfg_close(tk, j + 1) + 1
+            else:
+                j += 1
+        elif w in ("unsafe", "async", "default") or (
+                w == "const" and j + 1 < n and tk[j + 1][1] in ("fn", "unsafe", "async")):
+            j += 1
+        elif (w == "extern" and j + 2 < n and tk[j + 1][0] == "str"
+              and tk[j + 2][1] in ("fn", "unsafe")):
+            j += 2
+        elif w in CFG_ITEMS:
+            return w, j, vis
+        else:
+            return None, i, vis
+    return None, i, vis
+
+
+def cfg_end(tk, i, kind):
+    """The last token of the item or statement that starts at `i`."""
+    depth, j, n = 0, i, len(tk)
+    semi_only = kind in ("const", "static", "type", "use")
+    while j < n:
+        k, w, _ = tk[j]
+        if k == "p" and w in "([{":
+            if w == "{" and depth == 0 and not semi_only:
+                e = cfg_close(tk, j)
+                nxt = tk[e + 1][1] if e + 1 < n else ""
+                if kind is not None:
+                    return e
+                if nxt in (";", ","):
+                    return e + 1
+                if nxt in ("else", ".", "?", ")", "]", "as") or (nxt and nxt in "+-*/%&|^=<>!"):
+                    j = e + 1
+                    continue
+                return e
+            depth += 1
+        elif k == "p" and w in ")]}":
+            depth -= 1
+            if depth < 0:
+                return j - 1
+        elif k == "p" and (w == ";" or (w == "," and kind is None)) and depth == 0:
+            return j
+        j += 1
+    return n - 1
+
+
+def cfg_scan(code):
+    """Tokens, cfg ranges, dead_code allow ranges and judged items of one file."""
+    tk = cfg_tokens(code)
+    n, ranges, allows, items = len(tk), [], [], []
+    braces, ctx, pending, i, fresh = [], [], [], 0, True
+
+    def attr(words, s, e):
+        if words[:2] == ["cfg", "("]:
+            ranges.append((s, e, cfg_pred(words, 2)[0]))
+        elif words[:2] == ["cfg_attr", "("]:
+            p, j = cfg_pred(words, 2)
+            if "dead_code" in words[j:] and {"allow", "expect"} & set(words[j:]):
+                allows.append((s, e, p))
+        elif words[:1] in (["allow"], ["expect"]) and "dead_code" in words:
+            allows.append((s, e, None))
+
+    while i < n:
+        k, w, _ = tk[i]
+        while ctx and i > ctx[-1][0]:
+            ctx.pop()
+        if w == "#" and i + 1 < n and tk[i + 1][1] in ("[", "!"):
+            inner = tk[i + 1][1] == "!"
+            o = i + 2 if inner else i + 1
+            if o < n and tk[o][1] == "[":
+                e = cfg_close(tk, o)
+                words = [t[1] for t in tk[o + 1:e]]
+                if inner:
+                    attr(words, i, cfg_close(tk, braces[-1]) if braces else n - 1)
+                    fresh = True
+                else:
+                    pending.append(words)
+                i = e + 1
+                continue
+        start = fresh or tk[i - 1][1] in (";", "{", "}") or bool(pending)
+        fresh = False
+        kind, kw, vis = cfg_header(tk, i) if start else (None, i, None)
+        if pending:
+            e = cfg_end(tk, kw if kind else i, kind)
+            for words in pending:
+                attr(words, i, e)
+        attrs, pending = pending, []
+        if kind:
+            e = cfg_end(tk, kw, kind)
+            outer = ctx[-1][1] if ctx else None
+            if (kind in ("fn", "const", "static") and kw + 1 < n and tk[kw + 1][0] == "id"
+                    and tk[kw + 1][1] != "_"):
+                flat = [" ".join(a) for a in attrs]
+                root = (vis is not None or outer in ("trait", "trait impl", "extern", "macro_rules")
+                        or (kind == "fn" and tk[kw + 1][1] == "main")
+                        or any(f == "test" or f.startswith(("test ", "py")) or "no_mangle" in f
+                               or f == "global_allocator" for f in flat))
+                items.append({"name": tk[kw + 1][1], "kind": kind, "at": kw + 1, "start": i,
+                              "end": e, "vis": vis, "root": root, "line": tk[kw + 1][2]})
+            body = next((j for j in range(kw, e + 1) if tk[j][1] == "{"), e)
+            if kind == "impl" and any(tk[j][1] == "for" for j in range(kw, body)):
+                kind = "trait impl"
+            ctx.append((e, kind))
+            i = kw + 1
+            continue
+        if w == "{":
+            braces.append(i)
+        elif w == "}" and braces:
+            braces.pop()
+        i += 1
+    return tk, ranges, allows, items
+
+
+def cfg_dead_items(files, file_cfgs, test_modes):
+    """(file, line, kind, name, targets, caller cfgs) for each item that is
+    compiled on some target where nothing live refers to it. `files` maps a
+    path to rust_code(text, strings=True); one call covers one crate."""
+    scans = {rel: cfg_scan(code) for rel, code in files.items()}
+    within = lambda at, rs: [r[2] for r in rs if r[0] <= at <= r[1]]
+    items = []
+    for rel, (tk, ranges, allows, found) in scans.items():
+        for it in found:
+            items.append(dict(it, rel=rel, cfg=file_cfgs.get(rel, []) + within(it["at"], ranges),
+                              allow=[a for a in allows if a[0] <= it["at"] <= a[1]]))
+    by_name = defaultdict(list)
+    for x, it in enumerate(items):
+        by_name[it["name"]].append(x)
+    refs = defaultdict(list)  # item index -> (cfgs, enclosing item index or None)
+    for rel, (tk, ranges, _, _) in scans.items():
+        local = [x for x, it in enumerate(items) if it["rel"] == rel]
+        for t, (k, w, _) in enumerate(tk):
+            if k == "str":
+                names = [m for m in CFG_FMT_ARG.findall(w) if m in by_name]
+            elif (k == "id" and w in by_name and not (t + 2 < len(tk) and tk[t + 1][1] == ":"
+                  and tk[t + 2][1] == ":" and not (t + 3 < len(tk) and tk[t + 3][1] == "<"))):
+                names = [w]
+            else:
+                continue
+            if k == "id" and any(items[x]["at"] == t and items[x]["rel"] == rel
+                                 for x in by_name[w]):
+                continue
+            owner = None
+            for x in local:
+                if items[x]["start"] <= t <= items[x]["end"] and (
+                        owner is None or items[x]["start"] >= items[owner]["start"]):
+                    owner = x
+            cfgs = file_cfgs.get(rel, []) + within(t, ranges)
+            for name in names:
+                for x in by_name[name]:
+                    if x != owner and (items[x]["rel"] == rel or items[x]["vis"] is not None):
+                        refs[x].append((cfgs, owner))
+    dead = defaultdict(list)
+    for tname, (os_, fam, env_, vendor) in CFG_TARGETS.items():
+        for fname, feats in CFG_FEATURES.items():
+            for test in test_modes:
+                env = {"target_os": os_, "target_family": fam, "target_env": env_,
+                       "target_vendor": vendor, "unix": fam == "unix", "windows": fam == "windows",
+                       "debug_assertions": True, "features": feats, "test": test}
+                on = [cfg_all(it["cfg"], env) for it in items]
+                live = [on[x] is not False and (it["root"] or any(
+                    a[2] is None or cfg_eval(a[2], env) is not False for a in it["allow"]))
+                    for x, it in enumerate(items)]
+                changed = True
+                while changed:
+                    changed = False
+                    for x in range(len(items)):
+                        if not live[x] and on[x] is not False and any(
+                                cfg_all(c, env) is not False and (o is None or live[o])
+                                for c, o in refs[x]):
+                            live[x] = changed = True
+                for x in range(len(items)):
+                    if on[x] is True and not live[x]:
+                        dead[x].append(f"{tname} ({fname})")
+    out = []
+    for x, where in dead.items():
+        it = items[x]
+        callers = sorted({" and ".join(cfg_text(p) for p in c[len(file_cfgs.get(it["rel"], [])):])
+                          or "no cfg" for c, o in refs[x]})
+        out.append((it["rel"], it["line"], it["kind"], it["name"], sorted(set(where)), callers))
+    return sorted(out)
+
+
+CFG_DEAD_CASES = [
+    ("narrower callers", '#![cfg(unix)]\nfn helper() {}\n#[cfg(target_os = "linux")]\n#[test]\n'
+     'fn a() { helper(); }\n#[cfg(any(target_os = "linux", target_os = "macos"))]\n#[test]\n'
+     'fn b() { helper(); }\n', ["helper"]),
+    ("gated like its callers", '#[cfg(any(target_os = "linux", target_os = "macos"))]\n'
+     'fn helper() {}\n#[cfg(target_os = "linux")]\n#[test]\nfn a() { helper(); }\n'
+     '#[cfg(target_os = "macos")]\n#[test]\nfn b() { helper(); }\n', []),
+    ("called by a dead helper", 'fn inner() {}\nfn outer() { inner(); }\n'
+     '#[cfg(windows)]\n#[test]\nfn a() { outer(); }\n', ["inner", "outer"]),
+    ("allowed elsewhere", '#[cfg_attr(not(target_os = "linux"), allow(dead_code))]\n'
+     'fn helper() {}\n#[cfg(target_os = "linux")]\n#[test]\nfn a() { helper(); }\n', []),
+    ("cfg on a statement", 'fn helper() {}\n#[test]\nfn a() {\n'
+     '    #[cfg(target_os = "linux")]\n    helper();\n    let x = 1;\n}\n', ["helper"]),
+    ("cfg block in a match arm", 'fn helper() -> u8 { 1 }\n#[test]\nfn a() {\n    match 1 {\n'
+     '        #[cfg(unix)]\n        1 => {}\n        _ => { helper(); }\n    }\n}\n', []),
+    ("format capture", 'const NOTE: &str = "x";\n#[test]\nfn a() { println!("{NOTE}"); }\n', []),
+    ("a module path is not a call", 'fn space() {}\n#[test]\nfn a() { crate::space::f(); }\n',
+     ["space"]),
+    ("one variant per cfg", '#[cfg(unix)]\nfn which() {}\n#[cfg(windows)]\nfn which() {}\n'
+     '#[test]\nfn a() { which(); }\n', []),
+    ("trait method", 'struct S;\nimpl Drop for S {\n    fn drop(&mut self) {}\n}\n'
+     '#[test]\nfn a() { let _s = S; }\n', []),
+    ("a cfg it cannot read", '#[cfg(target_arch = "x86_64")]\nfn helper() {}\n'
+     '#[cfg(miri)]\n#[test]\nfn a() { helper(); }\n', []),
+    ("inner allow", 'mod m {\n    #![allow(dead_code)]\n    fn helper() {}\n}\n', []),
+]
+
+
+def cfg_crate_files(entries):
+    """rust_code of every file a crate root reaches through `mod name;`,
+    with the cfgs on each declaration."""
+    files, cfgs, todo = {}, {}, [(e, []) for e in entries]
+    while todo:
+        rel, cf = todo.pop()
+        p = ROOT / rel
+        if rel in files or not p.exists():
+            continue
+        files[rel], cfgs[rel] = rust_code(p.read_text(encoding="utf-8"), strings=True), cf
+        tk, ranges, _, _ = cfg_scan(files[rel])
+        base = p.parent if p.name in ("lib.rs", "main.rs", "mod.rs") else p.with_suffix("")
+        for i in range(len(tk) - 2):
+            if tk[i][1] == "mod" and tk[i + 1][0] == "id" and tk[i + 2][1] == ";":
+                for cand in (base / f"{tk[i + 1][1]}.rs", base / tk[i + 1][1] / "mod.rs"):
+                    if cand.exists():
+                        todo.append((cand.relative_to(ROOT).as_posix(),
+                                     cf + [r[2] for r in ranges if r[0] <= i <= r[1]]))
+                        break
+    return files, cfgs
+
+
+def check_cfg_dead():
+    """No fn, const or static is compiled on a cross-clippy target where
+    nothing calls it, and the checker meets every CFG_DEAD_CASES case."""
+    for what, text, want in CFG_DEAD_CASES:
+        got = [r[3] for r in cfg_dead_items({"case.rs": rust_code(text, strings=True)}, {}, [True])]
+        if got != want:
+            errors.append(f"scripts/precheck.py: cfg_dead_items gets CFG_DEAD_CASES '{what}' "
+                          f"wrong ({got}); the cfg dead-code check is broken")
+    crates = [cfg_crate_files(["src/lib.rs"]) + ([False, True],),
+              cfg_crate_files(["src/main.rs"]) + ([False, True],)]
+    for path in sorted((ROOT / "tests").glob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        crates.append(({rel: rust_code(path.read_text(encoding="utf-8"), strings=True)},
+                       {rel: []}, [True]))
+    seen = {e.split(": ")[0] for e in errors}
+    for files, cfgs, modes in crates:
+        for rel, line, kind, name, where, callers in cfg_dead_items(files, cfgs, modes):
+            if f"{rel}:{line}" in seen:
+                continue
+            seen.add(f"{rel}:{line}")
+            uses = "; ".join(callers) or "nothing"
+            errors.append(f"{rel}:{line}: {kind} {name} is compiled but never used on "
+                          f"{', '.join(where)}; its uses are under {uses}. "
+                          "Give it the cfg of its uses (any(...) of them), not an allow")
+
+
 def check_refusal_helpers():
     """A test that expects a refusal to change nothing goes through
     common::assert_refused_unchanged, which snapshots just before the call
@@ -3497,7 +3855,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers(); check_pair_refusals()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_cfg_dead(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers(); check_pair_refusals()
     check_long_lines(base); check_struct_field_drift(base); check_call_arity(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains(); check_global_state(); check_skip_notes(); check_du_df_audit()
     if "--no-fmt" not in sys.argv:
