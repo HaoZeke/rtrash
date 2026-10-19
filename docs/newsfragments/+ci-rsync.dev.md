@@ -1,0 +1,1 @@
+The CI macOS test jobs build pinned rsync 3.5.1 through `scripts/ci-rsync.sh` (checked by SHA-256 and cached) and set `RTRASH_REQUIRE_RSYNC=1`, so the rsync half of `filter_from_leaves_out_what_rsync_leaves_out` runs there; Windows CI stays without rsync, since the msys2 and Cygwin ports read a `C:\` path as a remote host.

@@ -1102,7 +1102,11 @@ fn filter_from_leaves_out_what_rsync_leaves_out() {
 
 /// `rsync` when `rsync --version` names version 3 or later. macOS ships
 /// openrsync or rsync 2.6.9, which read some rules another way, so those
-/// are skipped. With RTRASH_REQUIRE_RSYNC set, a missing rsync 3 fails.
+/// are skipped. With RTRASH_REQUIRE_RSYNC set, a missing rsync 3 fails;
+/// CI sets it on Linux and on macOS, where scripts/ci-rsync.sh builds
+/// rsync 3. Windows CI has no rsync: the msys2 and Cygwin ports read a
+/// `C:\` path as a remote host, and the half without rsync still checks
+/// RSYNC_CASES there.
 fn rsync3() -> Option<String> {
     let text = Command::new("rsync")
         .arg("--version")

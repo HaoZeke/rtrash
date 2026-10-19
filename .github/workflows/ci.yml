@@ -234,6 +234,8 @@ jobs:
         shell: bash
         run: echo "RTRASH_SKIP_LOG=${RUNNER_TEMP//\\//}/rtrash-skips.txt" >> "$GITHUB_ENV"
 
+      # No rsync here: the msys2 and Cygwin ports read a C:\ path as a
+      # remote host, so the rsync half of the filter-from test skips.
       - name: Test
         run: cargo test --locked
 
@@ -352,17 +354,37 @@ jobs:
           nu --version
           pwsh --version
 
+      # macOS comes with openrsync or rsync 2.6.9, which the rsync half of the
+      # filter-from parity test skips; build pinned rsync 3 instead
+      # (scripts/ci-rsync.sh says why not Homebrew).
+      - name: Cache rsync 3
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ci-rsync
+          key: ci-rsync-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci-rsync.sh') }}
+
+      - name: Build rsync 3
+        shell: bash
+        run: |
+          scripts/ci-rsync.sh "$RUNNER_TEMP/ci-rsync"
+          echo "$RUNNER_TEMP/ci-rsync" >> "$GITHUB_PATH"
+
+      - name: rsync version
+        run: rsync --version | head -n 1
+
       # The suite checks the FreeDesktop layout; the Finder default has its
       # own tests (which set RTRASH_MACOS_TRASH=finder) and job below.
       - name: Test
         run: cargo test --locked
         env:
           RTRASH_MACOS_TRASH: freedesktop
+          RTRASH_REQUIRE_RSYNC: "1"
 
       - name: Test without the TUI feature
         run: cargo test --locked --no-default-features
         env:
           RTRASH_MACOS_TRASH: freedesktop
+          RTRASH_REQUIRE_RSYNC: "1"
 
       - name: Skip notes from the tests
         if: always()
