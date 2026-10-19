@@ -2674,6 +2674,13 @@ It runs
 Windows
 .IR explorer.exe )
 on its own, so the explorer keeps the screen.
+.B RTRASH_OPENER
+names another program for
+.BR o ,
+split at spaces, which gets the path as its last argument, such as a
+script for a remote shell where
+.I xdg\-open
+reaches no desktop (gdu #584).
 Neither key changes anything, so both work with
 .BR \-\-no\-delete .
 .B .
@@ -4637,6 +4644,19 @@ It overrides
 .B policy.in_use
 and yields to
 .BR \-\-in\-use .
+.TP
+.B RTRASH_OPENER
+The program, with its arguments split at spaces, that
+.B o
+in the explorer
+.RB ( "du \-i" )
+runs on the cursor row's path, instead of
+.IR xdg\-open ,
+.I open
+on macOS or
+.I explorer.exe
+on Windows.
+A blank value keeps that default.
 .TP
 .B RTRASH_PRUNE
 Set to

@@ -206,8 +206,15 @@ fn pager_lines(set: Option<std::ffi::OsString>, fallback: &[&str]) -> Vec<Vec<st
 }
 
 /// The program that opens a path with its default application:
-/// `xdg-open`, `open` on macOS, `explorer.exe` on Windows.
+/// `$RTRASH_OPENER`, split at spaces (gdu #584), else `xdg-open`, `open`
+/// on macOS, `explorer.exe` on Windows.
 pub fn opener() -> Vec<std::ffi::OsString> {
+    opener_words(std::env::var_os("RTRASH_OPENER"))
+}
+
+/// The words of [`opener`] for the value `set`: its own, unless it is
+/// missing or blank.
+fn opener_words(set: Option<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     let program = if cfg!(windows) {
         "explorer.exe"
     } else if cfg!(target_os = "macos") {
@@ -215,7 +222,10 @@ pub fn opener() -> Vec<std::ffi::OsString> {
     } else {
         "xdg-open"
     };
-    vec![program.into()]
+    pager_lines(set, &[program])
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| vec![program.into()])
 }
 
 /// Hand the terminal to an interactive shell in `dir`, after printing
@@ -564,7 +574,13 @@ mod shell_tests {
         for cmd in pager_commands(std::path::Path::new("f.txt")) {
             assert_eq!(cmd.get_args().last().unwrap(), "f.txt");
         }
-        assert_eq!(opener().len(), 1);
+        assert_eq!(opener_words(None).len(), 1);
+    }
+
+    #[test]
+    fn rtrash_opener_names_the_program_and_its_arguments() {
+        assert_eq!(opener_words(Some("code -r".into())), ["code", "-r"]);
+        assert_eq!(opener_words(Some("  ".into())), opener_words(None));
     }
 
     #[test]

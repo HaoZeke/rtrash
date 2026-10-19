@@ -2384,7 +2384,7 @@ impl App {
                 std::thread::spawn(move || child.wait());
                 format!("opening {} with {name}", crate::util::term_path(&path))
             }
-            Err(e) => format!("cannot run {name}: {e}"),
+            Err(e) => format!("cannot run {name}: {e} (set RTRASH_OPENER to choose one)"),
         };
     }
 
