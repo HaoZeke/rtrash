@@ -1,0 +1,1 @@
+The man page now documents `rtrash keys` (the browsers' key bindings, `keys.toml` and its `--list`, `--sample` and `--path`), `RTRASH_KEYS`, the `keys.toml` path under FILES, and `RTRASH_DU_BULK` on macOS. A precheck rule now fails when a command the completions offer has no man section, or when `src/` reads an `RTRASH_*` variable that ENVIRONMENT does not list.

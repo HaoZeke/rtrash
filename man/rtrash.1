@@ -4144,6 +4144,51 @@ Display help and exit.
 .TP
 .B \-\-version
 Output version information and exit.
+.SS keys
+.B rtrash keys
+[\fB\-\-list\fR | \fB\-\-sample\fR | \fB\-\-path\fR]
+.PP
+Show the key bindings of the browsers (put, restore, empty and
+.BR "du \-i" ).
+Every action can be bound to other keys in
+.IR keys.toml ,
+under a
+.B [keys]
+table: each action takes a key name or an array of them, and an empty
+array unbinds it; actions the file leaves out keep their default keys.
+Key names are letters and symbols as typed, and
+.BR space ", " enter ", " esc ", " up ", " down ", " pgup ", " pgdn ", " home ", " end ,
+.BR ctrl\- X,
+.BR alt\- X
+and
+.BR f1 " to " f12 .
+.RS
+.nf
+[keys]
+move_down = ["down", "j"]
+toggle_mark = "space"
+help = []                 # unbind
+.fi
+.RE
+.PP
+A file that cannot be read or parsed gets a warning on stderr and is skipped.
+The help screen
+.RB ( ? )
+shows the keys in effect.
+In a build without the tui feature, the command fails.
+.TP
+.BR \-\-list ", " \-l
+Print the keys in effect (the default).
+.TP
+.B \-\-sample
+Print a
+.I keys.toml
+with every action and its default keys.
+.TP
+.B \-\-path
+Print where the file is looked for when
+.B RTRASH_KEYS
+is unset.
 .SS setup
 .B rtrash setup
 [\fIOPTION\fR]...
@@ -4510,6 +4555,12 @@ The config file to read instead of
 .IR $XDG_CONFIG_HOME/rtrash/config.toml .
 Empty turns the config file off.
 .TP
+.B RTRASH_KEYS
+The key bindings file to read instead of
+.IR $XDG_CONFIG_HOME/rtrash/keys.toml
+(see
+.BR keys ).
+.TP
 .B RTRASH_MAX_SIZE
 When set to a size such as 10G, each put afterwards prunes every trash
 directory it used back under that size, removing older items first.
@@ -4645,6 +4696,18 @@ inodes.
 It overrides
 .B policy.min_free
 in the config file.
+.TP
+.B RTRASH_DU_BULK
+On macOS, how the du walk reads a folder:
+.B 1
+always with
+.BR getattrlistbulk ,
+which returns the names and sizes of many entries at once;
+.B 0
+always with readdir and a stat for each entry.
+Unset or any other value, du starts with the bulk reads and falls back
+to readdir when the file system lacks the call or the reads wait on the
+disk.
 .TP
 .B RTRASH_EXTENT_MIN
 The smallest size on disk, such as 16K, of a file whose extents
@@ -4816,6 +4879,16 @@ when
 .B XDG_CONFIG_HOME
 is unset, and
 .I %APPDATA%\(rsrtrash\(rsconfig.toml
+on Windows.
+.TP
+.I $XDG_CONFIG_HOME/rtrash/keys.toml
+Key bindings of the browsers (see
+.BR keys );
+.I ~/.config/rtrash/keys.toml
+when
+.B XDG_CONFIG_HOME
+is unset, and
+.I %APPDATA%\(rsrtrash\(rskeys.toml
 on Windows.
 .TP
 .IR /etc/safe\-rm.conf ", " ~/.safe\-rm

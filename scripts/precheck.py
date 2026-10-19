@@ -3905,6 +3905,76 @@ def check_config_docs():
                           f"from the config example; add a `{name} = ...` line under [{table}]")
 
 
+# Every command the completions offer has a `.SS NAME` section in the man
+# page, and every RTRASH_* variable src/ reads has a `.B NAME` entry in its
+# ENVIRONMENT section (round 290: `rtrash keys`, RTRASH_KEYS and
+# RTRASH_DU_BULK had none). Test seams are left out: the RTRASH_TEST_ and
+# RTRASH_T_ prefixes and MAN_ENV_SEAMS.
+MAN_ENV_SEAMS = {
+    "RTRASH_OSASCRIPT": "a stand-in for osascript in the Finder tests",
+    "RTRASH_WSL_CONF": "a stand-in for /etc/wsl.conf in the wsl tests",
+    "RTRASH_WSL_OSRELEASE": "a stand-in for the kernel release in the wsl tests",
+}
+ENV_READ = re.compile(r'\bvar(?:_os)?\(\s*"(RTRASH_[A-Z0-9_]+)"')
+MAN_COVER_CASES = [
+    ("all there", ["put"], {"RTRASH_A"}, ".SS put\n.SH ENVIRONMENT\n.TP\n.B RTRASH_A\n.SH FILES\n",
+     []),
+    ("section with a note", ["rm"], set(), ".SS rm (permanent delete)\n.SH ENVIRONMENT\n.SH FILES\n",
+     []),
+    ("no section", ["keys"], set(), ".SS put\n.SH ENVIRONMENT\n.SH FILES\n", ["command keys"]),
+    ("section prefix only", ["key"], set(), ".SS keys\n.SH ENVIRONMENT\n.SH FILES\n",
+     ["command key"]),
+    ("no variable", [], {"RTRASH_KEYS"}, ".SH ENVIRONMENT\n.SH FILES\n", ["variable RTRASH_KEYS"]),
+    ("variable only outside ENVIRONMENT", [], {"RTRASH_KEYS"},
+     ".SS keys\n.B RTRASH_KEYS\n.SH ENVIRONMENT\n.SH FILES\n", ["variable RTRASH_KEYS"]),
+    ("seams", [], {"RTRASH_TEST_X", "RTRASH_T_SET", "RTRASH_OSASCRIPT"},
+     ".SH ENVIRONMENT\n.SH FILES\n", []),
+]
+
+
+def man_cover_gaps(subs, env_vars, man):
+    """The commands of `subs` with no `.SS` section in `man`, and the
+    variables of `env_vars` (seams left out) with no ENVIRONMENT entry."""
+    heads = set(re.findall(r"^\.SS (\S+)", man, re.M))
+    at = man.find(".SH ENVIRONMENT")
+    env = man[at:man.find(".SH ", at + 1)] if at >= 0 else ""
+    listed = set(re.findall(r"^\.BR? (RTRASH_[A-Z0-9_]+)", env, re.M))
+    gaps = [f"command {s}" for s in subs if s not in heads]
+    for v in sorted(env_vars):
+        if v.startswith(("RTRASH_TEST_", "RTRASH_T_")) or v in MAN_ENV_SEAMS:
+            continue
+        if v not in listed:
+            gaps.append(f"variable {v}")
+    return gaps
+
+
+def check_man_coverage():
+    """The man page has a section for every command and an entry for every
+    variable, and the matcher meets every MAN_COVER_CASES case."""
+    for what, subs, env_vars, man, want in MAN_COVER_CASES:
+        if man_cover_gaps(subs, env_vars, man) != want:
+            errors.append(f"scripts/precheck.py: man_cover_gaps gets MAN_COVER_CASES "
+                          f"'{what}' wrong; the man-coverage check is broken")
+    m = re.search(r"^_rtrash_subcommands=\(([^)]*)\)", read("completions/rtrash.bash"), re.M)
+    if not m:
+        errors.append("completions/rtrash.bash: no _rtrash_subcommands list; the "
+                      "man-coverage check reads it")
+        return
+    env_vars = set()
+    for path in sorted((ROOT / "src").rglob("*.rs")):
+        env_vars.update(ENV_READ.findall(rust_code(path.read_text(encoding="utf-8"),
+                                                   strings=True)))
+    for gap in man_cover_gaps(m.group(1).split(), env_vars, read("man/rtrash.1")):
+        kind, name = gap.split(" ", 1)
+        if kind == "command":
+            errors.append(f"man/rtrash.1: `rtrash {name}` (in the completions) has no "
+                          f"`.SS {name}` section under COMMANDS; document it")
+        else:
+            errors.append(f"man/rtrash.1: src/ reads {name} but ENVIRONMENT has no "
+                          f"`.B {name}` entry; document it, or add it to MAN_ENV_SEAMS "
+                          "if only tests set it")
+
+
 def check_rustfmt():
     """`cargo fmt --check` when a toolchain is there; three rounds in a row
     (170-172) needed a format-only amend after CI."""
@@ -3930,7 +4000,7 @@ def main():
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_cfg_dead(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers(); check_pair_refusals()
     check_long_lines(base); check_struct_field_drift(base); check_call_arity(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
-    check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains(); check_global_state(); check_skip_notes(); check_du_df_audit(); check_config_docs()
+    check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains(); check_global_state(); check_skip_notes(); check_du_df_audit(); check_config_docs(); check_man_coverage()
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
     for w in warnings:
