@@ -1,0 +1,1 @@
+The CI Linux and macOS test jobs install pinned elvish 0.21.0, fish 4.9.3 and nu 0.116.1 through `scripts/ci-shells.sh` (checked by SHA-256 and cached) and set `RTRASH_REQUIRE_SHELLS=1`, so the elvish, fish and nu completion tests run there instead of skipping.

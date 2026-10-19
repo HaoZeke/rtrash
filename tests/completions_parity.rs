@@ -29,7 +29,9 @@ const SUBCOMMANDS: &[&str] = &[
 
 /// An agent run with RTRASH_REQUIRE_SHELLS=1 must run every shell check: a
 /// quiet skip on the cloud agent hid a stale pwsh expectation (round 143c).
-/// CI installs pwsh on every runner, so pwsh is required there too.
+/// CI installs pwsh on every runner, so pwsh is required there too, and
+/// the Linux and macOS test jobs set the variable after
+/// scripts/ci-shells.sh puts pinned elvish, fish and nu on PATH.
 fn require_shell(name: &str) {
     let on_ci = name == "pwsh" && std::env::var_os("CI").is_some();
     let required = on_ci || std::env::var_os("RTRASH_REQUIRE_SHELLS").is_some();

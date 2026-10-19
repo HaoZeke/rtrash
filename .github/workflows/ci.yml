@@ -53,6 +53,30 @@ jobs:
         with:
           tool: nextest
 
+      # Pinned elvish, fish and nu (scripts/ci-shells.sh), so the
+      # completion tests run here instead of skipping; with
+      # RTRASH_REQUIRE_SHELLS set, a missing shell (pwsh too) fails them.
+      - name: Cache the pinned shells
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ci-shells
+          key: ci-shells-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci-shells.sh') }}
+
+      - name: Install elvish, fish and nu
+        shell: bash
+        run: |
+          scripts/ci-shells.sh "$RUNNER_TEMP/ci-shells"
+          echo "$RUNNER_TEMP/ci-shells" >> "$GITHUB_PATH"
+          echo "RTRASH_REQUIRE_SHELLS=1" >> "$GITHUB_ENV"
+
+      - name: Shell versions
+        shell: bash
+        run: |
+          elvish -version
+          fish --version
+          nu --version
+          pwsh --version
+
       - name: rsync 3 for the --filter-from parity test (36(d))
         run: |
           command -v rsync || { sudo apt-get update && sudo apt-get install -y rsync; }
@@ -303,6 +327,30 @@ jobs:
         run: |
           hdiutil create -size 64m -fs APFS -volname rtrashacl -attach "$RUNNER_TEMP/rtrashacl.dmg"
           echo "RTRASH_TEST_OTHER_VOLUME=/Volumes/rtrashacl" >> "$GITHUB_ENV"
+
+      # Pinned elvish, fish and nu (scripts/ci-shells.sh), so the
+      # completion tests run here instead of skipping; with
+      # RTRASH_REQUIRE_SHELLS set, a missing shell (pwsh too) fails them.
+      - name: Cache the pinned shells
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ci-shells
+          key: ci-shells-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci-shells.sh') }}
+
+      - name: Install elvish, fish and nu
+        shell: bash
+        run: |
+          scripts/ci-shells.sh "$RUNNER_TEMP/ci-shells"
+          echo "$RUNNER_TEMP/ci-shells" >> "$GITHUB_PATH"
+          echo "RTRASH_REQUIRE_SHELLS=1" >> "$GITHUB_ENV"
+
+      - name: Shell versions
+        shell: bash
+        run: |
+          elvish -version
+          fish --version
+          nu --version
+          pwsh --version
 
       # The suite checks the FreeDesktop layout; the Finder default has its
       # own tests (which set RTRASH_MACOS_TRASH=finder) and job below.
