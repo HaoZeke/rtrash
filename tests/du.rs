@@ -982,6 +982,191 @@ fn filter_from_reads_rsync_rules_where_the_first_match_wins() {
     assert_eq!(t.du(&["--filter-from=no-such-file"]).status.code(), Some(1));
 }
 
+/// The tree of the rsync parity test, sorted.
+const RSYNC_TREE: &[&str] = &[
+    "build/out.bin",
+    "cache",
+    "docs/draft.md",
+    "docs/x/draft.md",
+    "docs/x/y.md",
+    "docs/x/y/draft.md",
+    "foo/bar/baz.c",
+    "foo/baz.c",
+    "lib/sub/y.so",
+    "lib/x.so",
+    "logs/a/old.log",
+    "src/keep.log",
+    "src/main.rs",
+    "src/skip.log",
+    "sub/build/o.bin",
+    "sub/cache/c.bin",
+    "sub/target/z.o",
+    "sub/x.tmp",
+    "target/debug/x.o",
+    "target/t.txt",
+    "top.log",
+    "x.tmp",
+];
+
+/// Rules of the rsync parity test, each with the files of RSYNC_TREE that
+/// rsync 3.5.0 (`rsync -rn --out-format=%n`) left out under it: a `+`
+/// before a `-`, a leading `/`, a `/` inside, `dir/***`, a trailing `/`,
+/// `**` between folders and inside a name, and a trailing space.
+const RSYNC_CASES: &[(&str, &[&str])] = &[
+    (
+        "+ keep.log\n- *.log",
+        &["logs/a/old.log", "src/skip.log", "top.log"],
+    ),
+    ("- /target/***", &["target/debug/x.o", "target/t.txt"]),
+    ("- a/old.log", &["logs/a/old.log"]),
+    (
+        "- build/\n- cache/",
+        &["build/out.bin", "sub/build/o.bin", "sub/cache/c.bin"],
+    ),
+    (
+        "- docs/**/draft.md",
+        &["docs/x/draft.md", "docs/x/y/draft.md"],
+    ),
+    ("- **/top.log\n- /**/x.tmp", &["sub/x.tmp", "top.log"]),
+    ("- lib/**.so", &["lib/sub/y.so", "lib/x.so"]),
+    (
+        "+ */\n+ *.c\n- *",
+        &[
+            "build/out.bin",
+            "cache",
+            "docs/draft.md",
+            "docs/x/draft.md",
+            "docs/x/y.md",
+            "docs/x/y/draft.md",
+            "lib/sub/y.so",
+            "lib/x.so",
+            "logs/a/old.log",
+            "src/keep.log",
+            "src/main.rs",
+            "src/skip.log",
+            "sub/build/o.bin",
+            "sub/cache/c.bin",
+            "sub/target/z.o",
+            "sub/x.tmp",
+            "target/debug/x.o",
+            "target/t.txt",
+            "top.log",
+            "x.tmp",
+        ],
+    ),
+    ("- *.log ", &[]),
+    ("- /foo/**", &["foo/bar/baz.c", "foo/baz.c"]),
+    (
+        "- d*/x/**\n+ src/k*\n- src/*",
+        &[
+            "docs/x/draft.md",
+            "docs/x/y.md",
+            "docs/x/y/draft.md",
+            "src/main.rs",
+            "src/skip.log",
+        ],
+    ),
+    ("- /cache/***\n- sub/cache", &["sub/cache/c.bin"]),
+];
+
+/// 36(d): `--filter-from` leaves out what rsync leaves out. Each case
+/// lists what rsync 3.5.0 left out of the same tree, so the check runs
+/// on every platform. Where rsync 3 is on PATH, rsync is asked as well,
+/// so a newer rsync that reads a rule another way shows up here.
+#[test]
+fn filter_from_leaves_out_what_rsync_leaves_out() {
+    let t = Tree::new("rsync-parity");
+    for f in RSYNC_TREE {
+        t.file(f, 100);
+    }
+    let rules = Tree::new("rsync-parity-rules");
+    let file = rules.root.join("rules");
+    let rsync = rsync3();
+    for (text, out) in RSYNC_CASES {
+        fs::write(&file, format!("{text}\n")).unwrap();
+        let mut want: Vec<String> = RSYNC_TREE
+            .iter()
+            .copied()
+            .filter(|f| !out.contains(f))
+            .map(String::from)
+            .collect();
+        want.sort();
+        let arg = format!("--filter-from={}", file.display());
+        let j = t.json(&["--no-git", "-n", "100", &arg]);
+        assert_eq!(kept_names(&t, &j), want, "{text:?}: {j}");
+        if let Some(rsync) = &rsync {
+            assert_eq!(rsync_kept(rsync, &t.root, &file), want, "rsync, {text:?}");
+        }
+    }
+}
+
+/// `rsync` when `rsync --version` names version 3 or later. macOS ships
+/// openrsync or rsync 2.6.9, which read some rules another way, so those
+/// are skipped. With RTRASH_REQUIRE_RSYNC set, a missing rsync 3 fails.
+fn rsync3() -> Option<String> {
+    let text = Command::new("rsync")
+        .arg("--version")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let mut words = text.split_whitespace();
+    let major = match (words.next(), words.next(), words.next()) {
+        (Some("rsync"), Some("version"), Some(v)) => {
+            v.split('.').next().and_then(|m| m.parse::<u32>().ok())
+        }
+        _ => None,
+    };
+    if major.is_some_and(|m| m >= 3) {
+        return Some("rsync".into());
+    }
+    assert!(
+        std::env::var_os("RTRASH_REQUIRE_RSYNC").is_none(),
+        "RTRASH_REQUIRE_RSYNC is set but rsync 3 is not on PATH: {text:?}"
+    );
+    eprintln!("rsync 3 not on PATH; skipping the rsync half");
+    None
+}
+
+/// The files of du's JSON `j` for a scan of `t`, as paths from its root
+/// joined with `/`, sorted. The test's own XDG folders are left out.
+fn kept_names(t: &Tree, j: &str) -> Vec<String> {
+    let root = format!("{}{}", s(&t.root), std::path::MAIN_SEPARATOR);
+    let mut names: Vec<String> = paths_in(j, "files")
+        .iter()
+        .filter_map(|p| p.strip_prefix(&root))
+        .map(|p| p.replace('\\', "/"))
+        .filter(|p| !p.starts_with(".xdg/") && !p.starts_with(".cfg/"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The files `rsync -rn` would copy from `root` under the rules in
+/// `file`, as paths from `root`, sorted. The target is never made.
+fn rsync_kept(rsync: &str, root: &Path, file: &Path) -> Vec<String> {
+    let out = Command::new(rsync)
+        .arg("-rn")
+        .arg("--out-format=%n")
+        .arg(format!("--filter=merge {}", file.display()))
+        .arg(format!("{}/", root.display()))
+        .arg(root.with_extension("rsync-target"))
+        .output()
+        .expect("run rsync");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut names: Vec<String> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.is_empty() && !l.ends_with('/'))
+        .filter(|p| !p.starts_with(".xdg/") && !p.starts_with(".cfg/"))
+        .map(String::from)
+        .collect();
+    names.sort();
+    names
+}
+
 #[test]
 fn config_file_sets_du_defaults_and_options_win() {
     let t = Tree::new("config");

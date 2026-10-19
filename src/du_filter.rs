@@ -8,6 +8,10 @@
 //! `.gitignore`. A trailing `/` matches directories only, `!` re-includes,
 //! `*`, `?` and `[...]` stop at `/`, and `**` spans directories.
 //!
+//! `--filter-from` rules use rsync's wildcards instead (see [`RsyncRule`]):
+//! `**` crosses folders anywhere in a pattern, and `x/**/y` needs a folder
+//! between `x` and `y`.
+//!
 //! Excluded entries are skipped: they add nothing to any size or count,
 //! and an excluded directory is never opened.
 
@@ -326,27 +330,133 @@ impl Chain {
 }
 
 /// One rule of an rsync filter file (`--filter-from`): `- PATTERN`
-/// leaves out what it matches, `+ PATTERN` keeps it.
+/// leaves out what it matches, `+ PATTERN` keeps it. Rules match as
+/// rsync's own wildcards do, not as gitignore lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RsyncRule {
     exclude: bool,
-    pat: Pattern,
+    /// The pattern without its leading `/` and its trailing `/`.
+    pat: Vec<u8>,
+    /// A trailing `/`: only folders match.
+    dir_only: bool,
+    /// A leading `/`: the whole path from PATH must match.
+    anchored: bool,
+    /// A `/` or `**` inside: the path is matched, not only the name.
+    whole_path: bool,
 }
 
-/// The rsync rule `pattern` as a gitignore-style [`Pattern`]. A leading
-/// `/` anchors it at the scanned PATH, as both read it. A pattern with
-/// another `/` matches the end of the path in rsync, so it gains a
-/// leading `**/`. A leading `!` or `#` is a literal character there.
-fn rsync_pattern(pattern: &str) -> Option<Pattern> {
-    let inner = pattern.trim_end_matches('/');
-    let text = if !pattern.starts_with('/') && inner.contains('/') {
-        format!("**/{pattern}")
-    } else if pattern.starts_with(['!', '#']) {
-        format!("\\{pattern}")
-    } else {
-        pattern.to_string()
+impl RsyncRule {
+    /// The rule for `pattern`, or `None` when nothing is left of it. Only
+    /// one `/` comes off each end, as in rsync.
+    fn new(exclude: bool, pattern: &str) -> Option<RsyncRule> {
+        let dir_only = pattern.ends_with('/');
+        let p = pattern.strip_suffix('/').unwrap_or(pattern);
+        let anchored = p.starts_with('/');
+        let p = p.strip_prefix('/').unwrap_or(p);
+        if p.is_empty() {
+            return None;
+        }
+        Some(RsyncRule {
+            exclude,
+            pat: pattern_bytes(p),
+            dir_only,
+            anchored,
+            whole_path: anchored || p.contains('/') || p.contains("**"),
+        })
+    }
+
+    /// Whether the rule matches entry `name`, whose path from PATH is
+    /// `rel` (names joined with `/`). An unanchored path pattern may start
+    /// at any name in the path, and a leading `**/` also matches at the
+    /// top, where no folder is above.
+    fn matches(&self, name: &[u8], rel: &dyn Fn() -> Vec<u8>, is_dir: bool) -> bool {
+        if self.dir_only && !is_dir {
+            return false;
+        }
+        if !self.whole_path {
+            return wild_match(&self.pat, name);
+        }
+        let path = rel();
+        if self.anchored {
+            return wild_match(&self.pat, &path);
+        }
+        let stars = self.pat.iter().take_while(|&&b| b == b'*').count();
+        if stars >= 2
+            && self.pat.get(stars) == Some(&b'/')
+            && wild_match(&self.pat[stars + 1..], &path)
+        {
+            return true;
+        }
+        let starts = path
+            .iter()
+            .enumerate()
+            .filter(|&(_, &b)| b == b'/')
+            .map(|(i, _)| i + 1);
+        std::iter::once(0)
+            .chain(starts)
+            .any(|at| wild_match(&self.pat, &path[at..]))
+    }
+}
+
+/// rsync's wildcard match of `pat` against all of `text`: `*`, `?` and
+/// `[...]` stop at `/`, `**` crosses it, and `\` escapes the next byte.
+/// Each failed position is remembered, so many stars stay quick.
+fn wild_match(pat: &[u8], text: &[u8]) -> bool {
+    let mut failed = vec![false; (pat.len() + 1) * (text.len() + 1)];
+    wild_at(pat, text, (0, 0), &mut failed)
+}
+
+/// [`wild_match`] from pattern byte `at.0` and text byte `at.1`.
+fn wild_at(pat: &[u8], text: &[u8], at: (usize, usize), failed: &mut [bool]) -> bool {
+    let key = at.0 * (text.len() + 1) + at.1;
+    if failed[key] {
+        return false;
+    }
+    let ok = wild_step(pat, text, at, failed);
+    if !ok {
+        failed[key] = true;
+    }
+    ok
+}
+
+/// One step of [`wild_at`]: a run of stars, or one byte of each.
+fn wild_step(pat: &[u8], text: &[u8], (pi, ti): (usize, usize), failed: &mut [bool]) -> bool {
+    let Some(&c) = pat.get(pi) else {
+        return ti == text.len();
     };
-    Pattern::parse(&text)
+    if c == b'*' {
+        let run = pat[pi..].iter().take_while(|&&b| b == b'*').count();
+        let end = if run >= 2 {
+            text.len()
+        } else {
+            text[ti..]
+                .iter()
+                .position(|&b| b == b'/')
+                .map_or(text.len(), |n| ti + n)
+        };
+        return (ti..=end).any(|k| wild_at(pat, text, (pi + run, k), failed));
+    }
+    let Some(&t) = text.get(ti) else {
+        return false;
+    };
+    let used = match c {
+        b'?' if t != b'/' => 1,
+        b'[' => match class(&pat[pi..], t) {
+            Some((used, true)) if t != b'/' => used,
+            Some(_) => return false,
+            None if t == b'[' => 1,
+            None => return false,
+        },
+        b'\\' if pi + 1 < pat.len() => {
+            if pat[pi + 1] != t {
+                return false;
+            }
+            2
+        }
+        _ if c == t => 1,
+        _ => return false,
+    };
+    wild_at(pat, text, (pi + used, ti + 1), failed)
 }
 
 /// Parse an rsync filter file, rules in file order. Each line is
@@ -384,16 +494,16 @@ pub fn rsync_rules(text: &str) -> Result<Vec<RsyncRule>, String> {
             }
         };
         let pattern = pattern.unwrap_or_default();
-        // `dir/***` matches the folder and everything in it.
+        // `dir/***` matches the folder (as `dir/` would) and all in it.
         let pats = match pattern.strip_suffix("/***") {
-            Some(dir) if !dir.is_empty() => vec![dir.to_string(), format!("{dir}/**")],
+            Some(dir) if !dir.is_empty() => vec![format!("{dir}/"), format!("{dir}/**")],
             _ => vec![pattern.to_string()],
         };
         for text in pats {
-            let Some(pat) = rsync_pattern(&text) else {
+            let Some(rule) = RsyncRule::new(exclude, &text) else {
                 return Err(format!("line {}: '{line}' has no pattern", n + 1));
             };
-            rules.push(RsyncRule { exclude, pat });
+            rules.push(rule);
         }
     }
     Ok(rules)
@@ -584,10 +694,10 @@ impl Filter {
     /// not from the other filters.
     fn rsync_excludes(&self, dir: &Path, name: &[u8], is_dir: bool) -> bool {
         let (base, rules) = &self.rsync;
-        let rel = || rel_segments(base, dir, name);
+        let rel = || rel_segments(base, dir, name).join(&b'/');
         rules
             .iter()
-            .find(|r| r.pat.matches(name, &rel, is_dir))
+            .find(|r| r.matches(name, &rel, is_dir))
             .is_some_and(|r| r.exclude)
     }
 
@@ -814,15 +924,75 @@ mod tests {
         assert_eq!(r.len(), 4, "{r:?}");
         assert!(!r[0].exclude);
         assert!(r[1].exclude);
-        assert_eq!(r[2].pat, pat("/t"));
-        assert_eq!(r[3].pat, pat("/t/**"));
-        assert_eq!(rsync_rules("- a/b/").unwrap()[0].pat, pat("**/a/b/"));
-        assert_eq!(rsync_rules("H !x").unwrap()[0].pat, pat("\\!x"));
+        assert_eq!(r[2].pat, b"t");
+        assert!(r[2].dir_only);
+        assert!(r[2].anchored);
+        assert_eq!(r[3].pat, b"t/**");
+        assert!(!r[3].dir_only);
+        let ab = &rsync_rules("- a/b/").unwrap()[0];
+        assert_eq!(ab.pat, b"a/b");
+        assert!(!ab.anchored);
+        assert!(ab.whole_path);
+        assert_eq!(rsync_rules("H !x").unwrap()[0].pat, b"!x");
+        assert!(!rsync_rules("- *.log").unwrap()[0].whole_path);
+        assert!(rsync_rules("- **.so").unwrap()[0].whole_path);
         assert_eq!(rsync_rules("- a\n!\nS b").unwrap().len(), 1);
-        for bad in [". m", ": .f", "-! x", "merge f", "-", "+ ", "x y"] {
+        for bad in [
+            ". m", ": .f", "-! x", "merge f", "-", "+ ", "x y", "- /", "- //",
+        ] {
             let e = rsync_rules(bad).unwrap_err();
             assert!(e.starts_with("line 1: "), "{bad}: {e}");
         }
+    }
+
+    #[test]
+    fn rsync_wildcards_stop_at_a_slash_unless_doubled() {
+        assert!(wild_match(b"*.log", b"a.log"));
+        assert!(!wild_match(b"*", b"a/b"));
+        assert!(wild_match(b"**", b"a/b"));
+        assert!(!wild_match(b"a?c", b"a/c"));
+        assert!(wild_match(b"a?c", b"abc"));
+        assert!(wild_match(b"[a-c]x", b"bx"));
+        assert!(!wild_match(b"[!a-c]x", b"bx"));
+        assert!(!wild_match(b"a[/]b", b"a/b"));
+        assert!(wild_match(b"\\*", b"*"));
+        assert!(!wild_match(b"\\*", b"a"));
+        assert!(wild_match(b"lib/**.so", b"lib/sub/y.so"));
+        // Many stars that cannot match end quickly.
+        assert!(!wild_match(b"*a*a*a*a*a*a*a*a*b", &[b'a'; 200]));
+    }
+
+    /// Whether the first rule of `rules` matches the entry at `rel`.
+    fn rsync_hit(rules: &str, rel: &str, is_dir: bool) -> bool {
+        let r = &rsync_rules(rules).unwrap()[0];
+        let name = rel.rsplit('/').next().unwrap().as_bytes();
+        r.matches(name, &|| rel.as_bytes().to_vec(), is_dir)
+    }
+
+    /// The cases where gitignore and rsync part ways (36(d), found with
+    /// rsync 3.5.0): `x/**/y` needs a folder between, `**` inside a name
+    /// crosses folders, a leading `**/` matches at the top, `/***` names
+    /// a folder, and trailing spaces belong to the pattern.
+    #[test]
+    fn rsync_rules_part_from_gitignore_where_rsync_does() {
+        assert!(!rsync_hit("- docs/**/draft.md", "docs/draft.md", false));
+        assert!(rsync_hit("- docs/**/draft.md", "docs/x/draft.md", false));
+        assert!(rsync_hit(
+            "- docs/**/draft.md",
+            "a/docs/x/y/draft.md",
+            false
+        ));
+        assert!(rsync_hit("- lib/**.so", "lib/sub/y.so", false));
+        assert!(rsync_hit("- **/top.log", "top.log", false));
+        assert!(rsync_hit("- ***/src", "src", true));
+        assert!(!rsync_hit("- /**/x.tmp", "x.tmp", false));
+        assert!(rsync_hit("- /**/x.tmp", "sub/x.tmp", false));
+        assert!(!rsync_hit("- /t/***", "t", false));
+        assert!(rsync_hit("- /t/***", "t", true));
+        assert!(!rsync_hit("- /t/***", "a/t", true));
+        assert!(!rsync_hit("- *.log ", "a.log", false));
+        assert!(rsync_hit("- a/old.log", "logs/a/old.log", false));
+        assert!(!rsync_hit("- a/old.log", "logs/xa/old.log", false));
     }
 
     #[test]

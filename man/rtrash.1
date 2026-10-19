@@ -1916,6 +1916,24 @@ any other pattern with a
 matches the end of the path, and
 .B dir/***
 matches a directory and everything in it.
+Wildcards work as in rsync, not as in
+.IR .gitignore :
+.B *
+and
+.B ?
+stop at a
+.BR / ,
+.B **
+crosses it, and a pattern with
+.B **
+in it is matched against the whole path.
+So
+.B a/**/b
+needs a folder between
+.B a
+and
+.BR b ,
+and spaces at the end of a line belong to the pattern.
 .B !
 clears the rules above it in the file;
 .B P

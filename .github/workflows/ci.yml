@@ -47,10 +47,19 @@ jobs:
         with:
           tool: nextest
 
+      - name: rsync 3 for the --filter-from parity test (36(d))
+        run: |
+          command -v rsync || { sudo apt-get update && sudo apt-get install -y rsync; }
+          rsync --version | head -n 1
+
       - name: Test (nextest, locked, ci profile)
+        env:
+          RTRASH_REQUIRE_RSYNC: "1"
         run: cargo nextest run --locked --profile ci
 
       - name: Test without the TUI feature
+        env:
+          RTRASH_REQUIRE_RSYNC: "1"
         run: cargo nextest run --locked --profile ci --no-default-features
 
       - name: du smoke test against du(1) and a Python walk
