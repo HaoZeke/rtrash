@@ -3297,6 +3297,62 @@ def check_du_json_compares():
                               "the live trash summary")
 
 
+# `xs.iter().any(|x| *x == y)` over a slice of y's type is
+# clippy::manual_contains, and only a build sees the types. Round 274 sent
+# `filter_flags.iter().any(|f| *f == other)` and failed clippy. The check
+# takes the shape with a deref (`*x` or a `|&x|` pattern) against a plain
+# name, either side; by value (`|p| p == path`) the types often differ
+# (PathBuf and &Path), and then the lint is silent.
+MANUAL_CONTAINS = re.compile(
+    r"\.iter\(\)\s*\.any\(\|(&?)(\w+)\|\s*(?:(\*?)(\w+)\s*==\s*&?([A-Za-z_]\w*)"
+    r"|&?([A-Za-z_]\w*)\s*==\s*(\*?)(\w+))\s*\)")
+MANUAL_CONTAINS_CASES = [
+    ("round 274", "other => filter_flags.iter().any(|f| *f == other),\n", [1]),
+    ("pattern", "let k = v.iter().any(|&b| b == byte);\n", [1]),
+    ("other side", "let k = v.iter().any(|f| other == *f);\n", [1]),
+    ("second line", "let a = 1;\nlet k = v.iter().any(|f| *f == &name);\n", [2]),
+    ("literal", "args.iter().any(|a| a == \"--fix\")\n", []),
+    ("by value", "warned.iter().any(|p| p == path)\n", []),
+    ("index", "last.iter().any(|l| *l == items[i].0)\n", []),
+    ("method", "got.iter().any(|g| *g == want.as_bytes())\n", []),
+    ("or", "name.iter().any(|&b| b == b'/' || b == 0)\n", []),
+    ("contains", "filter_flags.contains(&other)\n", []),
+    ("comment", "// v.iter().any(|f| *f == other)\n", []),
+]
+
+
+def manual_contains_lines(text):
+    """Lines of `text` (comments left out) with an `iter().any` that
+    clippy::manual_contains would turn into `contains`."""
+    code = rust_code(text, strings=True)
+    hits = []
+    for m in MANUAL_CONTAINS.finditer(code):
+        pat_ref, arg = m.group(1), m.group(2)
+        if m.group(4) is not None:
+            star, used, other = m.group(3), m.group(4), m.group(5)
+        else:
+            star, used, other = m.group(7), m.group(8), m.group(6)
+        if used != arg or other == arg or not (pat_ref or star):
+            continue
+        hits.append(code.count("\n", 0, m.start()) + 1)
+    return hits
+
+
+def check_manual_contains():
+    """No `iter().any(|x| *x == y)` in src/ or tests/ (clippy::manual_contains),
+    and the matcher meets every MANUAL_CONTAINS_CASES case."""
+    for what, text, want in MANUAL_CONTAINS_CASES:
+        if manual_contains_lines(text) != want:
+            errors.append(f"scripts/precheck.py: manual_contains_lines gets MANUAL_CONTAINS_CASES "
+                          f"'{what}' wrong; the manual-contains check is broken")
+    for top in ("src", "tests"):
+        for path in sorted((ROOT / top).rglob("*.rs")):
+            rel = path.relative_to(ROOT).as_posix()
+            for line in manual_contains_lines(path.read_text(encoding="utf-8")):
+                errors.append(f"{rel}:{line}: iter().any comparing a deref of its argument "
+                              "with a name is clippy::manual_contains; use .contains(&name)")
+
+
 def check_rustfmt():
     """`cargo fmt --check` when a toolchain is there; three rounds in a row
     (170-172) needed a format-only amend after CI."""
@@ -3322,7 +3378,7 @@ def main():
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers(); check_pair_refusals()
     check_long_lines(base); check_struct_field_drift(base); check_call_arity(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
-    check_musl_aliases(); check_libc_const_args(); check_copy_progress()
+    check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains()
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
     for w in warnings:
