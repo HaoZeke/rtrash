@@ -609,6 +609,29 @@ pub fn expand(pat: &str) -> Option<String> {
     is_absolute(&s).then_some(s)
 }
 
+/// For each profile, the directories it judges entry by entry, by age,
+/// with its name. A pattern gives one when it ends in `/*` and has no
+/// other wildcard: `~/.claude/todos/*` gives `~/.claude/todos`. The
+/// explorer tags such a row (gdu #695) with no walk. A wildcard above
+/// the last part would need one.
+pub fn whole_dirs(profiles: &[Profile]) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    for p in profiles {
+        for pat in &p.paths {
+            let Some(full) = expand(pat) else {
+                continue;
+            };
+            let Some(dir) = full.strip_suffix("/*") else {
+                continue;
+            };
+            if !dir.contains(['*', '?', '[', '{']) {
+                out.push((PathBuf::from(dir), p.name.clone()));
+            }
+        }
+    }
+    out
+}
+
 /// `/x`, or on Windows also `C:\x`, `C:/x` and `\\server\share`.
 fn is_absolute(s: &str) -> bool {
     if s.starts_with('/') {
@@ -804,6 +827,26 @@ mod tests {
         };
         assert_eq!(expand(other), None);
         assert_eq!(expand("relative/*"), None);
+    }
+
+    #[test]
+    fn whole_dirs_come_from_patterns_that_end_in_one_star() {
+        let p = Profile {
+            name: "t".into(),
+            paths: [
+                "/v/a/*",
+                "/v/b/*.log",
+                "/v/c/**/x/*",
+                "/v/d*/e/*",
+                "/v/f",
+                "relative/*",
+            ]
+            .map(String::from)
+            .to_vec(),
+            ..from_builtin(&BUILTIN[1])
+        };
+        let want = [(PathBuf::from("/v/a"), "t".to_string())];
+        assert_eq!(whole_dirs(&[p]), want);
     }
 
     #[test]

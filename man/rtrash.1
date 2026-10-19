@@ -2721,6 +2721,20 @@ and a rescan.
 Opening or leaving the directory ends the filter.
 Rows show the artefact kind and git state; risky git state shows
 .BR ! .
+A directory that a reap profile empties by age shows
+.BR reap:NAME ,
+as gdu #695 asks, such as
+.B reap:npm
+on
+.IR ~/.npm/_logs .
+Its old entries are what
+.BI "rtrash reap \-\-profile=" NAME
+takes.
+Each profile path that ends in
+.B /*
+with no other wildcard gives such a badge, built in or from the config
+file.
+Deeper patterns would need a walk, so their rows stay untagged.
 Trash directories stay closed.
 Needs a terminal on stdin and the
 .B tui

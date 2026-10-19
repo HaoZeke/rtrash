@@ -1,0 +1,1 @@
+The `du -i` explorer tags a directory that a reap profile empties by age with `reap:NAME`, such as `reap:npm` on `~/.npm/_logs`, as gdu #695 asks. It reads the profile paths that end in `/*` with no other wildcard, so it needs no extra walk.

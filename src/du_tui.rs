@@ -352,6 +352,10 @@ struct App {
     hand_off: Option<HandOff>,
     /// Program and arguments `o` opens a row with (tests set their own).
     opener: Vec<std::ffi::OsString>,
+    /// Directories a reap profile empties by age, with the profile's
+    /// name, for the `reap:NAME` badge (gdu #695). Only [`run`] fills
+    /// it, so a snapshot and the tests show none.
+    reap_dirs: Vec<(PathBuf, String)>,
     /// The room left on the file system of a view, by the view's path
     /// (ncdu #77): read when the view changes, and again after a
     /// delete, an undo or a rescan. `None` inside when it can't be read.
@@ -1026,6 +1030,7 @@ impl App {
             export_to: String::new(),
             hand_off: None,
             opener: tui_term::opener(),
+            reap_dirs: Vec::new(),
             prog: prog.to_string(),
             cur: root.clone(),
             root,
@@ -2941,6 +2946,8 @@ struct RowCtx<'a> {
     share: Share,
     /// Bars on a log scale.
     log: bool,
+    /// The app's `reap_dirs`.
+    reap: &'a [(PathBuf, String)],
 }
 
 #[cfg(test)]
@@ -2959,6 +2966,7 @@ impl RowCtx<'_> {
             unread: &[],
             share: Share::Bar,
             log: false,
+            reap: &[],
         }
     }
 }
@@ -2974,6 +2982,7 @@ fn row_text_in(it: &Item, marked: bool, ctx: &RowCtx) -> String {
         unread,
         share,
         log,
+        reap,
     } = ctx;
     let name = if whole_path {
         it.path.to_string_lossy()
@@ -2998,6 +3007,9 @@ fn row_text_in(it: &Item, marked: bool, ctx: &RowCtx) -> String {
     let mut badges = Vec::new();
     if let Some(a) = it.artefact.filter(|_| !is_link(it)) {
         badges.push(a.to_string());
+    }
+    if let Some((_, name)) = reap.iter().find(|(d, _)| it.is_dir && *d == it.path) {
+        badges.push(format!("reap:{name}"));
     }
     // The same marks, in the same place, as the table's NOTE column.
     if let Some(m) = du::read_mark(it, unread) {
@@ -3083,6 +3095,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         unread: &view.unread,
         share: app.share,
         log: app.log_bars,
+        reap: &app.reap_dirs,
     };
     let items: Vec<ListItem> = view
         .rows
@@ -3396,6 +3409,7 @@ pub fn run(
         Ok(a) => App {
             read_only,
             allow_filtered,
+            reap_dirs: reap_dirs(),
             ..a
         },
         Err(e) => {
@@ -3404,6 +3418,15 @@ pub fn run(
         }
     };
     drive(prog, &mut app)
+}
+
+/// The directories of [`crate::reap_profiles::whole_dirs`] for the
+/// built-in profiles and the config file's, for [`run`]. Profile warnings
+/// are left to `rtrash reap`, which prints them.
+fn reap_dirs() -> Vec<(PathBuf, String)> {
+    let mut warn = Vec::new();
+    let all = crate::reap_profiles::all(crate::config::get(), &mut warn);
+    crate::reap_profiles::whole_dirs(&all)
 }
 
 /// Browse the snapshot or ncdu export `snap`, read from `file`, with no
@@ -4278,6 +4301,47 @@ mod tests {
         // A file is never marked, as in the table.
         let s = text(&it("/x/a", false), &here);
         assert!(s.ends_with(" a"), "{s}");
+    }
+
+    /// gdu #695: the row of a directory that a reap profile empties by
+    /// age names the profile. A file of that name gets no badge, and
+    /// neither does another directory.
+    #[test]
+    fn row_badges_name_the_reap_profile_of_a_directory() {
+        let it = |path: &str, is_dir: bool| Item {
+            path: PathBuf::from(path),
+            is_dir,
+            apparent: 0,
+            disk: 512,
+            mtime: 0,
+            items: 1,
+            artefact: None,
+            repos: Vec::new(),
+            git: None,
+            unique: None,
+            filtered_out: 0,
+        };
+        let reap = [(PathBuf::from("/x/wheels"), "pip".to_string())];
+        let ctx = RowCtx {
+            reap: &reap,
+            ..RowCtx::plain(1024, SortKey::Disk)
+        };
+        let s = row_text_in(&it("/x/wheels", true), false, &ctx);
+        assert!(s.ends_with("wheels/  [reap:pip]"), "{s}");
+        let s = row_text_in(&it("/x/wheels", false), false, &ctx);
+        assert!(!s.contains("reap:"), "{s}");
+        let s = row_text_in(&it("/x/other", true), false, &ctx);
+        assert!(!s.contains("reap:"), "{s}");
+    }
+
+    /// The explorer draws the badge from its own `reap_dirs`.
+    #[test]
+    fn the_explorer_tags_a_reap_directory_on_screen() {
+        let t = tree("reaptag");
+        let mut a = app(&t);
+        a.reap_dirs = vec![(t.0.join("w").join("big"), "t".to_string())];
+        let text = tui_term::render_text(100, 14, |f| ui(f, &mut a));
+        assert!(text.contains("big/  [reap:t]"), "{text}");
     }
 
     /// A folder the scan cannot open shows `unreadable`, a folder with one
