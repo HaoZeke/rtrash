@@ -2546,6 +2546,18 @@ fn roots_once(
     Ok((kept.into_iter().map(|(p, _)| p).collect(), notes))
 }
 
+/// Whether the scan can start at PATH `p`: the same lookups [`scan_on`]
+/// makes before it walks, so a PATH that passes here does not end the run.
+fn root_stat(p: &Path, follow: bool) -> io::Result<()> {
+    let abs = absolute(p)?;
+    if follow {
+        du_fs::stat_follow(&abs)?;
+    } else {
+        du_fs::lstat(&abs)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn absolute(p: &Path) -> io::Result<PathBuf> {
     if p.file_name().is_none() {
         // `.`, `..`, `/`: no final component to keep unresolved.
@@ -3908,6 +3920,19 @@ fn or_list(items: &[&str]) -> String {
 }
 
 pub fn run(prog: &str, args: &[String]) -> i32 {
+    let mut missing = false;
+    let code = run_paths(prog, args, &mut missing);
+    // A PATH that could not be read was named and left out and the rest
+    // were scanned; the run still fails, as in GNU du.
+    if missing && code == 0 {
+        1
+    } else {
+        code
+    }
+}
+
+/// [`run`], which sets `missing` when it leaves out a PATH it cannot read.
+fn run_paths(prog: &str, args: &[String], missing: &mut bool) -> i32 {
     if args.first().map(String::as_str) == Some("diff") {
         return crate::du_snap::run_diff(prog, &args[1..]);
     }
@@ -4415,6 +4440,19 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 eprintln!("{prog}: {e}");
                 return 2;
             }
+        }
+        // dust #585: an empty or missing PATH used to end the whole run.
+        // It is named and left out, and the others are scanned.
+        paths.retain(|p| match root_stat(p, opts.follow) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("{prog}: cannot access '{}': {e}", crate::util::err_path(p));
+                *missing = true;
+                false
+            }
+        });
+        if paths.is_empty() {
+            return 1;
         }
     }
     // Git never opens an excluded directory, so no `!` rule brings back

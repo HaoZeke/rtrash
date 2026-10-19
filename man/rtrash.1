@@ -1426,6 +1426,11 @@ The scan root itself appears only in the closing total.
 given twice is scanned once, with a note on standard error.
 A
 .I PATH
+that is empty or cannot be read is named on standard error and left
+out, as GNU du does; the other paths are still scanned, and the exit
+status is 1 (dust #585).
+A
+.I PATH
 inside another one is refused with exit status 2, as gdu refuses it:
 the walk of the outer one counts it already, so the totals,
 .BR \-\-json ,

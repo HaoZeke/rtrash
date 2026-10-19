@@ -1424,6 +1424,44 @@ fn files_from_scans_the_listed_paths() {
     assert_eq!(t.du(&["--files-from=missing"]).status.code(), Some(1));
 }
 
+/// dust #585: an empty or missing PATH ended the whole run. As in GNU
+/// du, each one is named on stderr and left out, the other paths are
+/// scanned, and the exit status is 1; when none is left, nothing is
+/// scanned, not ".".
+#[test]
+fn a_missing_or_empty_path_is_named_and_the_others_still_scan() {
+    let t = Tree::new("missing-root");
+    t.file("a/x.bin", 1_000);
+    t.file("b/y.bin", 2_000);
+    t.file("c/z.bin", 4_000);
+    let out = t.du(&["--no-git", "--json", "a", "", "missing", "b"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("cannot access '': "), "{err}");
+    assert!(err.contains("cannot access 'missing': "), "{err}");
+    let j = String::from_utf8(out.stdout).unwrap();
+    let files = paths_in(&j, "files");
+    assert!(files.contains(&s(&t.root.join("a").join("x.bin"))), "{j}");
+    assert!(files.contains(&s(&t.root.join("b").join("y.bin"))), "{j}");
+    assert!(!files.iter().any(|f| f.ends_with("z.bin")), "{j}");
+
+    // A listed path that is missing goes the same way.
+    fs::write(t.root.join("list"), "a\nmissing\n").unwrap();
+    let out = t.du(&["--no-git", "--json", "--files-from=list"]);
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("cannot access 'missing': "), "{err}");
+    let j = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        paths_in(&j, "files").iter().any(|f| f.ends_with("x.bin")),
+        "{j}"
+    );
+
+    let out = t.du(&["--no-git", "", "missing"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "{out:?}");
+}
+
 #[test]
 fn reverse_prints_the_top_row_last() {
     let t = Tree::new("du-reverse");
