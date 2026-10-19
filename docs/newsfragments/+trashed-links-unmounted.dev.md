@@ -1,0 +1,1 @@
+The man page now covers trashed symbolic links in its empty section (trashy #115). Each goes as the link, and empty removes a link into an unmounted volume like any other item. A new Linux test checks this with links into a tmpfs volume, before and after an unmount.

@@ -4759,6 +4759,96 @@ fn put_and_empty_follow_volumes_mounted_inside_volumes() {
     drop(mounts);
 }
 
+/// trashy #115: links in the trash that point into a volume, which is
+/// unmounted later. While it is mounted, put sends each link to the home
+/// trash, as the link lives there, and empty counts and removes the link
+/// alone, never what it points at. Once the volume is gone, every listing
+/// and the dangling-record sweep finish and keep both items, since their
+/// payloads are the links themselves; a full empty then removes them.
+#[cfg(target_os = "linux")]
+#[test]
+fn trashed_links_into_an_unmounted_volume_go_as_links() {
+    let _global = global_state();
+    if !as_root(&["true"]) {
+        common::skip("sudo unavailable; skipping");
+        return;
+    }
+    let sb = Sandbox::new("link-unmounted");
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+    let vol = sb.root.join("vol");
+    fs::create_dir_all(&vol).unwrap();
+    let opts = format!("size=16m,mode=0755,uid={uid},gid={gid}");
+    let at = vol.to_str().unwrap();
+    let mut mounts = Binds(Vec::new());
+    let ok = as_root(&["mount", "-t", "tmpfs", "-o", &opts, "tmpfs", at]);
+    assert!(ok, "sudo -n mount -t tmpfs failed for {at}");
+    mounts.0.push(vol.clone());
+    fs::create_dir_all(vol.join("sub")).unwrap();
+    let keep = vol.join("sub").join("keep.bin");
+    fs::write(&keep, vec![7u8; 2_000_000]).unwrap();
+    let names = ["rtrash-link-vol", "rtrash-link-sub", "rtrash-link-file"];
+    let targets = [vol.clone(), vol.join("sub"), keep.clone()];
+    for (name, to) in names.iter().zip(&targets) {
+        std::os::unix::fs::symlink(to, sb.work().join(name)).unwrap();
+    }
+    let put = |name: &str| {
+        let out = sb.run(&["put", name]);
+        assert!(out.status.success(), "{name}: {}", stderr_of(&out));
+    };
+
+    // Mounted: the link to a folder goes, the folder and its file stay.
+    put(names[1]);
+    assert_eq!(names_in_trash(&sb), vec![names[1].to_string()]);
+    let out = sb.empty(&[]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty(), "{:?}", trash_names(&sb));
+    assert_eq!(fs::read(&keep).unwrap().len(), 2_000_000);
+
+    // A dry run counts the links, not the 2 MB behind them.
+    put(names[0]);
+    put(names[2]);
+    assert!(!vol.join(format!(".Trash-{uid}")).exists());
+    let dry = sb.empty(&["--dry-run", "--json"]);
+    let text = stdout_of(&dry);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    assert!(text.contains(r#""removed":2,"#), "{text}");
+    let from = text.find(r#""bytes":"#).unwrap() + r#""bytes":"#.len();
+    let bytes: u64 = text[from..].split(',').next().unwrap().parse().unwrap();
+    assert!(bytes < 1_000_000, "{text}");
+
+    // Unmounted: both links now point at nothing there.
+    assert!(
+        as_root(&["umount", "-l", at]),
+        "sudo -n umount -l failed for {at}"
+    );
+    mounts.0.clear();
+    assert!(!keep.exists());
+    let runs: [&[&str]; 3] = [
+        &["list", "--home-only"],
+        &["list", "--home-only", "--size"],
+        &["status", "--home-only"],
+    ];
+    for args in runs {
+        let out = sb.run(args);
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+    }
+    let listed = stdout_of(&sb.run(&["list", "--home-only"]));
+    for name in [names[0], names[2]] {
+        assert!(listed.contains(name), "{name}: {listed}");
+    }
+    let left = vec![names[2].to_string(), names[0].to_string()];
+    let out = sb.empty(&["--dangling"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(names_in_trash(&sb), left);
+    let records: Vec<String> = left.iter().map(|n| format!("{n}.trashinfo")).collect();
+    assert_eq!(names_in(&sb.trash().join("info")), records);
+    let out = sb.empty(&[]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty(), "{:?}", trash_names(&sb));
+    assert!(vol.is_dir());
+    drop(mounts);
+}
+
 /// The mount point `path` is on: the longest one above it in
 /// `/proc/self/mounts`.
 #[cfg(target_os = "linux")]

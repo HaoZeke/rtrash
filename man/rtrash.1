@@ -426,6 +426,12 @@ sends each file there.
 and
 .B \-\-trash\-dir
 narrow the run.
+A trashed symbolic link goes as the link: put picks the trash by the
+volume the link sits on, and
+.B empty
+counts and removes the link alone, never what it points at (trashy #115).
+A link into a volume that is no longer mounted empties like any other
+item.
 .TP
 .BR \-n ", " \-\-dry\-run
 Report what would be removed without removing anything; also prints
