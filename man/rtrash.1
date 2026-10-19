@@ -1884,6 +1884,58 @@ to re-include an entry an earlier pattern left out.
 .B \-
 reads standard input.
 .TP
+.BI \-\-filter\-from= FILE
+Read rsync filter rules from
+.IR FILE ,
+as
+.B rsync
+reads them from a filter file, and leave out what they exclude.
+Each line is
+.B \- PATTERN
+or
+.BR exclude ,
+.B + PATTERN
+or
+.BR include ,
+with
+.B H
+and
+.B S
+read as
+.B \-
+and
+.BR + .
+The first rule that matches an entry decides, and an excluded
+directory is not walked.
+A pattern that starts with
+.B /
+is anchored at
+.IR PATH ;
+any other pattern with a
+.B /
+matches the end of the path, and
+.B dir/***
+matches a directory and everything in it.
+.B !
+clears the rules above it in the file;
+.B P
+and
+.B R
+rules only guard files on the receiving side, so du skips them.
+Lines starting with
+.B #
+or
+.B ;
+are comments.
+A merge rule, a rule with modifiers or any other line is refused with
+its line number.
+A
+.B +
+rule keeps an entry from the later rules of the file only; the other
+filters still apply.
+.B \-
+reads standard input.
+.TP
 .B \-\-exclude\-caches
 Leave out directories below
 .I PATH

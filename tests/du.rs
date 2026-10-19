@@ -944,6 +944,44 @@ fn exclude_patterns_leave_entries_out_of_sizes_and_rows() {
     assert_eq!(t.du(&["--exclude="]).status.code(), Some(2));
 }
 
+/// 35(g), as rsync reads them: `--filter-from` takes `+` and `-` rules,
+/// the first rule that matches decides, `/` anchors at PATH, a pattern
+/// with a slash matches the end of the path and `dir/***` takes the
+/// whole folder. A merge rule is refused with its line number.
+#[test]
+fn filter_from_reads_rsync_rules_where_the_first_match_wins() {
+    let t = Tree::new("filter-from");
+    t.file("src/main.rs", 10_000);
+    t.file("src/keep.log", 20_000);
+    t.file("src/skip.log", 30_000);
+    t.file("logs/a/old.log", 40_000);
+    t.file("target/debug/x.o", 50_000);
+    let rules = "# rsync rules\n+ keep.log\n- *.log\n- /target/***\n";
+    fs::write(t.root.join("rules"), rules).unwrap();
+    let j = t.json(&["--no-git", "--filter-from=rules"]);
+    let files = paths_in(&j, "files");
+    assert!(files.contains(&s(&t.root.join("src/keep.log"))), "{j}");
+    assert!(files.contains(&s(&t.root.join("src/main.rs"))), "{j}");
+    assert!(!files.contains(&s(&t.root.join("src/skip.log"))), "{j}");
+    assert!(!files.contains(&s(&t.root.join("logs/a/old.log"))), "{j}");
+    assert!(!files.iter().any(|f| f.contains("target")), "{j}");
+    assert_eq!(field(&j, "excluded"), 3, "{j}");
+
+    // A slash inside the pattern matches the end of the path.
+    fs::write(t.root.join("rules"), "- a/old.log\n").unwrap();
+    let j = t.json(&["--no-git", "--filter-from", "rules"]);
+    let files = paths_in(&j, "files");
+    assert!(!files.contains(&s(&t.root.join("logs/a/old.log"))), "{j}");
+    assert!(files.contains(&s(&t.root.join("src/skip.log"))), "{j}");
+
+    fs::write(t.root.join("rules"), "- *.o\n. other\n").unwrap();
+    let out = t.du(&["--filter-from=rules"]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("line 2: '. other'"), "{err}");
+    assert_eq!(t.du(&["--filter-from=no-such-file"]).status.code(), Some(1));
+}
+
 #[test]
 fn config_file_sets_du_defaults_and_options_win() {
     let t = Tree::new("config");
@@ -4806,6 +4844,7 @@ fn open_deleted_needs_a_listing() {
 fn every_pair_in_the_conflict_table_is_refused() {
     let t = Tree::new("conflict-table");
     t.file("a.bin", 4096);
+    fs::write(t.root.join("rules"), "- *.tmp\n").unwrap();
     // The flags that take a value get one; -f names no file, since the
     // refusal comes before any read.
     let args = |flag: &str| -> Vec<String> {
@@ -4814,6 +4853,7 @@ fn every_pair_in_the_conflict_table_is_refused() {
             "-f" => vec!["-f".into(), "missing.snap".into()],
             "--ncdu" => vec!["--ncdu=out.json".into()],
             "--min-size" => vec!["--min-size=1k".into()],
+            "--filter-from" => vec!["--filter-from=rules".into()],
             other => vec![other.into()],
         }
     };

@@ -148,6 +148,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l all-dir
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l artefacts -d 'list only regenerable build artefacts and caches'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l exclude -d 'leave out entries that match a gitignore-style pattern' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s X -l exclude-from -d 'read exclude patterns from a file' -r -F
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l filter-from -d 'read rsync filter rules from a file' -r -F
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l files-from -r -d 'also scan the paths listed in a file'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l files0-from -r -d 'also scan the NUL-separated paths in a file'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l exclude-caches -d 'leave out directories with a valid CACHEDIR.TAG'

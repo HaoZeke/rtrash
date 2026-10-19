@@ -142,6 +142,8 @@ directories appear as one `trash` row and are never printed by --print0.
                           (repeatable; directories are still walked; dust -e)
   -X, --exclude-from=FILE  read patterns from FILE, one per line (# comments
                           and !negations as in .gitignore; - is stdin)
+      --filter-from=FILE  leave out what the rsync filter rules in FILE
+                          exclude (+ and - lines; the first match wins)
       --files-from=FILE  also scan the paths in FILE, one per line (- is
                           stdin), as dust does
       --files0-from=FILE  the same with NUL-separated paths (find -print0)
@@ -3855,6 +3857,11 @@ pub const MODE_CONFLICTS: &[(&str, &str, &[&str])] = &[
         ],
     ),
     (
+        "--filter-from",
+        "filters what a scan walks",
+        &["-f", "--devices"],
+    ),
+    (
         "-f",
         "reads a snapshot, which can be stale",
         &["--print0", "--pick"],
@@ -3916,6 +3923,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut ncdu: Option<PathBuf> = None;
     let mut ncdu_binary = false;
     let mut devices = false;
+    let mut filter_from = false;
     let mut open_deleted = false;
     let mut dupes = false;
     let mut trash_dupes = false;
@@ -4125,6 +4133,17 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 }
                 Err(e) => bail!(e),
             }
+        } else if let Some(v) = take_value(args, &mut i, arg, "--filter-from", None) {
+            match v.map(|v| (v, du_filter::read_rsync_file(&crate::util::arg_path(v)))) {
+                Ok((_, Ok(Ok(rules)))) => filter.rsync.extend(rules),
+                Ok((v, Ok(Err(e)))) => bail!(format!("--filter-from '{v}': {e}")),
+                Ok((v, Err(e))) => {
+                    eprintln!("{prog}: cannot read filter file '{v}': {e}");
+                    return 1;
+                }
+                Err(e) => bail!(e),
+            }
+            filter_from = true;
         } else if let Some(v) = take_value(args, &mut i, arg, "--older-than", None)
             .or_else(|| take_value(args, &mut i, arg, "--min-age", None))
         {
@@ -4259,6 +4278,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         "--shared" => opts.shared_once,
         "--types" => opts.types,
         "--ratio" => ratio,
+        "--filter-from" => filter_from,
         _ => false,
     };
     let ncdu_flag = if ncdu_binary {

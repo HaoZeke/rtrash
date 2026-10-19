@@ -1,5 +1,5 @@
-//! Filters for `rtrash du`: `--exclude`, `--exclude-from`, `--exclude-caches`
-//! and `--gitignore`.
+//! Filters for `rtrash du`: `--exclude`, `--exclude-from`, `--filter-from`,
+//! `--exclude-caches` and `--gitignore`.
 //!
 //! Patterns use gitignore syntax. A pattern without a `/` (other than a
 //! trailing one) matches a name at any depth; one with a `/` matches the
@@ -119,6 +119,16 @@ fn pattern_bytes(seg: &str) -> Vec<u8> {
 /// are, so one stray byte neither drops the whole file nor any pattern.
 fn read_text(path: &Path) -> io::Result<String> {
     fs::read(path).map(crate::util::str_from_bytes)
+}
+
+/// [`read_text`], with `-` read from standard input.
+fn read_text_or_stdin(path: &Path) -> io::Result<String> {
+    if path.as_os_str() != "-" {
+        return read_text(path);
+    }
+    let mut b = Vec::new();
+    io::Read::read_to_end(&mut io::stdin(), &mut b)?;
+    Ok(crate::util::str_from_bytes(b))
 }
 
 /// Match path segments against pattern segments, `**` spanning zero or
@@ -315,11 +325,94 @@ impl Chain {
     }
 }
 
+/// One rule of an rsync filter file (`--filter-from`): `- PATTERN`
+/// leaves out what it matches, `+ PATTERN` keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RsyncRule {
+    exclude: bool,
+    pat: Pattern,
+}
+
+/// The rsync rule `pattern` as a gitignore-style [`Pattern`]. A leading
+/// `/` anchors it at the scanned PATH, as both read it. A pattern with
+/// another `/` matches the end of the path in rsync, so it gains a
+/// leading `**/`. A leading `!` or `#` is a literal character there.
+fn rsync_pattern(pattern: &str) -> Option<Pattern> {
+    let inner = pattern.trim_end_matches('/');
+    let text = if !pattern.starts_with('/') && inner.contains('/') {
+        format!("**/{pattern}")
+    } else if pattern.starts_with(['!', '#']) {
+        format!("\\{pattern}")
+    } else {
+        pattern.to_string()
+    };
+    Pattern::parse(&text)
+}
+
+/// Parse an rsync filter file, rules in file order. Each line is
+/// `- PATTERN` or `exclude PATTERN`, `+ PATTERN` or `include PATTERN`,
+/// `H` / `hide` as `-`, `S` / `show` as `+`, or `!` / `clear`, which drops
+/// the rules above it. `P`, `R`, `protect` and `risk` only guard files on
+/// the receiving side, so du skips them. Blank lines and lines starting
+/// with `#` or `;` are comments. A merge rule, a rule with modifiers, or
+/// any other line is an error that names its line.
+pub fn rsync_rules(text: &str) -> Result<Vec<RsyncRule>, String> {
+    let mut rules = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim_end_matches('\r');
+        if line.trim().is_empty() || line.starts_with(['#', ';']) {
+            continue;
+        }
+        let (word, pattern) = match line.split_once([' ', '_']) {
+            Some((w, p)) => (w, Some(p)),
+            None => (line, None),
+        };
+        let exclude = match (word, pattern) {
+            ("!" | "clear", None) => {
+                rules.clear();
+                continue;
+            }
+            ("P" | "R" | "protect" | "risk", Some(_)) => continue,
+            ("-" | "exclude" | "H" | "hide", Some(_)) => true,
+            ("+" | "include" | "S" | "show", Some(_)) => false,
+            _ => {
+                return Err(format!(
+                    "line {}: '{line}' is not a rule du reads (+, -, H, S, P, R or !, \
+                     without modifiers or merge files)",
+                    n + 1
+                ))
+            }
+        };
+        let pattern = pattern.unwrap_or_default();
+        // `dir/***` matches the folder and everything in it.
+        let pats = match pattern.strip_suffix("/***") {
+            Some(dir) if !dir.is_empty() => vec![dir.to_string(), format!("{dir}/**")],
+            _ => vec![pattern.to_string()],
+        };
+        for text in pats {
+            let Some(pat) = rsync_pattern(&text) else {
+                return Err(format!("line {}: '{line}' has no pattern", n + 1));
+            };
+            rules.push(RsyncRule { exclude, pat });
+        }
+    }
+    Ok(rules)
+}
+
+/// Read an rsync filter file (`--filter-from`; `-` is stdin).
+pub fn read_rsync_file(path: &Path) -> io::Result<Result<Vec<RsyncRule>, String>> {
+    let text = read_text_or_stdin(path)?;
+    Ok(rsync_rules(&text))
+}
+
 /// What the command line asked to leave out.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Spec {
     /// `--exclude` and `--exclude-from` lines, in order.
     pub patterns: Vec<String>,
+    /// `--filter-from` rules, in file order: the first that matches
+    /// decides, as in rsync.
+    pub rsync: Vec<RsyncRule>,
     pub exclude_caches: bool,
     pub gitignore: bool,
     /// `--exclude-regex`: entries whose path matches one are left out.
@@ -335,6 +428,7 @@ pub struct Spec {
 impl Spec {
     pub fn is_active(&self) -> bool {
         !self.patterns.is_empty()
+            || !self.rsync.is_empty()
             || self.exclude_caches
             || self.gitignore
             || !self.regex_out.is_empty()
@@ -390,13 +484,7 @@ pub fn keep_only(exts: &[String]) -> Vec<String> {
 
 /// Read `--exclude-from` lines (gitignore syntax; `-` is stdin).
 pub fn read_pattern_file(path: &Path) -> io::Result<Vec<String>> {
-    let text = if path.as_os_str() == "-" {
-        let mut b = Vec::new();
-        io::Read::read_to_end(&mut io::stdin(), &mut b)?;
-        crate::util::str_from_bytes(b)
-    } else {
-        read_text(path)?
-    };
+    let text = read_text_or_stdin(path)?;
     Ok(text
         .lines()
         .filter(|l| Pattern::parse(l).is_some())
@@ -408,6 +496,8 @@ pub fn read_pattern_file(path: &Path) -> io::Result<Vec<String>> {
 #[derive(Debug)]
 pub struct Filter {
     cli: Rules,
+    /// `--filter-from` rules and the folder they are relative to.
+    rsync: (PathBuf, Vec<RsyncRule>),
     pub exclude_caches: bool,
     pub gitignore: bool,
     /// Ignore rules from the repository that encloses the scan root.
@@ -434,8 +524,10 @@ impl Filter {
         let enclosing = spec.gitignore.then(|| ignored_from_above(root)).flatten();
         let root_ignored = enclosing.as_ref().is_some_and(|e| e.1);
         let root_chain = enclosing.map(|e| e.0);
+        let base = spec.base.as_deref().unwrap_or(root).to_path_buf();
         Filter {
             cli: spec.rules_for(root),
+            rsync: (base, spec.rsync.clone()),
             exclude_caches: spec.exclude_caches,
             gitignore: spec.gitignore,
             root_chain,
@@ -453,6 +545,9 @@ impl Filter {
         if !self.cli.is_empty() && self.cli.decide(dir, name, is_dir) == Some(true) {
             return true;
         }
+        if self.rsync_excludes(dir, name, is_dir) {
+            return true;
+        }
         if !self.regex_out.is_empty() || (!is_dir && !self.regex_in.is_empty()) {
             let full = dir.join(String::from_utf8_lossy(name).as_ref());
             let full = full.to_string_lossy();
@@ -468,6 +563,18 @@ impl Filter {
             Some(c) => c.decide(dir, name, is_dir) == Some(true),
             None => false,
         }
+    }
+
+    /// Whether the first `--filter-from` rule that matches leaves the
+    /// entry out. A `+` rule keeps it from the later rules of the file,
+    /// not from the other filters.
+    fn rsync_excludes(&self, dir: &Path, name: &[u8], is_dir: bool) -> bool {
+        let (base, rules) = &self.rsync;
+        let rel = || rel_segments(base, dir, name);
+        rules
+            .iter()
+            .find(|r| r.pat.matches(name, &rel, is_dir))
+            .is_some_and(|r| r.exclude)
     }
 
     /// The chain for directory `dir`, given its parent's chain and
@@ -643,6 +750,38 @@ mod tests {
         assert!(extensions("iso,", "--type").is_err());
         assert!(extensions("a/b", "--exclude-type").is_err());
         assert_eq!(keep_only(&["iso".into()]), ["*", "!*/", "!*.iso"]);
+    }
+
+    #[test]
+    fn rsync_rules_read_as_patterns() {
+        let r = rsync_rules("# c\n; c\n\n+ keep.log\nexclude *.log\n- /t/***\nP x\n").unwrap();
+        assert_eq!(r.len(), 4, "{r:?}");
+        assert!(!r[0].exclude);
+        assert!(r[1].exclude);
+        assert_eq!(r[2].pat, pat("/t"));
+        assert_eq!(r[3].pat, pat("/t/**"));
+        assert_eq!(rsync_rules("- a/b/").unwrap()[0].pat, pat("**/a/b/"));
+        assert_eq!(rsync_rules("H !x").unwrap()[0].pat, pat("\\!x"));
+        assert_eq!(rsync_rules("- a\n!\nS b").unwrap().len(), 1);
+        for bad in [". m", ": .f", "-! x", "merge f", "-", "+ ", "x y"] {
+            let e = rsync_rules(bad).unwrap_err();
+            assert!(e.starts_with("line 1: "), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn the_first_rsync_rule_that_matches_decides() {
+        let spec = Spec {
+            rsync: rsync_rules("+ keep.log\n- *.log\n- a/b/\n").unwrap(),
+            ..Default::default()
+        };
+        let f = Filter::new(&spec, Path::new("/b"));
+        let dir = Path::new("/b/x/a");
+        assert!(!f.excluded(None, dir, b"keep.log", false));
+        assert!(f.excluded(None, dir, b"skip.log", false));
+        assert!(f.excluded(None, dir, b"b", true));
+        assert!(!f.excluded(None, dir, b"b", false));
+        assert!(!f.excluded(None, Path::new("/b/x"), b"b", true));
     }
 
     fn pat(s: &str) -> Pattern {
