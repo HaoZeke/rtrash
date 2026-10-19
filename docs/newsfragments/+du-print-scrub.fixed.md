@@ -1,0 +1,1 @@
+The paths that `p` in `du -i` prints on quit, and those `du --print0` and `du --dupes --print0` list, show each control character as `?` when stdout is a terminal, as dua #365 asks, so a crafted file name cannot act on the screen. Down a pipe they stay the exact bytes, for `xargs`.

@@ -766,6 +766,27 @@ fn messages_scrub_control_characters_on_a_terminal() {
     }
 }
 
+/// dua #365: the paths `du --print0` lists go raw down a pipe, for
+/// `xargs -0`, and with `?` for each control character on a terminal.
+/// `p` in `du -i` prints its marked paths the same way.
+#[cfg(target_os = "linux")]
+#[test]
+fn du_print0_scrubs_control_characters_on_a_terminal() {
+    let sb = Sandbox::new("print0-scrub");
+    let dir = sb.work().join("d");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("a\x1b[2Jb\nc"), vec![1u8; 50_000]).unwrap();
+    let piped = sb.run(&["du", "--files", "--print0", "d"]);
+    assert!(piped.status.success(), "{piped:?}");
+    assert!(piped.stdout.ends_with(b"a\x1b[2Jb\nc\0"), "{piped:?}");
+    let Some(out) = on_a_terminal(&sb, "du --files --print0 d") else {
+        common::skip("skipping: no script(1) to give rtrash a terminal");
+        return;
+    };
+    assert!(out.contains("a?[2Jb?c"), "{out:?}");
+    assert!(!out.contains('\x1b'), "{out:?}");
+}
+
 /// restore errors quote the record's Path= verbatim; on a terminal its
 /// escape sequences must show as `?`, as list shows them.
 #[cfg(target_os = "linux")]

@@ -2300,6 +2300,10 @@ stderr names the first 10 and counts the rest.
 .B \-\-print0
 Print the listed paths separated by null bytes, for
 .BR "xargs \-0 rtrash put \-rf \-\-" .
+The bytes are the names as they are, unless stdout is a terminal: there
+each control character shows as
+.BR ? ,
+so a crafted name cannot act on the screen.
 .TP
 .B \-\-pick
 Open the put browser on the listed rows (directories, then files).
@@ -2610,6 +2614,10 @@ Any key closes them.
 .B p
 quits and prints the marked paths, or the cursor row when none is
 marked, on stdout once the screen is restored, one per line.
+Down a pipe each name goes as it is; on a terminal each control
+character shows as
+.BR ? ,
+as dua #365 asks, since the screen is the shell's again by then.
 .B y
 copies the same paths to the clipboard with the OSC 52 escape, which
 xterm, kitty, iTerm2, WezTerm and Windows Terminal accept, and tmux with

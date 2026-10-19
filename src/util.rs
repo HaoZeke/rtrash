@@ -715,6 +715,20 @@ pub fn term_path<P: AsRef<std::path::Path> + ?Sized>(p: &P) -> String {
     }
 }
 
+/// `p` ended by `end`, as a list of paths on stdout writes it: the raw
+/// bytes when `tty` is false, so `xargs` and a pipe get each name
+/// exactly, and with `?` for each control character on a terminal
+/// (dua #365), where a crafted name would act on the screen.
+pub fn path_line(p: &std::path::Path, end: u8, tty: bool) -> Vec<u8> {
+    let mut line = if tty {
+        scrub(&p.display().to_string()).into_owned().into_bytes()
+    } else {
+        p.as_os_str().as_encoded_bytes().to_vec()
+    };
+    line.push(end);
+    line
+}
+
 /// Text for a message on stderr: scrubbed when stderr is a terminal.
 pub fn err_text(s: &str) -> std::borrow::Cow<'_, str> {
     if stderr_is_tty() {
@@ -1071,6 +1085,22 @@ mod tests {
         assert_eq!(scrub("one\ntwo\rthree\tfour"), "one?two?three?four");
         assert_eq!(scrub("del\x7f c1\u{9b}"), "del? c1?");
         assert_eq!(scrub("txt.\u{202e}exe\u{2066}"), "txt.?exe?");
+    }
+
+    /// dua #365: a pipe gets a listed path as it is, a terminal sees
+    /// each control character as `?`.
+    #[test]
+    fn path_lines_go_raw_down_a_pipe_and_scrubbed_to_a_terminal() {
+        let p = std::path::Path::new("d/a\x1b[2Jb\nc");
+        assert_eq!(path_line(p, b'\n', false), b"d/a\x1b[2Jb\nc\n");
+        assert_eq!(path_line(p, 0, false), b"d/a\x1b[2Jb\nc\0");
+        assert_eq!(path_line(p, b'\n', true), b"d/a?[2Jb?c\n");
+        assert_eq!(path_line(p, 0, true), b"d/a?[2Jb?c\0");
+        let plain = std::path::Path::new("plain/ünïcode name");
+        assert_eq!(
+            path_line(plain, b'\n', true),
+            path_line(plain, b'\n', false)
+        );
     }
 
     #[test]

@@ -2389,10 +2389,10 @@ fn dupes_out(prog: &str, paths: &[PathBuf], opts: &ScanOpts, min_size: u64, out:
         .flat_map(|f| std::iter::once(f.path.as_path()).chain(f.links.iter().map(PathBuf::as_path)))
         .collect();
     if print0 {
+        let tty = crate::util::stdout_is_tty();
         let mut out = std::io::stdout().lock();
         for p in &extras {
-            let _ = out.write_all(p.as_os_str().as_encoded_bytes());
-            let _ = out.write_all(b"\0");
+            let _ = out.write_all(&crate::util::path_line(p, 0, tty));
         }
         return 0;
     }
@@ -4736,6 +4736,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let j = report_json_with(&report, &trash, unreadable, targets.as_ref(), open, ratio);
         println!("{j}");
     } else if print0 {
+        let tty = crate::util::stdout_is_tty();
         let mut out = io::stdout().lock();
         let mut held = 0usize;
         for it in report.dirs.iter().chain(report.files.iter()) {
@@ -4747,8 +4748,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 held += 1;
                 continue;
             }
-            let _ = out.write_all(it.path.as_os_str().as_encoded_bytes());
-            let _ = out.write_all(b"\0");
+            let _ = out.write_all(&crate::util::path_line(&it.path, 0, tty));
         }
         if held > 0 {
             eprintln!(

@@ -3466,10 +3466,12 @@ fn drive(prog: &str, app: &mut App) -> i32 {
         eprintln!("{prog}: tui error: {e}");
         return 1;
     }
+    // The screen is the shell's again, and a terminal would act on a
+    // control character in a name, so there each one prints as `?`.
+    let tty = crate::util::stdout_is_tty();
     let mut out = io::stdout().lock();
     for p in &app.print_on_exit {
-        let _ = io::Write::write_all(&mut out, p.as_os_str().as_encoded_bytes());
-        let _ = io::Write::write_all(&mut out, b"\n");
+        let _ = io::Write::write_all(&mut out, &crate::util::path_line(p, b'\n', tty));
     }
     0
 }
