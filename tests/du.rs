@@ -982,6 +982,75 @@ fn filter_from_reads_rsync_rules_where_the_first_match_wins() {
     assert_eq!(t.du(&["--filter-from=no-such-file"]).status.code(), Some(1));
 }
 
+/// dua #408: a Windows name may contain an unpaired surrogate, which NTFS
+/// keeps and no UTF-8 string can, and dua's --ignore-from panicked on one.
+/// du's filters match names as WTF-8 bytes and its regexes see the lossy
+/// path, so every kind takes such a name: the file counts when a filter
+/// misses it and drops out when one matches it.
+#[cfg(windows)]
+#[test]
+fn filters_take_a_name_with_an_unpaired_surrogate_on_windows() {
+    use std::os::windows::ffi::OsStringExt;
+    let t = Tree::new("surrogate");
+    t.file("d/keep.bin", 10_000);
+    let units: Vec<u16> = "lone"
+        .encode_utf16()
+        .chain([0xD800])
+        .chain(".bin".encode_utf16())
+        .collect();
+    let odd = t.root.join("d").join(std::ffi::OsString::from_wide(&units));
+    if let Err(e) = fs::write(&odd, vec![b'x'; 30_000]) {
+        common::skip(&format!("skipping: the volume refused the name: {e}"));
+        return;
+    }
+    // Whether the files list of a scan of d, the only PATH, has the odd
+    // name and keep.bin; rule files sit beside d.
+    let listed = |args: &[&str]| {
+        let mut a = vec!["--no-git"];
+        a.extend_from_slice(args);
+        a.push("d");
+        let j = t.json(&a);
+        let files = paths_in(&j, "files");
+        let odd = files.iter().any(|f| f.contains("lone"));
+        let keep = files.iter().any(|f| f.ends_with("keep.bin"));
+        (odd, keep)
+    };
+    let text = t.du(&["--no-git", "--files", "d"]);
+    let err = String::from_utf8_lossy(&text.stderr);
+    assert!(text.status.success(), "{err}");
+    assert!(
+        String::from_utf8_lossy(&text.stdout).contains("lone"),
+        "{err}"
+    );
+    assert_eq!(listed(&[]), (true, true));
+    // A rule file per kind, its pattern a miss and then a match. The
+    // repository makes --gitignore read the .gitignore beside d.
+    fs::create_dir_all(t.root.join(".git")).unwrap();
+    let files: [(&str, &str, &str); 3] = [
+        ("rules", "- ", "--filter-from=rules"),
+        ("patterns", "", "--exclude-from=patterns"),
+        (".gitignore", "", "--gitignore"),
+    ];
+    for (file, prefix, flag) in files {
+        for (pat, odd) in [("*.iso", true), ("lone*", false)] {
+            fs::write(t.root.join(file), format!("{prefix}{pat}\n")).unwrap();
+            assert_eq!(listed(&[flag]), (odd, true), "{flag} with {pat}");
+        }
+        fs::remove_file(t.root.join(file)).unwrap();
+    }
+    let flags: [(&str, (bool, bool)); 6] = [
+        ("--exclude=*.iso", (true, true)),
+        ("--exclude=lone*", (false, true)),
+        ("--exclude-regex=lone", (false, true)),
+        ("--include-regex=lone", (true, false)),
+        ("--type=bin", (true, true)),
+        ("--exclude-type=bin", (false, false)),
+    ];
+    for (flag, want) in flags {
+        assert_eq!(listed(&[flag]), want, "{flag}");
+    }
+}
+
 /// The tree of the rsync parity test, sorted.
 const RSYNC_TREE: &[&str] = &[
     "build/out.bin",
