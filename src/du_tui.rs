@@ -5237,6 +5237,26 @@ mod tests {
         let _ = fs::remove_dir_all(&t.0);
     }
 
+    /// ncdu #237 in the view itself: trashing the row under the cursor
+    /// takes it out, the rows below move up one place in the same order,
+    /// and the cursor stays at its index, now on the next row. Unix only:
+    /// the delete uses the pinned trash.
+    #[cfg(unix)]
+    #[test]
+    fn a_deleted_row_leaves_the_others_in_order_and_the_cursor_in_place() {
+        let t = tree("inplace");
+        fs::write(t.0.join("w/mid"), vec![3u8; 100_000]).unwrap();
+        let mut a = app(&t);
+        assert_eq!(names(&a), ["big", "mid", "file", "small"]);
+        a.select(1);
+        a.ask_delete();
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(!t.0.join("w/mid").exists());
+        assert_eq!(names(&a), ["big", "file", "small"]);
+        assert_eq!(a.list_state.selected(), Some(1));
+        let _ = fs::remove_dir_all(&t.0);
+    }
+
     #[test]
     fn a_row_back_from_the_stash_slots_in_without_moving_the_rest() {
         let row = |name: &str, disk: u64| Item {
