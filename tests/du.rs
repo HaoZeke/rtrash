@@ -2297,7 +2297,7 @@ fn totals_match_du_with_deep_links_and_unreadable_dirs() {
         return;
     }
     let t = Tree::new("parity");
-    // Deeper than the walker keeps directory descriptors open for.
+    // 80 levels: past 64, where the walk once stopped holding parents.
     let mut deep = String::from("deep");
     for i in 0..80 {
         deep.push_str(&format!("/d{i}"));
@@ -3423,6 +3423,80 @@ fn a_capped_address_space_walks_fewer_levels_instead_of_overflowing() {
     // A quarter of the cap gives each thread 64 MiB, a quarter of the full
     // stack, and so a quarter of the full 4096 levels.
     assert!(err.contains("1 directory past 1024 levels"), "{err}");
+    fs::remove_dir_all(&t.root).unwrap();
+}
+
+/// The walk holds parent directories open against a share of the soft
+/// RLIMIT_NOFILE. Under a limit of 48 a chain of 150 levels must still
+/// total in full, falling back to opens by path once the share is used
+/// up, never failing with "Too many open files".
+#[cfg(unix)]
+#[test]
+fn a_deep_chain_totals_in_full_under_a_low_open_file_limit() {
+    use std::os::unix::process::CommandExt;
+    let t = Tree::new("fd-budget");
+    let mut rel = String::from("chain");
+    let mut apparent = 0u64;
+    for i in 0..150 {
+        rel.push_str(&format!("/d{i:03}"));
+        t.file(&format!("{rel}/f.bin"), 100 + i);
+        apparent += 100 + i as u64;
+    }
+    let run = |limit: Option<libc::rlim_t>| {
+        let mut cmd = common::rtrash(&t.root);
+        cmd.args([
+            "du",
+            "--json",
+            "--no-git",
+            "-n",
+            "0",
+            "--threads",
+            "2",
+            "chain",
+        ])
+        .current_dir(&t.root)
+        .env("XDG_DATA_HOME", t.root.join(".xdg"))
+        .env("XDG_CONFIG_HOME", t.root.join(".cfg"));
+        if let Some(n) = limit {
+            // SAFETY: setrlimit is async-signal-safe and touches no memory
+            // of the parent, as a hook run between fork and exec must.
+            unsafe {
+                cmd.pre_exec(move || {
+                    let cap = libc::rlimit {
+                        rlim_cur: n,
+                        rlim_max: n,
+                    };
+                    if libc::setrlimit(libc::RLIMIT_NOFILE, &cap) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        let out = cmd.output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            out.status.success(),
+            "limit {limit:?}: {:?}: {err}",
+            out.status
+        );
+        assert!(!err.contains("cannot read"), "limit {limit:?}: {err}");
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let free = run(None);
+    assert_eq!(field(&free, "apparent"), apparent, "{free}");
+    assert_eq!(field(&free, "files"), 150, "{free}");
+    // 48 leaves no room to hold any parent; 160 holds some, then opens by path.
+    for limit in [48, 160] {
+        let j = run(Some(limit));
+        for key in ["disk", "apparent", "files", "dirs", "unreadable"] {
+            assert_eq!(
+                field(&j, key),
+                field(&free, key),
+                "limit {limit}, {key}: {j}"
+            );
+        }
+    }
     fs::remove_dir_all(&t.root).unwrap();
 }
 

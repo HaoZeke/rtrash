@@ -360,7 +360,8 @@ fn read_readdir(fd: RawFd, max: usize) -> (Entries, bool) {
 }
 
 /// Lift the soft limit on open files to the hard limit: the walk keeps a
-/// descriptor open for each directory on the path being read.
+/// descriptor open for each directory on the path being read, up to a
+/// share of this limit.
 pub fn raise_nofile_limit() {
     // SAFETY: getrlimit/setrlimit only read and write the struct.
     unsafe {
@@ -370,8 +371,17 @@ pub fn raise_nofile_limit() {
         }
         let mut r = r.assume_init();
         if r.rlim_cur < r.rlim_max {
+            let old = r.rlim_cur;
             r.rlim_cur = r.rlim_max;
-            libc::setrlimit(libc::RLIMIT_NOFILE, &r);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &r) != 0 {
+                // macOS refuses a soft limit past OPEN_MAX (10240), even
+                // with no hard limit; ask for that much instead.
+                let open_max: libc::rlim_t = 10240;
+                if open_max > old {
+                    r.rlim_cur = open_max.min(r.rlim_max);
+                    libc::setrlimit(libc::RLIMIT_NOFILE, &r);
+                }
+            }
         }
     }
 }

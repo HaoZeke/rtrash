@@ -8,7 +8,7 @@ use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rayon::prelude::*;
@@ -1075,6 +1075,8 @@ struct Ctx<'a> {
     decided: Option<&'a HashMap<(u64, u64), PathBuf>>,
     /// On a second walk, the files met at their path in `decided`.
     met: AtomicU64,
+    /// Directory descriptors held open as parents.
+    fds: FdBudget,
     /// Whether the scan reads anything below a PATH: rows, or file types
     /// by name. When it does not (`-s`, `-n 0`), a linked file may count
     /// at any of its paths, since a PATH's total is the same either way,
@@ -1272,11 +1274,96 @@ struct Node {
 /// At most this many repo roots are remembered per directory.
 const MAX_REPOS: usize = 64;
 
-/// Below this depth a directory stays open while its subdirectories are
-/// read, so they open relative to it. Deeper directories close first and
-/// their children open by full path, which bounds open descriptors,
-/// unless the path is too long for that ([`children_open_by_path`]).
-const FD_HOLD_DEPTH: usize = 64;
+/// Descriptors kept back from the parents the walk holds open
+/// ([`FdBudget`]): standard streams, the git probes, files read for
+/// `--unique`, and the directory each walk thread is reading.
+const FD_RESERVE: usize = 64;
+
+/// The most directory descriptors the walk holds open as parents.
+const FD_HOLD_MAX: usize = 1 << 16;
+
+/// Directories held open while their subdirectories are read, so those
+/// open relative to them, counted against a cap well under the soft
+/// `RLIMIT_NOFILE`. Once the cap is reached a directory closes before its
+/// children open, and they open by full path (each open then walks the
+/// path again), unless the path is too long for that
+/// ([`children_open_by_path`]). A fixed depth of 64 used to decide this:
+/// on a chain 1500 levels deep each open below it re-read every level.
+struct FdBudget {
+    held: AtomicUsize,
+    cap: usize,
+}
+
+impl FdBudget {
+    /// A budget of half the open files the soft limit leaves after
+    /// [`FD_RESERVE`] and four per walk thread, at most [`FD_HOLD_MAX`].
+    /// Windows opens every directory by path, so it holds none.
+    fn new(threads: usize) -> Self {
+        let cap = if cfg!(windows) {
+            0
+        } else {
+            let limit = open_files_cap().unwrap_or(usize::MAX);
+            (limit.saturating_sub(FD_RESERVE + 4 * threads) / 2).min(FD_HOLD_MAX)
+        };
+        FdBudget {
+            held: AtomicUsize::new(0),
+            cap,
+        }
+    }
+
+    /// One more directory held open, if the budget has room; it is given
+    /// back when the hold drops.
+    fn take(&self) -> Option<FdHold<'_>> {
+        let mut n = self.held.load(Ordering::Relaxed);
+        loop {
+            if n >= self.cap {
+                return None;
+            }
+            match self
+                .held
+                .compare_exchange_weak(n, n + 1, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return Some(FdHold(&self.held)),
+                Err(now) => n = now,
+            }
+        }
+    }
+
+    /// One more directory held open past the cap: one whose children's
+    /// paths are too long to open by. It still counts, so other holds
+    /// wait for it.
+    fn force(&self) -> FdHold<'_> {
+        self.held.fetch_add(1, Ordering::Relaxed);
+        FdHold(&self.held)
+    }
+}
+
+/// A directory descriptor counted in an [`FdBudget`].
+struct FdHold<'a>(&'a AtomicUsize);
+
+impl Drop for FdHold<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// The soft cap on this process's open files, if there is one.
+fn open_files_cap() -> Option<usize> {
+    #[cfg(unix)]
+    {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit only fills the struct handed to it.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0
+            && lim.rlim_cur != libc::RLIM_INFINITY
+        {
+            return usize::try_from(lim.rlim_cur).ok();
+        }
+    }
+    None
+}
 
 /// Whether the subdirectories of the directory at `path` can open by full
 /// path: theirs, one name longer, must stay under `PATH_MAX`.
@@ -1830,7 +1917,16 @@ fn walk_dir(
         }
     }
 
-    let parent = if depth < FD_HOLD_DEPTH || !children_open_by_path(path) {
+    // Held while the subdirectories are read, if the budget allows or
+    // their paths are too long to open by; the hold drops after `parent`.
+    let hold = if subdirs.is_empty() {
+        None
+    } else {
+        ctx.fds
+            .take()
+            .or_else(|| (!children_open_by_path(path)).then(|| ctx.fds.force()))
+    };
+    let parent = if hold.is_some() {
         Some(dir)
     } else {
         drop(dir);
@@ -1853,6 +1949,8 @@ fn walk_dir(
             )
         })
         .collect();
+    drop(parent);
+    drop(hold);
 
     let mut largest_child = 0u64;
     for child in children.into_iter().flatten() {
@@ -2110,6 +2208,7 @@ fn scan_pooled(
             decided,
             met: AtomicU64::new(0),
             rows: opts.top > 0 || opts.types,
+            fds: FdBudget::new(rayon::current_num_threads()),
             dirs_seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
             unread: Mutex::new(Vec::new()),
