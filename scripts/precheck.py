@@ -3353,6 +3353,21 @@ def check_manual_contains():
                               "with a name is clippy::manual_contains; use .contains(&name)")
 
 
+def check_du_df_audit():
+    """`scripts/du-df-audit.py --self-test` passes: its df parser, the
+    rule for which mounts -x walks, the expected rows and the bounds,
+    on canned macOS and Linux df output. Round 272b's macOS branch never
+    ran before CI, and a missing data volume row went unseen."""
+    script = ROOT / "scripts" / "du-df-audit.py"
+    if not script.exists():
+        return
+    r = subprocess.run([sys.executable, str(script), "--self-test"], cwd=ROOT,
+                       capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        why = (r.stdout + r.stderr).strip() or f"exit {r.returncode}"
+        errors.append(f"scripts/du-df-audit.py --self-test failed: {why}")
+
+
 def check_rustfmt():
     """`cargo fmt --check` when a toolchain is there; three rounds in a row
     (170-172) needed a format-only amend after CI."""
@@ -3378,7 +3393,7 @@ def main():
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers(); check_pair_refusals()
     check_long_lines(base); check_struct_field_drift(base); check_call_arity(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
-    check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains()
+    check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains(); check_du_df_audit()
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
     for w in warnings:
