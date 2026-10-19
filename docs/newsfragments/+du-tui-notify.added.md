@@ -1,0 +1,1 @@
+The `du -i` explorer rings the terminal bell when a scan or delete that took 10 seconds or more ends, so a user in another window or tmux pane learns of it, as dua #347 asks. `RTRASH_NOTIFY` or the config key `du.notify` picks `off`, `bell`, `osc9` or `osc777` (a desktop notification in the terminals that take one), and `du.notify_after` sets the seconds.

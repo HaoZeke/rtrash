@@ -106,6 +106,18 @@ const KEYS: &[(&str, &str, Kind, &str)] = &[
     ),
     ("du", "si", Kind::Bool, "sizes in powers of 1000 (--si)"),
     (
+        "du",
+        "notify",
+        Kind::Str,
+        "off, bell, osc9 or osc777: how -i says a long scan or delete ended (RTRASH_NOTIFY)",
+    ),
+    (
+        "du",
+        "notify_after",
+        Kind::Int,
+        "seconds a scan or delete in -i takes before it notifies (default 10)",
+    ),
+    (
         "list",
         "sort",
         Kind::Str,
@@ -554,6 +566,8 @@ pub fn template() -> String {
             ("du", "exclude", _) => "[\"*.iso\", \"/scratch/\"]".to_string(),
             ("du", "exclude_regex", _) => "[\"\\\\.tmp$\"]".to_string(),
             ("du", "git", _) => "true".to_string(),
+            ("du", "notify", _) => "\"bell\"".to_string(),
+            ("du", "notify_after", _) => "10".to_string(),
             ("list", "sort", _) => "\"date\"".to_string(),
             ("policy", "max_size", _) => "\"50G\"".to_string(),
             ("policy", "min_free", _) => "\"10G\"".to_string(),

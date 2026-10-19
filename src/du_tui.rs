@@ -346,6 +346,15 @@ struct App {
     print_on_exit: Vec<PathBuf>,
     /// Text `y` sends to the terminal clipboard on the next draw.
     clipboard: Option<String>,
+    /// How a long scan or delete says it ended (dua #347); off until
+    /// [`run`] reads the settings, so tests and snapshots stay quiet.
+    notify: Notify,
+    /// The bell or escape the next draw writes, from [`Notify::text`].
+    notice: Option<String>,
+    /// When the scans now running began, from an idle explorer.
+    scan_since: Option<std::time::Instant>,
+    /// When the delete now running began.
+    delete_since: Option<std::time::Instant>,
     /// The file name typed after `E`.
     export_to: String,
     /// What gets the terminal on the next turn of the loop (`b`, `v`).
@@ -1027,6 +1036,10 @@ impl App {
             log_bars: false,
             print_on_exit: Vec::new(),
             clipboard: None,
+            notify: Notify::OFF,
+            notice: None,
+            scan_since: None,
+            delete_since: None,
             export_to: String::new(),
             hand_off: None,
             opener: tui_term::opener(),
@@ -1110,6 +1123,9 @@ impl App {
         std::thread::spawn(move || {
             let _ = tx.send(scan_any(&d, &roots, &opts, git, sorting));
         });
+        if self.jobs.is_empty() {
+            self.scan_since = Some(std::time::Instant::now());
+        }
         self.jobs.insert(
             dir,
             Job {
@@ -1149,7 +1165,29 @@ impl App {
                 }
             }
         }
+        if any && self.jobs.is_empty() {
+            let since = self.scan_since.take();
+            self.ended(since, "scan done", false);
+        }
         any
+    }
+
+    /// Leave a [`Notify`] notice for the next draw when the work that
+    /// began at `since` took the threshold or longer, and the explorer is
+    /// not quitting. Its text is `what` and the time taken, then the
+    /// status line when `with_status` (a delete's outcome).
+    fn ended(&mut self, since: Option<std::time::Instant>, what: &str, with_status: bool) {
+        let Some(took) = since.map(|t| t.elapsed()) else {
+            return;
+        };
+        if self.quit || took < self.notify.after {
+            return;
+        }
+        let mut body = format!("{}: {what} in {}s", self.prog, took.as_secs());
+        if with_status {
+            body = format!("{body}; {}", self.status);
+        }
+        self.notice = self.notify.text(&body);
     }
 
     /// Put a finished scan of `dir` in place, keeping the cursor on the
@@ -1728,6 +1766,7 @@ impl App {
         self.away.clear();
         let (tx, rx) = mpsc::channel();
         let watch = Watch::default();
+        self.delete_since = Some(std::time::Instant::now());
         self.deleting = Some(Deleting {
             rx,
             watch: watch.clone(),
@@ -1794,6 +1833,8 @@ impl App {
         }
         if finished {
             self.finish_delete(d);
+            let since = self.delete_since.take();
+            self.ended(since, "trash done", true);
             return true;
         }
         // A new row done or a new chunk copied moves the status line;
@@ -2785,6 +2826,97 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// How the explorer says that a scan or delete of at least
+/// [`Notify::after`] has ended, so a user in another window learns of it
+/// (dua #347). A terminal turns the bell into an urgency hint or a tmux
+/// window flag; OSC 9 (iTerm2, Windows Terminal, WezTerm, ConEmu) and OSC
+/// 777 (foot, Ghostty, urxvt, WezTerm) raise a desktop notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ping {
+    Off,
+    Bell,
+    Osc9,
+    Osc777,
+}
+
+/// The notification settings: `RTRASH_NOTIFY` over `du.notify`, and
+/// `du.notify_after` seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Notify {
+    how: Ping,
+    after: Duration,
+}
+
+/// Seconds a scan or delete must take before it notifies, by default.
+const NOTIFY_AFTER: u64 = 10;
+
+/// The values `du.notify` and `RTRASH_NOTIFY` take.
+const NOTIFY_WANT: &str = "off, bell, osc9 or osc777";
+
+impl Notify {
+    const OFF: Notify = Notify {
+        how: Ping::Off,
+        after: Duration::ZERO,
+    };
+
+    /// What the terminal gets for a notice saying `body`: None when off.
+    /// The body is scrubbed, so a name in it cannot end the escape early.
+    fn text(&self, body: &str) -> Option<String> {
+        let body = crate::util::scrub(body);
+        match self.how {
+            Ping::Off => None,
+            Ping::Bell => Some("\x07".into()),
+            Ping::Osc9 => Some(format!("\x1b]9;{body}\x07")),
+            Ping::Osc777 => Some(format!("\x1b]777;notify;rtrash;{body}\x1b\\")),
+        }
+    }
+}
+
+/// The [`Ping`] named `s`, any case.
+fn ping_named(s: &str) -> Option<Ping> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "off" => Some(Ping::Off),
+        "bell" => Some(Ping::Bell),
+        "osc9" => Some(Ping::Osc9),
+        "osc777" => Some(Ping::Osc777),
+        _ => None,
+    }
+}
+
+/// The settings from `env` (`RTRASH_NOTIFY`; empty counts as unset) and
+/// `cfg`. A bad value adds a line to `warn` and keeps the default: the
+/// bell after [`NOTIFY_AFTER`] seconds.
+fn notify_from(env: Option<&str>, cfg: &crate::config::Config, warn: &mut Vec<String>) -> Notify {
+    let mut how = Ping::Bell;
+    if let Some(s) = cfg.str("du", "notify") {
+        match ping_named(s) {
+            Some(p) => how = p,
+            None => warn.push(cfg.bad_value("du", "notify", NOTIFY_WANT)),
+        }
+    }
+    if let Some(s) = env.filter(|s| !s.is_empty()) {
+        match ping_named(s) {
+            Some(p) => how = p,
+            None => warn.push(format!(
+                "ignoring RTRASH_NOTIFY='{}' (want {NOTIFY_WANT})",
+                crate::util::err_text(s)
+            )),
+        }
+    }
+    let after = match cfg.int("du", "notify_after").map(u64::try_from) {
+        None => NOTIFY_AFTER,
+        Some(Ok(n)) => n,
+        Some(Err(_)) => {
+            warn.push(cfg.bad_value("du", "notify_after", "seconds, 0 or more"));
+            NOTIFY_AFTER
+        }
+    };
+    Notify {
+        how,
+        after: Duration::from_secs(after),
+    }
+}
+
 /// The OSC 52 sequence that puts `text` on the system clipboard in
 /// terminals that allow it (xterm, kitty, iTerm2, WezTerm, Windows
 /// Terminal; tmux with set-clipboard on).
@@ -3302,6 +3434,11 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
             io::Write::write_all(&mut out, osc52(&text).as_bytes())?;
             io::Write::flush(&mut out)?;
         }
+        if let Some(text) = app.notice.take() {
+            let mut out = io::stdout();
+            io::Write::write_all(&mut out, text.as_bytes())?;
+            io::Write::flush(&mut out)?;
+        }
         match app.hand_off.take() {
             Some(HandOff::Shell(dir)) => {
                 let banner = format!(
@@ -3405,11 +3542,19 @@ pub fn run(
         Ok(r) => r,
         Err(code) => return code,
     };
+    // Settings warnings go out before the explorer takes the screen.
+    let mut warn = Vec::new();
+    let env = std::env::var("RTRASH_NOTIFY").ok();
+    let notify = notify_from(env.as_deref(), crate::config::get(), &mut warn);
+    for w in warn {
+        eprintln!("{prog}: warning: {w}");
+    }
     let mut app = match App::start(prog, seen, opts, git) {
         Ok(a) => App {
             read_only,
             allow_filtered,
             reap_dirs: reap_dirs(),
+            notify,
             ..a
         },
         Err(e) => {
@@ -5195,6 +5340,108 @@ mod tests {
         a.on_key(KeyCode::Char('r'), KeyModifiers::NONE);
         assert_eq!(a.view().disk, sum);
         assert_eq!(a.rows().len(), 2);
+    }
+
+    /// dua #347: RTRASH_NOTIFY wins over du.notify, du.notify_after sets
+    /// the threshold, and a bad value warns and keeps the default.
+    #[test]
+    fn notify_settings_come_from_the_env_then_the_config() {
+        use crate::config::Config;
+        let secs = |how, n| Notify {
+            how,
+            after: Duration::from_secs(n),
+        };
+        let none = Config::default();
+        let mut warn = Vec::new();
+        assert_eq!(notify_from(None, &none, &mut warn), secs(Ping::Bell, 10));
+        let cfg = Config::parse("[du]\nnotify = \"osc777\"\nnotify_after = 30\n", None);
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+        assert_eq!(notify_from(None, &cfg, &mut warn), secs(Ping::Osc777, 30));
+        assert_eq!(
+            notify_from(Some("OFF"), &cfg, &mut warn),
+            secs(Ping::Off, 30)
+        );
+        assert_eq!(notify_from(Some(""), &cfg, &mut warn).how, Ping::Osc777);
+        assert_eq!(notify_from(Some("osc9"), &none, &mut warn).how, Ping::Osc9);
+        assert!(warn.is_empty(), "{warn:?}");
+        let bad = Config::parse("[du]\nnotify = \"loud\"\nnotify_after = -1\n", None);
+        assert!(bad.warnings.is_empty(), "{:?}", bad.warnings);
+        assert_eq!(
+            notify_from(Some("chime"), &bad, &mut warn),
+            secs(Ping::Bell, 10)
+        );
+        assert_eq!(warn.len(), 3, "{warn:?}");
+        assert!(warn[0].contains("du.notify = 'loud'"), "{warn:?}");
+        assert!(warn[1].contains("RTRASH_NOTIFY='chime'"), "{warn:?}");
+        assert!(warn[2].contains("du.notify_after = '-1'"), "{warn:?}");
+    }
+
+    /// A notice is the bell, or an OSC whose body cannot end it early.
+    #[test]
+    fn notices_are_a_bell_or_an_osc_with_a_scrubbed_body() {
+        let n = |how| Notify {
+            how,
+            after: Duration::ZERO,
+        };
+        assert_eq!(n(Ping::Off).text("x"), None);
+        assert_eq!(n(Ping::Bell).text("x").as_deref(), Some("\x07"));
+        assert_eq!(
+            n(Ping::Osc9).text("a\x1b]0;t\x07b").as_deref(),
+            Some("\x1b]9;a?]0;t?b\x07")
+        );
+        assert_eq!(
+            n(Ping::Osc777).text("done").as_deref(),
+            Some("\x1b]777;notify;rtrash;done\x1b\\")
+        );
+    }
+
+    /// dua #347: a delete that took the threshold or longer leaves a
+    /// notice for the next draw, with its outcome; a shorter one none.
+    #[test]
+    fn a_long_delete_leaves_a_notice_and_a_short_one_none() {
+        let t = tree("notify-del");
+        let mut a = app(&t);
+        a.open(); // big
+        a.notify = Notify {
+            how: Ping::Osc777,
+            after: Duration::ZERO,
+        };
+        a.select(0);
+        a.ask_delete();
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        settle(&mut a);
+        let text = a.notice.take().expect("no notice");
+        assert!(
+            text.starts_with("\x1b]777;notify;rtrash;rtrash: trash done in "),
+            "{text:?}"
+        );
+        assert!(text.ends_with("\x1b\\"), "{text:?}");
+        assert_eq!(text.matches('\x1b').count(), 2, "{text:?}");
+        assert_eq!(a.delete_since, None);
+        a.on_key(KeyCode::Char('u'), KeyModifiers::NONE);
+        a.notify.after = Duration::from_secs(3600);
+        a.select(0);
+        a.ask_delete();
+        a.on_key(KeyCode::Char('y'), KeyModifiers::NONE);
+        settle(&mut a);
+        assert_eq!(a.notice, None);
+    }
+
+    /// dua #347: the last background scan to end leaves the notice, and
+    /// the explorer is idle again.
+    #[test]
+    fn the_end_of_the_background_scans_leaves_a_notice() {
+        let t = tree("notify-scan");
+        let roots = vec![t.0.join("w/big"), t.0.join("w/small")];
+        let mut a = App::start("rtrash", roots, ScanOpts::default(), false).unwrap();
+        assert!(a.scan_since.is_some());
+        a.notify = Notify {
+            how: Ping::Bell,
+            after: Duration::ZERO,
+        };
+        settle(&mut a);
+        assert_eq!(a.notice.as_deref(), Some("\x07"));
+        assert_eq!(a.scan_since, None);
     }
 
     #[test]

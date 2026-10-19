@@ -2662,6 +2662,23 @@ and
 .B fg
 brings the browser back.
 Windows has no job control, so Ctrl-Z does nothing there.
+A scan or delete that takes 10 seconds or more rings the terminal bell
+when it ends, so a user in another window or tmux pane learns of it
+(dua #347); a terminal shows the bell as an urgency hint or a window
+flag.
+.B du.notify
+or
+.B RTRASH_NOTIFY
+picks
+.BR off ,
+.BR bell ,
+.B osc9
+(a desktop notification in iTerm2, Windows Terminal, WezTerm and ConEmu)
+or
+.B osc777
+(foot, Ghostty, urxvt and WezTerm), and
+.B du.notify_after
+the seconds.
 .B v
 shows the cursor file in
 .B $PAGER
@@ -4074,6 +4091,8 @@ exclude_caches = false    # \-\-exclude\-caches
 gitignore = false         # \-\-gitignore
 no_delete = false         # \-\-no\-delete for every \-i
 si = false                # \-\-si
+notify = "bell"           # RTRASH_NOTIFY: off, bell, osc9 or osc777 for a long \-i scan or delete
+notify_after = 10         # seconds before \-i notifies (0 = always)
 
 [macos]
 trash = "finder"          # RTRASH_MACOS_TRASH: finder or freedesktop
@@ -4666,6 +4685,19 @@ It overrides
 .B policy.in_use
 and yields to
 .BR \-\-in\-use .
+.TP
+.B RTRASH_NOTIFY
+.BR off ", " bell ", " osc9 " or " osc777 :
+how the explorer
+.RB ( "du \-i" )
+says that a scan or delete of at least
+.B du.notify_after
+seconds (default 10) has ended.
+The default is
+.BR bell .
+It overrides
+.B du.notify
+in the config file; empty counts as unset.
 .TP
 .B RTRASH_OPENER
 The program, with its arguments split at spaces, that
