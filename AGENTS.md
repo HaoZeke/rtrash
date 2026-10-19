@@ -80,6 +80,7 @@ needs no build and finishes in under a second. CI runs the same script.
 | A commit subject is a plain sentence that starts with a capital, with no `type(scope):` prefix | precheck subject check under `--base`; the prek commit-msg hook (`precheck.py --commit-msg`) | round 209: `feat(du): ...` reworded before it reached main |
 | Files a patch changes pass codespell with the arguments of the pre-commit hook before a push | precheck codespell check under `--base` (codespell from PATH, or the hook's version through uvx) | round 233: the hook flagged a word in a test name on the cloud agent after every box check had passed |
 | macOS and Windows behaviour is proven on CI before main moves: push the round to a `round*` branch, wait for green, then fast-forward main | push triggers on `main` and `round*` in every workflow | 37 of 43 red mains failed off Linux |
+| Every key in `src/config.rs` `KEYS` is named in the README's `rtrash config` section and has a `key = ...` line under its table in the man page's config example | precheck config-docs check, with `CONFIG_DOC_CASES` | round 288: the README left out `[policy]` `min_free`, `warn_size` and `in_use`, `[macos]` and `[wsl]`, and the man example had no `[wsl]` table |
 
 Judgment calls no check can make:
 

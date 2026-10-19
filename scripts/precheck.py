@@ -3832,6 +3832,79 @@ def check_du_df_audit():
         errors.append(f"scripts/du-df-audit.py --self-test failed: {why}")
 
 
+# Every key src/config.rs reads is named in the README's `rtrash config`
+# section and has a `key = ...` line under its [section] in the man page's
+# config file example (round 288: the README skipped three [policy] keys,
+# [macos] and [wsl], and the man example had no [wsl] table).
+CONFIG_KEY = re.compile(r'\(\s*"([a-z_]+)",\s*"([a-z_]+)",\s*Kind::')
+CONFIG_DOC_CASES = [
+    ("named", [("du", "top")], "top = 30\n", "[du]\ntop = 20  # --top\n", []),
+    ("backticked", [("du", "si")], "The other keys are `si`.\n", "[du]\nsi = false\n", []),
+    ("missing in README", [("du", "si")], "nothing\n", "[du]\nsi = false\n",
+     ["README du.si"]),
+    ("word inside a word", [("du", "si")], "`size`\n", "[du]\nsi = false\n",
+     ["README du.si"]),
+    ("missing in man", [("wsl", "recycle")], "`recycle`\n", "[macos]\ntrash = 1\n",
+     ["man wsl.recycle"]),
+    ("man key under another table", [("wsl", "recycle")], "`recycle`\n",
+     "[du]\nrecycle = 1\n[wsl]\n", ["man wsl.recycle"]),
+]
+
+
+def config_doc_gaps(keys, readme, man):
+    """The (section, key) pairs of `keys` missing from the README config
+    text or from the man page's config example."""
+    tables = defaultdict(set)
+    table = None
+    for line in man.splitlines():
+        m = re.match(r"\[([a-z_.]+)\]\s*$", line)
+        if m:
+            table = m.group(1)
+            continue
+        m = re.match(r"([a-z_]+)\s*=", line)
+        if m and table:
+            tables[table].add(m.group(1))
+    gaps = []
+    for s, k in keys:
+        if not re.search(rf"`{k}`|^{k}\s*=", readme, re.M):
+            gaps.append(f"README {s}.{k}")
+        if k not in tables[s]:
+            gaps.append(f"man {s}.{k}")
+    return gaps
+
+
+def check_config_docs():
+    """Every config key is in the README config section and the man example,
+    and the matcher meets every CONFIG_DOC_CASES case."""
+    for what, keys, readme, man, want in CONFIG_DOC_CASES:
+        if config_doc_gaps(keys, readme, man) != want:
+            errors.append(f"scripts/precheck.py: config_doc_gaps gets CONFIG_DOC_CASES "
+                          f"'{what}' wrong; the config-docs check is broken")
+    src = (ROOT / "src/config.rs").read_text(encoding="utf-8")
+    at = src.find("const KEYS")
+    keys = CONFIG_KEY.findall(src[at:src.find("\n];", at)]) if at >= 0 else []
+    if not keys:
+        errors.append("src/config.rs: no KEYS table found; the config-docs check reads it")
+        return
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    m = re.search(r"^### `rtrash config`\n(.*?)(?=^### )", readme, re.M | re.S)
+    man = (ROOT / "man/rtrash.1").read_text(encoding="utf-8")
+    n = re.search(r"^\.SS config\n(.*?)^\.fi$", man, re.M | re.S)
+    if not m or not n:
+        errors.append("README.md or man/rtrash.1: no config section found; the "
+                      "config-docs check reads both")
+        return
+    for gap in config_doc_gaps(keys, m.group(1), n.group(1)):
+        where, key = gap.split(" ", 1)
+        table, name = key.split(".")
+        if where == "README":
+            errors.append(f"README.md: config key {key} (src/config.rs KEYS) is not named "
+                          f"in the `rtrash config` section; add `{name}` there")
+        else:
+            errors.append(f"man/rtrash.1: config key {key} (src/config.rs KEYS) is missing "
+                          f"from the config example; add a `{name} = ...` line under [{table}]")
+
+
 def check_rustfmt():
     """`cargo fmt --check` when a toolchain is there; three rounds in a row
     (170-172) needed a format-only amend after CI."""
@@ -3857,7 +3930,7 @@ def main():
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_cfg_dead(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers(); check_pair_refusals()
     check_long_lines(base); check_struct_field_drift(base); check_call_arity(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
-    check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains(); check_global_state(); check_skip_notes(); check_du_df_audit()
+    check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains(); check_global_state(); check_skip_notes(); check_du_df_audit(); check_config_docs()
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
     for w in warnings:

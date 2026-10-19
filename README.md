@@ -481,7 +481,7 @@ prune = "oldest"         # or largest (RTRASH_PRUNE wins)
 paths = ["/srv/data", "/home/*/keep"]   # put refuses these, like safe-rm entries
 ```
 
-The other `[du]` keys are `count`, `one_file_system`, `threads`, `git`, `exclude_regex`, `include_regex`, `exclude_caches`, `no_delete`, `si`, `notify` and `notify_after`, and `[list]` also takes `reverse`. Unknown keys and values of the wrong type earn a warning and are skipped, and the rest of the file still applies.
+The other `[du]` keys are `count`, `one_file_system`, `threads`, `git`, `exclude_regex`, `include_regex`, `exclude_caches`, `no_delete`, `si`, `notify` and `notify_after`, and `[list]` also takes `reverse`. `[policy]` also takes `min_free`, `warn_size` and `in_use` (as `RTRASH_MIN_FREE`, `RTRASH_WARN_SIZE` and `RTRASH_IN_USE`), `[macos]` takes `trash` (as `RTRASH_MACOS_TRASH`) and `[wsl]` takes `recycle` (as `RTRASH_WSL_RECYCLE`); `man rtrash` explains each one. Unknown keys and values of the wrong type earn a warning and are skipped, and the rest of the file still applies.
 
 ### `rtrash rm PATTERN...` (also `trash-rm`)
 
