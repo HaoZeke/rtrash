@@ -2885,6 +2885,65 @@ def check_disk_reads():
                           "as du does (35(a))")
 
 
+# 35(c): the listing stats differed from a stat by path four times (the
+# macOS bulk layout, Windows file id 0, the hidden Compact reparse point
+# and the hollow file), each found by a user. A fn in src/du_fs* outside
+# tests that hands the walk a listing stat (push_with_stat or restat) is
+# listed in LISTING_PARSERS by (file, module, fn), and du_fs.rs keeps
+# PARITY_TEST, which compares each such stat with lstat on every system.
+# LISTING_STAT_CASES tests the matcher.
+LISTING_STAT = re.compile(r"\.(?:push_with_stat|restat)\(")
+LISTING_PARSERS = {
+    ("src/du_fs.rs", "bulk", "parse"),
+    ("src/du_fs.rs", "fileid", "parse"),
+    ("src/du_fs/windows.rs", "", "entries_upto"),
+}
+PARITY_TEST = "fn the_walk_stat_of_each_entry_matches_a_stat_by_path()"
+LISTING_STAT_CASES = [
+    ("push", "            out.push_with_stat(name, kind, stat);", True),
+    ("restat", "        out.restat(|name| lstat(&self.path.join(os(name))).ok());", True),
+    ("define", "    fn push_with_stat(&mut self, name: &[u8], kind: Kind) {", False),
+    ("plain", "            out.push(name, kind);", False),
+]
+
+
+def enclosing_mod(lines, k):
+    """The name of the last top-level `mod x {` at or above line `k`."""
+    for j in range(k, -1, -1):
+        m = re.match(r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*\{", lines[j])
+        if m:
+            return m.group(1)
+    return ""
+
+
+def check_listing_parsers():
+    """Every listing parser that returns stats is named and tested."""
+    for what, line, want in LISTING_STAT_CASES:
+        if bool(LISTING_STAT.search(line)) != want:
+            errors.append(f"scripts/precheck.py: LISTING_STAT gets LISTING_STAT_CASES '{what}' "
+                          "wrong; the listing parser check is broken")
+    paths = [ROOT / "src/du_fs.rs", *sorted((ROOT / "src/du_fs").glob("*.rs"))]
+    for path in paths:
+        rel = path.relative_to(ROOT).as_posix()
+        raw = path.read_text(encoding="utf-8")
+        skip = test_mod_lines(raw.split("\n"))
+        lines = rust_code(raw).split("\n")
+        for k, line in enumerate(lines):
+            if k in skip or not LISTING_STAT.search(line):
+                continue
+            key = (rel, enclosing_mod(lines, k), enclosing_fn(lines, k))
+            if key not in LISTING_PARSERS:
+                errors.append(f"{rel}:{k + 1}: a listing that hands du a stat; add {key} to "
+                              "LISTING_PARSERS in scripts/precheck.py and make sure "
+                              "du_fs::tests::the_walk_stat_of_each_entry_matches_a_stat_by_path "
+                              "runs where it builds (35(c))")
+    lines = (ROOT / "src/du_fs.rs").read_text(encoding="utf-8").split("\n")
+    at = [k for k, line in enumerate(lines) if PARITY_TEST in line]
+    if not at or lines[at[0] - 1].strip() != "#[test]" or "#[cfg" in lines[at[0] - 2]:
+        errors.append("src/du_fs.rs: no test the_walk_stat_of_each_entry_matches_a_stat_by_path "
+                      "for every system; it compares each listing stat with lstat (35(c))")
+
+
 def enclosing_fn(lines, k):
     """The name of the last fn declared at or above 0-based line `k`."""
     for j in range(k, -1, -1):
@@ -3139,7 +3198,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers()
     check_long_lines(base); check_struct_field_drift(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress()
     if "--no-fmt" not in sys.argv:

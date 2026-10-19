@@ -1,0 +1,1 @@
+Each system now gets a unit test that builds one folder of plain, empty, sparse, hard-linked, linked and packed files. It checks each entry: the stat du takes must give the file type, length and disk use of a stat by path. A precheck rule names every directory listing that hands du a stat, so a new one cannot skip the test.

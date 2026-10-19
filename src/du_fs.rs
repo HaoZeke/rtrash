@@ -1160,4 +1160,132 @@ mod tests {
         assert_eq!(listed.sizes().1, st.sizes().1, "{listed:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// 35(c): the stat the walk takes for each entry, the listing's or else
+    /// one by name, matches a stat by path on file type, length and disk
+    /// use. Each system's listing parser is in precheck LISTING_PARSERS,
+    /// and this test covers them all: getdents on Linux, getattrlistbulk on
+    /// macOS, FileIdBothDirectoryInfo on Windows. The tree holds a plain
+    /// file, an empty one, a sparse one, two names of one file, a symlink
+    /// and a folder, plus packed files: compact /c and /exe on Windows and
+    /// an APFS clone on macOS. Every row is printed before the assert.
+    #[test]
+    fn the_walk_stat_of_each_entry_matches_a_stat_by_path() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("rtrash-dufs-{}-parity", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        // Text that packs well, so a packed file shows a smaller disk use.
+        let words = ["alpha ", "beta ", "gamma ", "delta ", "kappa ", "omega "];
+        let mut text = Vec::with_capacity(1 << 20);
+        let mut x = 0x2545_f491_u32;
+        while text.len() < 1 << 20 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            text.extend_from_slice(words[(x >> 16) as usize % words.len()].as_bytes());
+        }
+        fs::write(dir.join("plain.txt"), &text).unwrap();
+        fs::write(dir.join("empty"), b"").unwrap();
+        fs::hard_link(dir.join("plain.txt"), dir.join("again.txt")).unwrap();
+        let sparse = fs::File::create(dir.join("sparse.bin")).unwrap();
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Ioctl::FSCTL_SET_SPARSE;
+            crate::du_dupes::fsctl(&sparse, FSCTL_SET_SPARSE, &[], &mut []).unwrap();
+        }
+        sparse.set_len(8 << 20).unwrap();
+        drop(sparse);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("plain.txt", dir.join("link")).unwrap();
+        // A symlink needs a privilege on Windows; the test goes on without.
+        #[cfg(windows)]
+        let _ = std::os::windows::fs::symlink_file("plain.txt", dir.join("link"));
+        #[cfg(windows)]
+        for (name, args) in [
+            ("ntfs.txt", &["/c"][..]),
+            ("wof.txt", &["/c", "/exe:lzx"][..]),
+        ] {
+            let f = dir.join(name);
+            fs::write(&f, &text).unwrap();
+            let out = std::process::Command::new("compact")
+                .args(args)
+                .arg(&f)
+                .output();
+            eprintln!(
+                "parity: compact {args:?} {name}: {:?}",
+                out.map(|o| o.status)
+            );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let clone = std::process::Command::new("cp")
+                .arg("-c")
+                .arg(dir.join("plain.txt"))
+                .arg(dir.join("clone.txt"))
+                .status();
+            eprintln!("parity: cp -c clone.txt: {clone:?}");
+        }
+        let d = Dir::open(&dir).unwrap();
+        // On macOS read with getattrlistbulk itself, not whichever reader
+        // the timing heuristic picks.
+        #[cfg(target_os = "macos")]
+        let (e, failed) = {
+            use std::os::fd::AsRawFd;
+            let f = fs::File::open(&dir).unwrap();
+            bulk::read(f.as_raw_fd()).expect("getattrlistbulk read nothing from a temp folder")
+        };
+        #[cfg(not(target_os = "macos"))]
+        let (e, failed) = d.entries();
+        let mut listed = Vec::new();
+        let mut differ = Vec::new();
+        let mut from_listing = 0;
+        for i in 0..e.len() {
+            let (name, kind) = e.get(i);
+            let what = os(name).to_string_lossy().into_owned();
+            let by_path = lstat(&dir.join(os(name))).unwrap();
+            listed.push(what.clone());
+            if kind == Kind::Dir {
+                eprintln!("parity: {what}: listed as a folder, stat {by_path:?}");
+                if !by_path.is_dir() {
+                    differ.push(format!("{what}: listed as a folder"));
+                }
+                continue;
+            }
+            let walk = match e.stat(i) {
+                Some(s) => {
+                    from_listing += 1;
+                    s
+                }
+                None => d.stat_at(name).unwrap(),
+            };
+            eprintln!("parity: {what}: walk {walk:?}, by path {by_path:?}");
+            let fields = [
+                (
+                    "type",
+                    u64::from(walk.mode & S_IFMT),
+                    u64::from(by_path.mode & S_IFMT),
+                ),
+                ("size", walk.size, by_path.size),
+                ("disk", walk.sizes().1, by_path.sizes().1),
+            ];
+            for (field, w, p) in fields {
+                if w != p {
+                    differ.push(format!("{what}: {field} walk={w} by path={p}"));
+                }
+            }
+        }
+        listed.sort();
+        eprintln!("parity: listed {listed:?}, {from_listing} stats from the listing");
+        let _ = fs::remove_dir_all(&dir);
+        assert!(!failed);
+        assert_eq!(differ, Vec::<String>::new());
+        for want in ["again.txt", "empty", "plain.txt", "sparse.bin", "sub"] {
+            assert!(listed.iter().any(|n| n == want), "{want}");
+        }
+        // The listings of macOS and Windows carry stats; Linux has none.
+        if cfg!(any(target_os = "macos", windows)) {
+            assert!(from_listing >= 4, "{from_listing}");
+        }
+    }
 }
