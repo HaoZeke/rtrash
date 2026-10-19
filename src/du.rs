@@ -78,6 +78,10 @@ directories appear as one `trash` row and are never printed by --print0.
       --show-relative-size  add a SHARE column: each row's percent of its
                           PATH total (apparent size with --apparent, else
                           disk use); the JSON rows keep the byte counts
+      --ratio           add a RATIO column: disk use as a percent of the
+                          apparent size, below 100% where compression or
+                          holes save space; --json gives each row and
+                          root a ratio key, disk over apparent
       --bars            add a BAR column drawing that share in ten cells,
                           as dust's bars
       --graph-style=STYLE  draw the bars with hash (#, the default),
@@ -2802,18 +2806,18 @@ fn with_target(shown: String, target: Option<&Path>) -> String {
     }
 }
 
-/// [`item_json`] with `"target"` last when the row is a link; other rows
-/// keep their shape.
-fn item_json_with(it: &Item, target: Option<&Path>) -> String {
+/// [`item_json`] with `"ratio"` under `--ratio`, then `"target"` last
+/// when the row is a link; other rows keep their shape.
+fn item_json_with(it: &Item, target: Option<&Path>, ratio: bool) -> String {
     let j = item_json(it);
-    match target {
-        Some(t) => format!(
-            "{},\"target\":\"{}\"}}",
-            &j[..j.len() - 1],
-            json_escape(&t.to_string_lossy())
-        ),
-        None => j,
-    }
+    let target = target
+        .map(|t| format!(",\"target\":\"{}\"", json_escape(&t.to_string_lossy())))
+        .unwrap_or_default();
+    format!(
+        "{}{}{target}}}",
+        &j[..j.len() - 1],
+        ratio_key(ratio, it.disk, it.apparent)
+    )
 }
 
 /// Tags shown in the NOTE column.
@@ -2874,7 +2878,7 @@ fn trash_json(t: &TrashSummary) -> String {
 
 /// JSON form of a report (one object; arrays of roots, dirs and files).
 pub fn report_json(r: &Report, trash: &TrashSummary) -> String {
-    report_json_with(r, trash, Some(r.unreadable), None, None)
+    report_json_with(r, trash, Some(r.unreadable), None, None, false)
 }
 
 /// [`report_json`] with the unreadable count given, `null` when unknown
@@ -2885,6 +2889,7 @@ fn report_json_with(
     unreadable: Option<u64>,
     targets: Option<&Targets>,
     held: Option<&crate::holders::OpenDeleted>,
+    ratio: bool,
 ) -> String {
     let roots: Vec<String> = r
         .roots
@@ -2898,7 +2903,7 @@ fn report_json_with(
                     .map(|d| format!(",\"disk_all\":{d}"))
                     .unwrap_or_default(),
                 t.apparent,
-                unique_json(t.unique),
+                unique_json(t.unique) + &ratio_key(ratio, t.disk, t.apparent),
                 t.files,
                 t.links,
                 t.dirs,
@@ -2908,7 +2913,7 @@ fn report_json_with(
             )
         })
         .collect();
-    let row = |it: &Item| item_json_with(it, target_of(targets, it));
+    let row = |it: &Item| item_json_with(it, target_of(targets, it), ratio);
     let dirs: Vec<String> = r.dirs.iter().map(row).collect();
     let files: Vec<String> = r.files.iter().map(row).collect();
     let shared = r
@@ -3052,6 +3057,49 @@ struct Columns<'a> {
     unread: &'a Unread,
     /// `--show-symlink-target`: the rows that are links, and their targets.
     targets: Option<&'a Targets>,
+    /// `--ratio`: the RATIO column, disk use over apparent size.
+    ratio: bool,
+}
+
+/// Disk use over apparent size in thousandths, rounded; None for a row
+/// with no apparent size.
+fn ratio_milli(disk: u64, apparent: u64) -> Option<u64> {
+    if apparent == 0 {
+        return None;
+    }
+    let m = (u128::from(disk) * 1000 + u128::from(apparent) / 2) / u128::from(apparent);
+    Some(u64::try_from(m).unwrap_or(u64::MAX))
+}
+
+/// `38%`: the RATIO column, disk use as a percent of apparent size; `-`
+/// with no apparent size and `>999%` past that (a few bytes in a block).
+fn ratio_text(disk: u64, apparent: u64) -> String {
+    match ratio_milli(disk, apparent) {
+        None => "-".into(),
+        Some(m) if m >= 9_995 => ">999%".into(),
+        Some(m) => format!("{}%", (m + 5) / 10),
+    }
+}
+
+/// `,"ratio":0.381` under `--ratio` (null with no apparent size), else
+/// nothing, so other output keeps its shape.
+fn ratio_key(on: bool, disk: u64, apparent: u64) -> String {
+    if !on {
+        return String::new();
+    }
+    match ratio_milli(disk, apparent) {
+        Some(m) => format!(",\"ratio\":{}.{:03}", m / 1000, m % 1000),
+        None => ",\"ratio\":null".into(),
+    }
+}
+
+/// `, ratio 38%` for a Total line under `--ratio`, else nothing.
+fn ratio_note(on: bool, disk: u64, apparent: u64) -> String {
+    if on {
+        format!(", ratio {}", ratio_text(disk, apparent))
+    } else {
+        String::new()
+    }
 }
 
 /// `42.5%`: the part of the scan root that holds `it`, or `-` when no
@@ -3280,6 +3328,7 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
         reverse,
         unread,
         targets,
+        ratio,
     } = cols;
     if items.is_empty() {
         return;
@@ -3303,6 +3352,13 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
     let uniques = |v: &str| {
         if with_unique {
             format!("{v:>10}  ")
+        } else {
+            String::new()
+        }
+    };
+    let ratios = |v: &str| {
+        if ratio {
+            format!("{v:>6}  ")
         } else {
             String::new()
         }
@@ -3332,9 +3388,10 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
         }
     };
     println!(
-        "{:>10}  {:>10}  {}{}{}{}{:>when_width$}  {:<width$}  PATH",
+        "{:>10}  {:>10}  {}{}{}{}{}{:>when_width$}  {:<width$}  PATH",
         "DISK",
         "APPARENT",
+        ratios("RATIO"),
         bars_of("BAR"),
         shares("SHARE"),
         uniques("UNIQUE"),
@@ -3354,9 +3411,10 @@ fn print_table(title: &str, items: &[Item], now: i64, cols: Columns) {
         }
         let path = with_target(path, target_of(targets, it));
         println!(
-            "{:>10}  {:>10}  {}{}{}{}{:>when_width$}  {:<width$}  {}",
+            "{:>10}  {:>10}  {}{}{}{}{}{:>when_width$}  {:<width$}  {}",
             format_bytes(it.disk),
             format_bytes(it.apparent),
+            ratios(&ratio_text(it.disk, it.apparent)),
             bars_of(&bar(share.and_then(|(r, a)| root_part(it, r, a)), graph)),
             shares(&share.map_or(String::new(), |(r, a)| share_of(it, r, a))),
             uniques(&it.unique.map(format_bytes).unwrap_or_default()),
@@ -3781,6 +3839,22 @@ pub const MODE_CONFLICTS: &[(&str, &str, &[&str])] = &[
         &["-f", "-o", "--stacks", "--print0", "--pick", "-i"],
     ),
     (
+        "--ratio",
+        "adds a RATIO column to the table and a ratio key to the JSON",
+        &[
+            "--tree",
+            "--print0",
+            "--pick",
+            "-i",
+            "-o",
+            "--ncdu",
+            "--stacks",
+            "--dupes",
+            "--devices",
+            "--types",
+        ],
+    ),
+    (
         "-f",
         "reads a snapshot, which can be stale",
         &["--print0", "--pick"],
@@ -3857,6 +3931,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut show_mtime = false;
     let mut show_targets = false;
     let mut relative = false;
+    let mut ratio = false;
     let mut bars = false;
     let mut graph = GraphStyle::default();
     let mut tree: Option<usize> = None;
@@ -4087,6 +4162,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 "--show-mtime" => show_mtime = true,
                 "--show-symlink-target" => show_targets = true,
                 "--show-relative-size" => relative = true,
+                "--ratio" => ratio = true,
                 "--bars" => bars = true,
                 "--tree" => tree = Some(TREE_DEPTH),
                 "--no-unicode" => ascii = true,
@@ -4182,6 +4258,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         "--unique" => opts.unique,
         "--shared" => opts.shared_once,
         "--types" => opts.types,
+        "--ratio" => ratio,
         _ => false,
     };
     let ncdu_flag = if ncdu_binary {
@@ -4399,7 +4476,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         }
         let trash = TrashSummary::default();
         if json {
-            println!("{}", report_json_with(&report, &trash, known, None, None));
+            println!(
+                "{}",
+                report_json_with(&report, &trash, known, None, None, ratio)
+            );
         } else {
             print_table(
                 &format!("{} in {}", opts.sort.title("directories"), file.display()),
@@ -4415,14 +4495,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                     reverse,
                     unread: &report.unread,
                     targets: None,
+                    ratio,
                 },
             );
             for t in report.roots.iter().filter(|_| !skip_total) {
                 println!(
-                    "Total {}: {} on disk, {} apparent",
+                    "Total {}: {} on disk, {} apparent{}",
                     crate::util::term_path(&t.path),
                     format_bytes(t.disk),
-                    format_bytes(t.apparent)
+                    format_bytes(t.apparent),
+                    ratio_note(ratio, t.disk, t.apparent)
                 );
             }
         }
@@ -4598,7 +4680,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let targets = show_targets.then(|| link_targets(&report));
     if json {
         let unreadable = Some(report.unreadable);
-        let j = report_json_with(&report, &trash, unreadable, targets.as_ref(), held.as_ref());
+        let open = held.as_ref();
+        let j = report_json_with(&report, &trash, unreadable, targets.as_ref(), open, ratio);
         println!("{j}");
     } else if print0 {
         let mut out = io::stdout().lock();
@@ -4648,6 +4731,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 reverse,
                 unread: &report.unread,
                 targets: targets.as_ref(),
+                ratio,
             };
             print_table(&opts.sort.title("directories"), &report.dirs, now, cols);
             print_table(&opts.sort.title("files"), &report.files, now, cols);
@@ -4683,10 +4767,12 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 })
                 .unwrap_or_default();
             println!(
-                "Total {}{kind}: {} on disk{once}{unique}, {} apparent, {}{links}, {}, {}{excluded}",
+                "Total {}{kind}: {} on disk{once}{unique}, {} apparent{}, \
+                 {}{links}, {}, {}{excluded}",
                 crate::util::term_path(&t.path),
                 format_bytes(t.disk),
                 format_bytes(t.apparent),
+                ratio_note(ratio, t.disk, t.apparent),
                 plural(t.files, "file", "files"),
                 plural(t.dirs, "directory", "directories"),
                 plural(t.inodes(), "inode", "inodes")
@@ -4862,8 +4948,8 @@ mod tests {
         assert_eq!(with_target("own.bin".into(), None), "own.bin");
         let it = item("/w/link", 4096, 10);
         let plain = item_json(&it);
-        assert_eq!(item_json_with(&it, None), plain);
-        let j = item_json_with(&it, Some(Path::new("q\"t")));
+        assert_eq!(item_json_with(&it, None, false), plain);
+        let j = item_json_with(&it, Some(Path::new("q\"t")), false);
         assert!(j.starts_with(&plain[..plain.len() - 1]), "{j}");
         assert!(j.ends_with(",\"target\":\"q\\\"t\"}"), "{j}");
         let mut targets = Targets::new();
@@ -4916,7 +5002,7 @@ mod tests {
         let plain = tree_lines(&r, SortKey::Disk, 20, false, &TREE_ASCII, None);
         assert!(plain.iter().all(|l| !l.contains(" -> ")), "{plain:?}");
         let none = TrashSummary::default();
-        let j = report_json_with(&r, &none, Some(0), Some(&targets), None);
+        let j = report_json_with(&r, &none, Some(0), Some(&targets), None, false);
         assert_eq!(j.matches("\"target\":").count(), 2, "{j}");
         assert!(!report_json(&r, &none).contains("\"target\""));
         let _ = fs::remove_dir_all(&base);
@@ -5604,5 +5690,32 @@ mod tests {
             mode_conflict(&|flag: &str| flag == "--json", "--ncdu"),
             None
         );
+    }
+
+    /// 35(d), gdu #294 and #265: RATIO is disk use as a percent of
+    /// apparent size, rounded, and the JSON key is the same quotient to
+    /// three places. A row with no apparent size has none; plain output
+    /// keeps its shape.
+    #[test]
+    fn ratio_is_disk_use_over_apparent_size() {
+        assert_eq!(ratio_text(1, 2), "50%");
+        assert_eq!(ratio_text(1, 3), "33%");
+        assert_eq!(ratio_text(2, 3), "67%");
+        assert_eq!(ratio_text(4096, 4096), "100%");
+        assert_eq!(ratio_text(4096, 1000), "410%");
+        assert_eq!(ratio_text(4096, 10), ">999%");
+        assert_eq!(ratio_text(0, 0), "-");
+        assert_eq!(ratio_text(u64::MAX, u64::MAX), "100%");
+        assert_eq!(ratio_key(true, 1, 3), ",\"ratio\":0.333");
+        assert_eq!(ratio_key(true, 4096, 1000), ",\"ratio\":4.096");
+        assert_eq!(ratio_key(true, 0, 0), ",\"ratio\":null");
+        assert_eq!(ratio_key(false, 1, 3), "");
+        assert_eq!(ratio_note(true, 1, 2), ", ratio 50%");
+        assert_eq!(ratio_note(false, 1, 2), "");
+        let it = item("/w/packed", 4096, 16384);
+        let j = item_json_with(&it, None, true);
+        assert!(j.ends_with(",\"ratio\":0.250}"), "{j}");
+        let j = item_json_with(&it, Some(Path::new("t")), true);
+        assert!(j.ends_with(",\"ratio\":0.250,\"target\":\"t\"}"), "{j}");
     }
 }

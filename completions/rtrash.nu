@@ -225,6 +225,7 @@ export extern "rtrash du" [
     --no-unicode  # draw --tree with ASCII lines
     --dirs-first  # in --tree, list each folder's subfolders before its files
     --show-relative-size  # add a SHARE column: each row's percent of its
+    --ratio  # add a RATIO column: disk use as a percent of the
     --reverse  # print each table in reverse, the top row last
     --summarize(-s)  # print only the totals, no rows (GNU du -s, gdu)
     --skip-total  # print the rows without the Total lines (dust)

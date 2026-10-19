@@ -1,0 +1,1 @@
+`rtrash du --ratio` adds a `RATIO` column: the disk use of each row as a percent of its apparent size (gdu #294 and #265). A folder that compression or holes keep small shows below 100%, so Btrfs compression, Windows file compression and Compact show without compsize. Each Total line gives the ratio of its PATH, and `--json` gives each row and root a `ratio` key.

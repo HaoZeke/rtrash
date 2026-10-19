@@ -4832,7 +4832,81 @@ fn every_pair_in_the_conflict_table_is_refused() {
             pairs += 1;
         }
     }
-    assert!(pairs > 80, "{pairs}");
+    // Every pair of the table ran: the sum of the rows' lists.
+    let want: usize = rtrash::du::MODE_CONFLICTS
+        .iter()
+        .map(|&(_, _, others)| others.len())
+        .sum();
+    assert_eq!(pairs, want);
     assert!(!t.root.join("out.snap").exists());
     assert!(!t.root.join("out.json").exists());
+}
+
+/// 35(d), gdu #294 and #265: `--ratio` adds a RATIO column and a ratio to
+/// each Total line, and gives each JSON row and root a ratio key: its disk
+/// use over its apparent size, to three places. Without the flag the
+/// output keeps its shape.
+#[test]
+fn ratio_shows_disk_use_over_apparent_size() {
+    let t = Tree::new("ratio");
+    t.file("d/a.bin", 300_000);
+    t.file("d/b.bin", 10);
+    // Without --files the JSON lists folders in "dirs" as well as the
+    // files; --files would leave "dirs" empty.
+    let j = t.json(&["--no-git", "--ratio"]);
+    let mut rows = 0;
+    for obj in j.split("{\"path\":").skip(1) {
+        let (disk, apparent) = (field(obj, "disk"), field(obj, "apparent"));
+        let at = obj.find("\"ratio\":").expect(obj) + "\"ratio\":".len();
+        let got: String = obj[at..]
+            .chars()
+            .take_while(|c| *c != ',' && *c != '}')
+            .collect();
+        let want = match u128::from(apparent) {
+            0 => "null".to_string(),
+            a => {
+                let m = (u128::from(disk) * 1000 + a / 2) / a;
+                format!("{}.{:03}", m / 1000, m % 1000)
+            }
+        };
+        assert_eq!(got, want, "{obj}");
+        rows += 1;
+    }
+    // Every row emitted carries the key, and no key sits outside a row.
+    assert_eq!(j.matches("\"ratio\":").count(), rows, "{j}");
+    // The rows checked include the root, d and both files.
+    assert_eq!(paths_in(&j, "roots").len(), 1, "{j}");
+    assert!(paths_in(&j, "dirs").contains(&s(&t.root.join("d"))), "{j}");
+    let files = paths_in(&j, "files");
+    assert!(files.contains(&s(&t.root.join("d/a.bin"))), "{j}");
+    assert!(files.contains(&s(&t.root.join("d/b.bin"))), "{j}");
+    let out = t.du(&["--no-git", "--ratio", "--files"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("RATIO"), "{text}");
+    assert!(text.contains(", ratio "), "{text}");
+    let plain = String::from_utf8(t.du(&["--no-git", "--files"]).stdout).unwrap();
+    assert!(!plain.contains("RATIO"), "{plain}");
+    assert!(!plain.contains(", ratio "), "{plain}");
+    assert!(!t.json(&["--files"]).contains("\"ratio\":"));
+}
+
+/// 35(d): a sparse file shows a RATIO far below 100%, the case the column
+/// is for. Unix only: a file is not sparse on Windows until it is marked.
+#[cfg(unix)]
+#[test]
+fn ratio_of_a_sparse_file_is_far_below_one() {
+    let t = Tree::new("ratio-sparse");
+    let sparse = t.root.join("sparse.bin");
+    File::create(&sparse)
+        .unwrap()
+        .set_len(64 * 1024 * 1024)
+        .unwrap();
+    let j = t.json(&["--ratio", "--files"]);
+    let obj = j
+        .split("{\"path\":")
+        .find(|o| o.contains("sparse.bin"))
+        .expect(&j);
+    // 64 MiB long and a block or so on disk: below 0.010.
+    assert!(obj.contains("\"ratio\":0.00"), "{obj}");
 }

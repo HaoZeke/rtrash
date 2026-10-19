@@ -151,6 +151,7 @@ du_opts=(
   '(-C --count)'{-C,--count}'[add an ITEMS column]'
   '--show-mtime[show the modification time in place of AGE]'
   '--show-relative-size[add each row as a percent of its PATH total]'
+  '--ratio[add each row as disk use over apparent size]'
   '--bars[draw each row share as a bar]'
   '--graph-style=[characters the bars are drawn with]:style:(hash half-block eighth-block)'
   '--tree=-[print each PATH as a tree, DEPTH levels down]:depth:'

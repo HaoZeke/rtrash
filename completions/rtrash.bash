@@ -34,7 +34,7 @@ _rtrash_status_opts=(
 )
 
 _rtrash_du_opts=(
-  -n --top= -x --one-file-system --include-kernfs -L --follow-symlinks --show-symlink-target --apparent --sort= -C --count --show-mtime --show-relative-size --bars --graph-style= --tree --tree= --no-unicode --dirs-first --reverse -s --summarize --skip-total --strict --inodes --unique --shared --types --max-depth= --threads= --all-dirs
+  -n --top= -x --one-file-system --include-kernfs -L --follow-symlinks --show-symlink-target --apparent --sort= -C --count --show-mtime --show-relative-size --ratio --bars --graph-style= --tree --tree= --no-unicode --dirs-first --reverse -s --summarize --skip-total --strict --inodes --unique --shared --types --max-depth= --threads= --all-dirs
   --artefacts --exclude= -X --exclude-from= --files-from= --files0-from= --exclude-caches --type= --exclude-type= --collapse= --exclude-regex= --include-regex= --no-hidden --gitignore
   --dirs --files --older-than= --newer-than= --min-age= --max-age= --since= --until= --home-only --open-deleted
   --trash-dir= --no-git --include-dirty --allow-filtered --json --print0 --dupes --trash-dupes --link-dupes --clone-dupes --min-size= --pick -i --interactive --no-delete --si --no-prefix -o --output= --devices --ncdu= --ncdu-binary= -f --file= --stacks --help

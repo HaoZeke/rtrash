@@ -1686,6 +1686,20 @@ that holds it, by apparent size with
 .BR \-\-apparent ,
 else by disk use. The JSON rows keep the byte counts.
 .TP
+.B \-\-ratio
+Add a \fBRATIO\fR column: the disk use of each row as a percent of its
+apparent size, rounded. Below 100% the data takes less room than its
+length, as with Btrfs compression, Windows file compression and Compact,
+or holes in a sparse file. Above 100%, small files fill only part of
+their blocks. An empty row shows \-, and one past 999% shows >999%.
+Each Total line ends its sizes with the ratio of the
+.IR PATH .
+With
+.BR \-\-json ,
+each row and root gets a \fIratio\fR key, disk use over length to three
+places (null when the length is 0). Like compsize on Btrfs, the ratio
+comes from sizes the scan already has; no extent is read.
+.TP
 .BR \-s ", " \-\-summarize
 Print only the Total lines, no rows, as
 .B du \-s

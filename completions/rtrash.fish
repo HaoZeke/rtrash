@@ -128,6 +128,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l sort -d
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -s C -l count -d 'add an ITEMS column'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l show-mtime -d 'show the modification time in place of AGE'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l show-relative-size -d 'add each row as a percent of its PATH total'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l ratio -d 'add each row as disk use over apparent size'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l bars -d 'draw each row share as a bar'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l graph-style -x -a 'hash half-block eighth-block' -d 'characters the bars are drawn with'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q du' -l tree -d 'print each PATH as a tree, DEPTH levels down'
