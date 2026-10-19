@@ -1,0 +1,1 @@
+Tests that mount volumes, look at a real mount's top, put across devices without a pin or run a bare `rtrash empty` now hold one file lock, so they run one at a time under both `cargo test` and `cargo nextest`. A precheck rule makes each such test take it.

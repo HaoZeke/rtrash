@@ -143,6 +143,45 @@ impl Drop for Sandbox {
     }
 }
 
+/// Held by each test that reaches past its sandbox: one that mounts, one
+/// that makes or removes a volume trash on a real file system, and one
+/// that runs a bare `empty`, which reaches every volume trash. Without it
+/// a bare `empty` in one test could clear the volume trash of a mount
+/// another test just made. It is an exclusive `flock` on one file under
+/// `CARGO_TARGET_TMPDIR`. Each call opens its own descriptor, so the lock
+/// serializes these tests across the threads of `cargo test` as well as
+/// across the processes of `cargo nextest`. Dropping the guard, a panic
+/// that unwinds past it, or the death of the process lets go of it.
+struct GlobalState(fs::File);
+
+impl Drop for GlobalState {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: an open descriptor this guard owns.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// Wait for, then take, the lock on state outside the sandboxes; see
+/// [`GlobalState`]. Take it before the sandbox, so it goes last.
+fn global_state() -> GlobalState {
+    use std::os::unix::io::AsRawFd;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    fs::create_dir_all(dir).unwrap();
+    let path = dir.join("rtrash-global-state.lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    // SAFETY: an open descriptor; flock blocks until no other holds it.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    assert_eq!(rc, 0, "flock {}", path.display());
+    GlobalState(file)
+}
+
 fn stderr_of(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
@@ -1526,6 +1565,7 @@ fn put_writes_complete_trashinfo_after_fsync_path() {
 #[test]
 fn empty_without_pin_clears_home_trash() {
     // trash-cli parity: default empty visits home trash (no --trash-dir).
+    let _global = global_state();
     let sb = Sandbox::new("empty-default-home");
     sb.touch("home-only.txt");
     assert!(sb.run(&["put", "home-only.txt"]).status.success());
@@ -4546,6 +4586,7 @@ fn a_trash_seen_through_two_bind_mounts_counts_once() {
         eprintln!("sudo unavailable; skipping");
         return;
     }
+    let _global = global_state();
     let sb = Sandbox::new("bind-twice");
     let vol = sb.root.join("vol");
     let trash = vol.join(format!(".Trash-{}", unsafe { libc::getuid() }));
@@ -4603,6 +4644,7 @@ fn put_and_empty_follow_volumes_mounted_inside_volumes() {
         eprintln!("sudo unavailable; skipping");
         return;
     }
+    let _global = global_state();
     let sb = Sandbox::new("nested-mounts");
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let vol = sb.root.join("vol");
@@ -4739,6 +4781,7 @@ fn mount_top(path: &Path) -> PathBuf {
 #[test]
 fn a_home_trash_on_another_device_takes_files_its_volume_cannot() {
     use std::os::unix::ffi::OsStrExt;
+    let _global = global_state();
     let sb = Sandbox::new("xdg-other-device");
     let Some(xdg) = other_device_dir(&sb.root, "xdg") else {
         eprintln!("no second file system here; skipping");
@@ -4818,6 +4861,7 @@ fn a_symlinked_home_trash_works_through_the_link() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_home_trash_linked_to_another_device_takes_files_from_there() {
+    let _global = global_state();
     let sb = Sandbox::new("trash-link-device");
     let Some(real) = other_device_dir(&sb.root, "linked-trash") else {
         eprintln!("no second file system here; skipping");

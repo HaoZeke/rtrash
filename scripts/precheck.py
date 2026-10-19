@@ -3353,6 +3353,73 @@ def check_manual_contains():
                               "with a name is clippy::manual_contains; use .contains(&name)")
 
 
+# A test that reaches past its sandbox takes tests/cli.rs global_state()
+# first, so a bare `empty` in one test cannot clear the volume trash of a
+# mount another test just made (round 277). Past the sandbox means: a
+# mount (`Binds(`, a "mount" argument), a look at a real mount's top
+# (`mount_top(`), a bare `["empty"]`, or a put across devices that pins
+# no trash folder (`other_device_dir(` and no pin string in the test). Only #[test] fns are checked; the helpers are not tests.
+# The windows_* and wsl_* files are left out: windows_* reach only the
+# scratch Recycle Bin of RTRASH_TEST_BIN_DIR, and wsl_* run `rtrash wsl`
+# on a made-up drive tree, never a volume trash.
+GLOBAL_STATE_NEEDS = [
+    ("a mount", re.compile(r'Binds\(|"mount"')),
+    ("a real mount's top", re.compile(r"\bmount_top\(")),
+    ("a bare empty", re.compile(r'\[\s*"empty"\s*\]')),
+]
+GLOBAL_STATE_CASES = [
+    ("bare empty", '#[test]\nfn t() {\n    sb.run(&["empty"]);\n}\n', ["t"]),
+    ("held", '#[test]\nfn t() {\n    let _global = global_state();\n'
+     '    sb.run(&["empty"]);\n}\n', []),
+    ("pinned empty", '#[test]\nfn t() {\n    sb.run(&["empty", &pin]);\n}\n', []),
+    ("mount", '#[test]\nfn t() {\n    as_root(&["mount", "-t", "tmpfs"]);\n}\n', ["t"]),
+    ("binds", '#[cfg(target_os = "linux")]\n#[test]\nfn t() {\n'
+     '    let b = Binds(Vec::new());\n}\n', ["t"]),
+    ("xdev unpinned", '#[test]\nfn t() {\n    let o = other_device_dir(&r, "x");\n}\n', ["t"]),
+    ("xdev pinned", '#[test]\nfn t() {\n    let o = other_device_dir(&r, "x");\n'
+     '    let pin = format!("--trash-dir={}", o.display());\n}\n', []),
+    ("mount top", '#[test]\nfn t() {\n    let top = mount_top(&f);\n}\n', ["t"]),
+    ("helper", 'fn as_root(a: &[&str]) {\n    Command::new("mount");\n}\n', []),
+    ("comment", '#[test]\nfn t() {\n    // sb.run(&["empty"]);\n}\n', []),
+]
+
+
+def global_state_misses(text):
+    """Names of the #[test] fns in `text` that reach past their sandbox
+    without taking global_state()."""
+    code = rust_code(text, strings=True)
+    misses = []
+    for m in re.finditer(r"(?m)^((?:#\[[^\n]*\]\n)*)fn\s+(\w+)", code):
+        if "#[test]" not in m.group(1):
+            continue
+        end = code.find("\n}\n", m.end())
+        body = code[m.end():end if end >= 0 else len(code)]
+        needs = [what for what, rx in GLOBAL_STATE_NEEDS if rx.search(body)]
+        if "other_device_dir(" in body and "--trash-dir=" not in body:
+            needs.append("an unpinned put across devices")
+        if needs and "global_state()" not in body:
+            misses.append(m.group(2))
+    return misses
+
+
+def check_global_state():
+    """Every test that mounts, looks at a real mount's top, puts across
+    devices unpinned or runs a bare `empty` takes global_state(), and the
+    matcher meets every GLOBAL_STATE_CASES case."""
+    for what, text, want in GLOBAL_STATE_CASES:
+        if global_state_misses(text) != want:
+            errors.append(f"scripts/precheck.py: global_state_misses gets GLOBAL_STATE_CASES "
+                          f"'{what}' wrong; the global-state check is broken")
+    for path in sorted((ROOT / "tests").glob("*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        if path.name.startswith(("windows_", "wsl_")):
+            continue
+        for name in global_state_misses(path.read_text(encoding="utf-8")):
+            errors.append(f"{rel}: test {name} reaches past its sandbox (a mount, a real "
+                          "mount's top, an unpinned put across devices or a bare empty) "
+                          "without `let _global = global_state();`; tests run in parallel")
+
+
 def check_du_df_audit():
     """`scripts/du-df-audit.py --self-test` passes: its df parser, the
     rule for which mounts -x walks, the expected rows and the bounds,
@@ -3393,7 +3460,7 @@ def main():
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
     check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers(); check_pair_refusals()
     check_long_lines(base); check_struct_field_drift(base); check_call_arity(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
-    check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains(); check_du_df_audit()
+    check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains(); check_global_state(); check_du_df_audit()
     if "--no-fmt" not in sys.argv:
         check_rustfmt()
     for w in warnings:
