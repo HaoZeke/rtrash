@@ -1,0 +1,1 @@
+`rtrash du` stats a directory of many entries in a few jobs per thread rather than in jobs of 64 entries. It counts the linked files of each job in one batch, so a directory full of hard links takes each lock once a job rather than once a file.

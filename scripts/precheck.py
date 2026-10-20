@@ -2983,7 +2983,8 @@ LINK_CREDIT_OK = {
     ("src/du.rs", "counts_here"), ("src/du.rs", "first_link"),
     ("src/du.rs", "counts_at_path"),  # Ctx::counts_at_path, behind counts_here
     ("src/du.rs", "insert"),  # LinkSet::insert, behind first_link
-    ("src/du.rs", "see"),  # LinkClaims::see, the scan's claims
+    ("src/du.rs", "first_links"),  # LinkSet::first_links, behind counts_here_all
+    ("src/du.rs", "see_in"),  # LinkClaims::see and see_all, the scan's claims
     ("src/du_dupes.rs", "one_per_inode"),  # groups names; no sizes
     ("src/du_ncdu_bin.rs", "leaf"),  # ncdu's own per-directory sizes
 }

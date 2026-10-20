@@ -318,6 +318,52 @@ fn totals_only_scans_count_each_linked_file_once() {
 }
 
 #[test]
+fn a_huge_directory_of_links_counts_each_file_once_on_any_thread_count() {
+    // A directory of more than 256 entries is stat-ed in parallel jobs
+    // sized by the thread count, and the linked files of a job count in
+    // one batch. The totals and the rows must not depend on the split.
+    if cfg!(windows) {
+        return;
+    }
+    let t = Tree::new("hugelinks");
+    let n = 1500usize;
+    let mut total = 0u64;
+    for k in 0..n {
+        let f = t.file(&format!("huge/b{k:04}"), k + 1);
+        fs::hard_link(&f, t.root.join(format!("huge/a{k:04}"))).unwrap();
+        if k % 3 == 0 {
+            fs::create_dir_all(t.root.join("side")).unwrap();
+            fs::hard_link(&f, t.root.join(format!("side/c{k:04}"))).unwrap();
+        }
+        total += k as u64 + 1;
+    }
+    // Every file has a second name in huge/, every third a third in side/.
+    let links = (n + n / 3) as u64;
+    for threads in ["1", "3", "8"] {
+        let sum = t.json(&["--no-git", "-s", "--apparent", "--threads", threads]);
+        assert_eq!(field(&sum, "apparent"), total, "{threads} threads: {sum}");
+        assert_eq!(field(&sum, "links"), links, "{threads} threads: {sum}");
+        let args = [
+            "--no-git",
+            "--files",
+            "-n",
+            "5",
+            "--apparent",
+            "--threads",
+            threads,
+        ];
+        let list = t.json(&args);
+        assert_eq!(field(&list, "apparent"), total, "{threads} threads: {list}");
+        assert_eq!(field(&list, "links"), links, "{threads} threads: {list}");
+        // "huge/a.." sorts first of each file's names, so it counts there.
+        for k in n - 5..n {
+            let at = s(&t.root.join(format!("huge/a{k:04}")));
+            assert_eq!(field(row(&list, &at), "apparent"), k as u64 + 1, "{list}");
+        }
+    }
+}
+
+#[test]
 fn linked_files_list_at_their_smallest_path_with_their_own_sizes() {
     // A second walk takes each linked file's stat from the first one,
     // found by the inode number the listing gives (Linux). Every file

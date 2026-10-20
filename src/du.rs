@@ -948,6 +948,35 @@ impl LinkSet {
             .unwrap_or_else(|e| e.into_inner())
             .insert((dev, ino))
     }
+
+    /// [`LinkSet::first_link`] for each of `sts`, files of several links
+    /// that have a file ID: each shard is locked once for the lot rather
+    /// than once a file, so workers in one huge directory of links do not
+    /// queue on the shard locks.
+    fn first_links(&self, sts: &[du_fs::Stat]) -> Vec<bool> {
+        let mut first = vec![false; sts.len()];
+        for run in shard_runs(sts).chunk_by(|a, b| a.0 == b.0) {
+            let mut set = self.shards[run[0].0]
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for &(_, k) in run {
+                first[k] = set.insert((sts[k].dev, sts[k].ino));
+            }
+        }
+        first
+    }
+}
+
+/// `(shard, k)` for each file `sts[k]`, by shard: the runs of one shard
+/// for a batch of [`LinkSet::first_links`] or [`LinkClaims::see_all`].
+fn shard_runs(sts: &[du_fs::Stat]) -> Vec<(usize, usize)> {
+    let mut order: Vec<(usize, usize)> = sts
+        .iter()
+        .enumerate()
+        .map(|(k, st)| (LinkSet::shard(st.dev, st.ino), k))
+        .collect();
+    order.sort_unstable();
+    order
 }
 
 /// Whether a hard-linked file met at paths `a` and `b` counts at `a`
@@ -1052,6 +1081,24 @@ impl LinkClaims {
         let mut map = self.shards[LinkSet::shard(st.dev, st.ino)]
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        Self::see_in(&mut map, st, at, counted);
+    }
+
+    /// [`LinkClaims::see`] for each of `sts`, met at `at(k)`, with
+    /// `counted[k]`: each shard is locked once for the lot.
+    fn see_all(&self, sts: &[du_fs::Stat], at: impl Fn(usize) -> PathBuf, counted: &[bool]) {
+        for run in shard_runs(sts).chunk_by(|a, b| a.0 == b.0) {
+            let mut map = self.shards[run[0].0]
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for &(_, k) in run {
+                Self::see_in(&mut map, &sts[k], at(k), counted[k]);
+            }
+        }
+    }
+
+    /// [`LinkClaims::see`] in the locked shard `map` of file `st`.
+    fn see_in(map: &mut HashMap<(u64, u64), Claim>, st: &du_fs::Stat, at: PathBuf, counted: bool) {
         match map.entry((st.dev, st.ino)) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(Claim {
@@ -1107,6 +1154,8 @@ struct Ctx<'a> {
     met: AtomicU64,
     /// Directory descriptors held open as parents.
     fds: FdBudget,
+    /// Workers in the pool, to size the stat jobs of a wide directory.
+    threads: usize,
     /// A second walk may take a linked file's stat by the inode number
     /// its listing gives ([`listed_inodes_usable`]).
     ino_reuse: bool,
@@ -1244,7 +1293,7 @@ impl Ctx<'_> {
     /// in [`Ctx::claims`]. A file whose link count is unknown (0) counts at
     /// its first sighting, and so does every file when nothing below a
     /// PATH is read ([`Ctx::rows`]). Every count of a file in the walk goes
-    /// through here (precheck check_link_credit).
+    /// through here or [`Ctx::counts_here_all`] (precheck check_link_credit).
     fn counts_here(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         // -L: a file reached through links counts once, at its first
         // sighting; any file may be reached twice, and a path for each
@@ -1287,6 +1336,26 @@ impl Ctx<'_> {
         // Only the first walk keeps claims, so only it needs the path.
         if self.decided.is_none() {
             self.claims.see(st, dir.join(du_fs::os(name)), first);
+        }
+        first
+    }
+
+    /// Whether `st`'s count may wait for [`Ctx::counts_here_all`] with
+    /// the other linked files of its stat job: a file of several links
+    /// and a file ID, on a walk that neither follows links nor has
+    /// [`Ctx::decided`] paths.
+    fn defers(&self, st: &du_fs::Stat) -> bool {
+        !self.opts.follow && self.decided.is_none() && st.nlink > 1 && st.ino != 0
+    }
+
+    /// [`Ctx::counts_here`] for files `sts` that all [`Ctx::defers`], met
+    /// at `at(k)`, with each lock taken once for the lot. The claims do
+    /// not depend on the order of the sightings, so a batch counts as the
+    /// files one by one would.
+    fn counts_here_all(&self, sts: &[du_fs::Stat], at: impl Fn(usize) -> PathBuf) -> Vec<bool> {
+        let first = self.seen.first_links(sts);
+        if self.rows {
+            self.claims.see_all(sts, at, &first);
         }
         first
     }
@@ -1637,8 +1706,19 @@ const BTRFS_SUBVOL_INO: u64 = 256;
 
 /// Directories with more entries than this stat them in parallel.
 const WIDE_DIR: usize = 256;
-/// Entries per parallel stat job in a wide directory.
+/// The fewest entries in a parallel stat job of a wide directory.
 const WIDE_CHUNK: usize = 64;
+/// Stat jobs a worker gets in a wide directory: some to spare, so a worker
+/// left idle can take part of the rest.
+const WIDE_JOBS_PER_THREAD: usize = 4;
+
+/// Entries per stat job in a wide directory of `n` entries on `threads`
+/// workers. Jobs of a fixed 64 entries made 3,125 of them for 200,000
+/// entries, and the workers spent their time handing them round.
+fn wide_chunk(n: usize, threads: usize) -> usize {
+    n.div_ceil(threads.max(1) * WIDE_JOBS_PER_THREAD)
+        .max(WIDE_CHUNK)
+}
 
 /// What the stats of some entries of one directory add up to.
 struct Stats {
@@ -1657,6 +1737,8 @@ struct Stats {
     candidates: Vec<FileCandidate>,
     /// Entries the filters left out.
     filtered_out: u64,
+    /// `--types`: these entries' sizes by file type.
+    types: TypeMap,
 }
 
 /// `--shared`: add a file of `raw` allocated bytes with `shared`
@@ -1709,7 +1791,11 @@ fn stat_entries<const REUSE: bool>(
         subdirs: Vec::new(),
         candidates: Vec::new(),
         filtered_out: 0,
+        types: TypeMap::new(),
     };
+    // Linked files whose counts wait for one batch ([`Ctx::defers`]).
+    let mut pending: (Vec<usize>, Vec<du_fs::Stat>) = (Vec::new(), Vec::new());
+    let mut links = 0u64;
     let filter = ctx.filter.as_ref();
     let excluded = |name: &CStr, is_dir: bool| {
         let out = filter.is_some_and(|f| f.excluded(chain, path, name.to_bytes(), is_dir));
@@ -1718,7 +1804,6 @@ fn stat_entries<const REUSE: bool>(
         }
         out
     };
-    let mut types = TypeMap::new();
     for i in range {
         let (name, kind) = entries.get(i);
         if filter.is_some()
@@ -1772,20 +1857,66 @@ fn stat_entries<const REUSE: bool>(
             out.subdirs.push((i, Some(m)));
             continue;
         }
-        let first = ctx.counts_here(&m, path, name);
-        if !first {
-            ctx.links.fetch_add(1, Ordering::Relaxed);
+        if ctx.defers(&m) {
+            pending.0.push(i);
+            pending.1.push(m);
             continue;
         }
-        ctx.files.fetch_add(1, Ordering::Relaxed);
-        out.files += 1;
+        if ctx.counts_here(&m, path, name) {
+            out.add_file(ctx, dir, (i, name), &m, (depth, list_files));
+        } else {
+            links += 1;
+        }
+    }
+    if !pending.1.is_empty() {
+        let (idx, sts) = &pending;
+        let name = |k: usize| entries.get(idx[k]).0;
+        let first = ctx.counts_here_all(sts, |k| path.join(du_fs::os(name(k))));
+        for (k, first) in first.into_iter().enumerate() {
+            if first {
+                out.add_file(ctx, dir, (idx[k], name(k)), &sts[k], (depth, list_files));
+            } else {
+                links += 1;
+            }
+        }
+    }
+    // Once a job, not once a file: every worker adds to these.
+    ctx.links.fetch_add(links, Ordering::Relaxed);
+    ctx.files.fetch_add(out.files, Ordering::Relaxed);
+    if let Some(c) = &opts.control {
+        c.files.fetch_add(out.files, Ordering::Relaxed);
+        c.disk.fetch_add(out.disk, Ordering::Relaxed);
+    }
+    if !out.types.is_empty() {
+        merge_types(
+            &mut ctx.types.lock().unwrap_or_else(|e| e.into_inner()),
+            std::mem::take(&mut out.types),
+        );
+    }
+    out
+}
+
+impl Stats {
+    /// Add file `m`, entry `i` named `name` of `dir`, which counts here:
+    /// its sizes, its type and, if it is big enough, a place among the
+    /// candidates for the list.
+    fn add_file(
+        &mut self,
+        ctx: &Ctx<'_>,
+        dir: &du_fs::Dir,
+        (i, name): (usize, &CStr),
+        m: &du_fs::Stat,
+        (depth, list_files): (usize, bool),
+    ) {
+        let opts = ctx.opts;
+        self.files += 1;
         let (a, raw) = m.sizes();
-        out.apparent = out.apparent.saturating_add(a);
-        out.disk = out.disk.saturating_add(raw);
+        self.apparent = self.apparent.saturating_add(a);
+        self.disk = self.disk.saturating_add(raw);
         let (u, d) = if opts.unique || opts.shared_once {
-            let s = ctx.share_of(dir, name, &m, raw);
+            let s = ctx.share_of(dir, name, m, raw);
             let d = if opts.shared_once {
-                count_once(m.dev, raw, &s.shared, &mut out.base, &mut out.ranges)
+                count_once(m.dev, raw, &s.shared, &mut self.base, &mut self.ranges)
             } else {
                 raw
             };
@@ -1793,10 +1924,10 @@ fn stat_entries<const REUSE: bool>(
         } else {
             (0, raw)
         };
-        out.unique = out.unique.saturating_add(u);
-        out.mtime = out.mtime.max(m.mtime);
+        self.unique = self.unique.saturating_add(u);
+        self.mtime = self.mtime.max(m.mtime);
         if opts.types {
-            add_type(&mut types, name.to_bytes(), a, d);
+            add_type(&mut self.types, name.to_bytes(), a, d);
         }
         let link = opts.list_links && m.is_symlink();
         if list_files
@@ -1804,7 +1935,7 @@ fn stat_entries<const REUSE: bool>(
             && ctx.top_files.wants(ctx.key(a, d, 1, m.mtime))
             && ctx.listable(depth + 1, m.mtime)
         {
-            out.candidates.push(FileCandidate {
+            self.candidates.push(FileCandidate {
                 entry: i,
                 apparent: a,
                 disk: d,
@@ -1814,17 +1945,6 @@ fn stat_entries<const REUSE: bool>(
             });
         }
     }
-    if let Some(c) = &opts.control {
-        c.files.fetch_add(out.files, Ordering::Relaxed);
-        c.disk.fetch_add(out.disk, Ordering::Relaxed);
-    }
-    if !types.is_empty() {
-        merge_types(
-            &mut ctx.types.lock().unwrap_or_else(|e| e.into_inner()),
-            types,
-        );
-    }
-    out
 }
 
 fn merge_types(into: &mut TypeMap, from: TypeMap) {
@@ -1863,9 +1983,10 @@ fn stat_chunks<const REUSE: bool>(
     };
     let n = entries.len();
     if n > WIDE_DIR {
-        (0..n.div_ceil(WIDE_CHUNK))
+        let size = wide_chunk(n, ctx.threads);
+        (0..n.div_ceil(size))
             .into_par_iter()
-            .map(|c| stat_chunk(c * WIDE_CHUNK..n.min((c + 1) * WIDE_CHUNK)))
+            .map(|c| stat_chunk(c * size..n.min((c + 1) * size)))
             .collect()
     } else {
         vec![stat_chunk(0..n)]
@@ -2340,6 +2461,7 @@ fn scan_pooled(
             met: AtomicU64::new(0),
             rows: opts.top > 0 || opts.types,
             fds: FdBudget::new(rayon::current_num_threads()),
+            threads: rayon::current_num_threads(),
             ino_reuse: decided.is_some() && listed_inodes_usable(&abs),
             dirs_seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
@@ -5496,6 +5618,68 @@ mod tests {
             assert!(same_joined(&full, Path::new("/r"), &raw));
             assert!(!same_joined(&full, Path::new("/r"), &name(b"f\xfe")));
         }
+    }
+
+    #[test]
+    fn wide_directories_split_into_a_few_jobs_a_worker() {
+        assert_eq!(wide_chunk(200_000, 8), 6_250);
+        assert_eq!(200_000usize.div_ceil(wide_chunk(200_000, 8)), 32);
+        assert_eq!(wide_chunk(257, 8), WIDE_CHUNK, "never under the floor");
+        assert_eq!(wide_chunk(200_000, 1), 50_000);
+        assert_eq!(wide_chunk(1_000, 0), 250, "no workers counts as one");
+    }
+
+    /// 600 sightings of 200 linked files, three each, the first of each
+    /// at its largest path.
+    fn sightings() -> (Vec<du_fs::Stat>, impl Fn(usize) -> PathBuf) {
+        let ino = |k: usize| 1 + (k as u64 * 7) % 200;
+        let sts = (0..600)
+            .map(|k| du_fs::Stat {
+                mode: 0o100_000, // regular file
+                size: ino(k),
+                blocks: 1,
+                nlink: 3,
+                ino: ino(k),
+                dev: 5,
+                mtime: 0,
+            })
+            .collect();
+        let at = move |k: usize| PathBuf::from(format!("/r/d{}/f{}", 2 - k / 200, ino(k)));
+        (sts, at)
+    }
+
+    #[test]
+    fn a_batch_of_links_counts_as_the_files_one_by_one() {
+        let (sts, _) = sightings();
+        let one = LinkSet::new();
+        let want: Vec<bool> = sts.iter().map(|st| one.first_link(st)).collect();
+        let batch = LinkSet::new();
+        // Two batches, each with files met more than once in it.
+        let (a, b) = sts.split_at(250);
+        let mut got = batch.first_links(a);
+        got.extend(batch.first_links(b));
+        assert_eq!(got, want);
+        assert_eq!(got.iter().filter(|f| **f).count(), 200);
+    }
+
+    #[test]
+    fn claims_seen_in_a_batch_settle_as_one_by_one() {
+        let (sts, at) = sightings();
+        let first = LinkSet::new().first_links(&sts);
+        let one = LinkClaims::new();
+        for (k, st) in sts.iter().enumerate() {
+            one.see(st, at(k), first[k]);
+        }
+        let batch = LinkClaims::new();
+        batch.see_all(&sts, &at, &first);
+        let paths = |c: LinkClaims| -> std::collections::BTreeMap<(u64, u64), PathBuf> {
+            let fixed = c.settled().expect("first sightings at the largest paths");
+            fixed.into_iter().map(|(id, f)| (id, f.at)).collect()
+        };
+        let (want, got) = (paths(one), paths(batch));
+        assert_eq!(got, want);
+        assert_eq!(got.len(), 200);
+        assert!(got.values().all(|p| p.starts_with("/r/d0")), "{got:?}");
     }
 
     #[test]
