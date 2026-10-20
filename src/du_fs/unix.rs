@@ -233,13 +233,29 @@ impl Dir {
         self.entries_upto(usize::MAX)
     }
 
+    /// [`Self::entries`], keeping the inode number Linux `getdents64`
+    /// gives each regular file ([`Entries::file_ino`]). Only a walk that
+    /// will use the numbers asks for them: storing them costs the plain
+    /// listing a second vector and a fatter loop. Elsewhere it is
+    /// [`Self::entries`].
+    pub fn entries_with_inos(&self) -> (Entries, bool) {
+        #[cfg(target_os = "linux")]
+        {
+            read_getdents::<true>(self.fd.as_raw_fd(), usize::MAX)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.entries()
+        }
+    }
+
     /// [`Self::entries`], stopping once `max` or more are in: the rest of
     /// the buffer that crossed the mark comes along. macOS reads them
     /// all, since its bulk reader times whole listings.
     pub fn entries_upto(&self, max: usize) -> (Entries, bool) {
         #[cfg(target_os = "linux")]
         {
-            read_getdents(self.fd.as_raw_fd(), max)
+            read_getdents::<false>(self.fd.as_raw_fd(), max)
         }
         #[cfg(target_os = "macos")]
         {
@@ -283,8 +299,9 @@ pub fn lstat(path: &Path) -> io::Result<Stat> {
 #[cfg(target_os = "linux")]
 const GETDENTS_BUF: usize = 64 * 1024;
 
+/// `INOS`: keep each regular file's inode number ([`Dir::entries_with_inos`]).
 #[cfg(target_os = "linux")]
-fn read_getdents(fd: RawFd, max: usize) -> (Entries, bool) {
+fn read_getdents<const INOS: bool>(fd: RawFd, max: usize) -> (Entries, bool) {
     use std::cell::RefCell;
     thread_local! {
         static BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -317,7 +334,7 @@ fn read_getdents(fd: RawFd, max: usize) -> (Entries, bool) {
                 Ok(n) => n,
                 Err(_) => return (out, true),
             };
-            parse_dirents(&buf[..n], &mut out);
+            parse_dirents::<INOS>(&buf[..n], &mut out);
             if out.len() >= max {
                 return (out, false);
             }
@@ -326,9 +343,10 @@ fn read_getdents(fd: RawFd, max: usize) -> (Entries, bool) {
 }
 
 /// Parse `linux_dirent64` records: ino (8), off (8), reclen (2), type (1),
-/// then the NUL-terminated name.
+/// then the NUL-terminated name. `INOS`: keep the inode number of each
+/// regular file; without it the entries carry none.
 #[cfg(target_os = "linux")]
-fn parse_dirents(buf: &[u8], out: &mut Entries) {
+fn parse_dirents<const INOS: bool>(buf: &[u8], out: &mut Entries) {
     let mut off = 0usize;
     while off + 19 < buf.len() {
         let reclen = u16::from_ne_bytes([buf[off + 16], buf[off + 17]]) as usize;
@@ -338,6 +356,11 @@ fn parse_dirents(buf: &[u8], out: &mut Entries) {
         let d_type = buf[off + 18];
         let rec = &buf[off + 19..off + reclen];
         let len = rec.iter().position(|b| *b == 0).unwrap_or(rec.len());
+        if !INOS {
+            out.push(&rec[..len], kind_of(d_type));
+            off += reclen;
+            continue;
+        }
         let ino = if d_type == libc::DT_REG {
             let mut b = [0u8; 8];
             b.copy_from_slice(&buf[off..off + 8]);
@@ -478,7 +501,8 @@ mod tests {
     }
 
     /// The inode number getdents64 gives a regular file is the one its
-    /// fstatat gives; directories and symlinks get none.
+    /// fstatat gives; directories and symlinks get none. A plain listing
+    /// keeps none at all.
     #[cfg(target_os = "linux")]
     #[test]
     fn listed_inodes_of_regular_files_match_their_stat() {
@@ -491,9 +515,24 @@ mod tests {
         for i in 0..50 {
             fs::write(root.join(format!("f{i:02}")), b"x").unwrap();
         }
-        let d = Dir::open(&root).unwrap();
-        let (e, failed) = d.entries();
+        // A plain listing keeps no inode numbers: only a walk that reuses
+        // stats pays for them (round 293 slowed `du -s` by storing them).
+        // Each listing gets its own descriptor: one read to the end lists
+        // nothing more.
+        let (plain, failed) = Dir::open(&root).unwrap().entries();
         assert!(!failed);
+        assert!((0..plain.len()).all(|i| plain.file_ino(i).is_none()));
+        let d = Dir::open(&root).unwrap();
+        let (e, failed) = d.entries_with_inos();
+        assert!(!failed);
+        // The same entries, in whatever order each listing gives them.
+        let names = |l: &Entries| -> BTreeSet<Vec<u8>> {
+            (0..l.len())
+                .map(|i| l.get(i).0.to_bytes().to_vec())
+                .collect()
+        };
+        assert_eq!(names(&e), names(&plain));
+        assert_eq!(e.len(), 54);
         let mut files = 0;
         for i in 0..e.len() {
             let (name, _) = e.get(i);

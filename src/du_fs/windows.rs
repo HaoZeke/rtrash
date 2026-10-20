@@ -389,6 +389,12 @@ impl Dir {
         self.entries_upto(usize::MAX)
     }
 
+    /// [`Self::entries`]: the listing gives every stat already, so there
+    /// are no inode numbers to keep.
+    pub fn entries_with_inos(&self) -> (Entries, bool) {
+        self.entries()
+    }
+
     /// [`Self::entries`], stopping once `max` or more are in: the rest of
     /// the buffer that crossed the mark comes along.
     pub fn entries_upto(&self, max: usize) -> (Entries, bool) {

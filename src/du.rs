@@ -959,6 +959,17 @@ pub(crate) fn credits_first(a: &Path, b: &Path) -> bool {
     a < b
 }
 
+/// `full == dir.join(name)` for `name`, one entry of a listing (never
+/// empty, `.`, `..` or with a separator), without allocating. `Path`
+/// equality compares components, and `dir.join(name)` has the components
+/// of `dir` and then `name`, so this asks the same: `full` ends in `name`
+/// and the rest of it equals `dir`. A trailing separator or a `.` inside
+/// `dir` therefore changes neither answer, and names compare as bytes,
+/// UTF-8 or not.
+fn same_joined(full: &Path, dir: &Path, name: &CStr) -> bool {
+    full.file_name().is_some_and(|n| n == du_fs::os(name)) && full.parent() == Some(dir)
+}
+
 /// The hard-linked files of a saved tree, read one entry at a time: for
 /// each, the path it counts at by [`credits_first`] and what it adds
 /// there. `du_ncdu::Builder` adds those once the whole tree is read.
@@ -1227,14 +1238,14 @@ impl Ctx<'_> {
         self.seen.first_link(st)
     }
 
-    /// [`Ctx::first_link`] for the file `st` met at `at`, with the count of
-    /// a file of several links held to one path: on a second walk the one
-    /// [`Ctx::decided`] names, else the first sighting, noted in
-    /// [`Ctx::claims`]. A file whose link count is unknown (0) counts at
+    /// [`Ctx::first_link`] for the file `st` met in `dir` as `name`, with
+    /// the count of a file of several links held to one path: on a second
+    /// walk the one [`Ctx::decided`] names, else the first sighting, noted
+    /// in [`Ctx::claims`]. A file whose link count is unknown (0) counts at
     /// its first sighting, and so does every file when nothing below a
     /// PATH is read ([`Ctx::rows`]). Every count of a file in the walk goes
     /// through here (precheck check_link_credit).
-    fn counts_here(&self, st: &du_fs::Stat, at: impl FnOnce() -> PathBuf) -> bool {
+    fn counts_here(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         // -L: a file reached through links counts once, at its first
         // sighting; any file may be reached twice, and a path for each
         // would cost too much.
@@ -1244,10 +1255,28 @@ impl Ctx<'_> {
         if st.nlink <= 1 || st.ino == 0 || !self.rows {
             return self.first_link(st);
         }
-        let at = at();
+        // The path compare looks at a path the first walk stored, or
+        // builds one for a claim. Wide `-s` returns above (`rows` is
+        // false) and must not carry this body in its stat loop.
+        self.counts_at_path(st, dir, name)
+    }
+
+    /// Where a linked file counts. Not inlined into [`stat_entries`]: the
+    /// copy without reuse is the plain loop, and a `PathBuf` per name on
+    /// the reuse walk was the main-arena pile-up.
+    #[inline(never)]
+    fn counts_at_path(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
+        // A second walk already stored the path. Comparing the components
+        // builds no PathBuf for any linked name, met at its path or not.
         if let Some(d) = self.decided {
             if let Some(fixed) = d.get(&(st.dev, st.ino)) {
-                let here = fixed.at == at;
+                let here = same_joined(&fixed.at, dir, name);
+                debug_assert_eq!(
+                    here,
+                    fixed.at == dir.join(du_fs::os(name)),
+                    "same_joined({:?}, {dir:?}, {name:?})",
+                    fixed.at
+                );
                 if here {
                     self.met.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1255,8 +1284,9 @@ impl Ctx<'_> {
             }
         }
         let first = self.first_link(st);
+        // Only the first walk keeps claims, so only it needs the path.
         if self.decided.is_none() {
-            self.claims.see(st, at, first);
+            self.claims.see(st, dir.join(du_fs::os(name)), first);
         }
         first
     }
@@ -1654,10 +1684,13 @@ fn count_once(
 }
 
 /// Stat entries `range` of `dir`: sum the files and collect the
-/// subdirectories and the files big enough for the list.
-fn stat_entries(
+/// subdirectories and the files big enough for the list. `REUSE`: a
+/// second walk on `dev` that takes the first walk's stats of linked files
+/// ([`Dir::entries_with_inos`](du_fs::Dir::entries_with_inos)); without
+/// it `dev` is unused.
+fn stat_entries<const REUSE: bool>(
     ctx: &Ctx<'_>,
-    (dir, reuse): (&du_fs::Dir, Option<u64>),
+    (dir, dev): (&du_fs::Dir, u64),
     entries: &du_fs::Entries,
     range: std::ops::Range<usize>,
     depth: usize,
@@ -1701,15 +1734,17 @@ fn stat_entries(
             out.subdirs.push((i, None));
             continue;
         }
-        // A second walk reuses the first one's stat of a linked file,
-        // found by the inode number the listing gave (`reuse` is then
-        // the directory's device).
-        let known = || {
-            let ino = entries.file_ino(i)?;
-            let fixed = ctx.decided?.get(&(reuse?, ino))?;
-            Some(fixed.stat)
+        // With `REUSE` (a second walk), the first walk's stat of a linked
+        // file, found by the inode number the listing gave on device `dev`.
+        let listed = if REUSE {
+            entries.stat(i).or_else(|| {
+                let ino = entries.file_ino(i)?;
+                Some(ctx.decided?.get(&(dev, ino))?.stat)
+            })
+        } else {
+            entries.stat(i)
         };
-        let mut m = match entries.stat(i).or_else(known) {
+        let mut m = match listed {
             Some(m) => m,
             None => match dir.stat_at(name) {
                 Ok(m) => m,
@@ -1737,7 +1772,7 @@ fn stat_entries(
             out.subdirs.push((i, Some(m)));
             continue;
         }
-        let first = ctx.counts_here(&m, || path.join(du_fs::os(name)));
+        let first = ctx.counts_here(&m, path, name);
         if !first {
             ctx.links.fetch_add(1, Ordering::Relaxed);
             continue;
@@ -1801,6 +1836,42 @@ fn merge_types(into: &mut TypeMap, from: TypeMap) {
     }
 }
 
+/// Stat every entry of `dir` with [`stat_entries`]: on one thread, or in
+/// chunks on the pool when there are many, so a huge flat directory does
+/// not serialise the scan. Never inlined: with both copies of the stat loop
+/// in one parallel body, round 294's first try listed links 6% slower
+/// (more allocations queued on glibc's main arena).
+#[inline(never)]
+fn stat_chunks<const REUSE: bool>(
+    ctx: &Ctx<'_>,
+    (dir, dev): (&du_fs::Dir, u64),
+    entries: &du_fs::Entries,
+    depth: usize,
+    list_files: bool,
+    (path, rules): (&Path, Option<&Chain>),
+) -> Vec<Stats> {
+    let stat_chunk = |range: std::ops::Range<usize>| {
+        stat_entries::<REUSE>(
+            ctx,
+            (dir, dev),
+            entries,
+            range,
+            depth,
+            list_files,
+            (path, rules),
+        )
+    };
+    let n = entries.len();
+    if n > WIDE_DIR {
+        (0..n.div_ceil(WIDE_CHUNK))
+            .into_par_iter()
+            .map(|c| stat_chunk(c * WIDE_CHUNK..n.min((c + 1) * WIDE_CHUNK)))
+            .collect()
+    } else {
+        vec![stat_chunk(0..n)]
+    }
+}
+
 /// Walk one open directory. `listing` is false below `.git`, artefacts
 /// and trash roots: their sizes count, but nothing inside them is listed.
 fn walk_dir(
@@ -1831,7 +1902,15 @@ fn walk_dir(
         filtered_out: 0,
         left_out: false,
     };
-    let (entries, failed) = dir.entries();
+    // A second walk takes the first one's stats of linked files where the
+    // listing's inode numbers are the files' own. Every other walk lists
+    // and stats as if there were no numbers at all.
+    let reuse = (ctx.ino_reuse && dir.lists_true_inodes()).then_some(st.dev);
+    let (entries, failed) = if reuse.is_some() {
+        dir.entries_with_inos()
+    } else {
+        dir.entries()
+    };
     let list_files = listing && !opts.artefacts_only && opts.top > 0;
     let mut markers: Vec<&'static str> = Vec::new();
     let mut has_dot_git = false;
@@ -1877,31 +1956,15 @@ fn walk_dir(
             p.repo(path);
         }
     }
-    // A second walk takes the first one's stats of linked files where the
-    // listing's inode numbers are the files' own.
-    let reuse = (ctx.ino_reuse && dir.lists_true_inodes()).then_some(st.dev);
-    let stat_chunk = |range: std::ops::Range<usize>| {
-        stat_entries(
-            ctx,
-            (&dir, reuse),
-            &entries,
-            range,
-            depth,
-            list_files,
-            (path, chain.as_deref()),
-        )
-    };
-    let n = entries.len();
-    // One thread stats a directory's entries unless there are many: then
-    // chunks of them go to the pool, so a huge flat directory does not
-    // serialise the scan.
-    let parts: Vec<Stats> = if n > WIDE_DIR {
-        (0..n.div_ceil(WIDE_CHUNK))
-            .into_par_iter()
-            .map(|c| stat_chunk(c * WIDE_CHUNK..n.min((c + 1) * WIDE_CHUNK)))
-            .collect()
-    } else {
-        vec![stat_chunk(0..n)]
+    // Two copies of the stat loop: the one without reuse is the plain
+    // loop, with no inode lookup in it. Each runs in its own
+    // [`stat_chunks`], so each parallel body has one loop.
+    let rules = chain.as_deref();
+    let parts: Vec<Stats> = match reuse {
+        Some(dev) => {
+            stat_chunks::<true>(ctx, (&dir, dev), &entries, depth, list_files, (path, rules))
+        }
+        None => stat_chunks::<false>(ctx, (&dir, 0), &entries, depth, list_files, (path, rules)),
     };
     let mut subdirs: Vec<(usize, Option<du_fs::Stat>)> = Vec::new();
     let mut candidates: Vec<FileCandidate> = Vec::new();
@@ -5397,6 +5460,42 @@ mod tests {
             }
         }
         assert_eq!(used.len(), LinkSet::SHARDS, "sequential inodes spread out");
+    }
+
+    #[test]
+    fn same_joined_matches_exactly_where_join_does() {
+        let name = |s: &[u8]| std::ffi::CString::new(s).unwrap();
+        let cases: [(&str, &str, &[u8], bool); 8] = [
+            ("/r/a/x", "/r/a", b"x", true),
+            ("/r/b/x", "/r/a", b"x", false),  // another parent
+            ("/r/a/y", "/r/a", b"x", false),  // another name
+            ("/r/a/x", "/r/a/", b"x", true),  // a trailing slash on the dir
+            ("/r/a/x", "/r/./a", b"x", true), // a `.` inside the dir
+            ("/r/ax", "/r/a", b"x", false),   // no separator in between
+            ("/r/a/x", "/r", b"a/x", false),  // a name is one component
+            ("x", "", b"x", true),            // a relative PATH
+        ];
+        for (full, dir, n, want) in cases {
+            let (full, dir, n) = (Path::new(full), Path::new(dir), name(n));
+            assert_eq!(same_joined(full, dir, &n), want, "{full:?} {dir:?} {n:?}");
+            // `join` agrees on every name a listing can give.
+            if !n.to_bytes().contains(&b'/') {
+                assert_eq!(
+                    full == dir.join(du_fs::os(&n)),
+                    want,
+                    "{full:?} {dir:?} {n:?}"
+                );
+            }
+        }
+        // Names are bytes: a name that is not UTF-8 matches only itself.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let raw = name(b"f\xff");
+            let full = Path::new("/r").join(std::ffi::OsStr::from_bytes(b"f\xff"));
+            assert!(same_joined(&full, Path::new("/r"), &raw));
+            assert!(!same_joined(&full, Path::new("/r"), &name(b"f\xfe")));
+        }
     }
 
     #[test]
