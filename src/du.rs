@@ -968,7 +968,7 @@ impl LinkSet {
 }
 
 /// `(shard, k)` for each file `sts[k]`, by shard: the runs of one shard
-/// for a batch of [`LinkSet::first_links`] or [`LinkClaims::see_all`].
+/// for a batch of [`LinkSet::first_links`] or [`LinkClaims::claim_all`].
 fn shard_runs(sts: &[du_fs::Stat]) -> Vec<(usize, usize)> {
     let mut order: Vec<(usize, usize)> = sts
         .iter()
@@ -997,6 +997,25 @@ pub(crate) fn credits_first(a: &Path, b: &Path) -> bool {
 /// UTF-8 or not.
 fn same_joined(full: &Path, dir: &Path, name: &CStr) -> bool {
     full.file_name().is_some_and(|n| n == du_fs::os(name)) && full.parent() == Some(dir)
+}
+
+/// `credits_first(&dir.join(name), other)` for `name`, one entry of a
+/// listing, without building the path. `Path` order compares components
+/// one by one, and `dir.join(name)` has the components of `dir` and then
+/// `name`, so this compares those against `other`'s.
+fn joined_first(dir: &Path, name: &CStr, other: &Path) -> bool {
+    let joined = dir
+        .components()
+        .chain(std::iter::once(std::path::Component::Normal(du_fs::os(
+            name,
+        ))));
+    let first = joined.lt(other.components());
+    debug_assert_eq!(
+        first,
+        credits_first(&dir.join(du_fs::os(name)), other),
+        "joined_first({dir:?}, {name:?}, {other:?})"
+    );
+    first
 }
 
 /// The hard-linked files of a saved tree, read one entry at a time: for
@@ -1039,11 +1058,12 @@ impl<T> LinkCredit<T> {
 }
 
 /// Where each file with several hard links was met (gdu #439): the
-/// smallest of its paths, and whether its count fell there. The walk
-/// threads meet links in any order, so the first sighting moves between
-/// runs. Once a walk ends, [`LinkClaims::settled`] says whether every
-/// count fell on the smallest path; when one did not, the walk runs again
-/// with that path fixed for each file ([`Ctx::decided`]).
+/// smallest of its paths, and whether its count fell there. The first
+/// sighting to reach the claims takes the count, and the walk threads
+/// meet links in any order, so that sighting moves between runs. Once a
+/// walk ends, [`LinkClaims::settled`] says whether every count fell on
+/// the smallest path; when one did not, the walk runs again with that
+/// path fixed for each file ([`Ctx::decided`]).
 struct LinkClaims {
     shards: Vec<Mutex<HashMap<(u64, u64), Claim>>>,
 }
@@ -1053,19 +1073,27 @@ struct Claim {
     smallest: PathBuf,
     /// Whether the sighting that took the count was at `smallest`.
     counted_there: bool,
-    /// The file's stat, for a second walk ([`Fixed::stat`]).
+    /// The file's stat. A second walk takes it for an entry whose listed
+    /// inode number names this file ([`du_fs::Dir::lists_true_inodes`]),
+    /// so it stats no linked file again.
     stat: du_fs::Stat,
 }
 
-/// Where a second walk counts a linked file ([`Ctx::decided`]).
-struct Fixed {
-    /// The smallest of its paths.
-    at: PathBuf,
-    /// Its stat from the first walk. The second walk takes it for an
-    /// entry whose listed inode number names this file
-    /// ([`du_fs::Dir::lists_true_inodes`]), so it stats no linked file
-    /// again.
-    stat: du_fs::Stat,
+/// Where a second walk counts each linked file ([`Ctx::decided`]): the
+/// first walk's claims, left in the shards they were filed in, so
+/// settling them copies nothing.
+struct Decided {
+    shards: Vec<HashMap<(u64, u64), Claim>>,
+}
+
+impl Decided {
+    fn get(&self, id: &(u64, u64)) -> Option<&Claim> {
+        self.shards[LinkSet::shard(id.0, id.1)].get(id)
+    }
+
+    fn len(&self) -> usize {
+        self.shards.iter().map(|m| m.len()).sum()
+    }
 }
 
 impl LinkClaims {
@@ -1075,46 +1103,61 @@ impl LinkClaims {
         }
     }
 
-    /// Record a sighting of file `st` at `at`; `counted` is whether this
-    /// sighting took the file's count. Each path is met once.
-    fn see(&self, st: &du_fs::Stat, at: PathBuf, counted: bool) {
+    /// Note a sighting of file `st` in `dir` as `name`, and return
+    /// whether it takes the file's count: the first sighting to reach the
+    /// claims does. Each path is met once.
+    fn claim(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         let mut map = self.shards[LinkSet::shard(st.dev, st.ino)]
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        Self::see_in(&mut map, st, at, counted);
+        Self::see_in(&mut map, st, dir, name)
     }
 
-    /// [`LinkClaims::see`] for each of `sts`, met at `at(k)`, with
-    /// `counted[k]`: each shard is locked once for the lot.
-    fn see_all(&self, sts: &[du_fs::Stat], at: impl Fn(usize) -> PathBuf, counted: &[bool]) {
+    /// [`LinkClaims::claim`] for each of `sts`, met in `dir` as `name(k)`:
+    /// each shard is locked once for the lot.
+    fn claim_all<'n>(
+        &self,
+        sts: &[du_fs::Stat],
+        dir: &Path,
+        name: impl Fn(usize) -> &'n CStr,
+    ) -> Vec<bool> {
+        let mut first = vec![false; sts.len()];
         for run in shard_runs(sts).chunk_by(|a, b| a.0 == b.0) {
             let mut map = self.shards[run[0].0]
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             for &(_, k) in run {
-                Self::see_in(&mut map, &sts[k], at(k), counted[k]);
+                first[k] = Self::see_in(&mut map, &sts[k], dir, name(k));
             }
         }
+        first
     }
 
-    /// [`LinkClaims::see`] in the locked shard `map` of file `st`.
-    fn see_in(map: &mut HashMap<(u64, u64), Claim>, st: &du_fs::Stat, at: PathBuf, counted: bool) {
+    /// [`LinkClaims::claim`] in the locked shard `map` of file `st`. A
+    /// later sighting takes the path only when it comes first
+    /// ([`credits_first`]), and only then is that path built.
+    fn see_in(
+        map: &mut HashMap<(u64, u64), Claim>,
+        st: &du_fs::Stat,
+        dir: &Path,
+        name: &CStr,
+    ) -> bool {
         match map.entry((st.dev, st.ino)) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(Claim {
-                    smallest: at,
-                    counted_there: counted,
+                    smallest: dir.join(du_fs::os(name)),
+                    counted_there: true,
                     stat: *st,
                 });
+                true
             }
             std::collections::hash_map::Entry::Occupied(mut o) => {
                 let claim = o.get_mut();
-                if credits_first(&at, &claim.smallest) {
-                    claim.smallest = at;
-                    claim.counted_there = counted;
-                } else if counted {
+                if joined_first(dir, name, &claim.smallest) {
+                    claim.smallest = dir.join(du_fs::os(name));
                     claim.counted_there = false;
                 }
+                false
             }
         }
     }
@@ -1122,20 +1165,23 @@ impl LinkClaims {
     /// `None` when each linked file counted at its smallest path, else the
     /// smallest path and stat of every linked file, for a walk that counts
     /// there.
-    fn settled(self) -> Option<HashMap<(u64, u64), Fixed>> {
-        let claims: Vec<((u64, u64), Claim)> = self
+    fn settled(mut self) -> Option<Decided> {
+        // Most walks: no claims, or each counted at its smallest path.
+        // They return here and build no Decided.
+        if self
             .shards
-            .into_iter()
-            .flat_map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
-            .collect();
-        if claims.iter().all(|(_, c)| c.counted_there) {
+            .iter_mut()
+            .map(|m| m.get_mut().unwrap_or_else(|e| e.into_inner()))
+            .all(|m| m.values().all(|c| c.counted_there))
+        {
             return None;
         }
-        let fixed = |c: Claim| Fixed {
-            at: c.smallest,
-            stat: c.stat,
-        };
-        Some(claims.into_iter().map(|(id, c)| (id, fixed(c))).collect())
+        let shards = self
+            .shards
+            .into_iter()
+            .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
+            .collect();
+        Some(Decided { shards })
     }
 }
 
@@ -1149,7 +1195,7 @@ struct Ctx<'a> {
     /// Where this walk met each file with several links.
     claims: LinkClaims,
     /// For a second walk: the one path at which each linked file counts.
-    decided: Option<&'a HashMap<(u64, u64), Fixed>>,
+    decided: Option<&'a Decided>,
     /// On a second walk, the files met at their path in `decided`.
     met: AtomicU64,
     /// Directory descriptors held open as parents.
@@ -1289,8 +1335,8 @@ impl Ctx<'_> {
 
     /// [`Ctx::first_link`] for the file `st` met in `dir` as `name`, with
     /// the count of a file of several links held to one path: on a second
-    /// walk the one [`Ctx::decided`] names, else the first sighting, noted
-    /// in [`Ctx::claims`]. A file whose link count is unknown (0) counts at
+    /// walk the one [`Ctx::decided`] names, else the first sighting to
+    /// reach [`Ctx::claims`]. A file whose link count is unknown (0) counts at
     /// its first sighting, and so does every file when nothing below a
     /// PATH is read ([`Ctx::rows`]). Every count of a file in the walk goes
     /// through here or [`Ctx::counts_here_all`] (precheck check_link_credit).
@@ -1319,12 +1365,12 @@ impl Ctx<'_> {
         // builds no PathBuf for any linked name, met at its path or not.
         if let Some(d) = self.decided {
             if let Some(fixed) = d.get(&(st.dev, st.ino)) {
-                let here = same_joined(&fixed.at, dir, name);
+                let here = same_joined(&fixed.smallest, dir, name);
                 debug_assert_eq!(
                     here,
-                    fixed.at == dir.join(du_fs::os(name)),
+                    fixed.smallest == dir.join(du_fs::os(name)),
                     "same_joined({:?}, {dir:?}, {name:?})",
-                    fixed.at
+                    fixed.smallest
                 );
                 if here {
                     self.met.fetch_add(1, Ordering::Relaxed);
@@ -1332,12 +1378,14 @@ impl Ctx<'_> {
                 return here;
             }
         }
-        let first = self.first_link(st);
-        // Only the first walk keeps claims, so only it needs the path.
-        if self.decided.is_none() {
-            self.claims.see(st, dir.join(du_fs::os(name)), first);
+        // A second walk meets a file the first did not (it gained a link
+        // since): it counts at its first sighting.
+        if self.decided.is_some() {
+            return self.first_link(st);
         }
-        first
+        // The first walk: one lock and one lookup decide the count and
+        // note the path, which is built only when it is kept.
+        self.claims.claim(st, dir, name)
     }
 
     /// Whether `st`'s count may wait for [`Ctx::counts_here_all`] with
@@ -1349,15 +1397,20 @@ impl Ctx<'_> {
     }
 
     /// [`Ctx::counts_here`] for files `sts` that all [`Ctx::defers`], met
-    /// at `at(k)`, with each lock taken once for the lot. The claims do
-    /// not depend on the order of the sightings, so a batch counts as the
-    /// files one by one would.
-    fn counts_here_all(&self, sts: &[du_fs::Stat], at: impl Fn(usize) -> PathBuf) -> Vec<bool> {
-        let first = self.seen.first_links(sts);
+    /// in `dir` as `name(k)`, with each lock taken once for the lot. The
+    /// claims do not depend on the order of the sightings, so a batch
+    /// counts as the files one by one would.
+    fn counts_here_all<'n>(
+        &self,
+        sts: &[du_fs::Stat],
+        dir: &Path,
+        name: impl Fn(usize) -> &'n CStr,
+    ) -> Vec<bool> {
         if self.rows {
-            self.claims.see_all(sts, at, &first);
+            self.claims.claim_all(sts, dir, name)
+        } else {
+            self.seen.first_links(sts)
         }
-        first
     }
 
     fn key(&self, apparent: u64, disk: u64, items: u64, mtime: i64) -> u64 {
@@ -1765,6 +1818,33 @@ fn count_once(
     raw.min(own.saturating_add(once))
 }
 
+/// Count the linked files of a stat job that waited for one batch
+/// ([`Ctx::defers`]), entries `idx` of `dir` with stats `sts`: add each
+/// that counts here to `out`, and return how many did not. Not inlined:
+/// a tree of single-link files never calls it, and its stat loop then
+/// carries none of the claims code.
+#[inline(never)]
+fn count_deferred(
+    ctx: &Ctx<'_>,
+    out: &mut Stats,
+    (dir, entries): (&du_fs::Dir, &du_fs::Entries),
+    (idx, sts): (&[usize], &[du_fs::Stat]),
+    path: &Path,
+    (depth, list_files): (usize, bool),
+) -> u64 {
+    let name = |k: usize| entries.get(idx[k]).0;
+    let first = ctx.counts_here_all(sts, path, name);
+    let mut links = 0u64;
+    for (k, first) in first.into_iter().enumerate() {
+        if first {
+            out.add_file(ctx, dir, (idx[k], name(k)), &sts[k], (depth, list_files));
+        } else {
+            links += 1;
+        }
+    }
+    links
+}
+
 /// Stat entries `range` of `dir`: sum the files and collect the
 /// subdirectories and the files big enough for the list. `REUSE`: a
 /// second walk on `dev` that takes the first walk's stats of linked files
@@ -1869,16 +1949,15 @@ fn stat_entries<const REUSE: bool>(
         }
     }
     if !pending.1.is_empty() {
-        let (idx, sts) = &pending;
-        let name = |k: usize| entries.get(idx[k]).0;
-        let first = ctx.counts_here_all(sts, |k| path.join(du_fs::os(name(k))));
-        for (k, first) in first.into_iter().enumerate() {
-            if first {
-                out.add_file(ctx, dir, (idx[k], name(k)), &sts[k], (depth, list_files));
-            } else {
-                links += 1;
-            }
-        }
+        let job = (&pending.0[..], &pending.1[..]);
+        links += count_deferred(
+            ctx,
+            &mut out,
+            (dir, entries),
+            job,
+            path,
+            (depth, list_files),
+        );
     }
     // Once a job, not once a file: every worker adds to these.
     ctx.links.fetch_add(links, Ordering::Relaxed);
@@ -5630,8 +5709,13 @@ mod tests {
     }
 
     /// 600 sightings of 200 linked files, three each, the first of each
-    /// at its largest path.
-    fn sightings() -> (Vec<du_fs::Stat>, impl Fn(usize) -> PathBuf) {
+    /// at its largest path: sighting `k` is in `dir(k)` as `name(k)`.
+    #[allow(clippy::type_complexity)]
+    fn sightings() -> (
+        Vec<du_fs::Stat>,
+        impl Fn(usize) -> PathBuf,
+        impl Fn(usize) -> std::ffi::CString,
+    ) {
         let ino = |k: usize| 1 + (k as u64 * 7) % 200;
         let sts = (0..600)
             .map(|k| du_fs::Stat {
@@ -5644,13 +5728,14 @@ mod tests {
                 mtime: 0,
             })
             .collect();
-        let at = move |k: usize| PathBuf::from(format!("/r/d{}/f{}", 2 - k / 200, ino(k)));
-        (sts, at)
+        let dir = |k: usize| PathBuf::from(format!("/r/d{}", 2 - k / 200));
+        let name = move |k: usize| std::ffi::CString::new(format!("f{}", ino(k))).unwrap();
+        (sts, dir, name)
     }
 
     #[test]
     fn a_batch_of_links_counts_as_the_files_one_by_one() {
-        let (sts, _) = sightings();
+        let (sts, _, _) = sightings();
         let one = LinkSet::new();
         let want: Vec<bool> = sts.iter().map(|st| one.first_link(st)).collect();
         let batch = LinkSet::new();
@@ -5664,22 +5749,85 @@ mod tests {
 
     #[test]
     fn claims_seen_in_a_batch_settle_as_one_by_one() {
-        let (sts, at) = sightings();
-        let first = LinkSet::new().first_links(&sts);
+        let (sts, dir, name) = sightings();
+        let names: Vec<std::ffi::CString> = (0..sts.len()).map(name).collect();
         let one = LinkClaims::new();
-        for (k, st) in sts.iter().enumerate() {
-            one.see(st, at(k), first[k]);
-        }
+        let want_first: Vec<bool> = sts
+            .iter()
+            .enumerate()
+            .map(|(k, st)| one.claim(st, &dir(k), &names[k]))
+            .collect();
+        // One batch per directory, as a stat job files them.
         let batch = LinkClaims::new();
-        batch.see_all(&sts, &at, &first);
+        let mut got_first = Vec::new();
+        for d in 0..3 {
+            let r = d * 200..(d + 1) * 200;
+            let first = batch.claim_all(&sts[r.clone()], &dir(r.start), |k| {
+                names[r.start + k].as_c_str()
+            });
+            got_first.extend(first);
+        }
+        assert_eq!(got_first, want_first);
+        // Each file counts once, at its first sighting.
+        assert_eq!(got_first.iter().filter(|f| **f).count(), 200);
+        assert!(got_first[..200].iter().all(|f| *f));
         let paths = |c: LinkClaims| -> std::collections::BTreeMap<(u64, u64), PathBuf> {
             let fixed = c.settled().expect("first sightings at the largest paths");
-            fixed.into_iter().map(|(id, f)| (id, f.at)).collect()
+            assert_eq!(fixed.len(), 200);
+            let found = fixed.get(&(5, 1)).map(|c| c.smallest.clone());
+            assert_eq!(found, Some(PathBuf::from("/r/d0/f1")));
+            fixed
+                .shards
+                .into_iter()
+                .flatten()
+                .map(|(id, c)| (id, c.smallest))
+                .collect()
         };
         let (want, got) = (paths(one), paths(batch));
         assert_eq!(got, want);
         assert_eq!(got.len(), 200);
         assert!(got.values().all(|p| p.starts_with("/r/d0")), "{got:?}");
+    }
+
+    #[test]
+    fn claims_that_counted_at_the_smallest_path_settle() {
+        let (sts, dir, name) = sightings();
+        let c = LinkClaims::new();
+        // Smallest paths first: every count falls where it belongs.
+        for k in (0..sts.len()).rev() {
+            c.claim(&sts[k], &dir(k), &name(k));
+        }
+        assert!(c.settled().is_none());
+    }
+
+    #[test]
+    fn joined_first_orders_as_the_joined_path_does() {
+        let name = |s: &str| std::ffi::CString::new(s).unwrap();
+        let cases: [(&str, &str, &str, bool); 10] = [
+            ("/r/a", "x", "/r/a/y", true),
+            ("/r/a", "y", "/r/a/x", false),
+            ("/r/a", "x", "/r/a/x", false), // the same path is not first
+            ("/r/a", "x", "/r/b", true),
+            ("/r/b", "x", "/r/a/z", false),
+            ("/r", "a", "/r/a/x", true), // a parent comes before its children
+            ("/r/a/", "x", "/r/a/y", true), // a trailing slash on the dir
+            ("/r/./a", "y", "/r/a/x", false), // a `.` inside the dir
+            ("/r/a", "x", "/r/a.b/x", true), // by component, not by byte
+            ("", "x", "y", true),        // a relative PATH
+        ];
+        for (dir, n, other, want) in cases {
+            let (dir, n, other) = (Path::new(dir), name(n), Path::new(other));
+            assert_eq!(
+                joined_first(dir, &n, other),
+                want,
+                "{dir:?} {n:?} {other:?}"
+            );
+            assert_eq!(
+                credits_first(&dir.join(du_fs::os(&n)), other),
+                want,
+                "{dir:?} {n:?}"
+            );
+        }
     }
 
     #[test]

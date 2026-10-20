@@ -1,0 +1,1 @@
+`rtrash du` with rows (`-n`, `--types`) looks up each hard-linked file once a sighting rather than twice, builds a linked file's path only when it keeps it, and hands its claims to the second walk without copying them, so a tree full of hard links lists faster and in less memory.
