@@ -91,7 +91,7 @@ pub enum Kind {
 
 /// The entries of one directory: names packed into one buffer, each
 /// followed by a NUL so it can go straight to `fstatat`.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Entries {
     names: Vec<u8>,
     /// (start in `names`, length without the NUL, kind)
@@ -161,6 +161,49 @@ impl Entries {
                 *slot = Some(s);
             }
         }
+    }
+
+    /// The reads of one listing as one, in their order: entry `i` of a
+    /// read becomes entry `i` plus the entries of the reads before it.
+    /// The room for all of them is taken once.
+    pub fn concat(reads: Vec<Entries>) -> Entries {
+        let count: usize = reads.iter().map(|r| r.index.len()).sum();
+        let text: usize = reads.iter().map(|r| r.names.len()).sum();
+        let mut reads = reads.into_iter();
+        let mut all = reads.next().unwrap_or_default();
+        all.index.reserve(count - all.index.len());
+        all.names.reserve(text - all.names.len());
+        for more in reads {
+            all.append(more);
+        }
+        all
+    }
+
+    /// Add `more`, a later read of the same listing, after these: its
+    /// entry `i` becomes entry `self.len() + i`.
+    pub fn append(&mut self, more: Entries) {
+        if self.index.is_empty() {
+            *self = more;
+            return;
+        }
+        let (before, off) = (self.index.len(), self.names.len());
+        if !more.stats.is_empty() {
+            self.stats.resize(before, None);
+        }
+        if !more.inos.is_empty() {
+            self.inos.resize(before, 0);
+        }
+        self.names.extend_from_slice(&more.names);
+        let moved = more
+            .index
+            .into_iter()
+            .map(|(start, len, kind)| (start + off, len, kind));
+        self.index.extend(moved);
+        self.stats.extend(more.stats);
+        self.inos.extend(more.inos);
+        #[cfg(any(windows, test))]
+        self.restat
+            .extend(more.restat.into_iter().map(|i| i + before));
     }
 
     /// Stat of entry `i` if the listing returned one.

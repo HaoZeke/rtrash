@@ -619,6 +619,30 @@ mod tests {
         assert!(p.len() < e.len(), "{} of {}", p.len(), e.len());
         let (r5, _) = read_readdir(Dir::open(&root).unwrap().fd.as_raw_fd(), 5);
         assert_eq!(r5.len(), 5);
+        // On Linux each bounded read goes on from the last, and appending
+        // the reads gives the whole listing in its order (what du's
+        // list_and_stat relies on).
+        #[cfg(target_os = "linux")]
+        {
+            let one = Dir::open(&root).unwrap();
+            let (mut all, mut reads) = (Entries::default(), 0);
+            loop {
+                let (part, failed) = one.entries_upto(500);
+                assert!(!failed);
+                if part.is_empty() {
+                    break;
+                }
+                reads += 1;
+                all.append(part);
+            }
+            assert!(reads > 1, "{reads} reads");
+            let order = |e: &Entries| -> Vec<(std::ffi::CString, Kind)> {
+                (0..e.len())
+                    .map(|i| (e.get(i).0.to_owned(), e.get(i).1))
+                    .collect()
+            };
+            assert_eq!(order(&all), order(&e));
+        }
 
         use std::os::unix::fs::MetadataExt;
         let m = fs::symlink_metadata(root.join("link")).unwrap();

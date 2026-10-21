@@ -1,0 +1,1 @@
+On Linux, `rtrash du` starts the stats of a directory with tens of thousands of entries while the rest of the directory is still being read, so a huge folder no longer waits for its whole listing first. This is quickest when the cache is cold.

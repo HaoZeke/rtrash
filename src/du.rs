@@ -1205,6 +1205,14 @@ struct Ctx<'a> {
     /// A second walk may take a linked file's stat by the inode number
     /// its listing gives ([`listed_inodes_usable`]).
     ino_reuse: bool,
+    /// Whether a long directory's stats start while the rest of it is
+    /// read ([`list_and_stat`]): decided once a walk, so a walk that does
+    /// not stream lists as it always did. Linux only, where each read of a
+    /// listing goes on from the last; on more than one thread, since one
+    /// has nothing to overlap; only on a first walk, since a second one
+    /// reads inode numbers; and not under filters, which read the whole
+    /// listing first (.gitignore, CACHEDIR.TAG).
+    streams: bool,
     /// Whether the scan reads anything below a PATH: rows, or file types
     /// by name. When it does not (`-s`, `-n 0`), a linked file may count
     /// at any of its paths, since a PATH's total is the same either way,
@@ -2072,6 +2080,109 @@ fn stat_chunks<const REUSE: bool>(
     }
 }
 
+/// Entries a directory's first read must reach for its stats to start
+/// while the rest is read ([`list_and_stat`]), and the size of each later
+/// read: this many or more, up to the end of the `getdents64` buffer that
+/// crossed the mark. Tests use a smaller one, so a test tree of a few
+/// thousand entries takes several reads.
+const LISTED_BATCH: usize = if cfg!(test) { 512 } else { 16_384 };
+
+/// List `dir` for a walk that [`Ctx::streams`]. A listing that ends in its
+/// first read of [`LISTED_BATCH`] entries comes back as it is, for
+/// [`walk_dir`] to stat. In a longer one the stats start as the entries
+/// come: each read goes to the pool as stat jobs, one per worker, while
+/// the next is read, and `parts` gets the jobs' stats in listing order,
+/// with their entry numbers counted over the whole listing. A huge
+/// directory lists on one thread, and its stats used to wait for the
+/// whole listing: a cold one waits on the disk for every block of it.
+/// Returns the whole listing and whether reading it stopped on an error.
+/// Never inlined: a walk that does not stream must not carry it in
+/// [`enter`] (round 298's first try grew it by 721 bytes).
+#[inline(never)]
+fn list_and_stat(
+    ctx: &Ctx<'_>,
+    dir: &du_fs::Dir,
+    depth: usize,
+    listing: bool,
+    (path, rules): (&Path, Option<&Chain>),
+    parts: &mut Option<Vec<Stats>>,
+) -> (du_fs::Entries, bool) {
+    let (first, failed) = dir.entries_upto(LISTED_BATCH);
+    if failed || first.len() < LISTED_BATCH {
+        return (first, failed);
+    }
+    let opts = ctx.opts;
+    let list_files = listing && !opts.artefacts_only && opts.top > 0;
+    let workers = ctx.threads.max(1);
+    // (read, job in it, stats)
+    let done: Mutex<Vec<(usize, usize, Stats)>> = Mutex::new(Vec::new());
+    let mut reads: Vec<Arc<du_fs::Entries>> = Vec::new();
+    let mut failed = false;
+    rayon::scope(|s| {
+        let mut next = first;
+        loop {
+            let k = reads.len();
+            let read = Arc::new(next);
+            let n = read.len();
+            let per_job = n.div_ceil(workers).max(WIDE_CHUNK);
+            for (j, start) in (0..n).step_by(per_job).enumerate() {
+                let (read, done) = (Arc::clone(&read), &done);
+                s.spawn(move |_| {
+                    let range = start..n.min(start + per_job);
+                    let stats = stat_entries::<false>(
+                        ctx,
+                        (dir, 0),
+                        &read,
+                        range,
+                        depth,
+                        list_files,
+                        (path, rules),
+                    );
+                    done.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((k, j, stats));
+                });
+            }
+            reads.push(read);
+            // A short read ended the listing.
+            if failed || n < LISTED_BATCH {
+                break;
+            }
+            let (more, f) = dir.entries_upto(LISTED_BATCH);
+            failed = f;
+            if more.is_empty() {
+                break;
+            }
+            next = more;
+        }
+    });
+    let mut done = done.into_inner().unwrap_or_else(|e| e.into_inner());
+    done.sort_unstable_by_key(|d| (d.0, d.1));
+    let mut starts = Vec::with_capacity(reads.len());
+    let mut before = 0;
+    for read in &reads {
+        starts.push(before);
+        before += read.len();
+    }
+    // Every job is done, so each read has no other owner: no copy.
+    let all = du_fs::Entries::concat(reads.into_iter().map(Arc::unwrap_or_clone).collect());
+    let stats = done
+        .into_iter()
+        .map(|(k, _, mut stats)| {
+            let off = starts[k];
+            for d in &mut stats.subdirs {
+                d.0 += off;
+            }
+            for c in &mut stats.candidates {
+                c.entry += off;
+            }
+            stats
+        })
+        .collect();
+    *parts = Some(stats);
+    (all, failed)
+}
+
 /// Walk one open directory. `listing` is false below `.git`, artefacts
 /// and trash roots: their sizes count, but nothing inside them is listed.
 fn walk_dir(
@@ -2106,8 +2217,14 @@ fn walk_dir(
     // listing's inode numbers are the files' own. Every other walk lists
     // and stats as if there were no numbers at all.
     let reuse = (ctx.ino_reuse && dir.lists_true_inodes()).then_some(st.dev);
+    // A long directory's stats may start while it is read
+    // ([`Ctx::streams`]); they come back in `streamed`.
+    let mut streamed = None;
     let (entries, failed) = if reuse.is_some() {
         dir.entries_with_inos()
+    } else if ctx.streams {
+        let rules = chain.map(|c| &**c);
+        list_and_stat(ctx, &dir, depth, listing, (path, rules), &mut streamed)
     } else {
         dir.entries()
     };
@@ -2160,11 +2277,17 @@ fn walk_dir(
     // loop, with no inode lookup in it. Each runs in its own
     // [`stat_chunks`], so each parallel body has one loop.
     let rules = chain.as_deref();
-    let parts: Vec<Stats> = match reuse {
-        Some(dev) => {
-            stat_chunks::<true>(ctx, (&dir, dev), &entries, depth, list_files, (path, rules))
+    let parts: Vec<Stats> = if let Some(parts) = streamed {
+        parts
+    } else {
+        match reuse {
+            Some(dev) => {
+                stat_chunks::<true>(ctx, (&dir, dev), &entries, depth, list_files, (path, rules))
+            }
+            None => {
+                stat_chunks::<false>(ctx, (&dir, 0), &entries, depth, list_files, (path, rules))
+            }
         }
-        None => stat_chunks::<false>(ctx, (&dir, 0), &entries, depth, list_files, (path, rules)),
     };
     let mut subdirs: Vec<(usize, Option<du_fs::Stat>)> = Vec::new();
     let mut candidates: Vec<FileCandidate> = Vec::new();
@@ -2542,6 +2665,10 @@ fn scan_pooled(
             fds: FdBudget::new(rayon::current_num_threads()),
             threads: rayon::current_num_threads(),
             ino_reuse: decided.is_some() && listed_inodes_usable(&abs),
+            streams: cfg!(target_os = "linux")
+                && decided.is_none()
+                && rayon::current_num_threads() > 1
+                && !opts.filter.as_deref().is_some_and(|s| s.is_active()),
             dirs_seen: LinkSet::new(),
             unreadable: AtomicU64::new(0),
             unread: Mutex::new(Vec::new()),
@@ -5584,6 +5711,73 @@ mod tests {
             assert_eq!(row.apparent, m.len());
             assert_eq!(row.disk, m.blocks() * 512);
         }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A directory of several reads ([`LISTED_BATCH`]) is stat-ed while
+    /// it is read, and comes out as one listing would give it: the same
+    /// totals with and without rows, each file once (a hard link across
+    /// reads too), the biggest files under their own names, and its
+    /// folder found by its name.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_directory_stat_while_it_is_read_counts_as_one_listing() {
+        use std::os::unix::fs::MetadataExt;
+        let base = std::env::temp_dir().join(format!("rtrash-du-reads-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("big").join("sub")).unwrap();
+        let base = fs::canonicalize(&base).unwrap();
+        let big = base.join("big");
+        for i in 0..20 * LISTED_BATCH + 100 {
+            fs::write(big.join(format!("f{i:06}")), vec![1u8; i % 7]).unwrap();
+        }
+        for i in 0..5 {
+            fs::write(big.join(format!("large-{i}")), vec![2u8; 20_000 + i]).unwrap();
+        }
+        fs::write(big.join("sub").join("x"), vec![3u8; 5_000]).unwrap();
+        fs::hard_link(big.join("large-0"), big.join("zz-link")).unwrap();
+        let own = |p: &Path| fs::symlink_metadata(p).unwrap();
+        let mut want_disk: u64 = [&base, &big, &big.join("sub")]
+            .iter()
+            .map(|p| own(p).blocks() * 512)
+            .sum();
+        let (mut want_apparent, mut want_files) = (0u64, 0u64);
+        let mut inos = HashSet::new();
+        let listed = fs::read_dir(&big).unwrap().map(|e| e.unwrap().path());
+        for p in listed.chain([big.join("sub").join("x")]) {
+            let m = own(&p);
+            if m.is_dir() || !inos.insert(m.ino()) {
+                continue;
+            }
+            want_disk += m.blocks() * 512;
+            want_apparent += m.len();
+            want_files += 1;
+        }
+        let rows = ScanOpts {
+            all_dirs: true,
+            top: 5,
+            ..ScanOpts::default()
+        };
+        let plain = ScanOpts {
+            top: 0,
+            ..ScanOpts::default()
+        };
+        for opts in [&rows, &plain] {
+            let r = scan(std::slice::from_ref(&base), opts).unwrap();
+            let t = &r.roots[0];
+            assert_eq!(
+                (t.disk, t.apparent, t.files),
+                (want_disk, want_apparent, want_files)
+            );
+        }
+        let r = scan(std::slice::from_ref(&base), &rows).unwrap();
+        let mut top: Vec<PathBuf> = r.files.iter().map(|f| f.path.clone()).collect();
+        top.sort();
+        let want: Vec<PathBuf> = (0..5).map(|i| big.join(format!("large-{i}"))).collect();
+        assert_eq!(top, want, "{:?}", r.files);
+        let sub = r.dirs.iter().find(|d| d.path == big.join("sub"));
+        let sub = sub.unwrap_or_else(|| panic!("{:?}", r.dirs));
+        assert_eq!(sub.apparent, 5_000, "{sub:?}");
         let _ = fs::remove_dir_all(&base);
     }
 
