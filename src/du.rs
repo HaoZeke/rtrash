@@ -1116,7 +1116,8 @@ impl Claim {
 
 /// `dir.join(name)` with no room to spare. `join` copies `dir` and then
 /// grows the copy for `name`, which doubles it: a 45-byte path took a
-/// 96-byte block of the allocator, where one of 64 holds it.
+/// 96-byte block of the allocator, where one of 64 holds it. Used for
+/// the claims and for the path of each subdirectory the walk enters.
 fn joined_path(dir: &Path, name: &CStr) -> Box<Path> {
     let name = du_fs::os(name);
     let mut p = PathBuf::with_capacity(dir.as_os_str().len() + 1 + name.len());
@@ -2467,7 +2468,10 @@ fn walk_dir(
         .into_par_iter()
         .map(|(i, known)| {
             let cname = entries.get(i).0;
-            let child = path.join(du_fs::os(cname));
+            // Each level keeps its path while the levels below it are
+            // walked: built with `join`, a chain 1,500 deep kept twice the
+            // bytes of all its paths.
+            let child = joined_path(path, cname);
             let rel = parent.as_ref().map(|d| (d, cname));
             enter(
                 ctx,
