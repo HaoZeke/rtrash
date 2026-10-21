@@ -1068,15 +1068,61 @@ struct LinkClaims {
     shards: Vec<Mutex<HashMap<(u64, u64), Claim>>>,
 }
 
-/// One linked file in [`LinkClaims`].
+/// One linked file in [`LinkClaims`], kept small: a walk of 200,000
+/// linked files keeps one each. The path is built to its length
+/// ([`joined_path`]), and the stat leaves out the device and inode
+/// number, which are the file's key.
 struct Claim {
-    smallest: PathBuf,
+    smallest: Box<Path>,
     /// Whether the sighting that took the count was at `smallest`.
     counted_there: bool,
-    /// The file's stat. A second walk takes it for an entry whose listed
-    /// inode number names this file ([`du_fs::Dir::lists_true_inodes`]),
-    /// so it stats no linked file again.
-    stat: du_fs::Stat,
+    /// The rest of the file's stat ([`Claim::stat`]).
+    mode: u32,
+    size: u64,
+    blocks: u64,
+    nlink: u64,
+    mtime: i64,
+}
+
+impl Claim {
+    fn new(st: &du_fs::Stat, smallest: Box<Path>) -> Self {
+        Claim {
+            smallest,
+            counted_there: true,
+            mode: st.mode,
+            size: st.size,
+            blocks: st.blocks,
+            nlink: st.nlink,
+            mtime: st.mtime,
+        }
+    }
+
+    /// The stat of the file `(dev, ino)`, the key it is filed under. A
+    /// second walk takes it for an entry whose listed inode number names
+    /// this file ([`du_fs::Dir::lists_true_inodes`]), so it stats no
+    /// linked file again.
+    fn stat(&self, (dev, ino): (u64, u64)) -> du_fs::Stat {
+        du_fs::Stat {
+            mode: self.mode,
+            size: self.size,
+            blocks: self.blocks,
+            nlink: self.nlink,
+            ino,
+            dev,
+            mtime: self.mtime,
+        }
+    }
+}
+
+/// `dir.join(name)` with no room to spare. `join` copies `dir` and then
+/// grows the copy for `name`, which doubles it: a 45-byte path took a
+/// 96-byte block of the allocator, where one of 64 holds it.
+fn joined_path(dir: &Path, name: &CStr) -> Box<Path> {
+    let name = du_fs::os(name);
+    let mut p = PathBuf::with_capacity(dir.as_os_str().len() + 1 + name.len());
+    p.push(dir);
+    p.push(name);
+    p.into_boxed_path()
 }
 
 /// Where a second walk counts each linked file ([`Ctx::decided`]): the
@@ -1144,17 +1190,13 @@ impl LinkClaims {
     ) -> bool {
         match map.entry((st.dev, st.ino)) {
             std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert(Claim {
-                    smallest: dir.join(du_fs::os(name)),
-                    counted_there: true,
-                    stat: *st,
-                });
+                v.insert(Claim::new(st, joined_path(dir, name)));
                 true
             }
             std::collections::hash_map::Entry::Occupied(mut o) => {
                 let claim = o.get_mut();
                 if joined_first(dir, name, &claim.smallest) {
-                    claim.smallest = dir.join(du_fs::os(name));
+                    claim.smallest = joined_path(dir, name);
                     claim.counted_there = false;
                 }
                 false
@@ -1376,7 +1418,7 @@ impl Ctx<'_> {
                 let here = same_joined(&fixed.smallest, dir, name);
                 debug_assert_eq!(
                     here,
-                    fixed.smallest == dir.join(du_fs::os(name)),
+                    *fixed.smallest == *dir.join(du_fs::os(name)),
                     "same_joined({:?}, {dir:?}, {name:?})",
                     fixed.smallest
                 );
@@ -1912,7 +1954,7 @@ fn stat_entries<const REUSE: bool>(
         let listed = if REUSE {
             entries.stat(i).or_else(|| {
                 let ino = entries.file_ino(i)?;
-                Some(ctx.decided?.get(&(dev, ino))?.stat)
+                Some(ctx.decided?.get(&(dev, ino))?.stat((dev, ino)))
             })
         } else {
             entries.stat(i)
@@ -6038,19 +6080,55 @@ mod tests {
         let paths = |c: LinkClaims| -> std::collections::BTreeMap<(u64, u64), PathBuf> {
             let fixed = c.settled().expect("first sightings at the largest paths");
             assert_eq!(fixed.len(), 200);
-            let found = fixed.get(&(5, 1)).map(|c| c.smallest.clone());
+            let found = fixed.get(&(5, 1)).map(|c| c.smallest.to_path_buf());
             assert_eq!(found, Some(PathBuf::from("/r/d0/f1")));
             fixed
                 .shards
                 .into_iter()
                 .flatten()
-                .map(|(id, c)| (id, c.smallest))
+                .map(|(id, c)| (id, c.smallest.into_path_buf()))
                 .collect()
         };
         let (want, got) = (paths(one), paths(batch));
         assert_eq!(got, want);
         assert_eq!(got.len(), 200);
         assert!(got.values().all(|p| p.starts_with("/r/d0")), "{got:?}");
+    }
+
+    /// A claim gives back the stat it was made from under its key, and
+    /// its path is the joined one, with no room left over.
+    #[test]
+    fn a_claim_keeps_its_path_and_stat_in_the_room_they_need() {
+        let st = du_fs::Stat {
+            mode: 0o100644,
+            size: 4097,
+            blocks: 16,
+            nlink: 2,
+            ino: 77,
+            dev: 5,
+            mtime: -3,
+        };
+        let name = |s: &str| std::ffi::CString::new(s).unwrap();
+        for (dir, n) in [
+            ("/r/a", "x"),
+            ("/r/a/", "x"),
+            ("/", "x"),
+            ("", "x"),
+            ("r", "e000123"),
+        ] {
+            let (dir, n) = (Path::new(dir), name(n));
+            let p = joined_path(dir, &n);
+            assert_eq!(*p, *dir.join(du_fs::os(&n)), "{dir:?} {n:?}");
+            let c = Claim::new(&st, p);
+            assert!(c.counted_there);
+            assert_eq!(c.stat((st.dev, st.ino)), st);
+        }
+        #[cfg(target_pointer_width = "64")]
+        assert!(
+            std::mem::size_of::<Claim>() <= 56,
+            "{}",
+            std::mem::size_of::<Claim>()
+        );
     }
 
     #[test]
