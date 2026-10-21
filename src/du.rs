@@ -2073,11 +2073,42 @@ fn stat_chunks<const REUSE: bool>(
         let size = wide_chunk(n, ctx.threads);
         (0..n.div_ceil(size))
             .into_par_iter()
-            .map(|c| stat_chunk(c * size..n.min((c + 1) * size)))
+            .map(|c| {
+                let mut part = stat_chunk(c * size..n.min((c + 1) * size));
+                if list_files {
+                    keep_best(ctx, entries, &mut part.candidates);
+                }
+                part
+            })
             .collect()
     } else {
         vec![stat_chunk(0..n)]
     }
+}
+
+/// Keep the `top` best of one stat job's file `candidates`, named in
+/// `entries`, and free the room of the rest. [`walk_dir`] keeps the `top`
+/// best of the directory's in the same order, by key and then by name,
+/// and names are unique in a directory, so the best of all jobs are
+/// among the best of each. Done in the job, a wide directory's candidates
+/// are cut on every worker: walk_dir used to gather all of them first,
+/// one per file of a folder of 500,000 that tie on size, and choose
+/// among them on one thread.
+#[inline(never)]
+fn keep_best(ctx: &Ctx<'_>, entries: &du_fs::Entries, candidates: &mut Vec<FileCandidate>) {
+    let top = ctx.opts.top;
+    if candidates.len() <= top {
+        return;
+    }
+    let name_of = |c: &FileCandidate| entries.get(c.entry).0.to_bytes();
+    candidates.select_nth_unstable_by(top - 1, |x, y| {
+        rank(
+            (ctx.key(x.apparent, x.disk, 1, x.mtime), name_of(x)),
+            (ctx.key(y.apparent, y.disk, 1, y.mtime), name_of(y)),
+        )
+    });
+    candidates.truncate(top);
+    candidates.shrink_to_fit();
 }
 
 /// Entries a directory's first read must reach for its stats to start
@@ -2129,7 +2160,7 @@ fn list_and_stat(
                 let (read, done) = (Arc::clone(&read), &done);
                 s.spawn(move |_| {
                     let range = start..n.min(start + per_job);
-                    let stats = stat_entries::<false>(
+                    let mut stats = stat_entries::<false>(
                         ctx,
                         (dir, 0),
                         &read,
@@ -2138,6 +2169,10 @@ fn list_and_stat(
                         list_files,
                         (path, rules),
                     );
+                    // Entry numbers are still this read's own here.
+                    if list_files {
+                        keep_best(ctx, &read, &mut stats.candidates);
+                    }
                     done.lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .push((k, j, stats));
@@ -5779,6 +5814,41 @@ mod tests {
         let sub = sub.unwrap_or_else(|| panic!("{:?}", r.dirs));
         assert_eq!(sub.apparent, 5_000, "{sub:?}");
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A folder of more than [`WIDE_DIR`] files that tie on size. On one
+    /// thread its stat jobs cut their candidates in [`stat_chunks`], on
+    /// four (on Linux) in [`list_and_stat`] while it is read. Either way
+    /// the list is the larger file and then the tied ones by name, as if
+    /// one job had seen them all.
+    #[test]
+    fn a_wide_directory_lists_its_best_files_in_the_one_order() {
+        let base = std::env::temp_dir().join(format!("rtrash-du-best-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        // The scan reports `absolute` of the root: the parent is canonical,
+        // and on Windows the `\\?\` prefix is left off. Expected paths use
+        // that same root.
+        let root = absolute(&base).unwrap();
+        let n = 2 * LISTED_BATCH + 3 * WIDE_DIR;
+        // Made in reverse, so the first files made are not the answer.
+        for i in (0..n).rev() {
+            fs::write(root.join(format!("f{i:05}")), b"same").unwrap();
+        }
+        fs::write(root.join("zz-big"), vec![1u8; 100_000]).unwrap();
+        let opts = ScanOpts {
+            top: 4,
+            ..ScanOpts::default()
+        };
+        let mut want = vec![root.join("zz-big")];
+        want.extend((0..3).map(|i| root.join(format!("f{i:05}"))));
+        for threads in [1, 4] {
+            let r = scan_on(std::slice::from_ref(&root), &opts, None, Some(threads)).unwrap();
+            let got: Vec<PathBuf> = r.files.iter().map(|f| f.path.clone()).collect();
+            assert_eq!(got, want, "{threads} threads");
+            assert_eq!(r.roots[0].files, n as u64 + 1, "{threads} threads");
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

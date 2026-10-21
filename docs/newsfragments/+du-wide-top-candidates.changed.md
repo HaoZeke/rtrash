@@ -1,0 +1,1 @@
+When `rtrash du` lists the largest files, a folder with hundreds of thousands of files now keeps only the best few of each batch it stats. It no longer keeps one candidate per file until the folder is done, so it needs less memory and picks its list on every thread.
