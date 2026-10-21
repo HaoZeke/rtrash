@@ -1687,12 +1687,13 @@ struct FileCandidate {
 fn enter(
     ctx: &Ctx<'_>,
     parent: Option<(&du_fs::Dir, &CStr)>,
-    path: &Path,
+    buf: &mut PathBuf,
     known: Option<du_fs::Stat>,
     depth: usize,
     listing: bool,
     chain: Option<&Arc<Chain>>,
 ) -> Option<Node> {
+    let path: &Path = buf;
     // Stopped: skip what is not entered yet. The PATH itself still lists
     // its own files, so a stop always leaves something to show.
     if depth > 0 && ctx.opts.control.as_ref().is_some_and(|c| c.stopped()) {
@@ -1802,7 +1803,7 @@ fn enter(
     if (follow || cfg!(unix)) && st.ino != 0 && !ctx.dirs_seen.insert(st.dev, st.ino) {
         return None;
     }
-    walk_dir(ctx, dir, path, &st, depth, listing, chain)
+    walk_dir(ctx, dir, buf, &st, depth, listing, chain)
 }
 
 /// The inode of the top directory of every btrfs subvolume.
@@ -2266,12 +2267,13 @@ fn list_and_stat(
 fn walk_dir(
     ctx: &Ctx<'_>,
     dir: du_fs::Dir,
-    path: &Path,
+    buf: &mut PathBuf,
     st: &du_fs::Stat,
     depth: usize,
     listing: bool,
     chain: Option<&Arc<Chain>>,
 ) -> Option<Node> {
+    let path: &Path = buf;
     let opts = ctx.opts;
     // Like GNU du, a directory adds blocks to disk use but nothing to the
     // apparent size: its st_size is a filesystem detail, not data.
@@ -2464,28 +2466,51 @@ fn walk_dir(
         drop(dir);
         None
     };
-    let children: Vec<Option<Node>> = subdirs
-        .into_par_iter()
-        .map(|(i, known)| {
-            let cname = entries.get(i).0;
-            // Each level keeps its path while the levels below it are
-            // walked: built with `join`, a chain 1,500 deep kept twice the
-            // bytes of all its paths.
-            let child = joined_path(path, cname);
-            let rel = parent.as_ref().map(|d| (d, cname));
-            enter(
-                ctx,
-                rel,
-                &child,
-                known,
-                depth + 1,
-                inner_listing,
-                chain.as_ref(),
-            )
-        })
-        .collect();
+    // A lone subdirectory is walked on this thread, as rayon would walk
+    // a list of one, with its name pushed onto this level's path and
+    // popped after. A chain of them then keeps one path, not a copy a
+    // level: 1,500 deep, the copies came to 2.3 MB a thread. A PATH is
+    // left as given: popping a name from `dir/` would drop the slash.
+    let lone = (depth > 0 && subdirs.len() == 1).then(|| subdirs[0]);
+    let children: Vec<Option<Node>> = if let Some((i, known)) = lone {
+        let cname = entries.get(i).0;
+        let rel = parent.as_ref().map(|d| (d, cname));
+        let len = buf.as_os_str().len();
+        buf.push(du_fs::os(cname));
+        let child = enter(
+            ctx,
+            rel,
+            buf,
+            known,
+            depth + 1,
+            inner_listing,
+            chain.as_ref(),
+        );
+        buf.pop();
+        debug_assert_eq!(buf.as_os_str().len(), len);
+        vec![child]
+    } else {
+        subdirs
+            .into_par_iter()
+            .map(|(i, known)| {
+                let cname = entries.get(i).0;
+                let mut child = joined_path(path, cname).into_path_buf();
+                let rel = parent.as_ref().map(|d| (d, cname));
+                enter(
+                    ctx,
+                    rel,
+                    &mut child,
+                    known,
+                    depth + 1,
+                    inner_listing,
+                    chain.as_ref(),
+                )
+            })
+            .collect()
+    };
     drop(parent);
     drop(hold);
+    let path: &Path = buf;
 
     let mut largest_child = 0u64;
     for child in children.into_iter().flatten() {
@@ -2776,7 +2801,7 @@ fn scan_pooled(
         let (apparent, disk, disk_all, unique, artefact) = if meta.is_dir() {
             let walk = |ctx: &Ctx<'_>| {
                 let chain = ctx.filter.as_ref().and_then(|f| f.root_chain.as_ref());
-                enter(ctx, None, &abs, Some(meta), 0, true, chain)
+                enter(ctx, None, &mut abs.clone(), Some(meta), 0, true, chain)
             };
             let live = opts.control.as_deref();
             let before = live.map(|c| {
