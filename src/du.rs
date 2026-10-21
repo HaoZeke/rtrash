@@ -2,7 +2,7 @@
 //! reports the largest directories and files, with on-disk and apparent sizes.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::CStr;
+use std::ffi::{CStr, OsStr};
 use std::fs;
 use std::io::{self, Write};
 #[cfg(unix)]
@@ -1070,8 +1070,8 @@ struct LinkClaims {
 
 /// One linked file in [`LinkClaims`], kept small: a walk of 200,000
 /// linked files keeps one each. The path is built to its length
-/// ([`joined_path`]), and the stat leaves out the device and inode
-/// number, which are the file's key.
+/// ([`joined_path`]) from below the root ([`Ctx::below_root`]), and the
+/// stat leaves out the device and inode number, which are the file's key.
 struct Claim {
     smallest: Box<Path>,
     /// Whether the sighting that took the count was at `smallest`.
@@ -1112,6 +1112,16 @@ impl Claim {
             mtime: self.mtime,
         }
     }
+}
+
+/// How many bytes of each path below `root` are the root's: the root
+/// and the separator `push` puts after it, unless it ends in one.
+fn root_skip(root: &Path) -> usize {
+    let b = root.as_os_str().as_encoded_bytes();
+    let sep = b
+        .last()
+        .is_some_and(|&c| !std::path::is_separator(char::from(c)));
+    b.len() + usize::from(sep)
 }
 
 /// `dir.join(name)` with no room to spare. `join` copies `dir` and then
@@ -1237,6 +1247,8 @@ struct Ctx<'a> {
     seen: LinkSet,
     /// Where this walk met each file with several links.
     claims: LinkClaims,
+    /// The bytes that start every path below the root ([`root_skip`]).
+    root_skip: usize,
     /// For a second walk: the one path at which each linked file counts.
     decided: Option<&'a Decided>,
     /// On a second walk, the files met at their path in `decided`.
@@ -1407,11 +1419,30 @@ impl Ctx<'_> {
         self.counts_at_path(st, dir, name)
     }
 
+    /// `dir`, a directory of this walk, as a path from below the root.
+    /// The claims keep their paths this way, so that each linked file
+    /// does not keep its own copy of the root's path. Every path of one
+    /// root has the same start, so the order and equality of the paths
+    /// that follow it are those of the whole paths.
+    fn below_root<'p>(&self, dir: &'p Path) -> &'p Path {
+        let b = dir.as_os_str().as_encoded_bytes();
+        let rest = b.get(self.root_skip..).unwrap_or_default();
+        debug_assert!(
+            rest.is_empty() || std::path::is_separator(char::from(b[self.root_skip - 1])),
+            "below_root({dir:?})"
+        );
+        // SAFETY: a path of the walk is the root's path, a separator and
+        // the rest, so `rest` starts right after an ASCII separator or is
+        // empty, where an encoded OsStr may be split.
+        Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(rest) })
+    }
+
     /// Where a linked file counts. Not inlined into [`stat_entries`]: the
     /// copy without reuse is the plain loop, and a `PathBuf` per name on
     /// the reuse walk was the main-arena pile-up.
     #[inline(never)]
     fn counts_at_path(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
+        let dir = self.below_root(dir);
         // A second walk already stored the path. Comparing the components
         // builds no PathBuf for any linked name, met at its path or not.
         if let Some(d) = self.decided {
@@ -1458,7 +1489,7 @@ impl Ctx<'_> {
         name: impl Fn(usize) -> &'n CStr,
     ) -> Vec<bool> {
         if self.rows {
-            self.claims.claim_all(sts, dir, name)
+            self.claims.claim_all(sts, self.below_root(dir), name)
         } else {
             self.seen.first_links(sts)
         }
@@ -2765,6 +2796,7 @@ fn scan_pooled(
             root_dev: meta.dev,
             seen: LinkSet::new(),
             claims: LinkClaims::new(),
+            root_skip: root_skip(&abs),
             decided,
             met: AtomicU64::new(0),
             rows: opts.top > 0 || opts.types,
@@ -6169,6 +6201,27 @@ mod tests {
             c.claim(&sts[k], &dir(k), &name(k));
         }
         assert!(c.settled().is_none());
+    }
+
+    #[test]
+    fn root_skip_leaves_what_is_below_the_root() {
+        let roots: &[&str] = if cfg!(windows) {
+            &[r"C:\", r"C:\r", r"C:\r\", r"\\?\C:\r"]
+        } else {
+            &["/", "/r", "/r/", "/r/./"]
+        };
+        let bytes = |p: &Path| p.as_os_str().as_encoded_bytes().to_vec();
+        for root in roots {
+            let root = Path::new(root);
+            let skip = root_skip(root);
+            assert_eq!(bytes(root).get(skip..).unwrap_or_default(), b"", "{root:?}");
+            let mut p = root.to_path_buf();
+            p.push("a");
+            assert_eq!(&bytes(&p)[skip..], b"a", "{root:?}");
+            p.push("b");
+            let want = bytes(&Path::new("a").join("b"));
+            assert_eq!(bytes(&p)[skip..], want[..], "{root:?}");
+        }
     }
 
     #[test]
