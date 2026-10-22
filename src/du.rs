@@ -912,11 +912,59 @@ impl SharedTop {
     }
 }
 
+/// Builds the hasher of a walk's `(dev, ino)` sets and maps ([`LinkSet`],
+/// [`LinkClaims`]). Each directory and each file of several links costs
+/// one lookup there, and std's SipHash made those lookups a large part of
+/// a walk of deep trees. The keys are file IDs, not names, so two folded
+/// multiplies a key do. The seed comes from std's random keys, one per
+/// set, so the buckets a tree's IDs fall in change from run to run.
+#[derive(Clone)]
+struct InoHash(u64);
+
+impl Default for InoHash {
+    fn default() -> Self {
+        use std::hash::BuildHasher;
+        InoHash(std::collections::hash_map::RandomState::new().hash_one(0u64))
+    }
+}
+
+impl std::hash::BuildHasher for InoHash {
+    type Hasher = InoHasher;
+
+    fn build_hasher(&self) -> InoHasher {
+        InoHasher(self.0)
+    }
+}
+
+/// [`InoHash`]'s hasher: each `u64` written is folded into the state by
+/// a 128-bit multiply, which mixes the low and high bits alike.
+struct InoHasher(u64);
+
+impl std::hash::Hasher for InoHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        let p = u128::from(self.0 ^ n) * 0x9E37_79B9_7F4A_7C15_u128;
+        self.0 = (p as u64) ^ ((p >> 64) as u64);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type InoSet = HashSet<(u64, u64), InoHash>;
+type InoMap<V> = HashMap<(u64, u64), V, InoHash>;
+
 /// Hard links seen so far, as `(dev, ino)`, split over several locks so
 /// workers on a tree full of links (pnpm, nix, ccache) rarely wait on
 /// each other.
 struct LinkSet {
-    shards: Vec<Mutex<HashSet<(u64, u64)>>>,
+    shards: Vec<Mutex<InoSet>>,
 }
 
 impl LinkSet {
@@ -1065,7 +1113,7 @@ impl<T> LinkCredit<T> {
 /// the smallest path; when one did not, the walk runs again with that
 /// path fixed for each file ([`Ctx::decided`]).
 struct LinkClaims {
-    shards: Vec<Mutex<HashMap<(u64, u64), Claim>>>,
+    shards: Vec<Mutex<InoMap<Claim>>>,
 }
 
 /// One linked file in [`LinkClaims`], kept small: a walk of 200,000
@@ -1140,7 +1188,7 @@ fn joined_path(dir: &Path, name: &CStr) -> Box<Path> {
 /// first walk's claims, left in the shards they were filed in, so
 /// settling them copies nothing.
 struct Decided {
-    shards: Vec<HashMap<(u64, u64), Claim>>,
+    shards: Vec<InoMap<Claim>>,
 }
 
 impl Decided {
@@ -1193,12 +1241,7 @@ impl LinkClaims {
     /// [`LinkClaims::claim`] in the locked shard `map` of file `st`. A
     /// later sighting takes the path only when it comes first
     /// ([`credits_first`]), and only then is that path built.
-    fn see_in(
-        map: &mut HashMap<(u64, u64), Claim>,
-        st: &du_fs::Stat,
-        dir: &Path,
-        name: &CStr,
-    ) -> bool {
+    fn see_in(map: &mut InoMap<Claim>, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         match map.entry((st.dev, st.ino)) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(Claim::new(st, joined_path(dir, name)));
@@ -6046,6 +6089,23 @@ mod tests {
             "a mount point that cannot be stat-ed"
         );
         assert!(usable("/data/other/dir"), "its own mount only");
+    }
+
+    #[test]
+    fn ino_hash_spreads_close_ids() {
+        use std::hash::BuildHasher;
+        let h = InoHash::default();
+        let (mut low, mut top) = (HashSet::new(), HashSet::new());
+        for ino in 0..1024u64 {
+            let x = h.hash_one((7u64, ino));
+            low.insert(x & 1023);
+            top.insert(x >> 57);
+        }
+        // A table of 1024 buckets indexes by the low bits, and its tags
+        // are the top 7 bits.
+        assert!(low.len() > 512, "{} low buckets", low.len());
+        assert!(top.len() > 120, "{} tags", top.len());
+        assert_ne!(h.hash_one((7u64, 1u64)), h.hash_one((1u64, 7u64)));
     }
 
     #[test]

@@ -1,1 +1,2 @@
 On Linux, `rtrash du` counts the entries of each small or mid-sized directory read before storing them, and makes room for them all at once. Its lists of names no longer grow a doubling at a time, which took most of the allocator's work on a source tree. On every platform, a directory's list of subdirectories is no longer copied once its entries are stated.
+ The table of directories already walked, and the tables of hard links, hash their device and inode numbers with two multiplies in place of SipHash.
