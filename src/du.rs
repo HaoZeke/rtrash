@@ -2416,13 +2416,13 @@ fn walk_dir(
         node.disk = node.disk.saturating_add(p.disk);
         node.disk_all = node.disk_all.saturating_add(p.disk);
         node.base = node.base.saturating_add(p.base);
-        node.ranges.extend(p.ranges);
+        take_or_extend(&mut node.ranges, p.ranges);
         node.unique = node.unique.saturating_add(p.unique);
         node.mtime = node.mtime.max(p.mtime);
         node.items += p.files;
         node.filtered_out += p.filtered_out;
-        subdirs.extend(p.subdirs);
-        candidates.extend(p.candidates);
+        take_or_extend(&mut subdirs, p.subdirs);
+        take_or_extend(&mut candidates, p.candidates);
     }
 
     let name = path
@@ -2590,6 +2590,17 @@ fn walk_dir(
         node.offer_self(ctx, path, depth, largest_child, artefact);
     }
     Some(node)
+}
+
+/// Append `more` to `all`, or take `more` whole while `all` is empty. A
+/// directory stated in one job then keeps that job's lists as they are,
+/// with no new block, copy and free for each.
+fn take_or_extend<T>(all: &mut Vec<T>, more: Vec<T>) {
+    if all.is_empty() {
+        *all = more;
+    } else {
+        all.extend(more);
+    }
 }
 
 /// `HEAD`, `objects/` and `refs/`: the entries every git directory has.
@@ -5683,6 +5694,19 @@ fn warn_unread(prog: &str, report: &Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parts_are_taken_whole_into_an_empty_list() {
+        let first = vec![1, 2, 3];
+        let block = first.as_ptr();
+        let mut all = Vec::new();
+        take_or_extend(&mut all, Vec::new());
+        take_or_extend(&mut all, first);
+        assert_eq!(all.as_ptr(), block);
+        take_or_extend(&mut all, vec![4]);
+        take_or_extend(&mut all, Vec::new());
+        assert_eq!(all, [1, 2, 3, 4]);
+    }
 
     #[test]
     fn bars_fill_a_tenth_per_cell() {
