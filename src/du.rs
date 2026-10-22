@@ -2551,7 +2551,7 @@ fn walk_dir(
     };
     // A lone subdirectory is walked on this thread, as rayon would walk
     // a list of one, with its name pushed onto this level's path and
-    // popped after. A chain of them then keeps one path, not a copy a
+    // cut off after. A chain of them then keeps one path, not a copy a
     // level: 1,500 deep, the copies came to 2.3 MB a thread. A PATH is
     // left as given: popping a name from `dir/` would drop the slash.
     let lone = (depth > 0 && subdirs.len() == 1).then(|| subdirs[0]);
@@ -2572,8 +2572,7 @@ fn walk_dir(
             inner_listing,
             chain.as_ref(),
         );
-        buf.pop();
-        debug_assert_eq!(buf.as_os_str().len(), len);
+        cut_path(buf, len);
         vec![child]
     } else {
         subdirs
@@ -2633,6 +2632,23 @@ fn walk_dir(
         node.offer_self(ctx, path, depth, largest_child, artefact);
     }
     Some(node)
+}
+
+/// Cut `buf` back to its first `len` bytes. That is the path before
+/// [`enter`] pushed a name on it, and `PathBuf::pop` cuts there too.
+/// A deep chain cuts once a level. The pop parses the last component
+/// twice from the back to find that known length.
+fn cut_path(buf: &mut PathBuf, len: usize) {
+    debug_assert_eq!(buf.parent().map(|p| p.as_os_str().len()), Some(len));
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut bytes = std::mem::take(buf).into_os_string().into_vec();
+        bytes.truncate(len);
+        *buf = PathBuf::from(std::ffi::OsString::from_vec(bytes));
+    }
+    #[cfg(not(unix))]
+    buf.pop();
 }
 
 /// Append `more` to `all`, or take `more` whole while `all` is empty. A
@@ -5737,6 +5753,20 @@ fn warn_unread(prog: &str, report: &Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cut_path_leaves_what_pop_does() {
+        for (dir, name) in [("/", "a"), ("r", "b"), ("r/s", "c d"), ("./r", "\u{e9}")] {
+            let mut buf = PathBuf::from(dir);
+            let len = buf.as_os_str().len();
+            buf.push(name);
+            let mut popped = buf.clone();
+            popped.pop();
+            cut_path(&mut buf, len);
+            assert_eq!(buf, popped, "{dir:?} + {name:?}");
+            assert_eq!(buf.as_os_str().len(), len);
+        }
+    }
 
     #[test]
     fn parts_are_taken_whole_into_an_empty_list() {
