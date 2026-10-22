@@ -347,6 +347,9 @@ fn read_getdents<const INOS: bool>(fd: RawFd, max: usize) -> (Entries, bool) {
 /// regular file; without it the entries carry none.
 #[cfg(target_os = "linux")]
 fn parse_dirents<const INOS: bool>(buf: &[u8], out: &mut Entries) {
+    if COUNTED_READ.contains(&buf.len()) {
+        reserve_dirents::<INOS>(buf, out);
+    }
     let mut off = 0usize;
     while off + 19 < buf.len() {
         let reclen = u16::from_ne_bytes([buf[off + 16], buf[off + 17]]) as usize;
@@ -370,6 +373,36 @@ fn parse_dirents<const INOS: bool>(buf: &[u8], out: &mut Entries) {
         };
         out.push_with_ino(&rec[..len], kind_of(d_type), ino);
         off += reclen;
+    }
+}
+
+/// Bytes of a `getdents64` read worth counting before it is parsed.
+/// Under 128 bytes a read holds three entries at most besides the dots,
+/// and the vectors grow twice at most. Over 8 KiB the doubling has few
+/// steps left per record, so a count would cost what it saves. Full
+/// 64 KiB reads of huge listings skip it.
+#[cfg(target_os = "linux")]
+const COUNTED_READ: std::ops::RangeInclusive<usize> = 128..=8 * 1024;
+
+/// Room in `out` for every record of `buf`, so the parse does not grow
+/// its vectors a doubling at a time. Each record's name and NUL fit in
+/// its length less the 19 header bytes, so the names get the sum of
+/// those: the records' total length less 19 per record.
+#[cfg(target_os = "linux")]
+fn reserve_dirents<const INOS: bool>(buf: &[u8], out: &mut Entries) {
+    let (mut off, mut count) = (0usize, 0usize);
+    while off + 19 < buf.len() {
+        let reclen = u16::from_ne_bytes([buf[off + 16], buf[off + 17]]) as usize;
+        if reclen == 0 || off + reclen > buf.len() {
+            break;
+        }
+        off += reclen;
+        count += 1;
+    }
+    out.index.reserve(count);
+    out.names.reserve(off - 19 * count);
+    if INOS {
+        out.inos.reserve(count);
     }
 }
 
@@ -549,6 +582,45 @@ mod tests {
         }
         assert!(files == 52 || files == 0, "{files}");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A counted read reserves room for all its records up front, so
+    /// the parse fills the vectors without growing them.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn counted_read_parses_without_growing() {
+        let names: Vec<String> = [".".to_string(), "..".to_string()]
+            .into_iter()
+            .chain((0..20).map(|i| format!("file-{}", "n".repeat(i))))
+            .collect();
+        let mut buf = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let reclen = (19 + name.len() + 1).next_multiple_of(8);
+            let start = buf.len();
+            buf.resize(start + reclen, 0);
+            buf[start..start + 8].copy_from_slice(&(i as u64 + 1).to_ne_bytes());
+            buf[start + 16..start + 18].copy_from_slice(&(reclen as u16).to_ne_bytes());
+            buf[start + 18] = libc::DT_REG;
+            buf[start + 19..start + 19 + name.len()].copy_from_slice(name.as_bytes());
+        }
+        assert!(COUNTED_READ.contains(&buf.len()), "{}", buf.len());
+        let mut out = Entries::default();
+        reserve_dirents::<true>(&buf, &mut out);
+        let room = (
+            out.index.capacity(),
+            out.names.capacity(),
+            out.inos.capacity(),
+        );
+        parse_dirents::<true>(&buf, &mut out);
+        assert_eq!(out.len(), 20);
+        assert_eq!(out.get(19).0.to_bytes(), names[21].as_bytes());
+        assert_eq!(out.file_ino(19), Some(22));
+        let used = (
+            out.index.capacity(),
+            out.names.capacity(),
+            out.inos.capacity(),
+        );
+        assert_eq!(used, room);
     }
 
     #[test]
