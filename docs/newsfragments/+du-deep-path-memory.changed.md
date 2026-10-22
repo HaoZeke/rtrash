@@ -1,1 +1,1 @@
-`rtrash du` needs less memory on deeply nested trees: it keeps the path of each folder it walks into at that path's own length, and a chain of folders with one subfolder each shares a single path.
+`rtrash du` needs less memory on deeply nested trees: it keeps the path of each folder it walks into at that path's own length, and a chain of folders with one subfolder each shares a single path and, past 64 levels, keeps no list of subfolders per level.

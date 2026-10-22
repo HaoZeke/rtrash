@@ -1693,6 +1693,15 @@ const WALK_STACK: usize = 256 * 1024 * 1024;
 /// threads [`WALK_STACK`] each; each smaller try walks fewer levels.
 const WALK_STACKS: [usize; 4] = [WALK_STACK, WALK_STACK / 4, WALK_STACK / 16, 2 * 1024 * 1024];
 
+/// The depth from which a directory with one subdirectory frees its list
+/// of subdirectories before entering it ([`walk_dir`]). On a long chain
+/// each level would keep its list the whole way down, a 304-byte block a
+/// level. A shallower one keeps its list as before: freeing it early on
+/// the kernel tree (548 such directories, none deeper than 13) changed
+/// which blocks the allocator handed out later and cost 1.1 percent more
+/// instructions (bench2/r304).
+const CHAIN_FREE_DEPTH: usize = 64;
+
 /// Levels a walk thread with `stack` bytes of stack may enter: the share
 /// of [`MAX_DEPTH`] that [`WALK_STACK`] gives it, so each level keeps the
 /// room it has at full size.
@@ -2504,6 +2513,9 @@ fn walk_dir(
     // left as given: popping a name from `dir/` would drop the slash.
     let lone = (depth > 0 && subdirs.len() == 1).then(|| subdirs[0]);
     let children: Vec<Option<Node>> = if let Some((i, known)) = lone {
+        if depth >= CHAIN_FREE_DEPTH {
+            drop(subdirs);
+        }
         let cname = entries.get(i).0;
         let rel = parent.as_ref().map(|d| (d, cname));
         let len = buf.as_os_str().len();
