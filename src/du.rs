@@ -6360,6 +6360,32 @@ mod tests {
     }
 
     #[test]
+    fn shard_runs_match_a_sort_by_shard_and_entry() {
+        let stat = |ino: u64, dev: u64| du_fs::Stat {
+            mode: 0o100_000, // regular file
+            size: 1,
+            blocks: 1,
+            nlink: 2,
+            ino,
+            dev,
+            mtime: 0,
+        };
+        for n in [0usize, 1, 2, 17, 600, 5000] {
+            // Repeated files and two devices, as links in one batch are.
+            let sts: Vec<du_fs::Stat> = (0..n)
+                .map(|k| stat(1 + (k as u64 * 7919) % 997, 5 + (k % 2) as u64))
+                .collect();
+            let mut want: Vec<(usize, usize)> = sts
+                .iter()
+                .enumerate()
+                .map(|(k, st)| (LinkSet::shard(st.dev, st.ino), k))
+                .collect();
+            want.sort_unstable();
+            assert_eq!(shard_runs(&sts), want, "{n} files");
+        }
+    }
+
+    #[test]
     fn a_batch_of_links_counts_as_the_files_one_by_one() {
         let (sts, _, _) = sightings();
         let one = LinkSet::new();
