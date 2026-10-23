@@ -1017,13 +1017,46 @@ impl LinkSet {
 
 /// `(shard, k)` for each file `sts[k]`, by shard: the runs of one shard
 /// for a batch of [`LinkSet::first_links`] or [`LinkClaims::claim_all`].
+/// The pairs come out sorted, by shard and then by `k`.
+///
+/// A batch of 8 files or more is placed by counting: there are only
+/// [`LinkSet::SHARDS`] shards, and a batch from one huge directory of
+/// links holds tens of thousands of files, where a comparison sort makes
+/// about `n log n` comparisons. A smaller batch is sorted, because the
+/// count and prefix over every shard cost more than a few comparisons.
+/// The vector is filled with `(SHARDS, 0)`, a pair no file gets, so its
+/// allocation takes malloc's fast path; a zeroed fill would call calloc,
+/// which costs a small batch more than the zeroing itself.
+///
+/// This was already a function of its own, not inlined into its callers;
+/// `#[inline(never)]` keeps it so, whatever those callers become.
+#[inline(never)]
 fn shard_runs(sts: &[du_fs::Stat]) -> Vec<(usize, usize)> {
-    let mut order: Vec<(usize, usize)> = sts
-        .iter()
-        .enumerate()
-        .map(|(k, st)| (LinkSet::shard(st.dev, st.ino), k))
-        .collect();
-    order.sort_unstable();
+    if sts.len() < 8 {
+        let mut order: Vec<(usize, usize)> = sts
+            .iter()
+            .enumerate()
+            .map(|(k, st)| (LinkSet::shard(st.dev, st.ino), k))
+            .collect();
+        order.sort_unstable();
+        return order;
+    }
+    let mut next = [0usize; LinkSet::SHARDS];
+    for st in sts {
+        next[LinkSet::shard(st.dev, st.ino)] += 1;
+    }
+    let mut start = 0;
+    for slot in &mut next {
+        let count = *slot;
+        *slot = start;
+        start += count;
+    }
+    let mut order = vec![(LinkSet::SHARDS, 0); sts.len()];
+    for (k, st) in sts.iter().enumerate() {
+        let shard = LinkSet::shard(st.dev, st.ino);
+        order[next[shard]] = (shard, k);
+        next[shard] += 1;
+    }
     order
 }
 
