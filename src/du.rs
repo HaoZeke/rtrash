@@ -2426,6 +2426,47 @@ fn list_and_stat(
     (all, failed)
 }
 
+/// What a directory's names say about it.
+struct Names {
+    /// The [`MARKERS`] among them, in entry order.
+    markers: Vec<&'static str>,
+    has_dot_git: bool,
+    has_gitignore: bool,
+    /// The [`bare_part`]s of its entries.
+    bare_parts: u8,
+}
+
+/// Read every name in `entries` once for [`Names`]. Never inlined: this
+/// is [`walk_dir`]'s own loop over every entry, and inside [`enter`] its
+/// code moves with every change around it. Round 310's second commit
+/// changed no line of it, and flat (one directory of 500,000 entries)
+/// rose about two instructions an entry.
+#[inline(never)]
+fn scan_names(entries: &du_fs::Entries) -> Names {
+    let mut markers: Vec<&'static str> = Vec::new();
+    let mut has_dot_git = false;
+    let mut bare_parts = 0u8;
+    let mut has_gitignore = false;
+    for i in 0..entries.len() {
+        let (name, kind) = entries.get(i);
+        let bytes = name.to_bytes();
+        if bytes == b".git" {
+            has_dot_git = true;
+        }
+        has_gitignore |= bytes == b".gitignore";
+        if let Some(m) = MARKERS.iter().find(|m| m.as_bytes() == bytes) {
+            markers.push(m);
+        }
+        bare_parts |= bare_part(bytes, kind);
+    }
+    Names {
+        markers,
+        has_dot_git,
+        has_gitignore,
+        bare_parts,
+    }
+}
+
 /// Walk one open directory. `listing` is false below `.git`, artefacts
 /// and trash roots: their sizes count, but nothing inside them is listed.
 fn walk_dir(
@@ -2473,22 +2514,12 @@ fn walk_dir(
         dir.entries()
     };
     let list_files = listing && !opts.artefacts_only && opts.top > 0;
-    let mut markers: Vec<&'static str> = Vec::new();
-    let mut has_dot_git = false;
-    let mut bare_parts = 0u8;
-    let mut has_gitignore = false;
-    for i in 0..entries.len() {
-        let (name, kind) = entries.get(i);
-        let bytes = name.to_bytes();
-        if bytes == b".git" {
-            has_dot_git = true;
-        }
-        has_gitignore |= bytes == b".gitignore";
-        if let Some(m) = MARKERS.iter().find(|m| m.as_bytes() == bytes) {
-            markers.push(m);
-        }
-        bare_parts |= bare_part(bytes, kind);
-    }
+    let Names {
+        markers,
+        has_dot_git,
+        has_gitignore,
+        bare_parts,
+    } = scan_names(&entries);
     let mut chain = chain.cloned();
     if let Some(f) = &ctx.filter {
         // A tagged cache below PATH is left out whole, as with
