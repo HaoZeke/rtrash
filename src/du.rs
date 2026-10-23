@@ -2468,10 +2468,7 @@ fn walk_dir(
         take_or_extend(&mut candidates, p.candidates);
     }
 
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy())
-        .unwrap_or_default();
+    let name = dir_name(path, depth).to_string_lossy();
     // A bare repository is all git internals, like a `.git` directory.
     let is_git_dir = name == ".git";
     let closed = is_git_dir || bare;
@@ -2632,6 +2629,27 @@ fn walk_dir(
         node.offer_self(ctx, path, depth, largest_child, artefact);
     }
     Some(node)
+}
+
+/// The name of the directory at `path`, walked at `depth`. Below the
+/// PATH, [`enter`] only walks a path with one listed name pushed on its
+/// parent's. That name has no `/`, and `du_fs::Entries::push` never
+/// lists `.` or `..`, so on Unix it is the bytes after the last `/`, and
+/// no parse of the path is needed. The PATH keeps `file_name`: it is
+/// walked once, and `/` has no name.
+fn dir_name(path: &Path, depth: usize) -> &OsStr {
+    #[cfg(unix)]
+    if depth > 0 {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = path.as_os_str().as_bytes();
+        let start = bytes.iter().rposition(|&b| b == b'/').map_or(0, |i| i + 1);
+        let name = OsStr::from_bytes(&bytes[start..]);
+        debug_assert_eq!(Some(name), path.file_name());
+        return name;
+    }
+    #[cfg(not(unix))]
+    let _ = depth;
+    path.file_name().unwrap_or_default()
 }
 
 /// Cut `buf` back to its first `len` bytes. That is the path before
@@ -5753,6 +5771,30 @@ fn warn_unread(prog: &str, report: &Report) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dir_name_matches_file_name() {
+        // Below the PATH: a listed name pushed on its parent's path.
+        for (dir, name) in [("/", "a"), ("r", "b"), ("r/s/", "c d"), ("./r", ".git")] {
+            let mut path = PathBuf::from(dir);
+            path.push(name);
+            assert_eq!(dir_name(&path, 1), OsStr::new(name), "{path:?}");
+        }
+        // A name that is not UTF-8 and holds a backslash.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let name = OsStr::from_bytes(b"\xff\\x");
+            let path = Path::new("r").join(name);
+            assert_eq!(dir_name(&path, 1), name, "{path:?}");
+        }
+        // The PATH as given, where `file_name` decides.
+        for path in ["/", ".", "..", "r/..", "r/", "r/.", "r"] {
+            let path = Path::new(path);
+            let want = path.file_name().unwrap_or_default();
+            assert_eq!(dir_name(path, 0), want, "{path:?}");
+        }
+    }
 
     #[test]
     fn cut_path_leaves_what_pop_does() {
