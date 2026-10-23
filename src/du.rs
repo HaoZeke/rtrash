@@ -2170,6 +2170,16 @@ fn merge_types(into: &mut TypeMap, from: TypeMap) {
     }
 }
 
+/// One directory's stat jobs' [`Stats`], in entry order. A directory of
+/// [`WIDE_DIR`] entries or fewer has one job, kept as it is. A wide
+/// directory's jobs ([`stat_chunks`]) and a streamed listing's
+/// ([`list_and_stat`]) come in a vector. A vector of one cost every small
+/// directory an allocation and a free.
+enum Parts {
+    One(Stats),
+    Many(Vec<Stats>),
+}
+
 /// Stat every entry of `dir` with [`stat_entries`]: on one thread, or in
 /// chunks on the pool when there are many, so a huge flat directory does
 /// not serialise the scan. Never inlined: with both copies of the stat loop
@@ -2183,7 +2193,7 @@ fn stat_chunks<const REUSE: bool>(
     depth: usize,
     list_files: bool,
     (path, rules): (&Path, Option<&Chain>),
-) -> Vec<Stats> {
+) -> Parts {
     let stat_chunk = |range: std::ops::Range<usize>| {
         stat_entries::<REUSE>(
             ctx,
@@ -2198,19 +2208,90 @@ fn stat_chunks<const REUSE: bool>(
     let n = entries.len();
     if n > WIDE_DIR {
         let size = wide_chunk(n, ctx.threads);
-        (0..n.div_ceil(size))
-            .into_par_iter()
-            .map(|c| {
-                let mut part = stat_chunk(c * size..n.min((c + 1) * size));
-                if list_files {
-                    keep_best(ctx, entries, &mut part.candidates);
-                }
-                part
-            })
-            .collect()
+        Parts::Many(
+            (0..n.div_ceil(size))
+                .into_par_iter()
+                .map(|c| {
+                    let mut part = stat_chunk(c * size..n.min((c + 1) * size));
+                    if list_files {
+                        keep_best(ctx, entries, &mut part.candidates);
+                    }
+                    part
+                })
+                .collect(),
+        )
     } else {
-        vec![stat_chunk(0..n)]
+        Parts::One(stat_chunk(0..n))
     }
+}
+
+/// Stat `entries`, or take the stats [`list_and_stat`] `streamed`, add
+/// them to `node`, and return the directory's subdirectories, in entry
+/// order, and its file candidates, job by job. Within a job the candidates
+/// are not in entry order: [`keep_best`] reorders a wide or streamed
+/// directory's, and [`count_deferred`] appends the deferred linked files;
+/// [`walk_dir`] ranks them. Never inlined, so the [`Stats`] in flight
+/// stay in this frame and out of [`enter`]'s, which every level of a deep
+/// tree keeps on the stack: round 310's first try handed them back to
+/// [`walk_dir`] and grew enter's frame from 984 to 1,352 bytes.
+#[inline(never)]
+fn add_stats(
+    ctx: &Ctx<'_>,
+    (dir, reuse): (&du_fs::Dir, Option<u64>),
+    entries: &du_fs::Entries,
+    (depth, list_files): (usize, bool),
+    (path, rules): (&Path, Option<&Chain>),
+    streamed: Option<Vec<Stats>>,
+    node: &mut Node,
+) -> (Vec<(usize, Option<du_fs::Stat>)>, Vec<FileCandidate>) {
+    // Two copies of the stat loop: the one without reuse is the plain
+    // loop, with no inode lookup in it. Each runs in its own
+    // [`stat_chunks`], so each parallel body has one loop.
+    let parts = if let Some(parts) = streamed {
+        Parts::Many(parts)
+    } else {
+        match reuse {
+            Some(dev) => {
+                stat_chunks::<true>(ctx, (dir, dev), entries, depth, list_files, (path, rules))
+            }
+            None => stat_chunks::<false>(ctx, (dir, 0), entries, depth, list_files, (path, rules)),
+        }
+    };
+    let mut subdirs = Vec::new();
+    let mut candidates = Vec::new();
+    match parts {
+        Parts::One(p) => add_part(node, &mut subdirs, &mut candidates, p),
+        Parts::Many(parts) => {
+            for p in parts {
+                add_part(node, &mut subdirs, &mut candidates, p);
+            }
+        }
+    }
+    (subdirs, candidates)
+}
+
+/// Add one stat job's [`Stats`] to `node`, `subdirs` and `candidates`.
+/// Always inlined: it is [`add_stats`]'s loop body, and as a call of its
+/// own (round 310's closure) it cost every directory about 52
+/// instructions.
+#[inline(always)]
+fn add_part(
+    node: &mut Node,
+    subdirs: &mut Vec<(usize, Option<du_fs::Stat>)>,
+    candidates: &mut Vec<FileCandidate>,
+    p: Stats,
+) {
+    node.apparent = node.apparent.saturating_add(p.apparent);
+    node.disk = node.disk.saturating_add(p.disk);
+    node.disk_all = node.disk_all.saturating_add(p.disk);
+    node.base = node.base.saturating_add(p.base);
+    take_or_extend(&mut node.ranges, p.ranges);
+    node.unique = node.unique.saturating_add(p.unique);
+    node.mtime = node.mtime.max(p.mtime);
+    node.items += p.files;
+    node.filtered_out += p.filtered_out;
+    take_or_extend(subdirs, p.subdirs);
+    take_or_extend(candidates, p.candidates);
 }
 
 /// Keep the `top` best of one stat job's file `candidates`, named in
@@ -2436,37 +2517,16 @@ fn walk_dir(
             p.repo(path);
         }
     }
-    // Two copies of the stat loop: the one without reuse is the plain
-    // loop, with no inode lookup in it. Each runs in its own
-    // [`stat_chunks`], so each parallel body has one loop.
     let rules = chain.as_deref();
-    let parts: Vec<Stats> = if let Some(parts) = streamed {
-        parts
-    } else {
-        match reuse {
-            Some(dev) => {
-                stat_chunks::<true>(ctx, (&dir, dev), &entries, depth, list_files, (path, rules))
-            }
-            None => {
-                stat_chunks::<false>(ctx, (&dir, 0), &entries, depth, list_files, (path, rules))
-            }
-        }
-    };
-    let mut subdirs: Vec<(usize, Option<du_fs::Stat>)> = Vec::new();
-    let mut candidates: Vec<FileCandidate> = Vec::new();
-    for p in parts {
-        node.apparent = node.apparent.saturating_add(p.apparent);
-        node.disk = node.disk.saturating_add(p.disk);
-        node.disk_all = node.disk_all.saturating_add(p.disk);
-        node.base = node.base.saturating_add(p.base);
-        take_or_extend(&mut node.ranges, p.ranges);
-        node.unique = node.unique.saturating_add(p.unique);
-        node.mtime = node.mtime.max(p.mtime);
-        node.items += p.files;
-        node.filtered_out += p.filtered_out;
-        take_or_extend(&mut subdirs, p.subdirs);
-        take_or_extend(&mut candidates, p.candidates);
-    }
+    let (subdirs, mut candidates) = add_stats(
+        ctx,
+        (&dir, reuse),
+        &entries,
+        (depth, list_files),
+        (path, rules),
+        streamed,
+        &mut node,
+    );
 
     let name = dir_name(path, depth).to_string_lossy();
     // A bare repository is all git internals, like a `.git` directory.
