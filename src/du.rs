@@ -1099,6 +1099,77 @@ fn joined_first(dir: &Path, name: &CStr, other: &Path) -> bool {
     first
 }
 
+/// How many leading bytes `a` and `b` share. Eight bytes are compared at
+/// a time, so a long shared start costs a few steps.
+#[cfg(unix)]
+fn shared_len(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    while i + 8 <= n {
+        let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap_or_default());
+        let y = u64::from_le_bytes(b[i..i + 8].try_into().unwrap_or_default());
+        if x != y {
+            // In a little-endian load byte i is the lowest, so the lowest
+            // set bit of the difference is in the first byte that differs.
+            return i + (x ^ y).trailing_zeros() as usize / 8;
+        }
+        i += 8;
+    }
+    while i < n && a[i] == b[i] {
+        i += 1;
+    }
+    i
+}
+
+/// Where byte `b` of a path sorts when paths compare by component: an end
+/// before a separator, a separator before any other byte, and the rest as
+/// bytes. A component that ends first is a prefix of the other's, and
+/// `Path` orders it first, as this does.
+#[cfg(unix)]
+fn path_rank(b: Option<&u8>) -> u16 {
+    match b {
+        None => 0,
+        Some(&b'/') => 1,
+        Some(&c) => u16::from(c) + 2,
+    }
+}
+
+/// [`joined_first`] for the claims' paths, read as bytes. Those paths
+/// are below the root ([`Ctx::below_root`]) and were built a name at a
+/// time, so each separator is one byte between two names, with no `.`
+/// and no separator at the end (`/` alone excepted). For such paths the
+/// order by component is the order of the bytes with a separator below
+/// every other byte, and that needs no parse of either path.
+#[cfg(unix)]
+fn plain_joined_first(dir: &Path, name: &CStr, other: &Path) -> bool {
+    let d = dir.as_os_str().as_encoded_bytes();
+    let o = other.as_os_str().as_encoded_bytes();
+    let n = name.to_bytes();
+    let first = 'order: {
+        let i = shared_len(d, o);
+        if i < d.len() {
+            break 'order path_rank(d.get(i)) < path_rank(o.get(i));
+        }
+        // `dir` starts `other`. The joined path goes on with a separator,
+        // unless `dir` is empty or ends in one, and then the name.
+        let mut rest = &o[d.len()..];
+        if !d.is_empty() && d.last() != Some(&b'/') {
+            match rest.split_first() {
+                Some((&b'/', after)) => rest = after,
+                next => break 'order path_rank(Some(&b'/')) < path_rank(next.map(|(c, _)| c)),
+            }
+        }
+        let j = shared_len(n, rest);
+        path_rank(n.get(j)) < path_rank(rest.get(j))
+    };
+    debug_assert_eq!(
+        first,
+        joined_first(dir, name, other),
+        "plain_joined_first({dir:?}, {name:?}, {other:?})"
+    );
+    first
+}
+
 /// The hard-linked files of a saved tree, read one entry at a time: for
 /// each, the path it counts at by [`credits_first`] and what it adds
 /// there. `du_ncdu::Builder` adds those once the whole tree is read.
@@ -1273,7 +1344,8 @@ impl LinkClaims {
 
     /// [`LinkClaims::claim`] in the locked shard `map` of file `st`. A
     /// later sighting takes the path only when it comes first
-    /// ([`credits_first`]), and only then is that path built.
+    /// ([`credits_first`]), and only then is that path built. On Unix the
+    /// paths compare as bytes, in `plain_joined_first`.
     fn see_in(map: &mut InoMap<Claim>, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         match map.entry((st.dev, st.ino)) {
             std::collections::hash_map::Entry::Vacant(v) => {
@@ -1282,7 +1354,11 @@ impl LinkClaims {
             }
             std::collections::hash_map::Entry::Occupied(mut o) => {
                 let claim = o.get_mut();
-                if joined_first(dir, name, &claim.smallest) {
+                #[cfg(unix)]
+                let first = plain_joined_first(dir, name, &claim.smallest);
+                #[cfg(not(unix))]
+                let first = joined_first(dir, name, &claim.smallest);
+                if first {
                     claim.smallest = joined_path(dir, name);
                     claim.counted_there = false;
                 }
@@ -6570,6 +6646,57 @@ mod tests {
                 "{dir:?} {n:?}"
             );
         }
+    }
+
+    /// The byte order of below-root paths is the order by component, for
+    /// bytes on either side of the separator, prefixes of a name, a name
+    /// long enough to be read eight bytes at a time, and an empty or root
+    /// dir, so a claim lands where it did before.
+    #[cfg(unix)]
+    #[test]
+    fn plain_joined_first_orders_as_joined_first_does() {
+        use std::os::unix::ffi::OsStrExt;
+        let parts: [&[u8]; 8] = [
+            b"a",
+            b"ab",
+            b"a-",
+            b"a.b",
+            b" !",
+            b"\x01",
+            b"a\xff",
+            b"abcdefgh-ij",
+        ];
+        let mut paths: Vec<Vec<u8>> = vec![Vec::new()];
+        for p in parts {
+            paths.push(p.to_vec());
+            for q in parts {
+                paths.push([p, &b"/"[..], q].concat());
+            }
+        }
+        let rooted: Vec<Vec<u8>> = paths.iter().map(|p| [&b"/"[..], &p[..]].concat()).collect();
+        paths.extend(rooted);
+        let mut firsts = 0;
+        for d in &paths {
+            for n in parts {
+                let n = std::ffi::CString::new(n).unwrap();
+                for o in &paths {
+                    let (dir, other) = (Path::new(OsStr::from_bytes(d)), OsStr::from_bytes(o));
+                    let first = plain_joined_first(dir, &n, Path::new(other));
+                    assert_eq!(
+                        first,
+                        joined_first(dir, &n, Path::new(other)),
+                        "{dir:?} {n:?} {other:?}"
+                    );
+                    firsts += usize::from(first);
+                }
+            }
+        }
+        // Both answers come up, so the order is not one-sided.
+        let all = paths.len() * parts.len() * paths.len();
+        assert!(
+            firsts > all / 4 && firsts < all * 3 / 4,
+            "{firsts} of {all}"
+        );
     }
 
     #[test]
