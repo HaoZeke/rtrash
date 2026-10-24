@@ -6698,6 +6698,86 @@ mod tests {
         );
     }
 
+    /// The same over deeper paths: up to five names of up to twenty
+    /// bytes, many of them starting alike so the eight-byte reads meet the
+    /// first difference at every offset, and the second path often the
+    /// first one cut short, varied at its end or gone on further. A fixed
+    /// seed draws them, so a failure repeats.
+    #[cfg(unix)]
+    #[test]
+    fn plain_joined_first_orders_as_joined_first_does_on_deeper_paths() {
+        use std::os::unix::ffi::OsStrExt;
+        // xorshift64: a number below `n`.
+        fn below(seed: &mut u64, n: usize) -> usize {
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            (*seed % n as u64) as usize
+        }
+        // A name of one listing: never `.` or `..`, and no separator.
+        fn name(seed: &mut u64) -> Vec<u8> {
+            const STEM: &[u8] = b"abcdefghijklmnopqrst";
+            const BYTES: &[u8] = b"a-. \x01\xff0";
+            loop {
+                let len = 1 + below(seed, 20);
+                let mut n = STEM[..below(seed, len + 1)].to_vec();
+                while n.len() < len {
+                    n.push(BYTES[below(seed, BYTES.len())]);
+                }
+                if n != b"." && n != b".." {
+                    break n;
+                }
+            }
+        }
+        let join = |rooted: bool, names: &[Vec<u8>]| {
+            let p = names.join(&b'/');
+            if rooted {
+                [&b"/"[..], &p[..]].concat()
+            } else {
+                p
+            }
+        };
+        let mut seed = 0x5eed_0313;
+        let (cases, mut firsts, mut long) = (20_000, 0, 0);
+        for _ in 0..cases {
+            let rooted = below(&mut seed, 2) == 0;
+            let k = below(&mut seed, 5);
+            let mut names: Vec<Vec<u8>> = (0..k).map(|_| name(&mut seed)).collect();
+            let d = join(rooted, &names);
+            let n = name(&mut seed);
+            // The other path: a start of the joined one, its last name
+            // perhaps replaced, then more names, five at most.
+            names.push(n.clone());
+            names.truncate(below(&mut seed, k + 2));
+            if !names.is_empty() && below(&mut seed, 3) == 0 {
+                *names.last_mut().unwrap() = name(&mut seed);
+            }
+            for _ in 0..below(&mut seed, 6 - names.len()) {
+                names.push(name(&mut seed));
+            }
+            let o = join(rooted != (below(&mut seed, 8) == 0), &names);
+            let n = std::ffi::CString::new(n).unwrap();
+            let (dir, other) = (
+                Path::new(OsStr::from_bytes(&d)),
+                Path::new(OsStr::from_bytes(&o)),
+            );
+            let first = plain_joined_first(dir, &n, other);
+            assert_eq!(
+                first,
+                joined_first(dir, &n, other),
+                "{dir:?} {n:?} {other:?}"
+            );
+            firsts += usize::from(first);
+            long += usize::from(shared_len(&d, &o) >= 16);
+        }
+        // Both answers come up, and a quarter of the pairs share sixteen
+        // bytes or more, so the eight-byte reads are exercised.
+        assert!(
+            firsts > cases / 4 && firsts < cases * 3 / 4 && long > cases / 4,
+            "{firsts} first and {long} long of {cases}"
+        );
+    }
+
     #[test]
     fn file_id_zero_never_merges_files() {
         let set = LinkSet::new();
