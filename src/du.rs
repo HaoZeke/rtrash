@@ -1103,11 +1103,9 @@ fn joined_first(dir: &Path, name: &CStr, other: &Path) -> bool {
 /// a time, so a long shared start costs a few steps.
 #[cfg(unix)]
 fn shared_len(a: &[u8], b: &[u8]) -> usize {
-    let n = a.len().min(b.len());
     let mut i = 0;
-    while i + 8 <= n {
-        let x = u64::from_le_bytes(a[i..i + 8].try_into().unwrap_or_default());
-        let y = u64::from_le_bytes(b[i..i + 8].try_into().unwrap_or_default());
+    for (x, y) in a.as_chunks::<8>().0.iter().zip(b.as_chunks::<8>().0) {
+        let (x, y) = (u64::from_le_bytes(*x), u64::from_le_bytes(*y));
         if x != y {
             // In a little-endian load byte i is the lowest, so the lowest
             // set bit of the difference is in the first byte that differs.
@@ -1115,6 +1113,7 @@ fn shared_len(a: &[u8], b: &[u8]) -> usize {
         }
         i += 8;
     }
+    let n = a.len().min(b.len());
     while i < n && a[i] == b[i] {
         i += 1;
     }
