@@ -3020,6 +3020,75 @@ def check_link_credit():
                           "du::LinkCredit for a saved tree (du::credits_first)")
 
 
+# Round 312: on Unix the claims compare paths as bytes (plain_joined_first),
+# with the separator below every other byte. That is the order by component
+# only for paths built one listed name at a time below the root, with no `.`
+# and no doubled or trailing separator, and in a release build nothing
+# checks it. Those paths come from Ctx::below_root, so plain_joined_first is
+# called only from LinkClaims::see_in, see_in only from claim and claim_all,
+# and those only from a fn that takes its dir from below_root. CLAIM_PATH
+# finds the common forms: a method call, a path call such as
+# `LinkClaims::claim(`, several on one line, and plain_joined_first named
+# without a call (a fn pointer). CLAIM_PATH_CASES tests it.
+CLAIM_PATH = re.compile(r"\b(plain_joined_first)\b|\b(see_in)\s*\(|(?:\.|::)\s*(claim)(?:_all)?\s*\(")
+CLAIM_PATH_CALLERS = {"plain_joined_first": {"see_in"}, "see_in": {"claim", "claim_all"},
+                      "claim": {"counts_at_path", "counts_here_all"}}
+CLAIM_PATH_CASES = [
+    ("plain", "                let first = plain_joined_first(dir, name, &claim.smallest);",
+     ["plain_joined_first"]),
+    ("see", "                first[k] = Self::see_in(&mut map, &sts[k], dir, name(k));", ["see_in"]),
+    ("claim", "        self.claims.claim(st, dir, name)", ["claim"]),
+    ("all", "            self.claims.claim_all(sts, self.below_root(dir), name)", ["claim"]),
+    ("ufcs", "        LinkClaims::claim(&mut self.claims, st, dir, name)", ["claim"]),
+    ("ufcs all", "        LinkClaims::claim_all(&mut c, sts, dir, name)", ["claim"]),
+    ("two", "        let (a, b) = (c.claim(st, d, n), c.claim(st, e, n));", ["claim", "claim"]),
+    ("mixed", "        let f = see_in(m, st, d, n) && plain_joined_first(d, n, o);",
+     ["see_in", "plain_joined_first"]),
+    ("pointer", "        let f: fn(&Path, &CStr, &Path) -> bool = plain_joined_first;",
+     ["plain_joined_first"]),
+    ("decl", "fn plain_joined_first(dir: &Path, name: &CStr, other: &Path) -> bool {", []),
+    ("const decl", "pub(crate) const fn plain_joined_first(dir: &Path) -> bool {", []),
+    ("unsafe decl", "    unsafe fn see_in(map: &mut InoMap<Claim>, st: &du_fs::Stat) -> bool {", []),
+    ("name", "    let n = claim_name(&dir, stem);", []),
+]
+
+
+def claim_path_callees(line):
+    """The claim-path fns that `line` calls or names, in order. A fn's own
+    declaration (`fn NAME`, with any qualifiers before `fn`) is neither."""
+    found = []
+    for m in CLAIM_PATH.finditer(line):
+        if re.search(r"\bfn\s+$", line[:m.start()]):
+            continue
+        found.append(m.group(1) or m.group(2) or m.group(3))
+    return found
+
+
+def check_claim_paths():
+    """The byte compare of claim paths sees only paths from below_root."""
+    for what, line, want in CLAIM_PATH_CASES:
+        if claim_path_callees(line) != want:
+            errors.append(f"scripts/precheck.py: claim_path_callees gets CLAIM_PATH_CASES '{what}' "
+                          "wrong; the claim-path check is broken")
+    for path in sorted((ROOT / "src").glob("du*.rs")):
+        rel = path.relative_to(ROOT).as_posix()
+        raw = path.read_text(encoding="utf-8")
+        skip = test_mod_lines(raw.split("\n"))
+        lines = rust_code(raw).split("\n")
+        for k, line in enumerate(lines):
+            if k in skip:
+                continue
+            for callee in claim_path_callees(line):
+                caller = enclosing_fn(lines, k)
+                if caller in CLAIM_PATH_CALLERS[callee] and (
+                        callee != "claim" or "below_root(" in enclosing_fn_text(lines, k)):
+                    continue
+                errors.append(f"{rel}:{k + 1}: {callee} in {caller or 'no fn'} may see a path not "
+                              "from Ctx::below_root; the claims compare paths as bytes, which is Path "
+                              "order only for below-root paths built a name at a time, so reach them "
+                              "through Ctx::counts_here")
+
+
 # dua #410 and #406: a Win32 call refuses a path of 260 characters or more
 # unless it carries the verbatim prefix. util::win_path adds it from
 # util::WIN_LONG units on; util::win_text converts a name that is not a
@@ -4000,7 +4069,7 @@ def main():
         return commit_msg_hook(sys.argv[sys.argv.index("--commit-msg") + 1])
     base = sys.argv[sys.argv.index("--base") + 1] if "--base" in sys.argv else None
     check_rust_code(); check_stale_cases(); check_split_cases(); check_completions(); check_test_tags(); check_pid_paths(); check_long_sleeps(); check_clock_waits(); check_tight_elapsed()
-    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_cfg_dead(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers(); check_pair_refusals()
+    check_fn_params(); check_permanent_gate(); check_test_seams(); check_os_trash_scoped(); check_cfg_helpers(); check_cfg_dead(); check_refusal_helpers(); check_rtrash_pinned(); check_bin_seam(); check_du_json_compares(); check_du_rows(); check_record_sections(); check_lock_rechecks(); check_scan_rechecks(); check_put_says(); check_browser_prints(); check_dot_operands(); check_copy_then_remove(); check_volume_trash_owner(); check_whole_file_writes(); check_key_reads(); check_prompt_answers(); check_doc_gaps(); check_size_sums(); check_size_args(); check_report_literals(); check_explorer_walks(); check_chain_totals(); check_mount_probes(); check_bounded_walks(); check_missing_looks(); check_filtered_opens(); check_mount_table_reads(); check_reparse_links(); check_mklink_calls(); check_exact_encoded(); check_message_paths(); check_lock_waits(); check_trash_root_sets(); check_link_credit(); check_claim_paths(); check_win_paths(); check_compressed_sizes(); check_disk_floors(); check_disk_reads(); check_directorysizes_paths(); check_link_copies(); check_rank_order(); check_listing_parsers(); check_pair_refusals()
     check_long_lines(base); check_struct_field_drift(base); check_call_arity(base); check_split_attributes(base); check_removed_literals(base); check_commit_subjects(base); check_codespell(base)
     check_musl_aliases(); check_libc_const_args(); check_copy_progress(); check_manual_contains(); check_global_state(); check_skip_notes(); check_du_df_audit(); check_config_docs(); check_man_coverage()
     if "--no-fmt" not in sys.argv:
