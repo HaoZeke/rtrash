@@ -6664,6 +6664,55 @@ mod tests {
         assert!(c.settled().is_none());
     }
 
+    /// A file on the root device is keyed by inode alone and one on any
+    /// other device by both numbers, so one inode number on two devices
+    /// is two files with a claim each, whatever device the claims were
+    /// built for.
+    #[test]
+    fn claims_keep_one_inode_on_two_devices_apart() {
+        let st = |dev| du_fs::Stat {
+            mode: 0o100_000, // regular file
+            size: dev,
+            blocks: 1,
+            nlink: 2,
+            ino: 9,
+            dev,
+            mtime: 0,
+        };
+        let name = |s: &str| std::ffi::CString::new(s).unwrap();
+        for root in [5, 6, 7] {
+            let c = LinkClaims::new(root);
+            for dev in [5, 6] {
+                let n = name(&format!("f{dev}"));
+                // The larger path first, so the smaller one takes it.
+                assert!(c.claim(&st(dev), Path::new("b"), &n), "{root} {dev}");
+                assert!(!c.claim(&st(dev), Path::new("a"), &n), "{root} {dev}");
+            }
+            let fixed = c.settled().expect("each count fell at the larger path");
+            assert_eq!(fixed.len(), 2, "{root}");
+            for dev in [5, 6] {
+                let got = fixed.get(&(dev, 9)).expect("a claim on each device");
+                let want = Path::new("a").join(format!("f{dev}"));
+                assert_eq!(*got.smallest, *want, "{root} {dev}");
+                assert_eq!(got.stat((dev, 9)), st(dev), "{root} {dev}");
+            }
+            assert!(fixed.get(&(7, 9)).is_none(), "{root}");
+        }
+        #[cfg(target_pointer_width = "64")]
+        assert!(
+            std::mem::size_of::<(u64, Claim)>() <= 64,
+            "{}",
+            std::mem::size_of::<(u64, Claim)>()
+        );
+        // Every root builds its shards, claims or not: they stay in one
+        // block of glibc's per-thread cache, which holds up to 1,032 bytes.
+        #[cfg(all(target_os = "linux", target_env = "gnu", target_pointer_width = "64"))]
+        {
+            let shards = LinkSet::SHARDS * std::mem::size_of::<Mutex<ClaimShard>>();
+            assert!(shards <= 1032, "{shards}");
+        }
+    }
+
     #[test]
     fn root_skip_leaves_what_is_below_the_root() {
         let roots: &[&str] = if cfg!(windows) {
