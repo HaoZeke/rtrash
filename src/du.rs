@@ -1615,8 +1615,11 @@ impl Ctx<'_> {
     /// its first sighting, and so does every file when nothing below a
     /// PATH is read ([`Ctx::rows`]). Every count of a file in the walk goes
     /// through here or [`Ctx::counts_here_all`] (precheck check_link_credit).
-    /// A file met at its [`Ctx::decided`] path adds one to `met`.
-    fn counts_here(&self, st: &du_fs::Stat, dir: &Path, name: &CStr, met: &mut u64) -> bool {
+    /// The first walk does not take a hit count: a local in [`stat_entries`]
+    /// stayed zero, and the check after that loop was five instructions a
+    /// directory on a tree of one-file directories. A second walk adds the
+    /// hit in [`Ctx::counts_metered`].
+    fn counts_here(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         // -L: a file reached through links counts once, at its first
         // sighting; any file may be reached twice, and a path for each
         // would cost too much.
@@ -1628,8 +1631,23 @@ impl Ctx<'_> {
         }
         // The path compare looks at a path the first walk stored, or
         // builds one for a claim. Wide `-s` returns above (`rows` is
-        // false) and must not carry this body in its stat loop.
-        self.counts_at_path(st, dir, name, met)
+        // false) and must not carry this body in its stat loop. A first
+        // walk defers every file that would reach the compare, so the hit
+        // total below stays unused.
+        let mut met = 0u64;
+        self.counts_at_path::<false>(st, dir, name, &mut met)
+    }
+
+    /// [`Ctx::counts_here`] on a second walk. A file met at its
+    /// [`Ctx::decided`] path adds one to `met`.
+    fn counts_metered(&self, st: &du_fs::Stat, dir: &Path, name: &CStr, met: &mut u64) -> bool {
+        if self.opts.follow {
+            return st.ino == 0 || self.seen.insert(st.dev, st.ino);
+        }
+        if st.nlink <= 1 || st.ino == 0 || !self.rows {
+            return self.first_link(st);
+        }
+        self.counts_at_path::<true>(st, dir, name, met)
     }
 
     /// `dir`, a directory of this walk, as a path from below the root.
@@ -1654,7 +1672,13 @@ impl Ctx<'_> {
     /// copy without reuse is the plain loop, and a `PathBuf` per name on
     /// the reuse walk was the main-arena pile-up.
     #[inline(never)]
-    fn counts_at_path(&self, st: &du_fs::Stat, dir: &Path, name: &CStr, met: &mut u64) -> bool {
+    fn counts_at_path<const REUSE: bool>(
+        &self,
+        st: &du_fs::Stat,
+        dir: &Path,
+        name: &CStr,
+        met: &mut u64,
+    ) -> bool {
         let dir = self.below_root(dir);
         // A second walk already stored the path. Comparing the components
         // builds no PathBuf for any linked name, met at its path or not.
@@ -1667,7 +1691,11 @@ impl Ctx<'_> {
                     "same_joined({:?}, {dir:?}, {name:?})",
                     fixed.smallest
                 );
-                *met += u64::from(here);
+                // Only the second-walk copy adds. The first-walk copy
+                // passes a local it never reads.
+                if REUSE {
+                    *met += u64::from(here);
+                }
                 return here;
             }
         }
@@ -2179,6 +2207,9 @@ fn stat_entries<const REUSE: bool>(
     // Linked files whose counts wait for one batch ([`Ctx::defers`]).
     let mut pending: (Vec<usize>, Vec<du_fs::Stat>) = (Vec::new(), Vec::new());
     let mut links = 0u64;
+    // Second-walk hits, added once for the job. The first-walk copy does
+    // not use it: the zero and the check after the loop were on the plain
+    // `-s` path, about five instructions a directory.
     let mut met = 0u64;
     let filter = ctx.filter.as_ref();
     let excluded = |name: &CStr, is_dir: bool| {
@@ -2246,7 +2277,12 @@ fn stat_entries<const REUSE: bool>(
             pending.1.push(m);
             continue;
         }
-        if ctx.counts_here(&m, path, name, &mut met) {
+        let counts = if REUSE {
+            ctx.counts_metered(&m, path, name, &mut met)
+        } else {
+            ctx.counts_here(&m, path, name)
+        };
+        if counts {
             out.add_file(ctx, dir, (i, name), &m, (depth, list_files));
         } else {
             links += 1;
@@ -2266,7 +2302,7 @@ fn stat_entries<const REUSE: bool>(
     // Once a job, not once a file: every worker adds to these.
     ctx.links.fetch_add(links, Ordering::Relaxed);
     ctx.files.fetch_add(out.files, Ordering::Relaxed);
-    if met > 0 {
+    if REUSE && met > 0 {
         ctx.met.fetch_add(met, Ordering::Relaxed);
     }
     if let Some(c) = &opts.control {
@@ -4992,11 +5028,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let code = run_paths(prog, args, &mut missing);
     // A PATH that could not be read was named and left out and the rest
     // were scanned; the run still fails, as in GNU du.
-    if missing && code == 0 {
-        1
-    } else {
-        code
-    }
+    if missing && code == 0 { 1 } else { code }
 }
 
 /// [`run`], which sets `missing` when it leaves out a PATH it cannot read.
@@ -6222,7 +6254,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn links_are_rows_only_when_the_scan_lists_links() {
-        use std::os::unix::fs::{symlink, MetadataExt};
+        use std::os::unix::fs::{MetadataExt, symlink};
         let base = std::env::temp_dir().join(format!("rtrash-du-links-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("dir")).unwrap();
