@@ -2973,18 +2973,21 @@ def check_trash_root_sets():
 # the first sighting gave a different folder the file's size from run to
 # run, and an ncdu export read back gave it to whichever link it wrote
 # first. du::credits_first is the one rule: Ctx::counts_here applies it in
-# a scan and du::LinkCredit to a saved tree (du_ncdu::Builder). A link
+# a scan, counts_metered is that same early return on a second walk, and
+# du::LinkCredit applies it to a saved tree (du_ncdu::Builder). A link
 # dedupe anywhere else in src/du*.rs (first_link, an inode set insert)
 # decides by order again. LINK_CREDIT_OK names the deciders and the inode
 # sets that credit no folder size. LINK_CREDIT_CASES tests the matcher.
 LINK_CREDIT = re.compile(r"\.first_link\s*\(|\bseen\.insert\s*\([^)]*\bino\b"
                          r"|\.(?:insert|entry)\s*\(\s*\([^)]*\bino\b")
 LINK_CREDIT_OK = {
-    ("src/du.rs", "counts_here"), ("src/du.rs", "first_link"),
+    ("src/du.rs", "counts_here"), ("src/du.rs", "counts_metered"),
+    ("src/du.rs", "first_link"),
     ("src/du.rs", "counts_at_path"),  # Ctx::counts_at_path, behind counts_here
     ("src/du.rs", "insert"),  # LinkSet::insert, behind first_link
     ("src/du.rs", "first_links"),  # LinkSet::first_links, behind counts_here_all
-    ("src/du.rs", "see_in"),  # LinkClaims::claim and claim_all, the scan's claims
+    # (dev, ino) entry of a file on another device, behind claim and claim_all.
+    ("src/du.rs", "place_other"),
     ("src/du_dupes.rs", "one_per_inode"),  # groups names; no sizes
     ("src/du_ncdu_bin.rs", "leaf"),  # ncdu's own per-directory sizes
 }
@@ -3024,19 +3027,34 @@ def check_link_credit():
 # with the separator below every other byte. That is the order by component
 # only for paths built one listed name at a time below the root, with no `.`
 # and no doubled or trailing separator, and in a release build nothing
-# checks it. Those paths come from Ctx::below_root, so plain_joined_first is
-# called only from LinkClaims::see_in, see_in only from claim and claim_all,
-# and those only from a fn that takes its dir from below_root. CLAIM_PATH
+# checks it. Those paths come from Ctx::below_root. plain_joined_first is
+# called only from retarget (what see_in used to hold), retarget only from
+# place_here and place_other, those only from claim and claim_all, and
+# those only from a fn that takes its dir from below_root. CLAIM_PATH
 # finds the common forms: a method call, a path call such as
 # `LinkClaims::claim(`, several on one line, and plain_joined_first named
 # without a call (a fn pointer). CLAIM_PATH_CASES tests it.
-CLAIM_PATH = re.compile(r"\b(plain_joined_first)\b|\b(see_in)\s*\(|(?:\.|::)\s*(claim)(?:_all)?\s*\(")
-CLAIM_PATH_CALLERS = {"plain_joined_first": {"see_in"}, "see_in": {"claim", "claim_all"},
-                      "claim": {"counts_at_path", "counts_here_all"}}
+CLAIM_PATH = re.compile(
+    r"\b(plain_joined_first)\b|\b(see_in|retarget|place_here|place_other)\s*\("
+    r"|(?:\.|::)\s*(claim)(?:_all)?\s*\(")
+CLAIM_PATH_CALLERS = {
+    "plain_joined_first": {"see_in", "retarget"},
+    "see_in": {"claim", "claim_all"},
+    "retarget": {"place_here", "place_other"},
+    "place_here": {"claim", "claim_all"},
+    "place_other": {"claim", "claim_all"},
+    "claim": {"counts_at_path", "counts_here_all"},
+}
 CLAIM_PATH_CASES = [
     ("plain", "                let first = plain_joined_first(dir, name, &claim.smallest);",
      ["plain_joined_first"]),
     ("see", "                first[k] = Self::see_in(&mut map, &sts[k], dir, name(k));", ["see_in"]),
+    ("retarget", "            Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),",
+     ["retarget"]),
+    ("place", "                    first[k] = Self::place_here(&mut here, st, dir, name(k));",
+     ["place_here"]),
+    ("other", "                    first[k] = Self::place_other(map, st, dir, name(k));",
+     ["place_other"]),
     ("claim", "        self.claims.claim(st, dir, name)", ["claim"]),
     ("all", "            self.claims.claim_all(sts, self.below_root(dir), name)", ["claim"]),
     ("ufcs", "        LinkClaims::claim(&mut self.claims, st, dir, name)", ["claim"]),
