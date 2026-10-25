@@ -1365,14 +1365,8 @@ impl LinkClaims {
     /// claims does. Each path is met once.
     fn claim(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         let shard = LinkSet::shard(st.dev, st.ino);
-        if st.dev == self.dev {
-            let mut map = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
-            Self::place_here(&mut map, st, dir, name)
-        } else {
-            let mut other = self.other.lock().unwrap_or_else(|e| e.into_inner());
-            let map = other[shard].get_or_insert_with(Box::default);
-            Self::place_other(map, st, dir, name)
-        }
+        let mut here = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
+        self.see_in(shard, &mut here, st, dir, name)
     }
 
     /// [`LinkClaims::claim`] for each of `sts`, met in `dir` as `name(k)`:
@@ -1387,30 +1381,53 @@ impl LinkClaims {
         for run in shard_runs(sts).chunk_by(|a, b| a.0 == b.0) {
             let shard = run[0].0;
             let mut here = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
-            // Locked only when the run has a file on another device, and
-            // only after the shard lock, so the two locks never wait on
-            // each other the other way around.
-            let mut foreign = None;
             for &(_, k) in run {
-                let st = &sts[k];
-                if st.dev == self.dev {
-                    first[k] = Self::place_here(&mut here, st, dir, name(k));
-                } else {
-                    if foreign.is_none() {
-                        foreign = Some(self.other.lock().unwrap_or_else(|e| e.into_inner()));
-                    }
-                    let slot = &mut foreign.as_mut().unwrap()[shard];
-                    let map = slot.get_or_insert_with(Box::default);
-                    first[k] = Self::place_other(map, st, dir, name(k));
-                }
+                first[k] = self.see_in(shard, &mut here, &sts[k], dir, name(k));
             }
         }
         first
     }
 
-    /// A later sighting takes the path only when it comes first
-    /// ([`credits_first`]), and only then is that path built. On Unix the
-    /// paths compare as bytes, in `plain_joined_first`.
+    /// [`LinkClaims::claim`] in the locked root-device map `here` of shard
+    /// `shard`. A file on `self.dev` is filed by inode alone. A file on
+    /// any other device locks [`LinkClaims::other`] for that one file,
+    /// after this shard lock, so the two locks never wait on each other
+    /// the other way around. A later sighting takes the path only when it
+    /// comes first ([`credits_first`]), and only then is that path built.
+    /// On Unix the paths compare as bytes, in `plain_joined_first`.
+    fn see_in(
+        &self,
+        shard: usize,
+        here: &mut HashMap<u64, Claim, InoHash>,
+        st: &du_fs::Stat,
+        dir: &Path,
+        name: &CStr,
+    ) -> bool {
+        use std::collections::hash_map::Entry;
+        if st.dev == self.dev {
+            match here.entry(st.ino) {
+                Entry::Vacant(v) => {
+                    v.insert(Claim::new(st, joined_path(dir, name)));
+                    true
+                }
+                Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),
+            }
+        } else {
+            let mut other = self.other.lock().unwrap_or_else(|e| e.into_inner());
+            let map = other[shard].get_or_insert_with(Box::default);
+            match map.entry((st.dev, st.ino)) {
+                Entry::Vacant(v) => {
+                    v.insert(Claim::new(st, joined_path(dir, name)));
+                    true
+                }
+                Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),
+            }
+        }
+    }
+
+    /// The path compare of [`LinkClaims::see_in`]. Inlined there: a call
+    /// of its own was about fifty instructions on every later sighting.
+    #[inline(always)]
     fn retarget(claim: &mut Claim, dir: &Path, name: &CStr) -> bool {
         #[cfg(unix)]
         let first = plain_joined_first(dir, name, &claim.smallest);
@@ -1421,36 +1438,6 @@ impl LinkClaims {
             claim.counted_there = false;
         }
         false
-    }
-
-    /// [`LinkClaims::claim`] into the root-device map. The key is the
-    /// inode number alone.
-    fn place_here(
-        map: &mut HashMap<u64, Claim, InoHash>,
-        st: &du_fs::Stat,
-        dir: &Path,
-        name: &CStr,
-    ) -> bool {
-        use std::collections::hash_map::Entry;
-        match map.entry(st.ino) {
-            Entry::Vacant(v) => {
-                v.insert(Claim::new(st, joined_path(dir, name)));
-                true
-            }
-            Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),
-        }
-    }
-
-    /// [`LinkClaims::claim`] into the map of files on any other device.
-    fn place_other(map: &mut InoMap<Claim>, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
-        use std::collections::hash_map::Entry;
-        match map.entry((st.dev, st.ino)) {
-            Entry::Vacant(v) => {
-                v.insert(Claim::new(st, joined_path(dir, name)));
-                true
-            }
-            Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),
-        }
     }
 
     /// `None` when each linked file counted at its smallest path, else the

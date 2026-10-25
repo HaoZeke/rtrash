@@ -2987,7 +2987,7 @@ LINK_CREDIT_OK = {
     ("src/du.rs", "insert"),  # LinkSet::insert, behind first_link
     ("src/du.rs", "first_links"),  # LinkSet::first_links, behind counts_here_all
     # (dev, ino) entry of a file on another device, behind claim and claim_all.
-    ("src/du.rs", "place_other"),
+    ("src/du.rs", "see_in"),
     ("src/du_dupes.rs", "one_per_inode"),  # groups names; no sizes
     ("src/du_ncdu_bin.rs", "leaf"),  # ncdu's own per-directory sizes
 }
@@ -3028,21 +3028,19 @@ def check_link_credit():
 # only for paths built one listed name at a time below the root, with no `.`
 # and no doubled or trailing separator, and in a release build nothing
 # checks it. Those paths come from Ctx::below_root. plain_joined_first is
-# called only from retarget (what see_in used to hold), retarget only from
-# place_here and place_other, those only from claim and claim_all, and
-# those only from a fn that takes its dir from below_root. CLAIM_PATH
-# finds the common forms: a method call, a path call such as
-# `LinkClaims::claim(`, several on one line, and plain_joined_first named
-# without a call (a fn pointer). CLAIM_PATH_CASES tests it.
+# called only from retarget, retarget only from see_in, see_in only from
+# claim and claim_all, and those only from a fn that takes its dir from
+# below_root. CLAIM_PATH finds the common forms: a method call, a path
+# call such as `LinkClaims::claim(`, several on one line, and
+# plain_joined_first named without a call (a fn pointer).
+# CLAIM_PATH_CASES tests it.
 CLAIM_PATH = re.compile(
-    r"\b(plain_joined_first)\b|\b(see_in|retarget|place_here|place_other)\s*\("
+    r"\b(plain_joined_first)\b|\b(see_in|retarget)\s*\("
     r"|(?:\.|::)\s*(claim)(?:_all)?\s*\(")
 CLAIM_PATH_CALLERS = {
-    "plain_joined_first": {"see_in", "retarget"},
+    "plain_joined_first": {"retarget"},
     "see_in": {"claim", "claim_all"},
-    "retarget": {"place_here", "place_other"},
-    "place_here": {"claim", "claim_all"},
-    "place_other": {"claim", "claim_all"},
+    "retarget": {"see_in"},
     "claim": {"counts_at_path", "counts_here_all"},
 }
 CLAIM_PATH_CASES = [
@@ -3051,10 +3049,6 @@ CLAIM_PATH_CASES = [
     ("see", "                first[k] = Self::see_in(&mut map, &sts[k], dir, name(k));", ["see_in"]),
     ("retarget", "            Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),",
      ["retarget"]),
-    ("place", "                    first[k] = Self::place_here(&mut here, st, dir, name(k));",
-     ["place_here"]),
-    ("other", "                    first[k] = Self::place_other(map, st, dir, name(k));",
-     ["place_other"]),
     ("claim", "        self.claims.claim(st, dir, name)", ["claim"]),
     ("all", "            self.claims.claim_all(sts, self.below_root(dir), name)", ["claim"]),
     ("ufcs", "        LinkClaims::claim(&mut self.claims, st, dir, name)", ["claim"]),
