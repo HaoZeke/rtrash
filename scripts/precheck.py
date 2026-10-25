@@ -2986,8 +2986,8 @@ LINK_CREDIT_OK = {
     ("src/du.rs", "counts_at_path"),  # Ctx::counts_at_path, behind counts_here
     ("src/du.rs", "insert"),  # LinkSet::insert, behind first_link
     ("src/du.rs", "first_links"),  # LinkSet::first_links, behind counts_here_all
-    # (dev, ino) entry of a file on another device, behind claim and claim_all.
-    ("src/du.rs", "see_in"),
+    # (dev, ino) entry of a file on another device, behind see_in.
+    ("src/du.rs", "see_foreign"),
     ("src/du_dupes.rs", "one_per_inode"),  # groups names; no sizes
     ("src/du_ncdu_bin.rs", "leaf"),  # ncdu's own per-directory sizes
 }
@@ -3028,19 +3028,20 @@ def check_link_credit():
 # only for paths built one listed name at a time below the root, with no `.`
 # and no doubled or trailing separator, and in a release build nothing
 # checks it. Those paths come from Ctx::below_root. plain_joined_first is
-# called only from retarget, retarget only from see_in, see_in only from
-# claim and claim_all, and those only from a fn that takes its dir from
-# below_root. CLAIM_PATH finds the common forms: a method call, a path
-# call such as `LinkClaims::claim(`, several on one line, and
-# plain_joined_first named without a call (a fn pointer).
-# CLAIM_PATH_CASES tests it.
+# called only from see_in and from retarget, retarget only from
+# see_foreign, see_foreign only from see_in, see_in only from claim and
+# claim_all, and those only from a fn that takes its dir from below_root.
+# CLAIM_PATH finds the common forms: a method call, a path call such as
+# `LinkClaims::claim(`, several on one line, and plain_joined_first named
+# without a call (a fn pointer). CLAIM_PATH_CASES tests it.
 CLAIM_PATH = re.compile(
-    r"\b(plain_joined_first)\b|\b(see_in|retarget)\s*\("
+    r"\b(plain_joined_first)\b|\b(see_in|retarget|see_foreign)\s*\("
     r"|(?:\.|::)\s*(claim)(?:_all)?\s*\(")
 CLAIM_PATH_CALLERS = {
-    "plain_joined_first": {"retarget"},
+    "plain_joined_first": {"see_in", "retarget"},
     "see_in": {"claim", "claim_all"},
-    "retarget": {"see_in"},
+    "retarget": {"see_foreign"},
+    "see_foreign": {"see_in"},
     "claim": {"counts_at_path", "counts_here_all"},
 }
 CLAIM_PATH_CASES = [

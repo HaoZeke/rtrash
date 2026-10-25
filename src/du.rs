@@ -1140,6 +1140,7 @@ fn path_rank(b: Option<&u8>) -> u16 {
 /// order by component is the order of the bytes with a separator below
 /// every other byte, and that needs no parse of either path.
 #[cfg(unix)]
+#[inline(always)]
 fn plain_joined_first(dir: &Path, name: &CStr, other: &Path) -> bool {
     let d = dir.as_os_str().as_encoded_bytes();
     let o = other.as_os_str().as_encoded_bytes();
@@ -1366,7 +1367,7 @@ impl LinkClaims {
     fn claim(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         let shard = LinkSet::shard(st.dev, st.ino);
         let mut here = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
-        self.see_in(shard, &mut here, st, dir, name)
+        self.see_in(&mut here, st, dir, name)
     }
 
     /// [`LinkClaims::claim`] for each of `sts`, met in `dir` as `name(k)`:
@@ -1382,51 +1383,70 @@ impl LinkClaims {
             let shard = run[0].0;
             let mut here = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
             for &(_, k) in run {
-                first[k] = self.see_in(shard, &mut here, &sts[k], dir, name(k));
+                first[k] = self.see_in(&mut here, &sts[k], dir, name(k));
             }
         }
         first
     }
 
-    /// [`LinkClaims::claim`] in the locked root-device map `here` of shard
-    /// `shard`. A file on `self.dev` is filed by inode alone. A file on
-    /// any other device locks [`LinkClaims::other`] for that one file,
-    /// after this shard lock, so the two locks never wait on each other
-    /// the other way around. A later sighting takes the path only when it
-    /// comes first ([`credits_first`]), and only then is that path built.
-    /// On Unix the paths compare as bytes, in `plain_joined_first`.
+    /// [`LinkClaims::claim`] in the locked root-device map `here`. A file
+    /// on `self.dev` is filed by inode alone. A file on any other device
+    /// goes to [`LinkClaims::see_foreign`], which locks
+    /// [`LinkClaims::other`] after this shard lock, so the two locks never
+    /// wait on each other the other way around. A later sighting takes the
+    /// path only when it comes first ([`credits_first`]), and only then is
+    /// that path built. On Unix the paths compare as bytes, in
+    /// `plain_joined_first`, inlined here.
     fn see_in(
         &self,
-        shard: usize,
         here: &mut HashMap<u64, Claim, InoHash>,
         st: &du_fs::Stat,
         dir: &Path,
         name: &CStr,
     ) -> bool {
         use std::collections::hash_map::Entry;
-        if st.dev == self.dev {
-            match here.entry(st.ino) {
-                Entry::Vacant(v) => {
-                    v.insert(Claim::new(st, joined_path(dir, name)));
-                    true
-                }
-                Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),
+        if st.dev != self.dev {
+            return self.see_foreign(st, dir, name);
+        }
+        match here.entry(st.ino) {
+            Entry::Vacant(v) => {
+                v.insert(Claim::new(st, joined_path(dir, name)));
+                true
             }
-        } else {
-            let mut other = self.other.lock().unwrap_or_else(|e| e.into_inner());
-            let map = other[shard].get_or_insert_with(Box::default);
-            match map.entry((st.dev, st.ino)) {
-                Entry::Vacant(v) => {
-                    v.insert(Claim::new(st, joined_path(dir, name)));
-                    true
+            Entry::Occupied(o) => {
+                let claim = o.into_mut();
+                #[cfg(unix)]
+                let first = plain_joined_first(dir, name, &claim.smallest);
+                #[cfg(not(unix))]
+                let first = joined_first(dir, name, &claim.smallest);
+                if first {
+                    claim.smallest = joined_path(dir, name);
+                    claim.counted_there = false;
                 }
-                Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),
+                false
             }
         }
     }
 
-    /// The path compare of [`LinkClaims::see_in`]. Inlined there: a call
-    /// of its own was about fifty instructions on every later sighting.
+    /// [`LinkClaims::see_in`] for a file on a device other than the root.
+    /// Not in the root-device loop: that loop stays the inode compare.
+    #[cold]
+    #[inline(never)]
+    fn see_foreign(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
+        use std::collections::hash_map::Entry;
+        let shard = LinkSet::shard(st.dev, st.ino);
+        let mut other = self.other.lock().unwrap_or_else(|e| e.into_inner());
+        let map = other[shard].get_or_insert_with(Box::default);
+        match map.entry((st.dev, st.ino)) {
+            Entry::Vacant(v) => {
+                v.insert(Claim::new(st, joined_path(dir, name)));
+                true
+            }
+            Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),
+        }
+    }
+
+    /// The path compare of [`LinkClaims::see_foreign`].
     #[inline(always)]
     fn retarget(claim: &mut Claim, dir: &Path, name: &CStr) -> bool {
         #[cfg(unix)]
