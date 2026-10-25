@@ -1402,7 +1402,8 @@ struct Ctx<'a> {
     root_skip: usize,
     /// For a second walk: the one path at which each linked file counts.
     decided: Option<&'a Decided>,
-    /// On a second walk, the files met at their path in `decided`.
+    /// On a second walk, the files met at their path in `decided`, added
+    /// once a stat job ([`stat_entries`]).
     met: AtomicU64,
     /// Directory descriptors held open as parents.
     fds: FdBudget,
@@ -1554,7 +1555,8 @@ impl Ctx<'_> {
     /// its first sighting, and so does every file when nothing below a
     /// PATH is read ([`Ctx::rows`]). Every count of a file in the walk goes
     /// through here or [`Ctx::counts_here_all`] (precheck check_link_credit).
-    fn counts_here(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
+    /// A file met at its [`Ctx::decided`] path adds one to `met`.
+    fn counts_here(&self, st: &du_fs::Stat, dir: &Path, name: &CStr, met: &mut u64) -> bool {
         // -L: a file reached through links counts once, at its first
         // sighting; any file may be reached twice, and a path for each
         // would cost too much.
@@ -1567,7 +1569,7 @@ impl Ctx<'_> {
         // The path compare looks at a path the first walk stored, or
         // builds one for a claim. Wide `-s` returns above (`rows` is
         // false) and must not carry this body in its stat loop.
-        self.counts_at_path(st, dir, name)
+        self.counts_at_path(st, dir, name, met)
     }
 
     /// `dir`, a directory of this walk, as a path from below the root.
@@ -1592,7 +1594,7 @@ impl Ctx<'_> {
     /// copy without reuse is the plain loop, and a `PathBuf` per name on
     /// the reuse walk was the main-arena pile-up.
     #[inline(never)]
-    fn counts_at_path(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
+    fn counts_at_path(&self, st: &du_fs::Stat, dir: &Path, name: &CStr, met: &mut u64) -> bool {
         let dir = self.below_root(dir);
         // A second walk already stored the path. Comparing the components
         // builds no PathBuf for any linked name, met at its path or not.
@@ -1605,9 +1607,7 @@ impl Ctx<'_> {
                     "same_joined({:?}, {dir:?}, {name:?})",
                     fixed.smallest
                 );
-                if here {
-                    self.met.fetch_add(1, Ordering::Relaxed);
-                }
+                *met += u64::from(here);
                 return here;
             }
         }
@@ -2119,6 +2119,7 @@ fn stat_entries<const REUSE: bool>(
     // Linked files whose counts wait for one batch ([`Ctx::defers`]).
     let mut pending: (Vec<usize>, Vec<du_fs::Stat>) = (Vec::new(), Vec::new());
     let mut links = 0u64;
+    let mut met = 0u64;
     let filter = ctx.filter.as_ref();
     let excluded = |name: &CStr, is_dir: bool| {
         let out = filter.is_some_and(|f| f.excluded(chain, path, name.to_bytes(), is_dir));
@@ -2185,7 +2186,7 @@ fn stat_entries<const REUSE: bool>(
             pending.1.push(m);
             continue;
         }
-        if ctx.counts_here(&m, path, name) {
+        if ctx.counts_here(&m, path, name, &mut met) {
             out.add_file(ctx, dir, (i, name), &m, (depth, list_files));
         } else {
             links += 1;
@@ -2205,6 +2206,9 @@ fn stat_entries<const REUSE: bool>(
     // Once a job, not once a file: every worker adds to these.
     ctx.links.fetch_add(links, Ordering::Relaxed);
     ctx.files.fetch_add(out.files, Ordering::Relaxed);
+    if met > 0 {
+        ctx.met.fetch_add(met, Ordering::Relaxed);
+    }
     if let Some(c) = &opts.control {
         c.files.fetch_add(out.files, Ordering::Relaxed);
         c.disk.fetch_add(out.disk, Ordering::Relaxed);
