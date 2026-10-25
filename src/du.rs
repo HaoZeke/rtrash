@@ -1216,7 +1216,48 @@ impl<T> LinkCredit<T> {
 /// the smallest path; when one did not, the walk runs again with that
 /// path fixed for each file ([`Ctx::decided`]).
 struct LinkClaims {
-    shards: Vec<Mutex<InoMap<Claim>>>,
+    /// The device whose files [`ClaimShard::here`] keys by inode alone.
+    dev: u64,
+    shards: Vec<Mutex<ClaimShard>>,
+}
+
+/// One shard of [`LinkClaims`] and [`Decided`]. Nearly every linked file
+/// of a walk is on the root device, so its claim is keyed by inode number
+/// alone, in `here`; a file on any other device keeps the `(dev, ino)`
+/// key, in `other`. A file is looked up in one map only, picked by its
+/// device, so it still has one claim. The 8-byte key makes each bucket of
+/// a walk's largest table 64 bytes, not 72: 2 MiB less on 200,000 linked
+/// files, and one `u64` hashed and compared a lookup, not two. `other`
+/// is boxed and made at its first file: most walks have none, and every
+/// root builds its shards even when it keeps no rows, where a second
+/// inline table would take the shard vec past 1,032 bytes, the largest
+/// block glibc's per-thread cache holds.
+#[derive(Default)]
+struct ClaimShard {
+    here: HashMap<u64, Claim, InoHash>,
+    other: Option<Box<InoMap<Claim>>>,
+}
+
+impl ClaimShard {
+    /// The claim of file `(dev, ino)`, with `here` the device keyed by
+    /// inode alone.
+    fn get(&self, here: u64, (dev, ino): (u64, u64)) -> Option<&Claim> {
+        if dev == here {
+            self.here.get(&ino)
+        } else {
+            self.other.as_ref()?.get(&(dev, ino))
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.here.len() + self.other.as_ref().map_or(0, |m| m.len())
+    }
+
+    fn values(&self) -> impl Iterator<Item = &Claim> {
+        self.here
+            .values()
+            .chain(self.other.iter().flat_map(|m| m.values()))
+    }
 }
 
 /// One linked file in [`LinkClaims`], kept small: a walk of 200,000
@@ -1291,12 +1332,14 @@ fn joined_path(dir: &Path, name: &CStr) -> Box<Path> {
 /// first walk's claims, left in the shards they were filed in, so
 /// settling them copies nothing.
 struct Decided {
-    shards: Vec<InoMap<Claim>>,
+    /// [`LinkClaims::dev`].
+    dev: u64,
+    shards: Vec<ClaimShard>,
 }
 
 impl Decided {
     fn get(&self, id: &(u64, u64)) -> Option<&Claim> {
-        self.shards[LinkSet::shard(id.0, id.1)].get(id)
+        self.shards[LinkSet::shard(id.0, id.1)].get(self.dev, *id)
     }
 
     fn len(&self) -> usize {
@@ -1305,8 +1348,11 @@ impl Decided {
 }
 
 impl LinkClaims {
-    fn new() -> Self {
+    /// Claims that key the files of device `dev`, the root's, by inode
+    /// number alone.
+    fn new(dev: u64) -> Self {
         LinkClaims {
+            dev,
             shards: (0..LinkSet::SHARDS).map(|_| Mutex::default()).collect(),
         }
     }
@@ -1318,7 +1364,7 @@ impl LinkClaims {
         let mut map = self.shards[LinkSet::shard(st.dev, st.ino)]
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        Self::see_in(&mut map, st, dir, name)
+        Self::see_in(&mut map, self.dev, st, dir, name)
     }
 
     /// [`LinkClaims::claim`] for each of `sts`, met in `dir` as `name(k)`:
@@ -1335,7 +1381,7 @@ impl LinkClaims {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             for &(_, k) in run {
-                first[k] = Self::see_in(&mut map, &sts[k], dir, name(k));
+                first[k] = Self::see_in(&mut map, self.dev, &sts[k], dir, name(k));
             }
         }
         first
@@ -1344,26 +1390,37 @@ impl LinkClaims {
     /// [`LinkClaims::claim`] in the locked shard `map` of file `st`. A
     /// later sighting takes the path only when it comes first
     /// ([`credits_first`]), and only then is that path built. On Unix the
-    /// paths compare as bytes, in `plain_joined_first`.
-    fn see_in(map: &mut InoMap<Claim>, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
-        match map.entry((st.dev, st.ino)) {
-            std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert(Claim::new(st, joined_path(dir, name)));
-                true
-            }
-            std::collections::hash_map::Entry::Occupied(mut o) => {
-                let claim = o.get_mut();
-                #[cfg(unix)]
-                let first = plain_joined_first(dir, name, &claim.smallest);
-                #[cfg(not(unix))]
-                let first = joined_first(dir, name, &claim.smallest);
-                if first {
-                    claim.smallest = joined_path(dir, name);
-                    claim.counted_there = false;
+    /// paths compare as bytes, in `plain_joined_first`. A file on device
+    /// `here` is filed by inode alone ([`ClaimShard`]).
+    fn see_in(map: &mut ClaimShard, here: u64, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
+        use std::collections::hash_map::Entry;
+        let claim = if st.dev == here {
+            match map.here.entry(st.ino) {
+                Entry::Vacant(v) => {
+                    v.insert(Claim::new(st, joined_path(dir, name)));
+                    return true;
                 }
-                false
+                Entry::Occupied(o) => o.into_mut(),
             }
+        } else {
+            let other = map.other.get_or_insert_with(Box::default);
+            match other.entry((st.dev, st.ino)) {
+                Entry::Vacant(v) => {
+                    v.insert(Claim::new(st, joined_path(dir, name)));
+                    return true;
+                }
+                Entry::Occupied(o) => o.into_mut(),
+            }
+        };
+        #[cfg(unix)]
+        let first = plain_joined_first(dir, name, &claim.smallest);
+        #[cfg(not(unix))]
+        let first = joined_first(dir, name, &claim.smallest);
+        if first {
+            claim.smallest = joined_path(dir, name);
+            claim.counted_there = false;
         }
+        false
     }
 
     /// `None` when each linked file counted at its smallest path, else the
@@ -1385,7 +1442,10 @@ impl LinkClaims {
             .into_iter()
             .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
             .collect();
-        Some(Decided { shards })
+        Some(Decided {
+            dev: self.dev,
+            shards,
+        })
     }
 }
 
@@ -3098,7 +3158,7 @@ fn scan_pooled(
             prefetch,
             root_dev: meta.dev,
             seen: LinkSet::new(),
-            claims: LinkClaims::new(),
+            claims: LinkClaims::new(meta.dev),
             root_skip: root_skip(&abs),
             decided,
             met: AtomicU64::new(0),
@@ -3153,7 +3213,7 @@ fn scan_pooled(
             // over for the second walk. A stop during that walk keeps the
             // first. A scan that reads no rows keeps no claims, so it
             // walks once.
-            let claims = std::mem::replace(&mut ctx.claims, LinkClaims::new());
+            let claims = std::mem::replace(&mut ctx.claims, LinkClaims::new(ctx.root_dev));
             let settled = if live.is_some_and(ScanControl::stopped) {
                 None
             } else {
@@ -6515,14 +6575,14 @@ mod tests {
     fn claims_seen_in_a_batch_settle_as_one_by_one() {
         let (sts, dir, name) = sightings();
         let names: Vec<std::ffi::CString> = (0..sts.len()).map(name).collect();
-        let one = LinkClaims::new();
+        let one = LinkClaims::new(5);
         let want_first: Vec<bool> = sts
             .iter()
             .enumerate()
             .map(|(k, st)| one.claim(st, &dir(k), &names[k]))
             .collect();
         // One batch per directory, as a stat job files them.
-        let batch = LinkClaims::new();
+        let batch = LinkClaims::new(5);
         let mut got_first = Vec::new();
         for d in 0..3 {
             let r = d * 200..(d + 1) * 200;
@@ -6540,10 +6600,14 @@ mod tests {
             assert_eq!(fixed.len(), 200);
             let found = fixed.get(&(5, 1)).map(|c| c.smallest.to_path_buf());
             assert_eq!(found, Some(PathBuf::from("/r/d0/f1")));
+            let dev = fixed.dev;
             fixed
                 .shards
                 .into_iter()
-                .flatten()
+                .flat_map(|s| {
+                    let here = s.here.into_iter().map(move |(ino, c)| ((dev, ino), c));
+                    here.chain(s.other.into_iter().flat_map(|m| *m))
+                })
                 .map(|(id, c)| (id, c.smallest.into_path_buf()))
                 .collect()
         };
@@ -6592,7 +6656,7 @@ mod tests {
     #[test]
     fn claims_that_counted_at_the_smallest_path_settle() {
         let (sts, dir, name) = sightings();
-        let c = LinkClaims::new();
+        let c = LinkClaims::new(5);
         // Smallest paths first: every count falls where it belongs.
         for k in (0..sts.len()).rev() {
             c.claim(&sts[k], &dir(k), &name(k));
