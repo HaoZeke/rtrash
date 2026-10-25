@@ -5069,7 +5069,11 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let code = run_paths(prog, args, &mut missing);
     // A PATH that could not be read was named and left out and the rest
     // were scanned; the run still fails, as in GNU du.
-    if missing && code == 0 { 1 } else { code }
+    if missing && code == 0 {
+        1
+    } else {
+        code
+    }
 }
 
 /// [`run`], which sets `missing` when it leaves out a PATH it cannot read.
@@ -6295,7 +6299,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn links_are_rows_only_when_the_scan_lists_links() {
-        use std::os::unix::fs::{MetadataExt, symlink};
+        use std::os::unix::fs::{symlink, MetadataExt};
         let base = std::env::temp_dir().join(format!("rtrash-du-links-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("dir")).unwrap();
