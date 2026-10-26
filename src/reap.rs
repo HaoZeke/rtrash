@@ -2138,13 +2138,18 @@ pub(crate) fn purge_oldest(
                 crate::util::err_path(&dir.root)
             );
         }
+        // Measure again at `at`, the path that was short. Another trash
+        // on the same device can sit outside the directory a test seam
+        // names. statfs of that trash is the real disk, and a seam that
+        // is still short would look done.
         left = if dry_run {
             (
                 left.0.saturating_sub(done.bytes),
                 left.1.saturating_sub(done.inodes),
             )
         } else {
-            crate::space::query(&dir.root).map_or(left, |s| target.need(&s))
+            let measured = at.unwrap_or(dir.root.as_path());
+            crate::space::query(measured).map_or(left, |s| target.need(&s))
         };
     }
     left
