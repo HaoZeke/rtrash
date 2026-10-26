@@ -3698,6 +3698,11 @@ fn dupes_find_copies_and_trash_all_but_one() {
 /// a parallel test's du summary reads (round 231 went red on Windows).
 /// A single `--trash-dir` pins where they go, two are refused, and the
 /// du trash summary counts what arrived.
+///
+/// The summary otherwise counts every trash on the scan's device. A
+/// volume trash already on the machine made that 1 before this test
+/// moved a file. The run's home is the scratch tree. `--home-only`
+/// keeps the summary on that home trash.
 #[test]
 fn trash_dupes_go_to_the_scratch_trash_not_the_system_bin() {
     let t = Tree::new("dupes-bin");
@@ -3718,7 +3723,7 @@ fn trash_dupes_go_to_the_scratch_trash_not_the_system_bin() {
             .parse()
             .unwrap()
     };
-    assert_eq!(items(&t.json(&["--no-git"])), 0);
+    assert_eq!(items(&t.json(&["--no-git", "--home-only"])), 0);
     let out = t.du(&["--dupes", "--trash-dupes", "--min-size=1k"]);
     assert!(
         out.status.success(),
@@ -3743,7 +3748,7 @@ fn trash_dupes_go_to_the_scratch_trash_not_the_system_bin() {
         assert!(!bin.exists());
         assert!(t.root.join(".xdg/Trash/files/a-copy.bin").is_file());
     }
-    let j = t.json(&["--no-git"]);
+    let j = t.json(&["--no-git", "--home-only"]);
     assert_eq!(items(&j), 1, "{j}");
 
     // One --trash-dir pins the trash; a second is refused.
