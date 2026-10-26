@@ -1665,8 +1665,10 @@ impl Ctx<'_> {
     /// through here or [`Ctx::counts_here_all`] (precheck check_link_credit).
     /// The first walk does not take a hit count: a local in [`stat_entries`]
     /// stayed zero, and the check after that loop was five instructions a
-    /// directory on a tree of one-file directories. A second walk adds the
-    /// hit in [`Ctx::counts_metered`].
+    /// directory on a tree of one-file directories. A second walk that
+    /// reuses listed inodes adds the hit in [`Ctx::counts_metered`], once
+    /// a stat job. One that stats each file again adds it here. Without
+    /// that hit the walk is dropped and the first sighting keeps the count.
     fn counts_here(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         // -L: a file reached through links counts once, at its first
         // sighting; any file may be reached twice, and a path for each
@@ -1680,10 +1682,14 @@ impl Ctx<'_> {
         // The path compare looks at a path the first walk stored, or
         // builds one for a claim. Wide `-s` returns above (`rows` is
         // false) and must not carry this body in its stat loop. A first
-        // walk defers every file that would reach the compare, so the hit
-        // total below stays unused.
+        // walk defers every file that would reach the compare. This copy
+        // runs when a second walk stats the file again.
         let mut met = 0u64;
-        self.counts_at_path::<false>(st, dir, name, &mut met)
+        let counts = self.counts_at_path::<true>(st, dir, name, &mut met);
+        if met > 0 {
+            self.met.fetch_add(met, Ordering::Relaxed);
+        }
+        counts
     }
 
     /// [`Ctx::counts_here`] on a second walk. A file met at its
@@ -1896,7 +1902,18 @@ impl Drop for FdHold<'_> {
 /// that is not a directory turns it off for the scan, and so does a mount
 /// table or a mount point that cannot be read. Linux only: no other
 /// listing gives the numbers.
+/// Tests set this so a second walk stats every file again, the way a
+/// listing with no inode numbers does.
+#[cfg(test)]
+static NO_LISTED_INODES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(test, unix))]
+static NO_LISTED_INODES_LOCK: Mutex<()> = Mutex::new(());
+
 fn listed_inodes_usable(root: &Path) -> bool {
+    #[cfg(test)]
+    if NO_LISTED_INODES.load(Ordering::Relaxed) {
+        return false;
+    }
     #[cfg(target_os = "linux")]
     {
         let (Ok(table), Ok(root)) = (crate::trashdir::read_mount_table(), fs::canonicalize(root))
@@ -6348,6 +6365,61 @@ mod tests {
             assert_eq!(row.disk, m.blocks() * 512);
         }
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A second walk that stats each file again still counts a linked file
+    /// at its smallest path. The hit was recorded only when the listing's
+    /// inode numbers were reused, so this walk was dropped and the first
+    /// sighting kept the count. macOS listings carry no such numbers, and
+    /// an export read back then gave the size to another directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_walk_that_stats_again_counts_at_the_smallest_path() {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                NO_LISTED_INODES.store(false, Ordering::Relaxed);
+            }
+        }
+        let _hold = NO_LISTED_INODES_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        NO_LISTED_INODES.store(true, Ordering::Relaxed);
+        let _clear = Clear;
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-du-restat-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(root.join("a/f"), vec![1u8; 50_000]).unwrap();
+        fs::hard_link(root.join("a/f"), root.join("a/b/f-link")).unwrap();
+        fs::write(root.join("a/b/g"), vec![2u8; 9_000]).unwrap();
+        fs::hard_link(root.join("a/b/g"), root.join("a/z-link")).unwrap();
+        let opts = ScanOpts {
+            all_dirs: true,
+            top: usize::MAX,
+            ..ScanOpts::default()
+        };
+        let report = scan(std::slice::from_ref(&root), &opts).unwrap();
+        let apparent = |suffix: &str| {
+            report
+                .dirs
+                .iter()
+                .find(|d| d.path.ends_with(suffix))
+                .map(|d| d.apparent)
+                .unwrap_or_else(|| panic!("no {suffix} in {:?}", report.dirs))
+        };
+        // a/b/f-link sorts before a/f, and a/b/g before a/z-link, so both
+        // counts land in a/b. The root counts each file once.
+        assert_eq!(apparent("a/b"), 59_000, "{:?}", report.dirs);
+        assert_eq!(report.roots[0].apparent, 59_000);
+        assert_eq!(report.roots[0].files, 2);
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// A directory of several reads ([`LISTED_BATCH`]) is stat-ed while
