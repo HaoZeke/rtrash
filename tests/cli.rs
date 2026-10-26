@@ -7739,17 +7739,40 @@ fn reap_roots_find_cargo_targets_outside_home_to_the_set_depth() {
     assert!(text.contains("p1/target"), "{text}");
 }
 
-/// Run a copy of sleep under the file name of `as_exe`, in `cwd`.
-/// A fork elsewhere in the test binary can briefly hold the fresh copy
-/// open for writing, so spawning retries while it is busy.
+/// Run a sleeper under the file name of `as_exe`, in `cwd`.
+///
+/// The file name is the process name reap reads. Copying `/usr/bin/sleep`
+/// does that only while the copy ignores its argv0. Where coreutils is
+/// one binary, an unknown name exits at once. The tests compile a sleeper
+/// instead. A fork elsewhere in the test binary can briefly hold the
+/// fresh file open for writing, so spawning retries while it is busy.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn spawn_as(as_exe: &Path, cwd: &Path) -> std::process::Child {
     fs::create_dir_all(as_exe.parent().unwrap()).unwrap();
-    let sleep = ["/bin/sleep", "/usr/bin/sleep"]
-        .into_iter()
-        .find(|p| Path::new(p).exists())
-        .unwrap();
-    fs::copy(sleep, as_exe).unwrap();
+    let src = as_exe.with_extension("rs");
+    fs::write(
+        &src,
+        "fn main() {\n    \
+         let secs = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(60);\n    \
+         std::thread::sleep(\n        \
+         std::time::Duration::from_secs(secs));\n}\n",
+    )
+    .unwrap();
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let built = Command::new(rustc)
+        .arg("--edition=2021")
+        .arg("-o")
+        .arg(as_exe)
+        .arg(&src)
+        .output()
+        .unwrap_or_else(|e| panic!("cannot run rustc: {e}"));
+    assert!(
+        built.status.success(),
+        "rustc stand-in {}: {}",
+        as_exe.display(),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let _ = fs::remove_file(&src);
     for _ in 0..100 {
         match Command::new(as_exe).arg("60").current_dir(cwd).spawn() {
             Ok(c) => return c,
