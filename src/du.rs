@@ -1140,6 +1140,7 @@ fn path_rank(b: Option<&u8>) -> u16 {
 /// order by component is the order of the bytes with a separator below
 /// every other byte, and that needs no parse of either path.
 #[cfg(unix)]
+#[inline(always)]
 fn plain_joined_first(dir: &Path, name: &CStr, other: &Path) -> bool {
     let d = dir.as_os_str().as_encoded_bytes();
     let o = other.as_os_str().as_encoded_bytes();
@@ -1216,22 +1217,28 @@ impl<T> LinkCredit<T> {
 /// the smallest path; when one did not, the walk runs again with that
 /// path fixed for each file ([`Ctx::decided`]).
 struct LinkClaims {
-    /// The device whose files [`ClaimShard::here`] keys by inode alone.
+    /// The device whose files are keyed by inode alone.
     dev: u64,
-    shards: Vec<Mutex<ClaimShard>>,
+    /// One map per shard for files on `dev`. Every root builds this vec,
+    /// whether or not it keeps claims, so it stays the 768-byte block the
+    /// old `(dev, ino)` shards used. A pointer on each shard grew that
+    /// block to 896 bytes. An 896-byte block is a tcache chunk: fast bins
+    /// stop at 128 bytes.
+    shards: Vec<Mutex<HashMap<u64, Claim, InoHash>>>,
+    /// Files on any other device, one map per shard, boxed at the first
+    /// such file. Off `shards`, so that vec does not grow.
+    other: Mutex<[Option<Box<InoMap<Claim>>>; LinkSet::SHARDS]>,
 }
 
-/// One shard of [`LinkClaims`] and [`Decided`]. Nearly every linked file
-/// of a walk is on the root device, so its claim is keyed by inode number
-/// alone, in `here`; a file on any other device keeps the `(dev, ino)`
-/// key, in `other`. A file is looked up in one map only, picked by its
-/// device, so it still has one claim. The 8-byte key makes each bucket of
-/// a walk's largest table 64 bytes, not 72: 2 MiB less on 200,000 linked
-/// files, and one `u64` hashed and compared a lookup, not two. `other`
-/// is boxed and made at its first file: most walks have none, and every
-/// root builds its shards even when it keeps no rows, where a second
-/// inline table would take the shard vec past 1,032 bytes, the largest
-/// block glibc's per-thread cache holds.
+/// The two maps of one shard, put together when a count has to move to
+/// the smallest path ([`Decided`]). The walk does not allocate this: the
+/// root-device map stays in [`LinkClaims::shards`] and the other map
+/// beside it. Nearly every linked file is on the root device, so its
+/// claim is keyed by inode number alone; a file on any other device keeps
+/// the `(dev, ino)` key. A file is in one map only, picked by its device,
+/// so it still has one claim. The 8-byte key makes each bucket of a
+/// walk's largest table 64 bytes, not 72: 2 MiB less on 200,000 linked
+/// files, and one `u64` hashed and compared a lookup, not two.
 #[derive(Default)]
 struct ClaimShard {
     here: HashMap<u64, Claim, InoHash>,
@@ -1251,12 +1258,6 @@ impl ClaimShard {
 
     fn len(&self) -> usize {
         self.here.len() + self.other.as_ref().map_or(0, |m| m.len())
-    }
-
-    fn values(&self) -> impl Iterator<Item = &Claim> {
-        self.here
-            .values()
-            .chain(self.other.iter().flat_map(|m| m.values()))
     }
 }
 
@@ -1353,7 +1354,10 @@ impl LinkClaims {
     fn new(dev: u64) -> Self {
         LinkClaims {
             dev,
-            shards: (0..LinkSet::SHARDS).map(|_| Mutex::default()).collect(),
+            shards: (0..LinkSet::SHARDS)
+                .map(|_| Mutex::default())
+                .collect::<Vec<Mutex<HashMap<u64, Claim, InoHash>>>>(),
+            other: Mutex::new(std::array::from_fn(|_| None)),
         }
     }
 
@@ -1361,10 +1365,9 @@ impl LinkClaims {
     /// whether it takes the file's count: the first sighting to reach the
     /// claims does. Each path is met once.
     fn claim(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
-        let mut map = self.shards[LinkSet::shard(st.dev, st.ino)]
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        Self::see_in(&mut map, self.dev, st, dir, name)
+        let shard = LinkSet::shard(st.dev, st.ino);
+        let mut here = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
+        self.see_in(&mut here, st, dir, name)
     }
 
     /// [`LinkClaims::claim`] for each of `sts`, met in `dir` as `name(k)`:
@@ -1377,41 +1380,65 @@ impl LinkClaims {
     ) -> Vec<bool> {
         let mut first = vec![false; sts.len()];
         for run in shard_runs(sts).chunk_by(|a, b| a.0 == b.0) {
-            let mut map = self.shards[run[0].0]
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let shard = run[0].0;
+            let mut here = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
             for &(_, k) in run {
-                first[k] = Self::see_in(&mut map, self.dev, &sts[k], dir, name(k));
+                first[k] = self.see_in(&mut here, &sts[k], dir, name(k));
             }
         }
         first
     }
 
-    /// [`LinkClaims::claim`] in the locked shard `map` of file `st`. A
-    /// later sighting takes the path only when it comes first
-    /// ([`credits_first`]), and only then is that path built. On Unix the
-    /// paths compare as bytes, in `plain_joined_first`. A file on device
-    /// `here` is filed by inode alone ([`ClaimShard`]).
-    fn see_in(map: &mut ClaimShard, here: u64, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
+    /// [`LinkClaims::claim`] in the locked root-device map `here`. A file
+    /// on `self.dev` is filed by inode alone. A file on any other device
+    /// goes to [`LinkClaims::see_foreign`], which locks
+    /// [`LinkClaims::other`] after this shard lock, so the two locks never
+    /// wait on each other the other way around. A later sighting takes the
+    /// path only when it comes first ([`credits_first`]), and only then is
+    /// that path built. On Unix the paths compare as bytes inside
+    /// [`LinkClaims::retarget`], which is inlined here.
+    fn see_in(
+        &self,
+        here: &mut HashMap<u64, Claim, InoHash>,
+        st: &du_fs::Stat,
+        dir: &Path,
+        name: &CStr,
+    ) -> bool {
         use std::collections::hash_map::Entry;
-        let claim = if st.dev == here {
-            match map.here.entry(st.ino) {
-                Entry::Vacant(v) => {
-                    v.insert(Claim::new(st, joined_path(dir, name)));
-                    return true;
-                }
-                Entry::Occupied(o) => o.into_mut(),
+        if st.dev != self.dev {
+            return self.see_foreign(st, dir, name);
+        }
+        match here.entry(st.ino) {
+            Entry::Vacant(v) => {
+                v.insert(Claim::new(st, joined_path(dir, name)));
+                true
             }
-        } else {
-            let other = map.other.get_or_insert_with(Box::default);
-            match other.entry((st.dev, st.ino)) {
-                Entry::Vacant(v) => {
-                    v.insert(Claim::new(st, joined_path(dir, name)));
-                    return true;
-                }
-                Entry::Occupied(o) => o.into_mut(),
+            Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),
+        }
+    }
+
+    /// [`LinkClaims::see_in`] for a file on a device other than the root.
+    /// Not in the root-device loop: that loop stays the inode compare.
+    #[cold]
+    #[inline(never)]
+    fn see_foreign(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
+        use std::collections::hash_map::Entry;
+        let shard = LinkSet::shard(st.dev, st.ino);
+        let mut other = self.other.lock().unwrap_or_else(|e| e.into_inner());
+        let map = other[shard].get_or_insert_with(Box::default);
+        match map.entry((st.dev, st.ino)) {
+            Entry::Vacant(v) => {
+                v.insert(Claim::new(st, joined_path(dir, name)));
+                true
             }
-        };
+            Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),
+        }
+    }
+
+    /// The path compare of a later sighting. Inlined into
+    /// [`LinkClaims::see_in`] and [`LinkClaims::see_foreign`].
+    #[inline(always)]
+    fn retarget(claim: &mut Claim, dir: &Path, name: &CStr) -> bool {
         #[cfg(unix)]
         let first = plain_joined_first(dir, name, &claim.smallest);
         #[cfg(not(unix))]
@@ -1426,26 +1453,37 @@ impl LinkClaims {
     /// `None` when each linked file counted at its smallest path, else the
     /// smallest path and stat of every linked file, for a walk that counts
     /// there.
-    fn settled(mut self) -> Option<Decided> {
+    fn settled(self) -> Option<Decided> {
+        let LinkClaims {
+            dev,
+            mut shards,
+            other,
+        } = self;
+        let other = other.into_inner().unwrap_or_else(|e| e.into_inner());
         // Most walks: no claims, or each counted at its smallest path.
         // They return here and build no Decided.
-        if self
-            .shards
+        let all_there = shards
             .iter_mut()
             .map(|m| m.get_mut().unwrap_or_else(|e| e.into_inner()))
-            .all(|m| m.values().all(|c| c.counted_there))
-        {
+            .zip(other.iter())
+            .all(|(here, foreign)| {
+                here.values().all(|c| c.counted_there)
+                    && foreign
+                        .as_ref()
+                        .is_none_or(|m| m.values().all(|c| c.counted_there))
+            });
+        if all_there {
             return None;
         }
-        let shards = self
-            .shards
+        let shards = shards
             .into_iter()
-            .map(|m| m.into_inner().unwrap_or_else(|e| e.into_inner()))
+            .zip(other)
+            .map(|(m, foreign)| ClaimShard {
+                here: m.into_inner().unwrap_or_else(|e| e.into_inner()),
+                other: foreign,
+            })
             .collect();
-        Some(Decided {
-            dev: self.dev,
-            shards,
-        })
+        Some(Decided { dev, shards })
     }
 }
 
@@ -6803,12 +6841,18 @@ mod tests {
             "{}",
             std::mem::size_of::<(u64, Claim)>()
         );
-        // Every root builds its shards, claims or not: they stay in one
-        // block of glibc's per-thread cache, which holds up to 1,032 bytes.
+        // Every root builds its shards, claims or not. The block is 768
+        // bytes, one tcache size. Fast bins stop at 128 bytes. The
+        // foreign-device maps are not in this vec. A pointer on each
+        // shard made the block 896 bytes, which tcache serves as its own
+        // size.
         #[cfg(all(target_os = "linux", target_env = "gnu", target_pointer_width = "64"))]
         {
-            let shards = LinkSet::SHARDS * std::mem::size_of::<Mutex<ClaimShard>>();
-            assert!(shards <= 1032, "{shards}");
+            let c = LinkClaims::new(1);
+            let elem = std::mem::size_of_val(&c.shards[0]);
+            let bytes = c.shards.capacity() * elem;
+            assert_eq!(c.shards.capacity(), LinkSet::SHARDS);
+            assert_eq!(bytes, 768, "{bytes} from {elem}");
         }
     }
 
