@@ -1462,8 +1462,10 @@ struct Ctx<'a> {
     root_skip: usize,
     /// For a second walk: the one path at which each linked file counts.
     decided: Option<&'a Decided>,
-    /// On a second walk, the files met at their path in `decided`, added
-    /// once a stat job ([`stat_entries`]).
+    /// On a second walk, the files met at their path in `decided`. A walk
+    /// that reuses listed inodes adds them once a stat job
+    /// ([`stat_entries`]). A walk that stats each file again adds one hit
+    /// per file.
     met: AtomicU64,
     /// Directory descriptors held open as parents.
     fds: FdBudget,
@@ -1615,8 +1617,14 @@ impl Ctx<'_> {
     /// its first sighting, and so does every file when nothing below a
     /// PATH is read ([`Ctx::rows`]). Every count of a file in the walk goes
     /// through here or [`Ctx::counts_here_all`] (precheck check_link_credit).
-    /// A file met at its [`Ctx::decided`] path adds one to `met`.
-    fn counts_here(&self, st: &du_fs::Stat, dir: &Path, name: &CStr, met: &mut u64) -> bool {
+    /// The first walk does not take a hit count: a local in [`stat_entries`]
+    /// stayed zero, and the check after that loop was five instructions a
+    /// directory on a tree of one-file directories. A second walk that
+    /// reuses listed inodes adds the hit in [`Ctx::counts_metered`], once
+    /// a stat job. One that stats each file again adds one hit per file
+    /// here. Without that hit the walk is dropped and the first sighting
+    /// keeps the count.
+    fn counts_here(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         // -L: a file reached through links counts once, at its first
         // sighting; any file may be reached twice, and a path for each
         // would cost too much.
@@ -1628,7 +1636,26 @@ impl Ctx<'_> {
         }
         // The path compare looks at a path the first walk stored, or
         // builds one for a claim. Wide `-s` returns above (`rows` is
-        // false) and must not carry this body in its stat loop.
+        // false) and must not carry this body in its stat loop. A first
+        // walk defers every file that would reach the compare. This copy
+        // runs when a second walk stats the file again.
+        let mut met = 0u64;
+        let counts = self.counts_at_path(st, dir, name, &mut met);
+        if met > 0 {
+            self.met.fetch_add(met, Ordering::Relaxed);
+        }
+        counts
+    }
+
+    /// [`Ctx::counts_here`] on a second walk that reuses listed inodes.
+    /// A file met at its [`Ctx::decided`] path adds one to `met`.
+    fn counts_metered(&self, st: &du_fs::Stat, dir: &Path, name: &CStr, met: &mut u64) -> bool {
+        if self.opts.follow {
+            return st.ino == 0 || self.seen.insert(st.dev, st.ino);
+        }
+        if st.nlink <= 1 || st.ino == 0 || !self.rows {
+            return self.first_link(st);
+        }
         self.counts_at_path(st, dir, name, met)
     }
 
@@ -1814,6 +1841,14 @@ impl Drop for FdHold<'_> {
     }
 }
 
+// Set on the thread that starts a scan, so that scan's second walk stats
+// every file again, the way a listing with no inode numbers does. Other
+// `cargo test` threads keep the real answer.
+#[cfg(test)]
+thread_local! {
+    static NO_LISTED_INODES: std::cell::Cell<bool> = std::cell::Cell::new(false);
+}
+
 /// Whether a second walk below `root` may take a linked file's stat by
 /// the inode number its listing gives. A regular file bind-mounted over
 /// another lists the hidden file's number, so a mount point below `root`
@@ -1821,6 +1856,10 @@ impl Drop for FdHold<'_> {
 /// table or a mount point that cannot be read. Linux only: no other
 /// listing gives the numbers.
 fn listed_inodes_usable(root: &Path) -> bool {
+    #[cfg(test)]
+    if NO_LISTED_INODES.with(|f| f.get()) {
+        return false;
+    }
     #[cfg(target_os = "linux")]
     {
         let (Ok(table), Ok(root)) = (crate::trashdir::read_mount_table(), fs::canonicalize(root))
@@ -2179,6 +2218,9 @@ fn stat_entries<const REUSE: bool>(
     // Linked files whose counts wait for one batch ([`Ctx::defers`]).
     let mut pending: (Vec<usize>, Vec<du_fs::Stat>) = (Vec::new(), Vec::new());
     let mut links = 0u64;
+    // Second-walk hits, added once for the job. The first-walk copy does
+    // not use it: the zero and the check after the loop were on the plain
+    // `-s` path, about five instructions a directory.
     let mut met = 0u64;
     let filter = ctx.filter.as_ref();
     let excluded = |name: &CStr, is_dir: bool| {
@@ -2246,7 +2288,12 @@ fn stat_entries<const REUSE: bool>(
             pending.1.push(m);
             continue;
         }
-        if ctx.counts_here(&m, path, name, &mut met) {
+        let counts = if REUSE {
+            ctx.counts_metered(&m, path, name, &mut met)
+        } else {
+            ctx.counts_here(&m, path, name)
+        };
+        if counts {
             out.add_file(ctx, dir, (i, name), &m, (depth, list_files));
         } else {
             links += 1;
@@ -2266,7 +2313,7 @@ fn stat_entries<const REUSE: bool>(
     // Once a job, not once a file: every worker adds to these.
     ctx.links.fetch_add(links, Ordering::Relaxed);
     ctx.files.fetch_add(out.files, Ordering::Relaxed);
-    if met > 0 {
+    if REUSE && met > 0 {
         ctx.met.fetch_add(met, Ordering::Relaxed);
     }
     if let Some(c) = &opts.control {
@@ -6264,6 +6311,58 @@ mod tests {
             assert_eq!(row.disk, m.blocks() * 512);
         }
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A second walk that stats each file again still counts a linked file
+    /// at its smallest path. A listing with no inode numbers takes this
+    /// path, including overlayfs, macOS and Windows. The hit is one per
+    /// file. Without it the walk is dropped and the first sighting keeps
+    /// the count.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_walk_that_stats_again_counts_at_the_smallest_path() {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                NO_LISTED_INODES.set(false);
+            }
+        }
+        NO_LISTED_INODES.set(true);
+        let _clear = Clear;
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-du-restat-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(root.join("a/f"), vec![1u8; 50_000]).unwrap();
+        fs::hard_link(root.join("a/f"), root.join("a/b/f-link")).unwrap();
+        fs::write(root.join("a/b/g"), vec![2u8; 9_000]).unwrap();
+        fs::hard_link(root.join("a/b/g"), root.join("a/z-link")).unwrap();
+        let opts = ScanOpts {
+            all_dirs: true,
+            top: usize::MAX,
+            ..ScanOpts::default()
+        };
+        let report = scan(std::slice::from_ref(&root), &opts).unwrap();
+        let apparent = |suffix: &str| {
+            report
+                .dirs
+                .iter()
+                .find(|d| d.path.ends_with(suffix))
+                .map(|d| d.apparent)
+                .unwrap_or_else(|| panic!("no {suffix} in {:?}", report.dirs))
+        };
+        // a/b/f-link sorts before a/f, and a/b/g before a/z-link, so both
+        // counts land in a/b. The root counts each file once.
+        assert_eq!(apparent("a/b"), 59_000, "{:?}", report.dirs);
+        assert_eq!(report.roots[0].apparent, 59_000);
+        assert_eq!(report.roots[0].files, 2);
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// A directory of several reads ([`LISTED_BATCH`]) is stat-ed while
