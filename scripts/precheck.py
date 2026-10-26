@@ -2973,14 +2973,16 @@ def check_trash_root_sets():
 # the first sighting gave a different folder the file's size from run to
 # run, and an ncdu export read back gave it to whichever link it wrote
 # first. du::credits_first is the one rule: Ctx::counts_here applies it in
-# a scan and du::LinkCredit to a saved tree (du_ncdu::Builder). A link
+# a scan, counts_metered is that same early return on a second walk, and
+# du::LinkCredit applies it to a saved tree (du_ncdu::Builder). A link
 # dedupe anywhere else in src/du*.rs (first_link, an inode set insert)
 # decides by order again. LINK_CREDIT_OK names the deciders and the inode
 # sets that credit no folder size. LINK_CREDIT_CASES tests the matcher.
 LINK_CREDIT = re.compile(r"\.first_link\s*\(|\bseen\.insert\s*\([^)]*\bino\b"
                          r"|\.(?:insert|entry)\s*\(\s*\([^)]*\bino\b")
 LINK_CREDIT_OK = {
-    ("src/du.rs", "counts_here"), ("src/du.rs", "first_link"),
+    ("src/du.rs", "counts_here"), ("src/du.rs", "counts_metered"),
+    ("src/du.rs", "first_link"),
     ("src/du.rs", "counts_at_path"),  # Ctx::counts_at_path, behind counts_here
     ("src/du.rs", "insert"),  # LinkSet::insert, behind first_link
     ("src/du.rs", "first_links"),  # LinkSet::first_links, behind counts_here_all
