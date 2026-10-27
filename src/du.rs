@@ -7106,12 +7106,12 @@ mod tests {
             assert_eq!(c.stat((st.dev, st.ino)), st);
             assert_eq!(*arena.path(c.path), *joined_path(dir, &n), "{dir:?} {n:?}");
         }
+        assert_eq!(std::mem::size_of::<ClaimHash>(), 0);
         #[cfg(target_pointer_width = "64")]
-        assert!(
-            std::mem::size_of::<Claim>() <= 56,
-            "{}",
-            std::mem::size_of::<Claim>()
-        );
+        {
+            assert_eq!(std::mem::size_of::<Claim>(), 56);
+            assert!(std::mem::size_of::<PathRef>() <= 16);
+        }
     }
 
     #[test]
@@ -7155,16 +7155,29 @@ mod tests {
                 let got = fixed.get(&(dev, 9)).expect("a claim on each device");
                 let want = Path::new("a").join(format!("f{dev}"));
                 assert_eq!(*got.path(), *want, "{root} {dev}");
+                let shard = &fixed.shards[LinkSet::shard(dev, 9)];
+                if dev == root {
+                    let claim = shard.here.get(&9).expect("on the root device");
+                    assert_eq!(
+                        shard.here_paths.path(claim.path),
+                        want.as_path(),
+                        "{root} {dev}"
+                    );
+                } else {
+                    let foreign = shard.other.as_ref().expect("on another device");
+                    let claim = foreign.map.get(&(dev, 9)).expect("on another device");
+                    assert_eq!(
+                        foreign.paths.path(claim.path),
+                        want.as_path(),
+                        "{root} {dev}"
+                    );
+                }
                 assert_eq!(got.stat((dev, 9)), st(dev), "{root} {dev}");
             }
             assert!(fixed.get(&(7, 9)).is_none(), "{root}");
         }
         #[cfg(target_pointer_width = "64")]
-        assert!(
-            std::mem::size_of::<(u64, Claim)>() <= 64,
-            "{}",
-            std::mem::size_of::<(u64, Claim)>()
-        );
+        assert_eq!(std::mem::size_of::<(u64, Claim)>(), 64);
         // Every root builds its shards, claims or not. The block is 768
         // bytes, one tcache size. Fast bins stop at 128 bytes. The
         // foreign-device maps are not in this vec. A pointer on each
@@ -7178,6 +7191,212 @@ mod tests {
             assert_eq!(c.shards.capacity(), LinkSet::SHARDS);
             assert_eq!(bytes, 768, "{bytes} from {elem}");
         }
+    }
+
+    #[test]
+    fn push_joined_writes_what_joined_path_builds() {
+        let name = |s: &[u8]| std::ffi::CString::new(s).unwrap();
+        let cases: &[(&str, &[u8])] = &[
+            ("/r/a", b"x"),
+            ("/r/a/", b"x"),
+            ("/", b"x"),
+            ("", b"x"),
+            ("r", b"e000123"),
+        ];
+        let mut arena = PathArena::new();
+        for &(dir, n) in cases {
+            let (dir, n) = (Path::new(dir), name(n));
+            let r = push_joined(&mut arena, dir, &n);
+            assert_eq!(
+                arena.path(r).as_os_str().as_encoded_bytes(),
+                joined_path(dir, &n).as_os_str().as_encoded_bytes(),
+                "{dir:?} {n:?}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let n = name(b"f\xff");
+            let dir = Path::new("/r");
+            let r = push_joined(&mut arena, dir, &n);
+            assert_eq!(
+                arena.path(r).as_os_str().as_bytes(),
+                joined_path(dir, &n).as_os_str().as_bytes()
+            );
+        }
+    }
+
+    /// Inodes of `dev` that [`LinkSet::shard`] files together.
+    fn inos_on_one_shard(dev: u64, n: usize) -> (usize, Vec<u64>) {
+        let shard = 3;
+        let mut inos = Vec::with_capacity(n);
+        let mut ino = 1u64;
+        while inos.len() < n {
+            if LinkSet::shard(dev, ino) == shard {
+                inos.push(ino);
+            }
+            ino += 1;
+        }
+        (shard, inos)
+    }
+
+    fn claim_stat(dev: u64, ino: u64) -> du_fs::Stat {
+        du_fs::Stat {
+            mode: 0o100_000, // regular file
+            size: ino,
+            blocks: 1,
+            nlink: 2,
+            ino,
+            dev,
+            mtime: 7,
+        }
+    }
+
+    /// The live bytes of `ino` in `shard`, and the offset they start at.
+    fn live_path(c: &LinkClaims, shard: usize, ino: u64) -> (u64, Vec<u8>) {
+        let slot = c.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
+        let r = slot.map.get(&ino).expect("a claim").path;
+        let bytes = &slot.paths.inner.as_ref().expect("a path buffer").bytes;
+        let start = r.off as usize;
+        (r.off, bytes[start..start + r.len as usize].to_vec())
+    }
+
+    #[test]
+    fn a_retarget_keeps_the_smallest_path_in_the_shard_buffer() {
+        let dev = 1u64;
+        let (shard, inos) = inos_on_one_shard(dev, 5);
+        let c = LinkClaims::new(dev);
+        let cstr = |s: &str| std::ffi::CString::new(s).unwrap();
+        // file, dir, name. Later sightings are the smaller path: a shorter
+        // one (in place), one of equal length (in place) and a longer one
+        // (appended). The fourth file's later path is larger, so it stays.
+        let steps: [(usize, &str, &str); 9] = [
+            (0, "a", "xxxx"),
+            (1, "b", "yyyy"),
+            (0, "a", "xx"),
+            (2, "n", "a"),
+            (1, "a", "yyyy"),
+            (3, "a", "d"),
+            (4, "c", "e"),
+            (2, "m", "aaaa"),
+            (3, "z", "d"),
+        ];
+        let mut seen = [0u8; 5];
+        let mut snaps: [Option<(u64, Vec<u8>)>; 5] = [None, None, None, None, None];
+        for (file, dir, name) in steps {
+            let before = snaps.clone();
+            let n = cstr(name);
+            c.claim(&claim_stat(dev, inos[file]), Path::new(dir), &n);
+            seen[file] += 1;
+            // A rewrite may change only the file it rewrites.
+            for (other, &ino) in inos.iter().enumerate() {
+                if other == file {
+                    continue;
+                }
+                let Some((off, bytes)) = &before[other] else {
+                    continue;
+                };
+                let (off2, bytes2) = live_path(&c, shard, ino);
+                assert_eq!(off2, *off, "file {other} offset");
+                assert_eq!(bytes2, *bytes, "file {other} bytes");
+            }
+            let (off, bytes) = live_path(&c, shard, inos[file]);
+            let want = joined_path(Path::new(dir), &n);
+            if file == 3 && seen[file] == 2 {
+                let (old_off, old_bytes) = before[file].as_ref().unwrap();
+                assert_eq!(off, *old_off, "a larger path stays stored");
+                assert_eq!(bytes, *old_bytes, "a larger path stays stored");
+            } else {
+                assert_eq!(bytes, want.as_os_str().as_encoded_bytes(), "file {file}");
+                if seen[file] == 2 {
+                    let (old_off, old_bytes) = before[file].as_ref().unwrap();
+                    if file == 2 {
+                        assert!(off > *old_off, "appended");
+                    } else {
+                        assert_eq!(off, *old_off, "in place");
+                    }
+                    assert_ne!(bytes, *old_bytes);
+                }
+            }
+            snaps[file] = Some((off, bytes));
+        }
+        let fixed = c.settled().expect("three files counted at a larger path");
+        for (file, &ino) in inos.iter().enumerate() {
+            let met: Vec<(&str, &str)> = steps
+                .iter()
+                .filter(|s| s.0 == file)
+                .map(|s| (s.1, s.2))
+                .collect();
+            let mut least = joined_path(Path::new(met[0].0), &cstr(met[0].1)).into_path_buf();
+            for (dir, name) in met.iter().skip(1) {
+                let p = joined_path(Path::new(dir), &cstr(name)).into_path_buf();
+                if p.as_path() < least.as_path() {
+                    least = p;
+                }
+            }
+            let got = fixed.get(&(dev, ino)).expect("a claim");
+            assert_eq!(got.path(), least.as_path(), "file {file}");
+            let claim = fixed.shards[shard].here.get(&ino).expect("root map");
+            let first = joined_path(Path::new(met[0].0), &cstr(met[0].1));
+            assert_eq!(claim.counted_there, first.as_ref() == least.as_path());
+            assert_eq!(got.stat((dev, ino)), claim_stat(dev, ino));
+        }
+    }
+
+    #[test]
+    fn the_claim_buffer_compacts_and_keeps_every_path() {
+        let dev = 1u64;
+        let (shard, inos) = inos_on_one_shard(dev, 3);
+        let c = LinkClaims::new(dev);
+        let cstr = |n: usize, byte: u8| std::ffi::CString::new(vec![byte; n]).unwrap();
+        // Two longer replacements of one file pass the test floor (64) and
+        // half the buffer. The other two files stay, so compaction has to
+        // copy every claim.
+        let specs = [
+            (inos[0], 200, b'z'),
+            (inos[1], 50, b'm'),
+            (inos[2], 50, b'n'),
+        ];
+        for &(ino, len, byte) in &specs {
+            assert!(c.claim(&claim_stat(dev, ino), Path::new(""), &cstr(len, byte)));
+        }
+        assert!(!c.claim(&claim_stat(dev, inos[0]), Path::new(""), &cstr(201, b'a')));
+        assert!(!c.claim(&claim_stat(dev, inos[0]), Path::new(""), &cstr(202, b'A')));
+        let live = {
+            let slot = c.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
+            let store = slot.paths.inner.as_ref().expect("a path buffer");
+            let live: usize = slot.map.values().map(|claim| claim.path.len as usize).sum();
+            assert_eq!(store.garbage, 0, "compaction did not run");
+            assert_eq!(store.bytes.len(), live);
+            assert!(store.bytes.len() <= live * 2 + 64);
+            // The historical buffer held every version: 200 + 50 + 50 + 201 + 202.
+            assert!(live < 200 + 50 + 50 + 201 + 202);
+            live
+        };
+        let fixed = c
+            .settled()
+            .expect("the long file counted at its first path");
+        let want = [
+            (inos[0], 202, b'A'),
+            (inos[1], 50, b'm'),
+            (inos[2], 50, b'n'),
+        ];
+        for (ino, len, byte) in want {
+            let got = fixed.get(&(dev, ino)).expect("a claim");
+            let name = cstr(len, byte);
+            assert_eq!(got.path(), joined_path(Path::new(""), &name).as_ref());
+            assert_eq!(got.stat((dev, ino)), claim_stat(dev, ino));
+        }
+        assert_eq!(
+            fixed.shards[shard]
+                .here_paths
+                .inner
+                .as_ref()
+                .unwrap()
+                .bytes
+                .len(),
+            live
+        );
     }
 
     #[test]
