@@ -997,14 +997,222 @@ type ClaimMap<K> = HashMap<K, Claim, ClaimHash>;
 /// Claims of files on a device other than the root's, keyed by both numbers.
 type ForeignClaimMap = ClaimMap<(u64, u64)>;
 
-/// One root-device claim map and the spare word that keeps its lock 48
-/// bytes, so the shard block stays 768. The word is the room the path
-/// buffer takes.
-struct ClaimSlot {
+/// Where a claim's path sits in its shard's [`PathArena`]. A `u64` offset
+/// keeps [`Claim`] at 56 bytes, so a bucket stays 64, and the offset
+/// cannot overflow the buffer.
+#[derive(Clone, Copy)]
+struct PathRef {
+    off: u64,
+    len: u32,
+}
+
+/// The bytes of one shard's claim paths, and how many of them no claim
+/// still names.
+struct PathStore {
+    bytes: Vec<u8>,
+    garbage: usize,
+}
+
+/// One buffer for every claim path of a shard. `None` until the first
+/// claim, so a walk that keeps no claims allocates nothing here. The box
+/// is eight bytes, which is what keeps the shard lock at 48.
+#[derive(Default)]
+struct PathArena {
+    inner: Option<Box<PathStore>>,
+}
+
+impl PathArena {
+    fn new() -> Self {
+        PathArena { inner: None }
+    }
+
+    fn store(&mut self) -> &mut PathStore {
+        self.inner.get_or_insert_with(|| {
+            Box::new(PathStore {
+                bytes: Vec::new(),
+                garbage: 0,
+            })
+        })
+    }
+
+    /// The path `r` names. `r` came from this arena.
+    fn path(&self, r: PathRef) -> &Path {
+        let bytes = &self.inner.as_ref().expect("a claim path").bytes;
+        let start = r.off as usize;
+        let end = start + r.len as usize;
+        bytes_as_path(&bytes[start..end])
+    }
+}
+
+fn bytes_as_path(bytes: &[u8]) -> &Path {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Path::new(OsStr::from_bytes(bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        // SAFETY: each stored range is the full `as_encoded_bytes` of one
+        // `OsStr`, written by [`push_joined`] and never split.
+        Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(bytes) })
+    }
+}
+
+/// `n` as a path length. A claim path past 4 GiB cannot occur.
+fn path_len(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or_else(|_| path_too_long(n))
+}
+
+#[cold]
+#[inline(never)]
+fn path_too_long(n: usize) -> ! {
+    panic!("a claim path is longer than 4 GiB ({n} bytes)")
+}
+
+/// Keep `dir`/`name` when it comes before the claim's path. A shorter or
+/// equal path overwrites the old bytes; a longer one is appended and the
+/// old length becomes unreferenced.
+fn keep_smaller(claim: &mut Claim, arena: &mut PathArena, dir: &Path, name: &CStr) {
+    #[cfg(not(unix))]
+    let joined = joined_path(dir, name);
+    #[cfg(unix)]
+    let new_len = joined_bytes_len(dir, name);
+    #[cfg(not(unix))]
+    let new_len = joined.as_os_str().len();
+    let old = claim.path;
+    let old_len = old.len as usize;
+    if new_len <= old_len {
+        let start = old.off as usize;
+        #[cfg(unix)]
+        write_joined_at(&mut arena.store().bytes[start..start + new_len], dir, name);
+        #[cfg(not(unix))]
+        arena.store().bytes[start..start + new_len]
+            .copy_from_slice(joined.as_os_str().as_encoded_bytes());
+        if new_len < old_len {
+            arena.store().garbage += old_len - new_len;
+        }
+        claim.path.len = path_len(new_len);
+    } else {
+        #[cfg(unix)]
+        {
+            claim.path = push_joined(arena, dir, name);
+        }
+        #[cfg(not(unix))]
+        {
+            let bytes = joined.as_os_str().as_encoded_bytes();
+            let store = arena.store();
+            let off = store.bytes.len();
+            store.bytes.extend_from_slice(bytes);
+            claim.path = PathRef {
+                off: off as u64,
+                len: path_len(new_len),
+            };
+        }
+        arena.store().garbage += old_len;
+    }
+    claim.counted_there = false;
+}
+
+/// Append the bytes [`joined_path`] would build for `dir` and `name`.
+fn push_joined(arena: &mut PathArena, dir: &Path, name: &CStr) -> PathRef {
+    #[cfg(unix)]
+    {
+        let len = joined_bytes_len(dir, name);
+        let store = arena.store();
+        let off = store.bytes.len();
+        store.bytes.resize(off + len, 0);
+        write_joined_at(&mut store.bytes[off..off + len], dir, name);
+        PathRef {
+            off: off as u64,
+            len: path_len(len),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let joined = joined_path(dir, name);
+        let bytes = joined.as_os_str().as_encoded_bytes();
+        let store = arena.store();
+        let off = store.bytes.len();
+        store.bytes.extend_from_slice(bytes);
+        PathRef {
+            off: off as u64,
+            len: path_len(bytes.len()),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn joined_bytes_len(dir: &Path, name: &CStr) -> usize {
+    let d = dir.as_os_str().as_encoded_bytes();
+    let sep = !d.is_empty() && d.last() != Some(&b'/');
+    d.len() + usize::from(sep) + name.to_bytes().len()
+}
+
+#[cfg(unix)]
+fn write_joined_at(dst: &mut [u8], dir: &Path, name: &CStr) {
+    let d = dir.as_os_str().as_encoded_bytes();
+    let n = name.to_bytes();
+    let sep = !d.is_empty() && d.last() != Some(&b'/');
+    dst[..d.len()].copy_from_slice(d);
+    let mut i = d.len();
+    if sep {
+        dst[i] = b'/';
+        i += 1;
+    }
+    dst[i..i + n.len()].copy_from_slice(n);
+}
+
+/// Copy the live paths into a new buffer when the unreferenced bytes are
+/// most of it and past the floor. A shard then holds about twice its live
+/// bytes plus the floor.
+fn compact_if<K: Eq + std::hash::Hash>(map: &mut ClaimMap<K>, arena: &mut PathArena) {
+    let (garbage, len) = match arena.inner.as_ref() {
+        Some(s) => (s.garbage, s.bytes.len()),
+        None => return,
+    };
+    if garbage > len / 2 && garbage > compact_floor() {
+        compact(map, arena);
+    }
+}
+
+const fn compact_floor() -> usize {
+    #[cfg(test)]
+    {
+        64
+    }
+    #[cfg(not(test))]
+    {
+        64 * 1024
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn compact<K: Eq + std::hash::Hash>(map: &mut ClaimMap<K>, arena: &mut PathArena) {
+    let mut store = arena.inner.take().expect("a claim path");
+    let mut live = 0usize;
+    for claim in map.values() {
+        live += claim.path.len as usize;
+    }
+    let mut next = Vec::with_capacity(live);
+    for claim in map.values_mut() {
+        let start = claim.path.off as usize;
+        let len = claim.path.len as usize;
+        let off = next.len() as u64;
+        next.extend_from_slice(&store.bytes[start..start + len]);
+        claim.path.off = off;
+    }
+    store.bytes = next;
+    store.garbage = 0;
+    arena.inner = Some(store);
+}
+
+/// One root-device claim map and the buffer its paths share. The buffer
+/// is eight bytes until the first claim, so the shard lock stays 48 and
+/// the block stays 768.
+struct ShardState {
     map: ClaimMap<u64>,
-    /// Holds the shard at 48 bytes until the path buffer uses it.
-    #[allow(dead_code)]
-    spare: u64,
+    paths: PathArena,
 }
 
 /// Hard links seen so far, as `(dev, ino)`, split over several locks so
@@ -1270,53 +1478,89 @@ struct LinkClaims {
     /// whether or not it keeps claims, so it stays the 768-byte block the
     /// old `(dev, ino)` shards used. A pointer on each shard grew that
     /// block to 896 bytes. An 896-byte block is a tcache chunk: fast bins
-    /// stop at 128 bytes. [`ClaimHash`] is zero-sized, and the spare word
-    /// in [`ClaimSlot`] holds each lock at 48 bytes.
-    shards: Vec<Mutex<ClaimSlot>>,
-    /// Files on any other device, one map per shard, boxed at the first
-    /// such file. Off `shards`, so that vec does not grow. The same
-    /// [`ClaimHash`] as the root-device maps.
-    other: Mutex<[Option<Box<ForeignClaimMap>>; LinkSet::SHARDS]>,
+    /// stop at 128 bytes. [`ClaimHash`] is zero-sized, and [`PathArena`]
+    /// is eight bytes until the first claim, so each lock stays 48 bytes.
+    shards: Vec<Mutex<ShardState>>,
+    /// Files on any other device, one map and path buffer per shard,
+    /// boxed at the first such file. Off `shards`, so that vec does not
+    /// grow. The same [`ClaimHash`] as the root-device maps.
+    other: Mutex<[Option<Box<ForeignClaims>>; LinkSet::SHARDS]>,
+}
+
+/// Claims of files on a device other than the root's, and the buffer
+/// their paths share. Built at the first such file.
+#[derive(Default)]
+struct ForeignClaims {
+    map: ForeignClaimMap,
+    paths: PathArena,
 }
 
 /// The two maps of one shard, put together when a count has to move to
 /// the smallest path ([`Decided`]). The walk does not allocate this: the
-/// root-device map stays in [`LinkClaims::shards`] and the other map
-/// beside it. Nearly every linked file is on the root device, so its
-/// claim is keyed by inode number alone; a file on any other device keeps
-/// the `(dev, ino)` key. A file is in one map only, picked by its device,
-/// so it still has one claim. The 8-byte key makes each bucket of a
-/// walk's largest table 64 bytes, not 72: 2 MiB less on 200,000 linked
-/// files, and one `u64` hashed and compared a lookup, not two.
+/// root-device map and its path buffer stay in [`LinkClaims::shards`] and
+/// the other map beside it. Nearly every linked file is on the root
+/// device, so its claim is keyed by inode number alone; a file on any
+/// other device keeps the `(dev, ino)` key. A file is in one map only,
+/// picked by its device, so it still has one claim. The 8-byte key makes
+/// each bucket of a walk's largest table 64 bytes, not 72: 2 MiB less on
+/// 200,000 linked files, and one `u64` hashed and compared a lookup, not
+/// two.
 #[derive(Default)]
 struct ClaimShard {
     here: ClaimMap<u64>,
-    other: Option<Box<ForeignClaimMap>>,
+    here_paths: PathArena,
+    other: Option<Box<ForeignClaims>>,
+}
+
+/// A claim and the path it names, borrowed from the shard that holds both.
+struct ClaimView<'a> {
+    claim: &'a Claim,
+    path: &'a Path,
+}
+
+impl<'a> ClaimView<'a> {
+    fn path(&self) -> &'a Path {
+        self.path
+    }
+
+    fn stat(&self, id: (u64, u64)) -> du_fs::Stat {
+        self.claim.stat(id)
+    }
 }
 
 impl ClaimShard {
     /// The claim of file `(dev, ino)`, with `here` the device keyed by
     /// inode alone.
-    fn get(&self, here: u64, (dev, ino): (u64, u64)) -> Option<&Claim> {
+    fn get(&self, here: u64, (dev, ino): (u64, u64)) -> Option<ClaimView<'_>> {
         if dev == here {
-            self.here.get(&ino)
+            let claim = self.here.get(&ino)?;
+            Some(ClaimView {
+                path: self.here_paths.path(claim.path),
+                claim,
+            })
         } else {
-            self.other.as_ref()?.get(&(dev, ino))
+            let foreign = self.other.as_deref()?;
+            let claim = foreign.map.get(&(dev, ino))?;
+            Some(ClaimView {
+                path: foreign.paths.path(claim.path),
+                claim,
+            })
         }
     }
 
     fn len(&self) -> usize {
-        self.here.len() + self.other.as_ref().map_or(0, |m| m.len())
+        self.here.len() + self.other.as_ref().map_or(0, |m| m.map.len())
     }
 }
 
 /// One linked file in [`LinkClaims`], kept small: a walk of 200,000
-/// linked files keeps one each. The path is built to its length
-/// ([`joined_path`]) from below the root ([`Ctx::below_root`]), and the
-/// stat leaves out the device and inode number, which are the file's key.
+/// linked files keeps one each. The path is a span of the shard's buffer
+/// ([`PathArena`]), written from below the root ([`Ctx::below_root`]),
+/// and the stat leaves out the device and inode number, which are the
+/// file's key.
 struct Claim {
-    smallest: Box<Path>,
-    /// Whether the sighting that took the count was at `smallest`.
+    path: PathRef,
+    /// Whether the sighting that took the count was at `path`.
     counted_there: bool,
     /// The rest of the file's stat ([`Claim::stat`]).
     mode: u32,
@@ -1327,9 +1571,9 @@ struct Claim {
 }
 
 impl Claim {
-    fn new(st: &du_fs::Stat, smallest: Box<Path>) -> Self {
+    fn new(st: &du_fs::Stat, path: PathRef) -> Self {
         Claim {
-            smallest,
+            path,
             counted_there: true,
             mode: st.mode,
             size: st.size,
@@ -1369,7 +1613,9 @@ fn root_skip(root: &Path) -> usize {
 /// `dir.join(name)` with no room to spare. `join` copies `dir` and then
 /// grows the copy for `name`, which doubles it: a 45-byte path took a
 /// 96-byte block of the allocator, where one of 64 holds it. Used for
-/// the claims and for the path of each subdirectory the walk enters.
+/// the path of each subdirectory the walk enters. On Unix a claim path
+/// is written straight into its shard's buffer ([`push_joined`]);
+/// elsewhere that buffer copies this path.
 fn joined_path(dir: &Path, name: &CStr) -> Box<Path> {
     let name = du_fs::os(name);
     let mut p = PathBuf::with_capacity(dir.as_os_str().len() + 1 + name.len());
@@ -1379,8 +1625,8 @@ fn joined_path(dir: &Path, name: &CStr) -> Box<Path> {
 }
 
 /// Where a second walk counts each linked file ([`Ctx::decided`]): the
-/// first walk's claims, left in the shards they were filed in, so
-/// settling them copies nothing.
+/// first walk's claims and the buffers their paths share, left in the
+/// shards they were filed in, so [`LinkClaims::settled`] copies no path.
 struct Decided {
     /// [`LinkClaims::dev`].
     dev: u64,
@@ -1388,7 +1634,7 @@ struct Decided {
 }
 
 impl Decided {
-    fn get(&self, id: &(u64, u64)) -> Option<&Claim> {
+    fn get(&self, id: &(u64, u64)) -> Option<ClaimView<'_>> {
         self.shards[LinkSet::shard(id.0, id.1)].get(self.dev, *id)
     }
 
@@ -1406,9 +1652,9 @@ impl LinkClaims {
             dev,
             shards: (0..LinkSet::SHARDS)
                 .map(|_| {
-                    Mutex::new(ClaimSlot {
+                    Mutex::new(ShardState {
                         map: HashMap::default(),
-                        spare: 0,
+                        paths: PathArena::new(),
                     })
                 })
                 .collect(),
@@ -1422,7 +1668,7 @@ impl LinkClaims {
     fn claim(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         let shard = LinkSet::shard(st.dev, st.ino);
         let mut slot = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
-        self.see_in(&mut slot.map, st, dir, name)
+        self.see_in(&mut slot, st, dir, name)
     }
 
     /// [`LinkClaims::claim`] for each of `sts`, met in `dir` as `name(k)`:
@@ -1438,7 +1684,7 @@ impl LinkClaims {
             let shard = run[0].0;
             let mut slot = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
             for &(_, k) in run {
-                first[k] = self.see_in(&mut slot.map, &sts[k], dir, name(k));
+                first[k] = self.see_in(&mut slot, &sts[k], dir, name(k));
             }
         }
         first
@@ -1452,18 +1698,30 @@ impl LinkClaims {
     /// path only when it comes first ([`credits_first`]), and only then is
     /// that path built. On Unix the paths compare as bytes inside
     /// [`LinkClaims::retarget`], which is inlined here.
-    fn see_in(&self, here: &mut ClaimMap<u64>, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
+    fn see_in(&self, here: &mut ShardState, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         use std::collections::hash_map::Entry;
         if st.dev != self.dev {
             return self.see_foreign(st, dir, name);
         }
-        match here.entry(st.ino) {
+        let ShardState { map, paths } = here;
+        let mut occupied = false;
+        let counts = match map.entry(st.ino) {
             Entry::Vacant(v) => {
-                v.insert(Claim::new(st, joined_path(dir, name)));
+                let path = push_joined(paths, dir, name);
+                v.insert(Claim::new(st, path));
                 true
             }
-            Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),
+            Entry::Occupied(o) => {
+                occupied = true;
+                Self::retarget(o.into_mut(), paths, dir, name)
+            }
+        };
+        // Only a later sighting can leave unreferenced bytes. An insert
+        // does not pay for the check.
+        if occupied {
+            compact_if(map, paths);
         }
+        counts
     }
 
     /// [`LinkClaims::see_in`] for a file on a device other than the root.
@@ -1474,27 +1732,37 @@ impl LinkClaims {
         use std::collections::hash_map::Entry;
         let shard = LinkSet::shard(st.dev, st.ino);
         let mut other = self.other.lock().unwrap_or_else(|e| e.into_inner());
-        let map = other[shard].get_or_insert_with(Box::default);
-        match map.entry((st.dev, st.ino)) {
+        let slot = other[shard].get_or_insert_with(Box::default);
+        let ForeignClaims { map, paths } = slot.as_mut();
+        let mut occupied = false;
+        let counts = match map.entry((st.dev, st.ino)) {
             Entry::Vacant(v) => {
-                v.insert(Claim::new(st, joined_path(dir, name)));
+                let path = push_joined(paths, dir, name);
+                v.insert(Claim::new(st, path));
                 true
             }
-            Entry::Occupied(o) => Self::retarget(o.into_mut(), dir, name),
+            Entry::Occupied(o) => {
+                occupied = true;
+                Self::retarget(o.into_mut(), paths, dir, name)
+            }
+        };
+        if occupied {
+            compact_if(map, paths);
         }
+        counts
     }
 
     /// The path compare of a later sighting. Inlined into
-    /// [`LinkClaims::see_in`] and [`LinkClaims::see_foreign`].
+    /// [`LinkClaims::see_in`] and [`LinkClaims::see_foreign`]. Returns
+    /// whether the sighting takes the count: a later one never does.
     #[inline(always)]
-    fn retarget(claim: &mut Claim, dir: &Path, name: &CStr) -> bool {
+    fn retarget(claim: &mut Claim, arena: &mut PathArena, dir: &Path, name: &CStr) -> bool {
         #[cfg(unix)]
-        let first = plain_joined_first(dir, name, &claim.smallest);
+        let first = plain_joined_first(dir, name, arena.path(claim.path));
         #[cfg(not(unix))]
-        let first = joined_first(dir, name, &claim.smallest);
+        let first = joined_first(dir, name, arena.path(claim.path));
         if first {
-            claim.smallest = joined_path(dir, name);
-            claim.counted_there = false;
+            keep_smaller(claim, arena, dir, name);
         }
         false
     }
@@ -1519,7 +1787,7 @@ impl LinkClaims {
                 slot.map.values().all(|c| c.counted_there)
                     && foreign
                         .as_ref()
-                        .is_none_or(|m| m.values().all(|c| c.counted_there))
+                        .is_none_or(|m| m.map.values().all(|c| c.counted_there))
             });
         if all_there {
             return None;
@@ -1527,9 +1795,13 @@ impl LinkClaims {
         let shards = shards
             .into_iter()
             .zip(other)
-            .map(|(m, foreign)| ClaimShard {
-                here: m.into_inner().unwrap_or_else(|e| e.into_inner()).map,
-                other: foreign,
+            .map(|(m, foreign)| {
+                let slot = m.into_inner().unwrap_or_else(|e| e.into_inner());
+                ClaimShard {
+                    here: slot.map,
+                    here_paths: slot.paths,
+                    other: foreign,
+                }
             })
             .collect();
         Some(Decided { dev, shards })
@@ -1774,12 +2046,12 @@ impl Ctx<'_> {
         // builds no PathBuf for any linked name, met at its path or not.
         if let Some(d) = self.decided {
             if let Some(fixed) = d.get(&(st.dev, st.ino)) {
-                let here = same_joined(&fixed.smallest, dir, name);
+                let here = same_joined(fixed.path(), dir, name);
                 debug_assert_eq!(
                     here,
-                    *fixed.smallest == *dir.join(du_fs::os(name)),
+                    *fixed.path() == *dir.join(du_fs::os(name)),
                     "same_joined({:?}, {dir:?}, {name:?})",
-                    fixed.smallest
+                    fixed.path()
                 );
                 *met += u64::from(here);
                 return here;
@@ -6784,17 +7056,18 @@ mod tests {
         let paths = |c: LinkClaims| -> std::collections::BTreeMap<(u64, u64), PathBuf> {
             let fixed = c.settled().expect("first sightings at the largest paths");
             assert_eq!(fixed.len(), 200);
-            let found = fixed.get(&(5, 1)).map(|c| c.smallest.to_path_buf());
+            let found = fixed.get(&(5, 1)).map(|c| c.path().to_path_buf());
             assert_eq!(found, Some(PathBuf::from("/r/d0/f1")));
             let dev = fixed.dev;
-            fixed
-                .shards
-                .into_iter()
-                .flat_map(|s| {
-                    let here = s.here.into_iter().map(move |(ino, c)| ((dev, ino), c));
-                    here.chain(s.other.into_iter().flat_map(|m| *m))
-                })
-                .map(|(id, c)| (id, c.smallest.into_path_buf()))
+            let mut ids = Vec::new();
+            for s in &fixed.shards {
+                ids.extend(s.here.keys().map(|&ino| (dev, ino)));
+                if let Some(f) = &s.other {
+                    ids.extend(f.map.keys().copied());
+                }
+            }
+            ids.into_iter()
+                .map(|id| (id, fixed.get(&id).expect("a claim").path().to_path_buf()))
                 .collect()
         };
         let (want, got) = (paths(one), paths(batch));
@@ -6825,11 +7098,13 @@ mod tests {
             ("r", "e000123"),
         ] {
             let (dir, n) = (Path::new(dir), name(n));
-            let p = joined_path(dir, &n);
-            assert_eq!(*p, *dir.join(du_fs::os(&n)), "{dir:?} {n:?}");
-            let c = Claim::new(&st, p);
+            let mut arena = PathArena::new();
+            let r = push_joined(&mut arena, dir, &n);
+            assert_eq!(*arena.path(r), *dir.join(du_fs::os(&n)), "{dir:?} {n:?}");
+            let c = Claim::new(&st, r);
             assert!(c.counted_there);
             assert_eq!(c.stat((st.dev, st.ino)), st);
+            assert_eq!(*arena.path(c.path), *joined_path(dir, &n), "{dir:?} {n:?}");
         }
         #[cfg(target_pointer_width = "64")]
         assert!(
@@ -6879,7 +7154,7 @@ mod tests {
             for dev in [5, 6] {
                 let got = fixed.get(&(dev, 9)).expect("a claim on each device");
                 let want = Path::new("a").join(format!("f{dev}"));
-                assert_eq!(*got.smallest, *want, "{root} {dev}");
+                assert_eq!(*got.path(), *want, "{root} {dev}");
                 assert_eq!(got.stat((dev, 9)), st(dev), "{root} {dev}");
             }
             assert!(fixed.get(&(7, 9)).is_none(), "{root}");
