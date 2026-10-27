@@ -912,12 +912,13 @@ impl SharedTop {
     }
 }
 
-/// Builds the hasher of a walk's `(dev, ino)` sets and maps ([`LinkSet`],
-/// [`LinkClaims`]). Each directory and each file of several links costs
-/// one lookup there, and std's SipHash made those lookups a large part of
-/// a walk of deep trees. The keys are file IDs, not names, so two folded
-/// multiplies a key do. The seed comes from std's random keys, one per
-/// set, so the buckets a tree's IDs fall in change from run to run.
+/// Builds the hasher of a walk's `(dev, ino)` sets ([`LinkSet`]). Each
+/// directory and each file of several links costs one lookup there, and
+/// std's SipHash made those lookups a large part of a walk of deep trees.
+/// The keys are file IDs, not names, so two folded multiplies a key do.
+/// The seed comes from std's random keys, one per set, so the buckets a
+/// tree's IDs fall in change from run to run. The claim maps use
+/// [`ClaimHash`], one seed for the process.
 #[derive(Clone)]
 struct InoHash(u64);
 
@@ -957,8 +958,54 @@ impl std::hash::Hasher for InoHasher {
     }
 }
 
+/// The hasher of the claim maps. It is zero-sized: one seed for the
+/// process, drawn the first time a root builds its claims, and read with
+/// a relaxed load on each hash. The buckets still change from run to run.
+/// Eight bytes a shard come free, which is the room a path buffer needs,
+/// and a link set keeps [`InoHash`] with a seed of its own.
+#[derive(Clone, Default)]
+struct ClaimHash;
+
+/// `0` means no seed yet. A drawn seed of `0` is replaced, so a load of
+/// `0` is only the unset state.
+static CLAIM_SEED: AtomicU64 = AtomicU64::new(0);
+
+/// Draw the claim seed once. Later calls load it. Two roots that build
+/// claims together keep whichever seed landed first.
+fn init_claim_seed() {
+    use std::hash::BuildHasher;
+    if CLAIM_SEED.load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    let mut drawn = std::collections::hash_map::RandomState::new().hash_one(0u64);
+    if drawn == 0 {
+        drawn = 0x9E37_79B9_7F4A_7C15;
+    }
+    let _ = CLAIM_SEED.compare_exchange(0, drawn, Ordering::Relaxed, Ordering::Relaxed);
+}
+
+impl std::hash::BuildHasher for ClaimHash {
+    type Hasher = InoHasher;
+
+    fn build_hasher(&self) -> InoHasher {
+        InoHasher(CLAIM_SEED.load(Ordering::Relaxed))
+    }
+}
+
 type InoSet = HashSet<(u64, u64), InoHash>;
-type InoMap<V> = HashMap<(u64, u64), V, InoHash>;
+type ClaimMap<K> = HashMap<K, Claim, ClaimHash>;
+/// Claims of files on a device other than the root's, keyed by both numbers.
+type ForeignClaimMap = ClaimMap<(u64, u64)>;
+
+/// One root-device claim map and the spare word that keeps its lock 48
+/// bytes, so the shard block stays 768. The word is the room the path
+/// buffer takes.
+struct ClaimSlot {
+    map: ClaimMap<u64>,
+    /// Holds the shard at 48 bytes until the path buffer uses it.
+    #[allow(dead_code)]
+    spare: u64,
+}
 
 /// Hard links seen so far, as `(dev, ino)`, split over several locks so
 /// workers on a tree full of links (pnpm, nix, ccache) rarely wait on
@@ -1223,11 +1270,13 @@ struct LinkClaims {
     /// whether or not it keeps claims, so it stays the 768-byte block the
     /// old `(dev, ino)` shards used. A pointer on each shard grew that
     /// block to 896 bytes. An 896-byte block is a tcache chunk: fast bins
-    /// stop at 128 bytes.
-    shards: Vec<Mutex<HashMap<u64, Claim, InoHash>>>,
+    /// stop at 128 bytes. [`ClaimHash`] is zero-sized, and the spare word
+    /// in [`ClaimSlot`] holds each lock at 48 bytes.
+    shards: Vec<Mutex<ClaimSlot>>,
     /// Files on any other device, one map per shard, boxed at the first
-    /// such file. Off `shards`, so that vec does not grow.
-    other: Mutex<[Option<Box<InoMap<Claim>>>; LinkSet::SHARDS]>,
+    /// such file. Off `shards`, so that vec does not grow. The same
+    /// [`ClaimHash`] as the root-device maps.
+    other: Mutex<[Option<Box<ForeignClaimMap>>; LinkSet::SHARDS]>,
 }
 
 /// The two maps of one shard, put together when a count has to move to
@@ -1241,8 +1290,8 @@ struct LinkClaims {
 /// files, and one `u64` hashed and compared a lookup, not two.
 #[derive(Default)]
 struct ClaimShard {
-    here: HashMap<u64, Claim, InoHash>,
-    other: Option<Box<InoMap<Claim>>>,
+    here: ClaimMap<u64>,
+    other: Option<Box<ForeignClaimMap>>,
 }
 
 impl ClaimShard {
@@ -1352,11 +1401,17 @@ impl LinkClaims {
     /// Claims that key the files of device `dev`, the root's, by inode
     /// number alone.
     fn new(dev: u64) -> Self {
+        init_claim_seed();
         LinkClaims {
             dev,
             shards: (0..LinkSet::SHARDS)
-                .map(|_| Mutex::default())
-                .collect::<Vec<Mutex<HashMap<u64, Claim, InoHash>>>>(),
+                .map(|_| {
+                    Mutex::new(ClaimSlot {
+                        map: HashMap::default(),
+                        spare: 0,
+                    })
+                })
+                .collect(),
             other: Mutex::new(std::array::from_fn(|_| None)),
         }
     }
@@ -1366,8 +1421,8 @@ impl LinkClaims {
     /// claims does. Each path is met once.
     fn claim(&self, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         let shard = LinkSet::shard(st.dev, st.ino);
-        let mut here = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
-        self.see_in(&mut here, st, dir, name)
+        let mut slot = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
+        self.see_in(&mut slot.map, st, dir, name)
     }
 
     /// [`LinkClaims::claim`] for each of `sts`, met in `dir` as `name(k)`:
@@ -1381,9 +1436,9 @@ impl LinkClaims {
         let mut first = vec![false; sts.len()];
         for run in shard_runs(sts).chunk_by(|a, b| a.0 == b.0) {
             let shard = run[0].0;
-            let mut here = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
+            let mut slot = self.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
             for &(_, k) in run {
-                first[k] = self.see_in(&mut here, &sts[k], dir, name(k));
+                first[k] = self.see_in(&mut slot.map, &sts[k], dir, name(k));
             }
         }
         first
@@ -1397,13 +1452,7 @@ impl LinkClaims {
     /// path only when it comes first ([`credits_first`]), and only then is
     /// that path built. On Unix the paths compare as bytes inside
     /// [`LinkClaims::retarget`], which is inlined here.
-    fn see_in(
-        &self,
-        here: &mut HashMap<u64, Claim, InoHash>,
-        st: &du_fs::Stat,
-        dir: &Path,
-        name: &CStr,
-    ) -> bool {
+    fn see_in(&self, here: &mut ClaimMap<u64>, st: &du_fs::Stat, dir: &Path, name: &CStr) -> bool {
         use std::collections::hash_map::Entry;
         if st.dev != self.dev {
             return self.see_foreign(st, dir, name);
@@ -1466,8 +1515,8 @@ impl LinkClaims {
             .iter_mut()
             .map(|m| m.get_mut().unwrap_or_else(|e| e.into_inner()))
             .zip(other.iter())
-            .all(|(here, foreign)| {
-                here.values().all(|c| c.counted_there)
+            .all(|(slot, foreign)| {
+                slot.map.values().all(|c| c.counted_there)
                     && foreign
                         .as_ref()
                         .is_none_or(|m| m.values().all(|c| c.counted_there))
@@ -1479,7 +1528,7 @@ impl LinkClaims {
             .into_iter()
             .zip(other)
             .map(|(m, foreign)| ClaimShard {
-                here: m.into_inner().unwrap_or_else(|e| e.into_inner()),
+                here: m.into_inner().unwrap_or_else(|e| e.into_inner()).map,
                 other: foreign,
             })
             .collect();
