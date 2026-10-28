@@ -1,1 +1,1 @@
-The interop smoke test probes gio restores by name shape, prints the GLib and gvfs versions, marks the GLib 2.80 restore bug for non-ASCII names as a known failure that turns into a failure once fixed, and keeps a strict gio restore of an ASCII name for every putter.
+The interop smoke test probes gio restores by name shape and prints the GLib and gvfs versions. A gio that cannot restore its own trash is left out. A non-ASCII restore that fails is a real failure.
