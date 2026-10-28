@@ -319,6 +319,9 @@ impl SortKey {
     }
 
     /// The table heading for a list of `what` ordered by this key.
+    /// Inlined into the printer: on its own it sat in a page of unrelated
+    /// code, and faulting that page pulled the pages around it too.
+    #[inline(always)]
     pub fn title(self, what: &str) -> String {
         match self {
             SortKey::Disk => format!("Largest {what} (by disk use)"),
@@ -3045,6 +3048,38 @@ fn scan_names(entries: &du_fs::Entries) -> Names {
     }
 }
 
+/// Add one walked subdirectory to `node`. Returns its rank when it can
+/// be the largest listable child, else 0. Inlined into [`walk_dir`] so a
+/// wide tree does not pay a call per directory.
+#[inline(always)]
+fn absorb_child(ctx: &Ctx<'_>, node: &mut Node, child: Node) -> u64 {
+    if child.left_out {
+        node.filtered_out += 1;
+        return 0;
+    }
+    node.filtered_out += child.filtered_out;
+    let k = ctx.key(child.apparent, child.disk, child.items, child.mtime);
+    let largest = if child.listable && ctx.opts.min_size.is_none_or(|floor| k >= floor) {
+        k
+    } else {
+        0
+    };
+    node.items += 1 + child.items;
+    node.apparent = node.apparent.saturating_add(child.apparent);
+    node.disk = node.disk.saturating_add(child.disk);
+    node.disk_all = node.disk_all.saturating_add(child.disk_all);
+    node.base = node.base.saturating_add(child.base);
+    node.ranges.extend(child.ranges);
+    node.unique = node.unique.saturating_add(child.unique);
+    node.mtime = node.mtime.max(child.mtime);
+    for r in child.repos {
+        if node.repos.len() < MAX_REPOS {
+            node.repos.push(r);
+        }
+    }
+    largest
+}
+
 /// Walk one open directory. `listing` is false below `.git`, artefacts
 /// and trash roots: their sizes count, but nothing inside them is listed.
 fn walk_dir(
@@ -3265,28 +3300,7 @@ fn walk_dir(
 
     let mut largest_child = 0u64;
     for child in children.into_iter().flatten() {
-        if child.left_out {
-            node.filtered_out += 1;
-            continue;
-        }
-        node.filtered_out += child.filtered_out;
-        let k = ctx.key(child.apparent, child.disk, child.items, child.mtime);
-        if child.listable && opts.min_size.is_none_or(|floor| k >= floor) {
-            largest_child = largest_child.max(k);
-        }
-        node.items += 1 + child.items;
-        node.apparent = node.apparent.saturating_add(child.apparent);
-        node.disk = node.disk.saturating_add(child.disk);
-        node.disk_all = node.disk_all.saturating_add(child.disk_all);
-        node.base = node.base.saturating_add(child.base);
-        node.ranges.extend(child.ranges);
-        node.unique = node.unique.saturating_add(child.unique);
-        node.mtime = node.mtime.max(child.mtime);
-        for r in child.repos {
-            if node.repos.len() < MAX_REPOS {
-                node.repos.push(r);
-            }
-        }
+        largest_child = largest_child.max(absorb_child(ctx, &mut node, child));
     }
     if opts.shared_once {
         let once = crate::du_extent::coalesce(&mut node.ranges);
@@ -5917,14 +5931,27 @@ fn run_paths(prog: &str, args: &[String], missing: &mut bool) -> i32 {
         }
         // dust #585: an empty or missing PATH used to end the whole run.
         // It is named and left out, and the others are scanned.
-        paths.retain(|p| match root_stat(p, opts.follow) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("{prog}: cannot access '{}': {e}", crate::util::err_path(p));
-                *missing = true;
-                false
+        // In place, not a closure passed to `retain`: that closure was
+        // emitted on its own, and the one call faulted the pages around it.
+        let mut kept = 0;
+        for i in 0..paths.len() {
+            match root_stat(&paths[i], opts.follow) {
+                Ok(()) => {
+                    if kept != i {
+                        paths.swap(kept, i);
+                    }
+                    kept += 1;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{prog}: cannot access '{}': {e}",
+                        crate::util::err_path(&paths[i])
+                    );
+                    *missing = true;
+                }
             }
-        });
+        }
+        paths.truncate(kept);
         if paths.is_empty() {
             return 1;
         }
