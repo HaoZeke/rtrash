@@ -1009,10 +1009,281 @@ struct PathRef {
     len: u32,
 }
 
+/// Bytes of one shard's claim paths.
+///
+/// A `Vec` doubles, and sixteen shards growing in one heap leave the old
+/// blocks behind, so the resident set keeps about two megabytes the paths
+/// do not use. On Linux each shard reserves its own pages and makes
+/// writable only the ones it writes, so a later growth does not copy the
+/// buffer. Elsewhere a `Vec` that does not double is enough: those builds
+/// are not what the resident-set check runs.
+struct PathBytes {
+    #[cfg(target_os = "linux")]
+    ptr: *mut u8,
+    #[cfg(target_os = "linux")]
+    used: usize,
+    #[cfg(target_os = "linux")]
+    cap: usize,
+    #[cfg(target_os = "linux")]
+    reserve: usize,
+    #[cfg(not(target_os = "linux"))]
+    buf: Vec<u8>,
+}
+
+// The shard lock is the only way a walk reaches these bytes.
+#[cfg(target_os = "linux")]
+unsafe impl Send for PathBytes {}
+#[cfg(target_os = "linux")]
+unsafe impl Sync for PathBytes {}
+
+/// Address space reserved for one shard. Ten-name and three-name stay
+/// inside it, so growing the buffer never copies it.
+#[cfg(target_os = "linux")]
+const PATH_RESERVE: usize = 4 * 1024 * 1024;
+
+#[cfg(target_os = "linux")]
+fn page_size() -> usize {
+    static PAGE: AtomicUsize = AtomicUsize::new(0);
+    let known = PAGE.load(Ordering::Relaxed);
+    if known != 0 {
+        return known;
+    }
+    let n = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let n = if n <= 0 { 4096 } else { n as usize };
+    PAGE.store(n, Ordering::Relaxed);
+    n
+}
+
+#[cfg(target_os = "linux")]
+fn align_up(n: usize, unit: usize) -> usize {
+    let mask = unit - 1;
+    match n.checked_add(mask) {
+        Some(sum) => sum & !mask,
+        None => path_too_long(n),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[cold]
+#[inline(never)]
+fn path_map_fail(n: usize) -> ! {
+    std::alloc::handle_alloc_error(std::alloc::Layout::from_size_align(n.max(1), 1).unwrap());
+}
+
+impl PathBytes {
+    fn new() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            ptr: std::ptr::null_mut(),
+            #[cfg(target_os = "linux")]
+            used: 0,
+            #[cfg(target_os = "linux")]
+            cap: 0,
+            #[cfg(target_os = "linux")]
+            reserve: 0,
+            #[cfg(not(target_os = "linux"))]
+            buf: Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        #[cfg(target_os = "linux")]
+        {
+            self.used
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.buf.len()
+        }
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        #[cfg(target_os = "linux")]
+        {
+            self.ptr
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.buf.as_mut_ptr()
+        }
+    }
+
+    /// `new_len` is at most the current length, and that prefix stays.
+    fn set_len(&mut self, new_len: usize) {
+        #[cfg(target_os = "linux")]
+        {
+            debug_assert!(new_len <= self.used);
+            self.used = new_len;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.buf.truncate(new_len);
+        }
+    }
+
+    fn resize(&mut self, new_len: usize, byte: u8) {
+        #[cfg(target_os = "linux")]
+        {
+            if new_len > self.cap {
+                self.commit(new_len);
+            }
+            if new_len > self.used {
+                // SAFETY: `commit` made `cap` bytes at `ptr` writable, and
+                // `used..new_len` sits inside that region.
+                unsafe { std::ptr::write_bytes(self.ptr.add(self.used), byte, new_len - self.used) }
+            }
+            self.used = new_len;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if new_len > self.buf.capacity() {
+                self.buf.reserve_exact(new_len - self.buf.len());
+            }
+            self.buf.resize(new_len, byte);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn extend_from_slice(&mut self, extra: &[u8]) {
+        use std::ops::DerefMut;
+        let off = self.len();
+        self.resize(off + extra.len(), 0);
+        self.deref_mut()[off..off + extra.len()].copy_from_slice(extra);
+    }
+
+    /// Make the pages `need` touches writable. The rest of the reservation
+    /// stays inaccessible, so a fault stops at the last written page.
+    #[cfg(target_os = "linux")]
+    #[inline(never)]
+    fn commit(&mut self, need: usize) {
+        let cap = align_up(need, page_size());
+        if cap <= self.cap {
+            return;
+        }
+        if self.ptr.is_null() || cap > self.reserve {
+            self.ensure_reserve(cap);
+        }
+        let extra = cap - self.cap;
+        // SAFETY: `ptr + cap` is inside the reservation and page-aligned.
+        let start = unsafe { self.ptr.add(self.cap).cast() };
+        let rc = unsafe { libc::mprotect(start, extra, libc::PROT_READ | libc::PROT_WRITE) };
+        if rc != 0 {
+            path_map_fail(extra);
+        }
+        self.cap = cap;
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ensure_reserve(&mut self, cap: usize) {
+        let mut reserve = if self.reserve == 0 {
+            PATH_RESERVE
+        } else {
+            self.reserve
+        };
+        while reserve < cap {
+            reserve = reserve.saturating_mul(2);
+        }
+        reserve = align_up(reserve, page_size());
+        if self.ptr.is_null() {
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    reserve,
+                    libc::PROT_NONE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                    -1,
+                    0,
+                )
+            };
+            if ptr == libc::MAP_FAILED {
+                path_map_fail(reserve);
+            }
+            self.ptr = ptr.cast();
+            self.reserve = reserve;
+            return;
+        }
+        let ptr =
+            unsafe { libc::mremap(self.ptr.cast(), self.reserve, reserve, libc::MREMAP_MAYMOVE) };
+        if ptr == libc::MAP_FAILED {
+            path_map_fail(reserve);
+        }
+        self.ptr = ptr.cast();
+        self.reserve = reserve;
+    }
+
+    /// Drop the pages past the bytes still in use. Compaction slides the
+    /// live paths down, and those pages would otherwise stay the high
+    /// water.
+    fn decommit_tail(&mut self) {
+        let keep = if self.used == 0 {
+            0
+        } else {
+            align_up(self.used, page_size())
+        };
+        if self.ptr.is_null() || keep >= self.cap {
+            return;
+        }
+        let drop_len = self.cap - keep;
+        // SAFETY: `keep` and `cap` are page-aligned and inside the
+        // reservation, and no path byte sits at or past `keep`.
+        let start = unsafe { self.ptr.add(keep) };
+        unsafe {
+            libc::madvise(start.cast(), drop_len, libc::MADV_DONTNEED);
+            libc::mprotect(start.cast(), drop_len, libc::PROT_NONE);
+        }
+        self.cap = keep;
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for PathBytes {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            let _ = unsafe { libc::munmap(self.ptr.cast(), self.reserve) };
+        }
+    }
+}
+
+impl std::ops::Deref for PathBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        #[cfg(target_os = "linux")]
+        {
+            if self.used == 0 {
+                return &[];
+            }
+            // SAFETY: the first `used` bytes were written by `resize`.
+            unsafe { std::slice::from_raw_parts(self.ptr, self.used) }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            &self.buf
+        }
+    }
+}
+
+impl std::ops::DerefMut for PathBytes {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        #[cfg(target_os = "linux")]
+        {
+            if self.used == 0 {
+                return &mut [];
+            }
+            // SAFETY: same bytes as `deref`, and this borrow is exclusive.
+            unsafe { std::slice::from_raw_parts_mut(self.ptr, self.used) }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            &mut self.buf
+        }
+    }
+}
+
 /// The bytes of one shard's claim paths, and how many of them no claim
 /// still names.
 struct PathStore {
-    bytes: Vec<u8>,
+    bytes: PathBytes,
     garbage: usize,
 }
 
@@ -1032,7 +1303,7 @@ impl PathArena {
     fn store(&mut self) -> &mut PathStore {
         self.inner.get_or_insert_with(|| {
             Box::new(PathStore {
-                bytes: Vec::new(),
+                bytes: PathBytes::new(),
                 garbage: 0,
             })
         })
@@ -1165,16 +1436,38 @@ fn write_joined_at(dst: &mut [u8], dir: &Path, name: &CStr) {
     dst[i..i + n.len()].copy_from_slice(n);
 }
 
-/// Copy the live paths into a new buffer when the unreferenced bytes are
-/// most of it and past the floor. A shard then holds about twice its live
-/// bytes plus the floor.
+/// How many claims a shard may hold and still compact as soon as the
+/// abandoned bytes pass [`early_floor`]. A larger shard waits until they
+/// are half the buffer: the index of a hundred thousand claims is itself
+/// a resident-set spike. Ten-name puts about 1,250 claims on a shard, and
+/// sixteen shards can each sit just under the big floor while the listing
+/// keeps a megabyte it no longer names.
+const EARLY_COMPACT_CLAIMS: usize = 4096;
+
+/// Slide the live paths to the front when the unreferenced bytes are most
+/// of the buffer, or eight kilobytes of them on a small shard. They stay
+/// in this buffer: a second copy would be the resident set's high water.
+/// The pages past the live bytes are released.
 fn compact_if<K: Eq + std::hash::Hash>(map: &mut ClaimMap<K>, arena: &mut PathArena) {
     let (garbage, len) = match arena.inner.as_ref() {
         Some(s) => (s.garbage, s.bytes.len()),
         None => return,
     };
-    if garbage > len / 2 && garbage > compact_floor() {
+    let half = garbage > compact_floor() && garbage > len / 2;
+    let early = map.len() <= EARLY_COMPACT_CLAIMS && garbage > early_floor();
+    if half || early {
         compact(map, arena);
+    }
+}
+
+const fn early_floor() -> usize {
+    #[cfg(test)]
+    {
+        64
+    }
+    #[cfg(not(test))]
+    {
+        8 * 1024
     }
 }
 
@@ -1192,22 +1485,28 @@ const fn compact_floor() -> usize {
 #[cold]
 #[inline(never)]
 fn compact<K: Eq + std::hash::Hash>(map: &mut ClaimMap<K>, arena: &mut PathArena) {
-    let mut store = arena.inner.take().expect("a claim path");
-    let mut live = 0usize;
-    for claim in map.values() {
-        live += claim.path.len as usize;
-    }
-    let mut next = Vec::with_capacity(live);
-    for claim in map.values_mut() {
-        let start = claim.path.off as usize;
+    let store = arena.inner.as_mut().expect("a claim path");
+    let mut items: Vec<*mut Claim> = map.values_mut().map(std::ptr::from_mut).collect();
+    items.sort_unstable_by_key(|claim| unsafe { (**claim).path.off });
+    let mut dest = 0usize;
+    let ptr = store.bytes.as_mut_ptr();
+    for claim in items {
+        // SAFETY: `claim` points at an entry of `map`, which this function
+        // does not otherwise borrow, and the live ranges do not overlap.
+        // Sliding down keeps each source ahead of `dest`.
+        let claim = unsafe { &mut *claim };
+        let src = claim.path.off as usize;
         let len = claim.path.len as usize;
-        let off = next.len() as u64;
-        next.extend_from_slice(&store.bytes[start..start + len]);
-        claim.path.off = off;
+        if src != dest && len != 0 {
+            unsafe { std::ptr::copy(ptr.add(src), ptr.add(dest), len) };
+        }
+        claim.path.off = dest as u64;
+        dest += len;
     }
-    store.bytes = next;
+    store.bytes.set_len(dest);
     store.garbage = 0;
-    arena.inner = Some(store);
+    #[cfg(target_os = "linux")]
+    store.bytes.decommit_tail();
 }
 
 /// One root-device claim map and the buffer its paths share. The buffer
