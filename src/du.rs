@@ -1213,7 +1213,9 @@ impl PathBytes {
 
     /// Drop the pages past the bytes still in use. Compaction slides the
     /// live paths down, and those pages would otherwise stay the high
-    /// water.
+    /// water. Linux only: that is where the pages are mapped, and the
+    /// other targets keep a `Vec`.
+    #[cfg(target_os = "linux")]
     fn decommit_tail(&mut self) {
         let keep = if self.used == 0 {
             0
