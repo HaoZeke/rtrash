@@ -1041,6 +1041,11 @@ unsafe impl Sync for PathBytes {}
 #[cfg(target_os = "linux")]
 const PATH_RESERVE: usize = 4 * 1024 * 1024;
 
+/// How far [`PathBytes::commit`] extends the writable region. A page is
+/// the unit `mprotect` accepts; this is how many of them one call covers.
+#[cfg(target_os = "linux")]
+const COMMIT_STRIDE: usize = 64 * 1024;
+
 #[cfg(target_os = "linux")]
 fn page_size() -> usize {
     static PAGE: AtomicUsize = AtomicUsize::new(0);
@@ -1153,13 +1158,21 @@ impl PathBytes {
 
     /// Make the pages `need` touches writable. The rest of the reservation
     /// stays inaccessible, so a fault stops at the last written page.
+    /// Writable pages run at least [`COMMIT_STRIDE`] ahead of what is
+    /// already committed: one page at a time turned a ten-name listing
+    /// into hundreds of calls. Pages in that stride that this shard never
+    /// writes are not resident.
     #[cfg(target_os = "linux")]
     #[inline(never)]
     fn commit(&mut self, need: usize) {
-        let cap = align_up(need, page_size());
-        if cap <= self.cap {
+        let need = align_up(need, page_size());
+        if need <= self.cap {
             return;
         }
+        let cap = align_up(
+            self.cap.saturating_mul(2).max(COMMIT_STRIDE).max(need),
+            page_size(),
+        );
         if self.ptr.is_null() || cap > self.reserve {
             self.ensure_reserve(cap);
         }
@@ -1439,37 +1452,44 @@ fn write_joined_at(dst: &mut [u8], dir: &Path, name: &CStr) {
 }
 
 /// How many claims a shard may hold and still compact as soon as the
-/// abandoned bytes pass [`early_floor`]. A larger shard waits until they
-/// are half the buffer: the index of a hundred thousand claims is itself
-/// a resident-set spike. Ten-name puts about 1,250 claims on a shard, and
-/// sixteen shards can each sit just under the big floor while the listing
-/// keeps a megabyte it no longer names.
+/// abandoned bytes pass [`LinkClaims::early`]. A larger shard waits until
+/// they are half the buffer: the index of a hundred thousand claims is
+/// itself a resident-set spike. Ten-name puts about 1,250 claims on a
+/// shard, and sixteen shards can each sit just under the big floor while
+/// the listing keeps a megabyte it no longer names.
 const EARLY_COMPACT_CLAIMS: usize = 4096;
 
 /// Slide the live paths to the front when the unreferenced bytes are most
-/// of the buffer, or eight kilobytes of them on a small shard. They stay
-/// in this buffer: a second copy would be the resident set's high water.
-/// The pages past the live bytes are released.
-fn compact_if<K: Eq + std::hash::Hash>(map: &mut ClaimMap<K>, arena: &mut PathArena) {
+/// of the buffer, or `floor` of them on a small shard. They stay in this
+/// buffer: a second copy would be the resident set's high water. The
+/// pages past the live bytes are released.
+fn compact_if<K: Eq + std::hash::Hash>(map: &mut ClaimMap<K>, arena: &mut PathArena, floor: usize) {
     let (garbage, len) = match arena.inner.as_ref() {
         Some(s) => (s.garbage, s.bytes.len()),
         None => return,
     };
     let half = garbage > compact_floor() && garbage > len / 2;
-    let early = map.len() <= EARLY_COMPACT_CLAIMS && garbage > early_floor();
+    let early = map.len() <= EARLY_COMPACT_CLAIMS && garbage > floor;
     if half || early {
         compact(map, arena);
     }
 }
 
-const fn early_floor() -> usize {
+/// [`LinkClaims::early`] for this process. Tests use a tiny floor so a
+/// short replacement still compacts. A real one-thread walk uses 8KB;
+/// more threads use 24KB. See [`LinkClaims::early`].
+fn claim_early_floor() -> usize {
     #[cfg(test)]
     {
         64
     }
     #[cfg(not(test))]
     {
-        8 * 1024
+        if rayon::current_num_threads() == 1 {
+            8 * 1024
+        } else {
+            24 * 1024
+        }
     }
 }
 
@@ -1487,26 +1507,43 @@ const fn compact_floor() -> usize {
 #[cold]
 #[inline(never)]
 fn compact<K: Eq + std::hash::Hash>(map: &mut ClaimMap<K>, arena: &mut PathArena) {
-    let store = arena.inner.as_mut().expect("a claim path");
-    let mut items: Vec<*mut Claim> = map.values_mut().map(std::ptr::from_mut).collect();
-    items.sort_unstable_by_key(|claim| unsafe { (**claim).path.off });
-    let mut dest = 0usize;
-    let ptr = store.bytes.as_mut_ptr();
-    for claim in items {
-        // SAFETY: `claim` points at an entry of `map`, which this function
-        // does not otherwise borrow, and the live ranges do not overlap.
-        // Sliding down keeps each source ahead of `dest`.
-        let claim = unsafe { &mut *claim };
-        let src = claim.path.off as usize;
-        let len = claim.path.len as usize;
-        if src != dest && len != 0 {
-            unsafe { std::ptr::copy(ptr.add(src), ptr.add(dest), len) };
-        }
-        claim.path.off = dest as u64;
-        dest += len;
+    // Ten-name compacts a full shard many times. `sort_unstable_by_key`
+    // allocates a key buffer on every one of those, and so does a fresh
+    // `Vec` of the claims. This buffer stays on the thread. It is cleared
+    // before return: the pointers are only valid for this call.
+    std::thread_local! {
+        static CLAIM_ORDER: std::cell::RefCell<Vec<*mut Claim>> =
+            const { std::cell::RefCell::new(Vec::new()) };
     }
-    store.bytes.set_len(dest);
-    store.garbage = 0;
+    let store = arena.inner.as_mut().expect("a claim path");
+    CLAIM_ORDER.with(|slot| {
+        let mut items = slot.borrow_mut();
+        items.clear();
+        items.extend(map.values_mut().map(std::ptr::from_mut));
+        items.sort_unstable_by(|a, b| {
+            // SAFETY: each pointer is an entry of `map` for this call.
+            let (ao, bo) = unsafe { ((**a).path.off, (**b).path.off) };
+            ao.cmp(&bo)
+        });
+        let mut dest = 0usize;
+        let ptr = store.bytes.as_mut_ptr();
+        for &claim in items.iter() {
+            // SAFETY: `claim` points at an entry of `map`, which this
+            // function does not otherwise borrow, and the live ranges do
+            // not overlap. Sliding down keeps each source ahead of `dest`.
+            let claim = unsafe { &mut *claim };
+            let src = claim.path.off as usize;
+            let len = claim.path.len as usize;
+            if src != dest && len != 0 {
+                unsafe { std::ptr::copy(ptr.add(src), ptr.add(dest), len) };
+            }
+            claim.path.off = dest as u64;
+            dest += len;
+        }
+        items.clear();
+        store.bytes.set_len(dest);
+        store.garbage = 0;
+    });
     #[cfg(target_os = "linux")]
     store.bytes.decommit_tail();
 }
@@ -1778,6 +1815,13 @@ impl<T> LinkCredit<T> {
 struct LinkClaims {
     /// The device whose files are keyed by inode alone.
     dev: u64,
+    /// Unreferenced path bytes a small shard may hold before
+    /// [`compact_if`] slides them. One walk thread abandons little, and
+    /// eight kilobytes there is one pass. Several threads find a larger
+    /// name first, and sorting the full shard every eight kilobytes
+    /// misses the ten-name listing's time, so they wait for 24 kilobytes. A
+    /// larger shard ignores this and uses [`compact_floor`].
+    early: usize,
     /// One map per shard for files on `dev`. Every root builds this vec,
     /// whether or not it keeps claims, so it stays the 768-byte block the
     /// old `(dev, ino)` shards used. A pointer on each shard grew that
@@ -1954,6 +1998,7 @@ impl LinkClaims {
         init_claim_seed();
         LinkClaims {
             dev,
+            early: claim_early_floor(),
             shards: (0..LinkSet::SHARDS)
                 .map(|_| {
                     Mutex::new(ShardState {
@@ -2023,7 +2068,7 @@ impl LinkClaims {
         // Only a later sighting can leave unreferenced bytes. An insert
         // does not pay for the check.
         if occupied {
-            compact_if(map, paths);
+            compact_if(map, paths, self.early);
         }
         counts
     }
@@ -2051,7 +2096,7 @@ impl LinkClaims {
             }
         };
         if occupied {
-            compact_if(map, paths);
+            compact_if(map, paths, self.early);
         }
         counts
     }
@@ -2077,6 +2122,7 @@ impl LinkClaims {
     fn settled(self) -> Option<Decided> {
         let LinkClaims {
             dev,
+            early: _,
             mut shards,
             other,
         } = self;
