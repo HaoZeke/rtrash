@@ -531,5 +531,5 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check locked dependencies at the declared minimum
-        run: cargo check --all-features --locked
+      - name: Build locked dependencies at the declared minimum
+        run: cargo build --all-features --locked
