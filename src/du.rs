@@ -1582,6 +1582,12 @@ fn compact<K: Eq + std::hash::Hash>(map: &mut ClaimMap<K>, arena: &mut PathArena
             dest += len;
         }
         items.clear();
+        // A million-link shard is about half a megabyte of pointers.
+        // Keep that only for the pass. Listings near the early-claim
+        // limit reuse the buffer they already have.
+        if items.capacity() > EARLY_COMPACT_CLAIMS * 4 {
+            items.shrink_to(EARLY_COMPACT_CLAIMS);
+        }
         store.bytes.set_len(dest);
         store.garbage = 0;
     });
