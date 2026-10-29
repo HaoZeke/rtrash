@@ -1,1 +1,1 @@
-On a tree with many hard-linked files, `rtrash du` gives back the claim-path pages a shard no longer names, so a listing uses less memory. Totals and rows are unchanged.
+On Linux, `rtrash du` gives back the claim-path pages a shard no longer names, so a listing of many hard-linked files uses less memory. Other systems keep those bytes in the path buffer. Totals and rows are unchanged.
