@@ -1014,9 +1014,10 @@ struct PathRef {
 /// A `Vec` doubles, and sixteen shards growing in one heap leave the old
 /// blocks behind, so the resident set keeps about two megabytes the paths
 /// do not use. On Linux each shard reserves its own pages and makes
-/// writable only the ones it writes, so a later growth does not copy the
-/// buffer. Elsewhere a `Vec` that does not double is enough: those builds
-/// are not what the resident-set check runs.
+/// writable only the ones it writes. Growth inside that reservation does
+/// not move the bytes. Elsewhere the buffer is a `Vec` that doubles, so
+/// a run of appends does not allocate every path. Those builds are not
+/// what the resident-set check runs.
 struct PathBytes {
     #[cfg(target_os = "linux")]
     ptr: *mut u8,
@@ -1074,6 +1075,15 @@ fn align_up(n: usize, unit: usize) -> usize {
 #[inline(never)]
 fn path_map_fail(n: usize) -> ! {
     std::alloc::handle_alloc_error(std::alloc::Layout::from_size_align(n.max(1), 1).unwrap());
+}
+
+/// Grow `buf` to `new_len`, filling the new bytes with `byte`.
+/// [`Vec::resize`] at least doubles. This is the claim-path buffer on
+/// every target but Linux: `reserve_exact` to the new length allocates
+/// on every append. Tests call it on Linux too.
+#[cfg(any(test, not(target_os = "linux")))]
+fn resize_claim_vec(buf: &mut Vec<u8>, new_len: usize, byte: u8) {
+    buf.resize(new_len, byte);
 }
 
 impl PathBytes {
@@ -1142,10 +1152,9 @@ impl PathBytes {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            if new_len > self.buf.capacity() {
-                self.buf.reserve_exact(new_len - self.buf.len());
-            }
-            self.buf.resize(new_len, byte);
+            // `Vec::resize` at least doubles. `reserve_exact` would
+            // allocate on every append on macOS, FreeBSD and Windows.
+            resize_claim_vec(&mut self.buf, new_len, byte);
         }
     }
 
@@ -7814,6 +7823,25 @@ mod tests {
         assert!(bytes[..1_000_000].iter().all(|b| *b == b'q'));
         assert!(bytes[1_000_000..].iter().all(|b| *b == b'z'));
         assert_eq!(bytes.cap, big);
+    }
+
+    /// 62,500 one-byte appends. Doubling reallocates a few dozen times.
+    /// Growing to the exact length reallocates on every append.
+    #[test]
+    fn a_claim_path_vec_doubles_across_appends() {
+        let mut buf = Vec::new();
+        let mut grows = 0usize;
+        let mut prev = 0usize;
+        for i in 1..=62_500 {
+            resize_claim_vec(&mut buf, i, 0);
+            if buf.capacity() != prev {
+                grows += 1;
+                prev = buf.capacity();
+            }
+        }
+        assert!(grows < 40, "{grows} reallocations");
+        assert!(buf.capacity() >= 62_500);
+        assert!(buf.capacity() <= 62_500 * 2);
     }
 
     #[test]
