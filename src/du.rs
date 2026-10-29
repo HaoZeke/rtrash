@@ -1491,24 +1491,38 @@ fn write_joined_at(dst: &mut [u8], dir: &Path, name: &CStr) {
 const EARLY_COMPACT_CLAIMS: usize = 4096;
 
 /// Slide the live paths to the front when the unreferenced bytes are most
-/// of the buffer, or `floor` of them on a small shard. They stay in this
-/// buffer: a second copy would be the resident set's high water. The
-/// pages past the live bytes are released.
+/// of the buffer, or, on a small shard, more than `floor` and a quarter
+/// of the buffer. A fixed floor on every abandoned page sorts a four-name
+/// shard for the whole walk. The paths stay in this buffer: a second copy
+/// would be the resident set's high water. The pages past the live bytes
+/// are released.
 fn compact_if<K: Eq + std::hash::Hash>(map: &mut ClaimMap<K>, arena: &mut PathArena, floor: usize) {
     let (garbage, len) = match arena.inner.as_ref() {
         Some(s) => (s.garbage, s.bytes.len()),
         None => return,
     };
     let half = garbage > compact_floor() && garbage > len / 2;
-    let early = map.len() <= EARLY_COMPACT_CLAIMS && garbage > floor;
+    let early = map.len() <= EARLY_COMPACT_CLAIMS && garbage > floor.max(len / 4);
     if half || early {
         compact(map, arena);
     }
 }
 
+/// Unreferenced bytes a small shard may hold before it compacts, for a
+/// walk of `threads` threads. One thread abandons little. Several threads
+/// find a larger name first, and sorting every eight kilobytes misses the
+/// ten-name listing's time.
+fn claim_early_floor_for(threads: usize) -> usize {
+    if threads == 1 {
+        8 * 1024
+    } else {
+        24 * 1024
+    }
+}
+
 /// [`LinkClaims::early`] for this process. Tests use a tiny floor so a
-/// short replacement still compacts. A real one-thread walk uses 8KB;
-/// more threads use 24KB. See [`LinkClaims::early`].
+/// short replacement still compacts. A real walk uses
+/// [`claim_early_floor_for`].
 fn claim_early_floor() -> usize {
     #[cfg(test)]
     {
@@ -1516,11 +1530,7 @@ fn claim_early_floor() -> usize {
     }
     #[cfg(not(test))]
     {
-        if rayon::current_num_threads() == 1 {
-            8 * 1024
-        } else {
-            24 * 1024
-        }
+        claim_early_floor_for(rayon::current_num_threads())
     }
 }
 
@@ -1847,11 +1857,11 @@ struct LinkClaims {
     /// The device whose files are keyed by inode alone.
     dev: u64,
     /// Unreferenced path bytes a small shard may hold before
-    /// [`compact_if`] slides them. One walk thread abandons little, and
-    /// eight kilobytes there is one pass. Several threads find a larger
-    /// name first, and sorting the full shard every eight kilobytes
-    /// misses the ten-name listing's time, so they wait for 24 kilobytes. A
-    /// larger shard ignores this and uses [`compact_floor`].
+    /// [`compact_if`] slides them. One walk thread uses eight kilobytes
+    /// and several threads use 24. A pass also waits until the abandoned
+    /// bytes are a quarter of the buffer, so a four-name shard is not
+    /// sorted on every page. A larger shard ignores this and uses
+    /// [`compact_floor`].
     early: usize,
     /// One map per shard for files on `dev`. Every root builds this vec,
     /// whether or not it keeps claims, so it stays the 768-byte block the
@@ -7842,6 +7852,102 @@ mod tests {
         assert!(grows < 40, "{grows} reallocations");
         assert!(buf.capacity() >= 62_500);
         assert!(buf.capacity() <= 62_500 * 2);
+    }
+
+    /// Shorten every claim in place. The shorter name sorts first, so the
+    /// old bytes become unreferenced and the buffer length stays put.
+    fn abandon_tails(c: &LinkClaims, dev: u64, inos: &[u64], long: usize, short: usize) {
+        let long_name = std::ffi::CString::new(vec![b'z'; long]).unwrap();
+        let short_name = std::ffi::CString::new(vec![b'a'; short]).unwrap();
+        for &ino in inos {
+            assert!(c.claim(&claim_stat(dev, ino), Path::new(""), &long_name));
+        }
+        for &ino in inos {
+            assert!(!c.claim(&claim_stat(dev, ino), Path::new(""), &short_name));
+        }
+    }
+
+    fn shard_garbage(c: &LinkClaims, shard: usize) -> (usize, usize) {
+        let slot = c.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
+        let store = slot.paths.inner.as_ref().expect("a path buffer");
+        (store.garbage, store.bytes.len())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn shard_cap(c: &LinkClaims, shard: usize) -> usize {
+        let slot = c.shards[shard].lock().unwrap_or_else(|e| e.into_inner());
+        slot.paths.inner.as_ref().expect("a path buffer").bytes.cap
+    }
+
+    /// `floor` abandoned bytes, and at least a quarter of the buffer, on
+    /// a shard under [`EARLY_COMPACT_CLAIMS`]. Half the buffer would not
+    /// do it: the abandoned run equals half only when it is not greater.
+    fn early_floor_compacts(floor: usize, files: usize, long: usize, short: usize, fires: bool) {
+        let dev = 1u64;
+        let (shard, inos) = inos_on_one_shard(dev, files);
+        let mut c = LinkClaims::new(dev);
+        c.early = floor;
+        abandon_tails(&c, dev, &inos, long, short);
+        let (garbage, len) = shard_garbage(&c, shard);
+        let abandoned = files * (long - short);
+        let full = long * files;
+        if fires {
+            // A compact slid the live paths down, so the buffer is no
+            // longer every first name. Half the buffer would not have
+            // fired: the abandoned bytes equal half of `full`, not more.
+            assert!(len < full, "floor {floor} len {len} full {full}");
+            assert!(garbage <= floor.max(len / 4), "garbage {garbage}");
+            assert!(abandoned > floor);
+            assert!(abandoned > full / 4);
+            assert!(abandoned <= full / 2);
+            #[cfg(target_os = "linux")]
+            {
+                let cap = shard_cap(&c, shard);
+                assert!(cap < full, "cap {cap} did not shrink");
+                assert!(cap >= short * files);
+            }
+        } else {
+            assert_eq!(len, full, "floor {floor} compacted");
+            assert_eq!(garbage, abandoned);
+            assert!(abandoned > floor);
+            assert!(abandoned <= full / 4);
+        }
+        let fixed = c.settled();
+        assert!(
+            fixed.is_some(),
+            "the short path is not where it was counted"
+        );
+        let fixed = fixed.unwrap();
+        let want = joined_path(
+            Path::new(""),
+            &std::ffi::CString::new(vec![b'a'; short]).unwrap(),
+        );
+        for &ino in &inos {
+            let got = fixed.get(&(dev, ino)).expect("a claim");
+            assert_eq!(got.path(), want.as_ref());
+        }
+    }
+
+    #[test]
+    fn eight_kilobytes_compacts_a_small_shard_before_half_the_buffer() {
+        assert_eq!(claim_early_floor_for(1), 8 * 1024);
+        // 400 * 50 = 20_000 abandoned bytes. The buffer is 40_000, so
+        // this is half, not more than half, and more than a quarter.
+        early_floor_compacts(claim_early_floor_for(1), 400, 100, 50, true);
+        // 2_000 * 4 = 8_000 is under the floor. 3_000 * 4 = 12_000 is
+        // over eight kilobytes and under a quarter of 240_000.
+        early_floor_compacts(claim_early_floor_for(1), 3000, 80, 76, false);
+    }
+
+    #[test]
+    fn twenty_four_kilobytes_compacts_a_small_shard_the_same_way() {
+        assert_eq!(claim_early_floor_for(8), 24 * 1024);
+        assert_eq!(claim_early_floor_for(2), 24 * 1024);
+        // 600 * 50 = 30_000, buffer 60_000. Over 24KB, a quarter, not
+        // over half.
+        early_floor_compacts(claim_early_floor_for(8), 600, 100, 50, true);
+        // 3_200 * 8 = 25_600 is over 24KB and under a quarter of 320_000.
+        early_floor_compacts(claim_early_floor_for(8), 3200, 100, 92, false);
     }
 
     #[test]
