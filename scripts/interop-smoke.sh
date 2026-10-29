@@ -22,7 +22,7 @@
 # Everything happens in a scratch XDG_DATA_HOME, so the real trash stays
 # untouched. RTRASH_INTEROP_NO_GIO=1 leaves gio out. A gio that cannot
 # restore its own trash is left out the same way, after the probe says so.
-# Exits non-zero when any pairing that did run fails.
+# Exits non-zero when the gio probe or any pairing that did run fails.
 set -euo pipefail
 # grep -q stops reading at the first match, and rtrash then exits 141 on
 # the closed pipe, which pipefail counts as a failure; read it all instead.
@@ -115,10 +115,9 @@ restore() { # TOOL ABSPATH
 
 fail=0
 # gio's own round trip, by name shape, to tell a gvfs restore bug from an
-# rtrash one. On Ubuntu 24.04 (GLib 2.80.0, gvfs 1.54.4) gio restored
-# 'x é' as 'x \xc3\xa9' even between gio and gio, under a UTF-8 locale,
-# while 'x 100%' came back intact.
-gio_utf8_bug=0
+# rtrash one. The runner image changed, not GLib. With the same gio 2.88.0
+# and gvfs 1.60.0 packages, image 20261012.163.1 failed every round trip
+# and 20261025.179.1 passes them all.
 if [[ " ${restorers[*]} " == *" gio "* ]]; then
   echo "gio: $(gio --version 2>&1)"
   if command -v dpkg-query >/dev/null; then
@@ -139,9 +138,9 @@ if [[ " ${restorers[*]} " == *" gio "* ]]; then
     echo "probe gio -> gio '$n': ${seen[$n]}"
   done
   ls -b "$scratch/w" | grep '^probe' | sed 's/^/  left: /' || true
-  # gio 2.88 trashes a file and cannot restore it, ASCII names
-  # included. That is gio's own round trip, so the gio pairings are
-  # left out and the other tools still run.
+  # An ASCII round trip that fails is gio's own restore, so those
+  # pairings are left out and the other tools still run. Image
+  # 20261012.163.1 failed every name this way; 20261025.179.1 does not.
   if [[ ${seen["x 100%"]} == FAIL ]]; then
     echo "note: gio cannot restore its own trash (the 'x 100%' round trip failed); gio pairings skipped"
     find "$scratch/w" -maxdepth 1 -name 'probe*' -exec rm -f {} +
@@ -157,29 +156,10 @@ if [[ " ${restorers[*]} " == *" gio "* ]]; then
       [[ $x == gio ]] || keep+=("$x")
     done
     restorers=("${keep[@]}")
-  elif [[ ${seen["x é"]} == FAIL ]]; then
-    gio_utf8_bug=1
-    echo "note: this gio cannot restore a non-ASCII name; gio restores of the non-ASCII pairing names count as known failures (xfail), and an ASCII pairing name stays strict"
-  elif [[ -n ${RTRASH_INTEROP_EXPECT_GIO_UTF8_BUG:-} ]]; then
-    echo "FAIL probe: gio now restores non-ASCII names; drop RTRASH_INTEROP_EXPECT_GIO_UTF8_BUG and the xfail"
+  elif [[ ${seen["x é"]} == FAIL || ${seen["x 100% é"]} == FAIL ]]; then
+    echo "FAIL probe: gio cannot restore a non-ASCII name (gio's own round trip, as on GLib 2.80 / Ubuntu 24.04; the gio pairings below fail for the same reason; RTRASH_INTEROP_NO_GIO=1 leaves gio out)"
     fail=1
   fi
-fi
-
-# With the gio bug, every putter still pairs with a gio restore on an
-# ASCII name, strictly.
-if [[ $gio_utf8_bug == 1 ]]; then
-  for p in "${putters[@]}"; do
-    f="$scratch/w/$p to gio ascii 100%"
-    echo "$p gio" > "$f"
-    if put "$p" "$f" >/dev/null 2>&1 && ! [[ -e $f ]] \
-      && restore gio "$f" >/dev/null 2>&1 && [[ $(cat "$f" 2>/dev/null) == "$p gio" ]]; then
-      echo "ok   $p -> gio (ASCII name)"
-    else
-      echo "FAIL $p -> gio (ASCII name)"
-      fail=1
-    fi
-  done
 fi
 
 for p in "${putters[@]}"; do
@@ -195,13 +175,6 @@ for p in "${putters[@]}"; do
     uri_before=$( [[ $r == gio ]] && gio_uri "$f" 2>&1 || true)
     if out=$(restore "$r" "$f" 2>&1; echo "exit $?") && [[ $(cat "$f" 2>/dev/null) == "$p $r" ]]; then
       echo "ok   $p -> $r"
-    elif [[ $r == gio && $gio_utf8_bug == 1 ]]; then
-      echo "xfail $p -> $r (gio's own restore bug for non-ASCII names, see the probe above)"
-      ls -b "$scratch/w" 2>&1 | sed 's/^/  | /' || true
-      # Clear what gio left so later pairings start clean.
-      for left in "$scratch/w/$p to $r"*; do
-        [[ -e $left ]] && rm -f -- "$left"
-      done
     else
       echo "FAIL $p -> $r"
       printf '%s\n' "$out" | sed 's/^/  | /'

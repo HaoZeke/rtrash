@@ -28,10 +28,11 @@ gio lists and restores rtrash items (=gio trash --list=,
 GLib caveat: gio 2.80.0 with gvfs 1.54.4 (Ubuntu 24.04) restores any
 non-ASCII name escaped, so =x é= comes back as =x \xc3\xa9=, even for an
 item gio trashed itself, under a UTF-8 locale; =x 100%= comes back
-intact. gio 2.84 (Debian 13) restores both intact. The interop smoke
-test probes =x é=, =x 100%= and =x 100% é=, counts gio restores of
-non-ASCII names as known failures where the =x é= probe fails, and still
-checks every putter against a gio restore of an ASCII name. No upstream
+intact. gio 2.84 (Debian 13) and gio 2.88.0 (Ubuntu 26.04) restore both
+intact. The interop smoke test probes =x é=, =x 100%= and =x 100% é=
+with gio alone: when =x 100%= fails it leaves gio out, and when a
+non-ASCII probe fails the run fails, so on GLib 2.80 set
+=RTRASH_INTEROP_NO_GIO=1=. No upstream
 GLib or gvfs issue turned up in a search. The likely cause: the original
 =gio trash --restore= code
 ([[https://lists.gnome.org/archives/commits-list/2020-December/msg02952.html][725984f]])
