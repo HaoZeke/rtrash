@@ -1036,8 +1036,9 @@ unsafe impl Send for PathBytes {}
 #[cfg(target_os = "linux")]
 unsafe impl Sync for PathBytes {}
 
-/// Address space reserved for one shard. Ten-name and three-name stay
-/// inside it, so growing the buffer never copies it.
+/// First reservation for one shard. Growth inside it does not move the
+/// bytes. A shard past this extends the reservation, which can relocate
+/// it. Ten-name and three-name stay inside the first one.
 #[cfg(target_os = "linux")]
 const PATH_RESERVE: usize = 4 * 1024 * 1024;
 
@@ -1158,10 +1159,12 @@ impl PathBytes {
 
     /// Make the pages `need` touches writable. The rest of the reservation
     /// stays inaccessible, so a fault stops at the last written page.
-    /// Writable pages run at least [`COMMIT_STRIDE`] ahead of what is
-    /// already committed: one page at a time turned a ten-name listing
-    /// into hundreds of calls. Pages in that stride that this shard never
-    /// writes are not resident.
+    /// A growth past the first reservation makes that mapping writable
+    /// only for the move, then closes the tail again. Writable pages run
+    /// at least [`COMMIT_STRIDE`] ahead of what is already committed, and
+    /// the committed length at least doubles, with a 64 KiB minimum: one
+    /// page at a time turned a ten-name listing into hundreds of calls.
+    /// Pages in that stride that this shard never writes are not resident.
     #[cfg(target_os = "linux")]
     #[inline(never)]
     fn commit(&mut self, need: usize) {
@@ -1215,13 +1218,30 @@ impl PathBytes {
             self.reserve = reserve;
             return;
         }
-        let ptr =
-            unsafe { libc::mremap(self.ptr.cast(), self.reserve, reserve, libc::MREMAP_MAYMOVE) };
+        // `mremap` returns EFAULT when the range covers more than one
+        // mapping. The tail is `PROT_NONE`, so a release that did not
+        // land on the end of the reservation splits it. Join the
+        // reservation, move it, then close the tail again.
+        let old = self.reserve;
+        let rc =
+            unsafe { libc::mprotect(self.ptr.cast(), old, libc::PROT_READ | libc::PROT_WRITE) };
+        if rc != 0 {
+            path_map_fail(old);
+        }
+        let ptr = unsafe { libc::mremap(self.ptr.cast(), old, reserve, libc::MREMAP_MAYMOVE) };
         if ptr == libc::MAP_FAILED {
             path_map_fail(reserve);
         }
         self.ptr = ptr.cast();
         self.reserve = reserve;
+        if self.cap < self.reserve {
+            let tail = self.reserve - self.cap;
+            let start = unsafe { self.ptr.add(self.cap).cast() };
+            let rc = unsafe { libc::mprotect(start, tail, libc::PROT_NONE) };
+            if rc != 0 {
+                path_map_fail(tail);
+            }
+        }
     }
 
     /// Drop the pages past the bytes still in use. Compaction slides the
@@ -1244,6 +1264,8 @@ impl PathBytes {
         let start = unsafe { self.ptr.add(keep) };
         unsafe {
             libc::madvise(start.cast(), drop_len, libc::MADV_DONTNEED);
+            // This splits the reservation. [`PathBytes::ensure_reserve`]
+            // joins it before `mremap`.
             libc::mprotect(start.cast(), drop_len, libc::PROT_NONE);
         }
         self.cap = keep;
@@ -7771,6 +7793,27 @@ mod tests {
                 .len(),
             live
         );
+    }
+
+    /// The reviewer's abort: release the tail, then grow past the first
+    /// reservation. `mremap` has to see one mapping.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_released_claim_buffer_grows_past_the_reserve() {
+        let mut bytes = PathBytes::new();
+        bytes.resize(1_500_000, b'q');
+        let cap_full = bytes.cap;
+        bytes.set_len(1_000_000);
+        bytes.decommit_tail();
+        assert!(bytes.cap < cap_full, "cap {} stayed {cap_full}", bytes.cap);
+        assert!(bytes.iter().all(|b| *b == b'q'));
+        let big = 6 * 1024 * 1024;
+        bytes.resize(big, b'z');
+        assert_eq!(bytes.len(), big);
+        assert!(bytes.reserve > PATH_RESERVE);
+        assert!(bytes[..1_000_000].iter().all(|b| *b == b'q'));
+        assert!(bytes[1_000_000..].iter().all(|b| *b == b'z'));
+        assert_eq!(bytes.cap, big);
     }
 
     #[test]
