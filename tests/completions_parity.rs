@@ -27,8 +27,8 @@ const SUBCOMMANDS: &[&str] = &[
     "config",
 ];
 
-/// An agent run with RTRASH_REQUIRE_SHELLS=1 must run every shell check: a
-/// quiet skip on the cloud agent hid a stale pwsh expectation (round 143c).
+/// A run with RTRASH_REQUIRE_SHELLS=1 must run every shell check: a quiet
+/// skip in CI hid a stale pwsh expectation (round 143c).
 /// CI installs pwsh on every runner, so pwsh is required there too, and
 /// the Linux and macOS test jobs set the variable after
 /// scripts/ci-shells.sh puts pinned elvish, fish and nu on PATH.
