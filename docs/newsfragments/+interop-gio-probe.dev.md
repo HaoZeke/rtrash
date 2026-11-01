@@ -1,1 +1,1 @@
-The interop smoke test probes gio restores by name shape and prints the GLib and gvfs versions. A failed non-ASCII gio restore fails the run, and the strict ASCII gio pairing is gone. A gio that cannot restore an ASCII name is still left out.
+The interop smoke test probes gio restores by name shape and prints the GLib and gvfs versions. Any failed probe fails the run, the plain `x 100%` name included. `RTRASH_INTEROP_NO_GIO=1` leaves gio out.

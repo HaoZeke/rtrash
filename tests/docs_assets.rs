@@ -211,8 +211,9 @@ fn package_release_script_stages_fish_multicall() {
 #[cfg(unix)]
 #[test]
 fn interop_smoke_script_passes_with_the_tools_present() {
-    // CI installs trash-cli, gtrash and gio; here rtrash pairs with itself
-    // and with whichever of the others is on PATH.
+    // CI installs trash-cli, gtrash and gio and runs them. This test sets
+    // RTRASH_INTEROP_NO_GIO=1 to leave gio out. The run pairs rtrash with
+    // itself and with each of trash-cli and gtrash on PATH.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let out = std::process::Command::new(root.join("scripts/interop-smoke.sh"))
         .arg(env!("CARGO_BIN_EXE_rtrash"))
@@ -226,6 +227,11 @@ fn interop_smoke_script_passes_with_the_tools_present() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(text.contains("ok   rtrash -> rtrash"), "{text}");
+    assert!(
+        text.contains("note: RTRASH_INTEROP_NO_GIO=1 leaves gio out"),
+        "{text}"
+    );
+    assert!(!text.contains("gio or gvfsd missing"), "{text}");
     let ci = read(".github/workflows/ci.yml");
     assert!(ci.contains("scripts/interop-smoke.sh target/release/rtrash"));
 }

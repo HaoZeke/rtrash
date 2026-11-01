@@ -20,9 +20,10 @@
 # gio needs a session bus and gvfsd, so the script starts both in
 # dbus-run-session when gio is on PATH and no gvfsd runs yet.
 # Everything happens in a scratch XDG_DATA_HOME, so the real trash stays
-# untouched. RTRASH_INTEROP_NO_GIO=1 leaves gio out. A gio that cannot
-# restore its own trash is left out the same way, after the probe says so.
-# Exits non-zero when the gio probe or any pairing that did run fails.
+# untouched. RTRASH_INTEROP_NO_GIO=1 leaves gio out. Without that opt-out,
+# gio on PATH with gvfsd is part of the run, and a probe that cannot
+# restore fails the run.
+# Exits non-zero when the gio probe or any pairing fails.
 set -euo pipefail
 # grep -q stops reading at the first match, and rtrash then exits 141 on
 # the closed pipe, which pipefail counts as a failure; read it all instead.
@@ -56,7 +57,9 @@ putters=(rtrash)
 restorers=(rtrash)
 have trash-put && putters+=(trash-cli) && restorers+=(trash-cli)
 have gtrash && putters+=(gtrash) && restorers+=(gtrash)
-if [[ -z ${RTRASH_INTEROP_NO_GIO:-} ]] && have gio && [[ -n ${RTRASH_INTEROP_BUS:-} ]]; then
+if [[ -n ${RTRASH_INTEROP_NO_GIO:-} ]]; then
+  echo "note: RTRASH_INTEROP_NO_GIO=1 leaves gio out"
+elif have gio && [[ -n ${RTRASH_INTEROP_BUS:-} ]]; then
   putters+=(gio)
   restorers+=(gio)
 else
@@ -114,10 +117,8 @@ restore() { # TOOL ABSPATH
 }
 
 fail=0
-# gio's own round trip, by name shape, to tell a gvfs restore bug from an
-# rtrash one. The runner image changed, not GLib. With the same gio 2.88.0
-# and gvfs 1.60.0 packages, image 20261012.163.1 failed every round trip
-# and 20261025.179.1 passes them all.
+# gio's own round trip, by name shape, so a gvfs restore bug is not
+# reported as an rtrash failure.
 if [[ " ${restorers[*]} " == *" gio "* ]]; then
   echo "gio: $(gio --version 2>&1)"
   if command -v dpkg-query >/dev/null; then
@@ -138,24 +139,13 @@ if [[ " ${restorers[*]} " == *" gio "* ]]; then
     echo "probe gio -> gio '$n': ${seen[$n]}"
   done
   ls -b "$scratch/w" | grep '^probe' | sed 's/^/  left: /' || true
-  # An ASCII round trip that fails is gio's own restore, so those
-  # pairings are left out and the other tools still run. Image
-  # 20261012.163.1 failed every name this way; 20261025.179.1 does not.
+  find "$scratch/w" -maxdepth 1 -name 'probe*' -exec rm -f {} +
+  # Empty the scratch trash but keep its folders, which gvfsd watches.
+  mkdir -p "$trash/files" "$trash/info"
+  find "$trash/files" "$trash/info" -mindepth 1 -delete
   if [[ ${seen["x 100%"]} == FAIL ]]; then
-    echo "note: gio cannot restore its own trash (the 'x 100%' round trip failed); gio pairings skipped"
-    find "$scratch/w" -maxdepth 1 -name 'probe*' -exec rm -f {} +
-    rm -rf "$trash/files" "$trash/info"
-    mkdir -p "$trash/files" "$trash/info"
-    keep=()
-    for x in "${putters[@]}"; do
-      [[ $x == gio ]] || keep+=("$x")
-    done
-    putters=("${keep[@]}")
-    keep=()
-    for x in "${restorers[@]}"; do
-      [[ $x == gio ]] || keep+=("$x")
-    done
-    restorers=("${keep[@]}")
+    echo "FAIL probe: gio cannot restore its own trash (the 'x 100%' round trip failed; RTRASH_INTEROP_NO_GIO=1 leaves gio out)"
+    fail=1
   elif [[ ${seen["x é"]} == FAIL || ${seen["x 100% é"]} == FAIL ]]; then
     echo "FAIL probe: gio cannot restore a non-ASCII name (gio's own round trip, as on GLib 2.80 / Ubuntu 24.04; the gio pairings below fail for the same reason; RTRASH_INTEROP_NO_GIO=1 leaves gio out)"
     fail=1
