@@ -3,7 +3,7 @@ members = ["cargo:."]
 
 # Config for 'dist' (https://opensource.axo.dev/cargo-dist/)
 [dist]
-cargo-dist-version = "0.28.0"
+cargo-dist-version = "0.33.1"
 ci = "github"
 # Linux FreeDesktop only — do not ship darwin/windows stubs.
 installers = ["shell"]
@@ -14,3 +14,6 @@ pr-run-mode = "plan"
 # Tag GitHub Releases are created by release-musl.yml (package-release /
 # cargo-binstall layout). cargo-dist only plans on PRs (see release.yml on:).
 create-release = false
+# release.yml is post-processed by scripts/dist-pr-only-release-yml.sh, so it
+# never matches the generated file byte for byte. Skip that check in `dist plan`.
+allow-dirty = ["ci"]
