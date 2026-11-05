@@ -97,6 +97,12 @@ pub fn parse_bytes(content: &[u8]) -> TrashInfo {
     let mut path = PathBuf::new();
     let mut date = None;
     let mut batch = None;
+    // The first line of a key wins even when its value is dropped.
+    // `kept_text` answers `None` for a value that is too long or that
+    // grows past the cap when invalid bytes are replaced, and that
+    // `None` is not "the key was absent": a later line must not fill it.
+    let mut saw_date = false;
+    let mut saw_batch = false;
     let batch_key = format!("{BATCH_KEY}=");
     for line in content.split(|&b| b == b'\n') {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
@@ -105,13 +111,17 @@ pub fn parse_bytes(content: &[u8]) -> TrashInfo {
                 path = PathBuf::from(OsString::from_vec(url_decode_bytes(trim_end(v))));
             }
         } else if let Some(v) = line.strip_prefix(b"DeletionDate=") {
-            if date.is_none() {
+            if !saw_date {
+                saw_date = true;
                 date = kept_text(trim_end(trim_start(v)));
             }
         } else if let Some(v) = line.strip_prefix(batch_key.as_bytes()) {
-            let v = trim_end(trim_start(v));
-            if batch.is_none() && !v.is_empty() {
-                batch = kept_text(v);
+            if !saw_batch {
+                saw_batch = true;
+                let v = trim_end(trim_start(v));
+                if !v.is_empty() {
+                    batch = kept_text(v);
+                }
             }
         }
     }
@@ -413,6 +423,69 @@ mod tests {
         let info = parse_bytes(b"[Trash Info]\nPath=/a\nDeletionDate=soon\n");
         assert_eq!(info.deletion_date.as_deref(), Some("soon"));
         assert!(parse_local_to_epoch("soon").is_none());
+    }
+
+    /// A value `kept_text` drops used to look like a missing key, so a
+    /// later `DeletionDate` or batch line replaced it. The first line
+    /// stays the one an age cut reads, which is unreadable, and the later
+    /// date must not make the item old.
+    #[test]
+    fn a_rejected_first_date_or_batch_is_not_replaced() {
+        let later = "2001-01-01T00:00:00";
+        let cutoff = parse_local_to_epoch(later).unwrap();
+        let readable_and_old = |body: &[u8]| {
+            parse_bytes(body)
+                .deletion_date
+                .as_deref()
+                .and_then(parse_local_to_epoch)
+                .is_some_and(|t| t <= cutoff)
+        };
+
+        let mut huge = b"[Trash Info]\nPath=/a\nDeletionDate=".to_vec();
+        huge.extend(std::iter::repeat_n(b'A', VALUE_CAP + 1));
+        huge.extend(format!("\nDeletionDate={later}\n{BATCH_KEY}=").into_bytes());
+        huge.extend(std::iter::repeat_n(b'B', VALUE_CAP + 1));
+        huge.extend(b"\n");
+        huge.extend(format!("{BATCH_KEY}=17-42\n").into_bytes());
+        let info = parse_bytes(&huge);
+        assert!(info.deletion_date.is_none(), "{:?}", info.deletion_date);
+        assert!(info.batch.is_none(), "{:?}", info.batch);
+        assert!(!readable_and_old(&huge));
+
+        // Forty-three invalid bytes are under the cap, and each becomes
+        // the three-byte replacement character, so the text is dropped.
+        let raw = [0xffu8; 43];
+        assert!(raw.len() <= VALUE_CAP);
+        assert!(String::from_utf8_lossy(&raw).len() > VALUE_CAP);
+        let mut lossy = b"[Trash Info]\nPath=/a\nDeletionDate=".to_vec();
+        lossy.extend(raw);
+        lossy.extend(format!("\nDeletionDate={later}\n{BATCH_KEY}=").into_bytes());
+        lossy.extend(raw);
+        lossy.extend(format!("\n{BATCH_KEY}=17-42\n").into_bytes());
+        let info = parse_bytes(&lossy);
+        assert!(info.deletion_date.is_none(), "{:?}", info.deletion_date);
+        assert!(info.batch.is_none(), "{:?}", info.batch);
+        assert!(!readable_and_old(&lossy));
+
+        // A short unreadable date is kept, and an empty batch line is
+        // still the first batch key. Neither gives way to a later line.
+        let soon = format!(
+            "[Trash Info]\nPath=/a\nDeletionDate=soon\nDeletionDate={later}\n\
+             {BATCH_KEY}=\n{BATCH_KEY}=17-42\n"
+        );
+        let info = parse(&soon);
+        assert_eq!(info.deletion_date.as_deref(), Some("soon"));
+        assert!(info.batch.is_none(), "{:?}", info.batch);
+        assert!(!readable_and_old(soon.as_bytes()));
+
+        let first = format!(
+            "[Trash Info]\nPath=/a\nDeletionDate={later}\nDeletionDate=2024-06-01T00:00:00\n\
+             {BATCH_KEY}=first\n{BATCH_KEY}=second\n"
+        );
+        let info = parse(&first);
+        assert_eq!(info.deletion_date.as_deref(), Some(later));
+        assert_eq!(info.batch.as_deref(), Some("first"));
+        assert!(readable_and_old(first.as_bytes()));
     }
 
     #[test]

@@ -1214,6 +1214,23 @@ mod tests {
         assert!(!is_old(Some("garbage"), i64::MAX));
     }
 
+    /// The first date is too long to keep, so the age is unknown and the
+    /// cut leaves the item. The readable date on the next line must not
+    /// become the one the cut uses.
+    #[test]
+    fn an_age_cut_keeps_an_item_whose_first_date_cannot_be_read() {
+        let later = "2001-01-01T00:00:00";
+        let mut body = b"[Trash Info]\nPath=/tmp/a\nDeletionDate=".to_vec();
+        body.extend(std::iter::repeat_n(b'A', 200));
+        body.extend(format!("\nDeletionDate={later}\n").into_bytes());
+        let info = info::parse_bytes(&body);
+        let cutoff = info::parse_local_to_epoch(later).unwrap();
+        assert!(!is_old(info.deletion_date.as_deref(), cutoff));
+        let only_later = format!("[Trash Info]\nPath=/tmp/a\nDeletionDate={later}\n");
+        let info = info::parse(&only_later);
+        assert!(is_old(info.deletion_date.as_deref(), cutoff));
+    }
+
     #[test]
     fn cutoff_comparison() {
         let now = info::now_local_string();
