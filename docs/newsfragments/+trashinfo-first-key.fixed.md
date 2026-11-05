@@ -1,0 +1,1 @@
+The first `DeletionDate` or `X-Rtrash-Batch` in a trashinfo file wins even when that value is too long to keep or grows past the limit as invalid bytes are replaced. A later copy of the key no longer replaces it, so an age cut keeps an item whose first date cannot be read.

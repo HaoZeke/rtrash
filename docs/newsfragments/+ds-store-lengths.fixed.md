@@ -1,0 +1,1 @@
+`rtrash` now refuses a `.DS_Store` at once when its block table, table of contents or B-tree record count cannot fit in the bytes it points at. A block count of `u32::MAX` used to overflow the padded table size on a 32-bit host and panic a debug build.

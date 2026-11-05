@@ -1,0 +1,1 @@
+A small fuzzer under `fuzz/` feeds mutated `.trashinfo`, `directorysizes` and `.DS_Store` bytes to the parsers. It is not part of the default build. `cargo run --manifest-path fuzz/Cargo.toml -- --seconds 60` runs each one.

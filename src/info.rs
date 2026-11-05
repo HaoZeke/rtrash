@@ -97,6 +97,12 @@ pub fn parse_bytes(content: &[u8]) -> TrashInfo {
     let mut path = PathBuf::new();
     let mut date = None;
     let mut batch = None;
+    // The first line of a key wins even when its value is dropped.
+    // `kept_text` answers `None` for a value that is too long or that
+    // grows past the cap when invalid bytes are replaced, and that
+    // `None` is not "the key was absent": a later line must not fill it.
+    let mut saw_date = false;
+    let mut saw_batch = false;
     let batch_key = format!("{BATCH_KEY}=");
     for line in content.split(|&b| b == b'\n') {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
@@ -105,13 +111,17 @@ pub fn parse_bytes(content: &[u8]) -> TrashInfo {
                 path = PathBuf::from(OsString::from_vec(url_decode_bytes(trim_end(v))));
             }
         } else if let Some(v) = line.strip_prefix(b"DeletionDate=") {
-            if date.is_none() {
-                date = Some(String::from_utf8_lossy(trim_end(trim_start(v))).into_owned());
+            if !saw_date {
+                saw_date = true;
+                date = kept_text(trim_end(trim_start(v)));
             }
         } else if let Some(v) = line.strip_prefix(batch_key.as_bytes()) {
-            let v = trim_end(trim_start(v));
-            if batch.is_none() && !v.is_empty() {
-                batch = Some(String::from_utf8_lossy(v).into_owned());
+            if !saw_batch {
+                saw_batch = true;
+                let v = trim_end(trim_start(v));
+                if !v.is_empty() {
+                    batch = kept_text(v);
+                }
             }
         }
     }
@@ -130,6 +140,19 @@ fn trim_end(mut b: &[u8]) -> &[u8] {
         b = rest;
     }
     b
+}
+
+/// Longest `DeletionDate` or batch value kept from a record. A spec date
+/// is 19 bytes and a batch id is a short `millis-pid`. A longer value is
+/// dropped, so one hostile line is not stored or printed whole.
+const VALUE_CAP: usize = 128;
+
+fn kept_text(v: &[u8]) -> Option<String> {
+    if v.len() > VALUE_CAP {
+        return None;
+    }
+    let s = String::from_utf8_lossy(v).into_owned();
+    (s.len() <= VALUE_CAP).then_some(s)
 }
 
 fn trim_start(mut b: &[u8]) -> &[u8] {
@@ -154,10 +177,16 @@ pub fn local_string(epoch: i64) -> String {
         // never names `libc::time_t`, which libc deprecates on musl.
         let t = [epoch as _];
         let mut tm: libc::tm = std::mem::zeroed();
-        libc::localtime_r(t.as_ptr(), &mut tm);
+        // A time the library cannot convert still fills `tm` and returns
+        // null. Reading that struct prints a nonsense year.
+        if libc::localtime_r(t.as_ptr(), &mut tm).is_null() {
+            return "????-??-??T??:??:??".to_string();
+        }
+        let Some(year) = tm.tm_year.checked_add(1900) else {
+            return "????-??-??T??:??:??".to_string();
+        };
         format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-            tm.tm_year + 1900,
+            "{year:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
             tm.tm_mon + 1,
             tm.tm_mday,
             tm.tm_hour,
@@ -180,10 +209,34 @@ fn parse_num(b: &[u8]) -> Option<i32> {
     Some(v)
 }
 
+/// A real civil date in the trashinfo shape: month and day exist on the
+/// proleptic Gregorian calendar, the clock is `00:00:00` through
+/// `23:59:60` (second 60 is a leap second). `mktime` would otherwise
+/// normalize `2026-00-00` or `2023-02-29` into some other day, and an age
+/// filter would then delete the item as if that day had been written.
+fn real_clock(year: i32, mon: i32, day: i32, hour: i32, min: i32, sec: i32) -> bool {
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&min) || !(0..=60).contains(&sec) {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match mon {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&day)
+}
+
 /// Parse `YYYY-MM-DDTHH:MM:SS` (local time) to a unix timestamp.
+///
+/// The text must be that 19 bytes and nothing after them, and it must be
+/// a real calendar day. Anything else is unreadable, the same as a date
+/// that is not in this shape at all.
 pub fn parse_local_to_epoch(s: &str) -> Option<i64> {
     let b = s.as_bytes();
-    if b.len() < 19
+    if b.len() != 19
         || b[4] != b'-'
         || b[7] != b'-'
         || b[10] != b'T'
@@ -198,8 +251,8 @@ pub fn parse_local_to_epoch(s: &str) -> Option<i64> {
     let hour = parse_num(&b[11..13])?;
     let min = parse_num(&b[14..16])?;
     let sec = parse_num(&b[17..19])?;
-    if !(0..60).contains(&min) || !(0..61).contains(&sec) {
-        return mktime_local(year, mon, mday, hour, min, sec);
+    if !real_clock(year, mon, mday, hour, min, sec) {
+        return None;
     }
     // glibc stats /etc/localtime on every mktime when TZ is unset, so a
     // trash of thousands of items paid one stat each. Offsets change on
@@ -216,7 +269,9 @@ pub fn parse_local_to_epoch(s: &str) -> Option<i64> {
         *h.entry(key)
             .or_insert_with(|| mktime_local(year, mon, mday, hour, 0, 0))
     })?;
-    Some(base + i64::from(min) * 60 + i64::from(sec))
+    // At most 59 minutes and a leap second past the cached hour.
+    base.checked_add(i64::from(min) * 60)
+        .and_then(|t| t.checked_add(i64::from(sec)))
 }
 
 /// Epoch of each local `(year, month, day, hour)` seen, from mktime.
@@ -323,5 +378,129 @@ mod tests {
     fn bad_date_is_none() {
         assert!(parse_local_to_epoch("not-a-date").is_none());
         assert!(parse_local_to_epoch("2026-07-03 12:00:00").is_none());
+    }
+
+    /// mktime would turn these into some other civil day. An age filter
+    /// must not delete from that day: the date is unreadable.
+    #[test]
+    fn odd_dates_are_not_normalized_into_another_day() {
+        for s in [
+            "2023-02-29T00:00:00",
+            "1900-02-29T00:00:00",
+            "2026-00-00T00:00:00",
+            "2026-13-01T00:00:00",
+            "2026-04-31T00:00:00",
+            "2026-01-01T24:00:00",
+            "2026-01-01T00:99:00",
+            "2026-01-01T00:00:61",
+            "2026-07-03T12:00:00Z",
+            "2026-07-03T12:00:00.1",
+            "2026-07-03T12:00:0",
+            "9999-99-99T99:99:99",
+        ] {
+            assert!(parse_local_to_epoch(s).is_none(), "{s}");
+        }
+        // A real leap day, and the leap second the hour cache already
+        // agrees with mktime on, still parse.
+        assert!(parse_local_to_epoch("2024-02-29T12:00:00").is_some());
+        assert!(parse_local_to_epoch("2000-02-29T00:00:00").is_some());
+        assert!(parse_local_to_epoch("2024-02-29T23:59:60").is_some());
+    }
+
+    #[test]
+    fn a_huge_date_or_batch_is_not_kept() {
+        let mut body = b"[Trash Info]\nPath=/a\nDeletionDate=".to_vec();
+        body.extend(std::iter::repeat_n(b'A', 200));
+        body.extend(b"\nX-Rtrash-Batch=");
+        body.extend(std::iter::repeat_n(b'B', 200));
+        body.push(b'\n');
+        let info = parse_bytes(&body);
+        assert!(info.deletion_date.is_none());
+        assert!(info.batch.is_none());
+        assert_eq!(info.path, Path::new("/a"));
+        // A short value that is not a date is still kept, so check can
+        // name it, and it does not become an epoch.
+        let info = parse_bytes(b"[Trash Info]\nPath=/a\nDeletionDate=soon\n");
+        assert_eq!(info.deletion_date.as_deref(), Some("soon"));
+        assert!(parse_local_to_epoch("soon").is_none());
+    }
+
+    /// A value `kept_text` drops used to look like a missing key, so a
+    /// later `DeletionDate` or batch line replaced it. The first line
+    /// stays the one an age cut reads, which is unreadable, and the later
+    /// date must not make the item old.
+    #[test]
+    fn a_rejected_first_date_or_batch_is_not_replaced() {
+        let later = "2001-01-01T00:00:00";
+        let cutoff = parse_local_to_epoch(later).unwrap();
+        let readable_and_old = |body: &[u8]| {
+            parse_bytes(body)
+                .deletion_date
+                .as_deref()
+                .and_then(parse_local_to_epoch)
+                .is_some_and(|t| t <= cutoff)
+        };
+
+        let mut huge = b"[Trash Info]\nPath=/a\nDeletionDate=".to_vec();
+        huge.extend(std::iter::repeat_n(b'A', VALUE_CAP + 1));
+        huge.extend(format!("\nDeletionDate={later}\n{BATCH_KEY}=").into_bytes());
+        huge.extend(std::iter::repeat_n(b'B', VALUE_CAP + 1));
+        huge.extend(b"\n");
+        huge.extend(format!("{BATCH_KEY}=17-42\n").into_bytes());
+        let info = parse_bytes(&huge);
+        assert!(info.deletion_date.is_none(), "{:?}", info.deletion_date);
+        assert!(info.batch.is_none(), "{:?}", info.batch);
+        assert!(!readable_and_old(&huge));
+
+        // Forty-three invalid bytes are under the cap, and each becomes
+        // the three-byte replacement character, so the text is dropped.
+        let raw = [0xffu8; 43];
+        assert!(raw.len() <= VALUE_CAP);
+        assert!(String::from_utf8_lossy(&raw).len() > VALUE_CAP);
+        let mut lossy = b"[Trash Info]\nPath=/a\nDeletionDate=".to_vec();
+        lossy.extend(raw);
+        lossy.extend(format!("\nDeletionDate={later}\n{BATCH_KEY}=").into_bytes());
+        lossy.extend(raw);
+        lossy.extend(format!("\n{BATCH_KEY}=17-42\n").into_bytes());
+        let info = parse_bytes(&lossy);
+        assert!(info.deletion_date.is_none(), "{:?}", info.deletion_date);
+        assert!(info.batch.is_none(), "{:?}", info.batch);
+        assert!(!readable_and_old(&lossy));
+
+        // A short unreadable date is kept, and an empty batch line is
+        // still the first batch key. Neither gives way to a later line.
+        let soon = format!(
+            "[Trash Info]\nPath=/a\nDeletionDate=soon\nDeletionDate={later}\n\
+             {BATCH_KEY}=\n{BATCH_KEY}=17-42\n"
+        );
+        let info = parse(&soon);
+        assert_eq!(info.deletion_date.as_deref(), Some("soon"));
+        assert!(info.batch.is_none(), "{:?}", info.batch);
+        assert!(!readable_and_old(soon.as_bytes()));
+
+        let first = format!(
+            "[Trash Info]\nPath=/a\nDeletionDate={later}\nDeletionDate=2024-06-01T00:00:00\n\
+             {BATCH_KEY}=first\n{BATCH_KEY}=second\n"
+        );
+        let info = parse(&first);
+        assert_eq!(info.deletion_date.as_deref(), Some(later));
+        assert_eq!(info.batch.as_deref(), Some("first"));
+        assert!(readable_and_old(first.as_bytes()));
+    }
+
+    #[test]
+    fn an_unconvertible_epoch_is_not_a_garbage_date() {
+        // Must not panic, and must not print the year glibc leaves behind
+        // when the conversion fails.
+        for epoch in [i64::MAX, i64::MIN, i64::MIN + 1] {
+            let s = local_string(epoch);
+            assert!(!s.is_empty(), "{epoch}");
+            assert!(!s.contains('\n'), "{s}");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(local_string(i64::MAX), "????-??-??T??:??:??");
+            assert_eq!(local_string(i64::MIN), "????-??-??T??:??:??");
+        }
     }
 }

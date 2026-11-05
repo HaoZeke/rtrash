@@ -1,0 +1,13 @@
+[workspace]
+
+[package]
+name = "rtrash-fuzz"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+license = "MIT"
+description = "Mutational fuzz targets for parsers that read on-disk trash data"
+
+[dependencies]
+rtrash = { path = ".." }

@@ -1,0 +1,1 @@
+`rtrash du` no longer tries every split of every `**` when it matches a gitignore path. A long chain of them against a deep path gives the same answer quickly, and a pattern whose match table would pass two million cells does not match. An rsync wildcard over a long pattern and a long text remembers failed positions without allocating a table the size of their product.

@@ -1,0 +1,1 @@
+A `directorysizes` line longer than 64 KiB is ignored, so a run of zeros the size of the cache is not taken as a directory of size 0. Shorter lines keep the same size, mtime and name, including numbers with leading zeros.
