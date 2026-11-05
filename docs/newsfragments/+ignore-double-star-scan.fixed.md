@@ -1,0 +1,1 @@
+A gitignore `**` between other parts of a pattern no longer walks the rest of the path once per name. A long chain of them against a deep directory matches in time proportional to the table, and a table over two million cells still does not match.

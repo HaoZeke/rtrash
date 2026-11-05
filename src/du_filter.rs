@@ -138,20 +138,54 @@ fn read_text_or_stdin(path: &Path) -> io::Result<String> {
 /// Match path segments against pattern segments, `**` spanning zero or
 /// more of them. A trailing `**` needs at least one segment (`dir/**`
 /// matches what is inside `dir`, not `dir`).
+///
+/// The table is filled from the end. A non-trailing `**` is the or of the
+/// next row from this name onward, folded while that row is walked
+/// downward, so each cell is one step and a chain of `**` takes time
+/// proportional to the table. A pattern and a path whose table would pass
+/// two million cells do not match: a hostile ignore line must not hang
+/// the scan.
 fn path_match(pat: &[Vec<u8>], path: &[&[u8]]) -> bool {
-    match pat.split_first() {
-        None => path.is_empty(),
-        Some((first, rest)) if first.as_slice() == b"**" => {
-            if rest.is_empty() {
-                return !path.is_empty();
-            }
-            (0..=path.len()).any(|i| path_match(rest, &path[i..]))
-        }
-        Some((first, rest)) => match path.split_first() {
-            Some((p, prest)) => seg_match(first, p) && path_match(rest, prest),
-            None => false,
-        },
+    let (np, nt) = (pat.len(), path.len());
+    let Some(width) = nt.checked_add(1) else {
+        return false;
+    };
+    let Some(cells) = np.checked_add(1).and_then(|n| n.checked_mul(width)) else {
+        return false;
+    };
+    if cells > 2_000_000 {
+        return false;
     }
+    let mut dp = vec![false; cells];
+    let ix = |i: usize, j: usize| i * width + j;
+    for i in (0..=np).rev() {
+        if i == np {
+            for j in 0..=nt {
+                dp[ix(i, j)] = j == nt;
+            }
+            continue;
+        }
+        if pat[i].as_slice() == b"**" {
+            if i + 1 == np {
+                for j in 0..=nt {
+                    dp[ix(i, j)] = j < nt;
+                }
+            } else {
+                let mut any_from_here = false;
+                for j in (0..=nt).rev() {
+                    any_from_here |= dp[ix(i + 1, j)];
+                    dp[ix(i, j)] = any_from_here;
+                }
+            }
+            continue;
+        }
+        for j in 0..nt {
+            if seg_match(&pat[i], path[j]) {
+                dp[ix(i, j)] = dp[ix(i + 1, j + 1)];
+            }
+        }
+    }
+    dp[ix(0, 0)]
 }
 
 /// Glob match of one segment: `*`, `?`, `[...]` (with `!` or `^` to
@@ -398,29 +432,73 @@ impl RsyncRule {
     }
 }
 
+/// Positions already known not to match. A small pattern keeps a flat
+/// table; a huge one keeps only the positions it has tried, so the
+/// product of the two lengths is never allocated.
+struct Seen {
+    width: usize,
+    dense: Option<Vec<bool>>,
+    sparse: std::collections::HashSet<usize>,
+}
+
+impl Seen {
+    fn new(pat_len: usize, text_len: usize) -> Self {
+        let width = text_len.saturating_add(1);
+        let cells = pat_len.saturating_add(1).checked_mul(width);
+        let dense = cells.filter(|&n| n <= 2_000_000).map(|n| vec![false; n]);
+        Seen {
+            width,
+            dense,
+            sparse: std::collections::HashSet::new(),
+        }
+    }
+
+    fn key(&self, at: (usize, usize)) -> usize {
+        at.0.saturating_mul(self.width).saturating_add(at.1)
+    }
+
+    fn failed(&self, at: (usize, usize)) -> bool {
+        let k = self.key(at);
+        match &self.dense {
+            Some(v) => v.get(k).copied().unwrap_or(false),
+            None => self.sparse.contains(&k),
+        }
+    }
+
+    fn mark(&mut self, at: (usize, usize)) {
+        let k = self.key(at);
+        if let Some(v) = &mut self.dense {
+            if let Some(slot) = v.get_mut(k) {
+                *slot = true;
+            }
+        } else {
+            self.sparse.insert(k);
+        }
+    }
+}
+
 /// rsync's wildcard match of `pat` against all of `text`: `*`, `?` and
 /// `[...]` stop at `/`, `**` crosses it, and `\` escapes the next byte.
 /// Each failed position is remembered, so many stars stay quick.
 fn wild_match(pat: &[u8], text: &[u8]) -> bool {
-    let mut failed = vec![false; (pat.len() + 1) * (text.len() + 1)];
+    let mut failed = Seen::new(pat.len(), text.len());
     wild_at(pat, text, (0, 0), &mut failed)
 }
 
 /// [`wild_match`] from pattern byte `at.0` and text byte `at.1`.
-fn wild_at(pat: &[u8], text: &[u8], at: (usize, usize), failed: &mut [bool]) -> bool {
-    let key = at.0 * (text.len() + 1) + at.1;
-    if failed[key] {
+fn wild_at(pat: &[u8], text: &[u8], at: (usize, usize), failed: &mut Seen) -> bool {
+    if failed.failed(at) {
         return false;
     }
     let ok = wild_step(pat, text, at, failed);
     if !ok {
-        failed[key] = true;
+        failed.mark(at);
     }
     ok
 }
 
 /// One step of [`wild_at`]: a run of stars, or one byte of each.
-fn wild_step(pat: &[u8], text: &[u8], (pi, ti): (usize, usize), failed: &mut [bool]) -> bool {
+fn wild_step(pat: &[u8], text: &[u8], (pi, ti): (usize, usize), failed: &mut Seen) -> bool {
     let Some(&c) = pat.get(pi) else {
         return ti == text.len();
     };
@@ -1105,6 +1183,62 @@ mod tests {
         assert_eq!(hit("a/**", "a/b", false), Some(true));
         assert_eq!(hit("**/logs/x", "q/logs/x", false), Some(true));
         assert_eq!(hit("**/logs", "q/r/logs", true), Some(true));
+    }
+
+    /// A chain of `**` used to try every split of every split. Thirty
+    /// names and eight stars finished only after an absurd amount of work.
+    #[test]
+    fn many_double_stars_match_without_a_hang() {
+        let names: Vec<Vec<u8>> = (0..30).map(|i| format!("n{i}").into_bytes()).collect();
+        let path: Vec<&[u8]> = names.iter().map(Vec::as_slice).collect();
+        let mut segs = vec![b"**".to_vec(); 8];
+        segs.push(b"missing".to_vec());
+        let started = std::time::Instant::now();
+        assert!(!path_match(&segs, &path));
+        segs.pop();
+        segs.push(b"n29".to_vec());
+        assert!(path_match(&segs, &path));
+        // Hang guard only. The table is a few hundred cells.
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        // A pattern whose table would not fit does not match, and does
+        // not allocate it.
+        let wide = vec![b"a".to_vec(); 3_000];
+        let long: Vec<&[u8]> = wide.iter().map(Vec::as_slice).collect();
+        assert!(!path_match(&wide, &long));
+    }
+
+    /// Each non-trailing `**` used to scan every later name. Hundreds of
+    /// stars against a path of a couple of thousand names stay under the
+    /// cell cap, and that scan was cubic; both answers have to come back
+    /// before the hang guard.
+    #[test]
+    fn a_deep_path_with_many_double_stars_matches_quickly() {
+        const STARS: usize = 800;
+        const DEPTH: usize = 2_000;
+        let names = vec![b"a".to_vec(); DEPTH];
+        let path: Vec<&[u8]> = names.iter().map(Vec::as_slice).collect();
+        let mut segs = vec![b"**".to_vec(); STARS];
+        segs.push(b"b".to_vec());
+        let cells = (segs.len() + 1) * (path.len() + 1);
+        assert!(cells > 500_000 && cells <= 2_000_000, "{cells}");
+        let started = std::time::Instant::now();
+        assert!(!path_match(&segs, &path));
+        segs.pop();
+        segs.push(b"a".to_vec());
+        assert!(path_match(&segs, &path));
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        // A `**` in the middle may match no directory, and a trailing
+        // `**` still needs a name after its predecessor.
+        assert!(path_match(
+            &[b"a".to_vec(), b"**".to_vec(), b"a".to_vec()],
+            &path
+        ));
+        assert!(!path_match(
+            &[b"a".to_vec(), b"**".to_vec(), b"b".to_vec()],
+            &path
+        ));
+        assert!(!path_match(&[b"a".to_vec(), b"**".to_vec()], &path[..1]));
+        assert!(path_match(&[b"a".to_vec(), b"**".to_vec()], &path[..2]));
     }
 
     #[test]

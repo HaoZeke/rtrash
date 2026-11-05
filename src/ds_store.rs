@@ -95,6 +95,10 @@ impl<'a> Reader<'a> {
         Ok([b[0], b[1], b[2], b[3]])
     }
 
+    fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
+    }
+
     fn utf16(&mut self) -> Result<String, String> {
         let units = self.u32()? as usize;
         let bytes = self.take(units.checked_mul(2).ok_or("string length overflows")?)?;
@@ -157,15 +161,29 @@ pub fn parse(data: &[u8]) -> Result<Vec<Record>, String> {
     let mut r = Reader::new(info);
     let count = r.u32()? as usize;
     r.u32()?;
-    let padded = count.div_ceil(256) * 256;
+    // The address table is rounded up to a multiple of 256 entries.
+    // `count + 255` overflows a 32-bit usize when count is `u32::MAX`,
+    // which used to panic the debug build before any byte was checked.
+    let slots = count
+        .checked_add(255)
+        .map(|n| n & !255)
+        .ok_or("block table too large")?;
+    let table_bytes = slots.checked_mul(4).ok_or("block table too large")?;
+    if table_bytes > r.remaining() {
+        return Err("block table does not fit in the allocator block".into());
+    }
     let mut addrs = Vec::with_capacity(count.min(4096));
-    for i in 0..padded {
+    for i in 0..slots {
         let a = r.u32()?;
         if i < count {
             addrs.push(a);
         }
     }
     let ntoc = r.u32()?;
+    // Five bytes is the shortest table-of-contents entry (an empty name).
+    if u64::from(ntoc).saturating_mul(5) > r.remaining() as u64 {
+        return Err("table of contents does not fit".into());
+    }
     let mut dsdb = None;
     for _ in 0..ntoc {
         let n = r.u8()? as usize;
@@ -212,6 +230,13 @@ fn walk<'a>(
     let mut r = Reader::new(block(id)?);
     let right = r.u32()?;
     let count = r.u32()?;
+    // A bool record is 13 bytes, an internal record at least 17. Twelve
+    // and sixteen stay under those, so a real node still fits, and a
+    // count of `u32::MAX` in a short block is refused before the loop.
+    let min_rec: u64 = if right == 0 { 12 } else { 16 };
+    if u64::from(count).saturating_mul(min_rec) > r.remaining() as u64 {
+        return Err("record count does not fit in the block".into());
+    }
     for _ in 0..count {
         if right != 0 {
             let child = r.u32()?;
@@ -524,5 +549,38 @@ mod tests {
         node.extend_from_slice(&0u32.to_be_bytes());
         let img = assemble(&[dsdb_header(2, 1, 0, 1), node], 1);
         assert!(parse(&img).unwrap_err().contains("loops"));
+    }
+
+    /// A block count of `u32::MAX` used to overflow the padded table size
+    /// on a 32-bit host, and on any host it walked the claimed table until
+    /// the bytes ran out. It is refused from the sizes alone.
+    #[test]
+    fn a_huge_block_count_is_refused_without_a_long_walk() {
+        let mut data = vec![0, 0, 0, 1];
+        data.extend(b"Bud1");
+        let info_off = 32u32;
+        let info_size = 8u32 + 256 * 1024;
+        data.extend(info_off.to_be_bytes());
+        data.extend(info_size.to_be_bytes());
+        data.extend(info_off.to_be_bytes());
+        data.resize(4 + info_off as usize, 0);
+        data.extend(u32::MAX.to_be_bytes());
+        data.extend(0u32.to_be_bytes());
+        data.resize(data.len() + (info_size as usize - 8), 0);
+        let started = std::time::Instant::now();
+        let err = parse(&data).unwrap_err();
+        assert!(
+            err.contains("does not fit") || err.contains("too large"),
+            "{err}"
+        );
+        // Hang guard only: the refusal is a size check, not a scan.
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+
+        // A node whose record count cannot fit in the block.
+        let mut node = Vec::new();
+        node.extend_from_slice(&0u32.to_be_bytes());
+        node.extend_from_slice(&u32::MAX.to_be_bytes());
+        let img = assemble(&[dsdb_header(2, 0, 0, 1), node], 1);
+        assert!(parse(&img).unwrap_err().contains("does not fit"));
     }
 }

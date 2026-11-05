@@ -4596,7 +4596,9 @@ pub fn format_age(mtime: i64, now: i64) -> String {
     if mtime == MTIME_UNKNOWN {
         return "-".into();
     }
-    let s = (now - mtime).max(0);
+    // A timestamp near the ends of i64 (a damaged stat or snapshot) must
+    // not overflow the subtraction.
+    let s = now.saturating_sub(mtime).max(0);
     if s < 60 {
         format!("{s}s")
     } else if s < 3_600 {
@@ -8754,5 +8756,19 @@ mod tests {
         assert!(j.ends_with(",\"ratio\":0.250}"), "{j}");
         let j = item_json_with(&it, Some(Path::new("t")), true);
         assert!(j.ends_with(",\"ratio\":0.250,\"target\":\"t\"}"), "{j}");
+    }
+
+    #[test]
+    fn extreme_mtimes_do_not_panic() {
+        assert_eq!(format_age(1_700_000_100, 1_700_000_000), "0s");
+        assert_eq!(format_age(1_700_000_000 - 30, 1_700_000_000), "30s");
+        let ancient = format_age(i64::MIN + 1, 1_700_000_000);
+        assert!(ancient.ends_with('y'), "{ancient}");
+        assert_eq!(format_age(i64::MAX, 1_700_000_000), "0s");
+        let shown = format_mtime(i64::MAX);
+        assert!(!shown.is_empty());
+        assert!(!shown.contains('\n'), "{shown}");
+        #[cfg(target_os = "linux")]
+        assert_eq!(format_mtime(i64::MAX), "????-??-?? ??:??");
     }
 }

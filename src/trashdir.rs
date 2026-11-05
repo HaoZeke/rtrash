@@ -1615,24 +1615,27 @@ pub struct SizeLine {
     pub mtime: i64,
 }
 
+/// Longest `directorysizes` line read. A name under `files/` is at most a
+/// few hundred bytes even fully percent-encoded; a longer line is ignored
+/// and the directory is walked. The value of every shorter line is unchanged.
+const SIZE_LINE_MAX: usize = 64 * 1024;
+
 /// Parse one `directorysizes` line, without its newline. The spec lets a
 /// writer percent-encode anything from just `%` and newline up to every
 /// byte RFC 2396 reserves, so the name is decoded and every comparison is
 /// on its bytes: `My Dir`, `My%20Dir` and `My%20D%69r` name one directory.
 ///
 /// `None` for a line that is not `SIZE MTIME NAME` with decimal numbers
-/// (MTIME may be negative), and for a name that cannot be a child of
-/// `files/`: empty, `.`, `..`, or with a `/` or NUL byte. The spec refuses
-/// a `/` even as `%2F`.
+/// (MTIME may be negative), for a line longer than [`SIZE_LINE_MAX`], and
+/// for a name that cannot be a child of `files/`: empty, `.`, `..`, or
+/// with a `/` or NUL byte. The spec refuses a `/` even as `%2F`.
 pub fn directorysizes_parse_line(line: &[u8]) -> Option<SizeLine> {
-    let mut parts = line.splitn(3, |&b| b == b' ');
-    let digits = |f: &[u8]| !f.is_empty() && f.iter().all(u8::is_ascii_digit);
-    let size = parts.next().filter(|f| digits(f))?;
-    let mtime = parts.next()?;
-    let unsigned = mtime.strip_prefix(b"-").unwrap_or(mtime);
-    if !digits(unsigned) {
+    if line.len() > SIZE_LINE_MAX {
         return None;
     }
+    let mut parts = line.splitn(3, |&b| b == b' ');
+    let size = parse_u64_field(parts.next()?)?;
+    let mtime = parse_i64_field(parts.next()?)?;
     let name = crate::util::url_decode_bytes(parts.next()?);
     let bad = name.is_empty()
         || name == b"."
@@ -1641,11 +1644,48 @@ pub fn directorysizes_parse_line(line: &[u8]) -> Option<SizeLine> {
     if bad {
         return None;
     }
-    Some(SizeLine {
-        name,
-        size: std::str::from_utf8(size).ok()?.parse().ok()?,
-        mtime: std::str::from_utf8(mtime).ok()?.parse().ok()?,
-    })
+    Some(SizeLine { name, size, mtime })
+}
+
+/// A decimal `u64`. Leading zeros do not change the value. More than 20
+/// significant digits cannot fit, so the rest of a long run is not scanned
+/// by the general parser.
+fn parse_u64_field(b: &[u8]) -> Option<u64> {
+    if b.is_empty() || !b.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let mut i = 0;
+    while i + 1 < b.len() && b[i] == b'0' {
+        i += 1;
+    }
+    let sig = &b[i..];
+    if sig.len() > 20 {
+        return None;
+    }
+    std::str::from_utf8(sig).ok()?.parse().ok()
+}
+
+/// A decimal `i64`, optional leading `-`. Same digit rule as
+/// [`parse_u64_field`].
+fn parse_i64_field(b: &[u8]) -> Option<i64> {
+    let (neg, digits) = match b.strip_prefix(b"-") {
+        Some(rest) => (true, rest),
+        None => (false, b),
+    };
+    let v = parse_u64_field(digits)?;
+    if neg {
+        if v == i64::MAX as u64 + 1 {
+            Some(i64::MIN)
+        } else if v <= i64::MAX as u64 {
+            Some(-(v as i64))
+        } else {
+            None
+        }
+    } else if v <= i64::MAX as u64 {
+        Some(v as i64)
+    } else {
+        None
+    }
 }
 
 /// Every valid line of the `directorysizes` cache at `path`, read by
@@ -4483,6 +4523,27 @@ proc /proc proc rw 0 0
         assert_eq!(name(b"1 2 d\xff").unwrap(), b"d\xff");
         assert_eq!(name(b"1 2 100%25").unwrap(), b"100%");
         assert_eq!(directorysizes_parse_line(b"1 -5 x").unwrap().mtime, -5);
+        assert_eq!(
+            directorysizes_parse_line(b"00000000000000000042 -0007 n")
+                .unwrap()
+                .size,
+            42
+        );
+        assert_eq!(directorysizes_parse_line(b"1 -0007 n").unwrap().mtime, -7);
+        assert_eq!(
+            directorysizes_parse_line(b"1 -9223372036854775808 n")
+                .unwrap()
+                .mtime,
+            i64::MIN
+        );
+        // A line longer than a real cache entry is ignored, not read as a
+        // size of zero from a run of zeros.
+        let mut huge = vec![b'0'; SIZE_LINE_MAX + 1];
+        huge.extend_from_slice(b" 1 name");
+        assert!(directorysizes_parse_line(&huge).is_none());
+        let mut padded = vec![b'0'; 80];
+        padded.extend_from_slice(b" 1 name");
+        assert_eq!(directorysizes_parse_line(&padded).unwrap().size, 0);
         for bad in [
             &b"1 2 a%2Fb"[..],
             b"1 2 a/b",
