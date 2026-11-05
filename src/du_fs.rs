@@ -81,12 +81,78 @@ pub fn disk_bytes(path: &std::path::Path, meta: &std::fs::Metadata) -> u64 {
 }
 
 /// What the directory entry says about its type before any stat.
+///
+/// The discriminants are the tag stored in [`NameIx`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 pub enum Kind {
-    Dir,
+    Dir = 0,
     /// Anything that is known not to be a directory.
-    Other,
-    Unknown,
+    Other = 1,
+    Unknown = 2,
+}
+
+/// One name in a directory listing: where it sits in the name buffer, how
+/// long it is without its trailing NUL, and its [`Kind`].
+///
+/// Eight bytes. A `(usize, usize, Kind)` triple is 24, so a flat directory
+/// of 500,000 names keeps 4,000,000 bytes of index where the triple keeps
+/// 12,000,000.
+/// The start is 32 bits and the length 30: one directory's names are far
+/// under 4 GiB, and a single name is far under 1 GiB. The kind uses the
+/// top two bits of `meta`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct NameIx {
+    start: u32,
+    meta: u32,
+}
+
+impl NameIx {
+    const LEN_MASK: u32 = (1 << 30) - 1;
+
+    fn pack(start: usize, len: usize, kind: Kind) -> Self {
+        let start = u32::try_from(start).unwrap_or_else(|_| ix_too_big(start));
+        let len = u32::try_from(len).unwrap_or_else(|_| ix_too_big(len));
+        if len > Self::LEN_MASK {
+            ix_too_big(len as usize);
+        }
+        Self {
+            start,
+            meta: len | (u32::from(kind as u8) << 30),
+        }
+    }
+
+    /// The same entry after `off` bytes of names were placed ahead of it.
+    fn shift(self, off: usize) -> Self {
+        let start = (self.start as usize)
+            .checked_add(off)
+            .unwrap_or_else(|| ix_too_big(off));
+        Self::pack(start, self.name_len(), self.kind())
+    }
+
+    fn start(self) -> usize {
+        self.start as usize
+    }
+
+    fn name_len(self) -> usize {
+        (self.meta & Self::LEN_MASK) as usize
+    }
+
+    fn kind(self) -> Kind {
+        match self.meta >> 30 {
+            0 => Kind::Dir,
+            1 => Kind::Other,
+            _ => Kind::Unknown,
+        }
+    }
+}
+
+/// A directory listing cannot be addressed in [`NameIx`]'s fields.
+#[cold]
+#[inline(never)]
+fn ix_too_big(n: usize) -> ! {
+    panic!("a directory listing is too large to index ({n} bytes)")
 }
 
 /// The entries of one directory: names packed into one buffer, each
@@ -94,8 +160,8 @@ pub enum Kind {
 #[derive(Debug, Default, Clone)]
 pub struct Entries {
     names: Vec<u8>,
-    /// (start in `names`, length without the NUL, kind)
-    index: Vec<(usize, usize, Kind)>,
+    /// Where each name sits in `names`, eight bytes an entry ([`NameIx`]).
+    index: Vec<NameIx>,
     /// Stat of each entry when the listing returned one (macOS bulk
     /// reads); empty otherwise.
     stats: Vec<Option<Stat>>,
@@ -125,7 +191,7 @@ impl Entries {
         let start = self.names.len();
         self.names.extend_from_slice(name);
         self.names.push(0);
-        self.index.push((start, name.len(), kind));
+        self.index.push(NameIx::pack(start, name.len(), kind));
     }
 
     /// Add an entry along with the stat its listing returned.
@@ -194,11 +260,8 @@ impl Entries {
             self.inos.resize(before, 0);
         }
         self.names.extend_from_slice(&more.names);
-        let moved = more
-            .index
-            .into_iter()
-            .map(|(start, len, kind)| (start + off, len, kind));
-        self.index.extend(moved);
+        self.index
+            .extend(more.index.into_iter().map(|ix| ix.shift(off)));
         self.stats.extend(more.stats);
         self.inos.extend(more.inos);
         #[cfg(any(windows, test))]
@@ -219,11 +282,13 @@ impl Entries {
 
     /// Name and kind of entry `i`.
     pub fn get(&self, i: usize) -> (&CStr, Kind) {
-        let (start, len, kind) = self.index[i];
+        let ix = self.index[i];
+        let start = ix.start();
+        let len = ix.name_len();
         // SAFETY: push stored the name followed by exactly one NUL, and a
         // directory entry name never contains a NUL byte.
         let c = unsafe { CStr::from_bytes_with_nul_unchecked(&self.names[start..=start + len]) };
-        (c, kind)
+        (c, ix.kind())
     }
 }
 
@@ -736,6 +801,31 @@ mod fileid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The index is eight bytes a name, and a name is still found after
+    /// another listing is appended.
+    #[test]
+    fn a_directory_index_keeps_eight_bytes_an_entry() {
+        assert_eq!(std::mem::size_of::<NameIx>(), 8);
+        let mut entries = Entries::default();
+        entries.push(b".", Kind::Dir);
+        entries.push(b"..", Kind::Dir);
+        entries.push(b"dir", Kind::Dir);
+        entries.push(b"file", Kind::Other);
+        entries.push(b"maybe", Kind::Unknown);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.get(0).0.to_bytes(), b"dir");
+        assert_eq!(entries.get(0).1, Kind::Dir);
+        assert_eq!(entries.get(1).1, Kind::Other);
+        assert_eq!(entries.get(2).1, Kind::Unknown);
+        let mut more = Entries::default();
+        more.push(b"later", Kind::Other);
+        entries.append(more);
+        assert_eq!(entries.get(3).0.to_bytes(), b"later");
+        assert_eq!(entries.get(3).1, Kind::Other);
+        // The first name is still at the front of the buffer.
+        assert_eq!(entries.get(0).0.to_bytes(), b"dir");
+    }
 
     #[test]
     fn kernel_file_systems_are_told_apart() {
