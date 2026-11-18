@@ -3,13 +3,15 @@
 use std::path::PathBuf;
 
 use crate::list;
+use crate::rm_match::Matcher;
 use crate::trashdir::{self, TrashDir};
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... PATTERN...
-Permanently remove trashed items whose original path or basename matches
-a PATTERN (shell-style glob; quote globs from the shell; --match picks
-another kind, as trashy's -m does). Matching entries
+Permanently remove trashed items whose original path matches a PATTERN
+(shell-style glob; quote globs from the shell; --match picks another kind,
+as trashy's -m does). A bare name also matches basenames. An absolute path
+without glob characters matches only that exact original path. Matching entries
 are deleted from the trash (files/ + .trashinfo), not restored. An absolute
 PATTERN also matches with symlinks in its directory part resolved, the way
 put records original paths.
@@ -35,9 +37,14 @@ stderr is not a terminal is not asked. The last of -i, -f and -y wins.
   -m, --match=KIND  how to read PATTERNs (trashy's -m): glob (default),
                      regex, substring (text in the original path) or
                      exact (the whole original path)
+      --basename   also match every PATTERN against item basenames
+      --all-matches allow a basename pattern to select more than one item
       --batch=ID   only items from one put run: an ID from `undo --list`,
                      or `last` for the latest; with no PATTERN, all of it
-  -n, --dry-run    list matches and reclaimable size; do not delete
+      --keep-from=FILE never remove originals under a path prefix or matching
+                     a glob listed in FILE (also RTRASH_KEEP_FROM)
+  -n, --dry-run    list each matched original path and reclaimable size;
+                     show protected matches as kept; do not delete
   -i, --interactive  ask even when stdin is not a terminal (the reply is
                      read from stdin; no reply removes nothing)
   -y, --yes        do not ask
@@ -73,16 +80,30 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut dry_run = false;
     let mut home_only = false;
     let mut json = false;
+    let mut basename = false;
+    let mut all_matches = false;
     let mut kind = crate::filters::Match::Glob;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
     let mut patterns: Vec<String> = Vec::new();
+    let mut keep_files: Vec<PathBuf> = Vec::new();
     let mut batch: Option<String> = None;
     let mut size = list::SizeFilter::default();
 
     let mut i = 0usize;
     while i < args.len() {
+        match crate::keep::take_arg(args, &mut i, &mut keep_files) {
+            Some(Ok(())) => {
+                i += 1;
+                continue;
+            }
+            Some(Err(e)) => {
+                eprintln!("{prog}: {e}");
+                return 2;
+            }
+            None => {}
+        }
         match size.take(args, &mut i) {
             Some(Ok(())) => {
                 i += 1;
@@ -106,6 +127,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "-n" | "--dry-run" => dry_run = true,
             "--home-only" => home_only = true,
             "--json" => json = true,
+            "--basename" => basename = true,
+            "--all-matches" => all_matches = true,
             "--regex" => kind = crate::filters::Match::Regex,
             "-m" | "--match" => {
                 i += 1;
@@ -217,28 +240,40 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         eprintln!("Try '{prog} --help' for more information.");
         return 2;
     }
-    if matches!(
-        kind,
-        crate::filters::Match::Glob | crate::filters::Match::Exact
-    ) {
-        // put records originals with their parent directory resolved, so
-        // a path typed through a symlinked directory matches that way too.
-        let resolved: Vec<String> = patterns.iter().filter_map(|p| resolve_pattern(p)).collect();
-        patterns.extend(resolved);
-    }
-    let pats = match crate::filters::Patterns::new(patterns.clone(), kind) {
-        Ok(p) => p,
+    let aliases: Vec<Vec<String>> = patterns
+        .iter()
+        .map(|pattern| {
+            let mut texts = vec![pattern.clone()];
+            if matches!(
+                kind,
+                crate::filters::Match::Glob | crate::filters::Match::Exact
+            ) {
+                // put records originals with their parent directory resolved,
+                // so a path typed through a symlinked directory matches too.
+                if let Some(resolved) = resolve_pattern(pattern) {
+                    texts.push(resolved);
+                }
+            }
+            texts
+        })
+        .collect();
+    let matcher = match Matcher::new(&patterns, aliases, kind, basename) {
+        Ok(matcher) => matcher,
         Err(e) => {
             eprintln!("{prog}: {e}");
             return 2;
         }
     };
+    let keep = match crate::keep::KeepList::load(prog, &keep_files) {
+        Ok(keep) => keep,
+        Err(code) => return code,
+    };
 
     // Refuse accidental host-wide permanent purge of the whole trash.
-    if !force && !scoped && pats.is_mass() {
+    if !force && !scoped && matcher.is_mass() {
         eprintln!(
-            "{prog}: refusing mass pattern {:?} without --force (would permanently delete matching trash entries)",
-            patterns
+            "{prog}: refusing mass pattern {patterns:?} without --force \
+             (would permanently delete matching trash entries)"
         );
         eprintln!("Try '{prog} --force …' only if you intend a full selective purge.");
         return 2;
@@ -261,12 +296,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         };
         return crate::finder_shared::rm(
             prog,
-            &pats,
-            batch.as_deref(),
-            dry_run,
-            verbose,
-            json,
-            filter,
+            &matcher,
+            &crate::finder_shared::RmOpts {
+                batch: batch.as_deref(),
+                dry_run,
+                verbose,
+                json,
+                filter,
+                keep: &keep,
+                all_matches: all_matches || scoped,
+            },
         );
     }
     let mut entries = list::filter_age_secs(list::collect(&dirs), older_than, newer_than);
@@ -315,14 +354,46 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .file_name()
             .map(crate::util::str_from_os_ref)
             .unwrap_or_default();
-        pats.hit(path_s.as_ref(), base.as_str(), entry.name.as_str()) && size.keeps(size_of(entry))
+        matcher.hit(path_s.as_ref(), base.as_str(), entry.name.as_str())
+            && size.keeps(size_of(entry))
     };
+
+    if !all_matches && !scoped {
+        let candidates: Vec<_> = entries
+            .iter()
+            .filter(|e| size.keeps(size_of(e)))
+            .map(|e| {
+                let full = crate::util::str_from_os_ref(e.original.as_os_str());
+                let base = e
+                    .original
+                    .file_name()
+                    .map(crate::util::str_from_os_ref)
+                    .unwrap_or_default();
+                (full, base, e.name.clone(), e.original.clone())
+            })
+            .collect();
+        if let Some((pattern, paths)) = matcher.ambiguous(&candidates) {
+            eprintln!(
+                "{prog}: basename pattern '{pattern}' matches {} trash entries; \
+                 refusing without --all-matches:",
+                paths.len()
+            );
+            for path in paths {
+                eprintln!("  {}", crate::util::err_path(&path));
+            }
+            return 2;
+        }
+    }
+    let protected = |entry: &list::Entry| keep.keeps(&entry.original);
 
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
     // they came from, so a refused rm deletes nothing.
     let scoped_roots = crate::allow_roots::roots().is_some();
     if !dry_run && (crate::permanent_guard::cap().is_some() || scoped_roots) {
-        let hits: Vec<&list::Entry> = entries.iter().filter(|e| wanted(e)).collect();
+        let hits: Vec<&list::Entry> = entries
+            .iter()
+            .filter(|e| wanted(e) && !protected(e))
+            .collect();
         let origins: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
         if let Some(code) = crate::allow_roots::refuse_outside(prog, &origins) {
             return code;
@@ -336,7 +407,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     if crate::rm_ask::would_ask(dry_run, json) {
         let named: Vec<(String, u64)> = entries
             .iter()
-            .filter(|e| wanted(e))
+            .filter(|e| wanted(e) && !protected(e))
             .map(|e| (crate::util::term_path(&e.original), size_of(e)))
             .collect();
         if !crate::rm_ask::confirm(prog, &named) {
@@ -351,7 +422,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut not_reached: Option<usize> = None;
     for (k, entry) in entries.iter().enumerate() {
         if crate::interrupt::requested() {
-            not_reached = Some(entries[k..].iter().filter(|e| wanted(e)).count());
+            not_reached = Some(
+                entries[k..]
+                    .iter()
+                    .filter(|e| wanted(e) && !protected(e))
+                    .count(),
+            );
             break;
         }
         let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
@@ -360,12 +436,21 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .file_name()
             .map(crate::util::str_from_os_ref)
             .unwrap_or_default();
-        let hit = pats.hit(path_s.as_ref(), base.as_str(), entry.name.as_str());
+        let hit = matcher.hit(path_s.as_ref(), base.as_str(), entry.name.as_str());
         if !hit {
             continue;
         }
         let sz = size_of(entry);
         if !size.keeps(sz) {
+            continue;
+        }
+        if protected(entry) {
+            if dry_run && !json {
+                println!(
+                    "kept {} (matches keep list)",
+                    crate::util::term_path(&entry.original)
+                );
+            }
             continue;
         }
         if dry_run {

@@ -30,6 +30,8 @@ permanent delete). Use --plain to skip the TUI.
   -f, --force      do not ask (cancels an earlier -i)
       --max-count=N  refuse, deleting nothing, when more than N items
                      would go (also RTRASH_MAX_PERMANENT)
+      --keep-from=FILE never remove originals under a path prefix or matching
+                     a glob listed in FILE (also RTRASH_KEEP_FROM)
       --plain      skip TUI; non-interactive empty (also used when stdin is not a TTY)
       --all        allow an empty with no DAYS, --max-size, --until-free or
                      --trash-dir to remove items other puts left; without
@@ -82,6 +84,7 @@ struct Opts {
     /// `--all`: an unscoped empty may take items other puts left.
     all: bool,
     all_users: bool,
+    keep: crate::keep::KeepList,
 }
 
 /// The `.trashinfo` records in `dir` whose payload in `files/` is gone,
@@ -124,7 +127,16 @@ fn dangling_records(dir: &TrashDir) -> Vec<std::ffi::OsString> {
 /// refuses it there too. A dry run checks none of them, as `-n` there.
 fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
     let found: Vec<Vec<std::ffi::OsString>> = dirs.iter().map(dangling_records).collect();
-    let count = found.iter().map(|f| f.len() as u64).sum::<u64>();
+    let kept = |dir: &TrashDir, fname: &std::ffi::OsStr| {
+        let record = dir.info().join(fname);
+        crate::trash_check::record_origin(dir, &record)
+            .is_ok_and(|(original, _)| opts.keep.keeps(&original))
+    };
+    let count = dirs
+        .iter()
+        .zip(&found)
+        .map(|(dir, names)| names.iter().filter(|name| !kept(dir, name)).count() as u64)
+        .sum::<u64>();
     #[cfg(test)]
     {
         if let Some(f) = tests::AFTER_COUNT.take() {
@@ -137,11 +149,14 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
                 .iter()
                 .zip(&found)
                 .flat_map(|(dir, names)| {
-                    names.iter().map(move |fname| {
-                        let record = dir.info().join(fname);
-                        let origin = crate::trash_check::record_origin(dir, &record).ok();
-                        (record, origin.map(|(o, _)| o))
-                    })
+                    names
+                        .iter()
+                        .filter(|fname| !kept(dir, fname))
+                        .map(move |fname| {
+                            let record = dir.info().join(fname);
+                            let origin = crate::trash_check::record_origin(dir, &record).ok();
+                            (record, origin.map(|(o, _)| o))
+                        })
                 })
                 .collect();
             if let Some(code) = crate::allow_roots::refuse_outside_or_unplaced(prog, &scoped) {
@@ -176,6 +191,18 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
         let now = dangling_records(dir);
         for fname in now.iter().filter(|f| checked.contains(*f)) {
             let path = dir.info().join(fname);
+            if kept(dir, fname) {
+                if opts.dry_run && !opts.json {
+                    let shown = crate::trash_check::record_origin(dir, &path)
+                        .map(|(original, _)| original)
+                        .unwrap_or_else(|_| path.clone());
+                    println!(
+                        "kept {} (matches keep list)",
+                        crate::util::term_path(&shown)
+                    );
+                }
+                continue;
+            }
             if opts.dry_run {
                 if !opts.json {
                     println!("would remove {}", crate::util::term_path(&path));
@@ -297,8 +324,20 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         interactive: false,
         all_users: false,
         all: false,
+        keep: crate::keep::KeepList::default(),
     };
-    for arg in args {
+    let mut keep_files = Vec::new();
+    let mut i = 0usize;
+    while i < args.len() {
+        match crate::keep::take_arg(args, &mut i, &mut keep_files) {
+            Some(Ok(())) => {
+                i += 1;
+                continue;
+            }
+            Some(Err(e)) => return usage_err(prog, &e),
+            None => {}
+        }
+        let arg = &args[i];
         match arg.as_str() {
             "-n" | "--dry-run" => opts.dry_run = true,
             "-v" | "--verbose" => opts.verbose = true,
@@ -373,7 +412,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             },
             a => return usage_err(prog, &format!("unrecognized option '{a}'")),
         }
+        i += 1;
     }
+    opts.keep = match crate::keep::KeepList::load(prog, &keep_files) {
+        Ok(keep) => keep,
+        Err(code) => return code,
+    };
 
     if let Some((spec, floor)) = &opts.until_free {
         if opts.days.is_some() || opts.max_size.is_some() || opts.dangling || opts.all_users {
@@ -423,6 +467,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 dry_run: opts.dry_run,
                 verbose: opts.verbose,
                 json: opts.json,
+                keep: opts.keep.clone(),
             },
         );
     }
@@ -461,7 +506,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // TTY empty browser when no age filter (full interactive review).
     // --json implies non-interactive (scripts).
     #[cfg(feature = "tui")]
-    if !opts.plain && !opts.json && opts.days.is_none() && opts.max_size.is_none() && stdin_is_tty()
+    if !opts.plain
+        && !opts.json
+        && opts.keep.is_empty()
+        && opts.days.is_none()
+        && opts.max_size.is_none()
+        && stdin_is_tty()
     {
         let mut entries = list::collect(&dirs);
         // Orphans too, so the browser can clear everything a plain empty would.
@@ -504,7 +554,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // A cap counts what would go first, so a refused empty deletes nothing.
     if !opts.dry_run && crate::permanent_guard::cap().is_some() {
         let mut n = if age_pass {
-            would_remove(&dirs, cutoff)
+            would_remove(&dirs, cutoff, &opts.keep)
         } else {
             0
         };
@@ -522,6 +572,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                     gone_before: cutoff,
                     free_inodes: 0,
                     only: Some(seen.as_slice()),
+                    keep: None,
                 },
             )
             .removed;
@@ -570,6 +621,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 gone_before: cutoff,
                 free_inodes: 0,
                 only: Some(seen.as_slice()),
+                keep: Some(&opts.keep),
             },
         );
         removed.fetch_add(done.removed, Ordering::Relaxed);
@@ -653,16 +705,19 @@ fn until_free(prog: &str, spec: &str, floor: crate::reap::Floor, opts: &Opts) ->
         &roots,
         spec,
         floor,
-        opts.dry_run,
-        opts.verbose,
-        opts.json,
+        &crate::reap::FreeOpts {
+            dry_run: opts.dry_run,
+            verbose: opts.verbose,
+            json: opts.json,
+            keep: Some(&opts.keep),
+        },
     )
 }
 
 /// How many items a plain empty of `dirs` would delete: every child of
 /// files/ for a full empty, else the records older than `cutoff`.
-fn would_remove(dirs: &[TrashDir], cutoff: Option<i64>) -> u64 {
-    let old_record = |e: &fs::DirEntry, cut: i64| {
+fn would_remove(dirs: &[TrashDir], cutoff: Option<i64>, keep: &crate::keep::KeepList) -> u64 {
+    let old_record = |dir: &TrashDir, e: &fs::DirEntry, cut: i64| {
         let fname = e.file_name();
         let fname = crate::util::str_from_os_ref(&fname);
         if crate::util::trash_item_name(&fname).is_none() {
@@ -674,13 +729,25 @@ fn would_remove(dirs: &[TrashDir], cutoff: Option<i64>) -> u64 {
         is_old(
             parsed.as_ref().and_then(|i| i.deletion_date.as_deref()),
             cut,
-        )
+        ) && parsed
+            .as_ref()
+            .filter(|record| !record.path.as_os_str().is_empty())
+            .is_none_or(|record| !keep.keeps(&dir.resolve_original(&record.path)))
     };
     dirs.iter()
         .map(|dir| match cutoff {
-            None => fs::read_dir(dir.files()).map_or(0, |r| r.count() as u64),
+            None => fs::read_dir(dir.files()).map_or(0, |rows| {
+                rows.flatten()
+                    .filter(|entry| {
+                        let mut record = entry.file_name();
+                        record.push(".trashinfo");
+                        original_of(dir, &dir.info().join(record))
+                            .is_none_or(|original| !keep.keeps(&original))
+                    })
+                    .count() as u64
+            }),
             Some(cut) => fs::read_dir(dir.info()).map_or(0, |r| {
-                r.flatten().filter(|e| old_record(e, cut)).count() as u64
+                r.flatten().filter(|e| old_record(dir, e, cut)).count() as u64
             }),
         })
         .sum()
@@ -777,31 +844,39 @@ fn empty_one(
             let Some(name) = crate::util::trash_item_name(&fname) else {
                 continue;
             };
+            let parsed = info::read_bounded(&info_path, info::RECORD_CAP)
+                .map(|c| info::parse_bytes(&c))
+                .ok();
             let take = match cutoff {
                 None => true,
-                Some(cut) => {
-                    let parsed = info::read_bounded(&info_path, info::RECORD_CAP)
-                        .map(|c| info::parse_bytes(&c))
-                        .ok();
-                    is_old(
-                        parsed.as_ref().and_then(|i| i.deletion_date.as_deref()),
-                        cut,
-                    )
-                }
+                Some(cut) => is_old(
+                    parsed.as_ref().and_then(|i| i.deletion_date.as_deref()),
+                    cut,
+                ),
             };
+            let original = parsed
+                .as_ref()
+                .filter(|record| !record.path.as_os_str().is_empty())
+                .map(|record| dir.resolve_original(&record.path));
             // Under the lock, only an item that the count saw.
             if take && !seen.saw_item(&crate::util::os_from_str(name)) {
                 late += 1;
                 kept_names.push(name.to_string());
                 continue;
             }
+            if take && original.as_ref().is_some_and(|path| opts.keep.keeps(path)) {
+                if opts.dry_run && !opts.json {
+                    println!(
+                        "kept {} (matches keep list)",
+                        crate::util::term_path(original.as_ref().unwrap())
+                    );
+                }
+                kept_names.push(name.to_string());
+                continue;
+            }
             if take {
                 // -v names the original path, as trash-cli users asked.
-                let shown = if opts.verbose {
-                    original_of(dir, &info_path)
-                } else {
-                    None
-                };
+                let shown = if opts.verbose { original } else { None };
                 victims.push((
                     crate::util::join_name(&files_dir, name),
                     Some(info_path),
@@ -953,18 +1028,30 @@ fn full_empty_dry_run(dir: &TrashDir, opts: &Opts, removed: &AtomicU64, bytes: &
     let info_dir = dir.info();
     let mut n_files = 0u64;
     let mut total = 0u64;
+    let mut kept_records = std::collections::HashSet::new();
     let sizes = trashdir::DirSizes::load(dir);
     if let Ok(entries) = fs::read_dir(&files_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
+            let mut info_name = entry.file_name();
+            info_name.push(".trashinfo");
+            let original = original_of(dir, &info_dir.join(&info_name));
+            if original.as_ref().is_some_and(|path| opts.keep.keeps(path)) {
+                kept_records.insert(info_name);
+                if !opts.json {
+                    println!(
+                        "kept {} (matches keep list)",
+                        crate::util::term_path(original.as_ref().unwrap())
+                    );
+                }
+                continue;
+            }
             // Directory payloads: use validated directorysizes when present.
             let sz = sizes.payload_bytes(&crate::util::str_from_os_ref(&entry.file_name()));
             total = total.saturating_add(sz);
             n_files += 1;
             if opts.verbose {
-                let mut info = entry.file_name();
-                info.push(".trashinfo");
-                let shown = original_of(dir, &info_dir.join(info)).unwrap_or(p);
+                let shown = original.unwrap_or(p);
                 println!(
                     "would remove {} ({})",
                     crate::util::term_path(&shown),
@@ -975,6 +1062,20 @@ fn full_empty_dry_run(dir: &TrashDir, opts: &Opts, removed: &AtomicU64, bytes: &
     }
     if let Ok(entries) = fs::read_dir(&info_dir) {
         for entry in entries.flatten() {
+            if kept_records.contains(&entry.file_name()) {
+                continue;
+            }
+            if let Some(original) = original_of(dir, &entry.path()) {
+                if opts.keep.keeps(&original) {
+                    if !opts.json {
+                        println!(
+                            "kept {} (matches keep list)",
+                            crate::util::term_path(&original)
+                        );
+                    }
+                    continue;
+                }
+            }
             total = total.saturating_add(crate::fastdelete::disk_usage(&entry.path()));
         }
     }
@@ -1003,13 +1104,33 @@ fn full_empty_wipe(
     let names: Vec<std::ffi::OsString> = fs::read_dir(&files_dir)
         .map(|r| r.flatten().map(|e| e.file_name()).collect())
         .unwrap_or_default();
-    let late_names: std::collections::HashSet<&std::ffi::OsStr> = names
+    let counted_late: std::collections::HashSet<&std::ffi::OsStr> = names
         .iter()
         .map(|n| n.as_os_str())
         .filter(|n| !seen.saw_payload(n))
         .collect();
-    let late = |name: &std::ffi::OsStr| late_names.contains(name);
-    let late_record = |rec: &std::ffi::OsStr| !seen.saw_record(rec);
+    let protected: std::collections::HashSet<std::ffi::OsString> = names
+        .iter()
+        .filter(|name| {
+            let mut record = name.to_os_string();
+            record.push(".trashinfo");
+            original_of(dir, &info_dir.join(record))
+                .is_some_and(|original| opts.keep.keeps(&original))
+        })
+        .cloned()
+        .collect();
+    let stays = |name: &std::ffi::OsStr| counted_late.contains(name) || protected.contains(name);
+    let protected_records: std::collections::HashSet<std::ffi::OsString> = fs::read_dir(&info_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            original_of(dir, &entry.path()).is_some_and(|original| opts.keep.keeps(&original))
+        })
+        .map(|entry| entry.file_name())
+        .collect();
+    let late_record =
+        |record: &std::ffi::OsStr| !seen.saw_record(record) || protected_records.contains(record);
 
     // Verbose still lists intended removals before delete (stable UX),
     // by original path where a record names one.
@@ -1017,7 +1138,7 @@ fn full_empty_wipe(
         if let Ok(entries) = fs::read_dir(&files_dir) {
             for entry in entries
                 .flatten()
-                .filter(|e| !late(e.file_name().as_os_str()))
+                .filter(|e| !stays(e.file_name().as_os_str()))
             {
                 let mut info = entry.file_name();
                 info.push(".trashinfo");
@@ -1030,17 +1151,24 @@ fn full_empty_wipe(
     // A payload that cannot go stays, with its .trashinfo; the rest of the
     // trash still empties, and the failures are reported at the end.
     // The whole trash goes at once, so the cap takes every item or none.
-    let mut kept: Vec<String> = late_names
+    let mut kept: Vec<String> = counted_late
         .iter()
-        .map(|n| crate::util::str_from_os_ref(n))
+        .map(|name| crate::util::str_from_os_ref(name))
+        .chain(
+            protected
+                .iter()
+                .map(|name| crate::util::str_from_os_ref(name)),
+        )
         .collect();
+    kept.sort();
+    kept.dedup();
     let left = kept.len() as u64;
     if let Err(e) = crate::permanent_guard::gate_many(names.len() as u64 - left) {
         eprintln!("{prog}: {e}");
         errors.fetch_add(1, Ordering::Relaxed);
         return left;
     }
-    let (wf, wi) = crate::fastdelete::wipe_two_parallel(&files_dir, &info_dir, late, late_record);
+    let (wf, wi) = crate::fastdelete::wipe_two_parallel(&files_dir, &info_dir, stays, late_record);
     match wf {
         Ok(w) => {
             // Top-level `files/` children ≈ trashed items (incl. orphans).
@@ -1073,7 +1201,7 @@ fn full_empty_wipe(
     }
 
     prune_directorysizes(dir, &kept);
-    report_late(prog, dir, left);
+    report_late(prog, dir, counted_late.len() as u64);
     left
 }
 

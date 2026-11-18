@@ -94,6 +94,8 @@ pub struct Prune<'a> {
     /// item it did not count still counts toward the budget but is never
     /// removed (round 245). `None` takes any item.
     pub only: Option<&'a [trashdir::Seen]>,
+    /// Original paths protected by `empty --keep-from`.
+    pub keep: Option<&'a crate::keep::KeepList>,
 }
 
 /// Bring the trash roots in `dirs`, taken together, under `p.max` bytes.
@@ -127,8 +129,18 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
         let sizes = trashdir::DirSizes::load(dir);
         let entries: Vec<list::Entry> = list::collect(std::slice::from_ref(dir))
             .into_iter()
-            .filter(|e| !p.gone_before.is_some_and(|cut| e.epoch <= cut))
+            .filter(|e| p.gone_before.is_none_or(|cut| e.epoch > cut))
             .collect();
+        if p.dry_run {
+            if let Some(keep) = p.keep {
+                for entry in entries.iter().filter(|entry| keep.keeps(&entry.original)) {
+                    println!(
+                        "kept {} (matches keep list)",
+                        crate::util::term_path(&entry.original)
+                    );
+                }
+            }
+        }
         // Sizing stats every payload; spread it over the rayon pool.
         items.par_extend(entries.into_par_iter().map(|e| Candidate {
             root: ri,
@@ -143,7 +155,8 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
                 || p.only.is_some_and(|seen| {
                     let name = crate::util::os_from_str(&e.name);
                     !seen.get(ri).is_some_and(|s| s.saw_item(&name))
-                }),
+                })
+                || p.keep.is_some_and(|keep| keep.keeps(&e.original)),
             name: e.name,
         }));
         sizes.write_back_locked();

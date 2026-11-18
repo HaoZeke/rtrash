@@ -491,6 +491,21 @@ items would go for good.
 It overrides
 .BR RTRASH_MAX_PERMANENT .
 .TP
+.BI \-\-keep\-from =FILE
+Never remove an item whose recorded original path equals or is below a
+path prefix in
+.IR FILE ,
+or matches a shell glob in it.
+Blank lines and lines beginning with
+.B #
+are ignored.
+Repeatable; rules from
+.B RTRASH_KEEP_FROM
+also apply.
+With
+.BR \-n ,
+protected candidates are printed as kept with the reason.
+.TP
 .BI \-\-max\-size =SIZE
 Remove items until the trash directories in scope, taken together, fit in
 .IR SIZE .
@@ -4305,8 +4320,7 @@ Print the embedded man page source to stdout.
 Also multi-call
 .BR trash-rm .
 .PP
-Permanently remove trashed items whose original path or basename matches
-a
+Permanently remove trashed items whose original path matches a
 .I PATTERN
 (shell-style glob; quote globs from the shell). Matching entries are
 deleted from the trash
@@ -4318,12 +4332,17 @@ An orphan (no
 matches by its name in
 .B files/
 or its path there.
-An absolute
-.I PATTERN
-also matches with symlinks resolved in its directory part (up to the
-first glob), the form
+An absolute path with no glob characters matches only an exactly equal
+recorded original path.
+Its directory is also tried with symlinks resolved, the form
 .B put
 records, so a path typed through a symlinked directory still matches.
+A bare name also matches basenames.
+When one bare name selects more than one item,
+.B rm
+refuses and lists them unless
+.B \-\-all\-matches
+is given.
 .PP
 Note: multi-call name
 .B rm
@@ -4395,6 +4414,27 @@ or
 .B exact
 (the whole original path).
 Unlike trashy, the default stays glob.
+.TP
+.B \-\-basename
+Also match every
+.I PATTERN
+against item basenames.
+.TP
+.B \-\-all\-matches
+Allow one basename pattern to select more than one trash entry.
+.TP
+.BI \-\-keep\-from =FILE
+Never remove an item whose recorded original path equals or is below a
+listed path prefix, or matches a listed shell glob.
+Blank lines and lines beginning with
+.B #
+are ignored.
+Repeatable; rules from
+.B RTRASH_KEEP_FROM
+also apply.
+With
+.BR \-n ,
+protected matches are printed as kept with the reason.
 .TP
 .BI \-\-older\-than =AGE
 Only match items trashed more than
@@ -4489,6 +4529,16 @@ trash-rm foo
 .RE
 .fi
 .SH ENVIRONMENT
+.TP
+.B RTRASH_KEEP_FROM
+Path to a keep-list file read by
+.B rm
+and
+.BR empty .
+It has the same path-prefix and glob format as
+.BR \-\-keep\-from .
+If a requested keep-list file cannot be read, the command refuses to
+delete anything.
 .TP
 .B RTRASH_DEBUG
 When set, a Windows restore that matches nothing lists each Recycle Bin item's original path and the form it was compared in.

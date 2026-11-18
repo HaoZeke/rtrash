@@ -1786,16 +1786,110 @@ fn trash_rm_match_takes_substring_and_exact() {
         .to_string();
     let out = sb.run(&["rm", "--match=exact", &exact]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    // Exact needs the whole path: a bare name matches nothing.
+    // A clearly bare exact value matches the basename.
     let out = sb.run(&["rm", "--match=exact", "new.txt"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(trash_names(&sb), ["new.txt"]);
+    assert!(trash_names(&sb).is_empty());
     // A substring every path holds needs --force; a bad kind exits 2.
     let mass = sb.run(&["rm", "-m", "substring", "/"]);
     assert_eq!(mass.status.code(), Some(2), "{}", stderr_of(&mass));
     let bad = sb.run(&["rm", "--match=fuzzy", "x"]);
     assert_eq!(bad.status.code(), Some(2), "{}", stderr_of(&bad));
-    assert_eq!(trash_names(&sb), ["new.txt"]);
+    assert!(trash_names(&sb).is_empty());
+}
+
+#[test]
+fn trash_rm_requires_exact_absolute_paths_and_disambiguates_bare_names() {
+    let sb = Sandbox::new("rm-safe-match");
+    for dir in ["protected", "ordinary"] {
+        fs::create_dir(sb.work().join(dir)).unwrap();
+        fs::write(sb.work().join(dir).join("same.txt"), dir).unwrap();
+    }
+    assert!(sb
+        .run(&["put", "protected/same.txt", "ordinary/same.txt"])
+        .status
+        .success());
+
+    let ordinary = sb.work().join("ordinary/same.txt");
+    let out = sb.run(&["rm", "--home-only", ordinary.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let listed = stdout_of(&sb.run(&["list", "--home-only"]));
+    assert!(listed.contains("protected/same.txt"), "{listed}");
+    assert!(!listed.contains("ordinary/same.txt"), "{listed}");
+
+    fs::write(&ordinary, b"ordinary again").unwrap();
+    assert!(sb.run(&["put", "ordinary/same.txt"]).status.success());
+    let refused = sb.run(&["rm", "--home-only", "same.txt"]);
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr_of(&refused));
+    let err = stderr_of(&refused);
+    assert!(err.contains("--all-matches"), "{err}");
+    assert!(err.contains("protected/same.txt"), "{err}");
+    assert!(err.contains("ordinary/same.txt"), "{err}");
+    assert_eq!(trash_names(&sb).len(), 2);
+
+    let all = sb.run(&["rm", "--home-only", "--all-matches", "same.txt"]);
+    assert!(all.status.success(), "{}", stderr_of(&all));
+    assert!(trash_names(&sb).is_empty());
+}
+
+#[test]
+fn keep_from_protects_rm_and_empty_and_dry_runs_name_the_originals() {
+    let sb = Sandbox::new("keep-from");
+    for dir in ["protected", "ordinary"] {
+        fs::create_dir(sb.work().join(dir)).unwrap();
+        fs::write(sb.work().join(dir).join("item.txt"), dir).unwrap();
+    }
+    assert!(sb
+        .run(&["put", "protected/item.txt", "ordinary/item.txt"])
+        .status
+        .success());
+    let keep_file = sb.root.join("keep.txt");
+    fs::write(
+        &keep_file,
+        format!("# shared data\n{}\n", sb.work().join("protected").display()),
+    )
+    .unwrap();
+    let keep = keep_file.to_str().unwrap();
+
+    let dry = sb.run(&[
+        "rm",
+        "--home-only",
+        "--all-matches",
+        "--keep-from",
+        keep,
+        "-n",
+        "*.txt",
+    ]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    let shown = stdout_of(&dry);
+    assert!(shown.contains("kept "), "{shown}");
+    assert!(shown.contains("protected/item.txt"), "{shown}");
+    assert!(shown.contains("ordinary/item.txt"), "{shown}");
+    assert!(shown.contains("matches keep list"), "{shown}");
+
+    let removed = sb.run(&[
+        "rm",
+        "--home-only",
+        "--all-matches",
+        &format!("--keep-from={keep}"),
+        "*.txt",
+    ]);
+    assert!(removed.status.success(), "{}", stderr_of(&removed));
+    let listed = stdout_of(&sb.run(&["list", "--home-only"]));
+    assert!(listed.contains("protected/item.txt"), "{listed}");
+    assert!(!listed.contains("ordinary/item.txt"), "{listed}");
+
+    let dry_empty = sb.empty(&["--keep-from", keep, "-n"]);
+    assert!(dry_empty.status.success(), "{}", stderr_of(&dry_empty));
+    let shown = stdout_of(&dry_empty);
+    assert!(shown.contains("kept "), "{shown}");
+    assert!(shown.contains("protected/item.txt"), "{shown}");
+    assert!(shown.contains("matches keep list"), "{shown}");
+
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let kept = sb.run_env(&["empty", "--plain", &pin], &[("RTRASH_KEEP_FROM", keep)]);
+    assert!(kept.status.success(), "{}", stderr_of(&kept));
+    assert_eq!(trash_names(&sb).len(), 1);
 }
 
 #[test]
@@ -3135,7 +3229,7 @@ fn trash_rm_removes_match_keeps_other() {
     assert_eq!(trash_names(&sb).len(), 3);
 
     // --home-only: a bare rm would also delete the host's trashed *.o.
-    let out = sb.run(&["rm", "--home-only", "*.o"]);
+    let out = sb.run(&["rm", "--home-only", "--all-matches", "*.o"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let mut names = trash_names(&sb);
     names.sort();
@@ -8640,11 +8734,15 @@ fn max_count_refuses_rm_and_empty_past_the_cap() {
     };
     let cap2 = [("RTRASH_MAX_PERMANENT", "2")];
     refused(
-        &["rm", &pin, "--max-count=2", "mc-*"],
+        &["rm", &pin, "--all-matches", "--max-count=2", "mc-*"],
         &[],
         "3 items would be deleted",
     );
-    refused(&["rm", &pin, "mc-*"], &cap2, "more than the cap of 2");
+    refused(
+        &["rm", &pin, "--all-matches", "mc-*"],
+        &cap2,
+        "more than the cap of 2",
+    );
     refused(&["empty", &pin, "--all"], &cap2, "more than the cap of 2");
     refused(
         &["rm", &pin, "mc-a"],
@@ -8653,7 +8751,7 @@ fn max_count_refuses_rm_and_empty_past_the_cap() {
     );
     refused(&["rm", &pin, "--max-count=x", "mc-a"], &[], "--max-count");
     // A dry run only looks, so the cap lets it through.
-    let out = sb.run_env(&["rm", &pin, "-n", "mc-*"], &cap2);
+    let out = sb.run_env(&["rm", &pin, "--all-matches", "-n", "mc-*"], &cap2);
     assert!(out.status.success(), "{}", stderr_of(&out));
     // Within the cap the run goes ahead, and --max-count wins over the variable.
     let one = [("RTRASH_MAX_PERMANENT", "1")];
@@ -9109,7 +9207,10 @@ fn rm_stops_after_the_entry_in_hand_at_the_first_ctrl_c() {
     }
     let put = sb.run(&["put", "a.txt", "b.txt", "c.txt"]);
     assert!(put.status.success(), "{}", stderr_of(&put));
-    let out = sb.run_env(&["rm", "*.txt"], &[("RTRASH_TEST_SIGINT", "after-item:1")]);
+    let out = sb.run_env(
+        &["rm", "--all-matches", "*.txt"],
+        &[("RTRASH_TEST_SIGINT", "after-item:1")],
+    );
     let said = stderr_of(&out);
     assert_eq!(out.status.code(), Some(130), "{said}");
     assert!(

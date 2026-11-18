@@ -625,15 +625,19 @@ pub fn stats(top: usize) -> Vec<crate::trash_stats::Stats> {
 
 /// `rm` on the Finder trashes: permanently remove the items whose Put Back
 /// place, its file name or the name in the trash matches a pattern.
-pub fn rm(
-    prog: &str,
-    patterns: &crate::filters::Patterns,
-    batch: Option<&str>,
-    dry_run: bool,
-    verbose: bool,
-    json: bool,
-    filter: Filter,
-) -> i32 {
+pub(crate) struct RmOpts<'a> {
+    pub batch: Option<&'a str>,
+    pub dry_run: bool,
+    pub verbose: bool,
+    pub json: bool,
+    pub filter: Filter,
+    pub keep: &'a crate::keep::KeepList,
+    pub all_matches: bool,
+}
+
+pub(crate) fn rm(prog: &str, matcher: &crate::rm_match::Matcher, opts: &RmOpts<'_>) -> i32 {
+    let (batch, dry_run, verbose, json) = (opts.batch, opts.dry_run, opts.verbose, opts.json);
+    let (filter, keep, all_matches) = (opts.filter, opts.keep, opts.all_matches);
     let rows = match entries() {
         Ok(r) => filter.apply(r),
         Err(e) => {
@@ -665,35 +669,45 @@ pub fn rm(
     };
     let (mut removed, mut bytes, mut status) = (0u64, 0u64, 0);
     let mut matched: Vec<String> = Vec::new();
-    let regex = nfc_regexes(&patterns.regex);
-    // Substring and exact texts compare with the composed paths too.
-    let texts = crate::filters::Patterns {
-        texts: patterns.texts.iter().map(|t| nfc(t)).collect(),
-        ..patterns.clone()
-    };
     let hit = |e: &Entry| -> bool {
-        let path_s = e.shown.to_string_lossy();
+        let path_s = nfc(&e.shown.to_string_lossy());
         let base = e
             .shown
             .file_name()
-            .map(|b| b.to_string_lossy().into_owned())
+            .map(|b| nfc(&b.to_string_lossy()))
             .unwrap_or_default();
         let name = nfc(&e.name);
-        match patterns.kind {
-            crate::filters::Match::Glob => patterns.texts.iter().any(|p| {
-                let p = nfc(p);
-                crate::util::fnmatch(&p, &path_s)
-                    || crate::util::fnmatch(&p, &base)
-                    || crate::util::fnmatch(&p, &name)
-            }),
-            crate::filters::Match::Regex => {
-                let path_s = nfc(&path_s);
-                regex.iter().any(|r| r.is_match(&path_s))
-            }
-            _ => texts.hit(&nfc(&path_s), &base, &name),
-        }
+        matcher.hit_nfc(&path_s, &base, &name)
     };
     let hits: Vec<&Entry> = rows.iter().filter(|e| hit(e)).collect();
+    if !all_matches {
+        let candidates: Vec<_> = hits
+            .iter()
+            .map(|e| {
+                let full = nfc(&e.shown.to_string_lossy());
+                let base = e
+                    .shown
+                    .file_name()
+                    .map(|b| nfc(&b.to_string_lossy()))
+                    .unwrap_or_default();
+                (full, base, nfc(&e.name), e.shown.clone())
+            })
+            .collect();
+        if let Some((pattern, paths)) = matcher.ambiguous_nfc(&candidates) {
+            eprintln!(
+                "{prog}: basename pattern '{pattern}' matches {} trash entries; \
+                 refusing without --all-matches:",
+                paths.len()
+            );
+            for path in paths {
+                eprintln!("  {}", crate::util::err_path(&path));
+            }
+            return 2;
+        }
+    }
+    let (kept, hits): (Vec<_>, Vec<_>) = hits
+        .into_iter()
+        .partition(|e| e.original.as_ref().is_some_and(|path| keep.keeps(path)));
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
     // they came from (an item with no Put Back place counts as outside),
     // so a refused rm deletes nothing.
@@ -720,6 +734,14 @@ pub fn rm(
             .collect();
         if !crate::rm_ask::confirm(prog, &named) {
             return 0;
+        }
+    }
+    if dry_run && !json {
+        for e in kept {
+            println!(
+                "kept {} (matches keep list)",
+                crate::util::term_path(&e.shown)
+            );
         }
     }
     for e in hits {

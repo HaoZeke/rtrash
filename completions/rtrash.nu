@@ -142,6 +142,7 @@ export extern "rtrash empty" [
     --max-size: string  # remove items until the trash (all roots in scope
     --prune: string@"nu-complete rtrash prune"  # which items --max-size removes first
     --max-count: string  # refuse when more than N items would go
+    --keep-from: path  # read protected path prefixes and globs from FILE
     --until-free: string  # remove the oldest items until each trash file system has SPEC free
     --dangling  # remove only the .trashinfo records whose payload is gone
     --json  # emit a JSON summary on stdout ({dry_run, removed, bytes, days})
@@ -342,6 +343,9 @@ export extern "rtrash rm" [
     --smaller-than: string  # only match items taking less than SIZE on disk
     --batch: string  # only items from one put run: an ID from `undo --list`, or `last`
     --max-count: string  # refuse when more than N items would go
+    --basename  # also match PATTERNs against basenames
+    --all-matches  # allow one basename pattern to match several items
+    --keep-from: path  # read protected path prefixes and globs from FILE
     --regex  # PATTERNs are regular expressions on the original path
     --match(-m): string  # how to read PATTERNs: glob, regex, substring or exact
     --dry-run(-n)  # list matches and reclaimable size; do not delete
@@ -486,6 +490,7 @@ export extern "trash-empty" [
     --max-size: string  # remove items until the trash (all roots in scope
     --prune: string@"nu-complete rtrash prune"  # which items --max-size removes first
     --max-count: string  # refuse when more than N items would go
+    --keep-from: path  # read protected path prefixes and globs from FILE
     --until-free: string  # remove the oldest items until each trash file system has SPEC free
     --dangling  # remove only the .trashinfo records whose payload is gone
     --json  # emit a JSON summary on stdout ({dry_run, removed, bytes, days})
@@ -565,6 +570,9 @@ export extern "trash-rm" [
     --dry-run(-n)  # list matches and reclaimable size; do not delete
     --batch: string  # only items from one put run: an ID from `undo --list`, or `last`
     --max-count: string  # refuse when more than N items would go
+    --basename  # also match PATTERNs against basenames
+    --all-matches  # allow one basename pattern to match several items
+    --keep-from: path  # read protected path prefixes and globs from FILE
     --regex  # PATTERNs are regular expressions on the original path
     --match(-m): string  # how to read PATTERNs: glob, regex, substring or exact
     --interactive(-i)  # ask before deleting, even when stdin is not a terminal

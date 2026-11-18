@@ -1745,7 +1745,18 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         if purge_trash {
             for (dev, need) in needs.iter_mut().filter(|(_, n)| *n != (0, 0)) {
                 let at = on.iter().find(|(d, _)| d == dev).map(|(_, p)| p.as_path());
-                *need = purge_oldest(prog, *dev, at, *need, target, dry_run, verbose);
+                *need = purge_oldest(
+                    prog,
+                    *dev,
+                    at,
+                    *need,
+                    target,
+                    &PurgeOpts {
+                        dry_run,
+                        verbose,
+                        keep: None,
+                    },
+                );
             }
             for g in &mut groups {
                 g.entries
@@ -2073,6 +2084,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
 /// Empty the oldest items of this user's trashes on device `dev` until
 /// `need` (bytes, inodes) is freed, and return what is still needed:
 /// measured again after a real purge, estimated on a dry run.
+pub(crate) struct PurgeOpts<'a> {
+    pub dry_run: bool,
+    pub verbose: bool,
+    pub keep: Option<&'a crate::keep::KeepList>,
+}
+
 #[cfg(unix)]
 pub(crate) fn purge_oldest(
     prog: &str,
@@ -2080,8 +2097,7 @@ pub(crate) fn purge_oldest(
     at: Option<&Path>,
     need: (u64, u64),
     target: Floor,
-    dry_run: bool,
-    verbose: bool,
+    opts: &PurgeOpts<'_>,
 ) -> (u64, u64) {
     use crate::retention::{prune, Policy, Prune};
     use std::os::unix::fs::MetadataExt;
@@ -2093,9 +2109,9 @@ pub(crate) fn purge_oldest(
     let mut left = need;
     if crate::finder::is_default(false) {
         let before = left;
-        left = crate::finder::purge_oldest(prog, dev, left, dry_run);
-        purged(dry_run, u64::from(left != before));
-        if !dry_run && left != before {
+        left = crate::finder::purge_oldest(prog, dev, left, opts);
+        purged(opts.dry_run, u64::from(left != before));
+        if !opts.dry_run && left != before {
             if let Some(at) = at {
                 left = crate::space::query(at).map_or(left, |s| target.need(&s));
             }
@@ -2106,7 +2122,7 @@ pub(crate) fn purge_oldest(
             break;
         }
         let one = std::slice::from_ref(dir);
-        let opts = |max| Prune {
+        let prune_opts = |max| Prune {
             max,
             policy: Policy::Oldest,
             dry_run: true,
@@ -2115,24 +2131,29 @@ pub(crate) fn purge_oldest(
             gone_before: None,
             free_inodes: 0,
             only: None,
+            keep: opts.keep,
         };
-        let total = prune(prog, one, &opts(u64::MAX)).left;
+        let total = prune(prog, one, &prune_opts(u64::MAX)).left;
         let max = total.saturating_sub(left.0);
         let done = prune(
             prog,
             one,
             &Prune {
-                dry_run,
-                verbose,
+                dry_run: opts.dry_run,
+                verbose: opts.verbose,
                 free_inodes: left.1,
-                ..opts(max)
+                ..prune_opts(max)
             },
         );
-        purged(dry_run, done.removed);
+        purged(opts.dry_run, done.removed);
         if done.removed > 0 {
             eprintln!(
                 "{prog}: {} {} ({}) from trash '{}'",
-                if dry_run { "would empty" } else { "emptied" },
+                if opts.dry_run {
+                    "would empty"
+                } else {
+                    "emptied"
+                },
                 crate::util::plural(done.removed, "item", "items"),
                 crate::util::format_bytes(done.bytes),
                 crate::util::err_path(&dir.root)
@@ -2142,7 +2163,7 @@ pub(crate) fn purge_oldest(
         // on the same device can sit outside the directory a test seam
         // names. statfs of that trash is the real disk, and a seam that
         // is still short would look done.
-        left = if dry_run {
+        left = if opts.dry_run {
             (
                 left.0.saturating_sub(done.bytes),
                 left.1.saturating_sub(done.inodes),
@@ -2164,8 +2185,7 @@ pub(crate) fn purge_oldest(
     at: Option<&Path>,
     need: (u64, u64),
     target: Floor,
-    dry_run: bool,
-    verbose: bool,
+    opts: &PurgeOpts<'_>,
 ) -> (u64, u64) {
     // The volume that holds `at`: a drive, or a volume mounted on a
     // folder, whose Recycle Bin is its own.
@@ -2184,18 +2204,22 @@ pub(crate) fn purge_oldest(
     let Some(drive) = drive else {
         return need;
     };
-    let (n, bytes, files) = crate::win_recycle::purge_oldest_on(prog, &at, need, dry_run, verbose);
-    purged(dry_run, n);
+    let (n, bytes, files) = crate::win_recycle::purge_oldest_on(prog, &at, need, opts);
+    purged(opts.dry_run, n);
     if n > 0 {
         eprintln!(
             "{prog}: {} {} ({}) from the Recycle Bin of {}",
-            if dry_run { "would empty" } else { "emptied" },
+            if opts.dry_run {
+                "would empty"
+            } else {
+                "emptied"
+            },
             crate::util::plural(n, "item", "items"),
             crate::util::format_bytes(bytes),
             crate::util::err_path(&drive)
         );
     }
-    if dry_run {
+    if opts.dry_run {
         (need.0.saturating_sub(bytes), need.1.saturating_sub(files))
     } else {
         crate::space::query(&drive).map_or(need, |s| target.need(&s))
@@ -2207,14 +2231,19 @@ pub(crate) fn purge_oldest(
 /// trash items there until it is back at `floor`. Exits 1 when one stays
 /// short. JSON lists each short file system with what it needed and what
 /// is still missing (estimated on a dry run).
+pub(crate) struct FreeOpts<'a> {
+    pub dry_run: bool,
+    pub verbose: bool,
+    pub json: bool,
+    pub keep: Option<&'a crate::keep::KeepList>,
+}
+
 pub(crate) fn free_until(
     prog: &str,
     roots: &[PathBuf],
     spec: &str,
     floor: Floor,
-    dry_run: bool,
-    verbose: bool,
-    json: bool,
+    opts: &FreeOpts<'_>,
 ) -> i32 {
     let mut seen: Vec<u64> = Vec::new();
     let mut rows: Vec<String> = Vec::new();
@@ -2241,7 +2270,18 @@ pub(crate) fn free_until(
         if need == (0, 0) {
             continue;
         }
-        let left = purge_oldest(prog, dev, Some(root), need, floor, dry_run, verbose);
+        let left = purge_oldest(
+            prog,
+            dev,
+            Some(root),
+            need,
+            floor,
+            &PurgeOpts {
+                dry_run: opts.dry_run,
+                verbose: opts.verbose,
+                keep: opts.keep,
+            },
+        );
         if left != (0, 0) {
             still += 1;
             eprintln!(
@@ -2258,14 +2298,19 @@ pub(crate) fn free_until(
             left.1
         ));
     }
-    if json {
+    if opts.json {
         println!(
-            r#"{{"dry_run":{dry_run},"until_free":"{}","short":{},"still_short":{still},"file_systems":[{}]}}"#,
+            concat!(
+                r#"{{"dry_run":{},"until_free":"{},"short":{},"still_short":{},"#,
+                r#""file_systems":[{}]}}"#
+            ),
+            opts.dry_run,
             crate::util::json_escape(spec),
             rows.len(),
+            still,
             rows.join(",")
         );
-    } else if rows.is_empty() && (verbose || dry_run) {
+    } else if rows.is_empty() && (opts.verbose || opts.dry_run) {
         eprintln!("{prog}: every trash file system has {spec} free; nothing to do");
     }
     i32::from(still > 0)

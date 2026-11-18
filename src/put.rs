@@ -427,6 +427,7 @@ fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
                 gone_before: None,
                 free_inodes: 0,
                 only: None,
+                keep: None,
             },
         );
         if done.removed > 0 && !quiet {

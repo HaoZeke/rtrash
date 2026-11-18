@@ -1344,8 +1344,11 @@ fn max_count_refuses_finder_rm_and_empty_past_the_cap() {
     assert!(b.run(&["put", "fc-a", "fc-b", "fc-c"], "").status.success());
     let cap2 = [("RTRASH_MAX_PERMANENT", "2")];
     for (args, envs) in [
-        (&["rm", "--max-count=2", "fc-*"][..], &[][..]),
-        (&["rm", "fc-*"][..], &cap2[..]),
+        (
+            &["rm", "--all-matches", "--max-count=2", "fc-*"][..],
+            &[][..],
+        ),
+        (&["rm", "--all-matches", "fc-*"][..], &cap2[..]),
         (&["empty", "--all"][..], &cap2[..]),
     ] {
         let o = b.run_env(args, envs);

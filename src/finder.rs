@@ -1090,6 +1090,7 @@ pub struct EmptyOpts {
     pub dry_run: bool,
     pub verbose: bool,
     pub json: bool,
+    pub keep: crate::keep::KeepList,
 }
 
 /// The items `empty` removes: those older than the cutoff (all of them
@@ -1184,7 +1185,12 @@ pub fn prune_after_put(prog: &str, moved: &[(PathBuf, String)], quiet: bool) {
 /// `reap --purge-trash` on the Finder trashes of device `dev`: remove
 /// the oldest items until `need` (bytes, inodes) is freed, and return
 /// what is still needed. A dry run counts the items instead.
-pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u64, u64) {
+pub(crate) fn purge_oldest(
+    prog: &str,
+    dev: u64,
+    need: (u64, u64),
+    opts: &crate::reap::PurgeOpts<'_>,
+) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     let Ok(rows) = read_all(prog) else {
         return need;
@@ -1200,15 +1206,27 @@ pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u
         if left == (0, 0) {
             break;
         }
+        if e.original
+            .as_ref()
+            .is_some_and(|path| opts.keep.is_some_and(|keep| keep.keeps(path)))
+        {
+            if opts.dry_run {
+                println!(
+                    "kept {} (matches keep list)",
+                    crate::util::term_path(&e.shown)
+                );
+            }
+            continue;
+        }
         // An item that changed since the listing stays.
         let path = match e.checked() {
             Ok(p) => p,
-            Err(_) if dry_run => e.path(),
+            Err(_) if opts.dry_run => e.path(),
             Err(_) => continue,
         };
         let b = crate::fastdelete::disk_usage(&path);
         let inodes = 1 + crate::trash_stats::count_inodes(&path);
-        if !dry_run {
+        if !opts.dry_run {
             if let Err(err) = crate::permanent_guard::remove(&path) {
                 crate::finder_total::uncarried(&e.trash);
                 eprintln!(
@@ -1226,7 +1244,11 @@ pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u
     if n > 0 {
         eprintln!(
             "{prog}: {} {} ({}) from the Finder Trash",
-            if dry_run { "would empty" } else { "emptied" },
+            if opts.dry_run {
+                "would empty"
+            } else {
+                "emptied"
+            },
             crate::util::plural(n, "item", "items"),
             crate::util::format_bytes(freed),
         );
@@ -1251,6 +1273,20 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
     let mut bytes = 0u64;
     let mut failed = 0u64;
     let picked = empty_pick(rows, o.cutoff, o.max_size, o.prune);
+    let (kept, picked): (Vec<_>, Vec<_>) = picked.into_iter().partition(|(entry, _)| {
+        entry
+            .original
+            .as_ref()
+            .is_some_and(|path| o.keep.keeps(path))
+    });
+    if dry_run && !json {
+        for (entry, _) in kept {
+            println!(
+                "kept {} (matches keep list)",
+                crate::util::term_path(&entry.shown)
+            );
+        }
+    }
     // A cap counts the picks first, so a refused empty deletes nothing.
     if !dry_run {
         if let Some(code) = crate::permanent_guard::check_count(prog, picked.len() as u64) {

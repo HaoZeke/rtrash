@@ -2430,8 +2430,20 @@ on Windows (there is no FreeDesktop layout here).
         let mut policy = crate::budget::Policy::Oldest;
         let mut every = false;
         let mut age = AgeFilter::default();
+        let mut keep_files = Vec::new();
         let mut i = 0usize;
         while i < args.len() {
+            match crate::keep::take_arg(args, &mut i, &mut keep_files) {
+                Some(Ok(())) => {
+                    i += 1;
+                    continue;
+                }
+                Some(Err(e)) => {
+                    eprintln!("{prog}: {e}");
+                    return 2;
+                }
+                None => {}
+            }
             match age.take(args, &mut i) {
                 // As on Linux, `empty` takes no --newer-than.
                 Some(_) if age.newer_than.is_some() => {
@@ -2517,6 +2529,8 @@ With DAYS, only items deleted more than DAYS days ago, as on Linux.
                    (default oldest)
       --max-count=N  refuse, deleting nothing, when more than N items
                    would go (also RTRASH_MAX_PERMANENT)
+      --keep-from=FILE never remove originals under a path prefix or matching
+                   a glob listed in FILE (also RTRASH_KEEP_FROM)
       --all      let an empty with no DAYS, --max-size or --until-free
                    remove items other puts left; without it such an
                    empty asks on a terminal and refuses elsewhere unless
@@ -2550,13 +2564,28 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 }
             }
         }
+        let keep = match crate::keep::KeepList::load(prog, &keep_files) {
+            Ok(keep) => keep,
+            Err(code) => return code,
+        };
         if let Some((spec, floor)) = until {
             if age.older_than.is_some() || max_size.is_some() {
                 eprintln!("{prog}: --until-free takes no DAYS or --max-size");
                 return 2;
             }
             let roots: Vec<PathBuf> = bin_items().into_iter().map(|(b, _)| b).collect();
-            return crate::reap::free_until(prog, &roots, &spec, floor, dry_run, verbose, json);
+            return crate::reap::free_until(
+                prog,
+                &roots,
+                &spec,
+                floor,
+                &crate::reap::FreeOpts {
+                    dry_run,
+                    verbose,
+                    json,
+                    keep: Some(&keep),
+                },
+            );
         }
         let all = match super::list_items() {
             Ok(i) => i,
@@ -2601,6 +2630,17 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             let largest = policy == crate::budget::Policy::Largest;
             for i in pick_budget(&sized, max, largest) {
                 items.push(rest[i].clone());
+            }
+        }
+        let (kept, items): (Vec<_>, Vec<_>) = items
+            .into_iter()
+            .partition(|item| keep.keeps(&original_of(item)));
+        if dry_run && !json {
+            for item in kept {
+                println!(
+                    "kept {} (matches keep list)",
+                    crate::util::term_path(&original_of(&item))
+                );
             }
         }
         // The guard may have asked: act only on items still as listed.
@@ -2784,8 +2824,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         prog: &str,
         at: &Path,
         need: (u64, u64),
-        dry_run: bool,
-        verbose: bool,
+        opts: &crate::reap::PurgeOpts<'_>,
     ) -> (u64, u64, u64) {
         let items: Vec<TrashItem> = match super::list_items() {
             Ok(all) => {
@@ -2800,6 +2839,17 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 return (0, 0, 0);
             }
         };
+        let (kept, items): (Vec<_>, Vec<_>) = items
+            .into_iter()
+            .partition(|item| opts.keep.is_some_and(|keep| keep.keeps(&original_of(item))));
+        if opts.dry_run {
+            for item in kept {
+                println!(
+                    "kept {} (matches keep list)",
+                    crate::util::term_path(&original_of(&item))
+                );
+            }
+        }
         let sized: Vec<(i64, u64, u64)> = items
             .iter()
             .map(|it| {
@@ -2812,17 +2862,21 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             .iter()
             .fold((0u64, 0u64), |(b, f), &i| (b + sized[i].1, f + sized[i].2));
         let chosen: Vec<TrashItem> = picked.iter().map(|&i| items[i].clone()).collect();
-        if verbose || dry_run {
+        if opts.verbose || opts.dry_run {
             for it in &chosen {
                 println!(
                     "{} {}",
-                    if dry_run { "would remove" } else { "removed" },
+                    if opts.dry_run {
+                        "would remove"
+                    } else {
+                        "removed"
+                    },
                     crate::util::term_path(&original_of(it))
                 );
             }
         }
         let n = chosen.len() as u64;
-        if !dry_run && n > 0 {
+        if !opts.dry_run && n > 0 {
             if let Err(e) = crate::permanent_guard::gate_many(n) {
                 eprintln!("{prog}: {e}");
                 return (0, 0, 0);
@@ -3839,9 +3893,29 @@ registry), then the total and the free space on each (a warning under
         let mut kind = crate::filters::Match::Glob;
         let mut bad_match: Option<String> = None;
         let mut json = false;
+        let mut basename = false;
+        let mut all_matches = false;
         let mut patterns: Vec<String> = Vec::new();
+        let mut keep_files = Vec::new();
         let mut batch: Option<String> = None;
-        let filters = parse_with_filters(prog, args, |arg| {
+        let mut parsed_args = Vec::new();
+        let mut arg_index = 0usize;
+        while arg_index < args.len() {
+            match crate::keep::take_arg(args, &mut arg_index, &mut keep_files) {
+                Some(Ok(())) => {
+                    arg_index += 1;
+                }
+                Some(Err(e)) => {
+                    eprintln!("{prog}: {e}");
+                    return 2;
+                }
+                None => {
+                    parsed_args.push(args[arg_index].clone());
+                    arg_index += 1;
+                }
+            }
+        }
+        let filters = parse_with_filters(prog, &parsed_args, |arg| {
             match arg {
                 "-n" | "--dry-run" => dry_run = true,
                 "--regex" => kind = crate::filters::Match::Regex,
@@ -3850,6 +3924,8 @@ registry), then the total and the free space on each (a warning under
                     Err(e) => bad_match = Some(e),
                 },
                 "--json" => json = true,
+                "--basename" => basename = true,
+                "--all-matches" => all_matches = true,
                 "-f" | "--force" => {
                     force = true;
                     crate::rm_ask::set(crate::rm_ask::Mode::Never);
@@ -3880,6 +3956,8 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                    path (the same as --match=regex)
       --match=KIND  how to read PATTERNs (trashy's -m): glob (default),
                    regex, substring or exact (the whole original path)
+      --basename also match every PATTERN against item basenames
+      --all-matches allow a basename pattern to select more than one item
       --older-than=AGE  only match items deleted more than AGE ago: DAYS,
                    or a duration such as 2h, 30m or 1d12h
       --newer-than=AGE  only match items deleted within the last AGE
@@ -3894,6 +3972,8 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
   -f, --force    do not ask, and allow mass patterns (e.g. '*')
       --max-count=N  refuse, deleting nothing, when more than N items
                    would go (also RTRASH_MAX_PERMANENT)
+      --keep-from=FILE never remove originals under a path prefix or matching
+                   a glob listed in FILE (also RTRASH_KEEP_FROM)
   -v, --verbose  print each path
       --json     print a JSON summary (and the matched originals)
       --help     display this help and exit
@@ -3940,17 +4020,26 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             eprintln!("{prog}: missing PATTERN");
             return 2;
         }
-        let pats = match crate::filters::Patterns::new(patterns, kind) {
-            Ok(p) => p,
+        let aliases = patterns
+            .iter()
+            .cloned()
+            .map(|pattern| vec![pattern])
+            .collect();
+        let matcher = match crate::rm_match::Matcher::new(&patterns, aliases, kind, basename) {
+            Ok(matcher) => matcher,
             Err(e) => {
                 eprintln!("{prog}: {e}");
                 return 2;
             }
         };
-        if pats.is_mass() && !force && !scoped {
+        if matcher.is_mass() && !force && !scoped {
             eprintln!("{prog}: refusing a pattern that matches everything without --force");
             return 2;
         }
+        let keep = match crate::keep::KeepList::load(prog, &keep_files) {
+            Ok(keep) => keep,
+            Err(code) => return code,
+        };
         let items = match super::list_items() {
             Ok(i) => i,
             Err(e) => {
@@ -3975,11 +4064,47 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                     .file_name()
                     .map(|f| f.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                pats.hit(&full, &base, &base)
+                matcher.hit(&full, &base, &base)
             })
             .collect();
         // Size last: only the matches need their `$I` read.
         let matched = filters.apply(matched, |it| it.time_deleted, item_size);
+        if !all_matches && !scoped {
+            let candidates: Vec<_> = matched
+                .iter()
+                .map(|item| {
+                    let original = original_of(item);
+                    let full = original.to_string_lossy().into_owned();
+                    let base = original
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    (full, base.clone(), base, original)
+                })
+                .collect();
+            if let Some((pattern, paths)) = matcher.ambiguous(&candidates) {
+                eprintln!(
+                    "{prog}: basename pattern '{pattern}' matches {} trash entries; \
+                     refusing without --all-matches:",
+                    paths.len()
+                );
+                for path in paths {
+                    eprintln!("  {}", crate::util::err_path(&path));
+                }
+                return 2;
+            }
+        }
+        let (kept, matched): (Vec<_>, Vec<_>) = matched
+            .into_iter()
+            .partition(|item| keep.keeps(&original_of(item)));
+        if dry_run && !json {
+            for item in kept {
+                println!(
+                    "kept {} (matches keep list)",
+                    crate::util::term_path(&original_of(&item))
+                );
+            }
+        }
         if !dry_run {
             // RTRASH_ALLOW_ROOTS: rm deletes only items trashed from there.
             let origins: Vec<PathBuf> = matched.iter().map(original_of).collect();
@@ -4399,14 +4524,13 @@ pub fn bin_items() -> Vec<(PathBuf, Vec<BinStat>)> {
     os::bin_items()
 }
 #[cfg(windows)]
-pub fn purge_oldest_on(
+pub(crate) fn purge_oldest_on(
     prog: &str,
     at: &Path,
     need: (u64, u64),
-    dry_run: bool,
-    verbose: bool,
+    opts: &crate::reap::PurgeOpts<'_>,
 ) -> (u64, u64, u64) {
-    os::purge_oldest_on(prog, at, need, dry_run, verbose)
+    os::purge_oldest_on(prog, at, need, opts)
 }
 
 #[cfg(test)]

@@ -81,6 +81,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l home
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l older-than -d 'only items older than AGE (DAYS, 2h, 1d12h)' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l max-size -d 'remove items until the trash fits in SIZE' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l max-count -d 'refuse when more than N items would go' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l keep-from -d 'read protected path prefixes and globs from FILE' -r -F
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l prune -d 'which items --max-size removes first' -x -a 'oldest largest'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l until-free -d 'remove the oldest items until each trash file system has SPEC free' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l dangling -d 'remove only records whose payload is gone'
@@ -269,6 +270,9 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l larger-
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l smaller-than -d 'only match items under SIZE on disk' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l batch -d 'only items from one put run (an ID or last)' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l max-count -d 'refuse when more than N items would go' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l basename -d 'also match PATTERNs against basenames'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l all-matches -d 'allow one basename pattern to match several items'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l keep-from -d 'read protected path prefixes and globs from FILE' -r -F
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l regex -d 'PATTERNs are regular expressions on the original path'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s m -l match -d 'how to read PATTERNs' -xa 'glob regex substring exact'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s n -l dry-run -d 'list matches and reclaimable size; do not delete'
@@ -329,6 +333,7 @@ complete -c trash-empty -l home-only
 complete -c trash-empty -l older-than -r
 complete -c trash-empty -l max-size -r
 complete -c trash-empty -l max-count -r
+complete -c trash-empty -l keep-from -r -F
 complete -c trash-empty -l prune -x -a 'oldest largest'
 complete -c trash-empty -l until-free -r
 complete -c trash-empty -l dangling
@@ -404,6 +409,9 @@ complete -c trash-rm -l batch -r
 complete -c trash-rm -l max-count -r
 complete -c trash-rm -l regex
 complete -c trash-rm -s m -l match -xa 'glob regex substring exact'
+complete -c trash-rm -l basename
+complete -c trash-rm -l all-matches
+complete -c trash-rm -l keep-from -r -F
 complete -c trash-rm -l json
 complete -c trash-rm -s n -l dry-run
 complete -c trash-rm -s i -l interactive

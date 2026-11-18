@@ -485,12 +485,13 @@ The other `[du]` keys are `count`, `one_file_system`, `threads`, `git`, `exclude
 
 ### `rtrash rm PATTERN...` (also `trash-rm`)
 
-Permanently deletes trash entries whose original path, basename, or trash name matches a shell-style glob `PATTERN` (quote globs from the shell).
+Permanently deletes trash entries whose original path matches a shell-style glob `PATTERN` (quote globs from the shell). A literal absolute path matches only that exact recorded original. A bare name also matches the original basename (or trash name for an orphan); if it selects more than one item, rm refuses and lists the candidates unless `--all-matches` is given. `--basename` explicitly enables basename matching for any pattern.
 Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
 An orphan matches by its name in `files/` or its path there.
 Does **not** restore.
 On a terminal it names the matches (the first 10, with sizes) and asks once before it deletes, as `rm -I` does and as trash-cli #383 asks of `trash-rm`. Only `y` or `yes` goes on. A script, whose stdin or stderr is not a terminal, is never asked, so pipelines and cron jobs work as before. `-i`/`--interactive` asks even then, with the reply read from stdin. `-y`/`--yes` and `-f`/`--force` never ask, and the last of the three wins.
-Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-i`/`--interactive`, `-y`/`--yes`, `-f`/`--force` (no question, and mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).
+`--keep-from=FILE` protects every original below a listed path prefix or matching a listed glob; blank lines and lines beginning with `#` are ignored. `RTRASH_KEEP_FROM` names another keep-list file. The protection applies to both `rm` and `empty`, including age and size pruning, and `-n` reports protected candidates as kept.
+Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-i`/`--interactive`, `-y`/`--yes`, `-f`/`--force` (no question, and mass patterns), `--basename`, `--all-matches`, `--keep-from=FILE` (repeatable), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).
 
 ### Prompts
 
