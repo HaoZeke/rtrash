@@ -599,8 +599,8 @@ fn finder_restore_orders_the_numbered_list() {
         .collect();
     fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
 
-    // --newest-first puts m.txt, the last trashed, at 0.
-    let o = b.run(&["restore", "--plain", "--newest-first"], "0\n");
+    // The default lists newest first; index 0 is m.txt.
+    let o = b.run(&["restore", "--plain"], "0\n");
     assert!(o.status.success(), "{}", err(&o));
     assert!(
         out(&o).lines().next().unwrap_or("").ends_with("m.txt"),
@@ -608,18 +608,15 @@ fn finder_restore_orders_the_numbered_list() {
         out(&o)
     );
     assert!(b.work().join("m.txt").exists());
+    // --sort=oldest puts z.txt at 0 among the items still in the trash.
+    let o = b.run(&["restore", "--plain", "--sort=oldest"], "0\n");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(b.work().join("z.txt").exists());
+    assert!(!b.work().join("a.txt").exists());
     // --sort=path puts a.txt before z.txt.
     let o = b.run(&["restore", "--plain", "--sort=path"], "0\n");
     assert!(o.status.success(), "{}", err(&o));
     assert!(b.work().join("a.txt").exists());
-    assert!(!b.work().join("z.txt").exists());
-    // The default stays oldest first.
-    let o = b.run(&["restore", "--plain"], "\n");
-    assert!(
-        out(&o).lines().next().unwrap_or("").ends_with("z.txt"),
-        "{}",
-        out(&o)
-    );
 }
 
 #[test]

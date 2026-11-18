@@ -319,7 +319,7 @@ In JSON they carry `"orphan": true`; an age filter leaves them out.
 | `--json` | JSON array of `{deletion_date, original, name, trash_dir, batch}` (plus `size` in bytes with `--size`) |
 | `--size` | Add each item's disk usage (payload plus `.trashinfo`, as `status` counts it). As `trash-list`, trash-cli's `SIZE PATH` rows: the payload's size in bytes in place of the date |
 | `--files` | `trash-list` only, as trash-cli's hidden option: add ` -> FILE`, the item in the trash, to each row |
-| `--sort=date\|size\|name\|path` | Row order; `size` lists the largest first and implies `--size` |
+| `--sort=date\|newest\|oldest\|size\|name\|path` | Row order (default `date`, oldest first); `newest` lists the most recently trashed first; `size` lists the largest first and implies `--size` |
 | `--reverse` | Reverse the order |
 | `--older-than=DAYS` | Only items trashed more than DAYS days ago (same cutoff as `empty DAYS`) |
 | `--newer-than=DAYS` | Only items trashed within the last DAYS days |
@@ -411,7 +411,8 @@ $ rtrash empty -n && rtrash empty 14                    # free the space
 | `rtrash restore --conflict=rename\|skip\|overwrite …` | When the destination exists: restore as `NAME.1.EXT`, leave the item in the trash, or replace it (`-f`); the default refuses |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
 | `rtrash restore --name=NAME --latest --json` | Restore the newest item named `NAME` (file name or trash name) without a prompt and print `{"restored": [...], "failed": N, "skipped": N}` |
-| `rtrash restore --newest-first` / `--oldest-first` | Set the list order. The interactive browser lists newest first and `o` flips it; `--plain` lists oldest first, so the newest item sits next to the prompt |
+| `rtrash restore --sort=newest\|oldest\|size\|path` | Numbered table order (`newest` by default); `date` means oldest, as trash-restore spells it |
+| `rtrash restore --newest-first` / `--oldest-first` | Set the date order when `--sort` is not given. The interactive browser lists newest first and `o` flips it; `--plain` uses the same default |
 | Single match | Restores immediately without prompting |
 
 **TUI keys (shared by restore / empty / put):** defaults `↑↓`/`jk` move · `PgUp`/`PgDn` page · `g`/`G` first/last · `Space` mark · `a`/`A` all/clear · `/` live fuzzy · `?` help · `Enter` action · `q`/`Esc` quit.

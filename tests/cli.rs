@@ -2034,7 +2034,7 @@ fn list_and_status_take_ages_in_hours_and_minutes() {
 }
 
 #[test]
-fn restore_plain_order_defaults_oldest_first_and_flags_flip_it() {
+fn restore_plain_order_defaults_newest_first_and_flags_flip_it() {
     let sb = Sandbox::new("restore-order");
     let old = sb.touch("old.txt");
     let new = sb.touch("new.txt");
@@ -2042,23 +2042,29 @@ fn restore_plain_order_defaults_oldest_first_and_flags_flip_it() {
     backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
     let pin = format!("--trash-dir={}", sb.trash().display());
 
-    // Numbered table keeps oldest first: index 0 is the backdated item.
+    // Numbered table lists newest first: index 0 is the latest item.
     let out = sb.run_with_stdin(&["restore", &pin, "--plain"], "0\n");
-    assert!(out.status.success(), "{}", stderr_of(&out));
-    let table = stdout_of(&out);
-    let first = table.lines().next().unwrap_or("");
-    assert!(first.contains("old.txt"), "{table}");
-    assert!(old.exists() && !new.exists());
-
-    // --newest-first flips the table: index 0 is now the latest item.
-    assert!(sb.run(&["put", "old.txt"]).status.success());
-    backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
-    let out = sb.run_with_stdin(&["restore", &pin, "--plain", "--newest-first"], "0\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
     let table = stdout_of(&out);
     let first = table.lines().next().unwrap_or("");
     assert!(first.contains("new.txt"), "{table}");
     assert!(new.exists() && !old.exists());
+
+    // --sort=oldest and --oldest-first list the backdated item at index 0.
+    sb.touch("old.txt");
+    assert!(sb.run(&["put", "old.txt"]).status.success());
+    backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
+    for flag in ["--sort=oldest", "--oldest-first"] {
+        let out = sb.run_with_stdin(&["restore", &pin, "--plain", flag], "0\n");
+        assert!(out.status.success(), "{flag}: {}", stderr_of(&out));
+        let table = stdout_of(&out);
+        let first = table.lines().next().unwrap_or("");
+        assert!(first.contains("old.txt"), "{flag}: {table}");
+        assert!(old.exists(), "{flag}");
+        sb.touch("old.txt");
+        assert!(sb.run(&["put", "old.txt"]).status.success());
+        backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
+    }
 }
 
 #[test]
@@ -2286,6 +2292,19 @@ fn list_size_and_sort() {
     assert!(
         out.lines().next().unwrap_or("").ends_with("/small"),
         "{out}"
+    );
+    let out = stdout_of(&sb.run(&["list", &pin, "--sort=newest"]));
+    assert!(
+        out.lines().next().unwrap_or("").ends_with("/small"),
+        "{out}"
+    );
+    assert!(
+        stdout_of(&sb.run(&["list", &pin, "--sort=oldest"]))
+            .lines()
+            .next()
+            .unwrap_or("")
+            .ends_with("/big"),
+        "oldest matches default date order"
     );
     let json = stdout_of(&sb.run(&["list", &pin, "--size", "--json"]));
     assert!(json.contains("\"size\":"), "{json}");

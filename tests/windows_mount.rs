@@ -685,11 +685,14 @@ fn restore_sort_orders_the_numbered_list() {
             .to_string()
     };
     assert!(
-        pick(&[]).contains("sort-b-"),
-        "date order puts the oldest first"
+        pick(&[]).contains("sort-a-"),
+        "default lists the newest deleted item first"
     );
     assert!(pick(&["--sort=path"]).contains("sort-a-"), "path order");
-    assert!(pick(&["--sort=date", "--newest-first"]).contains("sort-a-"));
+    assert!(
+        pick(&["--sort=oldest"]).contains("sort-b-"),
+        "oldest lists the earliest deletion first"
+    );
     let bad = cmd(&lad).args(["restore", "--sort=bulk"]).output().unwrap();
     assert_eq!(bad.status.code(), Some(2));
     for p in [&a, &b] {

@@ -851,7 +851,11 @@ so a terminal never gets a raw path.
 .BI \-\-sort= KEY
 Order rows by
 .B date
-(the default),
+or
+.B oldest
+(the default, oldest first),
+.B newest
+(newest first),
 .B size
 (largest first; implies
 .BR \-\-size ),
@@ -2908,8 +2912,12 @@ The trash-cli spelling of
 .TP
 .BI \-\-sort= ORDER
 Order of the numbered table:
+.B newest
+(the default),
+.B oldest
+(or
 .B date
-(oldest first, the default),
+, as trash-restore spells it),
 .B size
 (largest first, as
 .B list \-\-sort=size
@@ -4106,7 +4114,7 @@ trash = "finder"          # RTRASH_MACOS_TRASH: finder or freedesktop
 recycle = false           # RTRASH_WSL_RECYCLE: puts under /mnt/<drive>/ go to the Recycle Bin
 
 [list]
-sort = "date"             # \-\-sort: date, size, name or path
+sort = "date"             # \-\-sort: date, newest, oldest, size, name or path
 size = false              # \-\-size
 reverse = false           # \-\-reverse
 

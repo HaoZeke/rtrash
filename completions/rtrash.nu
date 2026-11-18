@@ -164,7 +164,7 @@ export extern "rtrash list" [
     --smaller-than: string  # only items taking less than SIZE on disk
     --size  # add each item's disk usage (payload plus its
     --show-trashpath  # show where each item sits in the trash
-    --sort: string  # order by date (default), size, name (file name)
+    --sort: string  # order by date or oldest (default), newest, size, name (file name)
     --reverse  # reverse the order
     --last: int  # only the last N rows of the listing (after --sort and --reverse)
     --depth: int  # under each trashed directory, show what it holds,
@@ -303,7 +303,7 @@ export extern "rtrash restore" [
     --batch: string  # restore one whole put run (an undo --list id, or last)
     --newest-first  # list the most recently trashed item first
     --overwrite  # same as --force (trash-cli spelling)
-    --sort: string  # numbered table order: date, size, path or none
+    --sort: string  # numbered table order: newest, oldest, size, path or none
     --oldest-first  # list the oldest trashed item first
     --name: string@"nu-complete rtrash trashed names"  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original
@@ -508,7 +508,7 @@ export extern "trash-list" [
     --smaller-than: string  # only items taking less than SIZE on disk
     --size  # add each item's disk usage (payload plus its
     --show-trashpath  # show where each item sits in the trash
-    --sort: string  # order by date (default), size, name (file name)
+    --sort: string  # order by date or oldest (default), newest, size, name (file name)
     --reverse  # reverse the order
     --last: int  # only the last N rows of the listing (after --sort and --reverse)
     --depth: int  # under each trashed directory, show what it holds,
@@ -538,7 +538,7 @@ export extern "trash-restore" [
     --batch: string  # restore one whole put run (an undo --list id, or last)
     --newest-first  # list the most recently trashed item first
     --overwrite  # same as --force (trash-cli spelling)
-    --sort: string  # numbered table order: date, size, path or none
+    --sort: string  # numbered table order: newest, oldest, size, path or none
     --oldest-first  # list the oldest trashed item first
     --name: string@"nu-complete rtrash trashed names"  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original

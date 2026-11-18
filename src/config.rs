@@ -121,7 +121,7 @@ const KEYS: &[(&str, &str, Kind, &str)] = &[
         "list",
         "sort",
         Kind::Str,
-        "date, size, name or path (--sort)",
+        "date, newest, oldest, size, name or path (--sort)",
     ),
     ("list", "size", Kind::Bool, "show sizes (--size)"),
     (

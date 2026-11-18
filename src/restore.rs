@@ -29,14 +29,14 @@ from under the current directory, PATH also matches items trashed from
 under it, a single match still asks, and the table uses single spaces.
 
 The browser lists the most recently trashed item first, with the cursor on
-it. The numbered table lists oldest first, so the newest item sits next to
-the index prompt. --newest-first and --oldest-first set the order for both.
+it. The numbered table lists the most recently trashed item first by
+default. --newest-first and --oldest-first set the date order for both.
 
   -f, --force     overwrite an existing file (same as --conflict=overwrite)
       --overwrite  same as --force (trash-cli spelling)
-      --sort=ORDER  numbered table order: date (oldest first, default),
-                    size (largest first), path (original path) or none
-                    (as read)
+      --sort=ORDER  numbered table order: newest (default), oldest, size
+                    (largest first), path (original path) or none (as read);
+                    date means oldest, as trash-restore spells it
       --conflict=POLICY  when the destination exists: refuse (default),
                     overwrite, rename (restore next to it as NAME.1.EXT)
                     or skip
@@ -77,10 +77,11 @@ the index prompt. --newest-first and --oldest-first set the order for both.
       --version   output version information and exit
 ";
 
-/// The `--sort` orders of trash-cli's trash-restore.
+/// Numbered-table order for restore (shared spelling with trash-restore).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sort {
-    Date,
+    Newest,
+    Oldest,
     /// Largest first, as `list --sort=size`; ties keep the date order.
     Size,
     Path,
@@ -88,15 +89,40 @@ pub(crate) enum Sort {
 }
 
 impl Sort {
-    fn parse(s: &str) -> Option<Self> {
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "date" => Sort::Date,
+            "newest" => Sort::Newest,
+            "oldest" | "date" => Sort::Oldest,
             "size" => Sort::Size,
             "path" => Sort::Path,
             "none" => Sort::None,
             _ => return None,
         })
     }
+
+    /// When `Some`, this sort fixes the deletion-date direction.
+    pub(crate) fn date_newest_first(self) -> Option<bool> {
+        match self {
+            Sort::Newest => Some(true),
+            Sort::Oldest => Some(false),
+            Sort::Path | Sort::Size | Sort::None => None,
+        }
+    }
+}
+
+/// Default date order: newest for `rtrash restore`, oldest for `trash-restore`.
+pub(crate) fn default_date_newest_first(trash_cli: bool) -> bool {
+    !trash_cli
+}
+
+/// Date order from `--sort` and `--newest-first` / `--oldest-first`.
+pub(crate) fn date_newest_first(
+    sort: Option<Sort>,
+    newest_first: Option<bool>,
+    trash_cli: bool,
+) -> bool {
+    sort.and_then(Sort::date_newest_first)
+        .unwrap_or_else(|| newest_first.unwrap_or_else(|| default_date_newest_first(trash_cli)))
 }
 
 /// What to do when the restore destination already exists.
@@ -284,7 +310,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 Some(k) => sort = Some(k),
                 None => {
                     eprintln!(
-                        "{prog}: invalid --sort '{}' (date, size, path or none)",
+                        "{prog}: invalid --sort '{}' (newest, oldest, size, path or none)",
                         &a["--sort=".len()..]
                     );
                     return 2;
@@ -617,7 +643,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
         }
         Some(Sort::None) => {}
-        Some(Sort::Date) | None => order_entries(&mut matches, newest_first.unwrap_or(false)),
+        Some(Sort::Newest) => order_entries(&mut matches, true),
+        Some(Sort::Oldest) => order_entries(&mut matches, false),
+        None if all => {}
+        None => order_entries(
+            &mut matches,
+            date_newest_first(None, newest_first, trash_cli),
+        ),
     }
 
     // trash-cli asks even for one match; rtrash restores it right away.
@@ -1304,6 +1336,14 @@ mod tests {
             .iter()
             .map(|e| e.original.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn sort_parses_newest_oldest_and_date_alias() {
+        assert_eq!(Sort::parse("newest"), Some(Sort::Newest));
+        assert_eq!(Sort::parse("oldest"), Some(Sort::Oldest));
+        assert_eq!(Sort::parse("date"), Some(Sort::Oldest));
+        assert!(Sort::parse("bogus").is_none());
     }
 
     #[test]

@@ -2086,6 +2086,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
     #[derive(Clone, Copy)]
     enum ListSort {
         Date,
+        Newest,
         Size,
         Name,
         Path,
@@ -2167,8 +2168,12 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 None
             }
             a if a.starts_with("--sort=") => match &a["--sort=".len()..] {
-                "date" | "time" => {
+                "date" | "time" | "oldest" => {
                     sort = ListSort::Date;
+                    None
+                }
+                "newest" => {
+                    sort = ListSort::Newest;
                     None
                 }
                 "size" => {
@@ -2185,7 +2190,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     None
                 }
                 v => {
-                    bad = Some(format!("invalid --sort '{v}' (date, size, name or path)"));
+                    bad = Some(format!(
+                        "invalid --sort '{v}' (date, newest, oldest, size, name or path)"
+                    ));
                     Some(2)
                 }
             },
@@ -2269,8 +2276,8 @@ List items in the Windows Recycle Bin (system trash).
       --cwd-only only items that came from the current directory or below
       --directory=DIR  only items that came from DIR or below it (DIR
                    need not exist any more)
-      --sort=KEY order by date (default), size (largest first; implies
-                   --size), name (file name) or path (original path)
+      --sort=KEY order by date or oldest (default), newest, size (largest
+                   first; implies --size), name (file name) or path (original path)
       --reverse  reverse the order
       --depth=N  under each deleted folder, show what it holds, N levels
                    down, indented (not with --format)
@@ -2346,6 +2353,7 @@ on Windows (there is no FreeDesktop layout here).
                 // Other keys sort stably, so ties keep the date order.
                 match sort {
                     ListSort::Date => {}
+                    ListSort::Newest => items.reverse(),
                     ListSort::Size => items.sort_by_cached_key(|i| std::cmp::Reverse(item_size(i))),
                     ListSort::Name => items.sort_by_cached_key(|i| {
                         original_of(i).file_name().map(|n| n.to_os_string())
@@ -2873,7 +2881,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut conflict = Conflict::Refuse;
         let mut json = false;
         let mut plain = false;
-        let mut newest_first = false;
+        let mut newest_first: Option<bool> = None;
         let mut target: Option<PathBuf> = None;
         let mut last_run = false;
         let mut dry_run = false;
@@ -2998,17 +3006,20 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 }
                 "--plain" | "--home-only" => plain = true,
                 a if a.starts_with("--sort=") => match &a["--sort=".len()..] {
-                    "date" => sort = Some(TableSort::Date),
+                    "newest" => sort = Some(TableSort::Newest),
+                    "oldest" | "date" => sort = Some(TableSort::Oldest),
                     "size" => sort = Some(TableSort::Size),
                     "path" => sort = Some(TableSort::Path),
                     "none" => sort = Some(TableSort::None),
                     v => {
-                        eprintln!("{prog}: invalid --sort '{v}' (date, size, path or none)");
+                        eprintln!(
+                            "{prog}: invalid --sort '{v}' (newest, oldest, size, path or none)"
+                        );
                         return 2;
                     }
                 },
-                "--newest-first" => newest_first = true,
-                "--oldest-first" => newest_first = false,
+                "--newest-first" => newest_first = Some(true),
+                "--oldest-first" => newest_first = Some(false),
                 "--no-space-check" => crate::space::skip_check(true),
                 "--help" => {
                     print!(
@@ -3048,11 +3059,11 @@ Without PATH, print a numbered list and read an index from stdin.
                 current directory or below (implies --plain)
       --directory=DIR  as --cwd-only, for items deleted from under DIR;
                 DIR need not exist any more (implies --plain)
-      --sort=ORDER  numbered list order: date (oldest first, default),
-                size (largest first), path (original path) or none
-                (as read)
+      --sort=ORDER  numbered list order: newest (default), oldest, size
+                (largest first), path (original path) or none (as read);
+                date means oldest, as trash-restore spells it
       --newest-first  list the most recently deleted item first
-      --oldest-first  list the oldest deleted item first (default)
+      --oldest-first  list the oldest deleted item first
       --batch=last  restore every item the latest put moved, by the
                 record put keeps in %LOCALAPPDATA%\\rtrash
       --no-space-check  restore onto another drive even when it would
@@ -3260,8 +3271,11 @@ Without PATH, print a numbered list and read an index from stdin.
                 matches.sort_by_cached_key(|i| std::cmp::Reverse(item_size(i)));
             }
             Some(TableSort::None) => matches = as_read.unwrap_or(matches),
-            Some(TableSort::Date) | None => {
-                if newest_first {
+            Some(TableSort::Newest) => matches.reverse(),
+            Some(TableSort::Oldest) => {}
+            None => {
+                let nf = newest_first.unwrap_or(!trash_cli);
+                if nf {
                     matches.reverse();
                 }
             }
@@ -3274,7 +3288,7 @@ Without PATH, print a numbered list and read an index from stdin.
                 prog,
                 refs,
                 conflict == Conflict::Overwrite,
-                newest_first,
+                newest_first.unwrap_or(!trash_cli),
             );
         }
         let _ = plain;
@@ -3418,7 +3432,8 @@ Without PATH, print a numbered list and read an index from stdin.
     /// takes it.
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum TableSort {
-        Date,
+        Newest,
+        Oldest,
         Size,
         Path,
         None,
