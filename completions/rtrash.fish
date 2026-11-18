@@ -66,12 +66,13 @@ complete -c rtrash -n $put_cond -l trash-dir -d 'put into this trash root' -r
 complete -c rtrash -n $put_cond -l home-only -d 'always use the home trash'
 complete -c rtrash -n $put_cond -l plain -d 'skip TUI; require file operands'
 complete -c rtrash -n $put_cond -l no-space-check -d 'copy across devices even when space or inodes run low'
-complete -c rtrash -n $put_cond -l dry-run -d 'run every check and print what would move'
+complete -c rtrash -n $put_cond -s n -l dry-run -d 'run every check and print what would move'
 complete -c rtrash -n $put_cond -l in-use -x -a 'warn refuse ignore' -d 'when a live process holds an item'
 complete -c rtrash -n $put_cond -l json -d 'JSON summary of trashed items'
 
 # empty
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s n -l dry-run -d 'report what would be removed; show reclaimable size'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -l in-use -x -a 'warn refuse ignore' -d 'when a trashed item is held open'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s v -l verbose -d 'print each removed item'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s f -l force -d 'do not ask'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q empty' -s i -l interactive -d 'ask before emptying'
@@ -272,6 +273,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l max-cou
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l regex -d 'PATTERNs are regular expressions on the original path'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s m -l match -d 'how to read PATTERNs' -xa 'glob regex substring exact'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s n -l dry-run -d 'list matches and reclaimable size; do not delete'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l in-use -x -a 'warn refuse ignore' -d 'when a trashed item is held open'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s i -l interactive -d 'ask before deleting, even off a terminal'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s y -l yes -d 'do not ask before deleting'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s f -l force -d 'do not ask, and allow mass patterns that match everything'
@@ -312,7 +314,7 @@ for cmd in trash-put trash
     complete -c $cmd -l home-only
     complete -c $cmd -l plain
     complete -c $cmd -l no-space-check
-    complete -c $cmd -l dry-run
+    complete -c $cmd -s n -l dry-run
     complete -c $cmd -l in-use -x -a 'warn refuse ignore'
     complete -c $cmd -l json
     complete -c $cmd -l help
@@ -320,6 +322,7 @@ for cmd in trash-put trash
 end
 
 complete -c trash-empty -s n -l dry-run
+complete -c trash-empty -l in-use -x -a 'warn refuse ignore'
 complete -c trash-empty -s v -l verbose
 complete -c trash-empty -s f -l force
 complete -c trash-empty -s i -l interactive
@@ -406,6 +409,7 @@ complete -c trash-rm -l regex
 complete -c trash-rm -s m -l match -xa 'glob regex substring exact'
 complete -c trash-rm -l json
 complete -c trash-rm -s n -l dry-run
+complete -c trash-rm -l in-use -x -a 'warn refuse ignore'
 complete -c trash-rm -s i -l interactive
 complete -c trash-rm -s y -l yes
 complete -c trash-rm -s f -l force

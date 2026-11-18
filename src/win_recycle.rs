@@ -1778,7 +1778,7 @@ mod os {
                 "-v" | "--verbose" => verbose = true,
                 "--plain" => plain = true,
                 "--json" => json = true,
-                "--dry-run" => dry_run = true,
+                "-n" | "--dry-run" => dry_run = true,
                 "--allow-permanent" => allow_permanent = true,
                 // FreeDesktop options: the Recycle Bin has one place per
                 // drive, so there is nothing to pin or narrow down.
@@ -1802,9 +1802,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
   -v, --verbose  print each path and the Recycle Bin it went to
       --inspect  ask before each item, showing its size and, for a
                    directory, how many files it holds
-      --dry-run  run every check (missing files, holders) and print
-                   'would trash PATH' for each item that would move,
-                   moving nothing
+  -n, --dry-run  run every check (missing files, holders) and print
+                   'would trash PATH -> Recycle Bin of ROOT (SIZE, rename)'
+                   for each item that would move, moving nothing
       --plain    accepted for CLI parity (no TUI put browser on Windows)
       --json     print a JSON summary on stdout ({{trashed, failed}});
                    replaces -v output
@@ -1933,12 +1933,23 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     failed += 1;
                     continue;
                 }
-                let verb = if nuke.is_some() {
-                    "would delete for good"
-                } else {
-                    "would trash"
-                };
-                println!("{verb} '{}'", crate::util::term_path(&abs));
+                if nuke.is_some() {
+                    println!("would delete for good '{}'", crate::util::term_path(&abs));
+                    continue;
+                }
+                let size = crate::util::format_bytes(crate::fastdelete::disk_usage(&abs));
+                let root = test_bin_root().or_else(|| bin_root_of(&abs));
+                match &root {
+                    Some(r) => println!(
+                        "would trash '{}' -> Recycle Bin of {} ({size}, rename)",
+                        crate::util::term_path(&abs),
+                        crate::util::term_path(r)
+                    ),
+                    None => println!(
+                        "would trash '{}' ({size}, rename)",
+                        crate::util::term_path(&abs)
+                    ),
+                }
                 continue;
             }
             let root = test_bin_root().or_else(|| bin_root_of(&abs));
@@ -2421,8 +2432,39 @@ on Windows (there is no FreeDesktop layout here).
         }
     }
 
+    /// Drop items whose `$R` payload a process holds when `mode` is
+    /// refuse, or report them and keep them when it is warn. Ignore does
+    /// not scan. The status is 1 when refuse skipped any.
+    fn without_held(
+        prog: &str,
+        mode: crate::holders::InUse,
+        items: Vec<TrashItem>,
+    ) -> (Vec<TrashItem>, i32) {
+        if mode == crate::holders::InUse::Ignore || items.is_empty() {
+            return (items, 0);
+        }
+        let roots: Vec<PathBuf> = items.iter().map(|it| PathBuf::from(&it.id)).collect();
+        let snap = crate::holders::scan_for(mode, &roots);
+        let mut kept = Vec::with_capacity(items.len());
+        let mut status = 0;
+        for it in items {
+            let path = PathBuf::from(&it.id);
+            if let Some(who) = crate::holders::holder_text(mode, snap.as_ref(), &path) {
+                let refuse = mode == crate::holders::InUse::Refuse;
+                crate::holders::explain_hold(prog, &path, &who, refuse);
+                if refuse {
+                    status = 1;
+                    continue;
+                }
+            }
+            kept.push(it);
+        }
+        (kept, status)
+    }
+
     pub fn empty_run(prog: &str, args: &[String]) -> i32 {
         let mut dry_run = false;
+        let mut in_use = crate::holders::InUse::Ignore;
         let mut verbose = false;
         let mut json = false;
         let mut until: Option<(String, crate::reap::Floor)> = None;
@@ -2454,6 +2496,19 @@ on Windows (there is no FreeDesktop layout here).
                 "-n" | "--dry-run" => dry_run = true,
                 "-v" | "--verbose" => verbose = true,
                 "-f" | "--force" | "--plain" | "--home-only" => {}
+                a if a.starts_with("--in-use=") => {
+                    match crate::holders::InUse::parse(&a["--in-use=".len()..]) {
+                        Some(m) => in_use = m,
+                        None => {
+                            eprintln!(
+                                "{prog}: invalid argument '{}' for '--in-use' \
+                                 (want warn, refuse or ignore)",
+                                &a["--in-use=".len()..]
+                            );
+                            return 2;
+                        }
+                    }
+                }
                 "--json" => json = true,
                 "--all" => every = true,
                 a if a.starts_with("--max-count=") => {
@@ -2521,6 +2576,10 @@ With DAYS, only items deleted more than DAYS days ago, as on Linux.
                    remove items other puts left; without it such an
                    empty asks on a terminal and refuses elsewhere unless
                    every item came from the latest put
+      --in-use=WHEN  when a process holds a trashed item open: refuse
+                   (skip it), warn (report it and still remove it) or
+                   ignore (the default; does not scan, and does not follow
+                   RTRASH_IN_USE, which is put's)
       --json     print a JSON summary ({{dry_run, removed, bytes, days,
                    older_than_secs, max_size}}; with --until-free, the
                    per-drive summary)
@@ -2556,7 +2615,9 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 return 2;
             }
             let roots: Vec<PathBuf> = bin_items().into_iter().map(|(b, _)| b).collect();
-            return crate::reap::free_until(prog, &roots, &spec, floor, dry_run, verbose, json);
+            return crate::reap::free_until(
+                prog, &roots, &spec, floor, dry_run, verbose, json, in_use,
+            );
         }
         let all = match super::list_items() {
             Ok(i) => i,
@@ -2609,6 +2670,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         } else {
             rechecked(prog, items).0
         };
+        let (items, held_status) = without_held(prog, in_use, items);
         let n = items.len() as u64;
         let summary = |bytes_of: &[TrashItem]| {
             let bytes = bytes_of
@@ -2623,13 +2685,13 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         if dry_run {
             if json {
                 summary(&items);
-                return 0;
+                return held_status;
             }
             for it in &items {
                 println!("would remove {}", crate::util::term_path(&original_of(it)));
             }
             println!("{} item(s)", items.len());
-            return 0;
+            return held_status;
         }
         if let Some(code) = crate::permanent_guard::check_count(prog, items.len() as u64) {
             return code;
@@ -2648,7 +2710,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             return 1;
         }
         match os_limited::purge_all(items) {
-            Ok(()) => 0,
+            Ok(()) => held_status,
             Err(e) => {
                 eprintln!("{prog}: cannot empty Recycle Bin: {}", err_msg(e));
                 1
@@ -2786,6 +2848,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         need: (u64, u64),
         dry_run: bool,
         verbose: bool,
+        in_use: crate::holders::InUse,
     ) -> (u64, u64, u64) {
         let items: Vec<TrashItem> = match super::list_items() {
             Ok(all) => {
@@ -2808,10 +2871,12 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             })
             .collect();
         let picked = pick_oldest(&sized, need);
-        let (bytes, files) = picked
-            .iter()
-            .fold((0u64, 0u64), |(b, f), &i| (b + sized[i].1, f + sized[i].2));
         let chosen: Vec<TrashItem> = picked.iter().map(|&i| items[i].clone()).collect();
+        let (chosen, _) = without_held(prog, in_use, chosen);
+        let (bytes, files) = chosen.iter().fold((0u64, 0u64), |(b, f), it| {
+            let p = Path::new(&it.id);
+            (b + recycled_size(p), f + tree_files(p))
+        });
         if verbose || dry_run {
             for it in &chosen {
                 println!(
@@ -3834,6 +3899,7 @@ registry), then the total and the free space on each (a warning under
 
     pub fn rm_run(prog: &str, args: &[String]) -> i32 {
         let mut dry_run = false;
+        let mut in_use = crate::holders::InUse::Ignore;
         let mut force = false;
         let mut verbose = false;
         let mut kind = crate::filters::Match::Glob;
@@ -3844,6 +3910,19 @@ registry), then the total and the free space on each (a warning under
         let filters = parse_with_filters(prog, args, |arg| {
             match arg {
                 "-n" | "--dry-run" => dry_run = true,
+                a if a.starts_with("--in-use=") => {
+                    match crate::holders::InUse::parse(&a["--in-use=".len()..]) {
+                        Some(m) => in_use = m,
+                        None => {
+                            eprintln!(
+                                "{prog}: invalid argument '{}' for '--in-use' \
+                                 (want warn, refuse or ignore)",
+                                &a["--in-use=".len()..]
+                            );
+                            return Some(2);
+                        }
+                    }
+                }
                 "--regex" => kind = crate::filters::Match::Regex,
                 a if a.starts_with("--match=") => match crate::filters::Match::parse(&a[8..]) {
                     Ok(k) => kind = k,
@@ -3888,6 +3967,10 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
       --batch=last  only the items the latest put moved (Windows keeps
                    that one run); with no PATTERN, all of them
   -n, --dry-run  list matches only
+      --in-use=WHEN  when a process holds a matched item open: refuse
+                   (skip it), warn (report it and still remove it) or
+                   ignore (the default; does not scan, and does not follow
+                   RTRASH_IN_USE, which is put's)
   -i, --interactive  ask even when stdin is not a terminal (rm asks on
                    a terminal by default, naming the matches)
   -y, --yes      do not ask
@@ -3980,6 +4063,7 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             .collect();
         // Size last: only the matches need their `$I` read.
         let matched = filters.apply(matched, |it| it.time_deleted, item_size);
+        let (matched, held_status) = without_held(prog, in_use, matched);
         if !dry_run {
             // RTRASH_ALLOW_ROOTS: rm deletes only items trashed from there.
             let origins: Vec<PathBuf> = matched.iter().map(original_of).collect();
@@ -4025,13 +4109,13 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             }
         }
         let code = if dry_run {
-            0
+            held_status
         } else if let Err(e) = crate::permanent_guard::gate_many(matched.len() as u64) {
             eprintln!("{prog}: {e}");
             1
         } else {
             match os_limited::purge_all(matched) {
-                Ok(()) => i32::from(changed > 0),
+                Ok(()) => i32::from(changed > 0).max(held_status),
                 Err(e) => {
                     eprintln!("{prog}: purge failed: {}", err_msg(e));
                     1
@@ -4405,8 +4489,9 @@ pub fn purge_oldest_on(
     need: (u64, u64),
     dry_run: bool,
     verbose: bool,
+    in_use: crate::holders::InUse,
 ) -> (u64, u64, u64) {
-    os::purge_oldest_on(prog, at, need, dry_run, verbose)
+    os::purge_oldest_on(prog, at, need, dry_run, verbose, in_use)
 }
 
 #[cfg(test)]

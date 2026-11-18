@@ -1090,6 +1090,8 @@ pub struct EmptyOpts {
     pub dry_run: bool,
     pub verbose: bool,
     pub json: bool,
+    /// Held items are skipped (refuse) or removed after a warning (warn).
+    pub in_use: crate::holders::InUse,
 }
 
 /// The items `empty` removes: those older than the cutoff (all of them
@@ -1184,7 +1186,13 @@ pub fn prune_after_put(prog: &str, moved: &[(PathBuf, String)], quiet: bool) {
 /// `reap --purge-trash` on the Finder trashes of device `dev`: remove
 /// the oldest items until `need` (bytes, inodes) is freed, and return
 /// what is still needed. A dry run counts the items instead.
-pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u64, u64) {
+pub fn purge_oldest(
+    prog: &str,
+    dev: u64,
+    need: (u64, u64),
+    dry_run: bool,
+    in_use: crate::holders::InUse,
+) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     let Ok(rows) = read_all(prog) else {
         return need;
@@ -1194,6 +1202,8 @@ pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u
         .filter(|e| std::fs::metadata(&e.trash).is_ok_and(|m| m.dev() == dev))
         .collect();
     rows.sort_by_key(|e| e.epoch);
+    let roots: Vec<PathBuf> = rows.iter().map(|e| e.trash.clone()).collect();
+    let snap = crate::holders::scan_for(in_use, &roots);
     let mut left = need;
     let (mut n, mut freed) = (0u64, 0u64);
     for e in rows {
@@ -1208,6 +1218,13 @@ pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u
         };
         let b = crate::fastdelete::disk_usage(&path);
         let inodes = 1 + crate::trash_stats::count_inodes(&path);
+        if let Some(who) = crate::holders::holder_text(in_use, snap.as_ref(), &path) {
+            let refuse = in_use == crate::holders::InUse::Refuse;
+            crate::holders::explain_hold(prog, &path, &who, refuse);
+            if refuse {
+                continue;
+            }
+        }
         if !dry_run {
             if let Err(err) = crate::permanent_guard::remove(&path) {
                 crate::finder_total::uncarried(&e.trash);
@@ -1251,6 +1268,8 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
     let mut bytes = 0u64;
     let mut failed = 0u64;
     let picked = empty_pick(rows, o.cutoff, o.max_size, o.prune);
+    let roots: Vec<PathBuf> = picked.iter().map(|(e, _)| e.trash.clone()).collect();
+    let snap = crate::holders::scan_for(o.in_use, &roots);
     // A cap counts the picks first, so a refused empty deletes nothing.
     if !dry_run {
         if let Some(code) = crate::permanent_guard::check_count(prog, picked.len() as u64) {
@@ -1270,6 +1289,14 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
                 continue;
             }
         };
+        if let Some(who) = crate::holders::holder_text(o.in_use, snap.as_ref(), &path) {
+            let refuse = o.in_use == crate::holders::InUse::Refuse;
+            crate::holders::explain_hold(prog, &path, &who, refuse);
+            if refuse {
+                failed += 1;
+                continue;
+            }
+        }
         bytes += b;
         if dry_run {
             if !json {

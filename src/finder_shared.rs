@@ -220,6 +220,9 @@ pub(crate) fn entries_in(trash: &Path) -> std::io::Result<Vec<Entry>> {
 pub struct Filter {
     pub age: crate::filters::AgeFilter,
     pub size: crate::filters::SizeFilter,
+    /// Held items are skipped or reported. List and status leave this
+    /// at ignore, so they never scan.
+    pub in_use: crate::holders::InUse,
 }
 
 impl Filter {
@@ -722,6 +725,8 @@ pub fn rm(
             return 0;
         }
     }
+    let roots: Vec<PathBuf> = hits.iter().map(|e| e.trash.clone()).collect();
+    let snap = crate::holders::scan_for(filter.in_use, &roots);
     for e in hits {
         let path_s = e.shown.to_string_lossy();
         // After the question: the item must still be the one listed. One
@@ -738,6 +743,14 @@ pub fn rm(
         };
         let m = crate::finder_total::measure_item(&path);
         let sz = m.0;
+        if let Some(who) = crate::holders::holder_text(filter.in_use, snap.as_ref(), &path) {
+            let refuse = filter.in_use == crate::holders::InUse::Refuse;
+            crate::holders::explain_hold(prog, &path, &who, refuse);
+            if refuse {
+                status = 1;
+                continue;
+            }
+        }
         if dry_run {
             if !json {
                 println!("{}", crate::util::term_path(&e.shown));

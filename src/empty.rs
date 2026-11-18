@@ -60,6 +60,11 @@ permanent delete). Use --plain to skip the TUI.
                      default is the home trash plus every mounted volume
       --home-only  only the home trash (skip volume trash discovery)
       --all-users  every user's trash this account can write (root: all)
+      --in-use=WHEN  when a live process holds a trashed item open, mapped
+                     or as its working directory: refuse (skip it), warn
+                     (report it and still remove it) or ignore (the default;
+                     does not scan, and does not follow RTRASH_IN_USE or
+                     policy.in_use, which are put's)
       --help       display this help and exit
       --version    output version information and exit
 ";
@@ -82,6 +87,8 @@ struct Opts {
     /// `--all`: an unscoped empty may take items other puts left.
     all: bool,
     all_users: bool,
+    /// Held payloads are skipped or reported. Ignore does not scan.
+    in_use: crate::holders::InUse,
 }
 
 /// The `.trashinfo` records in `dir` whose payload in `files/` is gone,
@@ -297,6 +304,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         interactive: false,
         all_users: false,
         all: false,
+        in_use: crate::holders::InUse::Ignore,
     };
     for arg in args {
         match arg.as_str() {
@@ -310,6 +318,23 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "--json" => opts.json = true,
             "--dangling" => opts.dangling = true,
             "--home-only" => opts.home_only = true,
+            a if a.starts_with("--in-use=") => {
+                match crate::holders::InUse::parse(&a["--in-use=".len()..]) {
+                    Some(m) => opts.in_use = m,
+                    None => {
+                        return usage_err(
+                            prog,
+                            &format!(
+                            "invalid argument '{}' for '--in-use' (want warn, refuse or ignore)",
+                            &a["--in-use=".len()..]
+                        ),
+                        )
+                    }
+                }
+            }
+            "--in-use" => {
+                return usage_err(prog, "--in-use needs a value (--in-use=refuse|warn|ignore)")
+            }
             "--help" => {
                 print!("{}", HELP.replace("{prog}", prog));
                 return 0;
@@ -423,6 +448,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 dry_run: opts.dry_run,
                 verbose: opts.verbose,
                 json: opts.json,
+                in_use: opts.in_use,
             },
         );
     }
@@ -461,7 +487,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // TTY empty browser when no age filter (full interactive review).
     // --json implies non-interactive (scripts).
     #[cfg(feature = "tui")]
-    if !opts.plain && !opts.json && opts.days.is_none() && opts.max_size.is_none() && stdin_is_tty()
+    if !opts.plain
+        && !opts.json
+        && opts.days.is_none()
+        && opts.max_size.is_none()
+        && opts.in_use == crate::holders::InUse::Ignore
+        && stdin_is_tty()
     {
         let mut entries = list::collect(&dirs);
         // Orphans too, so the browser can clear everything a plain empty would.
@@ -522,6 +553,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                     gone_before: cutoff,
                     free_inodes: 0,
                     only: Some(seen.as_slice()),
+                    in_use: opts.in_use,
+                    note_holds: false,
                 },
             )
             .removed;
@@ -570,6 +603,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 gone_before: cutoff,
                 free_inodes: 0,
                 only: Some(seen.as_slice()),
+                in_use: opts.in_use,
+                note_holds: true,
             },
         );
         removed.fetch_add(done.removed, Ordering::Relaxed);
@@ -656,6 +691,7 @@ fn until_free(prog: &str, spec: &str, floor: crate::reap::Floor, opts: &Opts) ->
         opts.dry_run,
         opts.verbose,
         opts.json,
+        opts.in_use,
     )
 }
 
@@ -745,7 +781,7 @@ fn empty_one(
     // same two roots (every child of files/ and info/), not only .trashinfo rows.
     if cutoff.is_none() {
         if opts.dry_run {
-            full_empty_dry_run(dir, opts, removed, bytes);
+            full_empty_dry_run(prog, dir, opts, removed, bytes, errors);
         } else {
             let before = errors.load(Ordering::Relaxed);
             let left = full_empty_wipe(prog, seen, opts, removed, errors, failures);
@@ -831,6 +867,29 @@ fn empty_one(
     }
 
     report_late(prog, dir, late);
+
+    // Refuse drops a held item before the parallel delete, so its record
+    // stays and the run says why. Warn says why and still deletes it.
+    if opts.in_use != crate::holders::InUse::Ignore {
+        let snap = crate::holders::scan_for(opts.in_use, std::slice::from_ref(&files_dir));
+        let mut staying = Vec::new();
+        victims.retain(|(target, _, _)| {
+            let Some(who) = crate::holders::holder_text(opts.in_use, snap.as_ref(), target) else {
+                return true;
+            };
+            let refuse = opts.in_use == crate::holders::InUse::Refuse;
+            crate::holders::explain_hold(prog, target, &who, refuse);
+            if !refuse {
+                return true;
+            }
+            errors.fetch_add(1, Ordering::Relaxed);
+            if let Some(name) = target.file_name() {
+                staying.push(crate::util::str_from_os_ref(name));
+            }
+            false
+        });
+        kept_names.extend(staying);
+    }
 
     let sizes = trashdir::DirSizes::load(dir);
     // A total current before this pass loses what the pass takes.
@@ -948,17 +1007,36 @@ fn original_of(dir: &TrashDir, info_path: &std::path::Path) -> Option<PathBuf> {
 /// Dry-run inventory matching full wipe: every top-level child of `files/` and
 /// non-counted-as-item names under `info/` still contribute reclaim size; item
 /// count is top-level `files/` children (same as live wipe `n_files`).
-fn full_empty_dry_run(dir: &TrashDir, opts: &Opts, removed: &AtomicU64, bytes: &AtomicU64) {
+fn full_empty_dry_run(
+    prog: &str,
+    dir: &TrashDir,
+    opts: &Opts,
+    removed: &AtomicU64,
+    bytes: &AtomicU64,
+    errors: &AtomicU64,
+) {
     let files_dir = dir.files();
     let info_dir = dir.info();
     let mut n_files = 0u64;
     let mut total = 0u64;
     let sizes = trashdir::DirSizes::load(dir);
+    let snap = crate::holders::scan_for(opts.in_use, std::slice::from_ref(&files_dir));
+    let mut stayed: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Ok(entries) = fs::read_dir(&files_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
+            let name = crate::util::str_from_os_ref(&entry.file_name());
+            if let Some(who) = crate::holders::holder_text(opts.in_use, snap.as_ref(), &p) {
+                let refuse = opts.in_use == crate::holders::InUse::Refuse;
+                crate::holders::explain_hold(prog, &p, &who, refuse);
+                if refuse {
+                    errors.fetch_add(1, Ordering::Relaxed);
+                    stayed.insert(name);
+                    continue;
+                }
+            }
             // Directory payloads: use validated directorysizes when present.
-            let sz = sizes.payload_bytes(&crate::util::str_from_os_ref(&entry.file_name()));
+            let sz = sizes.payload_bytes(&name);
             total = total.saturating_add(sz);
             n_files += 1;
             if opts.verbose {
@@ -975,6 +1053,14 @@ fn full_empty_dry_run(dir: &TrashDir, opts: &Opts, removed: &AtomicU64, bytes: &
     }
     if let Ok(entries) = fs::read_dir(&info_dir) {
         for entry in entries.flatten() {
+            let fname = entry.file_name();
+            let stem = fname
+                .as_bytes()
+                .strip_suffix(b".trashinfo")
+                .map(|s| crate::util::str_from_os_ref(std::ffi::OsStr::from_bytes(s)));
+            if stem.is_some_and(|s| stayed.contains(&s)) {
+                continue;
+            }
             total = total.saturating_add(crate::fastdelete::disk_usage(&entry.path()));
         }
     }
@@ -1008,7 +1094,28 @@ fn full_empty_wipe(
         .map(|n| n.as_os_str())
         .filter(|n| !seen.saw_payload(n))
         .collect();
-    let late = |name: &std::ffi::OsStr| late_names.contains(name);
+    // A held payload stays, with its record, when refuse was asked.
+    // Warn names it and the wipe still takes it.
+    let mut held: std::collections::HashSet<std::ffi::OsString> = std::collections::HashSet::new();
+    if opts.in_use != crate::holders::InUse::Ignore {
+        let snap = crate::holders::scan_for(opts.in_use, std::slice::from_ref(&files_dir));
+        for name in &names {
+            if late_names.contains(name.as_os_str()) {
+                continue;
+            }
+            let path = files_dir.join(name);
+            let Some(who) = crate::holders::holder_text(opts.in_use, snap.as_ref(), &path) else {
+                continue;
+            };
+            let refuse = opts.in_use == crate::holders::InUse::Refuse;
+            crate::holders::explain_hold(prog, &path, &who, refuse);
+            if refuse {
+                held.insert(name.clone());
+                errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    let late = |name: &std::ffi::OsStr| late_names.contains(name) || held.contains(name);
     let late_record = |rec: &std::ffi::OsStr| !seen.saw_record(rec);
 
     // Verbose still lists intended removals before delete (stable UX),
@@ -1034,6 +1141,7 @@ fn full_empty_wipe(
         .iter()
         .map(|n| crate::util::str_from_os_ref(n))
         .collect();
+    kept.extend(held.iter().map(|n| crate::util::str_from_os_ref(n)));
     let left = kept.len() as u64;
     if let Err(e) = crate::permanent_guard::gate_many(names.len() as u64 - left) {
         eprintln!("{prog}: {e}");
@@ -1073,7 +1181,7 @@ fn full_empty_wipe(
     }
 
     prune_directorysizes(dir, &kept);
-    report_late(prog, dir, left);
+    report_late(prog, dir, late_names.len() as u64);
     left
 }
 

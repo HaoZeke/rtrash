@@ -243,6 +243,13 @@ fn home_dev(root: &Path) -> Option<u64> {
         .or_else(|| dev_of_deepest_existing(root))
 }
 
+/// The device a path would land on: the path itself when it exists, else
+/// its deepest existing ancestor. A dry run uses this before the trash exists.
+#[cfg(unix)]
+pub(crate) fn device_holding(path: &Path) -> Option<u64> {
+    home_dev(path)
+}
+
 /// Device of the deepest existing ancestor (the fs the path would land on).
 fn dev_of_deepest_existing(path: &Path) -> Option<u64> {
     let mut cur = path;
@@ -554,6 +561,114 @@ pub fn select(abs: &Path, dev: u64) -> io::Result<TrashDir> {
     }
     ensure_home(&home)?;
     Ok(home)
+}
+
+/// The trash [`select`] would use, without creating it or `files/` and
+/// `info/`. A dry run names this directory. A real put still goes through
+/// [`select`], which creates what is missing.
+#[cfg(unix)]
+pub fn choose(abs: &Path, dev: u64) -> io::Result<TrashDir> {
+    if crate::platform::is_macos_fdo_experimental() {
+        let _ = (abs, dev);
+        return Ok(TrashDir {
+            root: home_trash(),
+            topdir: None,
+        });
+    }
+    let home = TrashDir {
+        root: home_trash(),
+        topdir: None,
+    };
+    if home_dev(&home.root) == Some(dev) {
+        return Ok(home);
+    }
+    if let Some(top) = volume_top_of_path(abs) {
+        if let Some(td) = preview_on_volume(&top, uid()) {
+            return Ok(td);
+        }
+    }
+    Ok(home)
+}
+
+/// [`select_on_volume`] without creating anything. A missing trash that
+/// this user could create is named; one that would be refused falls
+/// through, and the caller uses the home trash, as [`select`] does.
+#[cfg(unix)]
+fn preview_on_volume(top: &Path, uid: u32) -> Option<TrashDir> {
+    let own = top.join(format!(".Trash-{uid}"));
+    let home = home_trash();
+    let shared = top.join(".Trash");
+    if let Ok(meta) = fs::symlink_metadata(&shared) {
+        if sticky_and_dir(&meta) {
+            let td = TrashDir {
+                root: shared.join(uid.to_string()),
+                topdir: Some(top.to_path_buf()),
+            };
+            if preview_user_trash(&td, uid, &own) {
+                return Some(td);
+            }
+        } else if let Some(why) = shared_trash_problem(&meta) {
+            warn_shared_trash_once(&shared, why, &own);
+        }
+    }
+    // A directory already there is used only when it is this user's.
+    // preview_user_trash asks the same question again for files/ and info/.
+    if let Ok(meta) = fs::symlink_metadata(&own) {
+        if let Some(why) = user_trash_problem(&meta, uid) {
+            warn_shared_trash_once(&own, why, &home);
+            return None;
+        }
+    }
+    let td = TrashDir {
+        root: own,
+        topdir: Some(top.to_path_buf()),
+    };
+    preview_user_trash(&td, uid, &home).then_some(td)
+}
+
+/// Whether [`ensure_user_trash`] would accept `td`, without creating it.
+#[cfg(unix)]
+fn preview_user_trash(td: &TrashDir, uid: u32, fallback: &Path) -> bool {
+    let refuse = |why: &str| {
+        warn_shared_trash_once(&td.root, why, fallback);
+        false
+    };
+    match fs::symlink_metadata(&td.root) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let Some(parent) = td.root.parent().filter(|p| !p.as_os_str().is_empty()) else {
+                return false;
+            };
+            if writable(parent) {
+                true
+            } else {
+                refuse(&format!("cannot be used ({e})"))
+            }
+        }
+        Err(e) => refuse(&format!("cannot be used ({e})")),
+        Ok(meta) => {
+            if let Some(why) = user_trash_problem(&meta, uid) {
+                return refuse(why);
+            }
+            for d in [td.files(), td.info()] {
+                match fs::symlink_metadata(&d) {
+                    Ok(m) if m.file_type().is_symlink() || !m.is_dir() => {
+                        return refuse("is not a real directory");
+                    }
+                    Ok(_) if !writable(&d) => {
+                        return refuse(&format!("'{}' is not writable", d.display()));
+                    }
+                    Ok(_) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        if !writable(&td.root) {
+                            return refuse(&format!("'{}' is not writable", td.root.display()));
+                        }
+                    }
+                    Err(e) => return refuse(&format!("cannot be used ({e})")),
+                }
+            }
+            true
+        }
+    }
 }
 
 /// Infer the FreeDesktop volume topdir from a trash root path.
@@ -2229,7 +2344,7 @@ fn entry_removable(path: &Path) -> io::Result<Node> {
 /// directory lets it write and search, and [`unlink_blocker`] passes each
 /// entry. The walk keeps its own stack: a chain of any depth stays off
 /// the thread stack, and paths past `PATH_MAX` are reached by descriptor.
-fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
+pub(crate) fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
     let item = entry_removable(path)?;
     if !meta.is_dir() {
         return Ok(());

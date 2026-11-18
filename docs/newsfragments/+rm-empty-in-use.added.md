@@ -1,0 +1,1 @@
+`rtrash rm` and `rtrash empty` take `--in-use=refuse|warn|ignore`. Refuse skips a trashed item a process holds open; warn reports it and still removes it. The default stays ignore and does not follow `RTRASH_IN_USE`.

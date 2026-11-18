@@ -1745,7 +1745,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         if purge_trash {
             for (dev, need) in needs.iter_mut().filter(|(_, n)| *n != (0, 0)) {
                 let at = on.iter().find(|(d, _)| d == dev).map(|(_, p)| p.as_path());
-                *need = purge_oldest(prog, *dev, at, *need, target, dry_run, verbose);
+                *need = purge_oldest(
+                    prog,
+                    *dev,
+                    at,
+                    *need,
+                    target,
+                    dry_run,
+                    verbose,
+                    crate::holders::InUse::Ignore,
+                );
             }
             for g in &mut groups {
                 g.entries
@@ -2074,6 +2083,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
 /// `need` (bytes, inodes) is freed, and return what is still needed:
 /// measured again after a real purge, estimated on a dry run.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn purge_oldest(
     prog: &str,
     dev: u64,
@@ -2082,6 +2092,7 @@ pub(crate) fn purge_oldest(
     target: Floor,
     dry_run: bool,
     verbose: bool,
+    in_use: crate::holders::InUse,
 ) -> (u64, u64) {
     use crate::retention::{prune, Policy, Prune};
     use std::os::unix::fs::MetadataExt;
@@ -2093,7 +2104,7 @@ pub(crate) fn purge_oldest(
     let mut left = need;
     if crate::finder::is_default(false) {
         let before = left;
-        left = crate::finder::purge_oldest(prog, dev, left, dry_run);
+        left = crate::finder::purge_oldest(prog, dev, left, dry_run, in_use);
         purged(dry_run, u64::from(left != before));
         if !dry_run && left != before {
             if let Some(at) = at {
@@ -2115,6 +2126,8 @@ pub(crate) fn purge_oldest(
             gone_before: None,
             free_inodes: 0,
             only: None,
+            in_use: crate::holders::InUse::Ignore,
+            note_holds: false,
         };
         let total = prune(prog, one, &opts(u64::MAX)).left;
         let max = total.saturating_sub(left.0);
@@ -2125,6 +2138,8 @@ pub(crate) fn purge_oldest(
                 dry_run,
                 verbose,
                 free_inodes: left.1,
+                in_use,
+                note_holds: true,
                 ..opts(max)
             },
         );
@@ -2158,6 +2173,7 @@ pub(crate) fn purge_oldest(
 /// The Windows side: the oldest items in the Recycle Bin of the drive
 /// that holds `at`, until `need` (bytes, files) is freed.
 #[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn purge_oldest(
     prog: &str,
     _dev: u64,
@@ -2166,6 +2182,7 @@ pub(crate) fn purge_oldest(
     target: Floor,
     dry_run: bool,
     verbose: bool,
+    in_use: crate::holders::InUse,
 ) -> (u64, u64) {
     // The volume that holds `at`: a drive, or a volume mounted on a
     // folder, whose Recycle Bin is its own.
@@ -2184,7 +2201,8 @@ pub(crate) fn purge_oldest(
     let Some(drive) = drive else {
         return need;
     };
-    let (n, bytes, files) = crate::win_recycle::purge_oldest_on(prog, &at, need, dry_run, verbose);
+    let (n, bytes, files) =
+        crate::win_recycle::purge_oldest_on(prog, &at, need, dry_run, verbose, in_use);
     purged(dry_run, n);
     if n > 0 {
         eprintln!(
@@ -2207,6 +2225,7 @@ pub(crate) fn purge_oldest(
 /// trash items there until it is back at `floor`. Exits 1 when one stays
 /// short. JSON lists each short file system with what it needed and what
 /// is still missing (estimated on a dry run).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn free_until(
     prog: &str,
     roots: &[PathBuf],
@@ -2215,6 +2234,7 @@ pub(crate) fn free_until(
     dry_run: bool,
     verbose: bool,
     json: bool,
+    in_use: crate::holders::InUse,
 ) -> i32 {
     let mut seen: Vec<u64> = Vec::new();
     let mut rows: Vec<String> = Vec::new();
@@ -2241,7 +2261,7 @@ pub(crate) fn free_until(
         if need == (0, 0) {
             continue;
         }
-        let left = purge_oldest(prog, dev, Some(root), need, floor, dry_run, verbose);
+        let left = purge_oldest(prog, dev, Some(root), need, floor, dry_run, verbose, in_use);
         if left != (0, 0) {
             still += 1;
             eprintln!(

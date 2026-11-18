@@ -851,6 +851,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 newer_than,
             },
             size: size_filter,
+            in_use: crate::holders::InUse::Ignore,
         };
         let shape = crate::finder::ListShape {
             json,

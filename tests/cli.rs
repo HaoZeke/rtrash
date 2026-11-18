@@ -8432,6 +8432,214 @@ fn put_dry_run_checks_and_moves_nothing() {
     assert!(stderr_of(&out).contains("missing"));
     assert!(sb.work().join("a").exists());
     assert!(!sb.trash().join("files/a").exists());
+    let line = stdout_of(&out);
+    assert!(
+        line.contains(&*sb.trash().to_string_lossy())
+            && (line.contains("rename") || line.contains("cross-device copy"))
+            && line.contains('('),
+        "{line}"
+    );
+}
+
+#[test]
+fn put_n_is_the_same_dry_run() {
+    let sb = Sandbox::new("putdry-n");
+    fs::write(sb.work().join("a"), b"x").unwrap();
+    let out = sb.run(&["put", "-n", "a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let line = stdout_of(&out);
+    assert!(line.contains("would trash"), "{line}");
+    assert!(
+        line.contains("rename") || line.contains("cross-device copy"),
+        "{line}"
+    );
+    assert!(sb.work().join("a").exists());
+    assert!(!sb.trash().join("files/a").exists());
+}
+
+#[test]
+fn put_dry_run_names_a_pinned_trash_and_creates_nothing() {
+    let sb = Sandbox::new("putdry-pin");
+    let pin = sb.root.join("pin");
+    fs::create_dir_all(pin.join("files")).unwrap();
+    fs::create_dir_all(pin.join("info")).unwrap();
+    fs::write(sb.work().join("a"), b"x").unwrap();
+    let arg = format!("--trash-dir={}", pin.display());
+    let out = sb.run(&["put", "-n", &arg, "a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let line = stdout_of(&out);
+    assert!(line.contains(&*pin.to_string_lossy()), "{line}");
+    assert!(line.contains("would trash"), "{line}");
+    assert!(sb.work().join("a").exists());
+    assert!(!pin.join("files/a").exists());
+
+    let fresh = sb.root.join("fresh-trash");
+    let arg = format!("--trash-dir={}", fresh.display());
+    let out = sb.run(&["put", "--dry-run", &arg, "a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let line = stdout_of(&out);
+    assert!(line.contains(&*fresh.to_string_lossy()), "{line}");
+    assert!(!fresh.exists(), "dry-run created {fresh:?}");
+    assert!(sb.work().join("a").exists());
+}
+
+#[test]
+fn put_dry_run_refuses_a_directory_without_r_and_leaves_it_with_r() {
+    let sb = Sandbox::new("putdry-dir");
+    fs::create_dir(sb.work().join("d")).unwrap();
+    let out = sb.run(&["put", "-n", "d"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("Is a directory"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(sb.work().join("d").is_dir());
+
+    let out = sb.run(&["put", "-n", "-r", "--home-only", "d"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let line = stdout_of(&out);
+    assert!(line.contains("would trash"), "{line}");
+    assert!(line.contains(&*sb.trash().to_string_lossy()), "{line}");
+    assert!(sb.work().join("d").is_dir());
+    assert!(!sb.trash().join("files/d").exists());
+}
+
+#[test]
+fn put_dry_run_refuses_a_payload_already_in_the_trash() {
+    let sb = Sandbox::new("putdry-inside");
+    fs::write(sb.work().join("a"), b"x").unwrap();
+    assert!(sb.run(&["put", "a"]).status.success());
+    let payload = sb.trash().join("files/a");
+    assert!(payload.exists());
+    let out = sb.run(&["put", "--dry-run", &payload.to_string_lossy()]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("inside the trash"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(payload.exists());
+    assert!(sb.trash().join("info/a.trashinfo").exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn put_dry_run_refuses_an_open_file_when_asked() {
+    let sb = Sandbox::new("putdry-hold");
+    let held = sb.touch("held.log");
+    let child = Holder::open(&held);
+    let out = sb.run(&["put", "-n", "--in-use=refuse", "held.log"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("in use by pid") && err.contains(&child.pid().to_string()),
+        "{err}"
+    );
+    assert!(stdout_of(&out).is_empty(), "{}", stdout_of(&out));
+    assert!(held.exists());
+    assert!(!sb.trash().join("files").join("held.log").exists());
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn rm_and_empty_skip_or_report_an_open_payload() {
+    let sb = Sandbox::new("rm-empty-hold");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    fs::write(sb.work().join("held"), b"h").unwrap();
+    fs::write(sb.work().join("idle"), b"i").unwrap();
+    assert!(sb.run(&["put", "held", "idle"]).status.success());
+    let payload = sb.trash().join("files/held");
+    let record = sb.trash().join("info/held.trashinfo");
+    let child = Holder::open(&payload);
+
+    let out = sb.run(&["rm", &pin, "--in-use=bogus", "--force", "*"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert!(payload.exists() && record.exists());
+    assert!(sb.trash().join("files/idle").exists());
+
+    let out = sb.run(&["rm", &pin, "-n", "--in-use=refuse", "--force", "*"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let text = format!("{}{}", stdout_of(&out), stderr_of(&out));
+    assert!(text.contains("in use by"), "{text}");
+    assert!(payload.exists() && record.exists());
+    assert!(sb.trash().join("files/idle").exists());
+
+    let out = sb.run(&["rm", &pin, "--in-use=refuse", "--force", "*"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("in use by") && stderr_of(&out).contains(&child.pid().to_string()),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(payload.exists() && record.exists());
+    assert!(!sb.trash().join("files/idle").exists());
+    assert!(!sb.trash().join("info/idle.trashinfo").exists());
+
+    let out = sb.run(&["rm", &pin, "--in-use=warn", "--force", "held"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("warning:") && err.contains("in use by"),
+        "{err}"
+    );
+    assert!(!payload.exists() && !record.exists());
+
+    fs::write(sb.work().join("held"), b"h").unwrap();
+    fs::write(sb.work().join("idle"), b"i").unwrap();
+    assert!(sb.run(&["put", "held", "idle"]).status.success());
+    let payload = sb.trash().join("files/held");
+    let record = sb.trash().join("info/held.trashinfo");
+    let _child = Holder::open(&payload);
+    let out = sb.run_env(
+        &["rm", &pin, "--force", "*"],
+        &[("RTRASH_IN_USE", "refuse")],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!stderr_of(&out).contains("in use"), "{}", stderr_of(&out));
+    assert!(!payload.exists() && !record.exists());
+
+    fs::write(sb.work().join("held"), b"h").unwrap();
+    fs::write(sb.work().join("idle"), b"i").unwrap();
+    assert!(sb.run(&["put", "held", "idle"]).status.success());
+    let payload = sb.trash().join("files/held");
+    let record = sb.trash().join("info/held.trashinfo");
+    let _child = Holder::open(&payload);
+    let out = sb.run(&["empty", &pin, "--plain", "--in-use=refuse"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("in use by"), "{}", stderr_of(&out));
+    assert!(payload.exists() && record.exists());
+    assert!(!sb.trash().join("files/idle").exists());
+
+    let out = sb.run(&["empty", &pin, "--plain", "--in-use=warn"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("warning:") && err.contains("in use by"),
+        "{err}"
+    );
+    assert!(!payload.exists() && !record.exists());
+
+    fs::write(sb.work().join("held"), b"h").unwrap();
+    fs::write(sb.work().join("idle"), b"i").unwrap();
+    assert!(sb.run(&["put", "held", "idle"]).status.success());
+    let payload = sb.trash().join("files/held");
+    let _child = Holder::open(&payload);
+    let out = sb.run_env(&["empty", &pin, "--plain"], &[("RTRASH_IN_USE", "refuse")]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!stderr_of(&out).contains("in use"), "{}", stderr_of(&out));
+    assert!(!payload.exists());
+
+    fs::write(sb.work().join("held"), b"h").unwrap();
+    fs::write(sb.work().join("idle"), b"i").unwrap();
+    assert!(sb.run(&["put", "held", "idle"]).status.success());
+    let payload = sb.trash().join("files/held");
+    let record = sb.trash().join("info/held.trashinfo");
+    let _child = Holder::open(&payload);
+    let out = sb.run(&["empty", &pin, "--plain", "--max-size=0", "--in-use=refuse"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(payload.exists() && record.exists(), "{}", stderr_of(&out));
+    assert!(!sb.trash().join("files/idle").exists());
 }
 
 #[test]

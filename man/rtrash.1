@@ -332,12 +332,22 @@ an item from elsewhere would need there.
 .B \-\-home\-only
 Always use the home trash (skip volume trash selection).
 .TP
-.B \-\-dry\-run
+.BR \-n ", " \-\-dry\-run
 Run every check put makes (protected paths, the home and mount\-point
-failsafes, git work, live holders) and print
-.I would trash PATH
-for each item that would move; nothing moves.
-On Windows, the dry run checks missing files and live holders.
+failsafes, git work, live holders,
+.BR \-r ,
+.B \-\-home\-only
+and where the item would go) and print
+.I would trash PATH \-> TRASH (SIZE, rename)
+or
+.I cross\-device copy
+for each item that would move.
+Nothing is created or moved.
+On Windows the line names the Recycle Bin of the item's volume and
+.IR rename ;
+an item the bin cannot take still prints
+.I would delete for good PATH
+and stays where it is.
 .TP
 .B \-\-plain
 Never open the put browser; require
@@ -436,6 +446,22 @@ item.
 .BR \-n ", " \-\-dry\-run
 Report what would be removed without removing anything; also prints
 approximate reclaimable disk space.
+.TP
+.BI \-\-in\-use= WHEN
+When a live process holds a trashed item open, mapped or as its working
+directory.
+.B refuse
+skips that item (the exit status is 1 and both the payload and its
+record stay).
+.B warn
+reports the holder and still removes the item.
+.B ignore
+(the default) does not scan.
+This does not follow
+.B RTRASH_IN_USE
+or
+.BR policy.in_use ,
+which set the default for put.
 .TP
 .BR \-v ", " \-\-verbose
 Print each removed item as
@@ -4454,6 +4480,25 @@ works: the Recycle Bin keeps no run ids, and rtrash records the latest put.
 .TP
 .BR \-n ", " \-\-dry\-run
 List matches and reclaimable size; do not delete.
+.TP
+.BI \-\-in\-use= WHEN
+When a live process holds a matched item open, mapped or as its working
+directory.
+.B refuse
+skips that item (the exit status is 1 and both the payload and its
+record stay).
+.B warn
+reports the holder and still removes the item.
+.B ignore
+(the default) does not scan.
+This does not follow
+.B RTRASH_IN_USE
+or
+.BR policy.in_use ,
+which set the default for put.
+A dry run with
+.B refuse
+does not count a held item as one that would go.
 .TP
 .BR \-i ", " \-\-interactive
 Ask before deleting even when stdin is not a terminal, reading the

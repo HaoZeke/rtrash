@@ -283,6 +283,8 @@ Names are reserved atomically, so concurrent invocations never clobber each othe
 
 **Script pins:** `--trash-dir=PATH` puts into that FreeDesktop root (creates `files/` and `info/` if needed); `--home-only` always uses the home trash.
 
+`-n`/`--dry-run` runs every check a real put makes, including `-r`, `--home-only` and `--in-use`, and prints `would trash PATH -> TRASH (SIZE, rename)` or `cross-device copy`. Nothing is created or moved.
+
 **Script output:** `--json` prints one object, `{"trashed": [...], "failed": N}`. Each trashed entry lists the original path, the name under `files/`, and the trash root, so a script can hand the names to `rtrash rm` or restore by path later.
 
 Putting a **directory** updates that trash dir’s FreeDesktop `directorysizes` cache (`size mtime percent-encoded-name`).
@@ -302,7 +304,7 @@ A directory you own but cannot list or change, such as a build tree's `pkg` at m
 Nothing someone else owns is changed.
 An item that still cannot go stays in the trash, with its `.trashinfo`.
 The rest still goes, and `empty` exits 1 after listing each item left and why.
-Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts), `--json` (summary: `dry_run`, `removed`, `bytes`, `days`, `max_size`).
+Options: `-n`/`--dry-run` (also prints an approximate **reclaimable** size via a fast in-process walk of the victims, like a small `du` of what would go away), `-v`/`--verbose`, `--trash-dir=PATH` (repeatable), `-f` (accepted for trash-cli compatibility; emptying never prompts), `--in-use=refuse|warn|ignore` (default `ignore`: a held payload is skipped, or reported and still removed; this does not follow `RTRASH_IN_USE`), `--json` (summary: `dry_run`, `removed`, `bytes`, `days`, `max_size`).
 
 **Retention by size:** `rtrash empty --max-size=10G` removes items, oldest first, until the trash directories in scope fit in 10 GiB together; `--prune=largest` removes the largest first, and `DAYS` runs before the size cut.
 Set `RTRASH_MAX_SIZE=10G` (and optionally `RTRASH_PRUNE=largest`), or `max_size` under `[policy]` in the config file, to prune after every put: each trash directory the put used goes back under the budget, and the items that put just trashed always stay.
@@ -490,7 +492,7 @@ Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
 An orphan matches by its name in `files/` or its path there.
 Does **not** restore.
 On a terminal it names the matches (the first 10, with sizes) and asks once before it deletes, as `rm -I` does and as trash-cli #383 asks of `trash-rm`. Only `y` or `yes` goes on. A script, whose stdin or stderr is not a terminal, is never asked, so pipelines and cron jobs work as before. `-i`/`--interactive` asks even then, with the reply read from stdin. `-y`/`--yes` and `-f`/`--force` never ask, and the last of the three wins.
-Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-i`/`--interactive`, `-y`/`--yes`, `-f`/`--force` (no question, and mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).
+Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-i`/`--interactive`, `-y`/`--yes`, `-f`/`--force` (no question, and mass patterns), `--in-use=refuse|warn|ignore` (default `ignore`: a held payload is skipped, or reported and still removed; this does not follow `RTRASH_IN_USE`), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).
 
 ### Prompts
 

@@ -145,6 +145,8 @@ pub fn bytes(prog: &str, dir: &TrashDir) -> u64 {
             gone_before: None,
             free_inodes: 0,
             only: None,
+            in_use: crate::holders::InUse::Ignore,
+            note_holds: false,
         },
     )
     .left;

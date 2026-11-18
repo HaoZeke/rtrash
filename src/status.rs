@@ -159,6 +159,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 newer_than,
             },
             size,
+            in_use: crate::holders::InUse::Ignore,
         };
         return crate::finder_shared::status(prog, json, filter);
     }

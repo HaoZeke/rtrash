@@ -38,6 +38,11 @@ stderr is not a terminal is not asked. The last of -i, -f and -y wins.
       --batch=ID   only items from one put run: an ID from `undo --list`,
                      or `last` for the latest; with no PATTERN, all of it
   -n, --dry-run    list matches and reclaimable size; do not delete
+      --in-use=WHEN  when a live process holds a matched item open, mapped
+                     or as its working directory: refuse (skip it), warn
+                     (report it and still remove it) or ignore (the default;
+                     does not scan, and does not follow RTRASH_IN_USE or
+                     policy.in_use, which are put's)
   -i, --interactive  ask even when stdin is not a terminal (the reply is
                      read from stdin; no reply removes nothing)
   -y, --yes        do not ask
@@ -80,6 +85,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut patterns: Vec<String> = Vec::new();
     let mut batch: Option<String> = None;
     let mut size = list::SizeFilter::default();
+    let mut in_use = crate::holders::InUse::Ignore;
 
     let mut i = 0usize;
     while i < args.len() {
@@ -150,6 +156,23 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
             a if a.starts_with("--trash-dir=") => {
                 trash_dirs.push(crate::util::arg_path(&a["--trash-dir=".len()..]));
+            }
+            a if a.starts_with("--in-use=") => {
+                match crate::holders::InUse::parse(&a["--in-use=".len()..]) {
+                    Some(m) => in_use = m,
+                    None => {
+                        eprintln!(
+                            "{prog}: invalid argument '{}' for '--in-use' \
+                         (want warn, refuse or ignore)",
+                            &a["--in-use=".len()..]
+                        );
+                        return 2;
+                    }
+                }
+            }
+            "--in-use" => {
+                eprintln!("{prog}: --in-use needs a value (--in-use=refuse|warn|ignore)");
+                return 2;
             }
             a if a.starts_with("--max-count=") => match crate::permanent_guard::max_count_arg(a) {
                 Some(Ok(n)) => crate::permanent_guard::set_max_count(n),
@@ -258,6 +281,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 newer_than,
             },
             size,
+            in_use,
         };
         return crate::finder_shared::rm(
             prog,
@@ -292,6 +316,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     }
     let mut status = 0i32;
+    let file_roots: Vec<PathBuf> = dirs.iter().map(|d| d.files()).collect();
+    let snap = crate::holders::scan_for(in_use, &file_roots);
     let mut removed = 0u64;
     let mut bytes = 0u64;
     let mut matched_paths: Vec<String> = Vec::new();
@@ -315,7 +341,20 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .file_name()
             .map(crate::util::str_from_os_ref)
             .unwrap_or_default();
-        pats.hit(path_s.as_ref(), base.as_str(), entry.name.as_str()) && size.keeps(size_of(entry))
+        if !pats.hit(path_s.as_ref(), base.as_str(), entry.name.as_str())
+            || !size.keeps(size_of(entry))
+        {
+            return false;
+        }
+        // Refuse will skip a held item, so the cap and the question do
+        // not count it as one that would go.
+        in_use != crate::holders::InUse::Refuse
+            || crate::holders::holder_text(
+                in_use,
+                snap.as_ref(),
+                &crate::util::join_name(&entry.dir.files(), &entry.name),
+            )
+            .is_none()
     };
 
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
@@ -367,6 +406,15 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         let sz = size_of(entry);
         if !size.keeps(sz) {
             continue;
+        }
+        let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
+        if let Some(who) = crate::holders::holder_text(in_use, snap.as_ref(), &payload) {
+            let refuse = in_use == crate::holders::InUse::Refuse;
+            crate::holders::explain_hold(prog, &payload, &who, refuse);
+            if refuse {
+                status = 1;
+                continue;
+            }
         }
         if dry_run {
             bytes = bytes.saturating_add(sz);

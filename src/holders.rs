@@ -10,6 +10,53 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// What to do with an item a live process holds.
+///
+/// `put` defaults to warn (`RTRASH_IN_USE`, else `policy.in_use`, else
+/// warn). `rm` and `empty` stay on ignore unless `--in-use` says otherwise,
+/// which is how they have always behaved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum InUse {
+    #[default]
+    Ignore,
+    Warn,
+    Refuse,
+}
+
+impl InUse {
+    pub fn parse(v: &str) -> Option<InUse> {
+        match v {
+            "ignore" => Some(InUse::Ignore),
+            "warn" => Some(InUse::Warn),
+            "refuse" => Some(InUse::Refuse),
+            _ => None,
+        }
+    }
+
+    /// `RTRASH_IN_USE`, else `policy.in_use`, else warn.
+    pub fn from_env(prog: &str) -> InUse {
+        if let Ok(v) = std::env::var("RTRASH_IN_USE") {
+            if let Some(m) = InUse::parse(&v) {
+                return m;
+            }
+            eprintln!(
+                "{prog}: warning: ignoring RTRASH_IN_USE='{v}' (want warn, refuse or ignore)"
+            );
+        }
+        let cfg = crate::config::get();
+        if let Some(v) = cfg.str("policy", "in_use") {
+            if let Some(m) = InUse::parse(v) {
+                return m;
+            }
+            eprintln!(
+                "{prog}: warning: {}",
+                cfg.bad_value("policy", "in_use", "warn, refuse or ignore")
+            );
+        }
+        InUse::Warn
+    }
+}
+
 /// One way one process holds one path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hold {
@@ -152,6 +199,35 @@ impl Snapshot {
     /// True when a live process holds `path` or anything below it.
     pub fn holds(&self, path: &Path) -> bool {
         !self.under(path).is_empty()
+    }
+}
+
+/// One scan of `roots` when `mode` asks for it. Ignore does not scan.
+pub fn scan_for(mode: InUse, roots: &[PathBuf]) -> Option<Snapshot> {
+    (mode != InUse::Ignore).then(|| Snapshot::scan_under(roots, true))
+}
+
+/// Who holds `path`, when `mode` is looking and `snap` finds someone.
+pub fn holder_text(mode: InUse, snap: Option<&Snapshot>, path: &Path) -> Option<String> {
+    if mode == InUse::Ignore {
+        return None;
+    }
+    let holds = snap?.under(path);
+    if holds.is_empty() {
+        None
+    } else {
+        Some(describe(&holds))
+    }
+}
+
+/// Say that `path` is held. Refuse also names the flag that removes it.
+pub fn explain_hold(prog: &str, path: &Path, who: &str, refuse: bool) {
+    let shown = crate::util::err_path(path);
+    if refuse {
+        eprintln!("{prog}: cannot remove '{shown}': in use by {who}");
+        eprintln!("{prog}: use --in-use=warn to remove it anyway");
+    } else {
+        eprintln!("{prog}: warning: '{shown}' is in use by {who}");
     }
 }
 

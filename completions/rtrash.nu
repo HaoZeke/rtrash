@@ -122,7 +122,7 @@ export extern "rtrash put" [
     --home-only  # always use the home trash (skip volume trash)
     --plain  # never open the put browser; require FILE operands
     --no-space-check  # copy across devices even when the copy would leave
-    --dry-run  # run every check and print what would move, moving nothing
+    --dry-run(-n)  # run every check and print what would move, moving nothing
     --in-use: string@"nu-complete rtrash in-use"  # when a live process has an item open, mapped or as
     --json  # print a JSON summary on stdout ({trashed, failed});
     --help  # display this help and exit
@@ -147,6 +147,7 @@ export extern "rtrash empty" [
     --json  # emit a JSON summary on stdout ({dry_run, removed, bytes, days})
     --trash-dir: string  # empty only this trash directory (repeatable);
     --home-only  # only the home trash (skip volume trash discovery)
+    --in-use: string@"nu-complete rtrash in-use"  # when a trashed item is held open
     --help  # display this help and exit
     --version  # output version information and exit
     days?: string
@@ -345,6 +346,7 @@ export extern "rtrash rm" [
     --regex  # PATTERNs are regular expressions on the original path
     --match(-m): string  # how to read PATTERNs: glob, regex, substring or exact
     --dry-run(-n)  # list matches and reclaimable size; do not delete
+    --in-use: string@"nu-complete rtrash in-use"  # when a trashed item is held open
     --interactive(-i)  # ask before deleting, even when stdin is not a terminal
     --yes(-y)  # do not ask
     --force(-f)  # do not ask, and allow mass patterns that match everything
@@ -466,7 +468,7 @@ export extern "trash-put" [
     --home-only  # always use the home trash (skip volume trash)
     --plain  # never open the put browser; require FILE operands
     --no-space-check  # copy across devices even when the copy would leave
-    --dry-run  # run every check and print what would move, moving nothing
+    --dry-run(-n)  # run every check and print what would move, moving nothing
     --in-use: string@"nu-complete rtrash in-use"  # when a live process has an item open, mapped or as
     --json  # print a JSON summary on stdout ({trashed, failed});
     --help  # display this help and exit
@@ -491,6 +493,7 @@ export extern "trash-empty" [
     --json  # emit a JSON summary on stdout ({dry_run, removed, bytes, days})
     --trash-dir: string  # empty only this trash directory (repeatable);
     --home-only  # only the home trash (skip volume trash discovery)
+    --in-use: string@"nu-complete rtrash in-use"  # when a trashed item is held open
     --help  # display this help and exit
     --version  # output version information and exit
     days?: string
@@ -563,6 +566,7 @@ export extern "trash-rm" [
     --larger-than: string  # only match items taking more than SIZE on disk
     --smaller-than: string  # only match items taking less than SIZE on disk
     --dry-run(-n)  # list matches and reclaimable size; do not delete
+    --in-use: string@"nu-complete rtrash in-use"  # when a trashed item is held open
     --batch: string  # only items from one put run: an ID from `undo --list`, or `last`
     --max-count: string  # refuse when more than N items would go
     --regex  # PATTERNs are regular expressions on the original path

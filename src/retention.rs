@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::io;
+use std::path::PathBuf;
 
 use rayon::prelude::*;
 
@@ -94,6 +95,13 @@ pub struct Prune<'a> {
     /// item it did not count still counts toward the budget but is never
     /// removed (round 245). `None` takes any item.
     pub only: Option<&'a [trashdir::Seen]>,
+    /// Held payloads are skipped (refuse) or removed after a warning
+    /// (warn). Ignore does not scan, which is every caller but `rm` and
+    /// `empty` when they were asked.
+    pub in_use: crate::holders::InUse,
+    /// Print the in-use note. A measuring pass sets this false so it
+    /// stays quiet while still skipping what refuse would skip.
+    pub note_holds: bool,
 }
 
 /// Bring the trash roots in `dirs`, taken together, under `p.max` bytes.
@@ -119,6 +127,8 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
             }
         }
     }
+    let roots: Vec<PathBuf> = dirs.iter().map(|d| d.files()).collect();
+    let snap = crate::holders::scan_for(p.in_use, &roots);
     let mut items = Vec::new();
     for (ri, dir) in dirs.iter().enumerate() {
         if !usable[ri] {
@@ -143,13 +153,38 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
                 || p.only.is_some_and(|seen| {
                     let name = crate::util::os_from_str(&e.name);
                     !seen.get(ri).is_some_and(|s| s.saw_item(&name))
-                }),
+                })
+                || (p.in_use == crate::holders::InUse::Refuse
+                    && snap.as_ref().is_some_and(|s| {
+                        crate::holders::holder_text(
+                            p.in_use,
+                            Some(s),
+                            &crate::util::join_name(&dir.files(), &e.name),
+                        )
+                        .is_some()
+                    })),
             name: e.name,
         }));
         sizes.write_back_locked();
     }
     let total: u64 = items.iter().map(|c| c.bytes).sum();
     out.left = total;
+    // Refuse keeps a held item, so the plan must pick something else to
+    // meet the budget. Say so once, on the pass the user is watching.
+    if p.note_holds
+        && p.in_use == crate::holders::InUse::Refuse
+        && (total > p.max || p.free_inodes > 0)
+    {
+        if let Some(s) = &snap {
+            for c in &items {
+                let payload = crate::util::join_name(&dirs[c.root].files(), &c.name);
+                if let Some(who) = crate::holders::holder_text(p.in_use, Some(s), &payload) {
+                    crate::holders::explain_hold(prog, &payload, &who, true);
+                    out.errors += 1;
+                }
+            }
+        }
+    }
     // Per root (bytes, items) still in the trash, for its running total.
     let mut kept = vec![(0u64, 0u64); dirs.len()];
     for c in &items {
@@ -164,6 +199,11 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
         let c = &items[i];
         let dir = &dirs[c.root];
         let shown = crate::util::join_name(&dir.files(), &c.name);
+        if p.note_holds && p.in_use == crate::holders::InUse::Warn {
+            if let Some(who) = crate::holders::holder_text(p.in_use, snap.as_ref(), &shown) {
+                crate::holders::explain_hold(prog, &shown, &who, false);
+            }
+        }
         if p.dry_run {
             if p.verbose {
                 println!(

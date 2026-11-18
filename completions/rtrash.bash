@@ -8,14 +8,14 @@ _rtrash_put_opts=(
   -f --force -i -I --interactive --inspect
   -r -R --recursive -d --dir -v --verbose
   --one-file-system --preserve-root --preserve-root=all --no-preserve-root
-  --trash-dir= --home-only --plain --no-space-check --dry-run --in-use= --json
+  --trash-dir= --home-only --plain --no-space-check -n --dry-run --in-use= --json
   --help --version
 )
 
 _rtrash_empty_opts=(
   -n --dry-run -v --verbose -f --force -i --interactive --all-users
   --trash-dir= --home-only --plain --older-than= --json
-  --max-size= --max-count= --prune= --until-free= --dangling --all
+  --max-size= --max-count= --prune= --until-free= --dangling --all --in-use=
   --help --version
 )
 
@@ -50,7 +50,7 @@ _rtrash_restore_opts=(
 
 _rtrash_rm_opts=(
   --trash-dir= --home-only -n --dry-run -i --interactive -y --yes -f --force -v --verbose
-  --older-than= --newer-than= --larger-than= --smaller-than= --batch= --max-count= --regex -m --match= --json
+  --older-than= --newer-than= --larger-than= --smaller-than= --batch= --max-count= --regex -m --match= --in-use= --json
   --help --version
 )
 

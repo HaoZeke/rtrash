@@ -14,47 +14,7 @@ pub(crate) enum Interactive {
     Always,
 }
 
-/// What put does with an item a live process holds.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum InUse {
-    Ignore,
-    Warn,
-    Refuse,
-}
-
-impl InUse {
-    fn parse(v: &str) -> Option<InUse> {
-        match v {
-            "ignore" => Some(InUse::Ignore),
-            "warn" => Some(InUse::Warn),
-            "refuse" => Some(InUse::Refuse),
-            _ => None,
-        }
-    }
-
-    /// `RTRASH_IN_USE`, else `policy.in_use`, else warn.
-    fn from_env(prog: &str) -> InUse {
-        if let Ok(v) = std::env::var("RTRASH_IN_USE") {
-            if let Some(m) = InUse::parse(&v) {
-                return m;
-            }
-            eprintln!(
-                "{prog}: warning: ignoring RTRASH_IN_USE='{v}' (want warn, refuse or ignore)"
-            );
-        }
-        let cfg = crate::config::get();
-        if let Some(v) = cfg.str("policy", "in_use") {
-            if let Some(m) = InUse::parse(v) {
-                return m;
-            }
-            eprintln!(
-                "{prog}: warning: {}",
-                cfg.bad_value("policy", "in_use", "warn, refuse or ignore")
-            );
-        }
-        InUse::Warn
-    }
-}
+pub(crate) use crate::holders::InUse;
 
 #[derive(Clone)]
 pub(crate) struct Opts {
@@ -75,7 +35,7 @@ pub(crate) struct Opts {
     pub quiet: bool,
     /// Check for live processes holding the item. The browsers leave it off.
     pub in_use: InUse,
-    /// `--dry-run`: run every check and say what would move, moving nothing.
+    /// `-n`/`--dry-run`: run every check and say what would move, moving nothing.
     pub dry_run: bool,
 }
 
@@ -134,10 +94,11 @@ to require CLI operands even on a TTY.
                           always (-i); without WHEN, prompt always
   -r, -R, --recursive   remove directories and their contents
   -d, --dir             remove empty directories
-      --dry-run         run every check (protected paths, the home and
-                          mount-point failsafes, git work, holders) and
-                          print 'would trash PATH' for each item that would
-                          move, moving nothing
+  -n, --dry-run         run every check a put makes (protected paths, the
+                          home and mount-point failsafes, git work, holders,
+                          -r, --home-only and where the item would go) and
+                          print 'would trash PATH -> TRASH (SIZE, rename)'
+                          or 'cross-device copy'; nothing is created or moved
   -v, --verbose         explain what is being done, naming the trash
                           directory each item went to
       --one-file-system accepted for rm compatibility (no-op: entries are
@@ -208,7 +169,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "--recursive" => opts.recursive = true,
             "--dir" => opts.empty_dirs = true,
             "--verbose" => opts.verbose = true,
-            "--dry-run" => opts.dry_run = true,
+            "-n" | "--dry-run" => opts.dry_run = true,
             "--inspect" => {
                 opts.force = false;
                 opts.inspect = true;
@@ -275,6 +236,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                         'r' | 'R' => opts.recursive = true,
                         'd' => opts.empty_dirs = true,
                         'v' => opts.verbose = true,
+                        'n' => opts.dry_run = true,
                         'i' => {
                             opts.force = false;
                             opts.interactive = Interactive::Always;
@@ -427,6 +389,8 @@ fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
                 gone_before: None,
                 free_inodes: 0,
                 only: None,
+                in_use: InUse::Ignore,
+                note_holds: false,
             },
         );
         if done.removed > 0 && !quiet {
@@ -809,8 +773,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         }
     }
     if opts.dry_run {
-        println!("would trash '{}'", crate::util::term_path(&abs));
-        return Ok(None);
+        return dry_preview(prog, path, &abs, &meta, opts);
     }
     // WSL, opted in: a file on a Windows drive goes to the Recycle Bin,
     // where Explorer restores it; rtrash list and undo do not see it.
@@ -869,14 +832,16 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
     match trash_overlap(&abs, &trash.root) {
         Some(Overlap::Contains) => {
             say!(
-                "{prog}: cannot trash '{name}': it contains the trash directory '{}' it would move into",
+                "{prog}: cannot trash '{name}': it contains the trash \
+                 directory '{}' it would move into",
                 crate::util::err_path(&trash.root)
             );
             return Err(1);
         }
         Some(Overlap::Inside) => {
             say!(
-                "{prog}: cannot trash '{name}': it is inside the trash directory '{}'; `rtrash rm` or `rtrash empty` deletes trashed items",
+                "{prog}: cannot trash '{name}': it is inside the trash \
+                 directory '{}'; `rtrash rm` or `rtrash empty` deletes trashed items",
                 crate::util::err_path(&trash.root)
             );
             return Err(1);
@@ -941,6 +906,144 @@ fn mappable(path: &Path) -> bool {
 
 /// The put operands, set before the first item so one scan covers them all.
 static SCAN_ROOTS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+
+/// `rename` when a put would rename into `dest`, else a cross-device copy.
+/// Same device is not enough: two btrfs subvolumes can share `st_dev` and
+/// still fail `rename` with EXDEV, which put then copies across.
+fn move_kind(src: &Path, src_dev: u64, dest: &Path) -> &'static str {
+    let same_device = trashdir::device_holding(dest) == Some(src_dev);
+    let same_mount = match (
+        trashdir::volume_top_of_path(src),
+        trashdir::volume_top_of_path(dest),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
+    kind_word(same_device, same_mount)
+}
+
+/// `rename` when the source and the trash share a device and a mount.
+fn kind_word(same_device: bool, same_mount: bool) -> &'static str {
+    if same_device && same_mount {
+        "rename"
+    } else {
+        "cross-device copy"
+    }
+}
+
+/// A directory `statvfs` can see: `path` when it is one, else the deepest
+/// existing ancestor. A dry run has not created the trash yet.
+fn probe_dir(path: &Path) -> &Path {
+    let mut cur = path;
+    loop {
+        if cur.is_dir() {
+            return cur;
+        }
+        match cur.parent() {
+            Some(p) if !p.as_os_str().is_empty() => cur = p,
+            _ => return Path::new("/"),
+        }
+    }
+}
+
+/// Where a real put would send `abs`, without creating the trash.
+fn preview_trash(opts: &Opts, abs: &Path, meta: &fs::Metadata) -> io::Result<trashdir::TrashDir> {
+    if let Some(pin) = &opts.trash_pin {
+        let td = trashdir::TrashDir::from_root(pin)?;
+        if let Some(top) = td.topdir.as_deref().filter(|t| !abs.starts_with(t)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the volume trash '{}' keeps only items from '{}'",
+                    pin.display(),
+                    top.display()
+                ),
+            ));
+        }
+        return Ok(td);
+    }
+    if opts.home_only {
+        return Ok(trashdir::TrashDir {
+            root: trashdir::home_trash(),
+            topdir: None,
+        });
+    }
+    trashdir::choose(abs, meta.dev())
+}
+
+/// Print what a put of `path` would do, and do none of it.
+fn dry_preview(
+    prog: &str,
+    path: &Path,
+    abs: &Path,
+    meta: &fs::Metadata,
+    opts: &Opts,
+) -> Result<Option<Trashed>, i32> {
+    let name = path.as_os_str().to_string_lossy();
+    let size = crate::util::format_bytes(crate::fastdelete::disk_usage(path));
+    if opts.trash_pin.is_none() && crate::wsl::applies(abs) {
+        println!(
+            "would trash '{}' -> Windows Recycle Bin ({size})",
+            crate::util::term_path(abs)
+        );
+        return Ok(None);
+    }
+    if opts.trash_pin.is_none() && crate::finder::is_default(false) {
+        let Some(trash) = crate::finder::trash_for(abs, meta.dev()) else {
+            say!("{prog}: cannot trash '{name}': HOME unset");
+            return Err(1);
+        };
+        let kind = move_kind(abs, meta.dev(), &trash);
+        println!(
+            "would trash '{}' -> '{}' ({size}, {kind})",
+            crate::util::term_path(abs),
+            crate::util::term_path(&trash)
+        );
+        return Ok(None);
+    }
+    let trash = match preview_trash(opts, abs, meta) {
+        Ok(t) => t,
+        Err(e) => {
+            say!("{prog}: cannot trash '{name}': {e}");
+            return Err(1);
+        }
+    };
+    match trash_overlap(abs, &trash.root) {
+        Some(Overlap::Contains) => {
+            say!(
+                "{prog}: cannot trash '{name}': it contains the trash \
+                 directory '{}' it would move into",
+                crate::util::err_path(&trash.root)
+            );
+            return Err(1);
+        }
+        Some(Overlap::Inside) => {
+            say!(
+                "{prog}: cannot trash '{name}': it is inside the trash \
+                 directory '{}'; `rtrash rm` or `rtrash empty` deletes trashed items",
+                crate::util::err_path(&trash.root)
+            );
+            return Err(1);
+        }
+        None => {}
+    }
+    let files = trash.files();
+    let kind = move_kind(abs, meta.dev(), &files);
+    if kind == "cross-device copy" {
+        if let Err(e) = trashdir::tree_removable(abs, meta)
+            .and_then(|()| crate::space::guard_copy(abs, meta, probe_dir(&files)))
+        {
+            say!("{prog}: cannot trash '{name}': {e}");
+            return Err(1);
+        }
+    }
+    println!(
+        "would trash '{}' -> '{}' ({size}, {kind})",
+        crate::util::term_path(abs),
+        crate::util::term_path(&trash.root)
+    );
+    Ok(None)
+}
 
 /// Pick destination trash: explicit pin (created if needed), home-only, or auto-select.
 fn resolve_put_trash(
@@ -1060,5 +1163,18 @@ mod warn_size_tests {
         assert!(WarnSize::Percent(10).exceeded(11, 100));
         assert!(!WarnSize::Percent(10).exceeded(10, 100));
         assert!(!WarnSize::Percent(10).exceeded(10, 0));
+    }
+}
+
+#[cfg(test)]
+mod dry_run_tests {
+    use super::kind_word;
+
+    #[test]
+    fn a_shared_device_and_mount_is_a_rename() {
+        assert_eq!(kind_word(true, true), "rename");
+        assert_eq!(kind_word(true, false), "cross-device copy");
+        assert_eq!(kind_word(false, true), "cross-device copy");
+        assert_eq!(kind_word(false, false), "cross-device copy");
     }
 }
