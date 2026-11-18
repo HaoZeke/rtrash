@@ -77,6 +77,8 @@ pub(crate) struct Opts {
     pub in_use: InUse,
     /// `--dry-run`: run every check and say what would move, moving nothing.
     pub dry_run: bool,
+    /// `--allow-copy`: allow copy+remove when trash and source are on different devices.
+    pub allow_copy: bool,
 }
 
 /// One item moved into a trash directory by `put_one`.
@@ -114,6 +116,7 @@ impl Default for Opts {
             quiet: false,
             in_use: InUse::Ignore,
             dry_run: false,
+            allow_copy: false,
         }
     }
 }
@@ -152,6 +155,9 @@ to require CLI operands even on a TTY.
       --no-space-check  copy across devices even when the copy would leave
                           the trash's file system under 5% of its bytes or
                           inodes free, or under RTRASH_MIN_FREE bytes
+      --allow-copy      allow a put to copy across devices into a trash on a
+                          different file system; without this, such a put
+                          refuses and leaves the file in place
       --in-use=WHEN     when a live process has an item open, mapped or as
                           its working directory: warn (the default), refuse,
                           or ignore (skips the process scan)
@@ -195,6 +201,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "--" => no_more_opts = true,
             "--plain" => plain = true,
             "--no-space-check" => crate::space::skip_check(true),
+            "--allow-copy" => opts.allow_copy = true,
             "--json" => {
                 json = true;
                 opts.quiet = true;
@@ -864,6 +871,23 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             return Err(1);
         }
     };
+    let trash_dev = match fs::metadata(&trash.root) {
+        Ok(m) => m.dev(),
+        Err(e) => {
+            say!("{prog}: cannot trash '{name}': {e}");
+            return Err(1);
+        }
+    };
+    if meta.dev() != trash_dev && !opts.allow_copy {
+        say!(
+            "{prog}: cannot trash '{name}': source is on device {} but trash '{}' is on device {}",
+            meta.dev(),
+            crate::util::err_path(&trash.root),
+            trash_dev
+        );
+        say!("{prog}: use the per-volume trash ($topdir/.Trash-$uid) or pass --allow-copy");
+        return Err(1);
+    }
     // Moving a directory into itself fails with a bare EINVAL, and an
     // item already in the trash would be trashed again, its info lost.
     match trash_overlap(&abs, &trash.root) {

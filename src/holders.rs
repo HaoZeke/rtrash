@@ -71,6 +71,8 @@ pub struct Snapshot {
     held: BTreeMap<PathBuf, Vec<Hold>>,
     /// Processes whose descriptors could not be read (another user's, without root).
     pub unreadable: usize,
+    /// Of `unreadable`, processes that belong to this user.
+    pub unreadable_mine: usize,
     /// False where rtrash has no way to list holders.
     pub supported: bool,
     /// Paths outside these trees are dropped (none are when it is
@@ -201,6 +203,8 @@ fn scan(s: &mut Snapshot) {
     use std::fs;
     use std::os::unix::fs::MetadataExt;
     let me = std::process::id();
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
     let Ok(dir) = fs::read_dir("/proc") else {
         s.supported = false;
         return;
@@ -307,6 +311,9 @@ fn scan(s: &mut Snapshot) {
         }
         if denied {
             s.unreadable += 1;
+            if fs::metadata(&base).is_ok_and(|m| m.uid() == euid) {
+                s.unreadable_mine += 1;
+            }
         }
     }
 }
@@ -561,6 +568,8 @@ fn vip_path(v: &libc::vnode_info_path) -> Option<PathBuf> {
 fn scan(s: &mut Snapshot) {
     use std::mem::{size_of, zeroed};
     let me = std::process::id();
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
     // SAFETY: libproc calls fill caller-sized buffers and return the byte
     // or entry count written; every struct is plain data.
     unsafe {
@@ -697,6 +706,9 @@ fn scan(s: &mut Snapshot) {
             }
             if denied {
                 s.unreadable += 1;
+                if uid.is_some_and(|u| u == euid) {
+                    s.unreadable_mine += 1;
+                }
             }
         }
     }

@@ -122,6 +122,7 @@ export extern "rtrash put" [
     --home-only  # always use the home trash (skip volume trash)
     --plain  # never open the put browser; require FILE operands
     --no-space-check  # copy across devices even when the copy would leave
+    --allow-copy  # allow a put to copy across devices into another trash
     --dry-run  # run every check and print what would move, moving nothing
     --in-use: string@"nu-complete rtrash in-use"  # when a live process has an item open, mapped or as
     --json  # print a JSON summary on stdout ({trashed, failed});
@@ -356,7 +357,7 @@ export extern "rtrash rm" [
 ]
 
 export extern "rtrash who" [
-    --json  # print a JSON object ({holders, unreadable})
+    --json  # print a JSON object ({holders, unreadable, unreadable_mine})
     --help  # display this help and exit
     --version  # output version information and exit
     ...paths: path
@@ -466,6 +467,7 @@ export extern "trash-put" [
     --home-only  # always use the home trash (skip volume trash)
     --plain  # never open the put browser; require FILE operands
     --no-space-check  # copy across devices even when the copy would leave
+    --allow-copy  # allow a put to copy across devices into another trash
     --dry-run  # run every check and print what would move, moving nothing
     --in-use: string@"nu-complete rtrash in-use"  # when a live process has an item open, mapped or as
     --json  # print a JSON summary on stdout ({trashed, failed});

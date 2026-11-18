@@ -276,12 +276,14 @@ Safety rails beyond rm:
 As with GNU rm, **the last of `-f` / `-i` / `-I` (and the matching long forms) wins** for prompt vs force behavior.
 `-f` also ignores missing paths.
 
-Trash placement follows the spec: the home trash (`$XDG_DATA_HOME/Trash`, defaulting under `~/.local/share`) for same-filesystem files, `$top/.Trash/$uid` (must be a sticky non-symlink directory) or `$top/.Trash-$uid` on other mounts, with a copy-into-home-trash fallback when the volume cannot host a trash directory.
+Trash placement follows the spec: the home trash (`$XDG_DATA_HOME/Trash`, defaulting under `~/.local/share`) for same-filesystem files, `$top/.Trash/$uid` (must be a sticky non-symlink directory) or `$top/.Trash-$uid` on other mounts. When the only usable trash is on another file system, put now refuses by default and points at the per-volume trash and `--allow-copy`.
 When `$top/.Trash` exists but fails the check (a symlink, a plain file, or no sticky bit), put warns once and uses `$top/.Trash-$uid`, as the spec asks.
 The per-user directory, `$top/.Trash/$uid` or `$top/.Trash-$uid`, must also be a real directory owned by you; one that is a symlink or belongs to another user gets a warning, put moves on to the next choice (in the end the home trash), and `list`, `empty` and `rm` skip it.
 Names are reserved atomically, so concurrent invocations never clobber each other; collisions get `name.2`, `name.3`, ... A put writes the whole `.trashinfo` under a temporary name in `info/`, then hard-links it to its trash name. The link fails if that name exists, as `O_EXCL` does. Other tools never read a cut-off record. Put falls back to creating the record with `O_EXCL` on a file system with no hard links. `rtrash status --check --fix` removes the temporary of a killed put.
 
 **Script pins:** `--trash-dir=PATH` puts into that FreeDesktop root (creates `files/` and `info/` if needed); `--home-only` always uses the home trash.
+
+**Cross-device safety:** when a put would have to copy into a trash on another file system, it refuses and leaves the source in place unless you pass `--allow-copy`. With `--allow-copy`, the previous copy+remove behavior applies (and `--no-space-check` still controls low-space refusal).
 
 **Script output:** `--json` prints one object, `{"trashed": [...], "failed": N}`. Each trashed entry lists the original path, the name under `files/`, and the trash root, so a script can hand the names to `rtrash rm` or restore by path later.
 
@@ -501,7 +503,7 @@ Every question rtrash asks on the command line (`put -i`, `put --inspect`, `empt
 Previously deferred items are implemented in the shipped put/empty path:
 
 - **Durable `.trashinfo`:** put `fsync`s the reserved info file (and best-effort the `info/` dir) before moving the payload.
-- **Cross-device fidelity:** a put or restore across file systems copies, then removes the original once the copy is whole. The copy keeps bytes, holes in sparse files, mode, owner where allowed, times, extended attributes (which carry access control lists and capabilities on Linux; on macOS the access control list is copied on its own), symlinks as links, named pipes, and hard links inside the tree. Where both sides share one btrfs file system, such as two subvolumes, it clones instead. A tree with a directory this user can't empty is refused before anything moves. A copy that fails partway is removed again and the original stays whole; once the copy is whole, it stays even when the original can't all go, so no file is lost (trash-cli #429).
+- **Cross-device fidelity:** restore, and put with `--allow-copy`, copy across file systems and then remove the original once the copy is whole. The copy keeps bytes, holes in sparse files, mode, owner where allowed, times, extended attributes (which carry access control lists and capabilities on Linux; on macOS the access control list is copied on its own), symlinks as links, named pipes, and hard links inside the tree. Where both sides share one btrfs file system, such as two subvolumes, it clones instead. A tree with a directory this user can't empty is refused before anything moves. A copy that fails partway is removed again and the original stays whole; once the copy is whole, it stays even when the original can't all go, so no file is lost (trash-cli #429).
 - **Put/empty exclusion:** each trash root takes an exclusive `flock` on `.rtrash.lock` for put and empty so the pair cannot tear mid-operation.
 - **Btrfs multi-subvol topdir:** volume topdir is the **longest mount-point prefix** from `/proc/self/mounts`, not a pure `st_dev` parent walk.
 - **No mount table (Termux):** when `/proc/self/mounts` cannot be read, the volume topdir comes from the `st_dev` parent walk, and `du --devices` lists the file systems of `/`, the home directory and the current directory.

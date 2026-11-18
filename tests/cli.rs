@@ -4937,11 +4937,11 @@ fn mount_top(path: &Path) -> PathBuf {
 }
 
 /// glib #883: with `$XDG_DATA_HOME` on another file system than a file,
-/// and no trash of ours on the file's volume, a put copies the file to
-/// the home trash, where list and restore find it. The test runs only
-/// where that volume's top directory holds no trash of ours and takes
-/// none (an ordinary user under a root-owned `/`), so it never makes or
-/// uses a trash outside the sandbox.
+/// and no trash of ours on the file's volume, a put now refuses by
+/// default; `--allow-copy` restores the previous copy-into-home-trash
+/// behavior. The test runs only where that volume's top directory holds
+/// no trash of ours and takes none (an ordinary user under a root-owned
+/// `/`), so it never makes or uses a trash outside the sandbox.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_home_trash_on_another_device_takes_files_its_volume_cannot() {
@@ -4970,6 +4970,13 @@ fn a_home_trash_on_another_device_takes_files_its_volume_cannot() {
     fs::write(&f, b"far away").unwrap();
     let env = [("XDG_DATA_HOME", xdg.to_str().unwrap())];
     let out = sb.run_env(&["put", "far.txt"], &env);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(err.contains("source is on device"), "{err}");
+    assert!(err.contains("--allow-copy"), "{err}");
+    assert!(f.exists());
+
+    let out = sb.run_env(&["put", "--allow-copy", "far.txt"], &env);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!f.exists());
     let trash = xdg.join("Trash");
@@ -5150,7 +5157,7 @@ fn put_across_devices_refuses_what_it_could_only_half_remove() {
     }
     let pin = format!("--trash-dir={}", other.display());
     for (op, keep) in cases {
-        let out = sb.run(&["put", "-r", &pin, op]);
+        let out = sb.run(&["put", "-r", "--allow-copy", &pin, op]);
         assert_eq!(out.status.code(), Some(1), "{op}: {}", stderr_of(&out));
         assert!(w.join(keep).exists(), "{op}: {keep} is gone");
         assert_eq!(names_in(&other.join("files")), Vec::<String>::new(), "{op}");
@@ -5189,7 +5196,7 @@ fn put_across_devices_refuses_a_tree_with_an_immutable_file() {
             common::skip(&format!("chattr {set} failed here; {dir} case skipped"));
             continue;
         }
-        let out = sb.run(&["put", "-r", &pin, dir]);
+        let out = sb.run(&["put", "-r", "--allow-copy", &pin, dir]);
         as_root(&["chattr", unset, path]);
         assert_eq!(out.status.code(), Some(1), "{dir}: {}", stderr_of(&out));
         let err = stderr_of(&out);
@@ -5299,7 +5306,15 @@ fn copies_across_devices_keep_posix_acls() {
             .output()
             .unwrap()
     };
-    let out = run(&["put", "-r", "--no-space-check", &pin, "f.txt", "d"]);
+    let out = run(&[
+        "put",
+        "-r",
+        "--allow-copy",
+        "--no-space-check",
+        &pin,
+        "f.txt",
+        "d",
+    ]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     check(
         &other.join("files/f.txt"),
@@ -5395,7 +5410,15 @@ fn copies_across_volumes_keep_macos_acls() {
             .output()
             .unwrap()
     };
-    let out = run(&["put", "-r", "--no-space-check", &pin, "f.txt", "d"]);
+    let out = run(&[
+        "put",
+        "-r",
+        "--allow-copy",
+        "--no-space-check",
+        &pin,
+        "f.txt",
+        "d",
+    ]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!file.exists() && !dir.exists());
     check(&other.join("files"), "trashed");
@@ -5454,7 +5477,7 @@ fn put_across_devices_keeps_the_target_from_filling() {
     fs::write(sb.work().join("big"), vec![b'x'; 4096]).unwrap();
     let pin = format!("--trash-dir={}", other.display());
     let out = common::rtrash(&sb.root)
-        .args(["put", &pin, "big"])
+        .args(["put", "--allow-copy", &pin, "big"])
         .current_dir(sb.work())
         .env("RTRASH_MIN_FREE", "1000000T")
         .output()
@@ -5470,7 +5493,7 @@ fn put_across_devices_keeps_the_target_from_filling() {
     assert_eq!(fs::read_dir(other.join("info")).unwrap().count(), 0);
 
     let out = common::rtrash(&sb.root)
-        .args(["put", "--no-space-check", &pin, "big"])
+        .args(["put", "--allow-copy", "--no-space-check", &pin, "big"])
         .current_dir(sb.work())
         .env("RTRASH_MIN_FREE", "1000000T")
         .output()
@@ -5478,6 +5501,37 @@ fn put_across_devices_keeps_the_target_from_filling() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!sb.work().join("big").exists());
     assert!(other.join("files/big").exists());
+    let _ = fs::remove_dir_all(&other);
+}
+
+#[test]
+fn put_home_only_refuses_cross_device_without_allow_copy() {
+    let _global = global_state();
+    let sb = Sandbox::new("put-home-only-xdev");
+    let Some(other) = other_device_dir(&sb.root, "home-only") else {
+        return;
+    };
+    let file = other.join("outside.txt");
+    fs::write(&file, b"x").unwrap();
+
+    let out = sb.run(&["put", "--home-only", file.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(err.contains("source is on device"), "{err}");
+    assert!(err.contains("--allow-copy"), "{err}");
+    assert!(err.contains(".Trash-$uid"), "{err}");
+    assert!(file.exists(), "{err}");
+
+    let out = sb.run(&[
+        "put",
+        "--home-only",
+        "--allow-copy",
+        "--no-space-check",
+        file.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!file.exists());
+    assert!(sb.trash().join("files/outside.txt").exists());
     let _ = fs::remove_dir_all(&other);
 }
 
@@ -5570,12 +5624,17 @@ fn who_names_the_process_holding_a_file_or_its_directory() {
             .any(|l| l.trim_start().starts_with(&line) && l.contains("fd 3")),
         "{text}"
     );
+    let err = stderr_of(&out);
+    assert!(err.contains("could not be read;"), "{err}");
+    assert!(err.contains("current user"), "{err}");
     let out = sb.run(&["who", "--json", "."]);
     assert!(out.status.success());
     assert!(stdout_of(&out).contains(&format!("\"pid\":{},", child.pid())));
     let out = sb.run(&["who", "idle.log"]);
     assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
     assert!(stdout_of(&out).is_empty());
+    let err = stderr_of(&out);
+    assert!(err.contains("could not be read;"), "{err}");
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

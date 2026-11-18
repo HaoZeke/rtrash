@@ -215,6 +215,8 @@ mod bin {
             force: true,
             quiet: true,
             trash_pin: pin.cloned(),
+            // du's browser keeps its existing cross-device copy behavior.
+            allow_copy: true,
             ..put::Opts::default()
         };
         let scoped = crate::interrupt::Watch {

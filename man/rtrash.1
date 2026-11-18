@@ -217,16 +217,19 @@ s into the trash. Accepts common
 flags with the same interactive/force semantics; nothing is unlinked
 permanently.
 .PP
-A trash on another file system gets a copy, and the original goes only
-once the copy is whole. The copy keeps holes in sparse files, mode, owner
-where allowed, times, extended attributes (with the access control
-list, which macOS keeps apart), named pipes, and hard links
-inside the tree. Within one btrfs file system it clones instead.
-A tree with a directory this user can't empty is refused before anything
-moves. Sockets can't be copied, so trashing one there fails. A copy that
-fails partway is removed again, and the original stays whole. When the
-copy is whole but the original can't all go, the copy stays, since part
-of the original may already be gone. Restore follows the same rules.
+When the chosen trash is on another file system, put refuses by default
+and leaves the item in place. With
+.B \-\-allow\-copy
+it copies to that trash and removes the original only once the copy is
+whole. The copy keeps holes in sparse files, mode, owner where allowed,
+times, extended attributes (with the access control list, which macOS
+keeps apart), named pipes, and hard links inside the tree. Within one
+btrfs file system it clones instead. A tree with a directory this user
+can't empty is refused before anything moves. Sockets can't be copied, so
+trashing one there fails. A copy that fails partway is removed again, and
+the original stays whole. When the copy is whole but the original can't
+all go, the copy stays, since part of the original may already be gone.
+Restore follows the same rules.
 .TP
 .BR \-f ", " \-\-force
 Ignore nonexistent files and arguments, never prompt.
@@ -345,11 +348,19 @@ Never open the put browser; require
 operands even on a TTY.
 .TP
 .B \-\-no\-space\-check
-Copy across devices even when the copy would leave the trash's file
+With
+.BR \-\-allow\-copy ,
+copy across devices even when the copy would leave the trash's file
 system with under 5% of its bytes or inodes free, or under
 .B RTRASH_MIN_FREE
 bytes.
 Without it, such a put fails before it copies anything.
+.TP
+.B \-\-allow\-copy
+Allow a put to copy across devices into a trash on another file system.
+Without it, such a put fails and names the source and trash device
+numbers, suggesting the per-volume trash
+.IR $topdir/.Trash\-$uid .
 .TP
 .BI \-\-in\-use= WHEN
 What to do when a live process holds an item, as
@@ -3211,10 +3222,10 @@ Exit status 0 means every item came back; 1 means nothing matched or an item fai
 .PP
 List the live processes that hold
 .I PATH
-or anything below it, one line each: the process id, its command, how it
-holds the path and the path held.
+or anything below it, one line each: the process id, user, command, how
+it holds the path and the path held.
 The ways are
-.BI "fd " N
+.BI "open fd " N
 (an open descriptor),
 .B mmap
 (a mapped file),
@@ -3236,8 +3247,8 @@ and
 do.
 macOS asks libproc for open files, working and root directories and the
 executable, but not memory maps.
-Without root, other users' processes cannot be read, and a note on
-stderr counts them.
+Without root, other users' processes may be unreadable; a final stderr
+line counts them and says whether any belong to the current user.
 Windows asks the Restart Manager which processes have a file open,
 checking at most 4096 files below each
 .IR PATH ;
@@ -3250,7 +3261,10 @@ Print a JSON object:
 .IR pid ", " uid ", " command ", " how ", " path )
 and
 .I unreadable
-(the count of processes that could not be read).
+and
+.I unreadable_mine
+(the counts of processes that could not be read, and of those that belong
+to the current user).
 .TP
 .B \-\-help
 Display help and exit.
