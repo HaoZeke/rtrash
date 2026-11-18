@@ -22,7 +22,7 @@ jobs:
     name: fmt · clippy · nextest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -57,7 +57,7 @@ jobs:
       # completion tests run here instead of skipping; with
       # RTRASH_REQUIRE_SHELLS set, a missing shell (pwsh too) fails them.
       - name: Cache the pinned shells
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/ci-shells
           key: ci-shells-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci-shells.sh') }}
@@ -117,7 +117,7 @@ jobs:
     name: clippy · x86_64 musl
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -144,7 +144,7 @@ jobs:
     name: clippy · x86_64 FreeBSD
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -167,7 +167,7 @@ jobs:
       matrix:
         fs: [btrfs, xfs]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -222,7 +222,7 @@ jobs:
       # Keep LF endings so tests that read checked-in files see what Unix sees.
       - run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -271,7 +271,7 @@ jobs:
     steps:
       - run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -311,7 +311,7 @@ jobs:
         os: [macos-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -334,7 +334,7 @@ jobs:
       # completion tests run here instead of skipping; with
       # RTRASH_REQUIRE_SHELLS set, a missing shell (pwsh too) fails them.
       - name: Cache the pinned shells
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/ci-shells
           key: ci-shells-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci-shells.sh') }}
@@ -358,7 +358,7 @@ jobs:
       # filter-from parity test skips; build pinned rsync 3 instead
       # (scripts/ci-rsync.sh says why not Homebrew).
       - name: Cache rsync 3
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/ci-rsync
           key: ci-rsync-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/ci-rsync.sh') }}
@@ -418,7 +418,7 @@ jobs:
     # the runner image allows that, a failure here does not fail CI.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -438,7 +438,7 @@ jobs:
     name: interop (trash-cli · gtrash · gio cross-restore)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -480,7 +480,7 @@ jobs:
     name: completion syntax (bash · zsh · fish)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install zsh and fish
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh fish
@@ -500,7 +500,7 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
@@ -510,7 +510,7 @@ jobs:
     name: msrv
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Read rust-version
         id: msrv
