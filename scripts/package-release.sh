@@ -4,6 +4,8 @@
 #   ./scripts/package-release.sh
 #   ./scripts/package-release.sh x86_64-unknown-linux-musl
 #   ./scripts/package-release.sh aarch64-unknown-linux-musl
+#   ./scripts/package-release.sh x86_64-apple-darwin
+#   ./scripts/package-release.sh aarch64-apple-darwin
 #   TARGETS="x86_64-unknown-linux-musl aarch64-unknown-linux-musl" ./scripts/package-release.sh --all
 # Env:
 #   OUT_DIR   output directory (default: dist/)
@@ -14,7 +16,7 @@
 #   bin path: {name}-{version}-{target}/bin/{bin}
 #   release:  $repo/releases/download/v{version}/...
 # Tag releases as v$VERSION so cargo-binstall can resolve assets without flags.
-# Supported release targets (CI): x86_64-unknown-linux-musl, aarch64-unknown-linux-musl.
+# Supported release targets (CI): x86_64/aarch64 Linux musl and Apple Darwin.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -32,8 +34,10 @@ elif [[ -n "${1:-}" ]]; then
   TARGETS=("$1")
 else
   # Single default on this host arch when possible.
-  case "$(uname -m)" in
-    aarch64|arm64) TARGETS=(aarch64-unknown-linux-musl) ;;
+  case "$(uname -s):$(uname -m)" in
+    Darwin:arm64) TARGETS=(aarch64-apple-darwin) ;;
+    Darwin:*) TARGETS=(x86_64-apple-darwin) ;;
+    Linux:aarch64|Linux:arm64) TARGETS=(aarch64-unknown-linux-musl) ;;
     *) TARGETS=(x86_64-unknown-linux-musl) ;;
   esac
 fi
@@ -109,8 +113,20 @@ INSTALL
   mkdir -p "$OUT_DIR"
   local TAR="$OUT_DIR/${NAME}.tar.gz"
   tar -C "$OUT_DIR" -czf "$TAR" "$NAME"
+  local SUM="${TAR}.sha256"
+  local tar_name
+  tar_name="$(basename "$TAR")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$OUT_DIR" && sha256sum "$tar_name" >"${tar_name}.sha256")
+  elif command -v shasum >/dev/null 2>&1; then
+    (cd "$OUT_DIR" && shasum -a 256 "$tar_name" >"${tar_name}.sha256")
+  else
+    echo "error: neither sha256sum nor shasum is available" >&2
+    return 1
+  fi
   echo "OK: $TAR"
-  ls -la "$TAR" "$STAGE/bin/rtrash"
+  echo "OK: $SUM"
+  ls -la "$TAR" "$SUM" "$STAGE/bin/rtrash"
 }
 
 for t in "${TARGETS[@]}"; do
