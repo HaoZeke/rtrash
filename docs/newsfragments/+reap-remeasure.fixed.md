@@ -1,1 +1,0 @@
-`rtrash reap --when-below` measures free space again before each entry instead of trusting the entries' sizes, so hard links, shared extents and other writers no longer make it stop early or late; a dry run still estimates.

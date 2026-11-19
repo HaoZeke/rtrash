@@ -1,1 +1,0 @@
-A Windows test pins that every `du` filter (`--filter-from`, `--exclude-from`, `--gitignore`, `--exclude`, both regex flags and both type flags) takes a file name with an unpaired surrogate, as NTFS allows: the file counts when a filter misses it and drops out when one matches it. dua #408 panicked on such a name.

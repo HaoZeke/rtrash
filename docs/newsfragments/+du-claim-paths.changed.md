@@ -1,1 +1,0 @@
-On a tree with many hard-linked files, `rtrash du` keeps each claim path in one buffer per shard instead of a separate allocation, so a listing (`-n`, the default, `--types`) uses less memory. With `-s` alone or `-n 0` it keeps no claims and is unchanged there. Totals and rows are unchanged.

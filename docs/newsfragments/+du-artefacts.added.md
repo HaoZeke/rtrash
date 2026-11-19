@@ -1,1 +1,0 @@
-du: tag regenerable build artefacts and caches (cargo `target`, `node_modules`, `__pycache__`, virtualenvs, CMake build trees, `CACHEDIR.TAG` directories) in a NOTE column and the JSON `artefact` field. Each artefact is one row, and `--artefacts` lists nothing else.

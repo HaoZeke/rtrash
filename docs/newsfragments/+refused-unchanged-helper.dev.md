@@ -1,1 +1,0 @@
-Tests that expect a refusal to change nothing share `common::assert_refused_unchanged`. It snapshots the watched folders and files, contents included, right before the call, and precheck flags any copy written by hand.

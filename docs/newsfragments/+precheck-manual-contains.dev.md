@@ -1,1 +1,0 @@
-The precheck script now flags a slice search written as iter().any with a deref of its argument against a name, which clippy rejects as manual_contains. Round 274 sent one in the du parser, and clippy failed in CI.

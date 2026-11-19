@@ -1,1 +1,0 @@
-The du explorer (`du -i`) now cuts a long path in its title and marks panel, and wraps the info panel, by terminal columns rather than characters, as dua 2.46 does. A path with Chinese, Japanese or Korean characters, or with emoji, stays inside its frame.

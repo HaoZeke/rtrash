@@ -1,1 +1,0 @@
-On a tree with many hard-linked files, `rtrash du` keeps a smaller record of where it met each one when it lists rows, with each path kept from below the folder it scans, so the scan needs less memory.

@@ -1,1 +1,0 @@
-An `empty` with no DAYS, `--max-size`, `--until-free` or `--trash-dir` now asks on a terminal, and exits 2 elsewhere, when the trash has items from other put runs; `--all` removes everything as before.
