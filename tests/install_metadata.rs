@@ -95,6 +95,18 @@ fn binstall_metadata_matches_package_release_basename() {
         script.contains("x86_64-unknown-linux-musl"),
         "package-release must know x86_64 musl target"
     );
+    assert!(
+        script.contains("aarch64-apple-darwin"),
+        "package-release must know Apple silicon target"
+    );
+    assert!(
+        script.contains("x86_64-apple-darwin"),
+        "package-release must know Intel macOS target"
+    );
+    assert!(
+        script.contains("${tar_name}.sha256"),
+        "package-release must write a checksum beside each tarball"
+    );
 
     assert!(
         musl_workflow.contains("aarch64-unknown-linux-musl"),
@@ -103,6 +115,18 @@ fn binstall_metadata_matches_package_release_basename() {
     assert!(
         musl_workflow.contains("x86_64-unknown-linux-musl"),
         "release-musl workflow must build x86_64 musl"
+    );
+    assert!(
+        musl_workflow.contains("aarch64-apple-darwin"),
+        "release workflow must build Apple silicon"
+    );
+    assert!(
+        musl_workflow.contains("x86_64-apple-darwin"),
+        "release workflow must build Intel macOS"
+    );
+    assert!(
+        musl_workflow.contains("dist/*.tar.gz*"),
+        "release workflow must upload tarballs and checksums"
     );
     assert!(
         dist_ws.contains("x86_64-unknown-linux-musl")

@@ -39,11 +39,44 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rtrash-${{ matrix.target }}
-          path: dist/*.tar.gz
+          path: dist/*.tar.gz*
       - name: upload release assets (tags only)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.tar.gz
+          files: dist/*.tar.gz*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  package-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: package
+        env:
+          # Host tests already run on PRs; packaging job focuses on the artifact.
+          SKIP_TEST: "1"
+        run: ./scripts/package-release.sh ${{ matrix.target }}
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtrash-${{ matrix.target }}
+          path: dist/*.tar.gz*
+      - name: upload release assets (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz*
           generate_release_notes: true
           fail_on_unmatched_files: true

@@ -121,8 +121,11 @@ Always run **`rtrash setup`** after the CLI binary lands on `PATH` (override wit
 
 ### 1. `cargo binstall` (preferred binary install)
 
-Uses [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) to download the prebuilt **Linux musl static** tarball for your CPU (no local compile).
-GitHub Releases ship **x86_64** and **aarch64** musl assets for tag `v*`.
+Uses [cargo-binstall](https://github.com/cargo-bins/cargo-binstall) to download
+the prebuilt tarball for your OS and CPU (no local compile). Linux tarballs are
+musl static.
+GitHub Releases ship **x86_64** and **aarch64** assets for Linux (musl) and macOS
+for tag `v*`.
 Crate metadata remaps typical glibc hosts (`*-unknown-linux-gnu`) to the matching musl tarball, so a normal:
 
 ```console
@@ -134,28 +137,37 @@ does **not** look for a non-existent `*-linux-gnu*.tar.gz` on x86_64 or aarch64 
 
 | Arch | Asset basename |
 | ---- | -------------- |
-| x86_64 | `rtrash-<version>-x86_64-unknown-linux-musl.tar.gz` |
-| aarch64 (ARM64) | `rtrash-<version>-aarch64-unknown-linux-musl.tar.gz` |
+| Linux x86_64 | `rtrash-<version>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux aarch64 (ARM64) | `rtrash-<version>-aarch64-unknown-linux-musl.tar.gz` |
+| macOS x86_64 | `rtrash-<version>-x86_64-apple-darwin.tar.gz` |
+| macOS aarch64 (Apple silicon) | `rtrash-<version>-aarch64-apple-darwin.tar.gz` |
 
-Naming matches `[package.metadata.binstall]` in `Cargo.toml` / `scripts/package-release.sh`.
+Each tarball has a same-named `.sha256` asset. Naming matches
+`[package.metadata.binstall]` in `Cargo.toml` / `scripts/package-release.sh`.
 
-Prebuilt musl tarballs are **Linux-only**. macOS (experimental; Finder Trash by default) and Windows (Recycle Bin backend) are **from-source** (`cargo install rtrash`); there are no Finder Trash or FreeDesktop-as-Recycle-Bin assets.
+macOS is experimental and uses Finder Trash by default. Windows (Recycle Bin
+backend) remains **from-source** (`cargo install rtrash`); there are no
+FreeDesktop-as-Recycle-Bin assets.
 
-### 2. Manual musl tarball (no cargo at all)
+### 2. Manual release tarball (no cargo at all)
 
 When a Release exists, download the matching asset from the repository Releases page, extract, put `bin/` on `PATH`, then `rtrash setup --force` (or follow `INSTALL.txt` in the tarball).
 
-Build the **same** artifact yourself (builder host with musl target):
+Build the **same** artifact yourself on the matching host:
 
 ```console
 $ ./scripts/package-release.sh x86_64-unknown-linux-musl
 $ ./scripts/package-release.sh aarch64-unknown-linux-musl
+$ ./scripts/package-release.sh x86_64-apple-darwin
+$ ./scripts/package-release.sh aarch64-apple-darwin
 # or, on a host that can build both:
 $ ./scripts/package-release.sh --all
-# → dist/rtrash-<version>-{x86_64,aarch64}-unknown-linux-musl.tar.gz
+# → dist/rtrash-<version>-<target>.tar.gz{,.sha256}
 ```
 
-CI: [`.github/workflows/release-musl.yml`](.github/workflows/release-musl.yml) builds both targets on `v*` tags (x86_64 and ubuntu-24.04-arm) and attaches the tarballs to the GitHub Release (what binstall downloads).
+CI: [`.github/workflows/release-musl.yml`](.github/workflows/release-musl.yml)
+builds Linux musl and native macOS targets on `v*` tags and attaches the
+tarballs and checksums to the GitHub Release (what binstall downloads).
 
 ### 3. From crates.io (`cargo install`)
 

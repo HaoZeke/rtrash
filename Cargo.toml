@@ -13,14 +13,15 @@ readme = "README.md"
 
 # cargo-binstall: resolve prebuilt binaries from GitHub Releases.
 # Must stay in lockstep with scripts/package-release.sh tarball naming:
-#   {name}-{version}-{arch}-unknown-linux-musl.tar.gz
+#   {name}-{version}-{target}.tar.gz
 # containing bin/{bin} (plus multi-call links, completions, man under share/).
 # Tags are v{version} (e.g. v0.1.0). After a matching Release asset is published:
 #   cargo binstall rtrash
 #   # or, from git metadata before crates.io publish:
 #   cargo binstall --git https://github.com/HaoZeke/rtrash rtrash
 #
-# Published Linux assets are *musl static* for x86_64 and aarch64. Map both
+# Published Linux assets are *musl static* for x86_64 and aarch64; macOS
+# publishes native Darwin targets under the generic target template. Map both
 # typical glibc hosts (*-linux-gnu) and musl hosts to the matching musl asset
 # so bare `cargo binstall rtrash` does not 404 looking for *-linux-gnu*.tar.gz.
 [package.metadata.binstall]
