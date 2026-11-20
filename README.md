@@ -419,6 +419,7 @@ $ rtrash empty -n && rtrash empty 14                    # free the space
 | `printf '0-2,5\n' \| rtrash restore` | Piped selection without TUI: indices, ranges, commas, or `all` |
 | `rtrash restore --glob='*.rs' --all` | Restore every item whose file name matches; a pattern with a `/` matches the original path |
 | `rtrash restore --regex='/src/.*\.c$' --all` | Restore every item whose original path matches the regular expression |
+| `rtrash restore --match=id ID` | Restore one item by `{id}` from `rtrash list --format='{id} {path}\n'` (id includes name, date and trash root) |
 | `rtrash restore --to=DIR …` | Restore into `DIR`, keeping each file name |
 | `rtrash restore --conflict=rename\|skip\|overwrite …` | When the destination exists: restore as `NAME.1.EXT`, leave the item in the trash, or replace it (`-f`); the default refuses |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
@@ -501,7 +502,7 @@ Permanently deletes trash entries whose original path, basename, or trash name m
 Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
 An orphan matches by its name in `files/` or its path there.
 Does **not** restore.
-On a terminal it names the matches (the first 10, with sizes) and asks once before it deletes, as `rm -I` does and as trash-cli #383 asks of `trash-rm`. Only `y` or `yes` goes on. A script, whose stdin or stderr is not a terminal, is never asked, so pipelines and cron jobs work as before. `-i`/`--interactive` asks even then, with the reply read from stdin. `-y`/`--yes` and `-f`/`--force` never ask, and the last of the three wins.
+On a terminal it names the matches (the first 10, with sizes) and asks once before it deletes, as `rm -I` does and as trash-cli #383 asks of `trash-rm`. Only `y` or `yes` goes on. A script, whose stdin or stderr is not a terminal, is never asked, so pipelines and cron jobs work as before. `-i`/`--interactive` asks even then, with the reply read from stdin. `-y`/`--yes` and `-f`/`--force` never ask, and the last of the three wins. Without `-f`, rm refuses payloads with dirty, unpushed or unknown git work; `-n` reports the same refusal without deleting anything.
 Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-i`/`--interactive`, `-y`/`--yes`, `-f`/`--force` (no question, and mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).
 
 ### Prompts

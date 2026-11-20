@@ -3061,7 +3061,7 @@ does:
 .B {id}
 from
 .BR "list \-\-format" ,
-the trash name and its deletion date).
+the trash name, deletion date and trash root).
 It takes the place of
 .BR \-\-name ,
 .B \-\-glob
@@ -4377,6 +4377,10 @@ The last of
 and
 .B \-y
 on the command line wins, as with rm(1).
+Without
+.BR \-f ,
+rm refuses payloads that hold dirty, unpushed or unknown git work; a
+dry run reports the same refusal.
 .TP
 .BI \-\-trash\-dir =PATH
 Only consider this trash directory (repeatable).
@@ -4418,7 +4422,7 @@ or
 .B {id}
 from
 .BR "list \-\-format" ,
-the trash name and its deletion date).
+the trash name, deletion date and trash root).
 Unlike trashy, the default stays glob.
 .TP
 .BI \-\-older\-than =AGE
@@ -4619,13 +4623,13 @@ than 10% of its bytes or inodes free, since moving a file into that
 trash frees nothing there. That warning and the one from
 .B status
 name
-.B "rtrash list \-\-sort=size \-\-format='{id} {path}'"
+.B "rtrash list \-\-sort=size \-\-format='{id} {path}\\n'"
 and
 .B "rtrash rm \-i \-\-max\-count=1 \-\-match=id ID" ,
 so the trash can be reviewed and one listed item removed after a
 confirmation.
 .I ID
-is that item's trash name and deletion date, as
+is that item's trash name, deletion date and trash root, as
 .B list
 shows it. The run asks even when stdin is not a terminal, and more
 than one match deletes nothing. A later item that reuses the original
