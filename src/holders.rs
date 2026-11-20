@@ -71,6 +71,10 @@ pub struct Snapshot {
     held: BTreeMap<PathBuf, Vec<Hold>>,
     /// Processes whose descriptors could not be read (another user's, without root).
     pub unreadable: usize,
+    /// Paths the Restart Manager could not check in full: its session or
+    /// query failed, or the folder held more files than one query takes.
+    #[cfg(windows)]
+    unchecked: std::sync::atomic::AtomicUsize,
     /// False where rtrash has no way to list holders.
     pub supported: bool,
     /// Paths outside these trees are dropped (none are when it is
@@ -146,12 +150,45 @@ impl Snapshot {
     #[cfg(windows)]
     pub fn under(&self, path: &Path) -> Vec<Hold> {
         let _ = (&self.held, &self.roots, self.maps);
-        win::query(&resolve(path))
+        let (holds, complete) = win::query(&resolve(path));
+        if !complete {
+            self.unchecked
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        holds
     }
 
     /// True when a live process holds `path` or anything below it.
     pub fn holds(&self, path: &Path) -> bool {
         !self.under(path).is_empty()
+    }
+
+    /// Why an empty answer from `under` does not prove a path is free:
+    /// the platform lists no holders, or some process (another user's,
+    /// without root) or path could not be inspected. None when every
+    /// process was seen. On Windows it reads what `under` has asked so far.
+    pub fn gap(&self) -> Option<String> {
+        if !self.supported {
+            return Some("cannot tell which processes hold files on this platform".to_string());
+        }
+        let mut parts = Vec::new();
+        if self.unreadable > 0 {
+            parts.push(format!(
+                "{} could not be inspected",
+                crate::util::plural(self.unreadable as u64, "process", "processes")
+            ));
+        }
+        #[cfg(windows)]
+        {
+            let n = self.unchecked.load(std::sync::atomic::Ordering::Relaxed);
+            if n > 0 {
+                parts.push(format!(
+                    "{} could not be checked in full",
+                    crate::util::plural(n as u64, "path", "paths")
+                ));
+            }
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
     }
 }
 
@@ -196,12 +233,32 @@ pub fn alive(pid: u32) -> bool {
 #[cfg(target_os = "linux")]
 const SUPPORTED: bool = true;
 
+/// Where the process folders are: `/proc`, or in debug builds the folder
+/// `RTRASH_TEST_PROC` names, so a test can stand in a few processes. A
+/// process folder there that holds a file named `denied` reads as one
+/// this user may not inspect, which a test run as root cannot get from
+/// file modes.
+#[cfg(target_os = "linux")]
+fn proc_dir() -> PathBuf {
+    if cfg!(debug_assertions) {
+        if let Some(d) = std::env::var_os("RTRASH_TEST_PROC") {
+            return PathBuf::from(d);
+        }
+    }
+    PathBuf::from("/proc")
+}
+
 #[cfg(target_os = "linux")]
 fn scan(s: &mut Snapshot) {
+    scan_in(s, &proc_dir());
+}
+
+#[cfg(target_os = "linux")]
+fn scan_in(s: &mut Snapshot, procs: &Path) {
     use std::fs;
     use std::os::unix::fs::MetadataExt;
     let me = std::process::id();
-    let Ok(dir) = fs::read_dir("/proc") else {
+    let Ok(dir) = fs::read_dir(procs) else {
         s.supported = false;
         return;
     };
@@ -217,6 +274,10 @@ fn scan(s: &mut Snapshot) {
             continue;
         }
         let base = entry.path();
+        if procs != Path::new("/proc") && base.join("denied").exists() {
+            s.unreadable += 1;
+            continue;
+        }
         let mut found: Vec<(String, PathBuf)> = Vec::new();
         let mut denied = false;
         for link in ["cwd", "root", "exe"] {
@@ -751,37 +812,46 @@ mod win {
     /// At most this many files of a directory go to one query.
     const MAX_FILES: usize = 4096;
 
-    /// The regular files at or below `path`, never through a link.
-    fn files(path: &Path) -> Vec<PathBuf> {
+    /// The regular files at or below `path`, never through a link, and
+    /// whether the list is whole: false when the path or a folder below it
+    /// could not be read, or the list stopped at `MAX_FILES`.
+    fn files(path: &Path) -> (Vec<PathBuf>, bool) {
         let mut out = Vec::new();
-        let Ok(m) = std::fs::symlink_metadata(path) else {
-            return out;
+        let m = match crate::util::look(path) {
+            crate::util::Look::There(m) => m,
+            crate::util::Look::Gone => return (out, true),
+            crate::util::Look::Unreachable(_) => return (out, false),
         };
         if m.is_file() {
             out.push(path.to_path_buf());
-            return out;
+            return (out, true);
         }
         if !m.is_dir() {
-            return out;
+            return (out, true);
         }
+        let mut whole = true;
         let mut stack = vec![path.to_path_buf()];
         while let Some(d) = stack.pop() {
             let Ok(rd) = std::fs::read_dir(&d) else {
+                whole = false;
                 continue;
             };
             for e in rd.flatten() {
-                let Ok(t) = e.file_type() else { continue };
+                let Ok(t) = e.file_type() else {
+                    whole = false;
+                    continue;
+                };
                 if t.is_dir() {
                     stack.push(e.path());
                 } else if t.is_file() {
                     out.push(e.path());
                     if out.len() >= MAX_FILES {
-                        return out;
+                        return (out, false);
                     }
                 }
             }
         }
-        out
+        (out, whole)
     }
 
     fn wide_str(w: &[u16]) -> String {
@@ -807,11 +877,12 @@ mod win {
         }
     }
 
-    /// The processes that have `path`, or a file below it, open.
-    pub fn query(path: &Path) -> Vec<Hold> {
-        let files = files(path);
+    /// The processes that have `path`, or a file below it, open, and
+    /// whether the Restart Manager answered for every file it was given.
+    pub fn query(path: &Path) -> (Vec<Hold>, bool) {
+        let (files, mut complete) = files(path);
         if files.is_empty() {
-            return Vec::new();
+            return (Vec::new(), complete);
         }
         let wide: Vec<Vec<u16>> = files
             .iter()
@@ -820,13 +891,14 @@ mod win {
         let ptrs: Vec<*const u16> = wide.iter().map(|w| w.as_ptr()).collect();
         let me = std::process::id();
         let mut infos: Vec<RM_PROCESS_INFO> = Vec::new();
+        let mut answered = false;
         // SAFETY: every pointer handed over points into a live buffer of
         // the stated length, and the session always ends.
         unsafe {
             let mut session = 0u32;
             let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
             if RmStartSession(&mut session, 0, key.as_mut_ptr()) != ERROR_SUCCESS {
-                return Vec::new();
+                return (Vec::new(), false);
             }
             let n = u32::try_from(ptrs.len()).unwrap_or(u32::MAX);
             if RmRegisterResources(
@@ -852,6 +924,7 @@ mod win {
                     );
                     if r == ERROR_SUCCESS {
                         infos.truncate(count as usize);
+                        answered = true;
                         break;
                     }
                     if r != ERROR_MORE_DATA {
@@ -863,6 +936,7 @@ mod win {
             }
             RmEndSession(session);
         }
+        complete &= answered;
         let mut out: Vec<Hold> = Vec::new();
         for info in &infos {
             let pid = info.Process.dwProcessId;
@@ -888,7 +962,7 @@ mod win {
                 names,
             });
         }
-        out
+        (out, complete)
     }
 }
 
@@ -989,6 +1063,48 @@ mod tests {
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(found, "the child's descriptor was never seen");
+    }
+
+    #[test]
+    fn a_snapshot_names_the_gap_that_an_empty_answer_hides() {
+        let none = Snapshot::default();
+        assert!(none.gap().unwrap().contains("on this platform"));
+        let mut s = Snapshot {
+            supported: true,
+            ..Snapshot::default()
+        };
+        assert_eq!(s.gap(), None);
+        s.unreadable = 1;
+        assert_eq!(s.gap().unwrap(), "1 process could not be inspected");
+        s.unreadable = 7;
+        assert_eq!(s.gap().unwrap(), "7 processes could not be inspected");
+    }
+
+    /// A process folder this user may not enter counts as unreadable, and
+    /// one it may read does not. Root passes every mode, so it has no
+    /// folder to be refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_folder_the_user_may_not_read_is_counted() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rtrash-proc-denied-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let shut = dir.join("4000001");
+        std::fs::create_dir_all(shut.join("fd")).unwrap();
+        std::fs::create_dir_all(dir.join("4000002/fd")).unwrap();
+        std::fs::set_permissions(shut.join("fd"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut s = Snapshot {
+            supported: true,
+            ..Snapshot::default()
+        };
+        scan_in(&mut s, &dir);
+        std::fs::set_permissions(shut.join("fd"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(s.unreadable, 1);
     }
 
     #[test]

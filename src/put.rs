@@ -162,7 +162,9 @@ to require CLI operands even on a TTY.
                           inodes free, or under RTRASH_MIN_FREE bytes
       --in-use=WHEN     when a live process has an item open, mapped or as
                           its working directory: warn (the default), refuse,
-                          or ignore (skips the process scan)
+                          or ignore (skips the process scan); refuse also
+                          refuses an item when some process could not be
+                          inspected (without root), unless -f is given
       --json            print a JSON summary on stdout ({trashed, failed});
                           implies --plain and replaces -v output
       --help            display this help and exit
@@ -955,6 +957,15 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                 return Err(1);
             }
             say!("{prog}: warning: '{name}' is in use by {who}");
+        } else if opts.in_use == InUse::Refuse {
+            if let Some(gap) = holders().gap() {
+                if !opts.force {
+                    say!("{prog}: cannot trash '{name}': it may be in use; {gap}");
+                    say!("{prog}: use -f or --in-use=warn to trash it anyway");
+                    return Err(1);
+                }
+                say!("{prog}: warning: '{name}' may be in use; {gap}");
+            }
         }
     }
     if opts.dry_run {
