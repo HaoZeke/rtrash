@@ -1701,6 +1701,22 @@ pub(crate) fn identity_changed(before: Option<(u64, u64)>, path: &Path) -> bool 
     }
 }
 
+/// Merge `extra` risky repository notes into `owned` without duplicating
+/// paths already scanned in the Recycle Bin.
+#[cfg(any(windows, test))]
+pub(crate) fn merge_git_risks(
+    owned: &mut Vec<(PathBuf, crate::du_git::RiskyGit)>,
+    extra: impl IntoIterator<Item = (PathBuf, crate::du_git::RiskyGit)>,
+) {
+    for (path, work) in extra {
+        if let Some((_, existing)) = owned.iter_mut().find(|(p, _)| *p == path) {
+            *existing = existing.union(work);
+        } else {
+            owned.push((path, work));
+        }
+    }
+}
+
 // ---- Windows CLI surface (system Recycle Bin via `trash` crate) ----
 
 #[cfg(windows)]
@@ -2151,7 +2167,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 }
                 let what = format!("the Recycle Bin of {}", crate::util::err_path(r));
                 let mut owned = bin_git_risks_for_root(r);
-                owned.extend(
+                super::merge_git_risks(
+                    &mut owned,
                     restore_notes
                         .iter()
                         .filter(|(path, _)| same_volume(path, r))
@@ -3981,11 +3998,9 @@ registry), then the total and the free space on each (a warning under
         let mut out = Vec::new();
         let test_root = test_bin_root();
         for (id, original) in items {
-            let item_root = test_root
-                .as_ref()
-                .cloned()
-                .or_else(|| bin_root_of(&id))
-                .unwrap_or_default();
+            let Some(item_root) = test_root.clone().or_else(|| bin_root_of(&id)) else {
+                continue;
+            };
             if !same_volume(root, &item_root) {
                 continue;
             }
@@ -4315,7 +4330,9 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             for it in matched {
                 let payload = Path::new(&it.id);
                 if crate::util::is_gone(payload) {
-                    kept.push(it);
+                    if dry_run {
+                        kept.push(it);
+                    }
                     continue;
                 }
                 if let Some(work) = crate::du_git::risky_tree(payload) {
@@ -4824,6 +4841,41 @@ mod tests {
             r"removed 'C:\mnt\data\a.txt' (Recycle Bin of C:\mnt\data\)"
         );
         assert_eq!(removed_line("a.txt", None), "removed 'a.txt'");
+    }
+
+    #[test]
+    fn merge_git_risks_unions_same_path_instead_of_duplicating() {
+        let dirty = crate::du_git::RiskyGit {
+            dirty: true,
+            unpushed: false,
+            unknown: false,
+        };
+        let unpushed = crate::du_git::RiskyGit {
+            dirty: false,
+            unpushed: true,
+            unknown: false,
+        };
+        let mut owned = vec![(PathBuf::from(r"C:\w\repo"), dirty)];
+        merge_git_risks(
+            &mut owned,
+            vec![
+                (PathBuf::from(r"C:\w\repo"), unpushed),
+                (PathBuf::from(r"C:\w\other"), dirty),
+            ],
+        );
+        assert_eq!(owned.len(), 2);
+        assert_eq!(
+            owned[0],
+            (
+                PathBuf::from(r"C:\w\repo"),
+                crate::du_git::RiskyGit {
+                    dirty: true,
+                    unpushed: true,
+                    unknown: false,
+                }
+            )
+        );
+        assert_eq!(owned[1], (PathBuf::from(r"C:\w\other"), dirty));
     }
 
     #[test]

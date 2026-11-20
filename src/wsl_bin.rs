@@ -116,7 +116,7 @@ pub fn scan(root: &Path, sid: &str) -> Vec<BinEntry> {
 }
 
 const USAGE: &str = "\
-Usage: rtrash wsl list [--json | --format=TEMPLATE] [MATCH]
+Usage: rtrash wsl list [--json | --format=TEMPLATE] [--match=KIND] [MATCH]
        rtrash wsl restore [-f] PATH...
        rtrash wsl rm [-n] [-f] [--match=KIND] MATCH|PATH...
        rtrash wsl empty [-n] [--all] [--older-than=AGE | DAYS]
@@ -353,6 +353,10 @@ fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
             }
             Err(c) => return c,
         }
+    }
+    if kind_set && matcher.is_none() {
+        eprintln!("{prog}: list: --match requires a MATCH");
+        return 2;
     }
     if json && format.is_some() {
         eprintln!("{prog}: list: give --json or --format, not both");

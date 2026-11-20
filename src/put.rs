@@ -515,7 +515,7 @@ fn warn_size(prog: &str) -> Option<(WarnSize, &'static str)> {
 /// Git work to name in a warning for `root`: this run's flags unioned with
 /// a scan of the trash. A FreeDesktop `files/` that cannot be listed is
 /// unknown, so the warning does not suggest removing anything. A Finder
-/// trash has no `files/` and keeps this run's flags.
+/// trash has no `files/`, so Finder runs scan `root` through `finder_shared`.
 fn risks_for(root: &Path, trashed: &[Trashed]) -> Vec<(PathBuf, crate::du_git::RiskyGit)> {
     let run: Vec<&Trashed> = trashed.iter().filter(|t| t.trash_dir == root).collect();
     let from_run = |t: &Trashed| t.risky_git.map(|w| (t.original.clone(), w));
@@ -523,9 +523,16 @@ fn risks_for(root: &Path, trashed: &[Trashed]) -> Vec<(PathBuf, crate::du_git::R
         return run.iter().filter_map(|t| from_run(t)).collect();
     };
     let scanned = if !dir.files().is_dir() {
-        crate::finder_shared::entries().ok().map(|rows| {
+        if !crate::finder::is_default(false) {
+            return run.iter().filter_map(|t| from_run(t)).collect();
+        }
+        let rows = match crate::finder_shared::entries_in(root) {
+            Ok(v) => Some(v),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+            Err(_) => None,
+        };
+        rows.map(|rows| {
             rows.into_iter()
-                .filter(|e| e.trash == root)
                 .filter_map(|e| {
                     let payload = e.path();
                     let work = crate::du_git::risky_tree(&payload)?;

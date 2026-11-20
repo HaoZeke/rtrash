@@ -353,6 +353,9 @@ fn wsl_list_and_rm_accept_match_id() {
     );
     assert!(!f.bin().join("$RAB12CD.txt").exists());
     assert!(f.bin().join("$REF34GH.txt").exists());
+
+    let missing_match = f.run(&["list", "--match=id"]);
+    assert_eq!(missing_match.status.code(), Some(2));
 }
 
 #[test]

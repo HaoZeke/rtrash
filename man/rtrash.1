@@ -395,7 +395,7 @@ With this option it lets Windows delete it for good, still through
 .TP
 .B \-\-json
 Print one JSON object on stdout:
-\fItrashed\fR (one entry per moved item with \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR)
+\fItrashed\fR (one entry per moved item with \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR, where \fIname\fR is the payload name in the trash: under \fIfiles/\fR on FreeDesktop, in the Finder Trash, or \fI$R...\fR in the Windows Recycle Bin)
 and \fIfailed\fR (operands that could not be trashed).
 Implies
 .B \-\-plain
@@ -4078,9 +4078,8 @@ prints an array of objects with
 .IR original ,
 .IR path ,
 .IR deleted ,
-.I date
-and
-.IR size ", and " id .
+.I date ,
+.IR size " and " id .
 .B list \-\-format=\fITEMPLATE\fR
 prints each item through a template, as
 .B rtrash list \-\-format
