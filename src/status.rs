@@ -301,9 +301,8 @@ pub fn print_status(
         let lows = s.lows(space::WARN_FREE_PERCENT);
         if !lows.is_empty() {
             eprintln!(
-                "rtrash: warning: {} is low: {}; free space with `rtrash empty --until-free=10%` (only the oldest items it needs) or `rtrash empty`",
-                crate::util::err_path(&d.root),
-                lows.join(", ")
+                "{}",
+                space::status_low_warning(&crate::util::err_path(&d.root), &lows)
             );
         }
     }

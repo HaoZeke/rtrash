@@ -1617,6 +1617,30 @@ fn volume_serial(path: &Path) -> Option<u32> {
     (ok != 0).then_some(info.dwVolumeSerialNumber)
 }
 
+/// Absolute path of an operand that may be a symlink. The parent is
+/// resolved and the final component stays as given, so the symlink itself
+/// remains the operand. `canonicalize` would follow it and attribute a
+/// repository behind the link to that other path.
+#[cfg(any(windows, test))]
+pub(crate) fn operand_path(path: &Path) -> PathBuf {
+    let Some(name) = path.file_name().filter(|n| !n.is_empty()) else {
+        return std::fs::canonicalize(path)
+            .map(|p| crate::util::plain_path(&p))
+            .unwrap_or_else(|_| path.to_path_buf());
+    };
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => match std::fs::canonicalize(p) {
+            Ok(c) => c,
+            Err(_) => return path.to_path_buf(),
+        },
+        _ => match std::env::current_dir() {
+            Ok(c) => c,
+            Err(_) => return path.to_path_buf(),
+        },
+    };
+    crate::util::plain_path(&parent.join(name))
+}
+
 // ---- Windows CLI surface (system Recycle Bin via `trash` crate) ----
 
 #[cfg(windows)]
@@ -1872,6 +1896,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut failed = 0usize;
         let mut moved: Vec<PathBuf> = Vec::new();
         let mut roots: Vec<PathBuf> = Vec::new();
+        // (volume root, original path, git work) for repositories this put flagged.
+        let mut risky_at: Vec<(PathBuf, PathBuf, crate::du_git::RiskyGit)> = Vec::new();
         for f in &files {
             match crate::util::look(f) {
                 crate::util::Look::There(_) => {}
@@ -1893,9 +1919,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     continue;
                 }
             }
-            let abs = std::fs::canonicalize(f)
-                .map(|p| crate::util::plain_path(&p))
-                .unwrap_or_else(|_| f.clone());
+            // Parent only: the final component is the operand, symlink included.
+            let abs = super::operand_path(f);
+            let work = repo_at(&abs);
             if let Some(snap) = &snap {
                 let holds = snap.under(f);
                 if !holds.is_empty() {
@@ -1967,16 +1993,27 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     // The path as the user gave it, made absolute; the
                     // canonical form can name a mounted folder by its
                     // volume GUID.
-                    moved.push(
-                        std::path::absolute(f)
-                            .map(|p| crate::util::plain_path(&p))
-                            .unwrap_or_else(|_| abs.clone()),
-                    );
+                    let kept = std::path::absolute(f)
+                        .map(|p| crate::util::plain_path(&p))
+                        .unwrap_or_else(|_| abs.clone());
+                    // The move has succeeded, so undo can name this item.
+                    if let Some(work) = work {
+                        eprintln!(
+                            "{prog}: warning: '{}' contains a git repository with {} work; \
+                             `rtrash undo` brings it back",
+                            crate::util::err_path(&abs),
+                            work.label()
+                        );
+                    }
                     if let Some(r) = root {
+                        if let Some(work) = work {
+                            risky_at.push((r.clone(), kept.clone(), work));
+                        }
                         if !roots.contains(&r) {
                             roots.push(r);
                         }
                     }
+                    moved.push(kept);
                 }
                 Err(e) => {
                     eprintln!(
@@ -2004,12 +2041,26 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         // The Recycle Bin keeps items on their own volume, so a full volume
         // stays full.
         for r in &roots {
-            let what = format!("the Recycle Bin of {}", r.display());
-            if let Some(w) = crate::space::low_warning(&what, r) {
+            let what = format!("the Recycle Bin of {}", crate::util::err_path(r));
+            let risky: Vec<(&Path, crate::du_git::RiskyGit)> = risky_at
+                .iter()
+                .filter(|(root, _, _)| root == r)
+                .map(|(_, path, work)| (path.as_path(), *work))
+                .collect();
+            if let Some(w) = crate::space::low_warning_for(&what, r, &risky) {
                 eprintln!("{prog}: warning: {w}");
             }
         }
         status
+    }
+
+    /// Risky git work at `abs`, when `abs` is a directory. The caller prints
+    /// the undo line only after the move into the bin has succeeded.
+    fn repo_at(abs: &Path) -> Option<crate::du_git::RiskyGit> {
+        if !std::fs::symlink_metadata(abs).is_ok_and(|m| m.is_dir()) {
+            return None;
+        }
+        crate::du_git::risky_repo_state(abs)
     }
 
     /// Why a payload would not move: the processes that hold it open, named
@@ -3770,9 +3821,8 @@ registry), then the total and the free space on each (a warning under
             let lows = s.lows(crate::space::WARN_FREE_PERCENT);
             if !lows.is_empty() {
                 eprintln!(
-                    "rtrash: warning: {} is low: {}; free space with `rtrash empty --until-free=10%` (only the oldest items it needs) or `rtrash empty`",
-                    crate::util::err_path(&root),
-                    lows.join(", ")
+                    "{}",
+                    crate::space::status_low_warning(&crate::util::err_path(root), &lows)
                 );
             }
         }
@@ -4413,6 +4463,44 @@ pub fn purge_oldest_on(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// The final component stays the operand. Canonicalizing the whole path
+    /// would follow a symlink and report the repository it points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_operand_is_not_the_repository_it_points_at() {
+        let top = std::env::temp_dir().join(format!("rtrash-operand-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&top);
+        let repo = top.join("real").join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let links = top.join("links");
+        std::fs::create_dir_all(&links).unwrap();
+        let link = links.join("shortcut");
+        std::os::unix::fs::symlink(&repo, &link).unwrap();
+        let op = operand_path(&link);
+        let canon = crate::util::plain_path(&std::fs::canonicalize(&link).unwrap());
+        assert_eq!(op.file_name(), Some(std::ffi::OsStr::new("shortcut")));
+        assert_ne!(op, canon);
+        assert!(std::fs::symlink_metadata(&op)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let flagged = |p: &Path| {
+            std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())
+                && crate::du_git::risky_repo_state(p).is_some()
+        };
+        assert!(!flagged(&op), "the symlink is not the repository");
+        assert!(flagged(&canon), "the target directory is the repository");
+        let via = top.join("via");
+        std::os::unix::fs::symlink(top.join("real"), &via).unwrap();
+        let through = operand_path(&via.join("repo"));
+        assert_eq!(through.file_name(), Some(std::ffi::OsStr::new("repo")));
+        assert!(
+            flagged(&through),
+            "a symlinked parent still names the repository"
+        );
+        let _ = std::fs::remove_dir_all(&top);
+    }
 
     #[test]
     fn removed_line_names_the_bin_of_the_volume() {
