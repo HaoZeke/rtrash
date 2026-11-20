@@ -8245,6 +8245,68 @@ fn put_warns_when_the_trash_file_system_is_low() {
     assert!(!stderr_of(&out).contains("is low"), "{}", stderr_of(&out));
 }
 
+/// A put that just moved git work flagged dirty or unpushed must not
+/// suggest removing anything when the file system is low or the trash is
+/// large. Unknown shares that flag (`GitState::is_risky`).
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn put_space_hint_keeps_flagged_git_work() {
+    let git = |repo: &Path, home: &Path, args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", home)
+            .env("GIT_AUTHOR_NAME", "Trash Test")
+            .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Trash Test")
+            .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+            .output()
+            .unwrap()
+    };
+    for (tag, commit) in [("unpushed", true), ("dirty", false)] {
+        let sb = Sandbox::new(&format!("put-git-{tag}"));
+        let repo = sb.work().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let init = git(&repo, &sb.root, &["init", "-q"]);
+        if !init.status.success() {
+            common::skip("git unavailable; skipping");
+            return;
+        }
+        fs::write(repo.join("f"), vec![b'x'; 90_000]).unwrap();
+        if commit {
+            let add = git(&repo, &sb.root, &["add", "f"]);
+            let committed = git(&repo, &sb.root, &["commit", "-qm", "work"]);
+            assert!(
+                add.status.success() && committed.status.success(),
+                "add: {}\ncommit: {}",
+                String::from_utf8_lossy(&add.stderr),
+                String::from_utf8_lossy(&committed.stderr)
+            );
+        }
+        let out = common::rtrash(&sb.root)
+            .args(["put", "--home-only", "-r", repo.to_str().unwrap()])
+            .env_remove("RTRASH_WARN_SIZE")
+            .env("RTRASH_WARN_SIZE", "1")
+            .env_remove("RTRASH_MAX_SIZE")
+            .env("RTRASH_TEST_FS", format!("100000:{}", sb.root.display()))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{tag}: {}", stderr_of(&out));
+        let err = stderr_of(&out);
+        assert!(
+            err.contains(&format!("with {tag} work"))
+                && err.contains("hold unrecoverable work")
+                && err.contains("must not be removed until it is pushed")
+                && err.contains("is low (")
+                && !err.contains("rtrash empty")
+                && !err.contains("rtrash list")
+                && !err.contains("rtrash rm"),
+            "{tag}: {err}"
+        );
+    }
+}
+
 #[test]
 fn an_unscoped_empty_needs_all_for_items_other_puts_left() {
     let sb = Sandbox::new("emptyguard");

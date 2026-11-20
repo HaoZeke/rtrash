@@ -146,28 +146,42 @@ pub fn test_fs() -> Option<(std::path::PathBuf, Space)> {
     Some((dir, s))
 }
 
-/// Closing advice of a low-space or big-trash warning: review the trash
-/// and remove chosen items by name. Never a blanket empty.
-pub fn warning_hint() -> &'static str {
-    concat!(
-        "review the trash with `rtrash list --sort=size` ",
-        "and remove chosen items by name with `rtrash rm NAME`",
-    )
+/// Closing advice of a low-space or big-trash warning.
+/// `keep_git` is set when this put moved a repository flagged dirty,
+/// unpushed or unknown: that work must stay until it is pushed.
+pub fn warning_hint(keep_git: bool) -> &'static str {
+    if keep_git {
+        concat!(
+            "items just trashed hold unrecoverable work ",
+            "and must not be removed until it is pushed",
+        )
+    } else {
+        concat!(
+            "review the trash with `rtrash list --sort=size` ",
+            "and remove chosen items by name with `rtrash rm NAME`",
+        )
+    }
 }
 
 /// The low-space warning for the file system of `what` (at `path`), or
 /// `None` when it has room or cannot be read.
 pub fn low_warning(what: &str, path: &Path) -> Option<String> {
+    low_warning_keeping(what, path, false)
+}
+
+/// As [`low_warning`]. When `keep_git` is set, the warning says the items
+/// just trashed hold unrecoverable work and must stay until it is pushed.
+pub fn low_warning_keeping(what: &str, path: &Path, keep_git: bool) -> Option<String> {
     let lows = query(path).ok()?.lows(WARN_FREE_PERCENT);
-    (!lows.is_empty()).then(|| low_message(what, &lows))
+    (!lows.is_empty()).then(|| low_message(what, &lows, keep_git))
 }
 
 /// The text of a low-space warning about `what`.
-pub fn low_message(what: &str, lows: &[String]) -> String {
+pub fn low_message(what: &str, lows: &[String], keep_git: bool) -> String {
     format!(
         "the file system of {what} is low ({}); trashing frees nothing there; {}",
         lows.join(", "),
-        warning_hint()
+        warning_hint(keep_git)
     )
 }
 
@@ -176,7 +190,7 @@ pub fn status_low_warning(what: &str, lows: &[String]) -> String {
     format!(
         "rtrash: warning: {what} is low: {}; {}",
         lows.join(", "),
-        warning_hint()
+        warning_hint(false)
     )
 }
 
@@ -453,19 +467,28 @@ mod tests {
 
     #[test]
     fn a_low_or_big_trash_hint_never_names_rtrash_empty() {
-        let hint = warning_hint();
-        assert!(!hint.contains("rtrash empty"), "{hint}");
-        assert!(hint.contains("rtrash list --sort=size"), "{hint}");
-        assert!(hint.contains("rtrash rm NAME"), "{hint}");
         let lows = ["9% of bytes free".to_string()];
-        let msg = low_message("trash '/t'", &lows);
+        for keep in [false, true] {
+            let hint = warning_hint(keep);
+            assert!(!hint.contains("rtrash empty"), "{hint}");
+            let msg = low_message("trash '/t'", &lows, keep);
+            assert!(msg.contains(hint), "{msg}");
+            assert!(msg.contains("trashing frees nothing"), "{msg}");
+            assert!(!msg.contains("rtrash empty"), "{msg}");
+        }
+        let review = warning_hint(false);
+        assert!(review.contains("rtrash list --sort=size"), "{review}");
+        assert!(review.contains("rtrash rm NAME"), "{review}");
+        let keep = warning_hint(true);
+        assert!(keep.contains("hold unrecoverable work"), "{keep}");
         assert!(
-            msg.contains(hint) && msg.contains("trashing frees nothing"),
-            "{msg}"
+            keep.contains("must not be removed until it is pushed"),
+            "{keep}"
         );
-        assert!(!msg.contains("rtrash empty"), "{msg}");
+        assert!(!keep.contains("rtrash rm"), "{keep}");
+        assert!(!keep.contains("rtrash list"), "{keep}");
         let status = status_low_warning("/t", &lows);
-        assert!(status.contains(hint), "{status}");
+        assert!(status.contains(review), "{status}");
         assert!(!status.contains("rtrash empty"), "{status}");
         assert!(status.starts_with("rtrash: warning: /t is low: 9% of bytes free; "));
     }

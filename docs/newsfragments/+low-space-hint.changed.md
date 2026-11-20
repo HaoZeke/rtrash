@@ -1,1 +1,1 @@
-The low-space and big-trash warnings of `put` and `status` now point at `rtrash list --sort=size` and `rtrash rm NAME`, so chosen items are removed by name.
+The low-space and big-trash warnings of `put` and `status` now point at `rtrash list --sort=size` and `rtrash rm NAME`, so chosen items are removed by name. When a put just moved a repository flagged dirty, unpushed or unknown, the warning says that work is unrecoverable and must not be removed until it is pushed.

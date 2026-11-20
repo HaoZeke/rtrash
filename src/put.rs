@@ -88,6 +88,9 @@ pub struct Trashed {
     pub name: String,
     /// Trash root the item went to.
     pub trash_dir: PathBuf,
+    /// Set when put flagged this item as a repository with dirty,
+    /// unpushed or unknown git work.
+    pub risky_git: bool,
 }
 
 /// JSON summary for `put --json`: every trashed item plus the failure count.
@@ -502,8 +505,14 @@ fn warn_size(prog: &str) -> Option<(WarnSize, &'static str)> {
     w.map(|w| (w, src))
 }
 
+/// Whether this put moved a repository it flagged dirty, unpushed or unknown.
+fn moved_risky_git(trashed: &[Trashed]) -> bool {
+    trashed.iter().any(|t| t.risky_git)
+}
+
 /// Warn when a trash this put used holds more than the warn size.
 fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
+    let hint = crate::space::warning_hint(moved_risky_git(trashed));
     let Some((limit, src)) = warn_size(prog) else {
         return;
     };
@@ -529,7 +538,7 @@ fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
                 "{prog}: warning: trash '{}' holds {}{share}, past {src}; {}",
                 crate::util::err_path(&root),
                 crate::fastdelete::format_bytes(bytes),
-                crate::space::warning_hint()
+                hint
             );
         }
     }
@@ -545,6 +554,7 @@ fn warn_big_finder_trash(prog: &str, trashed: &[Trashed]) {
     let Some((limit, src)) = warn_size(prog) else {
         return;
     };
+    let hint = crate::space::warning_hint(moved_risky_git(trashed));
     let mut roots: Vec<PathBuf> = trashed.iter().map(|t| t.trash_dir.clone()).collect();
     roots.sort();
     roots.dedup();
@@ -564,18 +574,20 @@ fn warn_big_finder_trash(prog: &str, trashed: &[Trashed]) {
                 "{prog}: warning: trash '{}' holds about {}, past {src}; {}",
                 crate::util::err_path(&root),
                 crate::fastdelete::format_bytes(bytes),
-                crate::space::warning_hint()
+                hint
             );
         }
     }
 }
 
 fn warn_low_space(prog: &str, trashed: &[Trashed]) {
+    let keep = moved_risky_git(trashed);
     let mut roots: Vec<PathBuf> = trashed.iter().map(|t| t.trash_dir.clone()).collect();
     roots.sort();
     roots.dedup();
     for root in roots {
-        if let Some(w) = crate::space::low_warning(&format!("trash '{}'", root.display()), &root) {
+        let what = format!("trash '{}'", root.display());
+        if let Some(w) = crate::space::low_warning_keeping(&what, &root, keep) {
             eprintln!("{prog}: warning: {w}");
         }
     }
@@ -790,12 +802,14 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             return Err(1);
         }
     }
+    let mut risky_git = false;
     if meta.is_dir() {
         if let Some(state) = crate::safety::risky_repo_state(&abs) {
             say!(
                 "{prog}: warning: '{name}' contains a git repository with {} work; `rtrash undo` brings it back",
                 state.as_str()
             );
+            risky_git = true;
         }
     }
     if opts.in_use != InUse::Ignore {
@@ -851,6 +865,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                     original: abs,
                     name: trash_name,
                     trash_dir,
+                    risky_git,
                 }))
             }
             Err(e) => {
@@ -904,6 +919,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                 original: abs,
                 name: trash_name,
                 trash_dir: trash.root,
+                risky_git,
             }))
         }
         Err(e) => {
@@ -1036,6 +1052,7 @@ mod json_tests {
             original: PathBuf::from("/w/a \"q\".txt"),
             name: "a \"q\".txt".into(),
             trash_dir: PathBuf::from("/x/Trash"),
+            risky_git: false,
         };
         let s = summary_json(&[t], 2);
         assert_eq!(
