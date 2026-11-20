@@ -5758,9 +5758,174 @@ fn put_warns_about_an_open_file_and_refuses_it_on_request() {
     assert!(stderr_of(&out).contains("warning: 'held.log' is in use by pid"));
     assert!(!held.exists());
     sb.touch("idle.log");
+    // Without root some processes cannot be inspected, and refuse then
+    // leaves even a file nobody holds, unless every process was seen.
+    let who = stdout_of(&sb.run(&["who", "--json", "idle.log"]));
+    let seen_all = who.contains("\"unreadable\":0}");
     let out = sb.run(&["put", &pin, "--in-use=refuse", "idle.log"]);
+    if seen_all {
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        assert!(stderr_of(&out).is_empty());
+    } else {
+        assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+        assert!(stderr_of(&out).contains("could not be inspected"));
+    }
+}
+
+/// A stand-in `/proc` for the debug seam `RTRASH_TEST_PROC`: each of
+/// `holders` is a process with `path` open as fd 3, each of `denied` one
+/// this user may not inspect (the `denied` file marks it, since a test run
+/// as root cannot get that from file modes).
+#[cfg(all(target_os = "linux", debug_assertions))]
+fn fake_proc(sb: &Sandbox, name: &str, holders: &[(u32, &Path)], denied: &[u32]) -> PathBuf {
+    let dir = sb.root.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    for (pid, path) in holders {
+        let fd = dir.join(pid.to_string()).join("fd");
+        fs::create_dir_all(&fd).unwrap();
+        std::os::unix::fs::symlink(fs::canonicalize(path).unwrap(), fd.join("3")).unwrap();
+        fs::write(dir.join(pid.to_string()).join("comm"), "fakeholder\n").unwrap();
+    }
+    for pid in denied {
+        let one = dir.join(pid.to_string());
+        fs::create_dir_all(&one).unwrap();
+        fs::write(one.join("denied"), "").unwrap();
+    }
+    dir
+}
+
+/// Debug builds on Linux only: as a normal user `who` lists what it can
+/// see and says on stderr how many processes it could not inspect, so an
+/// empty list is not taken for a free file. A stand-in /proc gives one
+/// holder and two processes this user may not read.
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[test]
+fn who_says_how_many_processes_it_could_not_inspect() {
+    let sb = Sandbox::new("who-noroot");
+    let held = sb.touch("w.log");
+    let proc = fake_proc(
+        &sb,
+        "proc-some",
+        &[(4_000_001, &held)],
+        &[4_000_002, 4_000_003],
+    );
+    let env = [("RTRASH_TEST_PROC", proc.to_str().unwrap())];
+    let out = sb.run_env(&["who", "w.log"], &env);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    assert!(
+        text.contains("4000001") && text.contains("fakeholder"),
+        "{text}"
+    );
+    let err = stderr_of(&out);
+    assert!(err.contains("2 processes could not be inspected"), "{err}");
+    assert!(err.contains("the list may be incomplete"), "{err}");
+    assert!(err.contains("run as root"), "{err}");
+    let out = sb.run_env(&["who", "--json", "w.log"], &env);
+    assert!(
+        stdout_of(&out).contains("\"unreadable\":2}"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(
+        stderr_of(&out).contains("2 processes could not be inspected"),
+        "{}",
+        stderr_of(&out)
+    );
+    let one = fake_proc(&sb, "proc-one", &[], &[4_000_002]);
+    let env = [("RTRASH_TEST_PROC", one.to_str().unwrap())];
+    let out = sb.run_env(&["who", "w.log"], &env);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
+    assert!(stdout_of(&out).is_empty());
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("no holder seen, but 1 process could not be inspected"),
+        "{err}"
+    );
+    assert!(err.contains("a path may still be in use"), "{err}");
+    let none = fake_proc(&sb, "proc-none", &[], &[]);
+    let env = [("RTRASH_TEST_PROC", none.to_str().unwrap())];
+    let out = sb.run_env(&["who", "w.log"], &env);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stderr_of(&out), "");
+}
+
+/// Debug builds on Linux only: `--in-use=refuse` never takes a process it
+/// could not inspect for no process at all. Put (and `rm`, which runs
+/// put) leaves the item, naming why, unless -f accepts the risk; warn
+/// stays quiet, as it was; a process list that cannot be read at all
+/// refuses too.
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[test]
+fn put_refuse_does_not_take_an_uninspected_process_for_a_free_file() {
+    let sb = Sandbox::new("put-refuse-noroot");
+    let f = sb.touch("r.log");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let blind = fake_proc(&sb, "proc-blind", &[], &[4_000_002]);
+    let env = [("RTRASH_TEST_PROC", blind.to_str().unwrap())];
+    let out = sb.run_env(&["put", &pin, "--in-use=refuse", "r.log"], &env);
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("cannot trash 'r.log': it may be in use; 1 process could not be inspected"),
+        "{err}"
+    );
+    assert!(err.contains("use -f or --in-use=warn"), "{err}");
+    assert!(f.exists());
+    let out = sb.run_env(
+        &["put", &pin, "--dry-run", "--in-use=refuse", "r.log"],
+        &env,
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let envs = [env[0], ("RTRASH_IN_USE", "refuse")];
+    let out = sb.run_env(&["put", &pin, "r.log"], &envs);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(f.exists());
+    let bindir = sb.root.join("bin");
+    fs::create_dir_all(&bindir).unwrap();
+    std::os::unix::fs::symlink(bin(), bindir.join("rm")).unwrap();
+    let out = Command::new(bindir.join("rm"))
+        .args([&pin, "r.log"])
+        .current_dir(sb.work())
+        .env("HOME", &sb.root)
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("RTRASH_TEST_PROC", &blind)
+        .env("RTRASH_IN_USE", "refuse")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(f.exists());
+    let out = sb.run_env(&["put", &pin, "--in-use=warn", "r.log"], &env);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(stderr_of(&out).is_empty());
+    assert_eq!(stderr_of(&out), "");
+    assert!(!f.exists());
+    let f = sb.touch("r.log");
+    let out = sb.run_env(&["put", &pin, "-f", "--in-use=refuse", "r.log"], &env);
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(
+        err.contains("warning: 'r.log' may be in use; 1 process could not be inspected"),
+        "{err}"
+    );
+    assert!(!f.exists());
+    let f = sb.touch("r.log");
+    let seen = fake_proc(&sb, "proc-seen", &[], &[]);
+    let env_seen = [("RTRASH_TEST_PROC", seen.to_str().unwrap())];
+    let out = sb.run_env(&["put", &pin, "--in-use=refuse", "r.log"], &env_seen);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stderr_of(&out), "");
+    assert!(!f.exists());
+    let f = sb.touch("r.log");
+    let gone = sb.root.join("no-such-proc");
+    let env_gone = [("RTRASH_TEST_PROC", gone.to_str().unwrap())];
+    let out = sb.run_env(&["put", &pin, "--in-use=refuse", "r.log"], &env_gone);
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("it may be in use; cannot tell which processes hold files on this platform"),
+        "{err}"
+    );
+    assert!(f.exists());
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
