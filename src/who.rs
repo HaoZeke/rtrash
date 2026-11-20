@@ -11,14 +11,16 @@ List the live processes that hold PATH or anything below it: an open
 descriptor, a memory map, the working or root directory, or the
 executable. Linux reads /proc as lsof and fuser do; macOS asks libproc
 (no memory maps); Windows asks the Restart Manager (open files only).
-Without root, other users' processes are not seen.
+Without root, other users' processes cannot be inspected: who lists the
+holders it can see and says on stderr how many processes it could not
+inspect, since an empty list is then no proof that a PATH is free.
 
       --json     print a JSON object ({holders, unreadable})
       --help     display this help and exit
       --version  output version information and exit
 
-Exit status is 0 when some process holds a PATH, 1 when none does or the
-platform cannot tell, and 2 on a usage error.
+Exit status is 0 when some process holds a PATH, 1 when none was seen or
+the platform cannot tell, and 2 on a usage error.
 ";
 
 fn usage_err(prog: &str, msg: &str) -> i32 {
@@ -91,16 +93,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             );
         }
     }
-    #[cfg(unix)]
-    // SAFETY: geteuid has no preconditions.
-    let root = unsafe { libc::geteuid() } == 0;
-    #[cfg(windows)]
-    let root = true;
-    if snap.unreadable > 0 && !root && !json {
-        eprintln!(
-            "{prog}: {} could not be read; run as root to see them",
-            crate::util::plural(snap.unreadable as u64, "process", "processes")
-        );
+    if let Some(gap) = snap.gap() {
+        #[cfg(unix)]
+        // SAFETY: geteuid has no preconditions.
+        let hint = if unsafe { libc::geteuid() } == 0 {
+            ""
+        } else {
+            "; run as root to inspect them"
+        };
+        #[cfg(windows)]
+        let hint = "";
+        if holds.is_empty() {
+            eprintln!("{prog}: no holder seen, but {gap}, so a path may still be in use{hint}");
+        } else {
+            eprintln!("{prog}: {gap}, so the list may be incomplete{hint}");
+        }
     }
     i32::from(holds.is_empty())
 }
