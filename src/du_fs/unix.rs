@@ -640,7 +640,7 @@ mod tests {
         // On macOS read with getattrlistbulk itself, not whichever reader
         // the timing heuristic picks.
         #[cfg(target_os = "macos")]
-        let (e, failed) = super::super::bulk::read(d.fd.as_raw_fd())
+        let (e, failed) = super::super::bulk::read_for_test(d.fd.as_raw_fd())
             .expect("getattrlistbulk read nothing from an APFS temp directory");
         #[cfg(not(target_os = "macos"))]
         let (e, failed) = d.entries();
