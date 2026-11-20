@@ -441,6 +441,8 @@ mod bulk {
 
     #[cfg(target_os = "macos")]
     pub use imp::read;
+    #[cfg(all(target_os = "macos", test))]
+    pub use imp::read_for_test;
 
     #[cfg(target_os = "macos")]
     mod imp {
@@ -488,7 +490,7 @@ mod bulk {
             }
         }
 
-        fn read_inner(fd: RawFd) -> Option<(Entries, bool)> {
+        fn read_inner(fd: RawFd, record_timing: bool) -> Option<(Entries, bool)> {
             thread_local! {
                 static BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
             }
@@ -535,7 +537,9 @@ mod bulk {
                     if n == 0 {
                         return Some((out, false));
                     }
-                    record(n as u64, start.elapsed().as_nanos() as u64);
+                    if record_timing {
+                        record(n as u64, start.elapsed().as_nanos() as u64);
+                    }
                     if !parse(&buf, n as usize, &mut out) {
                         return Some((out, true));
                     }
@@ -551,14 +555,14 @@ mod bulk {
             if setting() == Some(false) || (setting().is_none() && OFF.load(Ordering::Relaxed)) {
                 return None;
             }
-            read_inner(fd)
+            read_inner(fd, true)
         }
 
         /// Read a directory with `getattrlistbulk`, even if the timing
         /// heuristic would currently turn the bulk reads off.
         #[cfg(test)]
         pub fn read_for_test(fd: RawFd) -> Option<(Entries, bool)> {
-            read_inner(fd)
+            read_inner(fd, false)
         }
     }
 }
