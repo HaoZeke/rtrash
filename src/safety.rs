@@ -125,12 +125,11 @@ pub fn is_mount_root(abs: &Path, meta: &fs::Metadata) -> bool {
     }
 }
 
-/// For a directory that holds a git repository at its top, the risky
-/// work in that repository (dirty, unpushed or unknown), if any.
-/// Git missing or unable to answer is [`crate::du_git::RiskyGit::unknown`],
-/// not the absence of risk.
+/// Risky git work at or below `abs`. A nested repository counts, and a
+/// directory that was not fully scanned is unknown. Git missing or unable
+/// to answer is [`crate::du_git::RiskyGit::unknown`], not the absence of risk.
 pub fn risky_repo_state(abs: &Path) -> Option<crate::du_git::RiskyGit> {
-    crate::du_git::risky_repo_state(abs)
+    crate::du_git::risky_tree(abs)
 }
 
 /// The last component of `path` as typed, past any trailing slashes, and

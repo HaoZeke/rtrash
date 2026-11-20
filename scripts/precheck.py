@@ -1125,6 +1125,10 @@ PERMANENT_ALLOW = {
     ("win_recycle.rs", "restore_payload"): (3, MOVE + "; then the $I record of the restored item"),
     ("win_recycle.rs", "rm_run"): (1, BATCH),
     ("wsl_bin.rs", "remove_entry"): (1, RECORD),
+    ("put.rs", "retarget_seam"): (1, "a debug seam replacing a symlink the test created, "
+                                     "not a trash item"),
+    ("win_recycle.rs", "retarget_seam"): (1, "a debug seam replacing a symlink the test created, "
+                                             "not a trash item"),
 }
 
 
@@ -2765,6 +2769,8 @@ UNFILTERED_OPENS = {
     ("src/du_dupes.rs", "enters"): "read_level asks the filters first; this opens only a "
                                    "directory on another file system, to tell a kernfs",
     ("src/du_tui.rs", "quick_view"): "lists the directory on screen, which the scan entered",
+    ("src/du_git.rs", "find_repos"): "the trash git check of a directory the user asked to trash, "
+                                     "not a du scan, so an excluded folder is still the operand",
 }
 UNFILTERED_OPEN_CASES = [
     ("opens unasked", "fn w(d: &Dir) {\n    let c = d.open_child(n);\n}\n", [("w", 2)]),

@@ -1046,7 +1046,7 @@ fn a_finder_put_warns_past_the_warn_size() {
     assert!(
         err(&o).contains("past RTRASH_WARN_SIZE")
             && err(&o).contains("rtrash list --sort=size")
-            && err(&o).contains("rtrash rm -i --max-count=1 --match=exact PATH")
+            && err(&o).contains("rtrash rm -i --max-count=1 --match=id ID")
             && !err(&o).contains("rtrash empty")
             && !err(&o).contains("would lose the work"),
         "{}",

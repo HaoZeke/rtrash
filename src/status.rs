@@ -300,9 +300,15 @@ pub fn print_status(
         );
         let lows = s.lows(space::WARN_FREE_PERCENT);
         if !lows.is_empty() {
+            let owned = match list::git_risks(d) {
+                Some(v) => v.into_iter().map(|(p, _, w)| (p, w)).collect::<Vec<_>>(),
+                None => vec![(d.root.clone(), crate::du_git::RiskyGit::unknown())],
+            };
+            let pairs: Vec<(&std::path::Path, crate::du_git::RiskyGit)> =
+                owned.iter().map(|(p, w)| (p.as_path(), *w)).collect();
             eprintln!(
                 "{}",
-                space::status_low_warning(&crate::util::err_path(&d.root), &lows)
+                space::status_low_warning(&crate::util::err_path(&d.root), &lows, &pairs)
             );
         }
     }

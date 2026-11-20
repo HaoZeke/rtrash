@@ -129,6 +129,8 @@ pub(crate) enum Matcher {
     Substring(String),
     /// `--match=exact`: the whole original path.
     Exact(String),
+    /// `--match=id`: the `{id}` from `list --format`.
+    Id(String),
 }
 
 impl Matcher {
@@ -140,6 +142,7 @@ impl Matcher {
             Match::Glob => Matcher::Glob(pat),
             Match::Substring => Matcher::Substring(pat),
             Match::Exact => Matcher::Exact(pat),
+            Match::Id => Matcher::Id(pat),
             Match::Regex => match regex_lite::Regex::new(&pat) {
                 Ok(re) => Matcher::Regex(re),
                 Err(e) => return Err(format!("invalid regex '{pat}': {e}")),
@@ -163,11 +166,21 @@ impl Matcher {
                 full.contains(s.as_str())
             }
             Matcher::Exact(s) => crate::util::str_from_os_ref(original.as_os_str()) == *s,
+            // The date is not here; [`matches_record`] matches an id.
+            Matcher::Id(_) => false,
         }
     }
 
+    /// [`matches_parts`], and for [`Matcher::Id`] the id of `name` at `date`.
+    pub(crate) fn matches_record(&self, original: &Path, name: &str, date: &str) -> bool {
+        if let Matcher::Id(want) = self {
+            return want == &crate::filters::item_id(name, date);
+        }
+        self.matches_parts(original, name)
+    }
+
     fn matches(&self, e: &list::Entry) -> bool {
-        self.matches_parts(&e.original, &e.name)
+        self.matches_record(&e.original, &e.name, e.date.as_deref().unwrap_or(""))
     }
 }
 

@@ -310,10 +310,22 @@ plus every path or shell pattern, one per line, in
 and
 .BR ~/.safe\-rm .
 No flag overrides that list.
-Before it trashes a directory with a git repository at its top that
-has uncommitted, unpushed or unreadable work, put prints a warning;
+After a directory has been moved, put prints a warning when a git
+repository at its top or nested inside it has uncommitted, unpushed
+or unreadable work, or when that directory was not fully scanned.
+A dry run does not report git work.
+On the FreeDesktop trash the batch id is already in the record, so
 .B rtrash undo
 brings the run back.
+On Windows the warning names
+.B "rtrash restore \-\-batch=last"
+only after that last-put record has been written; otherwise it says
+to restore from the Recycle Bin.
+On WSL it names
+.B "rtrash wsl restore"
+or Explorer.
+.B rtrash undo
+does not restore the Recycle Bin.
 .TP
 .TP
 .BI \-\-trash\-dir =PATH
@@ -334,9 +346,10 @@ Always use the home trash (skip volume trash selection).
 .TP
 .B \-\-dry\-run
 Run every check put makes (protected paths, the home and mount\-point
-failsafes, git work, live holders) and print
+failsafes, live holders) and print
 .I would trash PATH
-for each item that would move; nothing moves.
+for each item that would move; nothing moves. Git work is not
+reported here; that warning is printed only after a move.
 On Windows, the dry run checks missing files and live holders.
 .TP
 .B \-\-plain
@@ -765,7 +778,7 @@ On Windows, list takes these matchers too.
 Print each item through
 .IR TEMPLATE ,
 with no escaping and no newline added:
-.B {date} {epoch} {path} {name} {trash} {batch} {size} {owner}
+.B {date} {epoch} {path} {name} {trash} {batch} {size} {owner} {id}
 expand, with
 .B {size}
 in bytes;
@@ -3040,9 +3053,15 @@ does:
 .BR glob ,
 .BR regex ,
 .B substring
-(text anywhere in the original path) or
+(text anywhere in the original path),
 .B exact
-(the whole original path).
+(the whole original path) or
+.B id
+(the
+.B {id}
+from
+.BR "list \-\-format" ,
+the trash name and its deletion date).
 It takes the place of
 .BR \-\-name ,
 .B \-\-glob
@@ -4393,7 +4412,13 @@ needs
 .BR \-\-force )
 or
 .B exact
-(the whole original path).
+(the whole original path) or
+.B id
+(the
+.B {id}
+from
+.BR "list \-\-format" ,
+the trash name and its deletion date).
 Unlike trashy, the default stays glob.
 .TP
 .BI \-\-older\-than =AGE
@@ -4485,7 +4510,8 @@ Examples:
 .RS
 rtrash rm \(aq*.o\(aq
 rtrash rm \-n \(aq*.o\(aq
-rtrash rm \-i \-\-max\-count=1 \-\-match=exact /home/you/old\-project
+rtrash rm /work/old\-project
+rtrash rm \-i \-\-max\-count=1 \-\-match=id ID
 trash-rm foo
 .RE
 .fi
@@ -4595,33 +4621,46 @@ than 10% of its bytes or inodes free, since moving a file into that
 trash frees nothing there. That warning and the one from
 .B status
 name
-.B "rtrash list \-\-sort=size"
+.B "rtrash list \-\-sort=size \-\-format='{id} {path}'"
 and
-.B "rtrash rm \-i \-\-max\-count=1 \-\-match=exact PATH" ,
-so the trash can be reviewed and one listed original path removed
-after a confirmation.
-.I PATH
-is that path as
+.B "rtrash rm \-i \-\-max\-count=1 \-\-match=id ID" ,
+so the trash can be reviewed and one listed item removed after a
+confirmation.
+.I ID
+is that item's trash name and deletion date, as
 .B list
-shows it. The match is the whole path, the run asks even when stdin
-is not a terminal, and more than one match deletes nothing, so a glob,
-a shared basename or a second copy of the path does not go with it.
-When a put just moved a repository it flagged dirty, unpushed or
-unknown into a trash, that trash's warning instead names those items
-and says that permanently removing one would lose the work.
+shows it. The run asks even when stdin is not a terminal, and more
+than one match deletes nothing. A later item that reuses the original
+path has a different id, so it is not removed in place of the one
+that was reviewed. Before it removes, rm reads the payload again and
+refuses a repository that still holds risky git work unless
+.B \-f
+is given.
+When any item in that trash holds dirty, unpushed or unknown git
+work, the warning names those items and does not suggest
+.BR rm .
 A dirty checkout is named as dirty even when it also has unpushed
-commits, and is not told only to wait until a push.
-Unknown, when git is missing or cannot answer, is never told to
-remove the item.
-.B undo
-and
-.B restore
-can still bring it back. The undo hint is printed only after the
-move has succeeded.
-A put to the Finder Trash warns the same way.
-On Windows it names the Recycle Bin of the volume and counts bytes only,
-and a repository is flagged the same way. The operand keeps its final
-component, so a symlink is not reported as the directory it points at.
+commits, and is not told only to wait until a push. Unknown stays
+in the warning when other items are dirty or unpushed. A nested
+repository counts, and a directory that was not fully scanned is
+unknown.
+On the FreeDesktop trash the undo hint is printed only after the
+move, whose record already holds the batch id.
+A put to the Finder Trash warns the same way, and names
+.B rtrash undo
+only after the Finder undo log has been written.
+On Windows it names the Recycle Bin of the volume and counts bytes
+only. The warning names
+.B "rtrash restore \-\-batch=last"
+only after the last-put record is written, and otherwise says to
+restore from the Recycle Bin.
+.B rtrash undo
+does not restore the Recycle Bin. The operand keeps its final
+component, so a symlink is not reported as the directory it points
+at, and the path in the warning is the path the bin records.
+On WSL the warning names
+.B "rtrash wsl restore"
+or Explorer.
 .TP
 .B RTRASH_NO_PERMANENT
 When set to anything but empty or

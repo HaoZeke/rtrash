@@ -56,7 +56,7 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
                      and new fields only get added
       --format=TEMPLATE print each item through TEMPLATE, unescaped:
                      {date} {epoch} {path} {name} {trash} {batch}
-                     {size} (bytes) {owner}; {{ and }} for braces,
+                     {size} (bytes) {owner} {id}; {{ and }} for braces,
                      \\t \\n \\0 for tab, newline, NUL; no newline added
       --help            display this help and exit
       --version         output version information and exit
@@ -169,6 +169,28 @@ impl<'a> Locked<'a> {
     pub fn gone(&self) -> bool {
         crate::util::is_gone(&self.payload())
     }
+}
+
+/// Git work in this trash's payloads, as original path, trash name and
+/// risk. `None` when the files directory cannot be listed, which a removal
+/// hint treats as unknown rather than safe.
+pub fn git_risks(dir: &TrashDir) -> Option<Vec<(PathBuf, String, crate::du_git::RiskyGit)>> {
+    let rd = fs::read_dir(dir.files()).ok()?;
+    let mut out = Vec::new();
+    for ent in rd {
+        let ent = ent.ok()?;
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        let payload = crate::util::join_name(&dir.files(), name.as_ref());
+        let Some(work) = crate::du_git::risky_tree(&payload) else {
+            continue;
+        };
+        let original = entry_named(dir, name.as_ref())
+            .map(|e| e.original)
+            .unwrap_or(payload);
+        out.push((original, name.into_owned(), work));
+    }
+    Some(out)
 }
 
 /// The entry that record `name` in `dir` makes as it reads now, or `None`
@@ -546,12 +568,16 @@ pub fn entry_to_json_sized(e: &Entry, size: Option<u64>) -> String {
         None => "null".to_string(),
     };
     format!(
-        "{{\"deletion_date\":\"{}\",\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\",\"batch\":{},\"missing\":{}{}}}",
+        concat!(
+            "{{\"deletion_date\":\"{}\",\"original\":\"{}\",\"name\":\"{}\",",
+            "\"trash_dir\":\"{}\",\"batch\":{},\"id\":\"{}\",\"missing\":{}{}}}"
+        ),
         json_escape(date),
         json_escape(&e.original.to_string_lossy()),
         json_escape(&crate::util::show_name(&e.name)),
         json_escape(&e.dir.root.to_string_lossy()),
         batch,
+        json_escape(&crate::filters::item_id(&e.name, date)),
         e.missing(),
         size,
     )
@@ -827,10 +853,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     // --glob/--regex/--name and --cwd-only, on the original path and the
     // name in the trash.
-    let keep = |original: &std::path::Path, name: &str| -> bool {
+    let keep = |original: &std::path::Path, name: &str, date: &str| -> bool {
         matcher
             .as_ref()
-            .is_none_or(|m| m.matches_parts(original, name))
+            .is_none_or(|m| m.matches_record(original, name, date))
             && cwd.as_ref().is_none_or(|d| {
                 original.starts_with(d)
                     || std::fs::canonicalize(d).is_ok_and(|r| original.starts_with(r))
@@ -905,7 +931,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let hints = folder_hints(prog, &dirs, &left, &strays, trash_cli);
     let mut unsized_rows = 0usize;
     let mut entries = filter_age_secs(collected, older_than, newer_than);
-    entries.retain(|e| keep(&e.original, &e.name));
+    entries.retain(|e| keep(&e.original, &e.name, e.date.as_deref().unwrap_or("")));
     // Orphans have no date, so only an unfiltered listing shows them; they
     // come last, after every recorded item.
     let mut recorded = entries.len();
@@ -913,7 +939,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         entries.extend(
             orphans(&dirs)
                 .into_iter()
-                .filter(|e| keep(&e.original, &e.name)),
+                .filter(|e| keep(&e.original, &e.name, e.date.as_deref().unwrap_or(""))),
         );
     }
     let with_size = with_size
@@ -962,8 +988,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         use std::io::Write;
         let mut out = std::io::BufWriter::new(std::io::stdout().lock());
         for (k, e) in rows.iter().enumerate() {
+            let date = e.date.as_deref().unwrap_or("");
+            let id = crate::filters::item_id(&e.name, date);
             let row = FmtRow {
-                date: e.date.as_deref().unwrap_or(""),
+                date,
                 epoch: e.epoch,
                 path: &e.original,
                 name: &e.name,
@@ -971,6 +999,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 batch: e.batch.as_deref().unwrap_or(""),
                 size: row_sizes.as_ref().map(|s| s[k]),
                 owner: owners.as_ref().map(|o| o[k].as_str()),
+                id: &id,
             };
             if out.write_all(&render_format(parts, &row)).is_err() {
                 return 0;

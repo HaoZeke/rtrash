@@ -646,7 +646,7 @@ pub fn default_list(
     shape: ListShape<'_>,
     refused: Option<&str>,
     filter: crate::finder_shared::Filter,
-    keep: &dyn Fn(&Path, &str) -> bool,
+    keep: &dyn Fn(&Path, &str, &str) -> bool,
 ) -> i32 {
     let ListShape {
         json,
@@ -664,7 +664,7 @@ pub fn default_list(
     };
     let mut rows: Vec<_> = rows
         .into_iter()
-        .filter(|e| keep(&e.shown, &e.name))
+        .filter(|e| keep(&e.shown, &e.name, &e.date))
         .collect();
     if let Some(n) = last {
         let cut = rows.len().saturating_sub(n);
@@ -699,6 +699,7 @@ pub fn default_list(
         let wants_size = parts.contains(&crate::list::FmtPart::Field(crate::list::Field::Size));
         let mut out = std::io::BufWriter::new(std::io::stdout().lock());
         for e in &rows {
+            let id = crate::filters::item_id(&e.name, &e.date);
             let row = crate::list::FmtRow {
                 date: &e.date,
                 epoch: e.epoch,
@@ -708,6 +709,7 @@ pub fn default_list(
                 batch: "",
                 size: wants_size.then(|| crate::fastdelete::disk_usage(&e.path())),
                 owner: None,
+                id: &id,
             };
             if out
                 .write_all(&crate::list::render_format(parts, &row))
@@ -877,7 +879,7 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
         placed
             .iter()
             .copied()
-            .filter(|e| m.matches_parts(&e.shown, &crate::finder_shared::nfc(&e.name)))
+            .filter(|e| m.matches_record(&e.shown, &crate::finder_shared::nfc(&e.name), &e.date))
             .collect()
     } else if let Some(t) = o.target {
         let abs = std::env::current_dir()
@@ -1377,7 +1379,12 @@ fn put(prog: &str, args: &[String]) -> i32 {
         }
     }
     if !logged.is_empty() {
-        crate::finder_shared::log_batch(crate::info::batch_id(), &logged);
+        if let Err(e) = crate::finder_shared::log_batch(crate::info::batch_id(), &logged) {
+            eprintln!(
+                "{prog}: warning: the Finder undo log could not be written ({e}); \
+                 restore the items from the Finder Trash"
+            );
+        }
     }
     i32::from(failed)
 }

@@ -321,7 +321,7 @@ fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     }
     let shown: Vec<&BinEntry> = items
         .iter()
-        .filter(|it| matcher.as_ref().is_none_or(|m| m.keeps(&it.local)))
+        .filter(|it| matcher.as_ref().is_none_or(|m| bin_keeps(m, it)))
         .collect();
     if json {
         println!("{}", list_json(&shown));
@@ -348,6 +348,16 @@ fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     0
 }
 
+fn bin_keeps(m: &crate::budget::PathMatch, it: &BinEntry) -> bool {
+    let name = it
+        .payload
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let date = crate::platform::epoch_to_iso_utc(it.deleted);
+    m.keeps_record(&it.local, &name, &date)
+}
+
 /// One `wsl list --format` row: the path under the automount root, the
 /// `$R` payload's name and its bin; no batch or owner.
 pub fn format_row(parts: &[crate::listfmt::FmtPart], it: &BinEntry) -> Vec<u8> {
@@ -357,6 +367,7 @@ pub fn format_row(parts: &[crate::listfmt::FmtPart], it: &BinEntry) -> Vec<u8> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let id = crate::filters::item_id(&name, &date);
     let row = crate::listfmt::FmtRow {
         date: &date,
         epoch: it.deleted,
@@ -366,6 +377,7 @@ pub fn format_row(parts: &[crate::listfmt::FmtPart], it: &BinEntry) -> Vec<u8> {
         batch: "",
         size: Some(it.size),
         owner: Some(""),
+        id: &id,
     };
     crate::listfmt::render_format(parts, &row)
 }
@@ -421,7 +433,7 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     let chosen: Vec<&BinEntry> = items
         .iter()
         .filter(|it| {
-            matcher.as_ref().is_some_and(|m| m.keeps(&it.local)) || paths.contains(&it.local)
+            matcher.as_ref().is_some_and(|m| bin_keeps(m, it)) || paths.contains(&it.local)
         })
         .collect();
     if chosen.is_empty() {

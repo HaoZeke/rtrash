@@ -463,6 +463,8 @@ pub enum Match {
     Substring,
     /// The whole original path, character for character.
     Exact,
+    /// One trash item: [`item_id`] of its name and deletion date.
+    Id,
 }
 
 impl Match {
@@ -472,8 +474,9 @@ impl Match {
             "regex" => Ok(Match::Regex),
             "substring" => Ok(Match::Substring),
             "exact" => Ok(Match::Exact),
+            "id" => Ok(Match::Id),
             _ => Err(format!(
-                "invalid --match '{s}' (use glob, regex, substring or exact)"
+                "invalid --match '{s}' (use glob, regex, substring, exact or id)"
             )),
         }
     }
@@ -486,6 +489,12 @@ pub struct Patterns {
     pub kind: Match,
     pub texts: Vec<String>,
     pub regex: Vec<regex_lite::Regex>,
+}
+
+/// The stable id `list` prints as `{id}`: the trash name and its
+/// deletion date. A later item that reuses the name has another date.
+pub fn item_id(name: &str, date: &str) -> String {
+    format!("{}@{}", crate::util::url_encode(name.as_bytes()), date)
 }
 
 impl Patterns {
@@ -515,8 +524,17 @@ impl Patterns {
                 .texts
                 .iter()
                 .any(|p| ["", "/", "\\"].contains(&p.as_str())),
-            Match::Exact => false,
+            Match::Exact | Match::Id => false,
         }
+    }
+
+    /// [`hit`], and for [`Match::Id`] the id of `name` at `date`.
+    pub fn selects(&self, full: &str, base: &str, name: &str, date: &str) -> bool {
+        if self.kind == Match::Id {
+            let id = item_id(name, date);
+            return self.texts.iter().any(|p| p == &id);
+        }
+        self.hit(full, base, name)
     }
 
     pub fn hit(&self, full: &str, base: &str, name: &str) -> bool {
@@ -529,6 +547,8 @@ impl Patterns {
             Match::Regex => self.regex.iter().any(|r| r.is_match(full)),
             Match::Substring => self.texts.iter().any(|p| full.contains(p.as_str())),
             Match::Exact => self.texts.iter().any(|p| p == full),
+            // The date is not here; [`selects`] matches an id.
+            Match::Id => false,
         }
     }
 }

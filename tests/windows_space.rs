@@ -434,7 +434,7 @@ fn put_warns_when_the_recycle_bin_volume_is_low() {
             && err.contains("is low (")
             && err.contains("trashing frees nothing")
             && err.contains("rtrash list --sort=size")
-            && err.contains("rtrash rm -i --max-count=1 --match=exact PATH")
+            && err.contains("rtrash rm -i --max-count=1 --match=id ID")
             && !err.contains("rtrash empty")
             && !err.contains("would lose the work"),
         "{err}"
@@ -518,7 +518,7 @@ fn put_space_hint_keeps_flagged_git_work() {
         assert!(
             err.contains(&format!("with {tag} work"))
                 && err.contains(remedy)
-                && err.contains("`rtrash undo` brings it back")
+                && err.contains("`rtrash restore --batch=last` brings it back")
                 && err.contains("is low (")
                 && lose.contains(tag)
                 && !err.contains("plain.txt")
@@ -580,37 +580,98 @@ fn a_dry_run_does_not_promise_undo_before_the_move() {
     let moved_err = String::from_utf8_lossy(&moved.stderr);
     assert!(moved.status.success(), "{moved_err}");
     assert!(
-        moved_err.contains("`rtrash undo` brings it back"),
+        moved_err.contains("`rtrash restore --batch=last` brings it back"),
         "{moved_err}"
     );
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// A symlink operand is not reported as the repository it points at.
+/// A junction operand is not reported as the repository it points at.
+/// A real put, so the warning that follows a move is what is checked.
+/// `mklink /J` needs no Developer Mode.
 #[test]
-fn put_does_not_attribute_a_symlink_to_the_repository_it_points_at() {
+fn put_does_not_attribute_a_junction_to_the_repository_it_points_at() {
     let base = common::scratch_dir("wingit", "put-git-link");
+    let vol = base.join("vol");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
     let repo = base.join("real");
     let _ = std::fs::remove_dir_all(&repo);
     std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join("f"), b"kept").unwrap();
     let link = base.join("shortcut");
-    let _ = std::fs::remove_file(&link);
-    if let Err(e) = std::os::windows::fs::symlink_dir(&repo, &link) {
-        common::skip(&format!("symlink unavailable; skipping ({e})"));
-        let _ = std::fs::remove_dir_all(&base);
-        return;
-    }
-    let dry = common::rtrash(&base)
-        .args(["put", "--dry-run", link.to_str().unwrap()])
+    let _ = std::fs::remove_dir_all(&link);
+    common::mklink_junction(&link, &repo);
+    let out = common::rtrash(&base)
+        .args(["put", link.to_str().unwrap()])
+        .env("RTRASH_TEST_BIN_ROOT", &vol)
+        .env("RTRASH_IN_USE", "ignore")
+        .env("RTRASH_TEST_FS", format!("100000:{}", vol.display()))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(!err.contains("git repository"), "{err}");
+    assert!(!err.contains("would lose the work"), "{err}");
+    assert!(!err.contains("rtrash undo"), "{err}");
+    assert!(
+        err.contains("rtrash rm -i --max-count=1 --match=id ID"),
+        "{err}"
+    );
+    assert!(
+        repo.join("f").is_file(),
+        "the repository behind the junction stays"
+    );
+    assert_eq!(std::fs::read(repo.join("f")).unwrap(), b"kept");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The last-put record is what `restore --batch=last` reads. When it
+/// cannot be written, the warning does not name that command or `undo`.
+#[test]
+fn a_failed_last_put_record_does_not_promise_restore() {
+    let base = common::scratch_dir("wingit", "last-put-fail");
+    let lad = common::local_app_data(&base);
+    std::fs::write(&lad, b"not a directory").unwrap();
+    let f = base.join("a.txt");
+    std::fs::write(&f, b"x").unwrap();
+    let out = common::rtrash(&base)
+        .args(["put", f.to_str().unwrap()])
         .env("RTRASH_IN_USE", "ignore")
         .output()
         .unwrap();
-    let err = String::from_utf8_lossy(&dry.stderr);
-    let out = String::from_utf8_lossy(&dry.stdout);
-    assert!(dry.status.success(), "{err}");
-    assert!(!err.contains("git repository"), "{err}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("could not be written"), "{err}");
+    assert!(err.contains("Recycle Bin"), "{err}");
+    assert!(!err.contains("restore --batch=last"), "{err}");
     assert!(!err.contains("rtrash undo"), "{err}");
-    assert!(out.contains("shortcut"), "{out}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The command the Windows warning names restores the repository.
+#[test]
+fn restore_batch_last_brings_back_the_repository_the_warning_names() {
+    let base = common::scratch_dir("wingit", "restore-last");
+    let repo = base.join("repo");
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::write(repo.join("f"), b"back").unwrap();
+    let put = common::rtrash(&base)
+        .args(["put", repo.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&put.stderr);
+    assert!(put.status.success(), "{err}");
+    assert!(!repo.join("f").exists());
+    let back = common::rtrash(&base)
+        .args(["restore", "--batch=last"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&back.stderr);
+    assert!(back.status.success(), "{err}");
+    assert_eq!(std::fs::read(repo.join("f")).unwrap(), b"back");
     let _ = std::fs::remove_dir_all(&base);
 }
 
