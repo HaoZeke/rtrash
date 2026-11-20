@@ -488,14 +488,7 @@ mod bulk {
             }
         }
 
-        /// Read a directory with `getattrlistbulk`. `None` means the
-        /// caller should use `readdir`: the bulk reads are off, the file
-        /// system does not support them, or they failed before returning
-        /// anything.
-        pub fn read(fd: RawFd) -> Option<(Entries, bool)> {
-            if setting() == Some(false) || (setting().is_none() && OFF.load(Ordering::Relaxed)) {
-                return None;
-            }
+        fn read_inner(fd: RawFd) -> Option<(Entries, bool)> {
             thread_local! {
                 static BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
             }
@@ -548,6 +541,24 @@ mod bulk {
                     }
                 }
             })
+        }
+
+        /// Read a directory with `getattrlistbulk`. `None` means the
+        /// caller should use `readdir`: the bulk reads are off, the file
+        /// system does not support them, or they failed before returning
+        /// anything.
+        pub fn read(fd: RawFd) -> Option<(Entries, bool)> {
+            if setting() == Some(false) || (setting().is_none() && OFF.load(Ordering::Relaxed)) {
+                return None;
+            }
+            read_inner(fd)
+        }
+
+        /// Read a directory with `getattrlistbulk`, even if the timing
+        /// heuristic would currently turn the bulk reads off.
+        #[cfg(test)]
+        pub fn read_for_test(fd: RawFd) -> Option<(Entries, bool)> {
+            read_inner(fd)
         }
     }
 }
@@ -1387,7 +1398,8 @@ mod tests {
         let (e, failed) = {
             use std::os::fd::AsRawFd;
             let f = fs::File::open(&dir).unwrap();
-            bulk::read(f.as_raw_fd()).expect("getattrlistbulk read nothing from a temp folder")
+            bulk::read_for_test(f.as_raw_fd())
+                .expect("getattrlistbulk read nothing from a temp folder")
         };
         #[cfg(not(target_os = "macos"))]
         let (e, failed) = d.entries();
