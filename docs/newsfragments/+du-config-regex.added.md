@@ -1,1 +1,0 @@
-The `[du]` table of the config file now takes `exclude_regex` and `include_regex`, lists of path regexes that `--exclude-regex` and `--include-regex` add to. A regex that does not compile earns a warning naming it, and the rest still apply.

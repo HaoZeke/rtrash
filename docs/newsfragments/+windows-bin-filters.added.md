@@ -1,1 +1,0 @@
-The Recycle Bin backend on Windows now filters as Linux and macOS do: `list`, `status` and `rm` take `--older-than`, `--newer-than`, `--larger-than` and `--smaller-than`, and `empty` takes a day count or `--older-than`.

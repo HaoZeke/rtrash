@@ -1,1 +1,0 @@
-The interop smoke test probes gio restores by name shape and prints the GLib and gvfs versions. Any failed probe fails the run, the plain `x 100%` name included. `RTRASH_INTEROP_NO_GIO=1` leaves gio out.

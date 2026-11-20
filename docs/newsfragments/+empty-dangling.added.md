@@ -1,1 +1,0 @@
-`rtrash empty --dangling` removes only the `.trashinfo` records whose payload is gone, which list as items but cannot be restored, as gtrash's `metafix` does; real items and payloads without a record stay.

@@ -1,1 +1,0 @@
-`RTRASH_OPENER` names the program, with arguments split at spaces, that `o` in `du -i` runs on a row instead of `xdg-open`, `open` or `explorer.exe`, as gdu #584 asks; a blank value keeps the default.

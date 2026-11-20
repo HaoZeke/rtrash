@@ -1,1 +1,0 @@
-`rtrash du` names an empty or missing PATH on stderr and scans the other paths, with exit status 1, as GNU du does. Before, one such PATH (`du a "" b`, or a missing line in `--files-from`) ended the whole run with no output, as dust #585 reports for dust.
