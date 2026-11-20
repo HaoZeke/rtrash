@@ -62,7 +62,8 @@ the index prompt. --newest-first and --oldest-first set the order for both.
       --regex=REGEX  match items whose original path contains REGEX
   -m, --match=KIND  read PATH as a pattern of KIND, as trashy's -m does:
                     glob, regex, substring (text in the original path) or
-                    exact (the whole original path)
+                    exact (the whole original path) or id (the {id} from
+                    `list --format`, which includes trash root and date)
       --latest    of several matches, restore the most recently trashed
       --all       of several matches, restore every one
   -n, --dry-run   show where each chosen item would go and change nothing;
@@ -171,16 +172,28 @@ impl Matcher {
         }
     }
 
-    /// [`matches_parts`], and for [`Matcher::Id`] the id of `name` at `date`.
-    pub(crate) fn matches_record(&self, original: &Path, name: &str, date: &str) -> bool {
+    /// [`matches_parts`], and for [`Matcher::Id`] the id of `name` at `date`
+    /// under `root`.
+    pub(crate) fn matches_record(
+        &self,
+        original: &Path,
+        name: &str,
+        date: &str,
+        root: &Path,
+    ) -> bool {
         if let Matcher::Id(want) = self {
-            return want == &crate::filters::item_id(name, date);
+            return want == &crate::filters::item_id(name, date, root);
         }
         self.matches_parts(original, name)
     }
 
     fn matches(&self, e: &list::Entry) -> bool {
-        self.matches_record(&e.original, &e.name, e.date.as_deref().unwrap_or(""))
+        self.matches_record(
+            &e.original,
+            &e.name,
+            e.date.as_deref().unwrap_or(""),
+            &e.dir.root,
+        )
     }
 }
 

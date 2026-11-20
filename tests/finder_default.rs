@@ -1206,6 +1206,45 @@ fn list_format_reads_the_finder_trash() {
 }
 
 #[test]
+fn finder_list_json_includes_scoped_id() {
+    let b = Box_::new("listjsonid");
+    fs::write(b.work().join("x.log"), b"abc").unwrap();
+    assert!(b.run(&["put", "x.log"], "").status.success());
+    let o = b.run(&["list", "--json"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let json = out(&o);
+    assert!(json.contains("\"id\":\""), "{json}");
+}
+
+#[test]
+fn finder_rm_refuses_risky_git_work_without_force_and_dry_run_reports_it() {
+    let b = Box_::new("rm-git-risk");
+    let repo = b.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::create_dir(repo.join(".git")).unwrap();
+    fs::write(repo.join("f"), b"x").unwrap();
+    assert!(b.run(&["put", "-r", "repo"], "").status.success());
+
+    let dry = b.run(&["rm", "-n", "repo"], "");
+    assert_eq!(dry.status.code(), Some(1), "{}", err(&dry));
+    assert!(err(&dry).contains("refusing to remove"), "{}", err(&dry));
+
+    let blocked = b.run(&["rm", "repo"], "");
+    assert_eq!(blocked.status.code(), Some(1), "{}", err(&blocked));
+    assert!(
+        err(&blocked).contains("refusing to remove"),
+        "{}",
+        err(&blocked)
+    );
+    assert!(err(&blocked).contains("pass -f"), "{}", err(&blocked));
+    assert!(out(&b.run(&["list"], "")).contains("repo"));
+
+    let forced = b.run(&["rm", "-f", "repo"], "");
+    assert!(forced.status.success(), "{}", err(&forced));
+    assert!(!out(&b.run(&["list"], "")).contains("repo"));
+}
+
+#[test]
 fn verbose_finder_empty_names_the_put_back_place() {
     let b = Box_::new("emptyv");
     fs::write(b.work().join("x.log"), b"abc").unwrap();

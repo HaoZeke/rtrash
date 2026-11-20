@@ -39,7 +39,7 @@ Finder drops stale records itself.
                      existing destination (same as --conflict=overwrite)
       --conflict=POLICY  refuse (default), overwrite, rename or skip
   -v, --verbose    put: name each trashed file
-      --json       list: a JSON array; restore: {restored, failed, skipped}
+      --json       list: a JSON array (with id); restore: {restored, failed, skipped}
       --help       display this help and exit
 ";
 
@@ -677,6 +677,7 @@ pub fn default_list(
                 let orig = e.original.as_ref().map_or("null".to_string(), |o| {
                     format!("\"{}\"", json_escape(&o.to_string_lossy()))
                 });
+                let id = crate::filters::item_id(&e.name, &e.date, &e.trash);
                 let at = if show_trash {
                     let p = json_escape(&e.path().to_string_lossy());
                     format!(",\"trash_path\":\"{p}\"")
@@ -684,10 +685,11 @@ pub fn default_list(
                     String::new()
                 };
                 format!(
-                    "{{\"date\":\"{}\",\"name\":\"{}\",\"trash\":\"{}\",\"original\":{orig}{at}}}",
+                    "{{\"date\":\"{}\",\"name\":\"{}\",\"trash\":\"{}\",\"original\":{orig},\"id\":\"{}\"{at}}}",
                     e.date,
                     json_escape(&e.name),
-                    json_escape(&e.trash.to_string_lossy())
+                    json_escape(&e.trash.to_string_lossy()),
+                    json_escape(&id)
                 )
             })
             .collect();
@@ -699,7 +701,7 @@ pub fn default_list(
         let wants_size = parts.contains(&crate::list::FmtPart::Field(crate::list::Field::Size));
         let mut out = std::io::BufWriter::new(std::io::stdout().lock());
         for e in &rows {
-            let id = crate::filters::item_id(&e.name, &e.date);
+            let id = crate::filters::item_id(&e.name, &e.date, &e.trash);
             let row = crate::list::FmtRow {
                 date: &e.date,
                 epoch: e.epoch,
@@ -879,7 +881,14 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
         placed
             .iter()
             .copied()
-            .filter(|e| m.matches_record(&e.shown, &crate::finder_shared::nfc(&e.name), &e.date))
+            .filter(|e| {
+                m.matches_record(
+                    &e.shown,
+                    &crate::finder_shared::nfc(&e.name),
+                    &e.date,
+                    &e.trash,
+                )
+            })
             .collect()
     } else if let Some(t) = o.target {
         let abs = std::env::current_dir()

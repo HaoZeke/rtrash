@@ -644,7 +644,8 @@ fn a_failed_last_put_record_does_not_promise_restore() {
     assert!(out.status.success(), "{err}");
     assert!(err.contains("could not be written"), "{err}");
     assert!(err.contains("Recycle Bin"), "{err}");
-    assert!(!err.contains("restore --batch=last"), "{err}");
+    assert!(err.contains("restore --batch=last"), "{err}");
+    assert!(err.contains("cannot see them yet"), "{err}");
     assert!(!err.contains("rtrash undo"), "{err}");
     let _ = std::fs::remove_dir_all(&base);
 }

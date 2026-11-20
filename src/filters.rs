@@ -491,10 +491,17 @@ pub struct Patterns {
     pub regex: Vec<regex_lite::Regex>,
 }
 
-/// The stable id `list` prints as `{id}`: the trash name and its
-/// deletion date. A later item that reuses the name has another date.
-pub fn item_id(name: &str, date: &str) -> String {
-    format!("{}@{}", crate::util::url_encode(name.as_bytes()), date)
+/// The stable id `list` prints as `{id}`: the trash name, deletion date and
+/// the trash root. A later item that reuses the name and date under another
+/// root has another id.
+pub fn item_id(name: &str, date: &str, root: &std::path::Path) -> String {
+    let root = crate::util::str_from_os_ref(root.as_os_str());
+    let root = crate::util::url_encode(root.as_bytes());
+    format!(
+        "{}@{}@{root}",
+        crate::util::url_encode(name.as_bytes()),
+        date
+    )
 }
 
 impl Patterns {
@@ -528,10 +535,18 @@ impl Patterns {
         }
     }
 
-    /// [`hit`], and for [`Match::Id`] the id of `name` at `date`.
-    pub fn selects(&self, full: &str, base: &str, name: &str, date: &str) -> bool {
+    /// [`hit`], and for [`Match::Id`] the id of `name` at `date` under
+    /// `root`.
+    pub fn selects(
+        &self,
+        full: &str,
+        base: &str,
+        name: &str,
+        date: &str,
+        root: &std::path::Path,
+    ) -> bool {
         if self.kind == Match::Id {
-            let id = item_id(name, date);
+            let id = item_id(name, date, root);
             return self.texts.iter().any(|p| p == &id);
         }
         self.hit(full, base, name)
@@ -651,5 +666,18 @@ mod pattern_tests {
             bytes: 0,
         };
         assert!(none.json(&[]).ends_with("\"matches\": [\n  ]\n}\n"));
+    }
+
+    #[test]
+    fn item_ids_differ_across_trash_roots() {
+        let name = "same.txt";
+        let date = "2026-11-20T10:11:12";
+        let a = super::item_id(
+            name,
+            date,
+            std::path::Path::new("/home/u/.local/share/Trash"),
+        );
+        let b = super::item_id(name, date, std::path::Path::new("/mnt/disk/.Trash-1000"));
+        assert_ne!(a, b);
     }
 }

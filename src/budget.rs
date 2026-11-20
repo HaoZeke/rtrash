@@ -262,10 +262,11 @@ impl PathMatch {
         }
     }
 
-    /// [`keeps`], and for [`PathMatch::Id`] the id of `name` at `date`.
-    pub fn keeps_record(&self, original: &Path, name: &str, date: &str) -> bool {
+    /// [`keeps`], and for [`PathMatch::Id`] the id of `name` at `date`
+    /// under `root`.
+    pub fn keeps_record(&self, original: &Path, name: &str, date: &str, root: &Path) -> bool {
         match self {
-            PathMatch::Id(want) => want == &crate::filters::item_id(name, date),
+            PathMatch::Id(want) => want == &crate::filters::item_id(name, date, root),
             _ => self.keeps(original),
         }
     }

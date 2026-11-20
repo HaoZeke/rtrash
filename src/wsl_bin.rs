@@ -118,7 +118,7 @@ pub fn scan(root: &Path, sid: &str) -> Vec<BinEntry> {
 const USAGE: &str = "\
 Usage: rtrash wsl list [--json | --format=TEMPLATE] [MATCH]
        rtrash wsl restore [-f] PATH...
-       rtrash wsl rm [-n] MATCH|PATH...
+       rtrash wsl rm [-n] [-f] MATCH|PATH...
        rtrash wsl empty [-n] [--all] [--older-than=AGE | DAYS]
 The Windows Recycle Bin from inside WSL: list its items by original path
 under the automount root, restore the newest item from each PATH, or
@@ -129,12 +129,14 @@ tested against the original path as WSL sees it.
       --format=TEMPLATE  list: each item through TEMPLATE, as list --format
                          does: {date} {epoch} {path} (under the automount
                          root) {name} ($R payload) {trash} (its bin) {size}
+                         {id}
       --glob=PATTERN     items whose path (or name, without a slash) matches
       --regex=RE         items whose path matches RE
       --name=NAME        items with exactly this file name
       --older-than=AGE   empty: items deleted more than AGE ago (2h, 7d)
       --all              empty: every item, without asking
   -n, --dry-run          rm, empty: print what would go, delete nothing
+  -f, --force            rm: remove entries even when they hold risky git work
   -f, --force            restore over an existing file
   -h, --help             show this help
 ";
@@ -355,7 +357,12 @@ fn bin_keeps(m: &crate::budget::PathMatch, it: &BinEntry) -> bool {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let date = crate::platform::epoch_to_iso_utc(it.deleted);
-    m.keeps_record(&it.local, &name, &date)
+    m.keeps_record(
+        &it.local,
+        &name,
+        &date,
+        it.payload.parent().unwrap_or(&it.payload),
+    )
 }
 
 /// One `wsl list --format` row: the path under the automount root, the
@@ -367,7 +374,7 @@ pub fn format_row(parts: &[crate::listfmt::FmtPart], it: &BinEntry) -> Vec<u8> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let id = crate::filters::item_id(&name, &date);
+    let id = crate::filters::item_id(&name, &date, it.payload.parent().unwrap_or(&it.payload));
     let row = crate::listfmt::FmtRow {
         date: &date,
         epoch: it.deleted,
@@ -388,13 +395,22 @@ pub fn list_json(items: &[&BinEntry]) -> String {
     let rows: Vec<String> = items
         .iter()
         .map(|it| {
+            let name = it
+                .payload
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let date = crate::platform::epoch_to_iso_utc(it.deleted);
+            let id =
+                crate::filters::item_id(&name, &date, it.payload.parent().unwrap_or(&it.payload));
             format!(
-                r#"{{"original":"{}","path":"{}","deleted":{},"date":"{}","size":{}}}"#,
+                r#"{{"original":"{}","path":"{}","deleted":{},"date":"{}","size":{},"id":"{}"}}"#,
                 crate::util::json_escape(&it.original),
                 crate::util::json_escape(&it.local.to_string_lossy()),
                 it.deleted,
-                crate::platform::epoch_to_iso_utc(it.deleted),
-                it.size
+                date,
+                it.size,
+                crate::util::json_escape(&id)
             )
         })
         .collect();
@@ -406,11 +422,16 @@ pub fn list_json(items: &[&BinEntry]) -> String {
 /// `rtrash rm`.
 fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     let mut dry = false;
+    let mut force = false;
     let mut matcher = None;
     let mut paths = Vec::new();
     for a in args {
         if matches!(a.as_str(), "-n" | "--dry-run") {
             dry = true;
+            continue;
+        }
+        if matches!(a.as_str(), "-f" | "--force") {
+            force = true;
             continue;
         }
         match take_matcher(prog, a, &mut matcher) {
@@ -442,6 +463,18 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     }
     let mut status = 0;
     for it in chosen {
+        if !force && !crate::util::is_gone(&it.payload) {
+            if let Some(work) = crate::du_git::risky_tree(&it.payload) {
+                eprintln!(
+                    "{prog}: refusing to remove '{}': it holds {} git work; \
+                     restore it, or pass -f to remove it anyway",
+                    crate::util::err_path(&it.local),
+                    work.label()
+                );
+                status = 1;
+                continue;
+            }
+        }
         if dry {
             println!("would remove '{}'", crate::util::term_path(&it.local));
             continue;

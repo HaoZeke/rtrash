@@ -153,11 +153,13 @@ pub fn test_fs() -> Option<(std::path::PathBuf, Space)> {
 fn keep_clause(one: bool, dirty: bool, unpushed: bool, unknown: bool) -> String {
     let whom = if one { "it" } else { "them" };
     let known = if dirty && unpushed {
-        format!("leave {whom} until the uncommitted work is committed and the commits are pushed")
+        format!(
+            "restore {whom} first, then leave {whom} until the uncommitted work is committed and the commits are pushed"
+        )
     } else if dirty {
-        format!("leave {whom} until the uncommitted work is committed")
+        format!("restore {whom} first, then leave {whom} until the uncommitted work is committed")
     } else if unpushed {
-        format!("leave {whom} until the work is pushed")
+        format!("restore {whom} first, then leave {whom} until the work is pushed")
     } else {
         String::new()
     };
@@ -184,7 +186,7 @@ fn keep_clause(one: bool, dirty: bool, unpushed: bool, unknown: bool) -> String 
 pub fn warning_hint(risky: &[(&Path, crate::du_git::RiskyGit)]) -> String {
     if risky.is_empty() {
         return concat!(
-            "review the trash with `rtrash list --sort=size --format='{id} {path}'` ",
+            "review the trash with `rtrash list --sort=size --format='{id} {path}\\n'` ",
             "and remove that item with `rtrash rm -i --max-count=1 --match=id ID`",
         )
         .to_string();
@@ -524,6 +526,7 @@ mod tests {
         let lows = ["9% of bytes free".to_string()];
         let review = warning_hint(&[]);
         assert!(review.contains("rtrash list --sort=size"), "{review}");
+        assert!(review.contains("{id} {path}\\n"), "{review}");
         assert!(
             review.contains("rtrash rm -i --max-count=1 --match=id ID"),
             "{review}"

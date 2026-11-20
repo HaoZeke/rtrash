@@ -628,17 +628,26 @@ pub fn stats(top: usize) -> Vec<crate::trash_stats::Stats> {
         .collect()
 }
 
+pub struct RmOpts<'a> {
+    pub batch: Option<&'a str>,
+    pub dry_run: bool,
+    pub force: bool,
+    pub verbose: bool,
+    pub json: bool,
+    pub filter: Filter,
+}
+
 /// `rm` on the Finder trashes: permanently remove the items whose Put Back
 /// place, its file name or the name in the trash matches a pattern.
-pub fn rm(
-    prog: &str,
-    patterns: &crate::filters::Patterns,
-    batch: Option<&str>,
-    dry_run: bool,
-    verbose: bool,
-    json: bool,
-    filter: Filter,
-) -> i32 {
+pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> i32 {
+    let RmOpts {
+        batch,
+        dry_run,
+        force,
+        verbose,
+        json,
+        filter,
+    } = opts;
     let rows = match entries() {
         Ok(r) => filter.apply(r),
         Err(e) => {
@@ -695,7 +704,9 @@ pub fn rm(
                 let path_s = nfc(&path_s);
                 regex.iter().any(|r| r.is_match(&path_s))
             }
-            crate::filters::Match::Id => texts.selects(&nfc(&path_s), &base, &name, &e.date),
+            crate::filters::Match::Id => {
+                texts.selects(&nfc(&path_s), &base, &name, &e.date, &e.trash)
+            }
             _ => texts.hit(&nfc(&path_s), &base, &name),
         }
     };
@@ -744,6 +755,18 @@ pub fn rm(
         };
         let m = crate::finder_total::measure_item(&path);
         let sz = m.0;
+        if !force && !crate::util::is_gone(&path) {
+            if let Some(work) = crate::du_git::risky_tree(&path) {
+                eprintln!(
+                    "{prog}: refusing to remove '{}': it holds {} git work; \
+                     restore it, or pass -f to remove it anyway",
+                    crate::util::err_path(&e.shown),
+                    work.label()
+                );
+                status = 1;
+                continue;
+            }
+        }
         if dry_run {
             if !json {
                 println!("{}", crate::util::term_path(&e.shown));

@@ -8852,6 +8852,42 @@ fn rm_refuses_a_repository_that_still_holds_risky_work() {
     assert!(!listed.contains("repo"), "{listed}");
 }
 
+/// A dangling record is removable: once the payload is gone, rm does not
+/// probe git work and does not refuse it as unknown.
+#[cfg(unix)]
+#[test]
+fn rm_removes_a_dangling_record_without_a_git_work_refusal() {
+    let sb = Sandbox::new("rm-git-dangling");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let path = repo.to_str().unwrap();
+    let put = sb.run(&["put", "--home-only", "-r", path]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let files = sb.trash().join("files");
+    let payload = fs::read_dir(&files)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::remove_dir_all(&payload).unwrap();
+    let rm = sb.run(&["rm", "--home-only", "--match=exact", path]);
+    let err = stderr_of(&rm);
+    assert!(rm.status.success(), "{err}");
+    assert!(!err.contains("it holds unknown git work"), "{err}");
+    let listed = stdout_of(&sb.run(&["list", "--home-only"]));
+    assert!(!listed.contains("repo"), "{listed}");
+}
+
 /// Work that appears after the first probe and before the move is kept.
 #[cfg(all(unix, debug_assertions))]
 #[test]
@@ -8922,6 +8958,41 @@ fn rm_by_id_leaves_a_later_item_at_the_same_path() {
     }
     assert_eq!(bodies, vec![b"two".to_vec()]);
     assert!(!f.exists());
+}
+
+/// Two items with the same trash name and deletion second under different
+/// trash roots get different ids, and rm by one id removes only that item.
+#[test]
+fn rm_by_id_distinguishes_items_from_different_trash_roots() {
+    let sb = Sandbox::new("rm-id-roots");
+    let roots = [sb.root.join("t1"), sb.root.join("t2")];
+    let date = "2026-01-02T03:04:05";
+    for (i, root) in roots.iter().enumerate() {
+        fs::create_dir_all(root.join("files")).unwrap();
+        fs::create_dir_all(root.join("info")).unwrap();
+        fs::write(root.join("files/same.txt"), format!("v{i}")).unwrap();
+        fs::write(
+            root.join("info/same.txt.trashinfo"),
+            format!(
+                "[Trash Info]\nPath=/work/{i}/same.txt\nDeletionDate={date}\nX-Rtrash-Batch=1-1\n"
+            ),
+        )
+        .unwrap();
+    }
+    let pin = |p: &PathBuf| format!("--trash-dir={}", p.display());
+    let a = pin(&roots[0]);
+    let b = pin(&roots[1]);
+    let listed = stdout_of(&sb.run(&["list", &a, &b, "--format={id}\t{path}\n"]));
+    let rows: Vec<(&str, &str)> = listed.lines().filter_map(|l| l.split_once('\t')).collect();
+    assert_eq!(rows.len(), 2, "{listed}");
+    assert_ne!(rows[0].0, rows[1].0, "{listed}");
+    let rm = sb.run(&["rm", &a, &b, "--match=id", rows[0].0]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    let left: usize = roots
+        .iter()
+        .map(|r| fs::read_dir(r.join("files")).unwrap().count())
+        .sum();
+    assert_eq!(left, 1);
 }
 
 /// A symlinked parent that is retargeted after the path was resolved does

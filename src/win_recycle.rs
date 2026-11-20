@@ -1651,10 +1651,11 @@ pub(crate) fn file_identity(path: &Path) -> Option<(u64, u64)> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
             GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
         };
         let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
             .ok()?;
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
@@ -1663,7 +1664,7 @@ pub(crate) fn file_identity(path: &Path) -> Option<(u64, u64)> {
             return None;
         }
         let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
-        return Some((u64::from(info.dwVolumeSerialNumber), index));
+        Some((u64::from(info.dwVolumeSerialNumber), index))
     }
     #[cfg(not(windows))]
     {
@@ -1695,7 +1696,7 @@ pub(crate) fn retarget_seam() {
 pub(crate) fn identity_changed(before: Option<(u64, u64)>, path: &Path) -> bool {
     match (before, file_identity(path)) {
         (Some(a), Some(b)) => a != b,
-        (None, None) => false,
+        (None, None) => true,
         _ => true,
     }
 }
@@ -1955,8 +1956,6 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut failed = 0usize;
         let mut moved: Vec<PathBuf> = Vec::new();
         let mut roots: Vec<PathBuf> = Vec::new();
-        // (volume root, original path, git work) for repositories this put flagged.
-        let mut risky_at: Vec<(PathBuf, PathBuf, crate::du_git::RiskyGit)> = Vec::new();
         let mut restore_notes: Vec<(PathBuf, crate::du_git::RiskyGit)> = Vec::new();
         for f in &files {
             match crate::util::look(f) {
@@ -2085,9 +2084,6 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                         restore_notes.push((kept.clone(), work));
                     }
                     if let Some(r) = root {
-                        if let Some(work) = work {
-                            risky_at.push((r.clone(), kept.clone(), work));
-                        }
                         if !roots.contains(&r) {
                             roots.push(r);
                         }
@@ -2144,10 +2140,10 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         if !json {
             for r in &roots {
                 let what = format!("the Recycle Bin of {}", crate::util::err_path(r));
-                let risky: Vec<(&Path, crate::du_git::RiskyGit)> = risky_at
+                let owned = bin_git_risks_for_root(r);
+                let risky: Vec<(&Path, crate::du_git::RiskyGit)> = owned
                     .iter()
-                    .filter(|(root, _, _)| root == r)
-                    .map(|(_, path, work)| (path.as_path(), *work))
+                    .map(|(path, work)| (path.as_path(), *work))
                     .collect();
                 if let Some(w) = crate::space::low_warning_for(&what, r, &risky) {
                     eprintln!("{prog}: warning: {w}");
@@ -2495,7 +2491,12 @@ on Windows (there is no FreeDesktop layout here).
                                 .map(|n| n.to_string_lossy().into_owned())
                                 .unwrap_or_default();
                             let date = platform::epoch_to_iso_utc(it.time_deleted);
-                            m.keeps_record(&o, &stable, &date)
+                            m.keeps_record(
+                                &o,
+                                &stable,
+                                &date,
+                                bin_root_of(Path::new(&it.id)).unwrap_or_default().as_path(),
+                            )
                         }) && cwd
                             .as_ref()
                             .is_none_or(|dirs| dirs.iter().any(|d| o.starts_with(d)))
@@ -2537,7 +2538,11 @@ on Windows (there is no FreeDesktop layout here).
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        let item_id = crate::filters::item_id(&stable, &date);
+                        let item_id = crate::filters::item_id(
+                            &stable,
+                            &date,
+                            &bin_root_of(Path::new(&it.id)).unwrap_or_default(),
+                        );
                         let row = crate::listfmt::FmtRow {
                             date: &date,
                             epoch: it.time_deleted,
@@ -3203,7 +3208,8 @@ Without PATH, print a numbered list and read an index from stdin.
       --regex=RE  match items whose original path matches RE
   -m, --match=KIND  read PATH as a pattern of KIND, as trashy's -m does:
                 glob, regex, substring, exact (the whole original path) or
-                id (the {{id}} from `list --format`)
+                id (the {{id}} from `list --format`, which includes
+                payload name, date and bin root)
       --to=DIR  restore into DIR, keeping each item's file name
       --older-than=AGE  only items deleted more than AGE ago; AGE is DAYS
                 or a duration such as 2h, 30m or 1d12h
@@ -3380,7 +3386,12 @@ Without PATH, print a numbered list and read an index from stdin.
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
                         let date = platform::epoch_to_iso_utc(i.time_deleted);
-                        m.keeps_record(&original_of(i), &stable, &date)
+                        m.keeps_record(
+                            &original_of(i),
+                            &stable,
+                            &date,
+                            bin_root_of(Path::new(&i.id)).unwrap_or_default().as_path(),
+                        )
                     })
                     .collect(),
                 // Without PATH or a match, --cwd-only keeps the items that
@@ -3936,17 +3947,73 @@ registry), then the total and the free space on each (a warning under
 
     /// Git work still in the Recycle Bin. A bin that cannot be listed is
     /// unknown, so a low-space warning does not suggest removing it.
-    fn bin_git_risks() -> Vec<(PathBuf, crate::du_git::RiskyGit)> {
-        let Ok(items) = super::list_items() else {
-            return vec![(PathBuf::from("."), crate::du_git::RiskyGit::unknown())];
-        };
+    fn scoped_bin_git_risks<I, F>(
+        root: &Path,
+        items: I,
+        mut risky_tree: F,
+    ) -> Vec<(PathBuf, crate::du_git::RiskyGit)>
+    where
+        I: IntoIterator<Item = (PathBuf, PathBuf)>,
+        F: FnMut(&Path) -> Option<crate::du_git::RiskyGit>,
+    {
         let mut out = Vec::new();
-        for it in items {
-            if let Some(w) = crate::du_git::risky_tree(Path::new(&it.id)) {
-                out.push((original_of(&it), w));
+        for (id, original) in items {
+            if bin_root_of(&id).as_deref() != Some(root) {
+                continue;
+            }
+            if let Some(work) = risky_tree(&id) {
+                out.push((original, work));
             }
         }
         out
+    }
+
+    fn bin_git_risks_for_root(root: &Path) -> Vec<(PathBuf, crate::du_git::RiskyGit)> {
+        let Ok(items) = super::list_items() else {
+            return vec![(root.to_path_buf(), crate::du_git::RiskyGit::unknown())];
+        };
+        scoped_bin_git_risks(
+            root,
+            items.into_iter().map(|it| {
+                let id = PathBuf::from(&it.id);
+                let original = original_of(&it);
+                (id, original)
+            }),
+            crate::du_git::risky_tree,
+        )
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn scoped_bin_git_risks_take_items_of_one_volume_only() {
+        let items = vec![
+            (
+                PathBuf::from(r"C:\$Recycle.Bin\S-1-1-0\$RA.txt"),
+                PathBuf::from(r"C:\on-c.txt"),
+            ),
+            (
+                PathBuf::from(r"D:\$Recycle.Bin\S-1-1-0\$RB.txt"),
+                PathBuf::from(r"D:\on-d.txt"),
+            ),
+        ];
+        let got = scoped_bin_git_risks(Path::new(r"C:\"), items, |_| {
+            Some(crate::du_git::RiskyGit {
+                dirty: false,
+                unpushed: true,
+                unknown: false,
+            })
+        });
+        assert_eq!(
+            got,
+            vec![(
+                PathBuf::from(r"C:\on-c.txt"),
+                crate::du_git::RiskyGit {
+                    dirty: false,
+                    unpushed: true,
+                    unknown: false
+                }
+            )]
+        );
     }
 
     /// A `Free on` line per drive, and a warning for a drive under
@@ -3963,7 +4030,7 @@ registry), then the total and the free space on each (a warning under
             );
             let lows = s.lows(crate::space::WARN_FREE_PERCENT);
             if !lows.is_empty() {
-                let owned = bin_git_risks();
+                let owned = bin_git_risks_for_root(root);
                 let pairs: Vec<(&Path, crate::du_git::RiskyGit)> =
                     owned.iter().map(|(p, w)| (p.as_path(), *w)).collect();
                 eprintln!(
@@ -4076,8 +4143,8 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                    path (the same as --match=regex)
       --match=KIND  how to read PATTERNs (trashy's -m): glob (default),
                    regex, substring, exact (the whole original path) or id
-                   (the {{id}} from `list --format`, the payload name and
-                   its date)
+                   (the {{id}} from `list --format`, the payload name,
+                   date and bin root)
       --older-than=AGE  only match items deleted more than AGE ago: DAYS,
                    or a duration such as 2h, 30m or 1d12h
       --newer-than=AGE  only match items deleted within the last AGE
@@ -4178,7 +4245,8 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 let date = platform::epoch_to_iso_utc(it.time_deleted);
-                pats.selects(&full, &base, &stable, &date)
+                let root = bin_root_of(Path::new(&it.id)).unwrap_or_default();
+                pats.selects(&full, &base, &stable, &date, &root)
             })
             .collect();
         // Size last: only the matches need their `$I` read.
@@ -4210,7 +4278,7 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             rechecked(prog, matched)
         };
         let mut refused = 0u32;
-        let matched = if force || dry_run {
+        let matched = if force {
             matched
         } else {
             let mut kept = Vec::new();
@@ -4248,7 +4316,7 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             }
         }
         let code = if dry_run {
-            0
+            i32::from(refused > 0)
         } else if let Err(e) = crate::permanent_guard::gate_many(matched.len() as u64) {
             eprintln!("{prog}: {e}");
             1
@@ -4658,6 +4726,9 @@ mod tests {
         assert!(!identity_changed(Some(ia), &a));
         assert!(identity_changed(Some(ia), &b));
         assert!(identity_changed(None, &a));
+        let gone = dir.join("gone");
+        assert!(file_identity(&gone).is_none());
+        assert!(identity_changed(None, &gone));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

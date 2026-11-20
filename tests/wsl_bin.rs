@@ -202,6 +202,7 @@ fn wsl_list_filters_and_prints_json() {
         text.contains(r#""original":"C:\\Users\\me\\notes.txt""#),
         "{text}"
     );
+    assert!(text.contains(r#""id":"#), "{text}");
     assert!(text.contains(r#""deleted":1700000000"#), "{text}");
     assert!(!text.contains("run.log"), "{text}");
     assert_eq!(f.run(&["list", "--regex=("]).status.code(), Some(2));
@@ -266,6 +267,44 @@ fn wsl_rm_deletes_matching_items_for_good() {
     // No match is not an error; no selector is.
     assert!(f.run(&["rm", "--name=none"]).status.success());
     assert_eq!(f.run(&["rm"]).status.code(), Some(2));
+}
+
+#[test]
+fn wsl_rm_refuses_risky_git_work_without_force_and_dry_run_reports_it() {
+    let f = Fake::new("rm-git-risk");
+    let id = "AB12CD";
+    let payload = f.bin().join(format!("$R{id}"));
+    fs::create_dir(&payload).unwrap();
+    fs::create_dir(payload.join(".git")).unwrap();
+    fs::write(payload.join("f"), b"x").unwrap();
+    let rec = encode_recycle_i_v2(
+        Path::new(r"C:\repo"),
+        0,
+        FILETIME_UNIX_EPOCH + 1_700_000_000 * 10_000_000,
+    );
+    fs::write(f.bin().join(format!("$I{id}")), rec).unwrap();
+
+    let dry = f.run(&["rm", "-n", "--name=repo"]);
+    let dry_err = String::from_utf8_lossy(&dry.stderr);
+    assert_eq!(dry.status.code(), Some(1), "{dry_err}");
+    assert!(dry_err.contains("refusing to remove"), "{dry_err}");
+    assert!(payload.exists(), "{dry_err}");
+
+    let blocked = f.run(&["rm", "--name=repo"]);
+    let err = String::from_utf8_lossy(&blocked.stderr);
+    assert_eq!(blocked.status.code(), Some(1), "{err}");
+    assert!(err.contains("refusing to remove"), "{err}");
+    assert!(err.contains("pass -f"), "{err}");
+    assert!(payload.exists(), "{err}");
+
+    let forced = f.run(&["rm", "-f", "--name=repo"]);
+    assert!(
+        forced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert!(!payload.exists());
+    assert!(!f.bin().join(format!("$I{id}")).exists());
 }
 
 #[test]

@@ -179,16 +179,15 @@ pub fn git_risks(dir: &TrashDir) -> Option<Vec<(PathBuf, String, crate::du_git::
     let mut out = Vec::new();
     for ent in rd {
         let ent = ent.ok()?;
-        let name = ent.file_name();
-        let name = name.to_string_lossy();
-        let payload = crate::util::join_name(&dir.files(), name.as_ref());
+        let name = crate::util::str_from_os_ref(&ent.file_name());
+        let payload = crate::util::join_name(&dir.files(), &name);
         let Some(work) = crate::du_git::risky_tree(&payload) else {
             continue;
         };
-        let original = entry_named(dir, name.as_ref())
+        let original = entry_named(dir, &name)
             .map(|e| e.original)
             .unwrap_or(payload);
-        out.push((original, name.into_owned(), work));
+        out.push((original, name, work));
     }
     Some(out)
 }
@@ -577,7 +576,7 @@ pub fn entry_to_json_sized(e: &Entry, size: Option<u64>) -> String {
         json_escape(&crate::util::show_name(&e.name)),
         json_escape(&e.dir.root.to_string_lossy()),
         batch,
-        json_escape(&crate::filters::item_id(&e.name, date)),
+        json_escape(&crate::filters::item_id(&e.name, date, &e.dir.root)),
         e.missing(),
         size,
     )
@@ -853,14 +852,18 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     // --glob/--regex/--name and --cwd-only, on the original path and the
     // name in the trash.
+    let keep_with_root =
+        |original: &std::path::Path, name: &str, date: &str, root: &std::path::Path| -> bool {
+            matcher
+                .as_ref()
+                .is_none_or(|m| m.matches_record(original, name, date, root))
+                && cwd.as_ref().is_none_or(|d| {
+                    original.starts_with(d)
+                        || std::fs::canonicalize(d).is_ok_and(|r| original.starts_with(r))
+                })
+        };
     let keep = |original: &std::path::Path, name: &str, date: &str| -> bool {
-        matcher
-            .as_ref()
-            .is_none_or(|m| m.matches_record(original, name, date))
-            && cwd.as_ref().is_none_or(|d| {
-                original.starts_with(d)
-                    || std::fs::canonicalize(d).is_ok_and(|r| original.starts_with(r))
-            })
+        keep_with_root(original, name, date, std::path::Path::new(""))
     };
     // macOS lists the Finder Trash unless a pin or the setting says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty() || all_users) {
@@ -931,16 +934,26 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let hints = folder_hints(prog, &dirs, &left, &strays, trash_cli);
     let mut unsized_rows = 0usize;
     let mut entries = filter_age_secs(collected, older_than, newer_than);
-    entries.retain(|e| keep(&e.original, &e.name, e.date.as_deref().unwrap_or("")));
+    entries.retain(|e| {
+        keep_with_root(
+            &e.original,
+            &e.name,
+            e.date.as_deref().unwrap_or(""),
+            &e.dir.root,
+        )
+    });
     // Orphans have no date, so only an unfiltered listing shows them; they
     // come last, after every recorded item.
     let mut recorded = entries.len();
     if older_than.is_none() && newer_than.is_none() {
-        entries.extend(
-            orphans(&dirs)
-                .into_iter()
-                .filter(|e| keep(&e.original, &e.name, e.date.as_deref().unwrap_or(""))),
-        );
+        entries.extend(orphans(&dirs).into_iter().filter(|e| {
+            keep_with_root(
+                &e.original,
+                &e.name,
+                e.date.as_deref().unwrap_or(""),
+                &e.dir.root,
+            )
+        }));
     }
     let with_size = with_size
         || sort == SortKey::Size
@@ -989,7 +1002,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let mut out = std::io::BufWriter::new(std::io::stdout().lock());
         for (k, e) in rows.iter().enumerate() {
             let date = e.date.as_deref().unwrap_or("");
-            let id = crate::filters::item_id(&e.name, date);
+            let id = crate::filters::item_id(&e.name, date, &e.dir.root);
             let row = FmtRow {
                 date,
                 epoch: e.epoch,
