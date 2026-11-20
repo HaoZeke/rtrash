@@ -199,7 +199,7 @@ fn odd_names_survive_put_list_restore_and_empty() {
         assert_eq!(json.matches("\"missing\":true").count(), gone, "{json}");
         // Restoring everything restores what is left and reports the rest.
         let _ = sb.s(&["restore", "--home-only", "--all", "--glob=*"]);
-        let _ = sb.s(&["rm", "--home-only", "*"]);
+        let _ = sb.s(&["rm", "--home-only", "--match=glob", "--force", "*"]);
         let out = sb.s(&["empty", "--home-only", "-v", "--all"]);
         assert!(
             out.status.success(),

@@ -2726,6 +2726,7 @@ on Windows (there is no FreeDesktop layout here).
         let mut max_size: Option<u64> = None;
         let mut policy = crate::budget::Policy::Oldest;
         let mut every = false;
+        let mut paths = Vec::new();
         let mut age = AgeFilter::default();
         let mut i = 0usize;
         while i < args.len() {
@@ -2795,9 +2796,14 @@ on Windows (there is no FreeDesktop layout here).
                 "--help" => {
                     print!(
                         "\
-Usage: {prog} [OPTION]... [DAYS]
+Usage: {prog} [OPTION]... [DAYS | PATH]...
 Permanently empty the Windows Recycle Bin (system trash).
 With DAYS, only items deleted more than DAYS days ago, as on Linux.
+A PATH removes only the items whose original path is that path,
+exactly. A relative PATH is resolved from the current directory, and
+a trailing slash is ignored. When nothing matches, longer paths that
+start the same way are named and left in place. A number or a
+duration is an age, not a path.
 
   -n, --dry-run  list what would be removed
   -v, --verbose  print each removed original path
@@ -2836,16 +2842,17 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 a if a.starts_with("--trash-dir=") => {}
                 a if !a.starts_with('-') => match crate::filters::parse_age_secs(a) {
                     Ok(d) => age.older_than = Some(d),
-                    Err(e) => {
-                        eprintln!("{prog}: {e}");
-                        return 2;
-                    }
+                    Err(_) => paths.push(a.to_string()),
                 },
                 a => {
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return 2;
                 }
             }
+        }
+        if !paths.is_empty() && (until.is_some() || max_size.is_some()) {
+            eprintln!("{prog}: a PATH takes no --until-free or --max-size");
+            return 2;
         }
         if let Some((spec, floor)) = until {
             if age.older_than.is_some() || max_size.is_some() {
@@ -2864,7 +2871,20 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         };
         // An empty of everything may take what other sessions or agents
         // put; it goes ahead alone only for the latest put's items.
-        if age.older_than.is_none() && max_size.is_none() && !every && !dry_run {
+        let wants = crate::orig_path::expand(&paths);
+        if !wants.is_empty() {
+            let have: Vec<PathBuf> = all.iter().map(original_of).collect();
+            crate::orig_path::hint(prog, &wants, &have);
+        }
+        let all: Vec<TrashItem> = if wants.is_empty() {
+            all
+        } else {
+            all.into_iter()
+                .filter(|it| crate::orig_path::selects(&wants, &original_of(it)))
+                .collect()
+        };
+        if age.older_than.is_none() && max_size.is_none() && paths.is_empty() && !every && !dry_run
+        {
             let rows: Vec<(PathBuf, i64)> = all
                 .iter()
                 .map(|it| (original_of(it), it.time_deleted))
@@ -4236,7 +4256,7 @@ registry), then the total and the free space on each (a warning under
         let mut dry_run = false;
         let mut force = false;
         let mut verbose = false;
-        let mut kind = crate::filters::Match::Glob;
+        let mut kind = crate::filters::Match::Exact;
         let mut bad_match: Option<String> = None;
         let mut json = false;
         let mut patterns: Vec<String> = Vec::new();
@@ -4274,14 +4294,18 @@ registry), then the total and the free space on each (a warning under
                     print!(
                         "\
 Usage: {prog} [OPTION]... PATTERN...
-Permanently delete Recycle Bin items matching PATTERN (glob).
+Permanently delete Recycle Bin items whose original path is PATTERN.
+A bare PATTERN is that path exactly, resolved from the current
+directory, with a trailing slash ignored. It does not remove a longer
+name or a file inside it. When nothing matches, those are named and
+left in place.
 
       --regex   PATTERNs are regular expressions searched in the original
                    path (the same as --match=regex)
-      --match=KIND  how to read PATTERNs (trashy's -m): glob (default),
-                   regex, substring, exact (the whole original path) or id
-                   (the {{id}} from `list --format`, the payload name,
-                   date and bin root)
+      --match=KIND  how to read PATTERNs (trashy's -m): exact (the
+                   default), glob, regex, substring or id (the {{id}}
+                   from `list --format`, the payload name, date and bin
+                   root)
       --older-than=AGE  only match items deleted more than AGE ago: DAYS,
                    or a duration such as 2h, 30m or 1d12h
       --newer-than=AGE  only match items deleted within the last AGE
@@ -4344,6 +4368,9 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             eprintln!("{prog}: missing PATTERN");
             return 2;
         }
+        if kind == crate::filters::Match::Exact {
+            patterns = crate::orig_path::expand(&patterns);
+        }
         let pats = match crate::filters::Patterns::new(patterns, kind) {
             Ok(p) => p,
             Err(e) => {
@@ -4370,10 +4397,18 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
         } else {
             items
         };
+        let exact = pats.kind == crate::filters::Match::Exact;
+        if exact {
+            let have: Vec<PathBuf> = items.iter().map(original_of).collect();
+            crate::orig_path::hint(prog, &pats.texts, &have);
+        }
         let matched: Vec<TrashItem> = items
             .into_iter()
             .filter(|it| {
                 let orig = original_of(it);
+                if exact {
+                    return crate::orig_path::selects(&pats.texts, &orig);
+                }
                 let full = orig.to_string_lossy().into_owned();
                 let base = orig
                     .file_name()

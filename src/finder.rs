@@ -1151,6 +1151,8 @@ pub struct EmptyOpts {
     pub dry_run: bool,
     pub verbose: bool,
     pub json: bool,
+    /// Original paths to remove exactly. Empty means every item in scope.
+    pub paths: Vec<String>,
 }
 
 /// The items `empty` removes: those older than the cutoff (all of them
@@ -1301,8 +1303,14 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
         Ok(r) => r,
         Err(c) => return c,
     };
+    let wants = crate::orig_path::expand(&o.paths);
+    if !wants.is_empty() {
+        let have: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
+        crate::orig_path::hint(prog, &wants, &have);
+    }
     let rows: Vec<_> = rows
         .into_iter()
+        .filter(|e| wants.is_empty() || crate::orig_path::selects(&wants, &e.shown))
         .map(|e| {
             let b = crate::fastdelete::disk_usage(&e.path());
             (e, b)

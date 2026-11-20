@@ -1089,6 +1089,7 @@ BATCH = "a batch the caller counted up front with permanent_guard::gate_many"
 PERMANENT_ALLOW = {
     ("du_dupes.rs", "clone_file"): (2, OWN + ": the clone target it just created"),
     ("du_dupes.rs", "link_one"): (2, OWN + ": the .rtrash-link temp beside the duplicate"),
+    ("empty.rs", "empty_exact"): (1, RECORD),
     ("empty.rs", "empty_one"): (1, RECORD),
     ("empty.rs", "full_empty_wipe"): (1, BATCH),
     ("empty_tui.rs", "permanently_remove_entries"): (1, RECORD),

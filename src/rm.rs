@@ -7,12 +7,15 @@ use crate::trashdir::{self, TrashDir};
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... PATTERN...
-Permanently remove trashed items whose original path or basename matches
-a PATTERN (shell-style glob; quote globs from the shell; --match picks
-another kind, as trashy's -m does). Matching entries
-are deleted from the trash (files/ + .trashinfo), not restored. An absolute
-PATTERN also matches with symlinks in its directory part resolved, the way
-put records original paths.
+Permanently remove trashed items whose original path is PATTERN.
+A bare PATTERN is that path exactly: the path put records, resolved
+from the current directory, with a trailing slash ignored. `rm ~/a`
+does not remove `~/ab` or `~/a/b`. When nothing matches, those longer
+paths are named and left in place. --match=glob (a shell glob of the
+original path, its basename or the trash name), --regex and
+--match=substring are the broader matches; --match=exact is the same
+comparison as a bare PATTERN. Matching entries are deleted from the
+trash (files/ + .trashinfo), not restored.
 
 Note: multi-call name `rm` means *put into trash* (safe). This command
 (subcommand `rtrash rm` or multi-call `trash-rm`) permanently deletes
@@ -34,10 +37,11 @@ unknown git work; -n reports the same refusal without deleting anything.
                      (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
       --regex      PATTERNs are regular expressions searched in the
                      original path (the same as --match=regex)
-  -m, --match=KIND  how to read PATTERNs (trashy's -m): glob (default),
-                     regex, substring (text in the original path),
-                     exact (the whole original path) or id (the {id}
-                     from `list --format`, the trash name, date and root)
+  -m, --match=KIND  how to read PATTERNs (trashy's -m): exact (the
+                     default; the whole original path), glob, regex,
+                     substring (text in the original path) or id (the
+                     {id} from `list --format`, the trash name, date
+                     and root)
       --batch=ID   only items from one put run: an ID from `undo --list`,
                      or `last` for the latest; with no PATTERN, all of it
   -n, --dry-run    list matches and reclaimable size; do not delete
@@ -54,10 +58,10 @@ unknown git work; -n reports the same refusal without deleting anything.
       --version    output version information and exit
 
 Examples:
-  {prog} '*.o'
-  {prog} -n '*.o'
-  {prog} foo
-  {prog} /work/old-project
+  {prog} /home/you/old-project
+  {prog} -n foo
+  {prog} --match=glob '*.o'
+  {prog} -n --match=glob '*.o'
   {prog} -i --max-count=1 --match=id ID
   {prog} --regex '/build-[0-9]+/'
   {prog} --batch=last
@@ -77,7 +81,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut dry_run = false;
     let mut home_only = false;
     let mut json = false;
-    let mut kind = crate::filters::Match::Glob;
+    let mut kind = crate::filters::Match::Exact;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
@@ -223,10 +227,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         eprintln!("Try '{prog} --help' for more information.");
         return 2;
     }
-    if matches!(
-        kind,
-        crate::filters::Match::Glob | crate::filters::Match::Exact
-    ) {
+    if kind == crate::filters::Match::Exact {
+        // The path put would record, including a relative one and one
+        // typed with a trailing slash.
+        patterns = crate::orig_path::expand(&patterns);
+    } else if kind == crate::filters::Match::Glob {
         // put records originals with their parent directory resolved, so
         // a path typed through a symlinked directory matches that way too.
         let resolved: Vec<String> = patterns.iter().filter_map(|p| resolve_pattern(p)).collect();
@@ -300,6 +305,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             return 1;
         }
     }
+    if kind == crate::filters::Match::Exact {
+        let have: Vec<PathBuf> = entries.iter().map(|e| e.original.clone()).collect();
+        crate::orig_path::hint(prog, &pats.texts, &have);
+    }
     let mut status = 0i32;
     let mut removed = 0u64;
     let mut bytes = 0u64;
@@ -317,7 +326,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     };
 
-    let wanted = |entry: &list::Entry| -> bool {
+    let path_hit = |entry: &list::Entry| -> bool {
+        if kind == crate::filters::Match::Exact {
+            return crate::orig_path::selects(&pats.texts, &entry.original);
+        }
         let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
         let base = entry
             .original
@@ -330,8 +342,9 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             entry.name.as_str(),
             entry.date.as_deref().unwrap_or(""),
             &entry.dir.root,
-        ) && size.keeps(size_of(entry))
+        )
     };
+    let wanted = |entry: &list::Entry| -> bool { path_hit(entry) && size.keeps(size_of(entry)) };
 
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
     // they came from, so a refused rm deletes nothing.
@@ -369,20 +382,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             not_reached = Some(entries[k..].iter().filter(|e| wanted(e)).count());
             break;
         }
-        let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
-        let base = entry
-            .original
-            .file_name()
-            .map(crate::util::str_from_os_ref)
-            .unwrap_or_default();
-        let hit = pats.selects(
-            path_s.as_ref(),
-            base.as_str(),
-            entry.name.as_str(),
-            entry.date.as_deref().unwrap_or(""),
-            &entry.dir.root,
-        );
-        if !hit {
+        if !path_hit(entry) {
             continue;
         }
         let sz = size_of(entry);

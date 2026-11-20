@@ -334,7 +334,7 @@ fn round(seed: u64) {
         vec!["list".into()],
         vec!["list".into(), "--size".into()],
         vec!["status".into()],
-        vec!["rm".into(), "h-*".into()],
+        vec!["rm".into(), "--match=glob".into(), "h-*".into()],
         vec!["rm".into(), format!("{o}/s0")],
         vec!["empty".into(), "1".into()],
         vec!["restore".into(), "--all".into(), "--conflict=skip".into()],

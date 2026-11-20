@@ -704,12 +704,17 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
                 let path_s = nfc(&path_s);
                 regex.iter().any(|r| r.is_match(&path_s))
             }
+            crate::filters::Match::Exact => crate::orig_path::selects(&patterns.texts, &e.shown),
             crate::filters::Match::Id => {
                 texts.selects(&nfc(&path_s), &base, &name, &e.date, &e.trash)
             }
             _ => texts.hit(&nfc(&path_s), &base, &name),
         }
     };
+    if patterns.kind == crate::filters::Match::Exact {
+        let have: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
+        crate::orig_path::hint(prog, &patterns.texts, &have);
+    }
     let hits: Vec<&Entry> = rows.iter().filter(|e| hit(e)).collect();
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
     // they came from (an item with no Put Back place counts as outside),
