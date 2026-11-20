@@ -646,7 +646,7 @@ pub fn default_list(
     shape: ListShape<'_>,
     refused: Option<&str>,
     filter: crate::finder_shared::Filter,
-    keep: &dyn Fn(&Path, &str, &str) -> bool,
+    keep: &dyn Fn(&Path, &str, &str, &Path) -> bool,
 ) -> i32 {
     let ListShape {
         json,
@@ -664,7 +664,7 @@ pub fn default_list(
     };
     let mut rows: Vec<_> = rows
         .into_iter()
-        .filter(|e| keep(&e.shown, &e.name, &e.date))
+        .filter(|e| keep(&e.shown, &e.name, &e.date, &e.trash))
         .collect();
     if let Some(n) = last {
         let cut = rows.len().saturating_sub(n);
@@ -677,7 +677,11 @@ pub fn default_list(
                 let orig = e.original.as_ref().map_or("null".to_string(), |o| {
                     format!("\"{}\"", json_escape(&o.to_string_lossy()))
                 });
-                let id = crate::filters::item_id(&e.name, &e.date, &e.trash);
+                let id = crate::filters::item_id(
+                    &crate::finder_shared::nfc(&e.name),
+                    &e.date,
+                    &e.trash,
+                );
                 let at = if show_trash {
                     let p = json_escape(&e.path().to_string_lossy());
                     format!(",\"trash_path\":\"{p}\"")
@@ -701,7 +705,8 @@ pub fn default_list(
         let wants_size = parts.contains(&crate::list::FmtPart::Field(crate::list::Field::Size));
         let mut out = std::io::BufWriter::new(std::io::stdout().lock());
         for e in &rows {
-            let id = crate::filters::item_id(&e.name, &e.date, &e.trash);
+            let id =
+                crate::filters::item_id(&crate::finder_shared::nfc(&e.name), &e.date, &e.trash);
             let row = crate::list::FmtRow {
                 date: &e.date,
                 epoch: e.epoch,

@@ -408,10 +408,11 @@ export extern "rtrash wsl" [
     --glob: string  # items whose path (or name, without a slash) matches
     --regex: string  # items whose path matches
     --name: string@"nu-complete rtrash wsl names"  # items with exactly this file name
+    --match(-m): string  # read MATCH as glob, regex, substring, exact or id
     --older-than: string  # empty: items deleted more than AGE ago
     --all  # empty: every item, without asking
     --dry-run(-n)  # rm, empty: print what would go, delete nothing
-    --force(-f)  # restore over an existing file
+    --force(-f)  # restore: overwrite; rm: remove risky git work
     --help  # display this help and exit
     action?: string@"nu-complete rtrash wsl"
     ...paths: string@"nu-complete rtrash wsl items"

@@ -675,7 +675,7 @@ mod pattern_tests {
         let a = super::item_id(
             name,
             date,
-            std::path::Path::new("/home/u/.local/share/Trash"),
+            std::path::Path::new("/fixture/home/.local/share/Trash"),
         );
         let b = super::item_id(name, date, std::path::Path::new("/mnt/disk/.Trash-1000"));
         assert_ne!(a, b);

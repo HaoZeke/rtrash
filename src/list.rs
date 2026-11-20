@@ -862,9 +862,6 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                         || std::fs::canonicalize(d).is_ok_and(|r| original.starts_with(r))
                 })
         };
-    let keep = |original: &std::path::Path, name: &str, date: &str| -> bool {
-        keep_with_root(original, name, date, std::path::Path::new(""))
-    };
     // macOS lists the Finder Trash unless a pin or the setting says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty() || all_users) {
         let refused = if volumes || show_dirs {
@@ -888,7 +885,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             depth,
             show_trash,
         };
-        return crate::finder::default_list(prog, shape, refused, filter, &keep);
+        return crate::finder::default_list(prog, shape, refused, filter, &keep_with_root);
     }
     if all_users && (home_only || !trash_dirs.is_empty()) {
         eprintln!("{prog}: --all-users takes no --home-only or --trash-dir");

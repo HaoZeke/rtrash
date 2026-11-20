@@ -308,6 +308,54 @@ fn wsl_rm_refuses_risky_git_work_without_force_and_dry_run_reports_it() {
 }
 
 #[test]
+fn wsl_list_and_rm_accept_match_id() {
+    let f = Fake::new("match-id");
+    f.recycle("AB12CD.txt", r"C:\a.txt", b"a", 1_700_000_000);
+    f.recycle("EF34GH.txt", r"C:\b.txt", b"b", 1_700_000_100);
+    let json = f.run(&["list", "--json"]);
+    assert!(
+        json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let body = String::from_utf8_lossy(&json.stdout);
+    let key = r#""id":""#;
+    let start = body.find(key).expect("id field in json") + key.len();
+    let end = body[start..].find('"').expect("id close quote") + start;
+    let id = body[start..end].to_string();
+
+    let listed = f.run(&["list", "--match=id", &id]);
+    let text = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(text.contains("a.txt") && !text.contains("b.txt"), "{text}");
+
+    let dry = f.run(&["rm", "-n", "-m", "id", &id]);
+    let dry_text = String::from_utf8_lossy(&dry.stdout);
+    assert!(
+        dry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    assert!(
+        dry_text.contains("a.txt") && !dry_text.contains("b.txt"),
+        "{dry_text}"
+    );
+
+    let rm = f.run(&["rm", "--match=id", &id]);
+    assert!(
+        rm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rm.stderr)
+    );
+    assert!(!f.bin().join("$RAB12CD.txt").exists());
+    assert!(f.bin().join("$REF34GH.txt").exists());
+}
+
+#[test]
 fn wsl_empty_goes_by_age_and_guards_the_whole_bin() {
     let f = Fake::new("empty");
     let now = std::time::SystemTime::now()

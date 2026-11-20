@@ -904,7 +904,8 @@ most recently trashed items.
 .TP
 .B \-\-json
 Emit a JSON array of objects
-(\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR,
+\fIdeletion_date\fR, \fIoriginal\fR, \fIname\fR, \fItrash_dir\fR,
+\fIid\fR,
 \fIbatch\fR, \fImissing\fR, and \fIsize\fR in bytes with
 .BR \-\-size ).
 The batch holds the put run id for items rtrash trashed, else null.
@@ -4046,11 +4047,21 @@ pick items as for
 by the path as WSL shows it; a
 .I PATH
 picks every item from that path.
+.B \-\-match=\fIKIND\fR
+(or
+.B \-m
+\fIKIND\fR)
+reads
+.I MATCH
+as glob, regex, substring, exact or id.
 No match prints a note and exits 0, as
 .B rtrash rm
 does;
 .B \-\-dry\-run
 prints what would go.
+.B \-f
+removes entries even when they still hold risky git work; without it,
+those entries are refused.
 .B rtrash wsl empty
 [\fB\-n\fR] [\fB\-\-all\fR] [\fB\-\-older\-than=\fIAGE\fR|\fIDAYS\fR]
 deletes items moved to the Recycle Bin more than
@@ -4069,7 +4080,7 @@ prints an array of objects with
 .IR deleted ,
 .I date
 and
-.IR size .
+.IR size ", and " id .
 .B list \-\-format=\fITEMPLATE\fR
 prints each item through a template, as
 .B rtrash list \-\-format

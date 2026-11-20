@@ -512,18 +512,6 @@ fn warn_size(prog: &str) -> Option<(WarnSize, &'static str)> {
     w.map(|w| (w, src))
 }
 
-/// Original paths this put flagged, among the items that went to `root`.
-fn risky_originals<'a>(
-    trashed: &'a [Trashed],
-    root: &Path,
-) -> Vec<(&'a Path, crate::du_git::RiskyGit)> {
-    trashed
-        .iter()
-        .filter(|t| t.trash_dir == root)
-        .filter_map(|t| t.risky_git.map(|w| (t.original.as_path(), w)))
-        .collect()
-}
-
 /// Git work to name in a warning for `root`: this run's flags unioned with
 /// a scan of the trash. A FreeDesktop `files/` that cannot be listed is
 /// unknown, so the warning does not suggest removing anything. A Finder
@@ -534,13 +522,22 @@ fn risks_for(root: &Path, trashed: &[Trashed]) -> Vec<(PathBuf, crate::du_git::R
     let Some(dir) = trashdir::TrashDir::from_root(root).ok() else {
         return run.iter().filter_map(|t| from_run(t)).collect();
     };
-    if !dir.files().is_dir() {
-        return risky_originals(trashed, root)
-            .into_iter()
-            .map(|(p, w)| (p.to_path_buf(), w))
-            .collect();
-    }
-    let Some(scanned) = crate::list::git_risks(&dir) else {
+    let scanned = if !dir.files().is_dir() {
+        crate::finder_shared::entries().ok().map(|rows| {
+            rows.into_iter()
+                .filter(|e| e.trash == root)
+                .filter_map(|e| {
+                    let payload = e.path();
+                    let work = crate::du_git::risky_tree(&payload)?;
+                    let original = e.original.unwrap_or(e.shown);
+                    Some((original, e.name, work))
+                })
+                .collect::<Vec<_>>()
+        })
+    } else {
+        crate::list::git_risks(&dir)
+    };
+    let Some(scanned) = scanned else {
         let mut out: Vec<_> = run.iter().filter_map(|t| from_run(t)).collect();
         out.push((root.to_path_buf(), crate::du_git::RiskyGit::unknown()));
         return out;
@@ -564,6 +561,18 @@ fn risks_for(root: &Path, trashed: &[Trashed]) -> Vec<(PathBuf, crate::du_git::R
         out.push((orig, w));
     }
     out
+}
+
+#[cfg(test)]
+fn risky_originals<'a>(
+    trashed: &'a [Trashed],
+    root: &Path,
+) -> Vec<(&'a Path, crate::du_git::RiskyGit)> {
+    trashed
+        .iter()
+        .filter(|t| t.trash_dir == root)
+        .filter_map(|t| t.risky_git.map(|w| (t.original.as_path(), w)))
+        .collect()
 }
 
 /// Warn when a trash this put used holds more than the warn size.
@@ -645,6 +654,13 @@ fn warn_low_space(prog: &str, trashed: &[Trashed]) {
     roots.sort();
     roots.dedup();
     for root in roots {
+        let Ok(space) = crate::space::query(&root) else {
+            continue;
+        };
+        let lows = space.lows(crate::space::WARN_FREE_PERCENT);
+        if lows.is_empty() {
+            continue;
+        }
         let owned = risks_for(&root, trashed);
         let pairs: Vec<(&Path, crate::du_git::RiskyGit)> =
             owned.iter().map(|(p, w)| (p.as_path(), *w)).collect();

@@ -699,7 +699,7 @@ fn put_json_leaves_out_the_repository_note() {
     assert!(!err.contains("is low"), "{err}");
     assert!(
         json.contains("\"trashed\":[")
-            && json.contains("\"name\":\"repo\"")
+            && json.contains("\"name\":\"$R")
             && json.trim_end().ends_with("\"failed\":0}"),
         "{json}"
     );

@@ -2069,9 +2069,12 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     // The same path the shell was given, which is what the
                     // bin records and what the warning names.
                     let kept = abs.clone();
-                    let located = super::list_items()
-                        .ok()
-                        .and_then(|items| items.into_iter().find(|it| original_of(it) == kept));
+                    let located = super::list_items().ok().and_then(|items| {
+                        items
+                            .into_iter()
+                            .filter(|it| original_of(it) == kept)
+                            .max_by_key(|it| it.time_deleted)
+                    });
                     let after = located
                         .as_ref()
                         .and_then(|it| crate::du_git::risky_tree(Path::new(&it.id)));
@@ -2139,8 +2142,21 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         // its low-space and big-trash warnings.
         if !json {
             for r in &roots {
+                let Ok(space) = crate::space::query(r) else {
+                    continue;
+                };
+                let lows = space.lows(crate::space::WARN_FREE_PERCENT);
+                if lows.is_empty() {
+                    continue;
+                }
                 let what = format!("the Recycle Bin of {}", crate::util::err_path(r));
-                let owned = bin_git_risks_for_root(r);
+                let mut owned = bin_git_risks_for_root(r);
+                owned.extend(
+                    restore_notes
+                        .iter()
+                        .filter(|(path, _)| same_volume(path, r))
+                        .cloned(),
+                );
                 let risky: Vec<(&Path, crate::du_git::RiskyGit)> = owned
                     .iter()
                     .map(|(path, work)| (path.as_path(), *work))
@@ -2151,6 +2167,11 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             }
         }
         status
+    }
+
+    /// True when `a` and `b` are on the same Windows volume.
+    fn same_volume(a: &Path, b: &Path) -> bool {
+        super::volume_key(a) != 0 && super::volume_key(a) == super::volume_key(b)
     }
 
     /// Risky git work at `abs`, when `abs` is a directory. The caller prints
@@ -2430,8 +2451,9 @@ List items in the Windows Recycle Bin (system trash).
       --show-trashpath  under each row, show the item's file in the
                    Recycle Bin ($R...; not with --format)
       --format=TEMPLATE  print each item through TEMPLATE: {{date}} {{epoch}}
-                   {{path}} {{name}} {{trash}} {{size}} (bytes); {{batch}} and
-                   {{owner}} print nothing here; \\t \\n \\0 escapes
+                   {{path}} {{name}} {{trash}} {{size}} {{id}} (bytes for
+                   {{size}}); {{batch}} and {{owner}} print nothing here;
+                   \\t \\n \\0 escapes
       --help     display this help and exit
       --version  output version information and exit
 
@@ -3957,8 +3979,14 @@ registry), then the total and the free space on each (a warning under
         F: FnMut(&Path) -> Option<crate::du_git::RiskyGit>,
     {
         let mut out = Vec::new();
+        let test_root = test_bin_root();
         for (id, original) in items {
-            if bin_root_of(&id).as_deref() != Some(root) {
+            let item_root = test_root
+                .as_ref()
+                .cloned()
+                .or_else(|| bin_root_of(&id))
+                .unwrap_or_default();
+            if !same_volume(root, &item_root) {
                 continue;
             }
             if let Some(work) = risky_tree(&id) {
@@ -4157,6 +4185,8 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                    a terminal by default, naming the matches)
   -y, --yes      do not ask
   -f, --force    do not ask, and allow mass patterns (e.g. '*')
+                  also remove entries that still hold risky git work;
+                  without it, those entries are refused
       --max-count=N  refuse, deleting nothing, when more than N items
                    would go (also RTRASH_MAX_PERMANENT)
   -v, --verbose  print each path
@@ -4283,7 +4313,12 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
         } else {
             let mut kept = Vec::new();
             for it in matched {
-                if let Some(work) = crate::du_git::risky_tree(Path::new(&it.id)) {
+                let payload = Path::new(&it.id);
+                if crate::util::is_gone(payload) {
+                    kept.push(it);
+                    continue;
+                }
+                if let Some(work) = crate::du_git::risky_tree(payload) {
                     eprintln!(
                         "{prog}: refusing to remove '{}': it holds {} git work; \
                          restore it, or pass -f to remove it anyway",
@@ -4292,7 +4327,19 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                     );
                     refused += 1;
                 } else {
-                    kept.push(it);
+                    if dry_run {
+                        kept.push(it);
+                        continue;
+                    }
+                    match super::recheck_item(&it) {
+                        Ok(()) => kept.push(it),
+                        Err(crate::util::Stale::Gone) => {}
+                        Err(s) => {
+                            let what = crate::util::err_path(&original_of(&it));
+                            eprintln!("{prog}: {}", s.reason(what.as_ref()));
+                            refused += 1;
+                        }
+                    }
                 }
             }
             kept

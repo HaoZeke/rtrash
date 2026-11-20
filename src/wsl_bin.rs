@@ -118,14 +118,16 @@ pub fn scan(root: &Path, sid: &str) -> Vec<BinEntry> {
 const USAGE: &str = "\
 Usage: rtrash wsl list [--json | --format=TEMPLATE] [MATCH]
        rtrash wsl restore [-f] PATH...
-       rtrash wsl rm [-n] [-f] MATCH|PATH...
+       rtrash wsl rm [-n] [-f] [--match=KIND] MATCH|PATH...
        rtrash wsl empty [-n] [--all] [--older-than=AGE | DAYS]
 The Windows Recycle Bin from inside WSL: list its items by original path
 under the automount root, restore the newest item from each PATH, or
 delete items for good (rm by match, empty by age or all of them; a whole
-empty asks first, or needs --all). MATCH is --glob=PATTERN, --regex=RE or --name=NAME,
-tested against the original path as WSL sees it.
-      --json             list: a JSON array
+empty asks first, or needs --all). MATCH is read as glob, regex, name,
+substring, exact or id (with --match=KIND), and is tested against the
+original path as WSL sees it.
+      --json             list: a JSON array of {original, path, deleted,
+                         date, size, id}
       --format=TEMPLATE  list: each item through TEMPLATE, as list --format
                          does: {date} {epoch} {path} (under the automount
                          root) {name} ($R payload) {trash} (its bin) {size}
@@ -136,8 +138,10 @@ tested against the original path as WSL sees it.
       --older-than=AGE   empty: items deleted more than AGE ago (2h, 7d)
       --all              empty: every item, without asking
   -n, --dry-run          rm, empty: print what would go, delete nothing
-  -f, --force            rm: remove entries even when they hold risky git work
-  -f, --force            restore over an existing file
+  -m, --match=KIND       list, rm: read MATCH as glob (default), regex,
+                         substring, exact or id
+  -f, --force            restore over an existing file; rm removes entries
+                         even when they hold risky git work
   -h, --help             show this help
 ";
 
@@ -270,7 +274,22 @@ fn take_matcher(
     prog: &str,
     a: &str,
     slot: &mut Option<crate::budget::PathMatch>,
+    kind: &mut crate::filters::Match,
+    kind_set: &mut bool,
 ) -> Result<bool, i32> {
+    if let Some(parsed) = crate::filters::match_arg(a) {
+        match parsed {
+            Ok(k) => {
+                *kind = k;
+                *kind_set = true;
+                return Ok(true);
+            }
+            Err(e) => {
+                eprintln!("{prog}: {e}");
+                return Err(2);
+            }
+        }
+    }
     match crate::budget::PathMatch::parse(a) {
         Some(Ok(m)) if slot.is_none() => {
             *slot = Some(m);
@@ -290,10 +309,19 @@ fn take_matcher(
 
 /// `wsl list [--json | --format=TEMPLATE] [MATCH]`.
 fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
+    let args = match crate::filters::join_spaced(args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{prog}: list: {e}");
+            return 2;
+        }
+    };
     let mut json = false;
     let mut format = None;
     let mut matcher = None;
-    for a in args {
+    let mut kind = crate::filters::Match::Glob;
+    let mut kind_set = false;
+    for a in &args {
         if a == "--json" {
             json = true;
             continue;
@@ -308,8 +336,17 @@ fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
             }
             continue;
         }
-        match take_matcher(prog, a, &mut matcher) {
+        match take_matcher(prog, a, &mut matcher, &mut kind, &mut kind_set) {
             Ok(true) => {}
+            Ok(false) if kind_set && !a.starts_with('-') && matcher.is_none() => {
+                match crate::budget::PathMatch::of_kind(kind, a) {
+                    Ok(m) => matcher = Some(m),
+                    Err(e) => {
+                        eprintln!("{prog}: list: {e}");
+                        return 2;
+                    }
+                }
+            }
             Ok(false) => {
                 eprintln!("{prog}: list: unknown argument '{a}'");
                 return 2;
@@ -421,11 +458,20 @@ pub fn list_json(items: &[&BinEntry]) -> String {
 /// `$R` payload and then its `$I` record. No match is not an error, as with
 /// `rtrash rm`.
 fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
+    let args = match crate::filters::join_spaced(args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{prog}: rm: {e}");
+            return 2;
+        }
+    };
     let mut dry = false;
     let mut force = false;
     let mut matcher = None;
+    let mut kind = crate::filters::Match::Glob;
+    let mut kind_set = false;
     let mut paths = Vec::new();
-    for a in args {
+    for a in &args {
         if matches!(a.as_str(), "-n" | "--dry-run") {
             dry = true;
             continue;
@@ -434,8 +480,21 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
             force = true;
             continue;
         }
-        match take_matcher(prog, a, &mut matcher) {
+        match take_matcher(prog, a, &mut matcher, &mut kind, &mut kind_set) {
             Ok(true) => {}
+            Ok(false) if kind_set && !a.starts_with('-') && matcher.is_none() => {
+                match crate::budget::PathMatch::of_kind(kind, a) {
+                    Ok(m) => matcher = Some(m),
+                    Err(e) => {
+                        eprintln!("{prog}: rm: {e}");
+                        return 2;
+                    }
+                }
+            }
+            Ok(false) if kind_set && !a.starts_with('-') => {
+                eprintln!("{prog}: rm: give one MATCH with --match");
+                return 2;
+            }
             Ok(false) if a.starts_with('-') && a != "-" => {
                 eprintln!("{prog}: rm: unknown option '{a}'");
                 return 2;

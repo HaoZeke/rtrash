@@ -753,8 +753,6 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
                 continue;
             }
         };
-        let m = crate::finder_total::measure_item(&path);
-        let sz = m.0;
         if !force && !crate::util::is_gone(&path) {
             if let Some(work) = crate::du_git::risky_tree(&path) {
                 eprintln!(
@@ -767,6 +765,21 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
                 continue;
             }
         }
+        let path = if dry_run {
+            path
+        } else {
+            match e.checked() {
+                Ok(p) => p,
+                Err(Stale::Gone) => continue,
+                Err(s) => {
+                    eprintln!("{prog}: {}", s.reason(&e.name));
+                    status = 1;
+                    continue;
+                }
+            }
+        };
+        let m = crate::finder_total::measure_item(&path);
+        let sz = m.0;
         if dry_run {
             if !json {
                 println!("{}", crate::util::term_path(&e.shown));

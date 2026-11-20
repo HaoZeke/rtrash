@@ -1057,6 +1057,35 @@ fn a_finder_put_warns_past_the_warn_size() {
 }
 
 #[test]
+fn a_finder_low_space_warning_scans_existing_risky_items() {
+    let b = Box_::new("finder-git-risk");
+    let repo = b.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::create_dir(repo.join(".git")).unwrap();
+    fs::write(repo.join("f"), b"x").unwrap();
+    // A low-space fake file system rooted at the sandbox: both the Finder
+    // trash and this ballast count against it.
+    fs::write(b.root.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+    let envs = [
+        ("RTRASH_TEST_FS", &*format!("100000:{}", b.root.display())),
+        ("RTRASH_WARN_SIZE", "1"),
+    ];
+    let first = b.run_env(&["put", "-r", repo.to_str().unwrap()], &envs);
+    assert!(first.status.success(), "{}", err(&first));
+
+    let plain = b.work().join("plain.txt");
+    fs::write(&plain, b"ok").unwrap();
+    let second = b.run_env(&["put", plain.to_str().unwrap()], &envs);
+    let err = err(&second);
+    assert!(second.status.success(), "{err}");
+    assert!(err.contains("would lose the work"), "{err}");
+    assert!(
+        !err.contains("rtrash rm -i --max-count=1 --match=id ID"),
+        "{err}"
+    );
+}
+
+#[test]
 fn finder_matching_ignores_unicode_normalization() {
     let b = Box_::new("nfc");
     let nfd = "ne\u{301}e.txt";
@@ -1214,6 +1243,22 @@ fn finder_list_json_includes_scoped_id() {
     assert!(o.status.success(), "{}", err(&o));
     let json = out(&o);
     assert!(json.contains("\"id\":\""), "{json}");
+}
+
+#[test]
+fn finder_match_id_round_trips_a_decomposed_name() {
+    let b = Box_::new("idnfd");
+    let nfd = "ne\u{301}e.txt";
+    fs::write(b.work().join(nfd), b"x").unwrap();
+    assert!(b.run(&["put", nfd], "").status.success());
+    let listed = b.run(&["list", "--format={id}\\t{name}\\n"], "");
+    assert!(listed.status.success(), "{}", err(&listed));
+    let row = out(&listed).lines().next().unwrap_or_default().to_string();
+    let (id, name) = row.split_once('\t').expect("id and name");
+    assert_eq!(name, nfd, "{row}");
+    let rm = b.run(&["rm", "--match=id", id], "");
+    assert!(rm.status.success(), "{}", err(&rm));
+    assert!(!b.finder().join(nfd).exists());
 }
 
 #[test]
