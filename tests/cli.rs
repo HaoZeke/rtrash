@@ -752,7 +752,7 @@ fn messages_scrub_control_characters_on_a_terminal() {
     let cases = [
         format!("put -- {evil}"),
         format!("restore --to={evil}"),
-        "rm --home-only --dry-run evil".to_string(),
+        "rm --home-only --dry-run --match=glob evil".to_string(),
         format!("empty {pin} --plain --dry-run --verbose"),
         format!("du --file={evil}"),
     ];
@@ -847,7 +847,13 @@ fn age_cuts_keep_items_whose_age_is_unknown() {
     }
     let pattern = format!("{}/*", w.display());
     // --home-only keeps rm and empty off the host's volume trashes.
-    let out = sb.run(&["rm", "--home-only", "--older-than=1", &pattern]);
+    let out = sb.run(&[
+        "rm",
+        "--home-only",
+        "--match=glob",
+        "--older-than=1",
+        &pattern,
+    ]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!sb.trash().join("files/old").exists());
     fs::write(sb.trash().join("files/old"), b"x").unwrap();
@@ -998,7 +1004,7 @@ fn rm_patterns_through_a_symlinked_parent_match() {
     let out = run_in(&lwork, &ldata, &["rm", typed.to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let glob = format!("{}/*.o", lwork.display());
-    let out = run_in(&lwork, &ldata, &["rm", "-n", &glob]);
+    let out = run_in(&lwork, &ldata, &["rm", "--match=glob", "-n", &glob]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(stdout_of(&out).lines().count(), 2, "{}", stdout_of(&out));
     let left: Vec<_> = fs::read_dir(sb.trash().join("info"))
@@ -1476,7 +1482,7 @@ fn orphans_show_in_list_and_status_and_go_with_rm() {
     assert!(st.contains("\"items\":2,"), "{st}");
     assert!(st.contains("\"orphans\":1"), "{st}");
 
-    let out = sb.run(&["rm", "--home-only", "linux-6.9"]);
+    let out = sb.run(&["rm", "--home-only", "--match=glob", "linux-6.9"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb).len(), 1);
     assert!(!orphan.exists());
@@ -1567,7 +1573,7 @@ fn trash_rm_dry_run_keeps_entries_and_reports_reclaim() {
     sb.touch("drop.o");
     sb.touch("keep.c");
     assert!(sb.run(&["put", "drop.o", "keep.c"]).status.success());
-    let out = sb.run(&["rm", "--dry-run", "*.o"]);
+    let out = sb.run(&["rm", "--match=glob", "--dry-run", "*.o"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let err = stderr_of(&out);
     assert!(err.contains("Would permanently remove"), "{err}");
@@ -1741,7 +1747,7 @@ fn trash_rm_refuses_star_without_force() {
     let sb = Sandbox::new("rm-star");
     sb.touch("a.txt");
     sb.run(&["put", "a.txt"]);
-    let out = sb.run(&["rm", "*"]);
+    let out = sb.run(&["rm", "--match=glob", "*"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb), vec!["a.txt"]);
 }
@@ -1786,9 +1792,10 @@ fn trash_rm_match_takes_substring_and_exact() {
         .to_string();
     let out = sb.run(&["rm", "--match=exact", &exact]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    // Exact needs the whole path: a bare name matches nothing.
-    let out = sb.run(&["rm", "--match=exact", "new.txt"]);
+    // A shorter path is not the file. new.txt stays, and is named.
+    let out = sb.run(&["rm", "--match=exact", "new"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("near miss"), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb), ["new.txt"]);
     // A substring every path holds needs --force; a bad kind exits 2.
     let mass = sb.run(&["rm", "-m", "substring", "/"]);
@@ -1957,6 +1964,7 @@ fn rm_and_empty_take_ages_in_hours_and_minutes() {
         "-f",
         "--older-than=1h",
         "--newer-than=2h30m",
+        "--match=glob",
         "*",
     ]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2330,10 +2338,25 @@ fn list_status_and_rm_filter_by_size() {
     let json = stdout_of(&sb.run(&["status", &pin, "--json", "--larger-than=32K"]));
     assert!(json.contains("\"total_items\": 2"), "{json}");
     assert!(json.contains("\"orphans\":1"), "{json}");
-    let dry = sb.run(&["rm", &pin, "-n", "--smaller-than=32K", "--force", "*"]);
+    let dry = sb.run(&[
+        "rm",
+        &pin,
+        "--match=glob",
+        "-n",
+        "--smaller-than=32K",
+        "--force",
+        "*",
+    ]);
     assert_eq!(stdout_of(&dry).lines().count(), 1, "{}", stdout_of(&dry));
     assert!(stdout_of(&dry).trim_end().ends_with("small"));
-    let gone = sb.run(&["rm", &pin, "--larger-than=100K", "--force", "*"]);
+    let gone = sb.run(&[
+        "rm",
+        &pin,
+        "--match=glob",
+        "--larger-than=100K",
+        "--force",
+        "*",
+    ]);
     assert!(gone.status.success(), "{}", stderr_of(&gone));
     assert_eq!(names(&["list", &pin]), ["big", "small"]);
     for bad in [
@@ -3135,7 +3158,7 @@ fn trash_rm_removes_match_keeps_other() {
     assert_eq!(trash_names(&sb).len(), 3);
 
     // --home-only: a bare rm would also delete the host's trashed *.o.
-    let out = sb.run(&["rm", "--home-only", "*.o"]);
+    let out = sb.run(&["rm", "--home-only", "--match=glob", "*.o"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let mut names = trash_names(&sb);
     names.sort();
@@ -3143,6 +3166,94 @@ fn trash_rm_removes_match_keeps_other() {
     assert!(sb.trash().join("info/keep.dat.trashinfo").exists());
     assert!(!sb.trash().join("info/drop.o.trashinfo").exists());
     assert!(!sb.trash().join("files/drop.o").exists());
+}
+
+/// A bare path is the original path put recorded. A sibling and a child
+/// stay, and a second try names them instead of removing them.
+#[test]
+fn rm_matches_the_original_path_exactly() {
+    let sb = Sandbox::new("exact-rm");
+    fs::create_dir(sb.work().join("a")).unwrap();
+    fs::write(sb.work().join("a/b"), b"child").unwrap();
+    assert!(sb.run(&["put", "a/b"]).status.success());
+    fs::remove_dir(sb.work().join("a")).unwrap();
+    fs::write(sb.work().join("a"), b"exact").unwrap();
+    fs::write(sb.work().join("ab"), b"sib").unwrap();
+    assert!(sb.run(&["put", "a", "ab"]).status.success());
+
+    let dry = sb.run(&["rm", "--home-only", "-n", "a/"]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    let shown = stdout_of(&dry);
+    let lines: Vec<_> = shown.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 1, "{}", stdout_of(&dry));
+    assert!(lines[0].ends_with("/a"), "{}", stdout_of(&dry));
+
+    let sub = sb.work().join("elsewhere");
+    fs::create_dir(&sub).unwrap();
+    let from = common::rtrash(&sb.root)
+        .args(["rm", "--home-only", "-n", "../a"])
+        .current_dir(&sub)
+        .output()
+        .unwrap();
+    assert!(from.status.success(), "{}", stderr_of(&from));
+    assert_eq!(
+        stdout_of(&from).lines().filter(|l| !l.is_empty()).count(),
+        1,
+        "{}",
+        stdout_of(&from)
+    );
+
+    let out = sb.run(&["rm", "--home-only", "a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["ab".to_string(), "b".to_string()]);
+
+    let again = sb.run(&["rm", "--home-only", "a"]);
+    assert!(again.status.success(), "{}", stderr_of(&again));
+    let err = stderr_of(&again);
+    assert!(err.contains("no exact match"), "{err}");
+    assert!(err.contains("near miss"), "{err}");
+    assert!(err.contains("/ab"), "{err}");
+    assert!(err.contains("/a/b"), "{err}");
+    assert_eq!(trash_names(&sb).len(), 2);
+}
+
+/// `empty PATH` removes that original path only, and names a near miss.
+#[test]
+fn empty_matches_the_original_path_exactly() {
+    let sb = Sandbox::new("exact-empty");
+    fs::create_dir(sb.work().join("a")).unwrap();
+    fs::write(sb.work().join("a/b"), b"child").unwrap();
+    assert!(sb.run(&["put", "a/b"]).status.success());
+    fs::remove_dir(sb.work().join("a")).unwrap();
+    fs::write(sb.work().join("a"), b"exact").unwrap();
+    fs::write(sb.work().join("ab"), b"sib").unwrap();
+    assert!(sb.run(&["put", "a", "ab"]).status.success());
+
+    let out = sb.run(&["empty", "--home-only", "--plain", "a/"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["ab".to_string(), "b".to_string()]);
+
+    let sub = sb.work().join("elsewhere");
+    fs::create_dir(&sub).unwrap();
+    let from = common::rtrash(&sb.root)
+        .args(["empty", "--home-only", "--plain", "../ab"])
+        .current_dir(&sub)
+        .output()
+        .unwrap();
+    assert!(from.status.success(), "{}", stderr_of(&from));
+    assert_eq!(trash_names(&sb), vec!["b".to_string()]);
+
+    let again = sb.run(&["empty", "--home-only", "--plain", "a"]);
+    assert!(again.status.success(), "{}", stderr_of(&again));
+    let err = stderr_of(&again);
+    assert!(err.contains("no exact match"), "{err}");
+    assert!(err.contains("near miss"), "{err}");
+    assert!(err.contains("/a/b"), "{err}");
+    assert_eq!(trash_names(&sb), vec!["b".to_string()]);
 }
 
 #[test]
@@ -3726,7 +3837,7 @@ fn rm_json_and_age_filters() {
     sb.touch("drop.o");
     assert!(sb.run(&["put", "keep.c"]).status.success());
     assert!(sb.run(&["put", "drop.o"]).status.success());
-    let j = sb.run(&["rm", &pin, "--json", "-n", "*.o"]);
+    let j = sb.run(&["rm", &pin, "--match=glob", "--json", "-n", "*.o"]);
     assert!(j.status.success(), "{}", stderr_of(&j));
     let s = stdout_of(&j);
     assert!(
@@ -3737,7 +3848,7 @@ fn rm_json_and_age_filters() {
     assert!(!s.contains("keep.c"), "{s}");
     // dry-run keeps files
     assert!(sb.trash().join("files/drop.o").is_file());
-    let gone = sb.run(&["rm", &pin, "--json", "*.o"]);
+    let gone = sb.run(&["rm", &pin, "--match=glob", "--json", "*.o"]);
     assert!(gone.status.success(), "{}", stderr_of(&gone));
     assert!(!sb.trash().join("files/drop.o").exists());
     assert!(sb.trash().join("files/keep.c").is_file());
@@ -6311,11 +6422,14 @@ fn rm_carries_the_total_and_trash_stats_total_reads_it() {
     let total = || stdout_of(&run(&["trash-stats", "--home-only", "--total", "--json"]));
     let a = write_at(&sb.root, "work/a.bin", &"a".repeat(50_000));
     let tree = write_at(&sb.root, "work/tree/x/y.txt", &"y".repeat(9_000));
-    for p in [a, tree.parent().unwrap().parent().unwrap().to_path_buf()] {
+    for p in [
+        a.clone(),
+        tree.parent().unwrap().parent().unwrap().to_path_buf(),
+    ] {
         let out = run(&["put", "-r", p.to_str().unwrap()]);
         assert!(out.status.success(), "{}", stderr_of(&out));
     }
-    let out = run(&["rm", "--home-only", "a.bin"]);
+    let out = run(&["rm", "--home-only", a.to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let carried = total();
     assert!(carried.contains(r#""items":1,"stale":false"#), "{carried}");
@@ -6327,7 +6441,7 @@ fn rm_carries_the_total_and_trash_stats_total_reads_it() {
         "o".repeat(7_000),
     )
     .unwrap();
-    let out = run(&["rm", "--home-only", "orphan.bin"]);
+    let out = run(&["rm", "--home-only", "--match=glob", "orphan.bin"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!sb.root.join("xdg/Trash/files/orphan.bin").exists());
     assert_eq!(total(), carried);
@@ -7892,7 +8006,7 @@ fn history_counts_stay_right_when_every_change_shares_a_clock_tick() {
     let out = run(&["empty", "--home-only", "30"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!info.exists());
-    assert_eq!(last_items(), 1, "empty by age");
+    assert_eq!(last_items(), 1, "aged empty");
     let json = stdout_of(&run(&["trash-stats", "--home-only", "--json"]));
     assert!(json.contains(r#""items":1,"#), "{json}");
     // A full empty that fails partway: the seam keeps e, the rest goes,
@@ -8640,11 +8754,15 @@ fn max_count_refuses_rm_and_empty_past_the_cap() {
     };
     let cap2 = [("RTRASH_MAX_PERMANENT", "2")];
     refused(
-        &["rm", &pin, "--max-count=2", "mc-*"],
+        &["rm", &pin, "--match=glob", "--max-count=2", "mc-*"],
         &[],
         "3 items would be deleted",
     );
-    refused(&["rm", &pin, "mc-*"], &cap2, "more than the cap of 2");
+    refused(
+        &["rm", &pin, "--match=glob", "mc-*"],
+        &cap2,
+        "more than the cap of 2",
+    );
     refused(&["empty", &pin, "--all"], &cap2, "more than the cap of 2");
     refused(
         &["rm", &pin, "mc-a"],
@@ -8653,7 +8771,7 @@ fn max_count_refuses_rm_and_empty_past_the_cap() {
     );
     refused(&["rm", &pin, "--max-count=x", "mc-a"], &[], "--max-count");
     // A dry run only looks, so the cap lets it through.
-    let out = sb.run_env(&["rm", &pin, "-n", "mc-*"], &cap2);
+    let out = sb.run_env(&["rm", &pin, "--match=glob", "-n", "mc-*"], &cap2);
     assert!(out.status.success(), "{}", stderr_of(&out));
     // Within the cap the run goes ahead, and --max-count wins over the variable.
     let one = [("RTRASH_MAX_PERMANENT", "1")];
@@ -8698,7 +8816,7 @@ fn allow_roots_keeps_put_restore_and_rm_inside() {
     for f in ["ar-in/ar-a", "ar-out/ar-d"] {
         assert!(sb.work().join(f).exists(), "{f} moved");
     }
-    refused(&["rm", &pin, "ar-c"], 1);
+    refused(&["rm", &pin, "ar-out/ar-c"], 1);
     refused(&["restore", "--home-only", "--name=ar-c"], 1);
     let empty = ["empty", pin.as_str(), "--all"];
     common::assert_refused_unchanged(&empty, &watch, 2, &[], || sb.run_env(&empty, &scope));
@@ -8721,7 +8839,7 @@ fn allow_roots_keeps_put_restore_and_rm_inside() {
     let out = sb.run_env(&["restore", "--home-only", "--name=ar-a"], &scope);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(inside.join("ar-a").exists());
-    let out = sb.run_env(&["rm", &pin, "ar-b"], &scope);
+    let out = sb.run_env(&["rm", &pin, "ar-in/ar-b"], &scope);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(names_in_trash(&sb).len(), after_put.len() - 2);
     // A root that does not exist allows nothing.
@@ -9109,7 +9227,10 @@ fn rm_stops_after_the_entry_in_hand_at_the_first_ctrl_c() {
     }
     let put = sb.run(&["put", "a.txt", "b.txt", "c.txt"]);
     assert!(put.status.success(), "{}", stderr_of(&put));
-    let out = sb.run_env(&["rm", "*.txt"], &[("RTRASH_TEST_SIGINT", "after-item:1")]);
+    let out = sb.run_env(
+        &["rm", "--match=glob", "*.txt"],
+        &[("RTRASH_TEST_SIGINT", "after-item:1")],
+    );
     let said = stderr_of(&out);
     assert_eq!(out.status.code(), Some(130), "{said}");
     assert!(

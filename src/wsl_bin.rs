@@ -119,12 +119,14 @@ const USAGE: &str = "\
 Usage: rtrash wsl list [--json | --format=TEMPLATE] [MATCH]
        rtrash wsl restore [-f] PATH...
        rtrash wsl rm [-n] MATCH|PATH...
-       rtrash wsl empty [-n] [--all] [--older-than=AGE | DAYS]
+       rtrash wsl empty [-n] [--all] [--older-than=AGE | DAYS | PATH]...
 The Windows Recycle Bin from inside WSL: list its items by original path
 under the automount root, restore the newest item from each PATH, or
-delete items for good (rm by match, empty by age or all of them; a whole
-empty asks first, or needs --all). MATCH is --glob=PATTERN, --regex=RE or --name=NAME,
-tested against the original path as WSL sees it.
+delete items for good. A bare PATH is that original path exactly, resolved
+from the current directory; a longer path is named and left in place.
+MATCH is --glob=PATTERN, --regex=RE or --name=NAME, tested against the
+original path as WSL sees it. empty takes an age, a PATH, or all of them
+(a whole empty asks first, or needs --all).
       --json             list: a JSON array
       --format=TEMPLATE  list: each item through TEMPLATE, as list --format
                          does: {date} {epoch} {path} (under the automount
@@ -407,10 +409,7 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
                 eprintln!("{prog}: rm: unknown option '{a}'");
                 return 2;
             }
-            Ok(false) => {
-                let p = crate::util::arg_path(a);
-                paths.push(std::path::absolute(&p).unwrap_or(p));
-            }
+            Ok(false) => paths.push(a.to_string()),
             Err(c) => return c,
         }
     }
@@ -418,10 +417,16 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
         eprintln!("{prog}: rm needs --glob, --regex, --name or a PATH");
         return 2;
     }
+    let wants = crate::orig_path::expand(&paths);
+    if !wants.is_empty() {
+        let have: Vec<std::path::PathBuf> = items.iter().map(|it| it.local.clone()).collect();
+        crate::orig_path::hint(prog, &wants, &have);
+    }
     let chosen: Vec<&BinEntry> = items
         .iter()
         .filter(|it| {
-            matcher.as_ref().is_some_and(|m| m.keeps(&it.local)) || paths.contains(&it.local)
+            matcher.as_ref().is_some_and(|m| m.keeps(&it.local))
+                || crate::orig_path::selects(&wants, &it.local)
         })
         .collect();
     if chosen.is_empty() {
@@ -463,6 +468,7 @@ pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
     let mut dry = false;
     let mut all = false;
     let mut age: Option<i64> = None;
+    let mut paths = Vec::new();
     for a in args {
         let a = a.as_str();
         let value = a
@@ -482,24 +488,33 @@ pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
                     return 2;
                 }
             },
+            _ if !a.starts_with('-') => paths.push(a.to_string()),
             _ => {
                 eprintln!("{prog}: empty: unknown argument '{a}'");
                 return 2;
             }
         }
     }
-    if all && age.is_some() {
-        eprintln!("{prog}: give --all or an age, not both");
+    if all && (age.is_some() || !paths.is_empty()) {
+        eprintln!("{prog}: give --all, or an age or a PATH, not both");
         return 2;
+    }
+    let wants = crate::orig_path::expand(&paths);
+    if !wants.is_empty() {
+        let have: Vec<std::path::PathBuf> = items.iter().map(|it| it.local.clone()).collect();
+        crate::orig_path::hint(prog, &wants, &have);
     }
     let chosen: Vec<&BinEntry> = items
         .iter()
-        .filter(|it| age.is_none_or(|s| now - it.deleted > s))
+        .filter(|it| {
+            age.is_none_or(|s| now - it.deleted > s)
+                && (wants.is_empty() || crate::orig_path::selects(&wants, &it.local))
+        })
         .collect();
     if chosen.is_empty() {
         return 0;
     }
-    if age.is_none() && !all && !dry && !confirm_whole(prog, chosen.len()) {
+    if age.is_none() && paths.is_empty() && !all && !dry && !confirm_whole(prog, chosen.len()) {
         return 2;
     }
     let mut status = 0;

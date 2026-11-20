@@ -414,6 +414,25 @@ is missing or unreadable has no known age, so
 keeps it, as trash-cli does; a full
 .B empty
 removes it.
+A
+.I PATH
+removes only the items whose original path is that path, exactly, the
+way
+.B put
+records it.
+A relative
+.I PATH
+is resolved from the current directory, and a trailing slash is not
+part of the path.
+.B empty
+of
+.I ~/a
+does not remove
+.I ~/ab
+or
+.IR ~/a/b .
+When nothing matches, those longer paths are named and left in place.
+A number or a duration is an age, not a path.
 .PP
 One run covers the home trash and this user's trash on every mounted
 volume, whatever the current folder (trash-cli #129).
@@ -4026,17 +4045,20 @@ pick items as for
 .BR list ,
 by the path as WSL shows it; a
 .I PATH
-picks every item from that path.
+is that original path exactly, resolved from the current directory,
+and a longer path is named and left in place.
 No match prints a note and exits 0, as
 .B rtrash rm
 does;
 .B \-\-dry\-run
 prints what would go.
 .B rtrash wsl empty
-[\fB\-n\fR] [\fB\-\-all\fR] [\fB\-\-older\-than=\fIAGE\fR|\fIDAYS\fR]
+[\fB\-n\fR] [\fB\-\-all\fR] [\fB\-\-older\-than=\fIAGE\fR|\fIDAYS\fR|\fIPATH\fR]...
 deletes items moved to the Recycle Bin more than
 .I AGE
-ago (or every item).
+ago, the items whose original path is
+.I PATH
+exactly, or every item.
 rtrash keeps no record of which put sent an item there from WSL, so
 emptying everything asks on a terminal and otherwise refuses unless
 .B \-\-all
@@ -4305,23 +4327,35 @@ Print the embedded man page source to stdout.
 Also multi-call
 .BR trash-rm .
 .PP
-Permanently remove trashed items whose original path or basename matches
-a
+Permanently remove trashed items whose original path is
+.IR PATTERN .
+A bare
 .I PATTERN
-(shell-style glob; quote globs from the shell). Matching entries are
-deleted from the trash
+is that path exactly: the path
+.B put
+records, resolved from the current directory, with a trailing slash
+ignored.
+.B rm
+of
+.I ~/a
+does not remove
+.I ~/ab
+or
+.IR ~/a/b .
+When nothing matches, those longer paths are named and left in place.
+Matching entries are deleted from the trash
 (\fBfiles/\fR and
 .BR .trashinfo ),
 not restored.
-An orphan (no
-.BR .trashinfo )
-matches by its name in
+.B \-\-match=glob
+matches the original path, its basename or the trash name (quote globs
+from the shell), which is how an orphan with no
+.B .trashinfo
+is selected by its name in
 .B files/
 or its path there.
-An absolute
-.I PATTERN
-also matches with symlinks resolved in its directory part (up to the
-first glob), the form
+An absolute glob also matches with symlinks resolved in its directory
+part (up to the first glob), the form
 .B put
 records, so a path typed through a symlinked directory still matches.
 .PP
@@ -4382,19 +4416,21 @@ How to read each
 as trashy's
 .B \-m
 does:
+.B exact
+(the default; the whole original path, as a bare
+.I PATTERN
+is read),
 .B glob
-(the default here),
+(the same breadth a bare pattern used to have),
 .B regex
 (the same as
-.BR \-\-regex ),
+.BR \-\-regex )
+or
 .B substring
 (text anywhere in the original path; an empty one or a lone separator
 needs
-.BR \-\-force )
-or
-.B exact
-(the whole original path).
-Unlike trashy, the default stays glob.
+.BR \-\-force ).
+Unlike trashy, whose default is regex, a bare pattern is an exact path.
 .TP
 .BI \-\-older\-than =AGE
 Only match items trashed more than
@@ -4483,9 +4519,10 @@ Output version information and exit.
 Examples:
 .nf
 .RS
-rtrash rm \(aq*.o\(aq
-rtrash rm \-n \(aq*.o\(aq
-trash-rm foo
+rtrash rm /home/you/old-project
+rtrash rm \-n foo
+rtrash rm \-\-match=glob \(aq*.o\(aq
+trash-rm \-\-match=glob foo
 .RE
 .fi
 .SH ENVIRONMENT
