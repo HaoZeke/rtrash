@@ -4485,6 +4485,7 @@ Examples:
 .RS
 rtrash rm \(aq*.o\(aq
 rtrash rm \-n \(aq*.o\(aq
+rtrash rm \-i \-\-max\-count=1 \-\-match=exact /home/you/old\-project
 trash-rm foo
 .RE
 .fi
@@ -4591,13 +4592,30 @@ or
 silence it.
 A put also warns when a trash it used sits on a file system with less
 than 10% of its bytes or inodes free, since moving a file into that
-trash frees nothing there; it and
+trash frees nothing there. That warning and the one from
 .B status
-point at
-.BR "empty \-\-until\-free=10%" ,
-which takes only the oldest items needed.
+name
+.B "rtrash list \-\-sort=size"
+and
+.B "rtrash rm \-i \-\-max\-count=1 \-\-match=exact PATH" ,
+so the trash can be reviewed and one listed original path removed
+after a confirmation.
+.I PATH
+is that path as
+.B list
+shows it. The match is the whole path, the run asks even when stdin
+is not a terminal, and more than one match deletes nothing, so a glob,
+a shared basename or a second copy of the path does not go with it.
+When a put just moved a repository it flagged dirty, unpushed or
+unknown into a trash, that trash's warning instead names those items
+and says that permanently removing one would lose the work.
+.B undo
+and
+.B restore
+can still bring it back until the work is pushed.
 A put to the Finder Trash warns the same way.
-On Windows it names the Recycle Bin of the volume and counts bytes only.
+On Windows it names the Recycle Bin of the volume and counts bytes only,
+and a repository is flagged the same way.
 .TP
 .B RTRASH_NO_PERMANENT
 When set to anything but empty or

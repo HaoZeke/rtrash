@@ -54,7 +54,7 @@ Examples:
   {prog} '*.o'
   {prog} -n '*.o'
   {prog} foo
-  {prog} /home/you/old-project
+  {prog} -i --max-count=1 --match=exact /home/you/old-project
   {prog} --regex '/build-[0-9]+/'
   {prog} --batch=last
 ";

@@ -1798,6 +1798,156 @@ fn trash_rm_match_takes_substring_and_exact() {
     assert_eq!(trash_names(&sb), ["new.txt"]);
 }
 
+/// Original paths `list --json` shows, in list order. `rm --match=exact`
+/// compares against these, not against a basename or a glob.
+fn listed_originals(sb: &Sandbox) -> Vec<String> {
+    let text = stdout_of(&sb.run(&["list", "--home-only", "--json"]));
+    let key = "\"original\":\"";
+    let mut rest = text.as_str();
+    let mut out = Vec::new();
+    while let Some(i) = rest.find(key) {
+        rest = &rest[i + key.len()..];
+        let end = rest.find('"').expect("original value");
+        out.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// A name that is itself a glob matches only that listed path. `rm *.log`
+/// also takes every other `.log`, including by basename.
+#[test]
+fn rm_exact_path_keeps_a_glob_name_to_one_item() {
+    let sb = Sandbox::new("rm-exact-glob");
+    fs::write(sb.work().join("*.log"), b"star").unwrap();
+    fs::write(sb.work().join("notes.log"), b"notes").unwrap();
+    assert!(sb
+        .run(&["put", "--home-only", "*.log", "notes.log"])
+        .status
+        .success());
+    let dry = sb.run(&["rm", "--home-only", "-n", "*.log"]);
+    let shown = format!("{}{}", stdout_of(&dry), stderr_of(&dry));
+    assert!(
+        shown.contains("*.log")
+            && shown.contains("notes.log")
+            && shown.contains("Would permanently remove 2 items"),
+        "{shown}"
+    );
+    let star = listed_originals(&sb)
+        .into_iter()
+        .find(|p| p.ends_with("/*.log"))
+        .expect("listed *.log");
+    let asked = sb.run_with_stdin(
+        &[
+            "rm",
+            "--home-only",
+            "-i",
+            "--max-count=1",
+            "--match=exact",
+            &star,
+        ],
+        "",
+    );
+    let err = stderr_of(&asked);
+    assert!(
+        err.contains("(y/N)") && err.contains("nothing removed"),
+        "{err}"
+    );
+    assert_eq!(listed_originals(&sb).len(), 2);
+    let yes = sb.run_with_stdin(
+        &[
+            "rm",
+            "--home-only",
+            "-i",
+            "--max-count=1",
+            "--match=exact",
+            &star,
+        ],
+        "y\n",
+    );
+    assert!(yes.status.success(), "{}", stderr_of(&yes));
+    let left = listed_originals(&sb);
+    assert!(left.iter().all(|p| !p.ends_with("/*.log")), "{left:?}");
+    assert!(left.iter().any(|p| p.ends_with("/notes.log")), "{left:?}");
+}
+
+/// Two trashed files with the same basename: a bare name removes both,
+/// and the listed original path of one removes only that one.
+#[test]
+fn rm_exact_path_keeps_a_duplicate_basename() {
+    let sb = Sandbox::new("rm-exact-dup");
+    fs::create_dir(sb.work().join("a")).unwrap();
+    fs::create_dir(sb.work().join("b")).unwrap();
+    fs::write(sb.work().join("a/foo"), b"a").unwrap();
+    fs::write(sb.work().join("b/foo"), b"b").unwrap();
+    assert!(sb
+        .run(&["put", "--home-only", "a/foo", "b/foo"])
+        .status
+        .success());
+    let dry = sb.run(&["rm", "--home-only", "-n", "foo"]);
+    assert!(
+        stderr_of(&dry).contains("Would permanently remove 2 items"),
+        "{}",
+        stderr_of(&dry)
+    );
+    let wanted = listed_originals(&sb)
+        .into_iter()
+        .find(|p| p.ends_with("/a/foo"))
+        .expect("listed a/foo");
+    let yes = sb.run_with_stdin(
+        &[
+            "rm",
+            "--home-only",
+            "-i",
+            "--max-count=1",
+            "--match=exact",
+            &wanted,
+        ],
+        "y\n",
+    );
+    assert!(yes.status.success(), "{}", stderr_of(&yes));
+    let left = listed_originals(&sb);
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(left[0].ends_with("/b/foo"), "{left:?}");
+}
+
+/// Two copies of one original path: `--max-count=1` deletes neither.
+#[test]
+fn rm_exact_path_stops_at_one_copy_of_a_path() {
+    let sb = Sandbox::new("rm-exact-cap");
+    sb.touch("same.txt");
+    assert!(sb.run(&["put", "--home-only", "same.txt"]).status.success());
+    sb.touch("same.txt");
+    assert!(sb.run(&["put", "--home-only", "same.txt"]).status.success());
+    let paths = listed_originals(&sb);
+    assert_eq!(paths.len(), 2, "{paths:?}");
+    assert!(paths.iter().all(|p| p.ends_with("/same.txt")), "{paths:?}");
+    let dry = sb.run(&["rm", "--home-only", "-n", "--match=exact", &paths[0]]);
+    assert!(
+        stderr_of(&dry).contains("Would permanently remove 2 items"),
+        "{}",
+        stderr_of(&dry)
+    );
+    let out = sb.run_with_stdin(
+        &[
+            "rm",
+            "--home-only",
+            "-i",
+            "--max-count=1",
+            "--match=exact",
+            &paths[0],
+        ],
+        "y\n",
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("more than the cap of 1"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(listed_originals(&sb).len(), 2);
+}
+
 #[test]
 fn empty_dry_run_reports_space_for_tree() {
     let sb = Sandbox::new("empty-dry-du");
@@ -6036,7 +6186,11 @@ fn put_warns_when_the_trash_grows_past_the_warn_size() {
     let out = put("a.txt", "1");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stderr_of(&out).contains("past RTRASH_WARN_SIZE"),
+        stderr_of(&out).contains("past RTRASH_WARN_SIZE")
+            && stderr_of(&out).contains("rtrash list --sort=size")
+            && stderr_of(&out).contains("rtrash rm -i --max-count=1 --match=exact PATH")
+            && !stderr_of(&out).contains("rtrash empty")
+            && !stderr_of(&out).contains("would lose the work"),
         "{}",
         stderr_of(&out)
     );
@@ -6708,7 +6862,11 @@ fn status_warns_from_the_test_file_system_and_stops_once_it_is_freed() {
     fs::write(xdg.join("filler"), vec![1u8; 550_000]).unwrap();
     let out = status(false);
     assert!(
-        stderr_of(&out).contains("is low") && stderr_of(&out).contains("empty --until-free=10%"),
+        stderr_of(&out).contains("is low")
+            && stderr_of(&out).contains("rtrash list --sort=size")
+            && stderr_of(&out).contains("rtrash rm -i --max-count=1 --match=exact PATH")
+            && !stderr_of(&out).contains("rtrash empty")
+            && !stderr_of(&out).contains("would lose the work"),
         "{}",
         stderr_of(&out)
     );
@@ -8229,12 +8387,89 @@ fn put_warns_when_the_trash_file_system_is_low() {
     assert!(
         err.contains("is low (")
             && err.contains("trashing frees nothing")
-            && err.contains("empty --until-free=10%"),
+            && err.contains("rtrash list --sort=size")
+            && err.contains("rtrash rm -i --max-count=1 --match=exact PATH")
+            && !err.contains("rtrash empty")
+            && !err.contains("would lose the work"),
         "{err}"
     );
     let quiet = write_at(&sb.root, "work/ok.bin", "x");
     let out = sb.run(&["put", "--home-only", quiet.to_str().unwrap()]);
     assert!(!stderr_of(&out).contains("is low"), "{}", stderr_of(&out));
+}
+
+/// A put that just moved git work flagged dirty or unpushed must not
+/// suggest removing anything from the trash that received it. A plain
+/// file put beside the repository is not named. Unknown shares that
+/// flag (`GitState::is_risky`).
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn put_space_hint_keeps_flagged_git_work() {
+    let git = |repo: &Path, home: &Path, args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", home)
+            .env("GIT_AUTHOR_NAME", "Trash Test")
+            .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Trash Test")
+            .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+            .output()
+            .unwrap()
+    };
+    for (tag, commit) in [("unpushed", true), ("dirty", false)] {
+        let sb = Sandbox::new(&format!("put-git-{tag}"));
+        let repo = sb.work().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let init = git(&repo, &sb.root, &["init", "-q"]);
+        if !init.status.success() {
+            common::skip("git unavailable; skipping");
+            return;
+        }
+        fs::write(repo.join("f"), vec![b'x'; 90_000]).unwrap();
+        fs::write(sb.work().join("plain.txt"), b"ok").unwrap();
+        if commit {
+            let add = git(&repo, &sb.root, &["add", "f"]);
+            let committed = git(&repo, &sb.root, &["commit", "-qm", "work"]);
+            assert!(
+                add.status.success() && committed.status.success(),
+                "add: {}\ncommit: {}",
+                String::from_utf8_lossy(&add.stderr),
+                String::from_utf8_lossy(&committed.stderr)
+            );
+        }
+        let plain = sb.work().join("plain.txt");
+        let out = common::rtrash(&sb.root)
+            .args([
+                "put",
+                "--home-only",
+                "-r",
+                repo.to_str().unwrap(),
+                plain.to_str().unwrap(),
+            ])
+            .env_remove("RTRASH_WARN_SIZE")
+            .env("RTRASH_WARN_SIZE", "1")
+            .env_remove("RTRASH_MAX_SIZE")
+            .env("RTRASH_TEST_FS", format!("100000:{}", sb.root.display()))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{tag}: {}", stderr_of(&out));
+        let err = stderr_of(&out);
+        assert!(
+            err.contains(&format!("with {tag} work"))
+                && err.contains("permanently removing it would lose the work")
+                && err.contains(&repo.display().to_string())
+                && err.contains("until the work is pushed")
+                && err.contains("is low (")
+                && !err.contains("plain.txt")
+                && !err.contains("unrecoverable")
+                && !err.contains("rtrash empty")
+                && !err.contains("rtrash list")
+                && !err.contains("rtrash rm"),
+            "{tag}: {err}"
+        );
+    }
 }
 
 #[test]

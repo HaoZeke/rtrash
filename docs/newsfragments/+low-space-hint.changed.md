@@ -1,1 +1,1 @@
-The low-space warnings of `put` and `status` now suggest `empty --until-free=10%`, which removes only the oldest items needed.
+The low-space and big-trash warnings of `put` and `status` now point at `rtrash list --sort=size` and `rtrash rm -i --max-count=1 --match=exact PATH`, so one listed original path is removed after a confirmation. When a put just moved a repository flagged dirty, unpushed or unknown into a trash, that trash's warning says permanently removing it would lose the work, which undo and restore can still bring back until the work is pushed.

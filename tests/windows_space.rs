@@ -432,11 +432,97 @@ fn put_warns_when_the_recycle_bin_volume_is_low() {
     assert!(
         err.contains("Recycle Bin of")
             && err.contains("is low (")
-            && err.contains("trashing frees nothing"),
+            && err.contains("trashing frees nothing")
+            && err.contains("rtrash list --sort=size")
+            && err.contains("rtrash rm -i --max-count=1 --match=exact PATH")
+            && !err.contains("rtrash empty")
+            && !err.contains("would lose the work"),
         "{err}"
     );
     let err = put("fine.txt", false);
     assert!(!err.contains("is low"), "{err}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A put of a dirty or unpushed repository on a short volume says that
+/// permanently removing it would lose the work, and does not suggest
+/// `rtrash rm`. A plain file put beside the repository is not named.
+/// The same check as the Unix put test.
+#[cfg(debug_assertions)]
+#[test]
+fn put_space_hint_keeps_flagged_git_work() {
+    let git = |repo: &std::path::Path, home: &std::path::Path, args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", home)
+            .env("GIT_AUTHOR_NAME", "Trash Test")
+            .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Trash Test")
+            .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+            .output()
+    };
+    let base = common::scratch_dir("wingit", "put-git");
+    let vol = base.join("vol");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+    for (tag, commit) in [("unpushed", true), ("dirty", false)] {
+        let repo = base.join(tag);
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir(&repo).unwrap();
+        let init = match git(&repo, &base, &["init", "-q"]) {
+            Ok(out) => out,
+            Err(_) => {
+                common::skip("git unavailable; skipping");
+                let _ = std::fs::remove_dir_all(&base);
+                return;
+            }
+        };
+        if !init.status.success() {
+            common::skip("git unavailable; skipping");
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        std::fs::write(repo.join("f"), vec![b'x'; 90_000]).unwrap();
+        let plain = base.join("plain.txt");
+        std::fs::write(&plain, b"ok").unwrap();
+        if commit {
+            let add = git(&repo, &base, &["add", "f"]).unwrap();
+            let committed = git(&repo, &base, &["commit", "-qm", "work"]).unwrap();
+            assert!(
+                add.status.success() && committed.status.success(),
+                "add: {}\ncommit: {}",
+                String::from_utf8_lossy(&add.stderr),
+                String::from_utf8_lossy(&committed.stderr)
+            );
+        }
+        let out = common::rtrash(&base)
+            .args(["put", repo.to_str().unwrap(), plain.to_str().unwrap()])
+            .env("RTRASH_TEST_BIN_ROOT", &vol)
+            .env("RTRASH_IN_USE", "ignore")
+            .env("RTRASH_TEST_FS", format!("100000:{}", vol.display()))
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{tag}: {err}");
+        let lose = err
+            .split("permanently removing it would lose the work")
+            .nth(1)
+            .unwrap_or("");
+        assert!(
+            err.contains(&format!("with {tag} work"))
+                && err.contains("until the work is pushed")
+                && err.contains("is low (")
+                && lose.contains(tag)
+                && !err.contains("plain.txt")
+                && !err.contains("unrecoverable")
+                && !err.contains("rtrash empty")
+                && !err.contains("rtrash list")
+                && !err.contains("rtrash rm"),
+            "{tag}: {err}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&base);
 }
 

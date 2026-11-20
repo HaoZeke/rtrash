@@ -597,6 +597,24 @@ mod pattern_tests {
     }
 
     #[test]
+    fn exact_match_ignores_globs_and_duplicate_basenames() {
+        let star = Patterns::new(vec!["/w/*.log".into()], Match::Exact).unwrap();
+        assert!(star.hit("/w/*.log", "*.log", "*.log"));
+        assert!(!star.hit("/w/notes.log", "notes.log", "notes.log"));
+        // The trash's internal name is not a second key.
+        assert!(!star.hit("/w/other", "other", "*.log"));
+        let dup = Patterns::new(vec!["/w/a/foo".into()], Match::Exact).unwrap();
+        assert!(dup.hit("/w/a/foo", "foo", "foo"));
+        assert!(!dup.hit("/w/b/foo", "foo", "foo.2"));
+        let glob = Patterns::new(vec!["foo".into()], Match::Glob).unwrap();
+        assert!(glob.hit("/w/a/foo", "foo", "foo"));
+        assert!(glob.hit("/w/b/foo", "foo", "foo.2"));
+        let gstar = Patterns::new(vec!["*.log".into()], Match::Glob).unwrap();
+        assert!(gstar.hit("/w/*.log", "*.log", "*.log"));
+        assert!(gstar.hit("/w/notes.log", "notes.log", "notes.log"));
+    }
+
+    #[test]
     fn rm_summary_json_lists_the_matches() {
         let sum = super::RmSummary {
             dry_run: true,

@@ -42,6 +42,25 @@ impl GitState {
     }
 }
 
+/// For a directory that holds a git repository at its top, the risky
+/// state of that repository (dirty, unpushed or unknown), if any.
+/// Shared by put on Unix and on Windows: `safety` is Unix-only.
+pub fn risky_repo_state(abs: &Path) -> Option<GitState> {
+    let is_repo = abs.join(".git").symlink_metadata().is_ok() || crate::du::is_bare_repo(abs);
+    if !is_repo {
+        return None;
+    }
+    let repos = [abs.to_path_buf()];
+    let rows = [RowQuery {
+        path: abs,
+        is_dir: true,
+        repos: &repos,
+    }];
+    let states = classify_all(&rows)?;
+    let (state, _) = states.into_iter().next()??;
+    state.is_risky().then_some(state)
+}
+
 /// One listed row to classify.
 #[derive(Debug, Clone, Copy)]
 pub struct RowQuery<'a> {

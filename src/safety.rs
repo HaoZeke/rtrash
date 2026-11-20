@@ -128,19 +128,7 @@ pub fn is_mount_root(abs: &Path, meta: &fs::Metadata) -> bool {
 /// For a directory that holds a git repository at its top, the risky
 /// state of that repository (dirty, unpushed or unknown), if any.
 pub fn risky_repo_state(abs: &Path) -> Option<crate::du_git::GitState> {
-    let is_repo = abs.join(".git").symlink_metadata().is_ok() || crate::du::is_bare_repo(abs);
-    if !is_repo {
-        return None;
-    }
-    let repos = [abs.to_path_buf()];
-    let rows = [crate::du_git::RowQuery {
-        path: abs,
-        is_dir: true,
-        repos: &repos,
-    }];
-    let states = crate::du_git::classify_all(&rows)?;
-    let (state, _) = states.into_iter().next()??;
-    state.is_risky().then_some(state)
+    crate::du_git::risky_repo_state(abs)
 }
 
 /// The last component of `path` as typed, past any trailing slashes, and

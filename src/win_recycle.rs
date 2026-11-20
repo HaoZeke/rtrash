@@ -1872,6 +1872,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut failed = 0usize;
         let mut moved: Vec<PathBuf> = Vec::new();
         let mut roots: Vec<PathBuf> = Vec::new();
+        // (volume root, original path) for repositories this put flagged.
+        let mut risky_at: Vec<(PathBuf, PathBuf)> = Vec::new();
         for f in &files {
             match crate::util::look(f) {
                 crate::util::Look::There(_) => {}
@@ -1896,6 +1898,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             let abs = std::fs::canonicalize(f)
                 .map(|p| crate::util::plain_path(&p))
                 .unwrap_or_else(|_| f.clone());
+            let risky = note_risky_repo(prog, &abs);
             if let Some(snap) = &snap {
                 let holds = snap.under(f);
                 if !holds.is_empty() {
@@ -1967,16 +1970,18 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     // The path as the user gave it, made absolute; the
                     // canonical form can name a mounted folder by its
                     // volume GUID.
-                    moved.push(
-                        std::path::absolute(f)
-                            .map(|p| crate::util::plain_path(&p))
-                            .unwrap_or_else(|_| abs.clone()),
-                    );
+                    let kept = std::path::absolute(f)
+                        .map(|p| crate::util::plain_path(&p))
+                        .unwrap_or_else(|_| abs.clone());
                     if let Some(r) = root {
+                        if risky {
+                            risky_at.push((r.clone(), kept.clone()));
+                        }
                         if !roots.contains(&r) {
                             roots.push(r);
                         }
                     }
+                    moved.push(kept);
                 }
                 Err(e) => {
                     eprintln!(
@@ -2004,12 +2009,35 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         // The Recycle Bin keeps items on their own volume, so a full volume
         // stays full.
         for r in &roots {
-            let what = format!("the Recycle Bin of {}", r.display());
-            if let Some(w) = crate::space::low_warning(&what, r) {
+            let what = format!("the Recycle Bin of {}", crate::util::err_path(r));
+            let risky: Vec<&Path> = risky_at
+                .iter()
+                .filter(|(root, _)| root == r)
+                .map(|(_, path)| path.as_path())
+                .collect();
+            if let Some(w) = crate::space::low_warning_for(&what, r, &risky) {
                 eprintln!("{prog}: warning: {w}");
             }
         }
         status
+    }
+
+    /// Whether `abs` is a repository with dirty, unpushed or unknown work,
+    /// after saying so. Undo still brings the directory back.
+    fn note_risky_repo(prog: &str, abs: &Path) -> bool {
+        if !std::fs::symlink_metadata(abs).is_ok_and(|m| m.is_dir()) {
+            return false;
+        }
+        let Some(state) = crate::du_git::risky_repo_state(abs) else {
+            return false;
+        };
+        eprintln!(
+            "{prog}: warning: '{}' contains a git repository with {} work; \
+             `rtrash undo` brings it back",
+            crate::util::err_path(abs),
+            state.as_str()
+        );
+        true
     }
 
     /// Why a payload would not move: the processes that hold it open, named
@@ -3770,9 +3798,8 @@ registry), then the total and the free space on each (a warning under
             let lows = s.lows(crate::space::WARN_FREE_PERCENT);
             if !lows.is_empty() {
                 eprintln!(
-                    "rtrash: warning: {} is low: {}; free space with `rtrash empty --until-free=10%` (only the oldest items it needs) or `rtrash empty`",
-                    crate::util::err_path(&root),
-                    lows.join(", ")
+                    "{}",
+                    crate::space::status_low_warning(&crate::util::err_path(root), &lows)
                 );
             }
         }

@@ -88,6 +88,9 @@ pub struct Trashed {
     pub name: String,
     /// Trash root the item went to.
     pub trash_dir: PathBuf,
+    /// Set when put flagged this item as a repository with dirty,
+    /// unpushed or unknown git work.
+    pub risky_git: bool,
 }
 
 /// JSON summary for `put --json`: every trashed item plus the failure count.
@@ -502,6 +505,15 @@ fn warn_size(prog: &str) -> Option<(WarnSize, &'static str)> {
     w.map(|w| (w, src))
 }
 
+/// Original paths this put flagged, among the items that went to `root`.
+fn risky_originals<'a>(trashed: &'a [Trashed], root: &Path) -> Vec<&'a Path> {
+    trashed
+        .iter()
+        .filter(|t| t.risky_git && t.trash_dir == root)
+        .map(|t| t.original.as_path())
+        .collect()
+}
+
 /// Warn when a trash this put used holds more than the warn size.
 fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
     let Some((limit, src)) = warn_size(prog) else {
@@ -525,10 +537,11 @@ fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
             } else {
                 String::new()
             };
+            let hint = crate::space::warning_hint(&risky_originals(trashed, &root));
             eprintln!(
-                "{prog}: warning: trash '{}' holds {}{share}, past {src}; free it with `rtrash empty`",
+                "{prog}: warning: trash '{}' holds {}{share}, past {src}; {hint}",
                 crate::util::err_path(&root),
-                crate::fastdelete::format_bytes(bytes)
+                crate::fastdelete::format_bytes(bytes),
             );
         }
     }
@@ -559,10 +572,11 @@ fn warn_big_finder_trash(prog: &str, trashed: &[Trashed]) {
         let bytes = before.bytes.saturating_add(added);
         let disk = crate::space::query(&root).map_or(0, |s| s.total);
         if limit.exceeded(bytes, disk) {
+            let hint = crate::space::warning_hint(&risky_originals(trashed, &root));
             eprintln!(
-                "{prog}: warning: trash '{}' holds about {}, past {src}; free it with `rtrash empty --until-free=10%` or `rtrash empty`",
+                "{prog}: warning: trash '{}' holds about {}, past {src}; {hint}",
                 crate::util::err_path(&root),
-                crate::fastdelete::format_bytes(bytes)
+                crate::fastdelete::format_bytes(bytes),
             );
         }
     }
@@ -573,7 +587,9 @@ fn warn_low_space(prog: &str, trashed: &[Trashed]) {
     roots.sort();
     roots.dedup();
     for root in roots {
-        if let Some(w) = crate::space::low_warning(&format!("trash '{}'", root.display()), &root) {
+        let risky = risky_originals(trashed, &root);
+        let what = format!("trash '{}'", crate::util::err_path(&root));
+        if let Some(w) = crate::space::low_warning_for(&what, &root, &risky) {
             eprintln!("{prog}: warning: {w}");
         }
     }
@@ -788,12 +804,14 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             return Err(1);
         }
     }
+    let mut risky_git = false;
     if meta.is_dir() {
         if let Some(state) = crate::safety::risky_repo_state(&abs) {
             say!(
                 "{prog}: warning: '{name}' contains a git repository with {} work; `rtrash undo` brings it back",
                 state.as_str()
             );
+            risky_git = true;
         }
     }
     if opts.in_use != InUse::Ignore {
@@ -849,6 +867,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                     original: abs,
                     name: trash_name,
                     trash_dir,
+                    risky_git,
                 }))
             }
             Err(e) => {
@@ -902,6 +921,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                 original: abs,
                 name: trash_name,
                 trash_dir: trash.root,
+                risky_git,
             }))
         }
         Err(e) => {
@@ -1034,6 +1054,7 @@ mod json_tests {
             original: PathBuf::from("/w/a \"q\".txt"),
             name: "a \"q\".txt".into(),
             trash_dir: PathBuf::from("/x/Trash"),
+            risky_git: false,
         };
         let s = summary_json(&[t], 2);
         assert_eq!(
@@ -1041,6 +1062,47 @@ mod json_tests {
             r#"{"trashed":[{"original":"/w/a \"q\".txt","name":"a \"q\".txt","trash_dir":"/x/Trash"}],"failed":2}"#
         );
         assert_eq!(summary_json(&[], 0), r#"{"trashed":[],"failed":0}"#);
+    }
+
+    #[test]
+    fn a_space_hint_names_only_the_risky_items_of_that_trash() {
+        let home = PathBuf::from("/home/t");
+        let vol = PathBuf::from("/mnt/vol");
+        let trashed = [
+            Trashed {
+                original: PathBuf::from("/work/repo"),
+                name: "repo".into(),
+                trash_dir: home.clone(),
+                risky_git: true,
+            },
+            Trashed {
+                original: PathBuf::from("/work/plain.txt"),
+                name: "plain.txt".into(),
+                trash_dir: home.clone(),
+                risky_git: false,
+            },
+            Trashed {
+                original: PathBuf::from("/vol/plain"),
+                name: "plain".into(),
+                trash_dir: vol.clone(),
+                risky_git: false,
+            },
+        ];
+        let home_hint = crate::space::warning_hint(&super::risky_originals(&trashed, &home));
+        assert!(
+            home_hint.contains("permanently removing it would lose the work"),
+            "{home_hint}"
+        );
+        assert!(home_hint.contains("'/work/repo'"), "{home_hint}");
+        assert!(!home_hint.contains("plain.txt"), "{home_hint}");
+        assert!(!home_hint.contains("rtrash rm"), "{home_hint}");
+        let vol_hint = crate::space::warning_hint(&super::risky_originals(&trashed, &vol));
+        assert!(
+            vol_hint.contains("rtrash rm -i --max-count=1 --match=exact PATH"),
+            "{vol_hint}"
+        );
+        assert!(!vol_hint.contains("would lose the work"), "{vol_hint}");
+        assert!(!vol_hint.contains("/vol/plain"), "{vol_hint}");
     }
 }
 

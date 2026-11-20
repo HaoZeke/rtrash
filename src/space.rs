@@ -146,18 +146,69 @@ pub fn test_fs() -> Option<(std::path::PathBuf, Space)> {
     Some((dir, s))
 }
 
+/// Closing advice of a low-space or big-trash warning.
+///
+/// `risky` is the original paths this put moved into this one trash and
+/// flagged as a repository with dirty, unpushed or unknown work. Empty
+/// means nothing just moved there is that kind of work: the advice is to
+/// review the trash and remove one listed original path, which asks first
+/// and stops at a single exact match. Otherwise the advice names those
+/// paths. Permanently removing one would lose the work; `undo` and
+/// `restore` still bring it back until the work is pushed.
+pub fn warning_hint(risky: &[&Path]) -> String {
+    if risky.is_empty() {
+        return concat!(
+            "review the trash with `rtrash list --sort=size` ",
+            "and remove one listed path with `rtrash rm -i --max-count=1 --match=exact PATH`",
+        )
+        .to_string();
+    }
+    let listed = risky
+        .iter()
+        .map(|p| format!("'{}'", crate::util::err_path(p)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if risky.len() == 1 {
+        format!(
+            "permanently removing it would lose the work ({listed}); \
+             leave it until the work is pushed"
+        )
+    } else {
+        format!(
+            "permanently removing them would lose the work ({listed}); \
+             leave them until the work is pushed"
+        )
+    }
+}
+
 /// The low-space warning for the file system of `what` (at `path`), or
 /// `None` when it has room or cannot be read.
 pub fn low_warning(what: &str, path: &Path) -> Option<String> {
+    low_warning_for(what, path, &[])
+}
+
+/// As [`low_warning`]. `risky` is passed to [`warning_hint`].
+pub fn low_warning_for(what: &str, path: &Path, risky: &[&Path]) -> Option<String> {
     let lows = query(path).ok()?.lows(WARN_FREE_PERCENT);
-    (!lows.is_empty()).then(|| low_message(what, &lows))
+    (!lows.is_empty()).then(|| low_message(what, &lows, risky))
 }
 
 /// The text of a low-space warning about `what`.
-pub fn low_message(what: &str, lows: &[String]) -> String {
+pub fn low_message(what: &str, lows: &[String], risky: &[&Path]) -> String {
     format!(
-        "the file system of {what} is low ({}); trashing frees nothing there until the trash is emptied (`rtrash empty --until-free=10%` takes only the oldest items it needs; `rtrash empty` takes all)",
-        lows.join(", ")
+        "the file system of {what} is low ({}); trashing frees nothing there; {}",
+        lows.join(", "),
+        warning_hint(risky)
+    )
+}
+
+/// The stderr line when `status` finds `what` (a trash root or a volume) low.
+/// Status did not just move anything, so the advice is the ordinary review.
+pub fn status_low_warning(what: &str, lows: &[String]) -> String {
+    format!(
+        "rtrash: warning: {what} is low: {}; {}",
+        lows.join(", "),
+        warning_hint(&[])
     )
 }
 
@@ -430,6 +481,50 @@ mod tests {
         let s = disk(100 * G, 9 * G, Some((1000, 50)));
         assert_eq!(s.lows(10), ["9% of bytes free", "5% of inodes free"]);
         assert!(disk(100 * G, 50 * G, Some((1000, 500))).lows(10).is_empty());
+    }
+
+    #[test]
+    fn a_low_or_big_trash_hint_never_names_rtrash_empty() {
+        let lows = ["9% of bytes free".to_string()];
+        let review = warning_hint(&[]);
+        assert!(review.contains("rtrash list --sort=size"), "{review}");
+        assert!(
+            review.contains("rtrash rm -i --max-count=1 --match=exact PATH"),
+            "{review}"
+        );
+        assert!(!review.contains("rtrash rm NAME"), "{review}");
+        assert!(!review.contains("rtrash empty"), "{review}");
+        let repo = std::path::Path::new("/work/repo");
+        let keep = warning_hint(&[repo]);
+        assert!(
+            keep.contains("permanently removing it would lose the work"),
+            "{keep}"
+        );
+        assert!(keep.contains("'/work/repo'"), "{keep}");
+        assert!(keep.contains("until the work is pushed"), "{keep}");
+        assert!(!keep.contains("unrecoverable"), "{keep}");
+        assert!(!keep.contains("rtrash rm"), "{keep}");
+        assert!(!keep.contains("rtrash list"), "{keep}");
+        assert!(!keep.contains("rtrash empty"), "{keep}");
+        let notes = std::path::Path::new("/work/notes.txt");
+        let both = warning_hint(&[repo, notes]);
+        assert!(
+            both.contains("permanently removing them would lose the work"),
+            "{both}"
+        );
+        assert!(both.contains("'/work/repo'"), "{both}");
+        assert!(both.contains("'/work/notes.txt'"), "{both}");
+        assert!(!both.contains("unrecoverable"), "{both}");
+        let msg = low_message("trash '/t'", &lows, &[repo]);
+        assert!(msg.contains("trashing frees nothing"), "{msg}");
+        assert!(msg.contains(&keep), "{msg}");
+        assert!(!msg.contains("rtrash empty"), "{msg}");
+        let plain = low_message("trash '/t'", &lows, &[]);
+        assert!(plain.contains(&review), "{plain}");
+        let status = status_low_warning("/t", &lows);
+        assert!(status.contains(&review), "{status}");
+        assert!(!status.contains("rtrash empty"), "{status}");
+        assert!(status.starts_with("rtrash: warning: /t is low: 9% of bytes free; "));
     }
 
     #[cfg(windows)]
