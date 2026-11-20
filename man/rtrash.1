@@ -4612,10 +4612,8 @@ total, and stays quiet until a total has been stored.
 It overrides
 .B policy.warn_size
 in the config file; an empty value turns it off, and
-.B \-q
-or
 .B \-\-json
-silence it.
+silences it.
 A put also warns when a trash it used sits on a file system with less
 than 10% of its bytes or inodes free, since moving a file into that
 trash frees nothing there. That warning and the one from
@@ -4646,6 +4644,8 @@ repository counts, and a directory that was not fully scanned is
 unknown.
 On the FreeDesktop trash the undo hint is printed only after the
 move, whose record already holds the batch id.
+.B \-\-json
+leaves that hint out.
 A put to the Finder Trash warns the same way, and names
 .B rtrash undo
 only after the Finder undo log has been written.

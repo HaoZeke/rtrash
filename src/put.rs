@@ -73,6 +73,9 @@ pub(crate) struct Opts {
     pub home_only: bool,
     /// Suppress `-v` lines (stdout carries the `--json` summary instead).
     pub quiet: bool,
+    /// `--json`: stdout is the summary and stderr stays errors, so the
+    /// repository note and the space warnings are left out.
+    pub json: bool,
     /// Check for live processes holding the item. The browsers leave it off.
     pub in_use: InUse,
     /// `--dry-run`: run every check and say what would move, moving nothing.
@@ -115,6 +118,7 @@ impl Default for Opts {
             trash_pin: None,
             home_only: false,
             quiet: false,
+            json: false,
             in_use: InUse::Ignore,
             dry_run: false,
         }
@@ -201,6 +205,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "--no-space-check" => crate::space::skip_check(true),
             "--json" => {
                 json = true;
+                opts.json = true;
                 opts.quiet = true;
             }
             // GNU rm: -f / -i / --interactive last flag wins for prompt vs force.
@@ -373,7 +378,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .map(|t| (t.name.clone(), t.original.clone(), t.trash_dir.clone()))
             .collect();
         let logged = crate::finder_shared::log_batch(crate::info::batch_id(), &items);
-        report_finder_undo(prog, &trashed, logged);
+        report_finder_undo(prog, &trashed, logged, json);
         let moved: Vec<(PathBuf, String)> = trashed
             .iter()
             .map(|t| (t.trash_dir.clone(), t.name.clone()))
@@ -770,14 +775,15 @@ fn retarget_seam() {
 }
 
 /// Finder undo is true only after the undo log has been written.
-fn report_finder_undo(prog: &str, trashed: &[Trashed], logged: std::io::Result<()>) {
+fn report_finder_undo(prog: &str, trashed: &[Trashed], logged: std::io::Result<()>, json: bool) {
     match logged {
-        Ok(()) => {
+        Ok(()) if !json => {
             for t in trashed {
                 let name = t.original.to_string_lossy();
                 say_undo(prog, name.as_ref(), t.risky_git);
             }
         }
+        Ok(()) => {}
         Err(e) => {
             eprintln!(
                 "{prog}: warning: the Finder undo log could not be written ({e}); \
@@ -952,7 +958,9 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
     if opts.trash_pin.is_none() && crate::wsl::applies(&abs) {
         return match crate::wsl::recycle(&abs, meta.is_dir()) {
             Ok(()) => {
-                say_wsl_restore(prog, name.as_ref(), probed);
+                if !opts.json {
+                    say_wsl_restore(prog, name.as_ref(), probed);
+                }
                 if opts.verbose && !opts.quiet {
                     println!(
                         "removed '{}' (Windows Recycle Bin)",
@@ -1035,7 +1043,10 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                 .flatten();
             let risky_git = crate::du_git::union_work(probed, after);
             // The batch id is in the record trash_move just wrote.
-            say_undo(prog, name.as_ref(), risky_git);
+            // `--json` keeps stderr to errors, as it does for the space warnings.
+            if !opts.json {
+                say_undo(prog, name.as_ref(), risky_git);
+            }
             if opts.verbose && !opts.quiet {
                 // Name the trash the item went to: a file on another
                 // file system goes to that file system's trash.

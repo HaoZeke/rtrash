@@ -2117,7 +2117,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             // The restore hint is true only after last-put.txt is written.
             // `rtrash undo` does not restore the Recycle Bin.
             match write_last_put(started, &moved) {
-                Ok(()) => {
+                Ok(()) if !json => {
                     for (path, work) in &restore_notes {
                         eprintln!(
                             "{prog}: warning: '{}' contains a git repository with {} work; \
@@ -2127,6 +2127,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                         );
                     }
                 }
+                Ok(()) => {}
                 Err(e) => {
                     eprintln!(
                         "{prog}: warning: the last-put record could not be written ({e}); \
@@ -2138,16 +2139,19 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             prune_after_put(prog, &moved, json);
         }
         // The Recycle Bin keeps items on their own volume, so a full volume
-        // stays full.
-        for r in &roots {
-            let what = format!("the Recycle Bin of {}", crate::util::err_path(r));
-            let risky: Vec<(&Path, crate::du_git::RiskyGit)> = risky_at
-                .iter()
-                .filter(|(root, _, _)| root == r)
-                .map(|(_, path, work)| (path.as_path(), *work))
-                .collect();
-            if let Some(w) = crate::space::low_warning_for(&what, r, &risky) {
-                eprintln!("{prog}: warning: {w}");
+        // stays full. `--json` leaves this out, as FreeDesktop leaves out
+        // its low-space and big-trash warnings.
+        if !json {
+            for r in &roots {
+                let what = format!("the Recycle Bin of {}", crate::util::err_path(r));
+                let risky: Vec<(&Path, crate::du_git::RiskyGit)> = risky_at
+                    .iter()
+                    .filter(|(root, _, _)| root == r)
+                    .map(|(_, path, work)| (path.as_path(), *work))
+                    .collect();
+                if let Some(w) = crate::space::low_warning_for(&what, r, &risky) {
+                    eprintln!("{prog}: warning: {w}");
+                }
             }
         }
         status

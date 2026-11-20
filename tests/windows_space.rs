@@ -649,6 +649,62 @@ fn a_failed_last_put_record_does_not_promise_restore() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// `put --json` of a dirty repository keeps stderr to errors: no
+/// repository note, and no low-space warning from the faked volume.
+#[cfg(debug_assertions)]
+#[test]
+fn put_json_leaves_out_the_repository_note() {
+    let base = common::scratch_dir("wingit", "put-json");
+    let vol = base.join("vol");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+    let repo = base.join("repo");
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir(&repo).unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &base)
+        .env("GIT_AUTHOR_NAME", "Trash Test")
+        .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+        .env("GIT_COMMITTER_NAME", "Trash Test")
+        .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+        .output();
+    let Ok(init) = init else {
+        common::skip("git unavailable; skipping");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    };
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    std::fs::write(repo.join("f"), b"x").unwrap();
+    let out = common::rtrash(&base)
+        .args(["put", "--json", repo.to_str().unwrap()])
+        .env("RTRASH_TEST_BIN_ROOT", &vol)
+        .env("RTRASH_IN_USE", "ignore")
+        .env("RTRASH_TEST_FS", format!("100000:{}", vol.display()))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{err}");
+    assert!(!repo.join("f").exists(), "{err}");
+    assert!(!err.contains("contains a git repository"), "{err}");
+    assert!(!err.contains("brings it back"), "{err}");
+    assert!(!err.contains("is low"), "{err}");
+    assert!(
+        json.contains("\"trashed\":[")
+            && json.contains("\"name\":\"repo\"")
+            && json.trim_end().ends_with("\"failed\":0}"),
+        "{json}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// The command the Windows warning names restores the repository.
 #[test]
 fn restore_batch_last_brings_back_the_repository_the_warning_names() {

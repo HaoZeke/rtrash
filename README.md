@@ -283,7 +283,7 @@ Accepts the common `rm(1)` flags with the same semantics, except that files move
 Safety rails beyond rm:
 
 - **safe-rm list.** Put skips safe-rm's built-in system directories and every path or shell pattern listed in `/etc/safe-rm.conf`, `/usr/local/etc/safe-rm.conf`, `$XDG_CONFIG_HOME/safe-rm` or `~/.safe-rm`, so an existing safe-rm setup keeps working.
-- **Repository warning.** After a directory moves, a git repository at its top or nested inside it that has uncommitted, unpushed or unreadable work prints a warning. On the FreeDesktop trash it names `rtrash undo`. On Windows it names `rtrash restore --batch=last` once that record is written. On WSL it names `rtrash wsl restore` or Explorer.
+- **Repository warning.** After a directory moves, a git repository at its top or nested inside it that has uncommitted, unpushed or unreadable work prints a warning. On the FreeDesktop trash it names `rtrash undo`. On Windows it names `rtrash restore --batch=last` once that record is written. On WSL it names `rtrash wsl restore` or Explorer. `put --json` leaves the warning out.
 
 As with GNU rm, **the last of `-f` / `-i` / `-I` (and the matching long forms) wins** for prompt vs force behavior.
 `-f` also ignores missing paths.

@@ -8617,6 +8617,38 @@ fn a_dry_run_does_not_promise_undo_before_the_move() {
     assert!(!repo.join("f").exists());
 }
 
+/// `put --json` keeps stderr to errors. The note about a trashed
+/// repository is left out, and the summary still lists the item.
+#[cfg(unix)]
+#[test]
+fn put_json_leaves_out_the_repository_note() {
+    let sb = Sandbox::new("put-repo-json");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let out = sb.run(&["put", "--json", "-r", "repo"]);
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(!repo.join("f").exists(), "{err}");
+    assert!(!err.contains("contains a git repository"), "{err}");
+    assert!(!err.contains("rtrash undo"), "{err}");
+    let json = stdout_of(&out);
+    assert!(
+        json.starts_with("{\"trashed\":[{\"original\":\"")
+            && json.contains("/repo\",\"name\":\"repo\"")
+            && json.trim_end().ends_with("\"failed\":0}"),
+        "{json}"
+    );
+}
+
 /// `--dry-run` does not claim to run the git work check.
 #[test]
 fn put_dry_run_help_does_not_claim_the_git_check() {
