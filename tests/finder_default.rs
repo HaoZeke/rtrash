@@ -1043,7 +1043,14 @@ fn a_finder_put_warns_past_the_warn_size() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(!err(&o).contains("past RTRASH_WARN_SIZE"), "{}", err(&o));
     let o = put("second.bin", "1K");
-    assert!(err(&o).contains("past RTRASH_WARN_SIZE"), "{}", err(&o));
+    assert!(
+        err(&o).contains("past RTRASH_WARN_SIZE")
+            && err(&o).contains("rtrash list --sort=size")
+            && err(&o).contains("rtrash rm NAME")
+            && !err(&o).contains("rtrash empty"),
+        "{}",
+        err(&o)
+    );
     let o = put("third.bin", "1G");
     assert!(!err(&o).contains("past"), "{}", err(&o));
 }

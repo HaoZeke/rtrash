@@ -526,9 +526,10 @@ fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
                 String::new()
             };
             eprintln!(
-                "{prog}: warning: trash '{}' holds {}{share}, past {src}; free it with `rtrash empty`",
+                "{prog}: warning: trash '{}' holds {}{share}, past {src}; {}",
                 crate::util::err_path(&root),
-                crate::fastdelete::format_bytes(bytes)
+                crate::fastdelete::format_bytes(bytes),
+                crate::space::warning_hint()
             );
         }
     }
@@ -560,9 +561,10 @@ fn warn_big_finder_trash(prog: &str, trashed: &[Trashed]) {
         let disk = crate::space::query(&root).map_or(0, |s| s.total);
         if limit.exceeded(bytes, disk) {
             eprintln!(
-                "{prog}: warning: trash '{}' holds about {}, past {src}; free it with `rtrash empty --until-free=10%` or `rtrash empty`",
+                "{prog}: warning: trash '{}' holds about {}, past {src}; {}",
                 crate::util::err_path(&root),
-                crate::fastdelete::format_bytes(bytes)
+                crate::fastdelete::format_bytes(bytes),
+                crate::space::warning_hint()
             );
         }
     }

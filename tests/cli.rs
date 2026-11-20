@@ -6036,7 +6036,10 @@ fn put_warns_when_the_trash_grows_past_the_warn_size() {
     let out = put("a.txt", "1");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stderr_of(&out).contains("past RTRASH_WARN_SIZE"),
+        stderr_of(&out).contains("past RTRASH_WARN_SIZE")
+            && stderr_of(&out).contains("rtrash list --sort=size")
+            && stderr_of(&out).contains("rtrash rm NAME")
+            && !stderr_of(&out).contains("rtrash empty"),
         "{}",
         stderr_of(&out)
     );
@@ -6708,7 +6711,10 @@ fn status_warns_from_the_test_file_system_and_stops_once_it_is_freed() {
     fs::write(xdg.join("filler"), vec![1u8; 550_000]).unwrap();
     let out = status(false);
     assert!(
-        stderr_of(&out).contains("is low") && stderr_of(&out).contains("empty --until-free=10%"),
+        stderr_of(&out).contains("is low")
+            && stderr_of(&out).contains("rtrash list --sort=size")
+            && stderr_of(&out).contains("rtrash rm NAME")
+            && !stderr_of(&out).contains("rtrash empty"),
         "{}",
         stderr_of(&out)
     );
@@ -8229,7 +8235,9 @@ fn put_warns_when_the_trash_file_system_is_low() {
     assert!(
         err.contains("is low (")
             && err.contains("trashing frees nothing")
-            && err.contains("empty --until-free=10%"),
+            && err.contains("rtrash list --sort=size")
+            && err.contains("rtrash rm NAME")
+            && !err.contains("rtrash empty"),
         "{err}"
     );
     let quiet = write_at(&sb.root, "work/ok.bin", "x");

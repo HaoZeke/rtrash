@@ -1,1 +1,1 @@
-The low-space warnings of `put` and `status` now suggest `empty --until-free=10%`, which removes only the oldest items needed.
+The low-space and big-trash warnings of `put` and `status` now point at `rtrash list --sort=size` and `rtrash rm NAME`, so chosen items are removed by name.

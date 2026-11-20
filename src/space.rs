@@ -146,6 +146,15 @@ pub fn test_fs() -> Option<(std::path::PathBuf, Space)> {
     Some((dir, s))
 }
 
+/// Closing advice of a low-space or big-trash warning: review the trash
+/// and remove chosen items by name. Never a blanket empty.
+pub fn warning_hint() -> &'static str {
+    concat!(
+        "review the trash with `rtrash list --sort=size` ",
+        "and remove chosen items by name with `rtrash rm NAME`",
+    )
+}
+
 /// The low-space warning for the file system of `what` (at `path`), or
 /// `None` when it has room or cannot be read.
 pub fn low_warning(what: &str, path: &Path) -> Option<String> {
@@ -156,8 +165,18 @@ pub fn low_warning(what: &str, path: &Path) -> Option<String> {
 /// The text of a low-space warning about `what`.
 pub fn low_message(what: &str, lows: &[String]) -> String {
     format!(
-        "the file system of {what} is low ({}); trashing frees nothing there until the trash is emptied (`rtrash empty --until-free=10%` takes only the oldest items it needs; `rtrash empty` takes all)",
-        lows.join(", ")
+        "the file system of {what} is low ({}); trashing frees nothing there; {}",
+        lows.join(", "),
+        warning_hint()
+    )
+}
+
+/// The stderr line when `status` finds `what` (a trash root or a volume) low.
+pub fn status_low_warning(what: &str, lows: &[String]) -> String {
+    format!(
+        "rtrash: warning: {what} is low: {}; {}",
+        lows.join(", "),
+        warning_hint()
     )
 }
 
@@ -430,6 +449,25 @@ mod tests {
         let s = disk(100 * G, 9 * G, Some((1000, 50)));
         assert_eq!(s.lows(10), ["9% of bytes free", "5% of inodes free"]);
         assert!(disk(100 * G, 50 * G, Some((1000, 500))).lows(10).is_empty());
+    }
+
+    #[test]
+    fn a_low_or_big_trash_hint_never_names_rtrash_empty() {
+        let hint = warning_hint();
+        assert!(!hint.contains("rtrash empty"), "{hint}");
+        assert!(hint.contains("rtrash list --sort=size"), "{hint}");
+        assert!(hint.contains("rtrash rm NAME"), "{hint}");
+        let lows = ["9% of bytes free".to_string()];
+        let msg = low_message("trash '/t'", &lows);
+        assert!(
+            msg.contains(hint) && msg.contains("trashing frees nothing"),
+            "{msg}"
+        );
+        assert!(!msg.contains("rtrash empty"), "{msg}");
+        let status = status_low_warning("/t", &lows);
+        assert!(status.contains(hint), "{status}");
+        assert!(!status.contains("rtrash empty"), "{status}");
+        assert!(status.starts_with("rtrash: warning: /t is low: 9% of bytes free; "));
     }
 
     #[cfg(windows)]
