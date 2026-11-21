@@ -1196,7 +1196,19 @@ pub fn prune_after_put(prog: &str, moved: &[(PathBuf, String)], quiet: bool) {
     let Ok(all) = crate::finder_shared::entries() else {
         return;
     };
-    let mine: Vec<PathBuf> = moved.iter().map(|(t, n)| t.join(n)).collect();
+    let keep = match crate::keep::Keep::load() {
+        Ok(keep) => keep,
+        Err(e) => {
+            eprintln!("{prog}: cannot read keep file: {e}; refusing Finder Trash retention");
+            return;
+        }
+    };
+    let mut mine: Vec<PathBuf> = moved.iter().map(|(t, n)| t.join(n)).collect();
+    mine.extend(
+        all.iter()
+            .filter(|e| keep.protects(&e.shown))
+            .map(crate::finder_shared::Entry::path),
+    );
     let mut trashes: Vec<&PathBuf> = moved.iter().map(|(t, _)| t).collect();
     trashes.sort();
     trashes.dedup();
@@ -1253,6 +1265,13 @@ pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u
     let Ok(rows) = read_all(prog) else {
         return need;
     };
+    let keep = match crate::keep::Keep::load() {
+        Ok(keep) => keep,
+        Err(e) => {
+            eprintln!("{prog}: cannot read keep file: {e}; refusing Finder Trash purge");
+            return need;
+        }
+    };
     let mut rows: Vec<_> = rows
         .into_iter()
         .filter(|e| std::fs::metadata(&e.trash).is_ok_and(|m| m.dev() == dev))
@@ -1264,6 +1283,13 @@ pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u
         if left == (0, 0) {
             break;
         }
+        if keep.protects(&e.shown) {
+            eprintln!(
+                "{prog}: kept '{}' (listed in the keep file)",
+                crate::util::err_path(&e.shown)
+            );
+            continue;
+        }
         // An item that changed since the listing stays.
         let path = match e.checked() {
             Ok(p) => p,
@@ -1272,7 +1298,9 @@ pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u
         };
         let b = crate::fastdelete::disk_usage(&path);
         let inodes = 1 + crate::trash_stats::count_inodes(&path);
-        if !dry_run {
+        if dry_run {
+            println!("would remove {}", crate::util::term_path(&e.shown));
+        } else {
             if let Err(err) = crate::permanent_guard::remove(&path) {
                 crate::finder_total::uncarried(&e.trash);
                 eprintln!(
@@ -1303,6 +1331,13 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
     let rows = match read_all(prog) {
         Ok(r) => r,
         Err(c) => return c,
+    };
+    let keep = match crate::keep::Keep::load() {
+        Ok(keep) => keep,
+        Err(e) => {
+            eprintln!("{prog}: cannot read keep file: {e}; refusing permanent deletion");
+            return 1;
+        }
     };
     let wants = crate::orig_path::expand(&o.paths);
     let have: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
@@ -1348,6 +1383,13 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
         }
     }
     for (e, b) in picked {
+        if keep.protects(&e.shown) {
+            eprintln!(
+                "{prog}: kept '{}' (listed in the keep file)",
+                crate::util::err_path(&e.shown)
+            );
+            continue;
+        }
         // After the count and any question: the item must still be the
         // one listed. One already gone needs nothing done; another in its
         // place stays, and the run says so.
@@ -1396,7 +1438,12 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
     } else if !verbose && !dry_run {
         eprintln!("Removed {}", crate::util::plural(removed, "item", "items"));
     }
-    i32::from(failed > 0)
+    if dry_run && removed == 0 {
+        eprintln!("{prog}: nothing would be permanently removed");
+        1
+    } else {
+        i32::from(failed > 0)
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -3110,6 +3110,28 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 return 1;
             }
         };
+        let keep = match crate::keep::Keep::load() {
+            Ok(keep) => keep,
+            Err(e) => {
+                eprintln!("{prog}: cannot read keep file: {e}; refusing permanent deletion");
+                return 1;
+            }
+        };
+        let all: Vec<TrashItem> = all
+            .into_iter()
+            .filter(|it| {
+                let original = original_of(it);
+                if keep.protects(&original) {
+                    eprintln!(
+                        "{prog}: kept '{}' (listed in the keep file)",
+                        crate::util::err_path(&original)
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
         // An empty of everything may take what other sessions or agents
         // put; it goes ahead alone only for the latest put's items.
         let have: Vec<PathBuf> = all.iter().map(original_of).collect();
@@ -3188,12 +3210,16 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         if dry_run {
             if json {
                 summary(&items);
-                return 0;
+                return i32::from(items.is_empty());
             }
             for it in &items {
                 println!("would remove {}", crate::util::term_path(&original_of(it)));
             }
             println!("{} item(s)", items.len());
+            if items.is_empty() {
+                eprintln!("{prog}: nothing would be permanently removed");
+                return 1;
+            }
             return 0;
         }
         if let Some(code) = crate::permanent_guard::check_count(prog, items.len() as u64) {
@@ -3321,6 +3347,13 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 crate::allow_roots::resolve(p).unwrap_or_else(|| crate::util::plain_path(p));
             key_of(&resolved, &mounts)
         };
+        let keep = match crate::keep::Keep::load() {
+            Ok(keep) => keep,
+            Err(e) => {
+                eprintln!("{prog}: cannot read keep file: {e}; refusing Recycle Bin retention");
+                return;
+            }
+        };
         let rows: Vec<(PathBuf, i64, u64)> = all
             .iter()
             .map(|it| {
@@ -3331,8 +3364,14 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 )
             })
             .collect();
-        let kept: Vec<PathBuf> = moved.iter().map(|p| norm(p)).collect();
-        let picked = crate::budget::trim_after_put(&rows, &kept, max, policy);
+        let mut protected: Vec<PathBuf> = moved.iter().map(|p| norm(p)).collect();
+        protected.extend(
+            all.iter()
+                .map(original_of)
+                .filter(|original| keep.protects(original))
+                .map(|original| norm(&original)),
+        );
+        let picked = crate::budget::trim_after_put(&rows, &protected, max, policy);
         if picked.is_empty() {
             return;
         }
@@ -3364,7 +3403,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         dry_run: bool,
         verbose: bool,
     ) -> (u64, u64, u64) {
-        let items: Vec<TrashItem> = match super::list_items() {
+        let mut items: Vec<TrashItem> = match super::list_items() {
             Ok(all) => {
                 let ids: Vec<PathBuf> = all.iter().map(|it| PathBuf::from(&it.id)).collect();
                 on_volume(&ids, volume_key, volume_key(at))
@@ -3377,6 +3416,25 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 return (0, 0, 0);
             }
         };
+        let keep = match crate::keep::Keep::load() {
+            Ok(keep) => keep,
+            Err(e) => {
+                eprintln!("{prog}: cannot read keep file: {e}; refusing Recycle Bin purge");
+                return (0, 0, 0);
+            }
+        };
+        items.retain(|it| {
+            let original = original_of(it);
+            if keep.protects(&original) {
+                eprintln!(
+                    "{prog}: kept '{}' (listed in the keep file)",
+                    crate::util::err_path(&original)
+                );
+                false
+            } else {
+                true
+            }
+        });
         let sized: Vec<(i64, u64, u64)> = items
             .iter()
             .map(|it| {
@@ -4679,13 +4737,27 @@ registry), then the total and the free space on each (a warning under
         let mut bad_match: Option<String> = None;
         let mut json = false;
         let mut patterns: Vec<String> = Vec::new();
+        let mut ids: Vec<String> = Vec::new();
+        let mut all_matches = false;
         let mut batch: Option<String> = None;
         let (rest, operands, short_err) = super::rm_option_args(args);
         bad_match = bad_match.or(short_err);
         let filters = parse_with_filters(prog, &rest, |arg| {
             match arg {
                 "-n" | "--dry-run" => dry_run = true,
+                "--glob" => kind = crate::filters::Match::Glob,
+                "--prefix" => kind = crate::filters::Match::Prefix,
+                "--substring" => kind = crate::filters::Match::Substring,
                 "--regex" => kind = crate::filters::Match::Regex,
+                "--all-matches" => all_matches = true,
+                a if a.starts_with("--id=") => {
+                    let id = &a["--id=".len()..];
+                    if id.is_empty() {
+                        eprintln!("{prog}: --id needs a Recycle Bin item name");
+                        return Some(2);
+                    }
+                    ids.push(id.to_string());
+                }
                 a if a.starts_with("--match=") => match crate::filters::Match::parse(&a[8..]) {
                     Ok(k) => kind = k,
                     Err(e) => bad_match = Some(e),
@@ -4721,12 +4793,17 @@ directory, with a trailing slash ignored. It does not remove a longer
 name or a file inside it. When nothing matches, those are named and
 left in place.
 
+      --glob    PATHs are shell-style globs
+      --prefix  PATHs match themselves and paths below them
+      --substring PATHs are text searched in the original path
       --regex   PATTERNs are regular expressions searched in the original
                    path (the same as --match=regex)
       --match=KIND  how to read PATTERNs (trashy's -m): exact (the
-                   default), glob, regex, substring or id (the {{id}}
-                   from `list --format`, the trash name, deletion date
-                   and trash root)
+                   default), glob, regex, substring, prefix or id (the
+                   {{id}} from `list --format`, the trash name, deletion
+                   date and trash root)
+      --id=NAME select one item by its Recycle Bin payload name
+      --all-matches allow more than one item with the same original path
       --older-than=AGE  only match items deleted more than AGE ago: DAYS,
                    or a duration such as 2h, 30m or 1d12h
       --newer-than=AGE  only match items deleted within the last AGE
@@ -4790,7 +4867,7 @@ left in place.
             kind = crate::filters::Match::Glob;
             patterns.push("*".into());
         }
-        if patterns.is_empty() {
+        if patterns.is_empty() && ids.is_empty() {
             eprintln!("{prog}: missing PATTERN");
             return 2;
         }
@@ -4829,9 +4906,6 @@ left in place.
             .into_iter()
             .filter(|it| {
                 let orig = original_of(it);
-                if exact {
-                    return crate::orig_path::selects(&pats.texts, &orig);
-                }
                 let full = orig.to_string_lossy().into_owned();
                 let base = orig
                     .file_name()
@@ -4843,7 +4917,12 @@ left in place.
                     .unwrap_or_default();
                 let date = platform::epoch_to_iso_utc(it.time_deleted);
                 let root = bin_root_of(Path::new(&it.id)).unwrap_or_default();
-                pats.selects(&full, &base, &stable, &date, &root)
+                (if exact {
+                    crate::orig_path::selects(&pats.texts, &orig)
+                } else {
+                    pats.selects(&full, &base, &stable, &date, &root)
+                })
+                    || crate::rm_match::id_hit(&ids, &stable)
             })
             .collect();
         // Size last: only the matches need their `$I` read.
@@ -4852,6 +4931,49 @@ left in place.
             let kept: Vec<PathBuf> = matched.iter().map(original_of).collect();
             let window = crate::orig_path::window(filters.age.is_set(), filters.size.is_set());
             crate::orig_path::hint(prog, &pats.operands, &have, &kept, window);
+        }
+        if exact
+            && ids.is_empty()
+            && crate::rm_match::refuse_ambiguous(
+                prog,
+                matched
+                    .iter()
+                    .map(original_of)
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .map(|path| path.as_path()),
+                all_matches,
+            )
+        {
+            return 2;
+        }
+        if matched.is_empty() {
+            return crate::rm_match::no_matches(prog);
+        }
+        let keep = match crate::keep::Keep::load() {
+            Ok(keep) => keep,
+            Err(e) => {
+                eprintln!("{prog}: cannot read keep file: {e}; refusing permanent deletion");
+                return 1;
+            }
+        };
+        let matched: Vec<TrashItem> = matched
+            .into_iter()
+            .filter(|it| {
+                let original = original_of(it);
+                if keep.protects(&original) {
+                    eprintln!(
+                        "{prog}: kept '{}' (listed in the keep file)",
+                        crate::util::err_path(&original)
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if matched.is_empty() {
+            return crate::rm_match::no_matches(prog);
         }
         if !dry_run {
             // RTRASH_ALLOW_ROOTS: rm deletes only items trashed from there.
@@ -4943,6 +5065,14 @@ left in place.
             }
         }
         let code = if dry_run {
+            if !json {
+                let bytes: u64 = matched.iter().map(item_size).sum();
+                eprintln!(
+                    "Would permanently remove {} ({})",
+                    crate::util::plural(matched.len() as u64, "item", "items"),
+                    crate::util::format_bytes(bytes)
+                );
+            }
             i32::from(refused > 0)
         } else if let Err(e) = crate::permanent_guard::gate_many(matched.len() as u64) {
             eprintln!("{prog}: {e}");

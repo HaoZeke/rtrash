@@ -628,7 +628,12 @@ pub fn stats(top: usize) -> Vec<crate::trash_stats::Stats> {
         .collect()
 }
 
+/// `rm` on the Finder trashes: permanently remove the items whose Put Back
+/// place, its file name or the name in the trash matches a pattern.
 pub struct RmOpts<'a> {
+    pub ids: &'a [String],
+    pub all_matches: bool,
+    pub keep: &'a crate::keep::Keep,
     pub batch: Option<&'a str>,
     pub dry_run: bool,
     pub force: bool,
@@ -641,6 +646,9 @@ pub struct RmOpts<'a> {
 /// place, its file name or the name in the trash matches a pattern.
 pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> i32 {
     let RmOpts {
+        ids,
+        all_matches,
+        keep,
         batch,
         dry_run,
         force,
@@ -704,23 +712,26 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
             .map(|b| b.to_string_lossy().into_owned())
             .unwrap_or_default();
         let name = nfc(&e.name);
-        match patterns.kind {
-            crate::filters::Match::Glob => patterns.texts.iter().any(|p| {
-                let p = nfc(p);
-                crate::util::fnmatch(&p, &path_s)
-                    || crate::util::fnmatch(&p, &base)
-                    || crate::util::fnmatch(&p, &name)
-            }),
-            crate::filters::Match::Regex => {
-                let path_s = nfc(&path_s);
-                regex.iter().any(|r| r.is_match(&path_s))
+        crate::rm_match::id_hit(ids, &e.name)
+            || match patterns.kind {
+                crate::filters::Match::Exact => {
+                    crate::orig_path::selects(&patterns.texts, &e.shown)
+                }
+                crate::filters::Match::Glob => patterns.texts.iter().any(|p| {
+                    let p = nfc(p);
+                    crate::util::fnmatch(&p, &path_s)
+                        || crate::util::fnmatch(&p, &base)
+                        || crate::util::fnmatch(&p, &name)
+                }),
+                crate::filters::Match::Regex => {
+                    let path_s = nfc(&path_s);
+                    regex.iter().any(|r| r.is_match(&path_s))
+                }
+                crate::filters::Match::Id => {
+                    texts.selects(&nfc(&path_s), &base, &name, &e.date, &e.trash)
+                }
+                _ => texts.hit(&nfc(&path_s), &base, &name),
             }
-            crate::filters::Match::Exact => crate::orig_path::selects(&patterns.texts, &e.shown),
-            crate::filters::Match::Id => {
-                texts.selects(&nfc(&path_s), &base, &name, &e.date, &e.trash)
-            }
-            _ => texts.hit(&nfc(&path_s), &base, &name),
-        }
     };
     if patterns.kind == crate::filters::Match::Exact {
         let kept: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
@@ -728,6 +739,19 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         crate::orig_path::hint(prog, &patterns.operands, &have, &kept, window);
     }
     let hits: Vec<&Entry> = rows.iter().filter(|e| hit(e)).collect();
+    if patterns.kind == crate::filters::Match::Exact
+        && ids.is_empty()
+        && crate::rm_match::refuse_ambiguous(
+            prog,
+            hits.iter().map(|e| e.shown.as_path()),
+            all_matches,
+        )
+    {
+        return 2;
+    }
+    if hits.is_empty() {
+        return crate::rm_match::no_matches(prog);
+    }
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
     // they came from (an item with no Put Back place counts as outside),
     // so a refused rm deletes nothing.
@@ -758,6 +782,13 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
     }
     for e in hits {
         let path_s = e.shown.to_string_lossy();
+        if keep.protects(&e.shown) {
+            eprintln!(
+                "{prog}: kept '{}' (listed in the keep file)",
+                crate::util::err_path(&e.shown)
+            );
+            continue;
+        }
         // The git scan reads the whole tree and can take a while, so it comes
         // first; the item must still be the one listed after it, and after
         // the question. One already gone needs nothing done; another in its
@@ -815,7 +846,8 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
             .map(|p| format!("\"{}\"", crate::util::json_escape(p)))
             .collect();
         println!(
-            "{{\"dry_run\":{dry_run},\"removed\":{removed},\"bytes\":{bytes},\"matches\":[{}]}}",
+            "{{\"dry_run\":{},\"removed\":{removed},\"bytes\":{bytes},\"matches\":[{}]}}",
+            dry_run,
             m.join(",")
         );
     } else if dry_run {

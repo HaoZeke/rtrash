@@ -772,7 +772,7 @@ on disk.
 .TP
 .BI \-\-glob =PATTERN
 Only items whose original path (a
-.I PATTERN
+.I PATH
 with a /) or file name matches a shell glob.
 .TP
 .BI \-\-regex =RE
@@ -4232,6 +4232,18 @@ refuses a path that matches an entry exactly or as a shell pattern.
 A config file cannot be undone by an option, so
 .B RTRASH_CONFIG=
 (empty) runs without it.
+.PP
+The
+.I keep
+file beside
+.I config.toml
+has one original path or path prefix per line, with blank lines and
+.B #
+comments ignored. Permanent
+.BR rm ,
+.BR empty ,
+.B reap
+and retention pruning always leave those paths alone.
 .TP
 .B \-\-path
 Print where the config file is looked for.
@@ -4489,6 +4501,16 @@ Only consider this trash directory (repeatable).
 .B \-\-home\-only
 Only the home trash (skip volume trash).
 .TP
+.B \-\-glob
+Read each operand as a shell-style glob over the original path, basename
+or trash item name.
+.TP
+.B \-\-prefix
+Match each original path equal to or below an operand.
+.TP
+.B \-\-substring
+Search each operand anywhere in the original path.
+.TP
 .B \-\-regex
 Each
 .I PATTERN
@@ -4521,6 +4543,9 @@ or
 needs
 .BR \-\-force )
 or
+.B prefix
+(the path and paths below it)
+or
 .B id
 (the
 .B {id}
@@ -4528,6 +4553,15 @@ from
 .BR "list \-\-format" ,
 the trash name, deletion date and trash root).
 Unlike trashy, whose default is regex, a bare pattern is an exact path.
+.TP
+.BI \-\-id =NAME
+Select one item by its name under the trash payload directory.
+.TP
+.B \-\-all\-matches
+Allow deletion when more than one trash item has the same original path.
+Without this flag such an exact match is refused; use
+.B \-\-id
+to choose only one.
 .TP
 .BI \-\-older\-than =AGE
 Only match items trashed more than

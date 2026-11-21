@@ -191,8 +191,9 @@ fn a_read_only_tree_past_max_path_leaves_the_bin_by_rm_and_empty() {
         let last = fs::read_to_string(&record).expect("a private last-put record");
         let want = s(&top).to_lowercase();
         assert!(last.to_lowercase().contains(&want), "{how}: {last}");
+        let top_s = s(&top);
         let args: Vec<&str> = if how == "rm" {
-            vec!["rm", name]
+            vec!["rm", &top_s]
         } else {
             vec!["empty"]
         };

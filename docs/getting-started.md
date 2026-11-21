@@ -34,7 +34,7 @@ Regenerate: [`docs/demo/record.sh`](demo/record.sh). Platform: Linux FreeDesktop
 | Interactive shell / scripts | `rtrash` CLI (or multi-call `trash-put` etc.) |
 | Safer than `os.remove` in Python | `import rtrash; rtrash.unlink(path)` |
 | Drop-in mental model for `rm` | `rtrash -rf path` or symlink `rm` → put |
-| Permanent purge of trash entries | `rtrash empty` / `rtrash rm PATTERN` |
+| Permanent purge of trash entries | `rtrash empty` / `rtrash rm PATH` |
 | Windows system Recycle Bin | `rtrash put/list/restore/empty` (from source; not FreeDesktop layout) |
 | macOS Finder Trash | Default for plain put, list, restore and empty (experimental); `RTRASH_MACOS_TRASH=freedesktop` keeps the FreeDesktop home trash |
 

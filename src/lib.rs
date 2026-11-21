@@ -55,6 +55,7 @@ pub mod holders;
 pub mod info;
 #[cfg(unix)]
 pub mod interrupt;
+pub mod keep;
 #[cfg(unix)]
 pub mod list;
 #[cfg(unix)]
@@ -77,6 +78,7 @@ pub mod retention;
 #[cfg(unix)]
 pub mod rm;
 pub mod rm_ask;
+pub mod rm_match;
 #[cfg(unix)]
 pub mod safety;
 #[cfg(unix)]

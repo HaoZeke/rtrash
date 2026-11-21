@@ -128,6 +128,7 @@ pub(crate) enum Matcher {
     Regex(regex_lite::Regex),
     /// `--match=substring`: text anywhere in the original path.
     Substring(String),
+    Prefix(String),
     /// `--match=exact`: the whole original path.
     Exact(String),
     /// `--match=id`: the `{id}` from `list --format`.
@@ -142,6 +143,7 @@ impl Matcher {
         Ok(match kind {
             Match::Glob => Matcher::Glob(pat),
             Match::Substring => Matcher::Substring(pat),
+            Match::Prefix => Matcher::Prefix(pat),
             Match::Exact => Matcher::Exact(pat),
             Match::Id => Matcher::Id(pat),
             Match::Regex => match regex_lite::Regex::new(&pat) {
@@ -166,6 +168,7 @@ impl Matcher {
                 let full = crate::util::str_from_os_ref(original.as_os_str());
                 full.contains(s.as_str())
             }
+            Matcher::Prefix(s) => original.starts_with(Path::new(s)),
             Matcher::Exact(s) => crate::util::str_from_os_ref(original.as_os_str()) == *s,
             // The date is not here; [`matches_record`] matches an id.
             Matcher::Id(_) => false,

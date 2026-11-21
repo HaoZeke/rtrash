@@ -1457,7 +1457,7 @@ fn odd_names_survive_the_finder_trash() {
             &format!("{args:?} after a payload vanished"),
         );
     }
-    let o = b.run(&["rm", "*"], "");
+    let o = b.run(&["rm", "--glob", "*"], "");
     ok(&o, "rm");
     let o = b.run(&["empty", "--all", "-v"], "");
     ok(&o, "empty");

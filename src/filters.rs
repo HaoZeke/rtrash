@@ -450,8 +450,7 @@ mod tests {
     }
 }
 
-/// How `rm` reads its PATTERNs: trashy's `--match` kinds. Globs are the
-/// default here (trashy's default is regex).
+/// How `rm` reads its PATTERNs: trashy's `--match` kinds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Match {
     /// Shell glob on the original path, its basename or the trash name.
@@ -461,6 +460,8 @@ pub enum Match {
     Regex,
     /// Text found anywhere in the original path.
     Substring,
+    /// The original path, or a path below it.
+    Prefix,
     /// The whole original path, character for character.
     Exact,
     /// One trash item: [`item_id`] of its name and deletion date.
@@ -473,10 +474,11 @@ impl Match {
             "glob" => Ok(Match::Glob),
             "regex" => Ok(Match::Regex),
             "substring" => Ok(Match::Substring),
+            "prefix" => Ok(Match::Prefix),
             "exact" => Ok(Match::Exact),
             "id" => Ok(Match::Id),
             _ => Err(format!(
-                "invalid --match '{s}' (use glob, regex, substring, exact or id)"
+                "invalid --match '{s}' (use exact, glob, regex, substring, prefix or id)"
             )),
         }
     }
@@ -544,6 +546,7 @@ impl Patterns {
                 .texts
                 .iter()
                 .any(|p| ["", "/", "\\"].contains(&p.as_str())),
+            Match::Prefix => self.texts.iter().any(|p| p == "/" || p == "\\"),
             Match::Exact | Match::Id => false,
         }
     }
@@ -574,6 +577,10 @@ impl Patterns {
             }),
             Match::Regex => self.regex.iter().any(|r| r.is_match(full)),
             Match::Substring => self.texts.iter().any(|p| full.contains(p.as_str())),
+            Match::Prefix => self
+                .texts
+                .iter()
+                .any(|p| std::path::Path::new(full).starts_with(std::path::Path::new(p))),
             Match::Exact => self.texts.iter().any(|p| p == full),
             // The date is not here; [`selects`] matches an id.
             Match::Id => false,

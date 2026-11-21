@@ -342,8 +342,13 @@ export extern "rtrash rm" [
     --smaller-than: string  # only match items taking less than SIZE on disk
     --batch: string  # only items from one put run: an ID from `undo --list`, or `last`
     --max-count: string  # refuse when more than N items would go
+    --glob  # PATHs are shell-style globs
+    --prefix  # PATHs match themselves and paths below them
+    --substring  # PATHs are searched in the original path
     --regex  # PATTERNs are regular expressions on the original path
-    --match(-m): string  # how to read PATTERNs: glob, regex, substring, exact or id
+    --match(-m): string  # exact (default), glob, regex, substring, prefix or id
+    --id: string  # select one trash item by name
+    --all-matches  # allow duplicate original paths
     --dry-run(-n)  # list matches and reclaimable size; do not delete
     --interactive(-i)  # ask before deleting, even when stdin is not a terminal
     --yes(-y)  # do not ask
@@ -566,8 +571,13 @@ export extern "trash-rm" [
     --dry-run(-n)  # list matches and reclaimable size; do not delete
     --batch: string  # only items from one put run: an ID from `undo --list`, or `last`
     --max-count: string  # refuse when more than N items would go
+    --glob  # PATHs are shell-style globs
+    --prefix  # PATHs match themselves and paths below them
+    --substring  # PATHs are searched in the original path
     --regex  # PATTERNs are regular expressions on the original path
-    --match(-m): string  # how to read PATTERNs: glob, regex, substring, exact or id
+    --match(-m): string  # exact (default), glob, regex, substring, prefix or id
+    --id: string  # select one trash item by name
+    --all-matches  # allow duplicate original paths
     --interactive(-i)  # ask before deleting, even when stdin is not a terminal
     --yes(-y)  # do not ask
     --force(-f)  # do not ask, and allow mass patterns that match everything

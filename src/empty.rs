@@ -89,6 +89,7 @@ struct Opts {
     all_users: bool,
     /// Original paths to remove exactly. Empty means the whole trash.
     paths: Vec<String>,
+    keep: crate::keep::Keep,
 }
 
 /// The `.trashinfo` records in `dir` whose payload in `files/` is gone,
@@ -183,6 +184,16 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
         let now = dangling_records(dir);
         for fname in now.iter().filter(|f| checked.contains(*f)) {
             let path = dir.info().join(fname);
+            if crate::trash_check::record_origin(dir, &path)
+                .ok()
+                .is_some_and(|(original, _)| opts.keep.protects(&original))
+            {
+                eprintln!(
+                    "{prog}: kept '{}' (listed in the keep file)",
+                    crate::util::err_path(&path)
+                );
+                continue;
+            }
             if opts.dry_run {
                 if !opts.json {
                     println!("would remove {}", crate::util::term_path(&path));
@@ -306,6 +317,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         all_users: false,
         all: false,
         paths: Vec::new(),
+        keep: crate::keep::Keep::default(),
     };
     let mut no_more_opts = false;
     for arg in args {
@@ -411,6 +423,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     if !opts.paths.is_empty() && opts.max_size.is_some() {
         return usage_err(prog, "a PATH takes no --max-size");
     }
+    opts.keep = match crate::keep::Keep::load() {
+        Ok(keep) => keep,
+        Err(e) => {
+            eprintln!("{prog}: cannot read keep file: {e}; refusing permanent deletion");
+            return 1;
+        }
+    };
 
     // macOS empties the Finder Trash unless a pin or the setting says
     // otherwise.
@@ -597,7 +616,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 max,
                 policy: opts.prune,
                 dry_run: opts.dry_run,
-                verbose: opts.verbose,
+                verbose: opts.verbose || opts.dry_run,
                 protect_batch: None,
                 gone_before: cutoff,
                 free_inodes: 0,
@@ -656,6 +675,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     }
     let failures = failures.into_inner().unwrap_or_else(|p| p.into_inner());
     eprint!("{}", failure_report(prog, &failures));
+    if opts.dry_run && n == 0 {
+        eprintln!("{prog}: nothing would be permanently removed");
+        return 1;
+    }
     if !opts.dry_run && crate::interrupt::requested() {
         eprintln!("{prog}: stopped by Ctrl-C: {n} removed; the rest stay in the trash");
         return 130;
@@ -777,7 +800,7 @@ fn empty_one(
     // same two roots (every child of files/ and info/), not only .trashinfo rows.
     if cutoff.is_none() {
         if opts.dry_run {
-            full_empty_dry_run(dir, opts, removed, bytes);
+            full_empty_dry_run(prog, dir, opts, removed, bytes);
         } else {
             let before = errors.load(Ordering::Relaxed);
             let left = full_empty_wipe(prog, seen, opts, removed, errors, failures);
@@ -799,7 +822,7 @@ fn empty_one(
     let mut kept_names: Vec<String> = Vec::new();
     // Items that came after the count, or took the name of one it counted.
     let mut late = 0u64;
-    let mut victims: Vec<(PathBuf, Option<PathBuf>, PathBuf)> = Vec::new(); // (target, info, display)
+    let mut victims: Vec<(PathBuf, Option<PathBuf>, PathBuf, std::ffi::OsString)> = Vec::new();
 
     if let Ok(entries) = fs::read_dir(&info_dir) {
         for entry in entries.flatten() {
@@ -828,16 +851,23 @@ fn empty_one(
                 continue;
             }
             if take {
+                let original = original_of(dir, &info_path);
+                if original.as_ref().is_some_and(|p| opts.keep.protects(p)) {
+                    let kept = original.as_ref().expect("checked");
+                    eprintln!(
+                        "{prog}: kept '{}' (listed in the keep file)",
+                        crate::util::err_path(kept)
+                    );
+                    kept_names.push(name.to_string());
+                    continue;
+                }
                 // -v names the original path, as trash-cli users asked.
-                let shown = if opts.verbose {
-                    original_of(dir, &info_path)
-                } else {
-                    None
-                };
+                let shown = opts.verbose.then_some(original).flatten();
                 victims.push((
                     crate::util::join_name(&files_dir, name),
                     Some(info_path),
                     shown.unwrap_or_else(|| crate::util::join_name(&dir.root.join("files"), name)),
+                    crate::util::os_from_str(name),
                 ));
             } else {
                 kept_names.push(name.to_string());
@@ -856,7 +886,7 @@ fn empty_one(
                 let has_info = info_dir.join(info_name).exists();
                 if !has_info {
                     let p = entry.path();
-                    victims.push((p.clone(), None, p));
+                    victims.push((p.clone(), None, p, entry.file_name()));
                 }
             }
         }
@@ -871,71 +901,78 @@ fn empty_one(
         .flatten();
     let gone = AtomicU64::new(0);
     let gone_items = AtomicU64::new(0);
-    victims.par_iter().for_each(|(target, info_path, display)| {
-        if opts.dry_run {
-            // Prefer FreeDesktop directorysizes for directory payloads; fall back
-            // to a disk_usage walk. Always add the .trashinfo size when present.
-            let name = target
-                .file_name()
-                .map(crate::util::str_from_os_ref)
-                .unwrap_or_default();
-            let sz = if info_path.is_some() && !name.is_empty() {
-                sizes.entry_bytes(&name)
-            } else {
-                crate::fastdelete::disk_usage(target)
-                    + info_path
-                        .as_ref()
-                        .map(|p| crate::fastdelete::disk_usage(p))
-                        .unwrap_or(0)
-            };
-            bytes.fetch_add(sz, Ordering::Relaxed);
-            if opts.verbose {
-                println!(
-                    "would remove {} ({})",
-                    crate::util::term_path(&display),
-                    crate::fastdelete::format_bytes(sz)
-                );
-            }
-            removed.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        // After a Ctrl-C, the items not started stay with their records.
-        if crate::interrupt::requested() {
-            return;
-        }
-        let sz = match (&total, info_path) {
-            (Some(_), Some(_)) => target
-                .file_name()
-                .map_or(0, |n| sizes.entry_bytes(&crate::util::str_from_os_ref(n))),
-            _ => 0,
-        };
-        match crate::permanent_guard::remove(target) {
-            Ok(()) => {
-                if info_path.is_some() {
-                    gone.fetch_add(sz, Ordering::Relaxed);
-                    gone_items.fetch_add(1, Ordering::Relaxed);
-                }
-                if let Some(ip) = info_path {
-                    // The payload is gone: its record goes too before a
-                    // Ctrl-C acts.
-                    let section = crate::interrupt::critical();
-                    match fs::remove_file(ip) {
-                        Ok(()) => {}
-                        // A concurrent empty may have won the race.
-                        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                        Err(e) => fail(failures, errors, ip.clone(), &e),
-                    }
-                    drop(section);
-                    crate::interrupt::test_seam("after-item");
-                }
-                if opts.verbose {
-                    println!("removed {}", crate::util::term_path(display));
+    victims
+        .par_iter()
+        .for_each(|(target, info_path, display, name)| {
+            if opts.dry_run {
+                // Prefer FreeDesktop directorysizes for directory payloads; fall back
+                // to a disk_usage walk. Always add the .trashinfo size when present.
+                let name = target
+                    .file_name()
+                    .map(crate::util::str_from_os_ref)
+                    .unwrap_or_default();
+                let sz = if info_path.is_some() && !name.is_empty() {
+                    sizes.entry_bytes(&name)
+                } else {
+                    crate::fastdelete::disk_usage(target)
+                        + info_path
+                            .as_ref()
+                            .map(|p| crate::fastdelete::disk_usage(p))
+                            .unwrap_or(0)
+                };
+                bytes.fetch_add(sz, Ordering::Relaxed);
+                if opts.verbose || opts.dry_run {
+                    println!(
+                        "would remove {} ({})",
+                        crate::util::term_path(&display),
+                        crate::fastdelete::format_bytes(sz)
+                    );
                 }
                 removed.fetch_add(1, Ordering::Relaxed);
+                return;
             }
-            Err(e) => fail(failures, errors, display.clone(), &e),
-        }
-    });
+            // After a Ctrl-C, the items not started stay with their records.
+            if crate::interrupt::requested() {
+                return;
+            }
+            if !seen.saw_item(name) {
+                let e = io::Error::other("item changed after it was selected; left as it is");
+                fail(failures, errors, display.clone(), &e);
+                return;
+            }
+            let sz = match (&total, info_path) {
+                (Some(_), Some(_)) => target
+                    .file_name()
+                    .map_or(0, |n| sizes.entry_bytes(&crate::util::str_from_os_ref(n))),
+                _ => 0,
+            };
+            match crate::permanent_guard::remove(target) {
+                Ok(()) => {
+                    if info_path.is_some() {
+                        gone.fetch_add(sz, Ordering::Relaxed);
+                        gone_items.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if let Some(ip) = info_path {
+                        // The payload is gone: its record goes too before a
+                        // Ctrl-C acts.
+                        let section = crate::interrupt::critical();
+                        match fs::remove_file(ip) {
+                            Ok(()) => {}
+                            // A concurrent empty may have won the race.
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                            Err(e) => fail(failures, errors, ip.clone(), &e),
+                        }
+                        drop(section);
+                        crate::interrupt::test_seam("after-item");
+                    }
+                    if opts.verbose {
+                        println!("removed {}", crate::util::term_path(display));
+                    }
+                    removed.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(e) => fail(failures, errors, display.clone(), &e),
+            }
+        });
 
     if opts.dry_run {
         sizes.write_back_locked();
@@ -1146,33 +1183,50 @@ fn original_of(dir: &TrashDir, info_path: &std::path::Path) -> Option<PathBuf> {
 /// Dry-run inventory matching full wipe: every top-level child of `files/` and
 /// non-counted-as-item names under `info/` still contribute reclaim size; item
 /// count is top-level `files/` children (same as live wipe `n_files`).
-fn full_empty_dry_run(dir: &TrashDir, opts: &Opts, removed: &AtomicU64, bytes: &AtomicU64) {
+fn full_empty_dry_run(
+    prog: &str,
+    dir: &TrashDir,
+    opts: &Opts,
+    removed: &AtomicU64,
+    bytes: &AtomicU64,
+) {
     let files_dir = dir.files();
     let info_dir = dir.info();
     let mut n_files = 0u64;
     let mut total = 0u64;
     let sizes = trashdir::DirSizes::load(dir);
+    let mut kept_records = std::collections::HashSet::new();
     if let Ok(entries) = fs::read_dir(&files_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
+            let mut info = entry.file_name();
+            info.push(".trashinfo");
+            let record = info_dir.join(&info);
+            let shown = original_of(dir, &record).unwrap_or_else(|| p.clone());
+            if opts.keep.protects(&shown) {
+                eprintln!(
+                    "{prog}: kept '{}' (listed in the keep file)",
+                    crate::util::err_path(&shown)
+                );
+                kept_records.insert(info);
+                continue;
+            }
             // Directory payloads: use validated directorysizes when present.
             let sz = sizes.payload_bytes(&crate::util::str_from_os_ref(&entry.file_name()));
             total = total.saturating_add(sz);
             n_files += 1;
-            if opts.verbose {
-                let mut info = entry.file_name();
-                info.push(".trashinfo");
-                let shown = original_of(dir, &info_dir.join(info)).unwrap_or(p);
-                println!(
-                    "would remove {} ({})",
-                    crate::util::term_path(&shown),
-                    crate::fastdelete::format_bytes(sz)
-                );
-            }
+            println!(
+                "would remove {} ({})",
+                crate::util::term_path(&shown),
+                crate::fastdelete::format_bytes(sz)
+            );
         }
     }
     if let Ok(entries) = fs::read_dir(&info_dir) {
         for entry in entries.flatten() {
+            if kept_records.contains(&entry.file_name()) {
+                continue;
+            }
             total = total.saturating_add(crate::fastdelete::disk_usage(&entry.path()));
         }
     }
@@ -1206,8 +1260,26 @@ fn full_empty_wipe(
         .map(|n| n.as_os_str())
         .filter(|n| !seen.saw_payload(n))
         .collect();
-    let late = |name: &std::ffi::OsStr| late_names.contains(name);
-    let late_record = |rec: &std::ffi::OsStr| !seen.saw_record(rec);
+    let mut protected_names: std::collections::HashSet<std::ffi::OsString> =
+        std::collections::HashSet::new();
+    let mut protected_records: std::collections::HashSet<std::ffi::OsString> =
+        std::collections::HashSet::new();
+    for name in &names {
+        let mut record = name.clone();
+        record.push(".trashinfo");
+        let info_path = info_dir.join(&record);
+        if let Some(original) = original_of(dir, &info_path).filter(|p| opts.keep.protects(p)) {
+            eprintln!(
+                "{prog}: kept '{}' (listed in the keep file)",
+                crate::util::err_path(&original)
+            );
+            protected_names.insert(name.clone());
+            protected_records.insert(record);
+        }
+    }
+    let late = |name: &std::ffi::OsStr| late_names.contains(name) || protected_names.contains(name);
+    let late_record =
+        |rec: &std::ffi::OsStr| !seen.saw_record(rec) || protected_records.contains(rec);
 
     // Verbose still lists intended removals before delete (stable UX),
     // by original path where a record names one.
@@ -1232,6 +1304,14 @@ fn full_empty_wipe(
         .iter()
         .map(|n| crate::util::str_from_os_ref(n))
         .collect();
+    kept.extend(
+        protected_names
+            .iter()
+            .map(|n| crate::util::str_from_os_ref(n)),
+    );
+    kept.sort();
+    kept.dedup();
+    let late_count = late_names.len() as u64;
     let left = kept.len() as u64;
     if let Err(e) = crate::permanent_guard::gate_many(names.len() as u64 - left) {
         eprintln!("{prog}: {e}");
@@ -1271,7 +1351,7 @@ fn full_empty_wipe(
     }
 
     prune_directorysizes(dir, &kept);
-    report_late(prog, dir, left);
+    report_late(prog, dir, late_count);
     left
 }
 

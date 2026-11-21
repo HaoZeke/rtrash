@@ -818,9 +818,9 @@ pub fn uid_name(uid: u32) -> String {
 
 /// Identity of a payload: device, inode and change time, so a new item
 /// that got the inode and name of a removed one still differs.
-type PayloadId = (u64, u64, i64, i64);
+pub(crate) type PayloadId = (u64, u64, i64, i64);
 
-fn payload_id(path: &Path) -> Option<PayloadId> {
+pub(crate) fn payload_id(path: &Path) -> Option<PayloadId> {
     let m = fs::symlink_metadata(path).ok()?;
     Some((m.dev(), m.ino(), m.ctime(), m.ctime_nsec()))
 }

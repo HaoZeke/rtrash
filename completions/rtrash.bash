@@ -50,7 +50,8 @@ _rtrash_restore_opts=(
 
 _rtrash_rm_opts=(
   --trash-dir= --home-only -n --dry-run -i --interactive -y --yes -f --force -v --verbose
-  --older-than= --newer-than= --larger-than= --smaller-than= --batch= --max-count= --regex -m --match= --json
+  --older-than= --newer-than= --larger-than= --smaller-than= --batch= --max-count=
+  --glob --prefix --substring --regex -m --match= --id= --all-matches --json
   --help --version
 )
 

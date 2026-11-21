@@ -1131,7 +1131,7 @@ fn empty_until_free_dry_run_reports_each_short_drive() {
         "{stdout}"
     );
     assert!(stderr.contains("from the Recycle Bin of"), "{stderr}");
-    // The dry run left the item; take it out by name.
+    // The dry run left the item; take it out by exact original path.
     let _ = common::rtrash_real(common::Real::RecycleBin)
         .arg("rm")
         .arg(&p)
@@ -1270,8 +1270,17 @@ fn rm_json_summarizes_the_recycle_bin_removal() {
     let done = rm(&["--json"]);
     assert!(done.contains("\"dry_run\": false"), "{done}");
     assert!(done.contains("\"removed\": 1"), "{done}");
-    let again = rm(&["--json"]);
-    assert!(again.contains("\"removed\": 0"), "{again}");
+    let again = common::rtrash_real(common::Real::RecycleBin)
+        .args(["rm", "--json"])
+        .arg(&p)
+        .output()
+        .unwrap();
+    assert_eq!(again.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("no trash items match"),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
 }
 
 /// `reap --permanent` on Windows deletes through permanent_guard::remove,
