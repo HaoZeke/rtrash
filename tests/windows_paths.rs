@@ -260,3 +260,83 @@ fn a_restore_across_volumes_makes_a_junction_again() {
     let _ = fs::remove_dir_all(&away);
     let _ = fs::remove_dir_all(&home);
 }
+
+fn lines(text: &str) -> usize {
+    text.lines().filter(|l| !l.is_empty()).count()
+}
+
+fn folded(p: &Path) -> String {
+    s(p).replace('/', "\\").to_ascii_lowercase()
+}
+
+/// Exact `rm` matches the original through letter case, `/`, a relative
+/// name, and the short 8.3 form of a parent. The file's own 8.3 name,
+/// read before `put`, matches nothing: that entry is gone, and the `$I`
+/// record keeps the one path put stored.
+#[test]
+fn rm_matches_the_exact_path_across_windows_spellings() {
+    let home = home("spellings");
+    let dir = home.join("LongDirectoryName");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("ExactFile.TXT");
+    fs::write(&file, "body").unwrap();
+    let long = s(&file);
+    let short_file = rtrash::win_recycle::short_path(&file);
+    let short_dir = rtrash::win_recycle::short_path(&dir);
+    ok(&run(&home, &["put", &long]));
+    assert!(!file.exists(), "put left {long}");
+
+    let case = s(&dir.join("exactfile.txt"));
+    assert_eq!(lines(&ok(&run(&home, &["rm", "-n", &case]))), 1, "{case}");
+    let slashed = long.replace('\\', "/");
+    assert_eq!(
+        lines(&ok(&run(&home, &["rm", "-n", &slashed]))),
+        1,
+        "{slashed}"
+    );
+    let rel = common::rtrash(&home)
+        .args(["rm", "-n", "ExactFile.TXT"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(rel.status.success(), "{}", text(&rel));
+    let rel_out = String::from_utf8_lossy(&rel.stdout);
+    assert_eq!(lines(&rel_out), 1, "{}", text(&rel));
+
+    match &short_dir {
+        Some(short) if folded(short) != folded(&dir) => {
+            let via = s(&short.join("ExactFile.TXT"));
+            assert_eq!(lines(&ok(&run(&home, &["rm", "-n", &via]))), 1, "{via}");
+            let other = dir.join("OtherFile.TXT");
+            fs::write(&other, "other").unwrap();
+            let short_other = s(&short.join("OtherFile.TXT"));
+            ok(&run(&home, &["put", &short_other]));
+            assert_eq!(
+                lines(&ok(&run(&home, &["rm", "-n", &s(&other)]))),
+                1,
+                "{short_other}"
+            );
+            ok(&run(&home, &["rm", &s(&other)]));
+        }
+        _ => common::skip("this volume has no 8.3 name for the directory"),
+    }
+    match short_file {
+        Some(short) if folded(&short) != folded(&file) => {
+            let dry = ok(&run(&home, &["rm", "-n", &s(&short)]));
+            assert_eq!(lines(&dry), 0, "a short final name matched: {dry}");
+        }
+        _ => common::skip("this volume has no 8.3 name for the file"),
+    }
+    let shown = ok(&run(&home, &["list"]));
+    assert!(
+        shown.to_ascii_lowercase().contains("exactfile.txt"),
+        "{shown}"
+    );
+    ok(&run(&home, &["rm", &case]));
+    let shown = ok(&run(&home, &["list"]));
+    assert!(
+        !shown.to_ascii_lowercase().contains("exactfile.txt"),
+        "{shown}"
+    );
+    let _ = fs::remove_dir_all(&home);
+}

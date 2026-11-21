@@ -1,0 +1,1 @@
+On Windows, `rtrash rm` and `rtrash empty` compare an exact original path with the Recycle Bin's path key, so letter case and `/` against `\` match, and the short 8.3 name of a parent that still exists matches its long name. The file's own 8.3 name is not recovered once the item has left the directory, because the `$I` record stores one path.

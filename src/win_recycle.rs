@@ -1236,6 +1236,31 @@ pub fn path_key(path: &str, mounts: &[(String, String)]) -> String {
     t.to_lowercase()
 }
 
+/// The 8.3 path of `path`, when the volume has one. None when the path is
+/// gone or the call fails. A directory that still exists can be asked
+/// after a file inside it has moved; the file's own short name cannot,
+/// because that directory entry is gone and a `$I` record stores one path.
+#[cfg(windows)]
+pub fn short_path(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    let wide = crate::util::win_path(path);
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: `wide` is NUL-terminated and `buf` is as long as the length passed.
+    let mut n = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    if n as usize >= buf.len() {
+        buf.resize(n as usize, 0);
+        // SAFETY: as above, with the size the first call asked for.
+        n = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    }
+    if n == 0 || n as usize >= buf.len() {
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_wide(
+        &buf[..n as usize],
+    )))
+}
+
 /// A volume path that is a folder rather than a drive root (`C:\\`).
 pub fn mounted_folder(path: &str) -> bool {
     let b = path.as_bytes();
