@@ -1148,6 +1148,7 @@ pub struct EmptyOpts {
     pub cutoff: Option<i64>,
     pub max_size: Option<u64>,
     pub prune: crate::retention::Policy,
+    pub interactive: bool,
     pub dry_run: bool,
     pub verbose: bool,
     pub json: bool,
@@ -1331,6 +1332,15 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
     let mut bytes = 0u64;
     let mut failed = 0u64;
     let picked = empty_pick(rows, o.cutoff, o.max_size, o.prune);
+    if o.interactive && !dry_run && !o.paths.is_empty() {
+        let named: Vec<(String, u64)> = picked
+            .iter()
+            .map(|(e, b)| (crate::util::term_path(&e.shown), *b))
+            .collect();
+        if !crate::rm_ask::confirm(prog, &named) {
+            return 0;
+        }
+    }
     // A cap counts the picks first, so a refused empty deletes nothing.
     if !dry_run {
         if let Some(code) = crate::permanent_guard::check_count(prog, picked.len() as u64) {

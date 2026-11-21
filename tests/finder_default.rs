@@ -1368,6 +1368,32 @@ fn verbose_finder_empty_names_the_put_back_place() {
     assert!(!line.contains(".Trash"), "{line}");
 }
 
+#[test]
+fn interactive_finder_empty_of_an_exact_path_honors_the_reply() {
+    let b = Box_::new("emptyiexact");
+    fs::write(b.work().join("chosen.txt"), b"chosen").unwrap();
+    fs::write(b.work().join("kept.txt"), b"kept").unwrap();
+    assert!(b
+        .run(&["put", "chosen.txt", "kept.txt"], "")
+        .status
+        .success());
+
+    let no = b.run(&["empty", "-i", "chosen.txt"], "no\n");
+    assert!(no.status.success(), "{}", err(&no));
+    assert!(
+        err(&no).contains("Permanently remove 1 item"),
+        "{}",
+        err(&no)
+    );
+    assert!(b.finder().join("chosen.txt").exists());
+    assert!(b.finder().join("kept.txt").exists());
+
+    let yes = b.run(&["empty", "-i", "chosen.txt"], "y\n");
+    assert!(yes.status.success(), "{}", err(&yes));
+    assert!(!b.finder().join("chosen.txt").exists());
+    assert!(b.finder().join("kept.txt").exists());
+}
+
 /// Odd but valid file names (APFS takes no invalid UTF-8) through put,
 /// every list form, restore, rm and empty on the Finder Trash. Each
 /// command must finish without a panic; restore brings back the bytes.

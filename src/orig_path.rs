@@ -23,14 +23,36 @@ use std::path::{Component, Path, PathBuf};
 /// On Windows, also the short and long names of that parent, and of the
 /// final component when it is still on disk and is not a link.
 pub fn forms(typed: &str) -> Vec<String> {
-    let lexical = lexical_abs(&crate::util::arg_path(typed));
+    let typed = crate::util::arg_path(typed);
+    let climbs = typed
+        .components()
+        .any(|component| component == Component::ParentDir);
+    let abs = absolute(&typed);
+    let lexical = lexical_abs(&abs);
+    let put = put_form(&abs);
+    let resolved_climb = climbs
+        && put
+            .as_deref()
+            .is_some_and(|path| norm(path) != norm(&lexical));
     let mut out = Vec::new();
-    push_form(&mut out, &lexical);
-    if let Some(put) = put_form(&lexical) {
-        push_form(&mut out, &put);
+    // A `..` after a linked directory follows the link before climbing.
+    // Its lexical collapse can name an unrelated item, so only the path
+    // that put actually recorded is safe in that case.
+    if !resolved_climb {
+        push_form(&mut out, &lexical);
+    }
+    if let Some(ref put) = put {
+        push_form(&mut out, put);
     }
     #[cfg(windows)]
-    push_windows_forms(&mut out, &lexical);
+    push_windows_forms(
+        &mut out,
+        if resolved_climb {
+            put.as_deref().unwrap_or(&lexical)
+        } else {
+            &lexical
+        },
+    );
     out
 }
 
@@ -170,20 +192,14 @@ pub fn hint(prog: &str, wants: &[String], have: &[PathBuf], kept: &[PathBuf], wi
 }
 
 fn lexical_abs(path: &Path) -> PathBuf {
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    };
+    let abs = absolute(path);
     let mut out = PathBuf::new();
     for component in abs.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
                 }
             }
             other => out.push(other.as_os_str()),
@@ -193,6 +209,21 @@ fn lexical_abs(path: &Path) -> PathBuf {
         PathBuf::from(".")
     } else {
         out
+    }
+}
+
+fn absolute(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+    #[cfg(not(windows))]
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
     }
 }
 
@@ -394,9 +425,13 @@ mod tests {
 
     #[test]
     fn an_exact_path_outside_the_window_is_not_a_near_miss() {
-        let exact = PathBuf::from("/home/u/a");
-        let sibling = PathBuf::from("/home/u/ab");
-        let child = PathBuf::from("/home/u/a/b");
+        #[cfg(windows)]
+        let base = Path::new(r"C:\home\u");
+        #[cfg(not(windows))]
+        let base = Path::new("/home/u");
+        let exact = base.join("a");
+        let sibling = base.join("ab");
+        let child = exact.join("b");
         let wants = vec![norm(&exact)];
         let have = vec![exact.clone(), sibling.clone(), child.clone()];
         let kept = vec![sibling.clone(), child.clone()];
@@ -408,8 +443,10 @@ mod tests {
         match &absent[0].1 {
             Notice::Miss(near) => {
                 let names: Vec<_> = near.iter().map(|p| norm(p)).collect();
-                assert!(names.iter().any(|n| n.ends_with("/ab")));
-                assert!(names.iter().any(|n| n.ends_with("/a/b")));
+                assert!(names.iter().any(|n| n.ends_with(&norm(Path::new("ab")))));
+                assert!(names
+                    .iter()
+                    .any(|n| n.ends_with(&norm(&Path::new("a").join("b")))));
             }
             Notice::Outside => panic!("a missing path is a near miss"),
         }

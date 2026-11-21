@@ -3377,8 +3377,8 @@ fn rm_matches_the_original_path_exactly() {
 #[test]
 fn rm_removes_one_spelling_of_an_accented_name() {
     let sb = Sandbox::new("exact-nfc");
-    let composed = "caf\u{e9}.txt";
-    let decomposed = "cafe\u{301}.txt";
+    let composed = "item-\u{e9}.txt";
+    let decomposed = "item-e\u{301}.txt";
     let a = sb.work().join(composed);
     let b = sb.work().join(decomposed);
     fs::write(&a, b"composed").unwrap();
@@ -3401,6 +3401,29 @@ fn rm_removes_one_spelling_of_an_accented_name() {
         .collect();
     assert_eq!(left.len(), 1, "{}", stderr_of(&out));
     assert_eq!(fs::read(&left[0]).unwrap(), b"decomposed");
+}
+
+/// A parent traversal after a link resolves the link before `..`. Its
+/// lexical collapse names the decoy, which must stay in the trash.
+#[cfg(unix)]
+#[test]
+fn rm_resolves_a_link_before_climbing_to_the_original_path() {
+    let sb = Sandbox::new("exact-link-up");
+    fs::create_dir_all(sb.work().join("real/sub")).unwrap();
+    std::os::unix::fs::symlink("real/sub", sb.work().join("link")).unwrap();
+    fs::write(sb.work().join("other.txt"), b"decoy").unwrap();
+    fs::write(sb.work().join("real/other.txt"), b"wanted").unwrap();
+    assert!(sb.run(&["put", "other.txt"]).status.success());
+    assert!(sb.run(&["put", "link/../other.txt"]).status.success());
+
+    let out = sb.run(&["rm", "--home-only", "link/../other.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let left: Vec<_> = fs::read_dir(sb.trash().join("files"))
+        .unwrap()
+        .flatten()
+        .map(|entry| fs::read(entry.path()).unwrap())
+        .collect();
+    assert_eq!(left, vec![b"decoy".to_vec()]);
 }
 
 fn set_deletion_date(sb: &Sandbox, name: &str, date: &str) {
@@ -3523,6 +3546,27 @@ fn empty_matches_the_original_path_exactly() {
     assert!(err.contains("near miss"), "{err}");
     assert!(err.contains("/a/b"), "{err}");
     assert_eq!(trash_names(&sb), vec!["b".to_string()]);
+}
+
+#[test]
+fn interactive_empty_of_an_exact_path_honors_the_reply() {
+    let sb = Sandbox::new("exact-empty-i");
+    fs::write(sb.work().join("chosen"), b"chosen").unwrap();
+    fs::write(sb.work().join("kept"), b"kept").unwrap();
+    assert!(sb.run(&["put", "chosen", "kept"]).status.success());
+
+    let no = sb.run_with_stdin(&["empty", "--home-only", "-i", "chosen"], "n\n");
+    assert!(no.status.success(), "{}", stderr_of(&no));
+    assert!(
+        stderr_of(&no).contains("Permanently remove 1 item"),
+        "{}",
+        stderr_of(&no)
+    );
+    assert_eq!(trash_names(&sb).len(), 2);
+
+    let yes = sb.run_with_stdin(&["empty", "--home-only", "-i", "chosen"], "yes\n");
+    assert!(yes.status.success(), "{}", stderr_of(&yes));
+    assert_eq!(trash_names(&sb), vec!["kept".to_string()]);
 }
 
 #[test]

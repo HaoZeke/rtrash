@@ -438,6 +438,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 cutoff,
                 max_size: opts.max_size,
                 prune: opts.prune,
+                interactive: opts.interactive,
                 dry_run: opts.dry_run,
                 verbose: opts.verbose,
                 json: opts.json,
@@ -992,6 +993,23 @@ fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
         &kept,
         crate::orig_path::window(opts.days.is_some(), false),
     );
+    if opts.interactive && !opts.dry_run {
+        let named: Vec<(String, u64)> = hits
+            .iter()
+            .map(|entry| {
+                let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
+                let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
+                (
+                    crate::util::term_path(&entry.original),
+                    crate::fastdelete::disk_usage(&payload)
+                        .saturating_add(crate::fastdelete::disk_usage(&info_path)),
+                )
+            })
+            .collect();
+        if !crate::rm_ask::confirm(prog, &named) {
+            return 0;
+        }
+    }
     if !opts.dry_run {
         let origins: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
         if let Some(code) = crate::allow_roots::refuse_outside(prog, &origins) {
