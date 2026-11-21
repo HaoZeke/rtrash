@@ -5,9 +5,10 @@ members = ["cargo:."]
 [dist]
 cargo-dist-version = "0.34.0"
 ci = "github"
-# Linux FreeDesktop only — do not ship darwin/windows stubs.
-installers = ["shell"]
-targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
+# Linux musl and Windows x64 (the Windows Recycle Bin backend). No darwin stubs:
+# macOS tarballs come from release-musl.yml.
+installers = ["shell", "powershell"]
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
 unix-archive = ".tar.gz"
 # On PRs, only run `dist plan` (no full multi-target build noise).
 pr-run-mode = "plan"
