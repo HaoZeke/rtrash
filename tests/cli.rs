@@ -5820,7 +5820,13 @@ fn who_says_how_many_processes_it_could_not_inspect() {
     let err = stderr_of(&out);
     assert!(err.contains("2 processes could not be inspected"), "{err}");
     assert!(err.contains("the list may be incomplete"), "{err}");
-    assert!(err.contains("run as root"), "{err}");
+    // SAFETY: geteuid has no preconditions. This is the check `as_root`
+    // makes: who prints the hint for a normal user and leaves it off for root.
+    if unsafe { libc::geteuid() } == 0 {
+        assert!(!err.contains("run as root"), "{err}");
+    } else {
+        assert!(err.contains("run as root"), "{err}");
+    }
     let out = sb.run_env(&["who", "--json", "w.log"], &env);
     assert!(
         stdout_of(&out).contains("\"unreadable\":2}"),
