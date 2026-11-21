@@ -927,9 +927,39 @@ mod listing {
     }
 }
 
+/// How one `RmGetList` call ended, apart from the Windows types.
+#[cfg(any(windows, test))]
+enum Reply {
+    /// It filled this many entries.
+    Done(usize),
+    /// The buffer was too small; this many entries are needed.
+    More(usize),
+    Failed,
+}
+
+/// The entries `get` fills, asking up to four times and growing a buffer of
+/// `blank` entries when it says more are needed. Entries come back only from
+/// a call that finished: a list that kept outgrowing the buffer gives None,
+/// not a buffer of blank entries.
+#[cfg(any(windows, test))]
+fn fill_list<T>(blank: impl Fn() -> T, mut get: impl FnMut(&mut [T]) -> Reply) -> Option<Vec<T>> {
+    let mut buf: Vec<T> = Vec::new();
+    for _ in 0..4 {
+        match get(&mut buf) {
+            Reply::Done(n) => {
+                buf.truncate(n);
+                return Some(buf);
+            }
+            Reply::More(need) => buf = (0..need + 4).map(|_| blank()).collect(),
+            Reply::Failed => return None,
+        }
+    }
+    None
+}
+
 #[cfg(windows)]
 mod win {
-    use super::{base_name, Hold};
+    use super::{base_name, fill_list, Hold, Reply};
     use std::os::windows::ffi::OsStringExt;
     use std::path::{Path, PathBuf};
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_MORE_DATA, ERROR_SUCCESS};
@@ -998,28 +1028,27 @@ mod win {
                 std::ptr::null(),
             ) == ERROR_SUCCESS
             {
-                for _ in 0..4 {
-                    let mut needed = 0u32;
-                    let mut count = infos.len() as u32;
-                    let mut reasons = 0u32;
-                    let r = RmGetList(
-                        session,
-                        &mut needed,
-                        &mut count,
-                        infos.as_mut_ptr(),
-                        &mut reasons,
-                    );
-                    if r == ERROR_SUCCESS {
-                        infos.truncate(count as usize);
-                        answered = true;
-                        break;
-                    }
-                    if r != ERROR_MORE_DATA {
-                        infos.clear();
-                        break;
-                    }
-                    infos = vec![std::mem::zeroed(); needed as usize + 4];
-                }
+                let got = fill_list(
+                    || std::mem::zeroed::<RM_PROCESS_INFO>(),
+                    |buf| {
+                        let mut needed = 0u32;
+                        let mut count = buf.len() as u32;
+                        let mut reasons = 0u32;
+                        match RmGetList(
+                            session,
+                            &mut needed,
+                            &mut count,
+                            buf.as_mut_ptr(),
+                            &mut reasons,
+                        ) {
+                            ERROR_SUCCESS => Reply::Done(count as usize),
+                            ERROR_MORE_DATA => Reply::More(needed as usize),
+                            _ => Reply::Failed,
+                        }
+                    },
+                );
+                answered = got.is_some();
+                infos = got.unwrap_or_default();
             }
             RmEndSession(session);
         }
@@ -1220,6 +1249,41 @@ mod tests {
             path: PathBuf::from(path),
             kind,
         }
+    }
+
+    #[test]
+    fn a_list_that_keeps_outgrowing_its_buffer_gives_no_blank_entries() {
+        let mut asks = 0;
+        let got = fill_list(
+            || 0u32,
+            |_| {
+                asks += 1;
+                Reply::More(3)
+            },
+        );
+        assert_eq!(got, None);
+        assert_eq!(asks, 4);
+    }
+
+    #[test]
+    fn a_list_that_fits_after_one_growth_is_cut_to_what_was_filled() {
+        let mut sizes = Vec::new();
+        let got = fill_list(
+            || 0u32,
+            |buf| {
+                sizes.push(buf.len());
+                if buf.is_empty() {
+                    return Reply::More(2);
+                }
+                buf[0] = 7;
+                buf[1] = 8;
+                Reply::Done(2)
+            },
+        );
+        assert_eq!(got, Some(vec![7, 8]));
+        assert_eq!(sizes, [0, 6]);
+        assert_eq!(fill_list(|| 0u32, |_| Reply::Done(0)), Some(vec![]));
+        assert_eq!(fill_list(|| 0u32, |_| Reply::Failed), None);
     }
 
     #[test]
