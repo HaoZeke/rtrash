@@ -1182,8 +1182,23 @@ fn empty_max_size_dry_run_trims_the_recycle_bins() {
         );
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
-    let roomy = dry(&["--max-size=999999G"]);
-    assert!(roomy.contains("0 item(s)"), "{roomy}");
+    let roomy = common::rtrash_real(common::Real::RecycleBin)
+        .args(["empty", "--max-size=999999G", "-n"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        roomy.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&roomy.stderr)
+    );
+    let roomy_out = String::from_utf8_lossy(&roomy.stdout);
+    assert!(roomy_out.contains("0 item(s)"), "{roomy_out}");
+    assert!(
+        String::from_utf8_lossy(&roomy.stderr).contains("nothing would be permanently removed"),
+        "{}",
+        String::from_utf8_lossy(&roomy.stderr)
+    );
     let tight = dry(&["--max-size=0", "--prune=largest"]);
     assert!(tight.contains(&name), "{tight}");
     let json = dry(&["--max-size=0", "--json"]);

@@ -3644,17 +3644,17 @@ fn interactive_empty_of_an_exact_path_honors_the_reply() {
 #[test]
 fn trash_rm_defaults_to_the_exact_original_path() {
     let sb = Sandbox::new("trash-rm-literal");
-    sb.touch("foo");
-    sb.touch("foobar");
-    assert!(sb.run(&["put", "foo", "foobar"]).status.success());
-    let out = sb.run(&["rm", "--home-only", "fo"]);
+    sb.touch("note");
+    sb.touch("notebook");
+    assert!(sb.run(&["put", "note", "notebook"]).status.success());
+    let out = sb.run(&["rm", "--home-only", "not"]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb).len(), 2);
-    let out = sb.run(&["rm", "--home-only", "foo"]);
+    let out = sb.run(&["rm", "--home-only", "note"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let mut names = trash_names(&sb);
     names.sort();
-    assert_eq!(names, vec!["foobar"]);
+    assert_eq!(names, vec!["notebook"]);
 }
 
 #[test]

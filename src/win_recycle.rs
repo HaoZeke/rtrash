@@ -1319,6 +1319,23 @@ pub fn long_path(path: &Path) -> Option<PathBuf> {
     )))
 }
 
+/// Whether a Recycle Bin item's normalized [`path_key`] matches any of
+/// `want_keys` under `Match::Exact` or `Match::Prefix`.
+pub fn win_path_matches(kind: crate::filters::Match, orig_key: &str, want_keys: &[String]) -> bool {
+    match kind {
+        crate::filters::Match::Exact => want_keys.iter().any(|k| k.as_str() == orig_key),
+        crate::filters::Match::Prefix => want_keys.iter().any(|k| {
+            let prefix = k.trim_end_matches('\\');
+            orig_key == k
+                || (!prefix.is_empty()
+                    && orig_key
+                        .strip_prefix(prefix)
+                        .is_some_and(|rest| rest.starts_with('\\')))
+        }),
+        _ => false,
+    }
+}
+
 /// A volume path that is a folder rather than a drive root (`C:\\`).
 pub fn mounted_folder(path: &str) -> bool {
     let b = path.as_bytes();
@@ -4885,6 +4902,41 @@ left in place.
             eprintln!("{prog}: refusing a pattern that matches everything without --force");
             return 2;
         }
+        let mounts = matches!(
+            kind,
+            crate::filters::Match::Exact | crate::filters::Match::Prefix
+        )
+        .then(super::volume_mounts)
+        .unwrap_or_default();
+        let path_keys: Vec<String> = match kind {
+            crate::filters::Match::Exact | crate::filters::Match::Prefix => {
+                let mut keys = Vec::new();
+                for p in &pats.texts {
+                    if p.is_empty() {
+                        continue;
+                    }
+                    let path = crate::util::arg_path(p);
+                    let abs = std::path::absolute(&path).unwrap_or(path);
+                    let abs = crate::util::plain_path(&abs);
+                    let mut forms = if kind == crate::filters::Match::Prefix {
+                        dir_forms(&abs)
+                    } else {
+                        path_forms(&abs)
+                    };
+                    if let Some(resolved) = crate::allow_roots::resolve(&abs) {
+                        forms.push(resolved);
+                    }
+                    for form in forms {
+                        let k = super::path_key(&form.to_string_lossy(), &mounts);
+                        if !keys.contains(&k) {
+                            keys.push(k);
+                        }
+                    }
+                }
+                keys
+            }
+            _ => Vec::new(),
+        };
         let items = match super::list_items() {
             Ok(i) => i,
             Err(e) => {
@@ -4906,23 +4958,37 @@ left in place.
             .into_iter()
             .filter(|it| {
                 let orig = original_of(it);
-                let full = orig.to_string_lossy().into_owned();
-                let base = orig
-                    .file_name()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let stable = Path::new(&it.id)
+                let id = Path::new(&it.id)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let date = platform::epoch_to_iso_utc(it.time_deleted);
-                let root = bin_root_of(Path::new(&it.id)).unwrap_or_default();
-                (if exact {
-                    crate::orig_path::selects(&pats.texts, &orig)
-                } else {
-                    pats.selects(&full, &base, &stable, &date, &root)
-                })
-                    || crate::rm_match::id_hit(&ids, &stable)
+                if crate::rm_match::id_hit(&ids, &id) {
+                    return true;
+                }
+                match kind {
+                    crate::filters::Match::Exact | crate::filters::Match::Prefix => {
+                        let key = super::path_key(&orig.to_string_lossy(), &mounts);
+                        super::win_path_matches(kind, &key, &path_keys)
+                    }
+                    crate::filters::Match::Id => {
+                        let full = orig.to_string_lossy().into_owned();
+                        let base = orig
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let date = platform::epoch_to_iso_utc(it.time_deleted);
+                        let root = bin_root_of(Path::new(&it.id)).unwrap_or_default();
+                        pats.selects(&full, &base, &id, &date, &root)
+                    }
+                    _ => {
+                        let full = orig.to_string_lossy().into_owned();
+                        let base = orig
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        pats.hit(&full, &base, &base)
+                    }
+                }
             })
             .collect();
         // Size last: only the matches need their `$I` read.
@@ -6358,6 +6424,54 @@ mod tests {
         assert_eq!(path_key(r"\\?\UNC\srv\share\f", &[]), r"\\srv\share\f");
         assert_eq!(path_key("C:/x/y/", &[]), r"c:\x\y");
         assert_eq!(path_key(r"C:\", &[]), r"c:\");
+    }
+
+    #[test]
+    fn win_path_matches_exact_and_prefix_by_normalized_key() {
+        let exact = vec![path_key(r"\\?\C:\Users\Alice\In\x.txt", &[])];
+        let orig = path_key("c:/users/alice/in/x.txt", &[]);
+        assert!(win_path_matches(
+            crate::filters::Match::Exact,
+            &orig,
+            &exact
+        ));
+        let sibling = path_key(r"C:\Users\Alice\In\x.txt.bak", &[]);
+        assert!(!win_path_matches(
+            crate::filters::Match::Exact,
+            &sibling,
+            &exact
+        ));
+
+        let prefix = vec![path_key(r"C:\Users\Alice\In\", &[])];
+        assert!(win_path_matches(
+            crate::filters::Match::Prefix,
+            &orig,
+            &prefix
+        ));
+        let dir_itself = path_key(r"c:\users\alice\in", &[]);
+        assert!(win_path_matches(
+            crate::filters::Match::Prefix,
+            &dir_itself,
+            &prefix
+        ));
+        let nearby = path_key(r"C:\Users\Alice\Inbox\x.txt", &[]);
+        assert!(!win_path_matches(
+            crate::filters::Match::Prefix,
+            &nearby,
+            &prefix
+        ));
+
+        let drive = vec![path_key(r"C:\", &[])];
+        assert!(win_path_matches(
+            crate::filters::Match::Prefix,
+            &orig,
+            &drive
+        ));
+        assert!(!win_path_matches(
+            crate::filters::Match::Prefix,
+            &path_key(r"D:\x.txt", &[]),
+            &drive
+        ));
     }
 
     /// A `$I` record whose name holds an unpaired surrogate (valid on
