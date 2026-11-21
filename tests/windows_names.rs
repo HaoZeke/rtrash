@@ -733,8 +733,10 @@ fn status_json_gives_the_status_object_for_the_recycle_bin() {
 }
 
 /// The cap on permanent deletions counts Recycle Bin matches first, so an
-/// rm past it purges nothing. The PATTERN names files only (no folder),
-/// so a short 8.3 %TEMP% and the long path the bin records both match.
+/// rm past it purges nothing. `--match=glob` names the files only, with no
+/// folder, so a short 8.3 %TEMP% and the long path the bin records both
+/// match. A bare pattern would be the exact original path and would miss
+/// whichever spelling put recorded.
 #[test]
 fn max_count_refuses_a_recycle_bin_rm_past_the_cap() {
     let dir = common::scratch_dir("names", "maxcount");
@@ -754,7 +756,11 @@ fn max_count_refuses_a_recycle_bin_rm_past_the_cap() {
     let pattern = format!("{tag}-*.txt");
     let rm = |args: &[&str], cap: Option<&str>| {
         let mut c = common::rtrash_real(common::Real::RecycleBin);
-        c.arg("rm").args(args).arg(&pattern).current_dir(&dir);
+        c.arg("rm")
+            .arg("--match=glob")
+            .args(args)
+            .arg(&pattern)
+            .current_dir(&dir);
         match cap {
             Some(v) => c.env("RTRASH_MAX_PERMANENT", v),
             None => c.env_remove("RTRASH_MAX_PERMANENT"),
@@ -877,7 +883,12 @@ fn allow_roots_scopes_the_recycle_bin_on_windows() {
     let restored = file.exists();
     // Trash it unscoped, then rm it scoped to the other folder and to its own.
     let again = run(&[os("put").as_os_str(), file.as_os_str()], None);
+    // The file sits in `in\`, and the bin may record that directory as a
+    // short 8.3 name or the long path. `--match=glob` on the file name
+    // selects it either way. A bare name is the exact path from this
+    // directory, which is a different path.
     let pattern = os(&format!("{tag}-x.txt"));
+    let glob = os("--match=glob");
     let listed = |o: &Output| {
         String::from_utf8_lossy(&o.stdout)
             .lines()
@@ -885,8 +896,13 @@ fn allow_roots_scopes_the_recycle_bin_on_windows() {
             .count()
     };
     let (rm_s, dry_s) = (os("rm"), os("-n"));
-    let dry = [rm_s.as_os_str(), dry_s.as_os_str(), pattern.as_os_str()];
-    let rm = [rm_s.as_os_str(), pattern.as_os_str()];
+    let dry = [
+        rm_s.as_os_str(),
+        dry_s.as_os_str(),
+        glob.as_os_str(),
+        pattern.as_os_str(),
+    ];
+    let rm = [rm_s.as_os_str(), glob.as_os_str(), pattern.as_os_str()];
     let (out_root, low_root) = (outside.to_string_lossy().into_owned(), long.to_lowercase());
     let before = listed(&run(&dry, None));
     let refused = run(&rm, Some(out_root.as_str()));
