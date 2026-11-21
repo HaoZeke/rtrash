@@ -1709,11 +1709,29 @@ pub(crate) fn merge_git_risks(
     extra: impl IntoIterator<Item = (PathBuf, crate::du_git::RiskyGit)>,
 ) {
     for (path, work) in extra {
-        if let Some((_, existing)) = owned.iter_mut().find(|(p, _)| *p == path) {
+        if let Some((_, existing)) = owned.iter_mut().find(|(p, _)| same_git_risk_path(p, &path)) {
             *existing = existing.union(work);
         } else {
             owned.push((path, work));
         }
+    }
+}
+
+/// Whether two spellings name one Windows path. Resolving the existing
+/// parent expands 8.3 names; the key also drops verbatim prefixes and case.
+#[cfg(any(windows, test))]
+fn same_git_risk_path(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let normalized =
+            |p: &Path| crate::allow_roots::resolve(p).unwrap_or_else(|| crate::util::plain_path(p));
+        let mounts = volume_mounts();
+        path_key(&normalized(a).to_string_lossy(), &mounts)
+            == path_key(&normalized(b).to_string_lossy(), &mounts)
+    }
+    #[cfg(not(windows))]
+    {
+        path_key(&a.to_string_lossy(), &[]) == path_key(&b.to_string_lossy(), &[])
     }
 }
 
@@ -1763,6 +1781,31 @@ mod os {
             })
             .collect();
         (kept, changed)
+    }
+
+    /// Debug-only seam: make one item's `$I` deletion time differ after
+    /// rm's git probes, so the final all-item recheck can be exercised.
+    fn rm_recheck_seam(items: &[TrashItem]) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        let Some(payload) = std::env::var_os("RTRASH_TEST_RM_RECHECK").map(PathBuf::from) else {
+            return;
+        };
+        if !items.iter().any(|it| Path::new(&it.id) == payload) {
+            return;
+        }
+        let Some(index) = index_file_for(&payload) else {
+            return;
+        };
+        let Ok(mut body) = std::fs::read(&index) else {
+            return;
+        };
+        let Some(first_time_byte) = body.get_mut(16) else {
+            return;
+        };
+        *first_time_byte ^= 1;
+        let _ = crate::file_replace::write_own(&index, &body);
     }
 
     /// `list --depth=N`: what a deleted folder's `$R` payload holds, N
@@ -4344,23 +4387,18 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                     );
                     refused += 1;
                 } else {
-                    if dry_run {
-                        kept.push(it);
-                        continue;
-                    }
-                    match super::recheck_item(&it) {
-                        Ok(()) => kept.push(it),
-                        Err(crate::util::Stale::Gone) => {}
-                        Err(s) => {
-                            let what = crate::util::err_path(&original_of(&it));
-                            eprintln!("{prog}: {}", s.reason(what.as_ref()));
-                            refused += 1;
-                        }
-                    }
+                    kept.push(it);
                 }
             }
             kept
         };
+        let (matched, final_changed) = if dry_run {
+            (matched, 0)
+        } else {
+            rm_recheck_seam(&matched);
+            rechecked(prog, matched)
+        };
+        let changed = changed.saturating_add(final_changed);
         // Taken before the purge: the `$R` payloads are gone after it.
         let summary = json.then(|| {
             let names: Vec<String> = matched
@@ -4855,11 +4893,11 @@ mod tests {
             unpushed: true,
             unknown: false,
         };
-        let mut owned = vec![(PathBuf::from(r"C:\w\repo"), dirty)];
+        let mut owned = vec![(PathBuf::from(r"C:\W\repo"), dirty)];
         merge_git_risks(
             &mut owned,
             vec![
-                (PathBuf::from(r"C:\w\repo"), unpushed),
+                (PathBuf::from(r"\\?\c:\w\REPO"), unpushed),
                 (PathBuf::from(r"C:\w\other"), dirty),
             ],
         );
@@ -4867,7 +4905,7 @@ mod tests {
         assert_eq!(
             owned[0],
             (
-                PathBuf::from(r"C:\w\repo"),
+                PathBuf::from(r"C:\W\repo"),
                 crate::du_git::RiskyGit {
                     dirty: true,
                     unpushed: true,
@@ -4876,6 +4914,13 @@ mod tests {
             )
         );
         assert_eq!(owned[1], (PathBuf::from(r"C:\w\other"), dirty));
+        let pairs: Vec<(&Path, crate::du_git::RiskyGit)> = owned
+            .iter()
+            .map(|(path, work)| (path.as_path(), *work))
+            .collect();
+        let hint = crate::space::warning_hint(&pairs);
+        assert!(hint.contains("uncommitted work is committed"), "{hint}");
+        assert!(hint.contains("commits are pushed"), "{hint}");
     }
 
     #[test]

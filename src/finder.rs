@@ -633,6 +633,9 @@ fn read_all(prog: &str) -> Result<Vec<crate::finder_shared::Entry>, i32> {
 pub struct ListShape<'a> {
     pub json: bool,
     pub format: Option<&'a [crate::list::FmtPart]>,
+    pub sort: crate::list::SortKey,
+    pub reverse: bool,
+    pub with_size: bool,
     /// `--last=N`: only the last N rows.
     pub last: Option<usize>,
     /// `--depth=N`: the tree under each trashed folder, N levels down.
@@ -651,6 +654,9 @@ pub fn default_list(
     let ListShape {
         json,
         format,
+        sort,
+        reverse,
+        with_size,
         last,
         depth,
         show_trash,
@@ -662,10 +668,31 @@ pub fn default_list(
         Ok(r) => filter.apply(r),
         Err(c) => return c,
     };
+    let with_size = with_size
+        || sort == crate::list::SortKey::Size
+        || format.is_some_and(|parts| {
+            parts.contains(&crate::list::FmtPart::Field(crate::list::Field::Size))
+        });
     let mut rows: Vec<_> = rows
         .into_iter()
         .filter(|e| keep(&e.shown, &e.name, &e.date, &e.trash))
+        .map(|e| {
+            let size = with_size.then(|| crate::fastdelete::disk_usage(&e.path()));
+            (e, size)
+        })
         .collect();
+    fn file_name(e: &crate::finder_shared::Entry) -> &std::ffi::OsStr {
+        e.shown.file_name().unwrap_or_default()
+    }
+    match sort {
+        crate::list::SortKey::Date => {}
+        crate::list::SortKey::Size => rows.sort_by_key(|(_, size)| std::cmp::Reverse(*size)),
+        crate::list::SortKey::Name => rows.sort_by(|(a, _), (b, _)| file_name(a).cmp(file_name(b))),
+        crate::list::SortKey::Path => rows.sort_by(|(a, _), (b, _)| a.shown.cmp(&b.shown)),
+    }
+    if reverse {
+        rows.reverse();
+    }
     if let Some(n) = last {
         let cut = rows.len().saturating_sub(n);
         rows.drain(..cut);
@@ -673,27 +700,31 @@ pub fn default_list(
     if json {
         let out: Vec<String> = rows
             .iter()
-            .map(|e| {
+            .map(|(e, size)| {
                 let orig = e.original.as_ref().map_or("null".to_string(), |o| {
                     format!("\"{}\"", json_escape(&o.to_string_lossy()))
                 });
-                let id = crate::filters::item_id(
-                    &crate::finder_shared::nfc(&e.name),
-                    &e.date,
-                    &e.trash,
-                );
+                let id =
+                    crate::filters::item_id(&crate::finder_shared::nfc(&e.name), &e.date, &e.trash);
                 let at = if show_trash {
                     let p = json_escape(&e.path().to_string_lossy());
                     format!(",\"trash_path\":\"{p}\"")
                 } else {
                     String::new()
                 };
+                let sized = size.map_or(String::new(), |n| format!(",\"size\":{n}"));
                 format!(
-                    "{{\"date\":\"{}\",\"name\":\"{}\",\"trash\":\"{}\",\"original\":{orig},\"id\":\"{}\"{at}}}",
+                    concat!(
+                        "{{\"date\":\"{}\",\"name\":\"{}\",\"trash\":\"{}\",",
+                        "\"original\":{orig},\"id\":\"{}\"{sized}{at}}}"
+                    ),
                     e.date,
                     json_escape(&e.name),
                     json_escape(&e.trash.to_string_lossy()),
-                    json_escape(&id)
+                    json_escape(&id),
+                    orig = orig,
+                    sized = sized,
+                    at = at
                 )
             })
             .collect();
@@ -702,9 +733,8 @@ pub fn default_list(
     }
     if let Some(parts) = format {
         use std::io::Write;
-        let wants_size = parts.contains(&crate::list::FmtPart::Field(crate::list::Field::Size));
         let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-        for e in &rows {
+        for (e, size) in &rows {
             let id =
                 crate::filters::item_id(&crate::finder_shared::nfc(&e.name), &e.date, &e.trash);
             let row = crate::list::FmtRow {
@@ -714,7 +744,7 @@ pub fn default_list(
                 name: &e.name,
                 trash: &e.trash,
                 batch: "",
-                size: wants_size.then(|| crate::fastdelete::disk_usage(&e.path())),
+                size: *size,
                 owner: None,
                 id: &id,
             };
@@ -730,11 +760,19 @@ pub fn default_list(
     }
     use std::io::Write;
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-    for e in &rows {
+    for (e, size) in &rows {
         let date = e.date.replacen('T', " ", 1);
-        let res = writeln!(out, "{date} {}", crate::util::term_path(&e.shown))
-            .and_then(|()| crate::listfmt::trash_line(&mut out, &e.path(), show_trash))
-            .and_then(|()| crate::list::write_tree(&mut out, &e.path(), depth));
+        let res = match size {
+            Some(n) => writeln!(
+                out,
+                "{date} {:>10} {}",
+                crate::util::format_bytes(*n),
+                crate::util::term_path(&e.shown)
+            ),
+            None => writeln!(out, "{date} {}", crate::util::term_path(&e.shown)),
+        }
+        .and_then(|()| crate::listfmt::trash_line(&mut out, &e.path(), show_trash))
+        .and_then(|()| crate::list::write_tree(&mut out, &e.path(), depth));
         if res.is_err() {
             return 0;
         }

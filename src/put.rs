@@ -516,22 +516,18 @@ fn warn_size(prog: &str) -> Option<(WarnSize, &'static str)> {
 /// a scan of the trash. A FreeDesktop `files/` that cannot be listed is
 /// unknown, so the warning does not suggest removing anything. A Finder
 /// trash has no `files/`, so Finder runs scan `root` through `finder_shared`.
-fn risks_for(root: &Path, trashed: &[Trashed]) -> Vec<(PathBuf, crate::du_git::RiskyGit)> {
+fn risks_for(
+    root: &Path,
+    trashed: &[Trashed],
+    is_finder: bool,
+) -> Vec<(PathBuf, crate::du_git::RiskyGit)> {
     let run: Vec<&Trashed> = trashed.iter().filter(|t| t.trash_dir == root).collect();
     let from_run = |t: &Trashed| t.risky_git.map(|w| (t.original.clone(), w));
     let Some(dir) = trashdir::TrashDir::from_root(root).ok() else {
         return run.iter().filter_map(|t| from_run(t)).collect();
     };
-    let scanned = if !dir.files().is_dir() {
-        if !crate::finder::is_default(false) {
-            return run.iter().filter_map(|t| from_run(t)).collect();
-        }
-        let rows = match crate::finder_shared::entries_in(root) {
-            Ok(v) => Some(v),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
-            Err(_) => None,
-        };
-        rows.map(|rows| {
+    let scanned = if is_finder {
+        crate::finder_shared::entries_in(root).ok().map(|rows| {
             rows.into_iter()
                 .filter_map(|e| {
                     let payload = e.path();
@@ -605,7 +601,7 @@ fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
             } else {
                 String::new()
             };
-            let owned = risks_for(&root, trashed);
+            let owned = risks_for(&root, trashed, false);
             let pairs: Vec<(&Path, crate::du_git::RiskyGit)> =
                 owned.iter().map(|(p, w)| (p.as_path(), *w)).collect();
             let hint = crate::space::warning_hint(&pairs);
@@ -643,7 +639,7 @@ fn warn_big_finder_trash(prog: &str, trashed: &[Trashed]) {
         let bytes = before.bytes.saturating_add(added);
         let disk = crate::space::query(&root).map_or(0, |s| s.total);
         if limit.exceeded(bytes, disk) {
-            let owned = risks_for(&root, trashed);
+            let owned = risks_for(&root, trashed, true);
             let pairs: Vec<(&Path, crate::du_git::RiskyGit)> =
                 owned.iter().map(|(p, w)| (p.as_path(), *w)).collect();
             let hint = crate::space::warning_hint(&pairs);
@@ -660,6 +656,7 @@ fn warn_low_space(prog: &str, trashed: &[Trashed]) {
     let mut roots: Vec<PathBuf> = trashed.iter().map(|t| t.trash_dir.clone()).collect();
     roots.sort();
     roots.dedup();
+    let finder_roots = crate::finder::trashes();
     for root in roots {
         let Ok(space) = crate::space::query(&root) else {
             continue;
@@ -668,7 +665,10 @@ fn warn_low_space(prog: &str, trashed: &[Trashed]) {
         if lows.is_empty() {
             continue;
         }
-        let owned = risks_for(&root, trashed);
+        let is_finder = finder_roots
+            .iter()
+            .any(|t| crate::finder_shared::same_path(t, &root));
+        let owned = risks_for(&root, trashed, is_finder);
         let pairs: Vec<(&Path, crate::du_git::RiskyGit)> =
             owned.iter().map(|(p, w)| (p.as_path(), *w)).collect();
         let what = format!("trash '{}'", crate::util::err_path(&root));
@@ -1228,6 +1228,21 @@ mod json_tests {
             r#"{"trashed":[{"original":"/w/a \"q\".txt","name":"a \"q\".txt","trash_dir":"/x/Trash"}],"failed":2}"#
         );
         assert_eq!(summary_json(&[], 0), r#"{"trashed":[],"failed":0}"#);
+    }
+
+    #[test]
+    fn a_missing_non_finder_trash_is_unknown_not_safe() {
+        let root = PathBuf::from("rtrash-test-missing-risk-root");
+        let trashed = [Trashed {
+            original: PathBuf::from("/work/plain.txt"),
+            name: "plain.txt".into(),
+            trash_dir: root.clone(),
+            risky_git: None,
+        }];
+        assert_eq!(
+            super::risks_for(&root, &trashed, false),
+            vec![(root, crate::du_git::RiskyGit::unknown())]
+        );
     }
 
     #[test]

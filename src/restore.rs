@@ -1305,6 +1305,7 @@ mod tests {
         let mut e = entry(out.join("item").to_str().unwrap(), 0);
         e.name = "item".into();
         e.dir = trash;
+        e.recorded = false;
         restore_one_to(&e, &out.join("item"), false).unwrap();
         assert_eq!(fs::read(out.join("item")).unwrap(), b"payload");
         assert_eq!(fs::read(&left).unwrap(), b"left behind");
@@ -1322,6 +1323,7 @@ mod tests {
                 topdir: None,
             },
             batch: None,
+            recorded: true,
         }
     }
 

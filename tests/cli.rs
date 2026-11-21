@@ -10300,6 +10300,34 @@ fn rm_keeps_an_item_that_took_the_name_while_it_asked() {
     assert!(sb.trash().join("info/a.o.trashinfo").is_file());
 }
 
+/// An id match is tied to the record that list read. Rewriting that record
+/// under the same trash name while rm asks makes the locked re-read refuse it.
+#[test]
+fn rm_by_id_refuses_a_record_rewritten_before_relock() {
+    let (sb, pin) = trashed_a_o("rm-id-rewritten");
+    let listed = stdout_of(&sb.run(&["list", &pin, "--format={id}\\n"]));
+    let id = listed.lines().next().unwrap_or_default().to_string();
+    assert!(!id.is_empty(), "{listed}");
+    let mut cmd = common::rtrash(&sb.root);
+    cmd.args(["rm", &pin, "-i", "--match=id", &id])
+        .current_dir(sb.work());
+    let mut rm = common::Asking::spawn(&mut cmd);
+    rm.wait_for("(y/N) ");
+
+    let record = sb.trash().join("info/a.o.trashinfo");
+    let before = fs::read_to_string(&record).unwrap();
+    let after = before.replace(
+        "DeletionDate=",
+        "DeletionDate=2001-01-01T00:00:00\nX-Rewritten-Date=",
+    );
+    fs::write(&record, after).unwrap();
+    let (status, rest) = rm.answer("y\n");
+    assert!(!status.success(), "{rest}");
+    assert!(rest.contains("changed in the trash"), "{rest}");
+    assert!(sb.trash().join("files/a.o").is_file());
+    assert!(record.is_file());
+}
+
 /// A trash pinned twice, however spelled, is one trash: a prune locks it
 /// once and counts its items once. Before, the second lock of the same
 /// root waited forever on the first (round 245).

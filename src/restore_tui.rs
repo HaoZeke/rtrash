@@ -837,6 +837,7 @@ mod tests {
                 topdir: None,
             },
             batch: None,
+            recorded: true,
         }
     }
 

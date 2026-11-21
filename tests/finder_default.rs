@@ -226,6 +226,56 @@ fn list_last_keeps_the_newest_finder_items() {
 }
 
 #[test]
+fn finder_list_applies_each_sort_before_last() {
+    let b = Box_::new("list-sort");
+    let small = b.work().join("a/z-small.txt");
+    let large = b.work().join("z/a-large.txt");
+    fs::create_dir_all(small.parent().unwrap()).unwrap();
+    fs::create_dir_all(large.parent().unwrap()).unwrap();
+    fs::write(&small, b"x").unwrap();
+    fs::write(&large, vec![b'x'; 128 * 1024]).unwrap();
+    assert!(b.run(&["put", "a/z-small.txt"], "").status.success());
+    common::next_trash_second();
+    assert!(b.run(&["put", "z/a-large.txt"], "").status.success());
+    b.put_back("z-small.txt", &small);
+    b.put_back("a-large.txt", &large);
+
+    let names = |args: &[&str]| {
+        let o = b.run(args, "");
+        assert!(o.status.success(), "{}", err(&o));
+        out(&o)
+    };
+    let by_size = names(&["list", "--sort=size", "--json"]);
+    let large_at = by_size
+        .find("a-large.txt")
+        .unwrap_or_else(|| panic!("{by_size}"));
+    let small_at = by_size
+        .find("z-small.txt")
+        .unwrap_or_else(|| panic!("{by_size}"));
+    assert!(
+        large_at < small_at && by_size.contains("\"size\":"),
+        "{by_size}"
+    );
+    let by_name = names(&["list", "--sort=name", "--format={name}\\n"]);
+    assert_eq!(
+        by_name.lines().collect::<Vec<_>>(),
+        ["a-large.txt", "z-small.txt"]
+    );
+    let by_path = names(&["list", "--sort=path", "--format={name}\\n"]);
+    assert_eq!(
+        by_path.lines().collect::<Vec<_>>(),
+        ["z-small.txt", "a-large.txt"]
+    );
+    let reversed = names(&["list", "--reverse", "--format={name}\\n"]);
+    assert_eq!(
+        reversed.lines().collect::<Vec<_>>(),
+        ["a-large.txt", "z-small.txt"]
+    );
+    let last = names(&["list", "--sort=size", "--last=1", "--format={name}\\n"]);
+    assert_eq!(last, "z-small.txt\n");
+}
+
+#[test]
 fn a_pin_or_the_setting_keeps_the_freedesktop_trash() {
     let b = Box_::new("pin");
     fs::write(b.work().join("x"), b"x").unwrap();
