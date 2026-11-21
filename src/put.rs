@@ -389,7 +389,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         // A put into a Finder trash frees nothing on that disk either.
         if !(opts.quiet || json) {
             warn_big_finder_trash(prog, &trashed);
-            warn_low_space(prog, &trashed);
+            warn_low_space(prog, &trashed, true);
         }
     }
     // The Finder Trash keeps no .trashinfo; its own branch above warns
@@ -399,7 +399,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         prune_after_put(prog, &trashed, opts.quiet || json);
         if !(opts.quiet || json) {
             warn_big_trash(prog, &trashed);
-            warn_low_space(prog, &trashed);
+            warn_low_space(prog, &trashed, false);
         }
     }
     status
@@ -652,11 +652,11 @@ fn warn_big_finder_trash(prog: &str, trashed: &[Trashed]) {
     }
 }
 
-fn warn_low_space(prog: &str, trashed: &[Trashed]) {
+fn warn_low_space(prog: &str, trashed: &[Trashed], finder_backend: bool) {
     let mut roots: Vec<PathBuf> = trashed.iter().map(|t| t.trash_dir.clone()).collect();
     roots.sort();
     roots.dedup();
-    let finder_roots = crate::finder::trashes();
+    let finder_roots = finder_backend.then(crate::finder::trashes);
     for root in roots {
         let Ok(space) = crate::space::query(&root) else {
             continue;
@@ -666,8 +666,8 @@ fn warn_low_space(prog: &str, trashed: &[Trashed]) {
             continue;
         }
         let is_finder = finder_roots
-            .iter()
-            .any(|t| crate::finder_shared::same_path(t, &root));
+            .as_ref()
+            .is_some_and(|v| v.iter().any(|t| crate::finder_shared::same_path(t, &root)));
         let owned = risks_for(&root, trashed, is_finder);
         let pairs: Vec<(&Path, crate::du_git::RiskyGit)> =
             owned.iter().map(|(p, w)| (p.as_path(), *w)).collect();

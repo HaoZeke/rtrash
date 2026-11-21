@@ -154,7 +154,8 @@ fn keep_clause(one: bool, dirty: bool, unpushed: bool, unknown: bool) -> String 
     let whom = if one { "it" } else { "them" };
     let known = if dirty && unpushed {
         format!(
-            "restore {whom} first, then leave {whom} until the uncommitted work is committed and the commits are pushed"
+            "restore {whom} first, then leave {whom} until the uncommitted work is committed \
+             and the commits are pushed"
         )
     } else if dirty {
         format!("restore {whom} first, then leave {whom} until the uncommitted work is committed")

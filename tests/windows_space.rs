@@ -463,11 +463,14 @@ fn put_space_hint_keeps_flagged_git_work() {
             .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
             .output()
     };
-    let base = common::scratch_dir("wingit", "put-git");
-    let vol = base.join("vol");
-    std::fs::create_dir_all(&vol).unwrap();
-    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
-    for (tag, commit) in [("unpushed", true), ("dirty", false)] {
+    for (tag, commit, case) in [
+        ("unpushed", true, "put-git-unpushed"),
+        ("dirty", false, "put-git-dirty"),
+    ] {
+        let base = common::scratch_dir("wingit", case);
+        let vol = base.join("vol");
+        std::fs::create_dir_all(&vol).unwrap();
+        std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
         let repo = base.join(tag);
         let _ = std::fs::remove_dir_all(&repo);
         std::fs::create_dir(&repo).unwrap();
@@ -531,8 +534,8 @@ fn put_space_hint_keeps_flagged_git_work() {
         if tag == "dirty" {
             assert!(!err.contains("until the work is pushed"), "{tag}: {err}");
         }
+        let _ = std::fs::remove_dir_all(&base);
     }
-    let _ = std::fs::remove_dir_all(&base);
 }
 
 /// Undo is named only after the item is in the bin. A dry run does not

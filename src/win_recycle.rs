@@ -1783,8 +1783,9 @@ mod os {
         (kept, changed)
     }
 
-    /// Debug-only seam: make one item's `$I` deletion time differ after
-    /// rm's git probes, so the final all-item recheck can be exercised.
+    /// Debug-only seam: make one item's `$I` deletion time differ by at
+    /// least one whole second after rm's git probes, so the final all-item
+    /// recheck (which compares whole seconds) can be exercised.
     fn rm_recheck_seam(items: &[TrashItem]) {
         if !cfg!(debug_assertions) {
             return;
@@ -1801,10 +1802,13 @@ mod os {
         let Ok(mut body) = std::fs::read(&index) else {
             return;
         };
-        let Some(first_time_byte) = body.get_mut(16) else {
+        let Some(raw) = body.get(16..24) else {
             return;
         };
-        *first_time_byte ^= 1;
+        let mut ticks = [0u8; 8];
+        ticks.copy_from_slice(raw);
+        let shifted = u64::from_le_bytes(ticks).wrapping_add(HUNDRED_NS_PER_SEC);
+        body[16..24].copy_from_slice(&shifted.to_le_bytes());
         let _ = crate::file_replace::write_own(&index, &body);
     }
 

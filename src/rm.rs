@@ -432,29 +432,6 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
         };
         let (payload, info_path) = (held.payload(), held.record());
-        // The id is the name and the deletion date. relock already required
-        // the date (and the original path and batch) to still match; check
-        // the id itself before anything is removed.
-        if kind == crate::filters::Match::Id {
-            let scanned = crate::filters::item_id(
-                &entry.name,
-                entry.date.as_deref().unwrap_or(""),
-                &entry.dir.root,
-            );
-            let now = crate::filters::item_id(
-                &held.entry().name,
-                held.entry().date.as_deref().unwrap_or(""),
-                &held.entry().dir.root,
-            );
-            if scanned != now {
-                eprintln!(
-                    "{prog}: '{}' changed in the trash after it was read; left as it is",
-                    crate::util::err_path(&entry.original)
-                );
-                status = 1;
-                continue;
-            }
-        }
         if !force && !held.gone() {
             if let Some(work) = crate::du_git::risky_tree(&payload) {
                 eprintln!(

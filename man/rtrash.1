@@ -897,8 +897,18 @@ would: the
 .I N
 most recently trashed items by default.
 Orphan payloads, listed last, count as rows.
-Windows applies it the same way.
-The macOS Finder Trash lists oldest first only, so there it keeps the
+Windows and the macOS Finder Trash apply it the same way:
+after
+.B \-\-sort
+and
+.BR \-\-reverse ,
+including
+.B \-\-sort=size
+(which implies
+.BR \-\-size ),
+it keeps the last
+.I N
+rows, so by default the
 .I N
 most recently trashed items.
 .TP
