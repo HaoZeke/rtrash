@@ -23,7 +23,7 @@ use std::path::{Component, Path, PathBuf};
 /// On Windows, also the short and long names of that parent, and of the
 /// final component when it is still on disk and is not a link.
 pub fn forms(typed: &str) -> Vec<String> {
-    let lexical = lexical_abs(Path::new(typed));
+    let lexical = lexical_abs(&crate::util::arg_path(typed));
     let mut out = Vec::new();
     push_form(&mut out, &lexical);
     if let Some(put) = put_form(&lexical) {
@@ -154,12 +154,12 @@ pub fn hint(prog: &str, wants: &[String], have: &[PathBuf], kept: &[PathBuf], wi
         match notice {
             Notice::Outside => eprintln!(
                 "{prog}: '{}' is in the trash, outside {window}",
-                crate::util::err_path(Path::new(&want))
+                crate::util::err_path(&crate::util::arg_path(&want))
             ),
             Notice::Miss(near) => {
                 eprintln!(
                     "{prog}: no exact match for '{}'",
-                    crate::util::err_path(Path::new(&want))
+                    crate::util::err_path(&crate::util::arg_path(&want))
                 );
                 for path in near {
                     eprintln!("{prog}: near miss: '{}'", crate::util::err_path(&path));

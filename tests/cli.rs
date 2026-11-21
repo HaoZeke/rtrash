@@ -4837,6 +4837,38 @@ fn names_that_are_not_utf8_put_list_rm_restore_and_empty() {
     assert_eq!(fs::read_dir(sb.trash().join("info")).unwrap().count(), 0);
 }
 
+/// The parent is a non-UTF-8 symlink. `put` records the target, so `rm` of
+/// the same bytes has to resolve that parent. A `Path` built from the
+/// private-use form looks up a directory that is not there.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_exact_rm_resolves_a_parent_that_is_not_utf8() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let sb = Sandbox::new("nonutf8parent");
+    let real = sb.work().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("f"), "z").unwrap();
+    let link = sb.work().join(OsStr::from_bytes(b"d\xff"));
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let mut path = link.into_os_string();
+    path.push("/f");
+    let put = run_os(&sb, &[OsStr::new("put"), path.as_os_str()]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let rm = run_os(
+        &sb,
+        &[
+            OsStr::new("rm"),
+            OsStr::new("--home-only"),
+            OsStr::new("-n"),
+            path.as_os_str(),
+        ],
+    );
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    let out = stdout_of(&rm);
+    assert_eq!(out.lines().count(), 1, "{out}{}", stderr_of(&rm));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn trashinfo_with_raw_bytes_lists_restores_and_ages_out() {
