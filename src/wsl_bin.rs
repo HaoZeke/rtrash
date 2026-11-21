@@ -119,12 +119,15 @@ const USAGE: &str = "\
 Usage: rtrash wsl list [--json | --format=TEMPLATE] [MATCH]
        rtrash wsl restore [-f] PATH...
        rtrash wsl rm [-n] MATCH|PATH...
-       rtrash wsl empty [-n] [--all] [--older-than=AGE | DAYS]
+       rtrash wsl empty [-n] [--all] [--older-than=AGE] [AGE | PATH]...
 The Windows Recycle Bin from inside WSL: list its items by original path
 under the automount root, restore the newest item from each PATH, or
-delete items for good (rm by match, empty by age or all of them; a whole
-empty asks first, or needs --all). MATCH is --glob=PATTERN, --regex=RE or --name=NAME,
-tested against the original path as WSL sees it.
+delete items for good. A bare PATH is that original path exactly, resolved
+from the current directory; a longer path is named and left in place.
+MATCH is --glob=PATTERN, --regex=RE or --name=NAME, tested against the
+original path as WSL sees it. empty takes an age (`7`, `2h`, `30m`, the
+same forms as --older-than), a PATH, or all of them (a whole empty asks
+first, or needs --all).
       --json             list: a JSON array
       --format=TEMPLATE  list: each item through TEMPLATE, as list --format
                          does: {date} {epoch} {path} (under the automount
@@ -407,10 +410,7 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
                 eprintln!("{prog}: rm: unknown option '{a}'");
                 return 2;
             }
-            Ok(false) => {
-                let p = crate::util::arg_path(a);
-                paths.push(std::path::absolute(&p).unwrap_or(p));
-            }
+            Ok(false) => paths.push(a.to_string()),
             Err(c) => return c,
         }
     }
@@ -418,10 +418,22 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
         eprintln!("{prog}: rm needs --glob, --regex, --name or a PATH");
         return 2;
     }
+    let wants = crate::orig_path::expand(&paths);
+    if !wants.is_empty() {
+        let have: Vec<std::path::PathBuf> = items.iter().map(|it| it.local.clone()).collect();
+        crate::orig_path::hint(
+            prog,
+            &wants,
+            &have,
+            &have,
+            crate::orig_path::window(false, false),
+        );
+    }
     let chosen: Vec<&BinEntry> = items
         .iter()
         .filter(|it| {
-            matcher.as_ref().is_some_and(|m| m.keeps(&it.local)) || paths.contains(&it.local)
+            matcher.as_ref().is_some_and(|m| m.keeps(&it.local))
+                || crate::orig_path::selects(&wants, &it.local)
         })
         .collect();
     if chosen.is_empty() {
@@ -454,52 +466,36 @@ fn now_epoch() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// `wsl empty [-n] [--all] [--older-than=AGE | DAYS]`: delete items by
-/// age, or all of them. rtrash keeps no record of which put sent an item
-/// to the Recycle Bin from WSL, so emptying everything always counts as
-/// touching items from elsewhere: it asks on a terminal and otherwise
-/// needs --all, like the guard of `rtrash empty`.
+/// `wsl empty [-n] [--all] [AGE | PATH]...`: delete items by age, or all
+/// of them. A positional token is an age when
+/// [`crate::filters::parse_age_secs`] accepts it (`7`, `2h`), and a path
+/// otherwise. rtrash keeps no record of which put sent an item to the
+/// Recycle Bin from WSL, so emptying everything always counts as touching
+/// items from elsewhere: it asks on a terminal and otherwise needs --all,
+/// like the guard of `rtrash empty`.
 pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
-    let mut dry = false;
-    let mut all = false;
-    let mut age: Option<i64> = None;
-    for a in args {
-        let a = a.as_str();
-        let value = a
-            .strip_prefix("--older-than=")
-            .or_else(|| (a.bytes().all(|b| b.is_ascii_digit()) && !a.is_empty()).then_some(a));
-        match a {
-            "-n" | "--dry-run" => dry = true,
-            "--all" => all = true,
-            _ if value.is_some() => match crate::filters::parse_age_secs(value.unwrap_or("")) {
-                Ok(s) if age.is_none() => age = Some(s),
-                Ok(_) => {
-                    eprintln!("{prog}: give one age");
-                    return 2;
-                }
-                Err(e) => {
-                    eprintln!("{prog}: {e}");
-                    return 2;
-                }
-            },
-            _ => {
-                eprintln!("{prog}: empty: unknown argument '{a}'");
-                return 2;
-            }
-        }
+    let scope = match parse_empty_args(prog, args) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let wants = crate::orig_path::expand(&scope.paths);
+    let chosen = matching(items, scope.age, &wants, now);
+    if !wants.is_empty() {
+        let have: Vec<std::path::PathBuf> = items.iter().map(|it| it.local.clone()).collect();
+        let kept: Vec<std::path::PathBuf> = chosen.iter().map(|it| it.local.clone()).collect();
+        crate::orig_path::hint(
+            prog,
+            &wants,
+            &have,
+            &kept,
+            crate::orig_path::window(scope.age.is_some(), false),
+        );
     }
-    if all && age.is_some() {
-        eprintln!("{prog}: give --all or an age, not both");
-        return 2;
-    }
-    let chosen: Vec<&BinEntry> = items
-        .iter()
-        .filter(|it| age.is_none_or(|s| now - it.deleted > s))
-        .collect();
     if chosen.is_empty() {
         return 0;
     }
-    if age.is_none() && !all && !dry && !confirm_whole(prog, chosen.len()) {
+    let (dry, all, age, paths) = (scope.dry, scope.all, scope.age, &scope.paths);
+    if age.is_none() && paths.is_empty() && !all && !dry && !confirm_whole(prog, chosen.len()) {
         return 2;
     }
     let mut status = 0;
@@ -517,6 +513,86 @@ pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
         }
     }
     status
+}
+
+struct EmptyArgs {
+    dry: bool,
+    all: bool,
+    age: Option<i64>,
+    paths: Vec<String>,
+}
+
+/// A positional token is an age when [`crate::filters::parse_age_secs`]
+/// accepts it, and a path when it does not. `--older-than=AGE` uses the
+/// same parser and reports a bad age.
+fn parse_empty_args(prog: &str, args: &[String]) -> Result<EmptyArgs, i32> {
+    let mut dry = false;
+    let mut all = false;
+    let mut age = None;
+    let mut paths = Vec::new();
+    for a in args {
+        let a = a.as_str();
+        if let Some(v) = a.strip_prefix("--older-than=") {
+            set_age(prog, v, &mut age)?;
+            continue;
+        }
+        match a {
+            "-n" | "--dry-run" => dry = true,
+            "--all" => all = true,
+            _ if !a.starts_with('-') => match crate::filters::parse_age_secs(a) {
+                Ok(_) => set_age(prog, a, &mut age)?,
+                Err(_) => paths.push(a.to_string()),
+            },
+            _ => {
+                eprintln!("{prog}: empty: unknown argument '{a}'");
+                return Err(2);
+            }
+        }
+    }
+    if all && (age.is_some() || !paths.is_empty()) {
+        eprintln!("{prog}: give --all, or an age or a PATH, not both");
+        return Err(2);
+    }
+    Ok(EmptyArgs {
+        dry,
+        all,
+        age,
+        paths,
+    })
+}
+
+/// Store one age from `text`. A second age, or a text
+/// [`crate::filters::parse_age_secs`] rejects, is an error.
+fn set_age(prog: &str, text: &str, age: &mut Option<i64>) -> Result<(), i32> {
+    match crate::filters::parse_age_secs(text) {
+        Ok(s) if age.is_none() => {
+            *age = Some(s);
+            Ok(())
+        }
+        Ok(_) => {
+            eprintln!("{prog}: give one age");
+            Err(2)
+        }
+        Err(e) => {
+            eprintln!("{prog}: {e}");
+            Err(2)
+        }
+    }
+}
+
+fn matching<'a>(
+    items: &'a [BinEntry],
+    age: Option<i64>,
+    wants: &[String],
+    now: i64,
+) -> Vec<&'a BinEntry> {
+    items
+        .iter()
+        .filter(|it| {
+            age.is_none_or(|s| now - it.deleted > s)
+                && (wants.is_empty() || crate::orig_path::selects(wants, &it.local))
+        })
+        .collect()
 }
 
 /// The guard for a whole `wsl empty`: ask on a terminal, else refuse with
@@ -569,5 +645,42 @@ mod tests {
         assert_eq!(win_to_wsl(r, r"\\srv\share\x"), None);
         assert_eq!(win_to_wsl(r, r"C:\a\..\b"), None);
         assert_eq!(win_to_wsl(r, "C:"), None);
+    }
+
+    fn bin(local: PathBuf, deleted: i64) -> BinEntry {
+        BinEntry {
+            payload: PathBuf::from("/mnt/c/$Recycle.Bin/S/$Rold"),
+            original: String::new(),
+            local,
+            deleted,
+            size: 1,
+        }
+    }
+
+    /// `2h` is an age, the same duration `parse_age_secs` reads. The young
+    /// item whose path is the expanded `2h` stays, and the item deleted
+    /// three hours ago is the one empty would take.
+    #[test]
+    fn a_wsl_empty_duration_is_an_age() {
+        let scope = parse_empty_args("rtrash", &["-n".into(), "2h".into()]).unwrap();
+        assert_eq!(
+            scope.age,
+            Some(crate::filters::parse_age_secs("2h").unwrap())
+        );
+        assert!(scope.paths.is_empty(), "{:?}", scope.paths);
+        let flagged = parse_empty_args("rtrash", &["--older-than=2h".into()]).unwrap();
+        assert_eq!(flagged.age, scope.age);
+        let path = parse_empty_args("rtrash", &["notes.txt".into()]).unwrap();
+        assert_eq!(path.age, None);
+        assert_eq!(path.paths, vec!["notes.txt".to_string()]);
+
+        let now = 1_700_000_000i64;
+        let old = PathBuf::from("/home/u/old.txt");
+        let young = PathBuf::from(&crate::orig_path::forms("2h")[0]);
+        let items = vec![bin(old.clone(), now - 3 * 3600), bin(young, now - 30)];
+        let wants = crate::orig_path::expand(&scope.paths);
+        let chosen = matching(&items, scope.age, &wants, now);
+        assert_eq!(chosen.len(), 1, "{chosen:?}");
+        assert_eq!(chosen[0].local, old);
     }
 }

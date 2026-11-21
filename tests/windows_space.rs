@@ -479,7 +479,8 @@ fn empty_until_free_dry_run_reports_each_short_drive() {
     assert!(stderr.contains("from the Recycle Bin of"), "{stderr}");
     // The dry run left the item; take it out by name.
     let _ = common::rtrash_real(common::Real::RecycleBin)
-        .args(["rm", &name])
+        .arg("rm")
+        .arg(&p)
         .output();
     assert_eq!(
         common::rtrash_real(common::Real::RecycleBin)
@@ -537,7 +538,8 @@ fn empty_max_size_dry_run_trims_the_recycle_bins() {
         "{json}"
     );
     let _ = common::rtrash_real(common::Real::RecycleBin)
-        .args(["rm", &name])
+        .arg("rm")
+        .arg(&p)
         .output();
     assert_eq!(
         common::rtrash_real(common::Real::RecycleBin)
@@ -570,7 +572,8 @@ fn put_under_a_roomy_budget_trims_nothing() {
     assert!(out.status.success(), "{err}");
     assert!(!err.contains("to keep them under"), "{err}");
     let _ = common::rtrash_real(common::Real::RecycleBin)
-        .args(["rm", &name])
+        .arg("rm")
+        .arg(&p)
         .output();
 }
 
@@ -596,7 +599,7 @@ fn rm_json_summarizes_the_recycle_bin_removal() {
         let out = common::rtrash_real(common::Real::RecycleBin)
             .arg("rm")
             .args(args)
-            .arg(&name)
+            .arg(&p)
             .output()
             .unwrap();
         assert!(

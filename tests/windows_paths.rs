@@ -71,7 +71,7 @@ fn put_list_rm_and_restore_reach_a_file_past_max_path() {
     let shown = ok(&run(&home, &["list"]));
     assert!(shown.lines().any(|l| l.ends_with(&path)), "{shown}");
     assert!(!shown.contains(r"\\?\"), "{shown}");
-    let matched = ok(&run(&home, &["rm", "-n", "leaf-deep.txt"]));
+    let matched = ok(&run(&home, &["rm", "-n", "--match=glob", "leaf-deep.txt"]));
     assert_eq!(matched.trim_end(), path, "{matched}");
     ok(&run(&home, &["restore", &path]));
     assert_eq!(fs::read_to_string(&f).unwrap(), "deep");

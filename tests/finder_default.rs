@@ -397,13 +397,14 @@ fn volume_trashes_join_list_restore_rm_and_status() {
 
     // Back into the volume trash, then a Finder rm takes it for good.
     fs::rename(&orig, vt.join("v.bin")).unwrap();
-    let o = run(&["rm", "-n", "v.bin"]);
+    let shown = orig.to_str().unwrap();
+    let o = run(&["rm", "-n", shown]);
     assert!(out(&o).contains("v.bin") && vt.join("v.bin").exists());
-    let o = run(&["rm", "v.bin"]);
+    let o = run(&["rm", shown]);
     assert!(o.status.success(), "{}", err(&o));
     assert!(!vt.join("v.bin").exists());
     assert!(vt.join(".DS_Store").exists());
-    let o = run(&["rm", "--older-than=1d", "*", "--force"]);
+    let o = run(&["rm", "--match=glob", "--older-than=1d", "*", "--force"]);
     assert!(o.status.success(), "{}", err(&o));
 }
 
@@ -1081,7 +1082,7 @@ fn finder_matching_ignores_unicode_normalization() {
     // rm takes a composed glob for a decomposed name.
     assert!(b.run(&["put", nfd], "").status.success());
     b.put_back(nfd, &f);
-    let o = b.run(&["rm", "n\u{e9}*"], "");
+    let o = b.run(&["rm", "--match=glob", "n\u{e9}*"], "");
     assert!(o.status.success(), "{}", err(&o));
     assert!(!b.finder().join(nfd).exists());
 
@@ -1344,8 +1345,11 @@ fn max_count_refuses_finder_rm_and_empty_past_the_cap() {
     assert!(b.run(&["put", "fc-a", "fc-b", "fc-c"], "").status.success());
     let cap2 = [("RTRASH_MAX_PERMANENT", "2")];
     for (args, envs) in [
-        (&["rm", "--max-count=2", "fc-*"][..], &[][..]),
-        (&["rm", "fc-*"][..], &cap2[..]),
+        (
+            &["rm", "--match=glob", "--max-count=2", "fc-*"][..],
+            &[][..],
+        ),
+        (&["rm", "--match=glob", "fc-*"][..], &cap2[..]),
         (&["empty", "--all"][..], &cap2[..]),
     ] {
         let o = b.run_env(args, envs);
@@ -1403,8 +1407,8 @@ fn allow_roots_keeps_finder_put_restore_and_rm_inside() {
     fs::write(b.finder().join("fa-c"), "fa-c").unwrap();
     let to_out = format!("--to={}", outside.display());
     for (args, item) in [
-        (&["rm", "fa-b"][..], "fa-b"),
-        (&["rm", "fa-c"][..], "fa-c"),
+        (&["rm", "--match=glob", "fa-b"][..], "fa-b"),
+        (&["rm", "--match=glob", "fa-c"][..], "fa-c"),
         (&["restore", &to_out, "fa-a"][..], "fa-a"),
     ] {
         refused(args);

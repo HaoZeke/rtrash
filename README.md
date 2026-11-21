@@ -266,7 +266,7 @@ Selective permanent delete from the trash (trash-cli `trash-rm`):
 
 ```console
 $ rtrash put a.o b.c
-$ rtrash rm '*.o'          # quote globs; removes a.o from trash only
+$ rtrash rm --match=glob '*.o'   # quote globs; removes a.o from trash only
 $ rtrash list              # b.c still listed
 ```
 
@@ -304,10 +304,11 @@ Put measures the tree in parallel after the move, outside the trash lock.
 When `status` or `empty --dry-run` has to walk a directory with no valid line, it writes the size back and drops lines for directories that left the trash, so the next run reads the cache.
 Putting ordinary files does not add directory lines.
 
-### `rtrash empty [DAYS]` (also `trash-empty`)
+### `rtrash empty [DAYS | PATH]` (also `trash-empty`)
 
 Purges every trash directory visible to the user (home trash plus mounted volumes).
 With `DAYS` (or `--older-than=DAYS`), only items trashed more than `DAYS` days ago go.
+A `PATH` removes only the items whose original path is that path, exactly, the way `put` records it (a relative path is resolved from the current directory, and a trailing slash is ignored). `empty ~/a` does not remove `~/ab` or `~/a/b`; when nothing matches, those longer paths are named and left in place. A number or a duration is an age, not a path.
 Entries are removed in parallel.
 Orphaned `files/` entries (no `.trashinfo`) and entries with broken metadata are purged on a full empty, and the `directorysizes` cache is pruned when present.
 A directory you own but cannot list or change, such as a build tree's `pkg` at mode 0311, gets owner `rwx` back and then goes.
@@ -497,9 +498,9 @@ The other `[du]` keys are `count`, `one_file_system`, `threads`, `git`, `exclude
 
 ### `rtrash rm PATTERN...` (also `trash-rm`)
 
-Permanently deletes trash entries whose original path, basename, or trash name matches a shell-style glob `PATTERN` (quote globs from the shell).
+Permanently deletes trash entries whose original path is exactly `PATTERN`: the path `put` records, resolved from the current directory, with a trailing slash ignored. `rm ~/a` does not remove `~/ab` or `~/a/b`. When nothing matches, those longer paths are named and left in place.
 Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
-An orphan matches by its name in `files/` or its path there.
+`--match=glob` is the shell glob of the original path, its basename or the trash name (quote globs from the shell), which is how an orphan is selected by its name in `files/` or its path there. `--regex` and `--match=substring` compare the whole original path. `--match=exact` is the same comparison as a bare `PATTERN`.
 Does **not** restore.
 On a terminal it names the matches (the first 10, with sizes) and asks once before it deletes, as `rm -I` does and as trash-cli #383 asks of `trash-rm`. Only `y` or `yes` goes on. A script, whose stdin or stderr is not a terminal, is never asked, so pipelines and cron jobs work as before. `-i`/`--interactive` asks even then, with the reply read from stdin. `-y`/`--yes` and `-f`/`--force` never ask, and the last of the three wins.
 Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-i`/`--interactive`, `-y`/`--yes`, `-f`/`--force` (no question, and mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).

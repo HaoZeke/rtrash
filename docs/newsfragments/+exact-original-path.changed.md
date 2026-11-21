@@ -1,0 +1,1 @@
+`rtrash rm` and `rtrash empty` take a bare path as the exact original path `put` recorded, so `rm ~/a` leaves `~/ab` and `~/a/b` in place and names them when nothing matches. Globs, regular expressions and substrings stay on `--match`, and on `--glob`, `--regex` and `--name` where those options already exist.

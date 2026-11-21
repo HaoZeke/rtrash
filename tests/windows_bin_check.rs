@@ -363,7 +363,7 @@ impl FlaggedBin {
         assert!(rows.trim_end().ends_with("rj-good.txt"), "{rows}");
 
         let dry = common::assert_refused_unchanged(&"rm -n", &watch, 0, &[], || {
-            self.run(&["rm", "-n", "-f", "*"])
+            self.run(&["rm", "-n", "-f", "--match=glob", "*"])
         });
         let matched = out_text(&dry);
         assert_eq!(matched.lines().count(), 1, "{matched}");
