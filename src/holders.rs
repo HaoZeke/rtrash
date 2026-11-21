@@ -883,7 +883,7 @@ mod listing {
 
     /// The regular files at or below `path`, never through a link, and
     /// whether the list is whole: false when the path or a folder below it
-    /// could not be read, or the list stopped at `MAX_FILES`.
+    /// could not be read, or a file beyond `MAX_FILES` was left out.
     pub fn files(path: &Path) -> (Vec<PathBuf>, bool) {
         let m = match crate::util::look(path) {
             crate::util::Look::There(m) => m,
@@ -913,10 +913,10 @@ mod listing {
                 match item.kind {
                     Kind::Dir => stack.push(item.path),
                     Kind::File => {
-                        out.push(item.path);
-                        if out.len() >= MAX_FILES {
+                        if out.len() == MAX_FILES {
                             return (out, false);
                         }
+                        out.push(item.path);
                     }
                     Kind::Other => {}
                     Kind::Unknown => whole = false,
@@ -1250,6 +1250,18 @@ mod tests {
         let (files, whole) = listing::walk(Path::new("/w"), &many);
         assert_eq!(files.len(), listing::MAX_FILES);
         assert!(!whole);
+    }
+
+    #[test]
+    fn a_walk_of_exactly_the_file_limit_is_whole() {
+        let exact = |_: &Path| -> std::io::Result<listing::Items> {
+            Ok(Box::new(
+                (0..listing::MAX_FILES).map(|i| item(&format!("/w/f{i}"), listing::Kind::File)),
+            ))
+        };
+        let (files, whole) = listing::walk(Path::new("/w"), &exact);
+        assert_eq!(files.len(), listing::MAX_FILES);
+        assert!(whole);
     }
 
     #[test]
