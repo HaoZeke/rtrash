@@ -795,6 +795,92 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
+/// The folder walk behind the Windows query, apart from the platform so
+/// that tests on Linux can run it: which regular files lie at or below a
+/// path, and whether the list is whole.
+#[cfg(any(windows, test))]
+mod listing {
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    /// At most this many files of a directory go to one query.
+    pub const MAX_FILES: usize = 4096;
+
+    pub enum Kind {
+        Dir,
+        File,
+        Other,
+        /// The type could not be read, so the entry is neither walked nor queried.
+        Unknown,
+    }
+
+    pub struct Item {
+        pub path: PathBuf,
+        pub kind: Kind,
+    }
+
+    pub type Items = Box<dyn Iterator<Item = Item>>;
+
+    /// The entries of the folder `d`, as the file system gives them.
+    pub fn read(d: &Path) -> io::Result<Items> {
+        let rd = std::fs::read_dir(d)?;
+        Ok(Box::new(rd.flatten().map(|e| Item {
+            path: e.path(),
+            kind: match e.file_type() {
+                Ok(t) if t.is_dir() => Kind::Dir,
+                Ok(t) if t.is_file() => Kind::File,
+                Ok(_) => Kind::Other,
+                Err(_) => Kind::Unknown,
+            },
+        })))
+    }
+
+    /// The regular files at or below `path`, never through a link, and
+    /// whether the list is whole: false when the path or a folder below it
+    /// could not be read, or the list stopped at `MAX_FILES`.
+    pub fn files(path: &Path) -> (Vec<PathBuf>, bool) {
+        let m = match crate::util::look(path) {
+            crate::util::Look::There(m) => m,
+            crate::util::Look::Gone => return (Vec::new(), true),
+            crate::util::Look::Unreachable(_) => return (Vec::new(), false),
+        };
+        if m.is_file() {
+            return (vec![path.to_path_buf()], true);
+        }
+        if !m.is_dir() {
+            return (Vec::new(), true);
+        }
+        walk(path, &read)
+    }
+
+    /// [`files`] for a folder, reading each folder below it through `read`.
+    pub fn walk(dir: &Path, read: &dyn Fn(&Path) -> io::Result<Items>) -> (Vec<PathBuf>, bool) {
+        let mut out = Vec::new();
+        let mut whole = true;
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(items) = read(&d) else {
+                whole = false;
+                continue;
+            };
+            for item in items {
+                match item.kind {
+                    Kind::Dir => stack.push(item.path),
+                    Kind::File => {
+                        out.push(item.path);
+                        if out.len() >= MAX_FILES {
+                            return (out, false);
+                        }
+                    }
+                    Kind::Other => {}
+                    Kind::Unknown => whole = false,
+                }
+            }
+        }
+        (out, whole)
+    }
+}
+
 #[cfg(windows)]
 mod win {
     use super::{base_name, Hold};
@@ -808,51 +894,6 @@ mod win {
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
-
-    /// At most this many files of a directory go to one query.
-    const MAX_FILES: usize = 4096;
-
-    /// The regular files at or below `path`, never through a link, and
-    /// whether the list is whole: false when the path or a folder below it
-    /// could not be read, or the list stopped at `MAX_FILES`.
-    fn files(path: &Path) -> (Vec<PathBuf>, bool) {
-        let mut out = Vec::new();
-        let m = match crate::util::look(path) {
-            crate::util::Look::There(m) => m,
-            crate::util::Look::Gone => return (out, true),
-            crate::util::Look::Unreachable(_) => return (out, false),
-        };
-        if m.is_file() {
-            out.push(path.to_path_buf());
-            return (out, true);
-        }
-        if !m.is_dir() {
-            return (out, true);
-        }
-        let mut whole = true;
-        let mut stack = vec![path.to_path_buf()];
-        while let Some(d) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&d) else {
-                whole = false;
-                continue;
-            };
-            for e in rd.flatten() {
-                let Ok(t) = e.file_type() else {
-                    whole = false;
-                    continue;
-                };
-                if t.is_dir() {
-                    stack.push(e.path());
-                } else if t.is_file() {
-                    out.push(e.path());
-                    if out.len() >= MAX_FILES {
-                        return (out, false);
-                    }
-                }
-            }
-        }
-        (out, whole)
-    }
 
     fn wide_str(w: &[u16]) -> String {
         let end = w.iter().position(|&c| c == 0).unwrap_or(w.len());
@@ -880,7 +921,7 @@ mod win {
     /// The processes that have `path`, or a file below it, open, and
     /// whether the Restart Manager answered for every file it was given.
     pub fn query(path: &Path) -> (Vec<Hold>, bool) {
-        let (files, mut complete) = files(path);
+        let (files, mut complete) = super::listing::files(path);
         if files.is_empty() {
             return (Vec::new(), complete);
         }
@@ -1105,6 +1146,80 @@ mod tests {
         std::fs::set_permissions(shut.join("fd"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(s.unreadable, 1);
+    }
+
+    fn item(path: &str, kind: listing::Kind) -> listing::Item {
+        listing::Item {
+            path: PathBuf::from(path),
+            kind,
+        }
+    }
+
+    #[test]
+    fn a_walk_lists_the_files_at_every_depth() {
+        let dir = std::env::temp_dir().join(format!("rtrash-walk-whole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(dir.join("top"), b"x").unwrap();
+        std::fs::write(dir.join("a/b/deep"), b"x").unwrap();
+        let (mut files, whole) = listing::files(&dir);
+        let one = listing::files(&dir.join("top"));
+        let none = listing::files(&dir.join("absent"));
+        let _ = std::fs::remove_dir_all(&dir);
+        files.sort();
+        assert_eq!(files, [dir.join("a/b/deep"), dir.join("top")]);
+        assert!(whole);
+        assert_eq!(one, (vec![dir.join("top")], true));
+        assert_eq!(none, (Vec::new(), true));
+    }
+
+    #[test]
+    fn a_walk_that_stops_at_the_file_limit_says_so() {
+        let many = |_: &Path| -> std::io::Result<listing::Items> {
+            Ok(Box::new(
+                (0..listing::MAX_FILES + 5).map(|i| item(&format!("/w/f{i}"), listing::Kind::File)),
+            ))
+        };
+        let (files, whole) = listing::walk(Path::new("/w"), &many);
+        assert_eq!(files.len(), listing::MAX_FILES);
+        assert!(!whole);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_read_leaves_the_walk_incomplete() {
+        let read = |d: &Path| -> std::io::Result<listing::Items> {
+            if d == Path::new("/w") {
+                Ok(Box::new(
+                    [
+                        item("/w/shut", listing::Kind::Dir),
+                        item("/w/a", listing::Kind::File),
+                    ]
+                    .into_iter(),
+                ))
+            } else {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        };
+        let (files, whole) = listing::walk(Path::new("/w"), &read);
+        assert_eq!(files, [PathBuf::from("/w/a")]);
+        assert!(!whole);
+    }
+
+    #[test]
+    fn an_entry_whose_type_cannot_be_read_leaves_the_walk_incomplete() {
+        let read = |_: &Path| -> std::io::Result<listing::Items> {
+            Ok(Box::new(
+                [
+                    item("/w/odd", listing::Kind::Unknown),
+                    item("/w/a", listing::Kind::File),
+                    item("/w/pipe", listing::Kind::Other),
+                ]
+                .into_iter(),
+            ))
+        };
+        let (files, whole) = listing::walk(Path::new("/w"), &read);
+        assert_eq!(files, [PathBuf::from("/w/a")]);
+        assert!(!whole);
     }
 
     #[test]
