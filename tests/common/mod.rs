@@ -336,9 +336,10 @@ pub fn rtrash(home: &Path) -> Command {
 /// anywhere in an argument as the start of a switch ("Invalid switch"),
 /// so both paths must be native; a `/` in either fails here first. Every
 /// mklink call in the tests goes through here (precheck
-/// check_mklink_calls).
+/// check_mklink_calls). The error is mklink's own text when it fails, so
+/// a test can skip.
 #[cfg(windows)]
-pub fn mklink_junction(link: &Path, target: &Path) {
+pub fn mklink_junction(link: &Path, target: &Path) -> std::io::Result<()> {
     for p in [link, target] {
         let plain = !p.as_os_str().to_string_lossy().contains('/');
         assert!(plain, "a mklink path with '/': {}", p.display());
@@ -347,10 +348,15 @@ pub fn mklink_junction(link: &Path, target: &Path) {
         .args(["/C", "mklink", "/J"])
         .arg(link)
         .arg(target)
-        .output()
-        .unwrap();
+        .output()?;
+    if out.status.success() {
+        return Ok(());
+    }
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "mklink /J {}: {err}", link.display());
+    Err(std::io::Error::other(format!(
+        "mklink /J {}: {err}",
+        link.display()
+    )))
 }
 
 /// The `LOCALAPPDATA` that [`rtrash`] gives a Windows run under `home`.
