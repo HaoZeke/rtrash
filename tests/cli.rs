@@ -3371,6 +3371,38 @@ fn rm_matches_the_original_path_exactly() {
     assert_eq!(trash_names(&sb).len(), 2);
 }
 
+/// A composed `é` and a decomposed one are two files on a file system that
+/// keeps both. `rm` of the composed spelling removes that item and leaves
+/// the decomposed one.
+#[test]
+fn rm_removes_one_spelling_of_an_accented_name() {
+    let sb = Sandbox::new("exact-nfc");
+    let composed = "caf\u{e9}.txt";
+    let decomposed = "cafe\u{301}.txt";
+    let a = sb.work().join(composed);
+    let b = sb.work().join(decomposed);
+    fs::write(&a, b"composed").unwrap();
+    fs::write(&b, b"decomposed").unwrap();
+    if fs::read(&a).unwrap() == b"decomposed" {
+        common::skip("this file system stores one Unicode spelling");
+        return;
+    }
+    assert!(
+        sb.run(&["put", composed, decomposed]).status.success(),
+        "put failed"
+    );
+    assert_eq!(trash_names(&sb).len(), 2, "put did not keep both spellings");
+    let out = sb.run(&["rm", "--home-only", composed]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let left: Vec<_> = fs::read_dir(sb.trash().join("files"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(left.len(), 1, "{}", stderr_of(&out));
+    assert_eq!(fs::read(&left[0]).unwrap(), b"decomposed");
+}
+
 fn set_deletion_date(sb: &Sandbox, name: &str, date: &str) {
     let path = sb.trash().join(format!("info/{name}.trashinfo"));
     let text = fs::read_to_string(&path).unwrap();

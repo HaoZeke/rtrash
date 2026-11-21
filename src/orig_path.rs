@@ -255,15 +255,16 @@ fn same(a: &str, b: &str) -> bool {
     key(a) == key(b)
 }
 
-/// NFC on Unix, where Finder may store a decomposed name. Windows has no
-/// such trash, and the crate that composes is Unix-only.
+/// NFC on macOS, where Finder may store a decomposed name. FreeDesktop
+/// paths compare as bytes, so a composed `é` and a decomposed one stay
+/// two files. Windows has no such trash.
 fn compose(text: &str) -> String {
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     {
         use unicode_normalization::UnicodeNormalization;
         text.nfc().collect()
     }
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "macos"))]
     {
         text.to_string()
     }
