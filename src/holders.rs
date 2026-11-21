@@ -823,16 +823,32 @@ mod listing {
 
     /// The entries of the folder `d`, as the file system gives them.
     pub fn read(d: &Path) -> io::Result<Items> {
-        let rd = std::fs::read_dir(d)?;
-        Ok(Box::new(rd.flatten().map(|e| Item {
-            path: e.path(),
-            kind: match e.file_type() {
-                Ok(t) if t.is_dir() => Kind::Dir,
-                Ok(t) if t.is_file() => Kind::File,
-                Ok(_) => Kind::Other,
-                Err(_) => Kind::Unknown,
+        Ok(typed(d, std::fs::read_dir(d)?))
+    }
+
+    /// `entries`, each with its kind. An entry the listing failed to give
+    /// is one more `Kind::Unknown` item, so the walk sees that something
+    /// was skipped instead of taking the folder for whole.
+    pub fn typed(
+        dir: &Path,
+        entries: impl Iterator<Item = io::Result<std::fs::DirEntry>> + 'static,
+    ) -> Items {
+        let dir = dir.to_path_buf();
+        Box::new(entries.map(move |e| match e {
+            Ok(e) => Item {
+                path: e.path(),
+                kind: match e.file_type() {
+                    Ok(t) if t.is_dir() => Kind::Dir,
+                    Ok(t) if t.is_file() => Kind::File,
+                    Ok(_) => Kind::Other,
+                    Err(_) => Kind::Unknown,
+                },
             },
-        })))
+            Err(_) => Item {
+                path: dir.clone(),
+                kind: Kind::Unknown,
+            },
+        }))
     }
 
     /// The regular files at or below `path`, never through a link, and
@@ -1220,6 +1236,28 @@ mod tests {
         let (files, whole) = listing::walk(Path::new("/w"), &read);
         assert_eq!(files, [PathBuf::from("/w/a")]);
         assert!(!whole);
+    }
+
+    #[test]
+    fn an_error_in_a_folder_listing_leaves_the_walk_incomplete() {
+        let dir = std::env::temp_dir().join(format!("rtrash-walk-err-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("one"), b"x").unwrap();
+        std::fs::write(dir.join("two"), b"x").unwrap();
+        // The listing fails after its entries, as a read of the folder can.
+        let read = |d: &Path| -> std::io::Result<listing::Items> {
+            let broken = std::fs::read_dir(d)?
+                .chain(std::iter::once(Err(std::io::Error::other("read failed"))));
+            Ok(listing::typed(d, broken))
+        };
+        let (mut files, whole) = listing::walk(&dir, &read);
+        let clean = listing::files(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        files.sort();
+        assert_eq!(files, [dir.join("one"), dir.join("two")]);
+        assert!(!whole);
+        assert!(clean.1);
     }
 
     #[test]
