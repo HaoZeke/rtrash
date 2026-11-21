@@ -65,16 +65,20 @@ fn base_name(p: &Path) -> Option<String> {
     p.file_name().map(|f| f.to_string_lossy().into_owned())
 }
 
+/// What `Snapshot::probe` found for one path.
+pub struct Probe {
+    pub holds: Vec<Hold>,
+    /// The answer may miss a holder: some file below the path was not
+    /// checked.
+    pub unchecked: bool,
+}
+
 /// Every hold of every readable process at one moment, keyed by path.
 #[derive(Debug, Default)]
 pub struct Snapshot {
     held: BTreeMap<PathBuf, Vec<Hold>>,
     /// Processes whose descriptors could not be read (another user's, without root).
     pub unreadable: usize,
-    /// Paths the Restart Manager could not check in full: its session or
-    /// query failed, or the folder held more files than one query takes.
-    #[cfg(windows)]
-    unchecked: std::sync::atomic::AtomicUsize,
     /// False where rtrash has no way to list holders.
     pub supported: bool,
     /// Paths outside these trees are dropped (none are when it is
@@ -149,13 +153,35 @@ impl Snapshot {
     /// Manager now.
     #[cfg(windows)]
     pub fn under(&self, path: &Path) -> Vec<Hold> {
+        self.probe(path).holds
+    }
+
+    /// `under`, and whether the answer covers every file below `path`. On
+    /// Windows the Restart Manager answers per path, and its query can fail
+    /// or stop at a file limit; elsewhere one scan covers every path.
+    #[cfg(windows)]
+    pub fn probe(&self, path: &Path) -> Probe {
         let _ = (&self.held, &self.roots, self.maps);
         let (holds, complete) = win::query(&resolve(path));
-        if !complete {
-            self.unchecked
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Probe {
+            holds,
+            unchecked: !complete,
         }
-        holds
+    }
+
+    /// `under`, and whether the answer covers every file below `path`.
+    /// Always so here, but in debug builds `RTRASH_TEST_PARTIAL=NAME` makes
+    /// a path with that last component an unchecked one, which stands in
+    /// for a failed Windows query in tests.
+    #[cfg(unix)]
+    pub fn probe(&self, path: &Path) -> Probe {
+        let unchecked = cfg!(debug_assertions)
+            && std::env::var_os("RTRASH_TEST_PARTIAL")
+                .is_some_and(|n| path.file_name() == Some(n.as_os_str()));
+        Probe {
+            holds: self.under(path),
+            unchecked,
+        }
     }
 
     /// True when a live process holds `path` or anything below it.
@@ -165,9 +191,17 @@ impl Snapshot {
 
     /// Why an empty answer from `under` does not prove a path is free:
     /// the platform lists no holders, or some process (another user's,
-    /// without root) or path could not be inspected. None when every
-    /// process was seen. On Windows it reads what `under` has asked so far.
+    /// without root) could not be inspected. None when every process was
+    /// seen. The paths a caller asked about are not counted; see `gap_of`.
     pub fn gap(&self) -> Option<String> {
+        self.gap_of(0)
+    }
+
+    /// [`gap`](Snapshot::gap) for an answer in which `unchecked_paths`
+    /// paths were not checked in full (`Probe::unchecked`). The count comes
+    /// from the caller, so a path checked in full is never held to the
+    /// failure of another.
+    pub fn gap_of(&self, unchecked_paths: usize) -> Option<String> {
         if !self.supported {
             return Some("cannot tell which processes hold files on this platform".to_string());
         }
@@ -178,15 +212,11 @@ impl Snapshot {
                 crate::util::plural(self.unreadable as u64, "process", "processes")
             ));
         }
-        #[cfg(windows)]
-        {
-            let n = self.unchecked.load(std::sync::atomic::Ordering::Relaxed);
-            if n > 0 {
-                parts.push(format!(
-                    "{} could not be checked in full",
-                    crate::util::plural(n as u64, "path", "paths")
-                ));
-            }
+        if unchecked_paths > 0 {
+            parts.push(format!(
+                "{} could not be checked in full",
+                crate::util::plural(unchecked_paths as u64, "path", "paths")
+            ));
         }
         (!parts.is_empty()).then(|| parts.join(", "))
     }
@@ -1135,6 +1165,27 @@ mod tests {
         assert_eq!(s.gap().unwrap(), "1 process could not be inspected");
         s.unreadable = 7;
         assert_eq!(s.gap().unwrap(), "7 processes could not be inspected");
+    }
+
+    #[test]
+    fn unchecked_paths_are_counted_by_the_caller_not_the_snapshot() {
+        let s = Snapshot {
+            supported: true,
+            ..Snapshot::default()
+        };
+        assert_eq!(s.gap_of(0), None);
+        assert_eq!(s.gap_of(1).unwrap(), "1 path could not be checked in full");
+        // One path's failure leaves no mark behind for the next one.
+        assert_eq!(s.gap(), None);
+        let mut blind = Snapshot {
+            supported: true,
+            ..Snapshot::default()
+        };
+        blind.unreadable = 2;
+        assert_eq!(
+            blind.gap_of(3).unwrap(),
+            "2 processes could not be inspected, 3 paths could not be checked in full"
+        );
     }
 
     /// A process folder this user may not enter counts as unreadable, and

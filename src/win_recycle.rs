@@ -2069,7 +2069,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             let abs = super::operand_path(f);
             let seen = super::file_identity(&abs);
             if let Some(snap) = &snap {
-                let holds = snap.under(&abs);
+                let probe = snap.probe(&abs);
+                let holds = probe.holds;
                 if !holds.is_empty() {
                     let who = crate::holders::describe(&holds);
                     if in_use == "refuse" {
@@ -2087,7 +2088,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                         crate::util::err_path(&f)
                     );
                 } else if in_use == "refuse" {
-                    if let Some(gap) = snap.gap() {
+                    if let Some(gap) = snap.gap_of(usize::from(probe.unchecked)) {
                         if !force {
                             eprintln!(
                                 "{prog}: cannot trash '{}': it may be in use; {gap}",
