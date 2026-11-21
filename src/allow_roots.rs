@@ -67,18 +67,21 @@ pub fn resolve(p: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-/// Whether resolved `p` is `root` or below it. Windows compares without
-/// case and with either slash.
+/// Whether resolved `p` is `root` or below it. Windows compares with
+/// [`crate::orig_path::norm`], the same key as an exact original path,
+/// so letter case, `/` and `\`, a `\\?\` prefix and a volume GUID mount
+/// all fold the same way.
 pub fn under(p: &Path, root: &Path) -> bool {
     if cfg!(windows) {
-        let key = |x: &Path| {
-            x.to_string_lossy()
-                .replace('/', "\\")
-                .trim_end_matches('\\')
-                .to_lowercase()
+        let p = crate::orig_path::norm(p);
+        let r = crate::orig_path::norm(root);
+        // `c:\` already ends in a separator; another one would hide `c:\x`.
+        let prefix = if r.ends_with('\\') {
+            r.clone()
+        } else {
+            format!("{r}\\")
         };
-        let (p, r) = (key(p), key(root));
-        p == r || p.starts_with(&format!("{r}\\"))
+        p == r || p.starts_with(&prefix)
     } else {
         p.starts_with(root)
     }
@@ -287,6 +290,9 @@ mod tests {
         if cfg!(windows) {
             assert!(under(Path::new(r"c:/work/A.TXT"), root));
             assert!(under(Path::new(r"C:\x"), Path::new(r"C:\")));
+            // The old key kept the verbatim prefix, so this was outside.
+            assert!(under(Path::new(r"\\?\C:\Work\a"), root));
+            assert!(!under(Path::new(r"\\?\D:\Work\a"), root));
         }
     }
 

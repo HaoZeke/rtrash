@@ -36,7 +36,7 @@ pub fn forms(typed: &str) -> Vec<String> {
 
 fn push_form(out: &mut Vec<String>, path: &Path) {
     let recorded = norm(path);
-    if out.iter().any(|have| same(have, &recorded)) {
+    if out.iter().any(|have| have == &recorded) {
         return;
     }
     out.push(recorded);
@@ -47,7 +47,7 @@ pub fn expand(typed: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for one in typed {
         for form in forms(one) {
-            if !out.iter().any(|have| same(have, &form)) {
+            if !out.contains(&form) {
                 out.push(form);
             }
         }
@@ -55,28 +55,36 @@ pub fn expand(typed: &[String]) -> Vec<String> {
     out
 }
 
-/// The path as a hint prints it: no `\\?\` prefix, and no trailing
-/// separator. [`selects`] compares with [`same`].
+/// The path two originals are compared in. On Windows this is
+/// [`crate::win_recycle::path_key`]: `\\?\` gone, a volume GUID read as
+/// its mount, `/` and `\` the same, no trailing separator, and lower
+/// case. Elsewhere it is the plain path with no trailing separator, and
+/// on macOS it is NFC.
 pub fn norm(path: &Path) -> String {
     let plain = crate::util::plain_path(path);
     let text = crate::util::str_from_os_ref(plain.as_os_str());
-    trim_sep(&compose(&text))
+    let text = trim_sep(&compose(&text));
+    #[cfg(windows)]
+    {
+        crate::win_recycle::path_key(&text, windows_mounts())
+    }
+    #[cfg(not(windows))]
+    {
+        text
+    }
 }
 
 /// `original` is one of the wanted forms.
 pub fn selects(wants: &[String], original: &Path) -> bool {
-    let got_n = norm(original);
-    let got = key(&got_n);
-    wants.iter().any(|want| key(want) == got)
+    let got = norm(original);
+    wants.iter().any(|want| want == &got)
 }
 
 /// `original` is a longer path that starts with `want`: a sibling such as
 /// `~/ab` or a child such as `~/a/b`, never `want` itself.
 pub fn continues(want: &Path, original: &Path) -> bool {
-    let want_n = norm(want);
-    let original_n = norm(original);
-    let want = key(&want_n);
-    let original = key(&original_n);
+    let want = norm(want);
+    let original = norm(original);
     original != want && original.starts_with(&want)
 }
 
@@ -101,23 +109,22 @@ enum Notice {
 }
 
 fn notices(wants: &[String], have: &[PathBuf], kept: &[PathBuf]) -> Vec<(String, Notice)> {
-    let got: Vec<String> = have.iter().map(|path| key(&norm(path))).collect();
-    let stay: Vec<String> = kept.iter().map(|path| key(&norm(path))).collect();
+    let got: Vec<String> = have.iter().map(|path| norm(path)).collect();
+    let stay: Vec<String> = kept.iter().map(|path| norm(path)).collect();
     let mut named = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for want in wants {
-        let want_key = key(want);
-        if stay.iter().any(|one| one == &want_key) {
+        if stay.iter().any(|one| one == want) {
             continue;
         }
-        if got.iter().any(|one| one == &want_key) {
+        if got.iter().any(|one| one == want) {
             out.push((want.clone(), Notice::Outside));
             continue;
         }
         let mut near = Vec::new();
         for (path, one) in have.iter().zip(got.iter()) {
-            let longer = one.starts_with(&want_key) && one != &want_key;
-            let exact_elsewhere = wants.iter().any(|w| key(w) == *one);
+            let longer = one.starts_with(want.as_str()) && one != want;
+            let exact_elsewhere = wants.iter().any(|w| w == one);
             if longer && !exact_elsewhere && named.insert(one.clone()) {
                 near.push(path.clone());
             }
@@ -231,28 +238,13 @@ fn short_parent(abs: &Path) -> Option<PathBuf> {
     Some(crate::util::plain_path(&short).join(name))
 }
 
-/// The Windows comparison key, or `text` itself elsewhere. On Windows
-/// this is [`crate::win_recycle::path_key`].
-fn key(text: &str) -> String {
-    #[cfg(windows)]
-    {
-        crate::win_recycle::path_key(text, windows_mounts())
-    }
-    #[cfg(not(windows))]
-    {
-        text.to_string()
-    }
-}
-
+/// Mounts for [`crate::win_recycle::path_key`], read once. An empty list
+/// still folds case and separators; a volume GUID then stays as written.
 #[cfg(windows)]
 fn windows_mounts() -> &'static [(String, String)] {
     use std::sync::OnceLock;
     static MOUNTS: OnceLock<Vec<(String, String)>> = OnceLock::new();
     MOUNTS.get_or_init(crate::win_recycle::volume_mounts)
-}
-
-fn same(a: &str, b: &str) -> bool {
-    key(a) == key(b)
 }
 
 /// NFC on macOS, where Finder may store a decomposed name. FreeDesktop
@@ -357,7 +349,10 @@ mod tests {
         let typed = Path::new(r"C:\Users\A\File.TXT");
         let slash = Path::new("c:/users/a/file.txt");
         let verbatim = Path::new(r"\\?\C:\Users\A\File.TXT");
-        assert!(same(&norm(typed), &norm(slash)), "{}", norm(slash));
+        let key = crate::win_recycle::path_key(r"C:\Users\A\File.TXT", &[]);
+        assert_eq!(norm(typed), key);
+        assert_eq!(norm(slash), key);
+        assert_eq!(norm(verbatim), key);
         assert!(selects(&[norm(typed)], slash));
         assert!(selects(&[norm(slash)], verbatim));
         assert!(!selects(&[norm(typed)], Path::new(r"C:\Users\A\File.TX")));
