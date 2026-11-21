@@ -295,7 +295,7 @@ Names are reserved atomically, so concurrent invocations never clobber each othe
 
 **Script pins:** `--trash-dir=PATH` puts into that FreeDesktop root (creates `files/` and `info/` if needed); `--home-only` always uses the home trash.
 
-**Script output:** `--json` prints one object, `{"trashed": [...], "failed": N}`. Each trashed entry lists `original` (the original path), `name` (the payload name in the trash: under `files/` on FreeDesktop, in the Finder Trash, or `$R...` in the Windows Recycle Bin), and `trash_dir` (the trash root), so a script can hand the names to `rtrash rm` or restore by path later.
+**Script output:** `--json` prints one object, `{"trashed": [...], "failed": N}`. Each trashed entry lists `original` (the original path), `name` (the payload name in the trash: under `files/` on FreeDesktop, in the Finder Trash, or `$R...` in the Windows Recycle Bin), and `trash_dir` (the trash root). Pass the original path to `rtrash rm` or to restore; `rtrash rm` selects the trash name with `--match=glob`.
 
 Putting a **directory** updates that trash dir’s FreeDesktop `directorysizes` cache (`size mtime percent-encoded-name`).
 Sizes count allocated blocks the way `du -B1` does, the directories' own blocks included and each hard-linked file once.
