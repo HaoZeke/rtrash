@@ -24,7 +24,7 @@ jobs:
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -36,13 +36,13 @@ jobs:
           SKIP_TEST: "1"
         run: ./scripts/package-release.sh ${{ matrix.target }}
       - name: upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rtrash-${{ matrix.target }}
           path: dist/*.tar.gz*
       - name: upload release assets (tags only)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.tar.gz*
           generate_release_notes: true
@@ -59,7 +59,7 @@ jobs:
             os: macos-15-intel
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -69,13 +69,13 @@ jobs:
           SKIP_TEST: "1"
         run: ./scripts/package-release.sh ${{ matrix.target }}
       - name: upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rtrash-${{ matrix.target }}
           path: dist/*.tar.gz*
       - name: upload release assets (tags only)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.tar.gz*
           generate_release_notes: true
