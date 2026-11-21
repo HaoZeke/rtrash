@@ -7,19 +7,21 @@
 //!
 //! On Windows the comparison is [`crate::win_recycle::path_key`]: letter
 //! case does not matter, `/` and `\` are the same separator, and a volume
-//! GUID path is its mount point. [`forms`] also adds the short 8.3 path of
-//! a parent that still exists. An 8.3 alias of the final component is not
-//! a form. After the item has moved, that directory entry is gone, so
-//! `GetShortPathNameW` cannot read the file's short name, and the `$I`
-//! record stores one path.
+//! GUID path is its mount point. [`forms`] adds the short and long
+//! spellings of a parent that still exists, with the final name as given,
+//! so a short path in a `$I` record matches the long path that was typed
+//! and the other way around. When that final component is still on disk
+//! and is not a link, its own short and long names are forms too. After
+//! the item has moved, the directory entry is gone, so the final name is
+//! only the one the `$I` record stored.
 
 use std::path::{Component, Path, PathBuf};
 
 /// Every spelling of `typed` that can equal the path a backend recorded:
 /// the path made absolute from the current directory, and the same path
 /// with a link in a parent resolved, which is the path `put` writes down.
-/// On Windows, also the short 8.3 path of that parent when the volume
-/// still has one, with the final name left as given.
+/// On Windows, also the short and long names of that parent, and of the
+/// final component when it is still on disk and is not a link.
 pub fn forms(typed: &str) -> Vec<String> {
     let lexical = lexical_abs(Path::new(typed));
     let mut out = Vec::new();
@@ -28,9 +30,7 @@ pub fn forms(typed: &str) -> Vec<String> {
         push_form(&mut out, &put);
     }
     #[cfg(windows)]
-    if let Some(short) = short_parent(&lexical) {
-        push_form(&mut out, &short);
-    }
+    push_windows_forms(&mut out, &lexical);
     out
 }
 
@@ -189,16 +189,53 @@ fn lexical_abs(path: &Path) -> PathBuf {
 }
 
 /// The path `put` records for `abs`: the parent resolved through links,
-/// then the final name, which is not followed. On Windows a path that is
-/// still there is the full canonical path, which is what that `put` writes.
+/// then the final name, which is not followed. A symlink or junction in
+/// that final component stays the link, on every system.
 fn put_form(abs: &Path) -> Option<PathBuf> {
-    #[cfg(windows)]
-    if let Ok(full) = std::fs::canonicalize(abs) {
-        return Some(crate::util::plain_path(&full));
-    }
     let name = abs.file_name()?.to_os_string();
     let parent = abs.parent().filter(|p| !p.as_os_str().is_empty())?;
     Some(resolve_parent(parent).join(name))
+}
+
+/// Short and long parents, and the final component's own short and long
+/// names when that component is still on disk and is not a link.
+/// `GetShortPathNameW` on a file that has moved fails, and the `$I`
+/// record from [`crate::win_recycle::test_bin_put`] stores one path
+/// (`absolute` of the operand), so a deleted file's own 8.3 name is not
+/// recovered. The parent is still there, and both of its spellings are.
+#[cfg(windows)]
+fn push_windows_forms(out: &mut Vec<String>, abs: &Path) {
+    let Some(parent) = abs.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return;
+    };
+    let mut names = Vec::new();
+    if let Some(name) = abs.file_name() {
+        names.push(name.to_os_string());
+    }
+    // A link's short path can be the target's. Ask only for a real entry.
+    let ask = std::fs::symlink_metadata(abs).is_ok_and(|m| !m.file_type().is_symlink());
+    if ask {
+        for alias in [
+            crate::win_recycle::short_path(abs),
+            crate::win_recycle::long_path(abs),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(name) = alias.file_name() {
+                names.push(name.to_os_string());
+            }
+        }
+    }
+    let mut parents = vec![resolve_parent(parent)];
+    if let Some(short) = crate::win_recycle::short_path(parent) {
+        parents.push(crate::util::plain_path(&short));
+    }
+    for dir in parents {
+        for name in &names {
+            push_form(out, &dir.join(name));
+        }
+    }
 }
 
 fn resolve_parent(parent: &Path) -> PathBuf {
@@ -224,18 +261,6 @@ fn resolve_parent(parent: &Path) -> PathBuf {
         }
     }
     crate::util::plain_path(parent)
-}
-
-/// The short 8.3 path of the parent, with the final name left as given.
-/// None when the parent is gone or the volume has no short name. The
-/// final component is not shortened: after the item has moved, its
-/// directory entry is gone.
-#[cfg(windows)]
-fn short_parent(abs: &Path) -> Option<PathBuf> {
-    let name = abs.file_name()?.to_os_string();
-    let parent = abs.parent().filter(|p| !p.as_os_str().is_empty())?;
-    let short = crate::win_recycle::short_path(parent)?;
-    Some(crate::util::plain_path(&short).join(name))
 }
 
 /// Mounts for [`crate::win_recycle::path_key`], read once. An empty list
@@ -302,6 +327,18 @@ mod tests {
         assert!(!continues(want, Path::new("/home/u/a")));
         assert!(!continues(want, Path::new("/home/u/a/")));
         assert!(!continues(want, Path::new("/home/u/b")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_final_symlink_is_not_the_path_put_records() {
+        let dir = scratch("finallink");
+        std::fs::write(dir.join("target"), b"t").unwrap();
+        std::os::unix::fs::symlink("target", dir.join("link")).unwrap();
+        let got = forms(&format!("{}/link", dir.display()));
+        assert!(got.iter().all(|f| f.ends_with("/link")), "{got:?}");
+        assert!(got.iter().all(|f| !f.ends_with("/target")), "{got:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]

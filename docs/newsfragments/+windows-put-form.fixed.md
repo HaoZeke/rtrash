@@ -1,0 +1,1 @@
+On Windows, an exact path resolves the parent and keeps a final symlink or junction as the link. The short and long spellings of a parent that still exists both match, so a short path stored by `put` matches the long path typed later. A deleted file's own 8.3 name is not recovered: the `$I` record stores one path.

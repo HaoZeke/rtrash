@@ -1261,6 +1261,29 @@ pub fn short_path(path: &Path) -> Option<PathBuf> {
     )))
 }
 
+/// The long path of `path`, when it is on disk. None when the path is
+/// gone or the call fails. This is the other spelling of [`short_path`].
+#[cfg(windows)]
+pub fn long_path(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+    let wide = crate::util::win_path(path);
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: `wide` is NUL-terminated and `buf` is as long as the length passed.
+    let mut n = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    if n as usize >= buf.len() {
+        buf.resize(n as usize, 0);
+        // SAFETY: as above, with the size the first call asked for.
+        n = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    }
+    if n == 0 || n as usize >= buf.len() {
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_wide(
+        &buf[..n as usize],
+    )))
+}
+
 /// A volume path that is a folder rather than a drive root (`C:\\`).
 pub fn mounted_folder(path: &str) -> bool {
     let b = path.as_bytes();
