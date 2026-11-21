@@ -725,7 +725,7 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
     if patterns.kind == crate::filters::Match::Exact {
         let kept: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
         let window = crate::orig_path::window(filter.age.is_set(), filter.size.is_set());
-        crate::orig_path::hint(prog, &patterns.texts, &have, &kept, window);
+        crate::orig_path::hint(prog, &patterns.operands, &have, &kept, window);
     }
     let hits: Vec<&Entry> = rows.iter().filter(|e| hit(e)).collect();
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where

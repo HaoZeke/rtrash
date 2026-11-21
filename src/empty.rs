@@ -987,7 +987,7 @@ fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
     let kept: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
     crate::orig_path::hint(
         prog,
-        &wants,
+        &opts.paths,
         &have,
         &kept,
         crate::orig_path::window(opts.days.is_some(), false),

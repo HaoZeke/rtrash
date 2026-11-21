@@ -519,7 +519,7 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
         let have: Vec<std::path::PathBuf> = items.iter().map(|it| it.local.clone()).collect();
         crate::orig_path::hint(
             prog,
-            &wants,
+            &paths,
             &have,
             &have,
             crate::orig_path::window(false, false),
@@ -593,7 +593,7 @@ pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
         let kept: Vec<std::path::PathBuf> = chosen.iter().map(|it| it.local.clone()).collect();
         crate::orig_path::hint(
             prog,
-            &wants,
+            &scope.paths,
             &have,
             &kept,
             crate::orig_path::window(scope.age.is_some(), false),

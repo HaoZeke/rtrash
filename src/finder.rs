@@ -1321,7 +1321,7 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
             .collect();
         crate::orig_path::hint(
             prog,
-            &wants,
+            &o.paths,
             &have,
             &kept,
             crate::orig_path::window(o.cutoff.is_some(), false),

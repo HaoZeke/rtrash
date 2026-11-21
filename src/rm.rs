@@ -227,23 +227,25 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         eprintln!("Try '{prog} --help' for more information.");
         return 2;
     }
-    if kind == crate::filters::Match::Exact {
-        // The path put would record, including a relative one and one
-        // typed with a trailing slash.
-        patterns = crate::orig_path::expand(&patterns);
-    } else if kind == crate::filters::Match::Glob {
+    if kind == crate::filters::Match::Glob {
         // put records originals with their parent directory resolved, so
         // a path typed through a symlinked directory matches that way too.
         let resolved: Vec<String> = patterns.iter().filter_map(|p| resolve_pattern(p)).collect();
         patterns.extend(resolved);
     }
-    let pats = match crate::filters::Patterns::new(patterns.clone(), kind) {
+    let mut pats = match crate::filters::Patterns::new(patterns.clone(), kind) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{prog}: {e}");
             return 2;
         }
     };
+    if kind == crate::filters::Match::Exact {
+        // The path put would record, including a relative one and one
+        // typed with a trailing slash. `operands` stays as typed, so a
+        // hint is once per operand rather than once per spelling.
+        pats.texts = crate::orig_path::expand(&pats.operands);
+    }
 
     // Refuse accidental host-wide permanent purge of the whole trash.
     if !force && !scoped && pats.is_mass() {
@@ -361,7 +363,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .collect();
         let window =
             crate::orig_path::window(older_than.is_some() || newer_than.is_some(), size.is_set());
-        crate::orig_path::hint(prog, &pats.texts, &have, &kept, window);
+        crate::orig_path::hint(prog, &pats.operands, &have, &kept, window);
     }
     let wanted = |entry: &list::Entry| -> bool { path_hit(entry) && size.keeps(size_of(entry)) };
 

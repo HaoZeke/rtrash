@@ -1,0 +1,1 @@
+An exact `rm` or `empty` names a miss once per operand. A hit on any spelling of that operand, including the path `put` records through a link, is a hit, so the other spellings are not listed as a miss or a near miss.

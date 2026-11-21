@@ -2959,7 +2959,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             let kept: Vec<PathBuf> = items.iter().map(original_of).collect();
             crate::orig_path::hint(
                 prog,
-                &wants,
+                &paths,
                 &have,
                 &kept,
                 crate::orig_path::window(age.older_than.is_some(), false),
@@ -4423,16 +4423,16 @@ left in place.
             eprintln!("{prog}: missing PATTERN");
             return 2;
         }
-        if kind == crate::filters::Match::Exact {
-            patterns = crate::orig_path::expand(&patterns);
-        }
-        let pats = match crate::filters::Patterns::new(patterns, kind) {
+        let mut pats = match crate::filters::Patterns::new(patterns, kind) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("{prog}: {e}");
                 return 2;
             }
         };
+        if kind == crate::filters::Match::Exact {
+            pats.texts = crate::orig_path::expand(&pats.operands);
+        }
         if pats.is_mass() && !force && !scoped {
             eprintln!("{prog}: refusing a pattern that matches everything without --force");
             return 2;
@@ -4480,7 +4480,7 @@ left in place.
         if exact {
             let kept: Vec<PathBuf> = matched.iter().map(original_of).collect();
             let window = crate::orig_path::window(filters.age.is_set(), filters.size.is_set());
-            crate::orig_path::hint(prog, &pats.texts, &have, &kept, window);
+            crate::orig_path::hint(prog, &pats.operands, &have, &kept, window);
         }
         if !dry_run {
             // RTRASH_ALLOW_ROOTS: rm deletes only items trashed from there.

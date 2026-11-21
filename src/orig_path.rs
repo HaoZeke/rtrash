@@ -98,9 +98,11 @@ pub fn window(age: bool, size: bool) -> &'static str {
     }
 }
 
-/// What to say about one wanted form. `have` is every original in scope,
+/// What to say about one operand. `have` is every original in scope,
 /// before the age and size filters. `kept` is the subset those filters
-/// still allow.
+/// still allow. An operand has every spelling from [`forms`]; one hit
+/// among them is a hit of the operand.
+#[derive(Debug)]
 enum Notice {
     /// The path is in `have` and missing from `kept`.
     Outside,
@@ -108,23 +110,27 @@ enum Notice {
     Miss(Vec<PathBuf>),
 }
 
-fn notices(wants: &[String], have: &[PathBuf], kept: &[PathBuf]) -> Vec<(String, Notice)> {
+fn notices(operands: &[String], have: &[PathBuf], kept: &[PathBuf]) -> Vec<(String, Notice)> {
     let got: Vec<String> = have.iter().map(|path| norm(path)).collect();
     let stay: Vec<String> = kept.iter().map(|path| norm(path)).collect();
+    let groups: Vec<(String, Vec<String>)> =
+        operands.iter().map(|op| (op.clone(), forms(op))).collect();
     let mut named = std::collections::BTreeSet::new();
     let mut out = Vec::new();
-    for want in wants {
-        if stay.iter().any(|one| one == want) {
+    for (operand, forms) in &groups {
+        if forms.iter().any(|form| stay.iter().any(|one| one == form)) {
             continue;
         }
-        if got.iter().any(|one| one == want) {
-            out.push((want.clone(), Notice::Outside));
+        if forms.iter().any(|form| got.iter().any(|one| one == form)) {
+            out.push((operand.clone(), Notice::Outside));
             continue;
         }
         let mut near = Vec::new();
         for (path, one) in have.iter().zip(got.iter()) {
-            let longer = one.starts_with(want.as_str()) && one != want;
-            let exact_elsewhere = wants.iter().any(|w| w == one);
+            let longer = forms
+                .iter()
+                .any(|form| one.starts_with(form.as_str()) && one != form);
+            let exact_elsewhere = groups.iter().any(|(_, fs)| fs.iter().any(|f| f == one));
             if longer && !exact_elsewhere && named.insert(one.clone()) {
                 near.push(path.clone());
             }
@@ -133,14 +139,16 @@ fn notices(wants: &[String], have: &[PathBuf], kept: &[PathBuf]) -> Vec<(String,
             continue;
         }
         near.sort_by_key(|path| norm(path));
-        out.push((want.clone(), Notice::Miss(near)));
+        out.push((operand.clone(), Notice::Miss(near)));
     }
     out
 }
 
-/// When a wanted form matches nothing in `kept`, either name it as outside
-/// `window` or name the longer paths in `have`. An original that equals
-/// some other wanted form is a hit of that form, so it is not named here.
+/// When an operand matches nothing in `kept`, either name it as outside
+/// `window` or name the longer paths in `have`, once. A hit on any
+/// spelling of the operand is a hit, so the other spellings are not
+/// listed. An original that equals some other operand is a hit of that
+/// operand, so it is not named here.
 pub fn hint(prog: &str, wants: &[String], have: &[PathBuf], kept: &[PathBuf], window: &str) {
     for (want, notice) in notices(wants, have, kept) {
         match notice {
@@ -327,6 +335,35 @@ mod tests {
         assert!(!continues(want, Path::new("/home/u/a")));
         assert!(!continues(want, Path::new("/home/u/a/")));
         assert!(!continues(want, Path::new("/home/u/b")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hit_on_one_form_of_an_operand_hints_nothing() {
+        let dir = scratch("group");
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        let operand = format!("{}/link/a", dir.display());
+        let real = dir.join("real/a");
+        let have = vec![real.clone(), dir.join("link/ab")];
+        let notes = notices(&[operand], &have, &[real]);
+        assert!(notes.is_empty(), "{notes:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_forms_of_one_operand_share_one_near_miss_list() {
+        let dir = scratch("group2");
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        let operand = format!("{}/link/a", dir.display());
+        let have = vec![dir.join("link/ab"), dir.join("real/ab")];
+        let notes = notices(&[operand], &have, &have);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        match &notes[0].1 {
+            Notice::Miss(near) => assert_eq!(near.len(), 2, "{near:?}"),
+            Notice::Outside => panic!("an absent path is a near miss"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
