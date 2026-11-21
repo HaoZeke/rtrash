@@ -2574,11 +2574,8 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         };
         // An empty of everything may take what other sessions or agents
         // put; it goes ahead alone only for the latest put's items.
+        let have: Vec<PathBuf> = all.iter().map(original_of).collect();
         let wants = crate::orig_path::expand(&paths);
-        if !wants.is_empty() {
-            let have: Vec<PathBuf> = all.iter().map(original_of).collect();
-            crate::orig_path::hint(prog, &wants, &have);
-        }
         let all: Vec<TrashItem> = if wants.is_empty() {
             all
         } else {
@@ -2613,6 +2610,16 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let (mut items, rest): (Vec<TrashItem>, Vec<TrashItem>) = all
             .into_iter()
             .partition(|it| age_pass && age.keeps(Some(it.time_deleted)));
+        if !wants.is_empty() {
+            let kept: Vec<PathBuf> = items.iter().map(original_of).collect();
+            crate::orig_path::hint(
+                prog,
+                &wants,
+                &have,
+                &kept,
+                crate::orig_path::window(age.older_than.is_some(), false),
+            );
+        }
         if let Some(max) = max_size {
             let sized: Vec<(i64, u64)> = rest
                 .iter()
@@ -3994,10 +4001,7 @@ left in place.
             items
         };
         let exact = pats.kind == crate::filters::Match::Exact;
-        if exact {
-            let have: Vec<PathBuf> = items.iter().map(original_of).collect();
-            crate::orig_path::hint(prog, &pats.texts, &have);
-        }
+        let have: Vec<PathBuf> = items.iter().map(original_of).collect();
         let matched: Vec<TrashItem> = items
             .into_iter()
             .filter(|it| {
@@ -4015,6 +4019,11 @@ left in place.
             .collect();
         // Size last: only the matches need their `$I` read.
         let matched = filters.apply(matched, |it| it.time_deleted, item_size);
+        if exact {
+            let kept: Vec<PathBuf> = matched.iter().map(original_of).collect();
+            let window = crate::orig_path::window(filters.age.is_set(), filters.size.is_set());
+            crate::orig_path::hint(prog, &pats.texts, &have, &kept, window);
+        }
         if !dry_run {
             // RTRASH_ALLOW_ROOTS: rm deletes only items trashed from there.
             let origins: Vec<PathBuf> = matched.iter().map(original_of).collect();

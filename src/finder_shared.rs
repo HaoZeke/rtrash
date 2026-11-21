@@ -634,13 +634,20 @@ pub fn rm(
     json: bool,
     filter: Filter,
 ) -> i32 {
-    let rows = match entries() {
-        Ok(r) => filter.apply(r),
+    let all = match entries() {
+        Ok(r) => r,
         Err(e) => {
             eprintln!("{prog}: cannot read the Finder Trash: {e}");
             return 1;
         }
     };
+    // Shown paths before the age and size filters, so a path the window
+    // leaves out is still visible to the hint.
+    let mut pre: Vec<(PathBuf, PathBuf, String)> = all
+        .iter()
+        .map(|e| (e.trash.clone(), e.shown.clone(), e.name.clone()))
+        .collect();
+    let rows = filter.apply(all);
     // --batch: only the items one put run left (`last`: the latest).
     let rows = match batch {
         None => rows,
@@ -658,11 +665,15 @@ pub fn rm(
                 }
                 return 1;
             };
+            pre.retain(|(trash, _, name)| {
+                items.iter().any(|l| l.trash == *trash && l.name == *name)
+            });
             rows.into_iter()
                 .filter(|e| items.iter().any(|l| l.trash == e.trash && l.name == e.name))
                 .collect()
         }
     };
+    let have: Vec<PathBuf> = pre.into_iter().map(|(_, shown, _)| shown).collect();
     let (mut removed, mut bytes, mut status) = (0u64, 0u64, 0);
     let mut matched: Vec<String> = Vec::new();
     let regex = nfc_regexes(&patterns.regex);
@@ -695,8 +706,9 @@ pub fn rm(
         }
     };
     if patterns.kind == crate::filters::Match::Exact {
-        let have: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
-        crate::orig_path::hint(prog, &patterns.texts, &have);
+        let kept: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
+        let window = crate::orig_path::window(filter.age.is_set(), filter.size.is_set());
+        crate::orig_path::hint(prog, &patterns.texts, &have, &kept, window);
     }
     let hits: Vec<&Entry> = rows.iter().filter(|e| hit(e)).collect();
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where

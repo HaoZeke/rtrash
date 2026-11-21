@@ -964,12 +964,13 @@ fn report_late(prog: &str, dir: &TrashDir, late: u64) {
 /// `opts.paths`, exactly. A near miss is named and left in place.
 fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
     let mut entries = list::collect(dirs);
+    let orphans = list::orphans(dirs);
+    let mut have: Vec<PathBuf> = entries.iter().map(|e| e.original.clone()).collect();
+    have.extend(orphans.iter().map(|e| e.original.clone()));
     if opts.days.is_none() {
-        entries.extend(list::orphans(dirs));
+        entries.extend(orphans);
     }
     let wants = crate::orig_path::expand(&opts.paths);
-    let have: Vec<PathBuf> = entries.iter().map(|e| e.original.clone()).collect();
-    crate::orig_path::hint(prog, &wants, &have);
     if let Some(secs) = opts.days {
         let age = crate::filters::AgeFilter {
             older_than: Some(secs),
@@ -983,6 +984,14 @@ fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
         .iter()
         .filter(|e| crate::orig_path::selects(&wants, &e.original))
         .collect();
+    let kept: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
+    crate::orig_path::hint(
+        prog,
+        &wants,
+        &have,
+        &kept,
+        crate::orig_path::window(opts.days.is_some(), false),
+    );
     if !opts.dry_run {
         let origins: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
         if let Some(code) = crate::allow_roots::refuse_outside(prog, &origins) {

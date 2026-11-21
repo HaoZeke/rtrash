@@ -3219,6 +3219,91 @@ fn rm_matches_the_original_path_exactly() {
     assert_eq!(trash_names(&sb).len(), 2);
 }
 
+fn set_deletion_date(sb: &Sandbox, name: &str, date: &str) {
+    let path = sb.trash().join(format!("info/{name}.trashinfo"));
+    let text = fs::read_to_string(&path).unwrap();
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.starts_with("DeletionDate=") {
+            out.push_str("DeletionDate=");
+            out.push_str(date);
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    fs::write(path, out).unwrap();
+}
+
+/// `a` is in the trash and too new for `--older-than`. `ab` is old enough.
+/// The hint names `a` as outside the window and leaves `ab` alone.
+#[test]
+fn rm_names_an_exact_path_outside_the_age_window() {
+    let sb = Sandbox::new("exact-age");
+    fs::write(sb.work().join("a"), b"exact").unwrap();
+    fs::write(sb.work().join("ab"), b"sibling-is-long-enough").unwrap();
+    assert!(sb.run(&["put", "a", "ab"]).status.success());
+    set_deletion_date(&sb, "a", "2099-01-01T00:00:00");
+    set_deletion_date(&sb, "ab", "2000-01-01T00:00:00");
+
+    let dry = sb.run(&["rm", "--home-only", "-n", "--older-than=1d", "a"]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    let err = stderr_of(&dry);
+    assert!(err.contains("outside the age window"), "{err}");
+    assert!(!err.contains("no exact match"), "{err}");
+    assert!(!err.contains("near miss"), "{err}");
+    assert!(!stdout_of(&dry).contains("/ab"), "{}", stdout_of(&dry));
+
+    let out = sb.run(&["rm", "--home-only", "--older-than=1d", "a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["a".to_string(), "ab".to_string()]);
+}
+
+/// `empty PATH` with an age cut names a path that is too new, and the
+/// older sibling stays.
+#[test]
+fn empty_names_an_exact_path_outside_the_age_window() {
+    let sb = Sandbox::new("exact-empty-age");
+    fs::write(sb.work().join("a"), b"exact").unwrap();
+    fs::write(sb.work().join("ab"), b"sibling-is-long-enough").unwrap();
+    assert!(sb.run(&["put", "a", "ab"]).status.success());
+    set_deletion_date(&sb, "a", "2099-01-01T00:00:00");
+    set_deletion_date(&sb, "ab", "2000-01-01T00:00:00");
+
+    let out = sb.run(&["empty", "--home-only", "--plain", "--older-than=1d", "a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(err.contains("outside the age window"), "{err}");
+    assert!(!err.contains("no exact match"), "{err}");
+    assert!(!err.contains("near miss"), "{err}");
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["a".to_string(), "ab".to_string()]);
+}
+
+/// `a` and `ab` are far under `--larger-than=1G`, so the exact path is in
+/// the trash and outside the size window. The hint says so and leaves
+/// both items in place.
+#[test]
+fn rm_names_an_exact_path_outside_the_size_window() {
+    let sb = Sandbox::new("exact-size");
+    fs::write(sb.work().join("a"), b"x").unwrap();
+    fs::write(sb.work().join("ab"), b"yy").unwrap();
+    assert!(sb.run(&["put", "a", "ab"]).status.success());
+
+    let out = sb.run(&["rm", "--home-only", "--larger-than=1G", "a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(err.contains("outside the size window"), "{err}");
+    assert!(!err.contains("no exact match"), "{err}");
+    assert!(!err.contains("near miss"), "{err}");
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["a".to_string(), "ab".to_string()]);
+}
+
 /// `empty PATH` removes that original path only, and names a near miss.
 #[test]
 fn empty_matches_the_original_path_exactly() {

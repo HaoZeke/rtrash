@@ -273,11 +273,22 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             filter,
         );
     }
-    let mut entries = list::filter_age_secs(list::collect(&dirs), older_than, newer_than);
+    let collected = list::collect(&dirs);
+    // Originals before the age filter, with their batch id, so a path that
+    // the window leaves out is still visible to the hint.
+    let mut pre: Vec<(PathBuf, Option<String>)> = collected
+        .iter()
+        .map(|e| (e.original.clone(), e.batch.clone()))
+        .collect();
+    let mut entries = list::filter_age_secs(collected, older_than, newer_than);
     // Payloads with no .trashinfo match by their name or their path under
     // files/; having no date, they stay out of an age-filtered rm.
+    let orphans = list::orphans(&dirs);
+    for orphan in &orphans {
+        pre.push((orphan.original.clone(), orphan.batch.clone()));
+    }
     if older_than.is_none() && newer_than.is_none() {
-        entries.extend(list::orphans(&dirs));
+        entries.extend(orphans);
     }
     if let Some(want) = &batch {
         let id = if want == "last" {
@@ -290,15 +301,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             return 1;
         };
         entries.retain(|e| e.batch.as_deref() == Some(id.as_str()));
+        pre.retain(|(_, batch_id)| batch_id.as_deref() == Some(id.as_str()));
         if entries.is_empty() {
             eprintln!("{prog}: no trashed items from put run '{id}'");
             return 1;
         }
     }
-    if kind == crate::filters::Match::Exact {
-        let have: Vec<PathBuf> = entries.iter().map(|e| e.original.clone()).collect();
-        crate::orig_path::hint(prog, &pats.texts, &have);
-    }
+    let have: Vec<PathBuf> = pre.into_iter().map(|(path, _)| path).collect();
     let mut status = 0i32;
     let mut removed = 0u64;
     let mut bytes = 0u64;
@@ -328,6 +337,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .unwrap_or_default();
         pats.hit(path_s.as_ref(), base.as_str(), entry.name.as_str())
     };
+    if kind == crate::filters::Match::Exact {
+        let kept: Vec<PathBuf> = entries
+            .iter()
+            .filter(|entry| size.keeps(size_of(entry)))
+            .map(|entry| entry.original.clone())
+            .collect();
+        let window =
+            crate::orig_path::window(older_than.is_some() || newer_than.is_some(), size.is_set());
+        crate::orig_path::hint(prog, &pats.texts, &have, &kept, window);
+    }
     let wanted = |entry: &list::Entry| -> bool { path_hit(entry) && size.keeps(size_of(entry)) };
 
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
