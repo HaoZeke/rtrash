@@ -133,6 +133,18 @@ fn binstall_metadata_matches_package_release_basename() {
             && dist_ws.contains("aarch64-unknown-linux-musl"),
         "cargo-dist must target both Linux musl arches"
     );
+    assert!(
+        script.contains("x86_64-pc-windows-msvc") && script.contains("rtrash.exe"),
+        "package-release must know the Windows x64 target"
+    );
+    assert!(
+        musl_workflow.contains("x86_64-pc-windows-msvc") && musl_workflow.contains("dist/*.zip*"),
+        "release workflow must build and upload the Windows x64 zip and checksum"
+    );
+    assert!(
+        dist_ws.contains("x86_64-pc-windows-msvc"),
+        "cargo-dist must plan the Windows x64 zip this workflow publishes"
+    );
 
     let (x86_base, x86_bin) = musl_asset(name, version, "x86_64");
     let (arm_base, arm_bin) = musl_asset(name, version, "aarch64");
