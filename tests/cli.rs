@@ -5776,6 +5776,75 @@ fn put_refuse_does_not_take_an_uninspected_process_for_a_free_file() {
     assert!(f.exists());
 }
 
+/// Debug builds on Linux only: a path the process query could not check
+/// in full is refused under `--in-use=refuse`, and a path checked in full
+/// next to it is not, whichever comes first on the command line.
+/// `RTRASH_TEST_PARTIAL` makes the path with that name an unchecked one,
+/// as a failed Windows query makes it.
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[test]
+fn put_refuse_holds_only_the_unchecked_path_to_its_gap() {
+    let sb = Sandbox::new("put-refuse-partial");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let seen = fake_proc(&sb, "proc-seen", &[], &[]);
+    let env = [
+        ("RTRASH_TEST_PROC", seen.to_str().unwrap()),
+        ("RTRASH_TEST_PARTIAL", "a.log"),
+    ];
+    for order in [["a.log", "b.log"], ["b.log", "a.log"]] {
+        let a = sb.touch("a.log");
+        let b = sb.touch("b.log");
+        let out = sb.run_env(&["put", &pin, "--in-use=refuse", order[0], order[1]], &env);
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(1), "{order:?}: {err}");
+        assert!(
+            err.contains(
+                "cannot trash 'a.log': it may be in use; 1 path could not be checked in full"
+            ),
+            "{order:?}: {err}"
+        );
+        assert!(!err.contains("b.log"), "{order:?}: {err}");
+        assert!(a.exists(), "{order:?}");
+        assert!(!b.exists(), "{order:?}");
+        fs::remove_file(&a).unwrap();
+        assert!(sb.run(&["empty", &pin]).status.success());
+    }
+    let a = sb.touch("a.log");
+    let out = sb.run_env(&["put", &pin, "-f", "--in-use=refuse", "a.log"], &env);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("warning: 'a.log' may be in use; 1 path could not be checked"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(!a.exists());
+}
+
+/// Debug builds on Linux only: `who` counts the paths it could not check
+/// in full, and says nothing for a path it checked in full.
+#[cfg(all(target_os = "linux", debug_assertions))]
+#[test]
+fn who_counts_only_the_paths_it_could_not_check() {
+    let sb = Sandbox::new("who-partial");
+    sb.touch("a.log");
+    sb.touch("b.log");
+    let seen = fake_proc(&sb, "proc-seen", &[], &[]);
+    let env = [
+        ("RTRASH_TEST_PROC", seen.to_str().unwrap()),
+        ("RTRASH_TEST_PARTIAL", "a.log"),
+    ];
+    let out = sb.run_env(&["who", "b.log", "a.log"], &env);
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("no holder seen, but 1 path could not be checked in full"),
+        "{err}"
+    );
+    let out = sb.run_env(&["who", "b.log"], &env);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stderr_of(&out), "");
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn reap_shared_reports_what_a_delete_frees() {

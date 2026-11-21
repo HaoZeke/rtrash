@@ -72,7 +72,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: cannot list the processes holding a path on this platform");
         return 1;
     }
-    let mut holds: Vec<Hold> = paths.iter().flat_map(|p| snap.under(p)).collect();
+    let mut unchecked = 0;
+    let mut holds: Vec<Hold> = Vec::new();
+    for p in &paths {
+        let probe = snap.probe(p);
+        unchecked += usize::from(probe.unchecked);
+        holds.extend(probe.holds);
+    }
     holds.sort_by(|a, b| (a.pid, &a.path, &a.how).cmp(&(b.pid, &b.path, &b.how)));
     holds.dedup();
     if json {
@@ -93,7 +99,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             );
         }
     }
-    if let Some(gap) = snap.gap() {
+    if let Some(gap) = snap.gap_of(unchecked) {
         #[cfg(unix)]
         // SAFETY: geteuid has no preconditions.
         let hint = if unsafe { libc::geteuid() } == 0 {

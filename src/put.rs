@@ -799,7 +799,8 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         }
     }
     if opts.in_use != InUse::Ignore {
-        let holds = holders().under(&abs);
+        let probe = holders().probe(&abs);
+        let holds = probe.holds;
         if !holds.is_empty() {
             let who = crate::holders::describe(&holds);
             if opts.in_use == InUse::Refuse {
@@ -809,7 +810,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             }
             say!("{prog}: warning: '{name}' is in use by {who}");
         } else if opts.in_use == InUse::Refuse {
-            if let Some(gap) = holders().gap() {
+            if let Some(gap) = holders().gap_of(usize::from(probe.unchecked)) {
                 if !opts.force {
                     say!("{prog}: cannot trash '{name}': it may be in use; {gap}");
                     say!("{prog}: use -f or --in-use=warn to trash it anyway");
