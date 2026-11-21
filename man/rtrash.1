@@ -362,6 +362,19 @@ working, root or executable path there.
 leaves it and counts it as failed, and
 .B ignore
 skips the process scan.
+Without root, other users' processes cannot be inspected, so
+.B refuse
+cannot tell that no process holds an item.
+When some process could not be inspected, or the platform lists no
+holders, and no process that was seen holds the item, refuse leaves it
+too and says how many processes it could not inspect;
+.B \-f
+trashes it anyway with a warning, and
+.B \-\-in\-use=warn
+trashes it without one.
+A git repository whose state cannot be read only earns a warning,
+because that is a risk put reports; refuse is the mode that promises the
+item was not in use, so it takes the safe side.
 It overrides
 .B RTRASH_IN_USE
 and
@@ -3236,12 +3249,27 @@ and
 do.
 macOS asks libproc for open files, working and root directories and the
 executable, but not memory maps.
-Without root, other users' processes cannot be read, and a note on
-stderr counts them.
+Without root, other users' processes cannot be read: who lists the
+holders among the processes it can inspect (your own), and a note on
+stderr, in
+.B \-\-json
+mode too, counts the processes it could not inspect and says that the
+list may be incomplete, or, when it saw no holder, that a path may still
+be in use.
+An empty list is therefore proof that a path is free only when no such
+note appears.
+A Linux
+.I /proc
+mounted with
+.B hidepid
+hides other users' processes altogether, so they are not counted.
 Windows asks the Restart Manager which processes have a file open,
 checking at most 4096 files below each
 .IR PATH ;
 it does not see working directories, and links are not followed.
+A path it could not check in full (a folder it could not read, more than
+that many files, or a Restart Manager query that failed) counts in the
+same note.
 .TP
 .B \-\-json
 Print a JSON object:
@@ -3260,7 +3288,9 @@ Output version information and exit.
 .PP
 Exit status is 0 when some process holds a
 .IR PATH ,
-1 when none does or the platform cannot tell, and 2 on a usage error.
+1 when none was seen or the platform cannot tell, and 2 on a usage error.
+Check stderr for the note about processes it could not inspect before
+taking status 1 for a free path.
 .SS reap
 .B rtrash reap
 [\fIOPTION\fR]... [\fIDIR\fR]...
@@ -4752,6 +4782,10 @@ globs of reap profiles search, after
 .B RTRASH_IN_USE
 .BR warn ", " refuse " or " ignore :
 what put does with an item a live process holds.
+.B refuse
+also leaves an item when some process could not be inspected, unless
+.B \-f
+is given.
 It overrides
 .B policy.in_use
 and yields to

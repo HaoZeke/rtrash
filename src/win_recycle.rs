@@ -1810,7 +1810,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                    replaces -v output
       --in-use=WHEN  when another process has a file open (as the
                    Restart Manager reports it): warn (the default),
-                   refuse, or ignore
+                   refuse, or ignore; refuse also refuses an item the
+                   Restart Manager could not check in full, unless -f
+                   is given
       --allow-permanent  let Windows delete for good an item its Recycle
                    Bin cannot take (no bin on the drive, the bin turned
                    off, or the item over the bin's cap); without it such
@@ -1897,7 +1899,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 .map(|p| crate::util::plain_path(&p))
                 .unwrap_or_else(|_| f.clone());
             if let Some(snap) = &snap {
-                let holds = snap.under(f);
+                let probe = snap.probe(f);
+                let holds = probe.holds;
                 if !holds.is_empty() {
                     let who = crate::holders::describe(&holds);
                     if in_use == "refuse" {
@@ -1914,6 +1917,23 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                         "{prog}: warning: '{}' is in use by {who}",
                         crate::util::err_path(&f)
                     );
+                } else if in_use == "refuse" {
+                    if let Some(gap) = snap.gap_of(usize::from(probe.unchecked)) {
+                        if !force {
+                            eprintln!(
+                                "{prog}: cannot trash '{}': it may be in use; {gap}",
+                                crate::util::err_path(&f)
+                            );
+                            eprintln!("{prog}: use -f or --in-use=warn to trash it anyway");
+                            status = status.max(1);
+                            failed += 1;
+                            continue;
+                        }
+                        eprintln!(
+                            "{prog}: warning: '{}' may be in use; {gap}",
+                            crate::util::err_path(&f)
+                        );
+                    }
                 }
             }
             if inspect && !inspect_ok(prog, f) {
