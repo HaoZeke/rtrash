@@ -3,7 +3,7 @@ members = ["cargo:."]
 
 # Config for 'dist' (https://opensource.axo.dev/cargo-dist/)
 [dist]
-cargo-dist-version = "0.33.1"
+cargo-dist-version = "0.34.0"
 ci = "github"
 # Linux FreeDesktop only — do not ship darwin/windows stubs.
 installers = ["shell"]
