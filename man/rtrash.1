@@ -4413,6 +4413,14 @@ is that path exactly: the path
 .B put
 records, resolved from the current directory, with a trailing slash
 ignored.
+On Windows a short 8.3 name of a parent that is still on disk matches
+the long name. The file's own short name does not, once the file is in
+the Recycle Bin:
+.I EXACTF~1.TXT
+is not
+.IR ExactFile.TXT .
+Type the long name, or pass
+.BR \-\-match=glob .
 .B rm
 of
 .I ~/a
@@ -4830,8 +4838,13 @@ keep to the scope too: a delete or restore with any path outside does
 nothing.
 Paths compare on disk: roots and the folders above each path are
 resolved, so a symlinked folder that leads out of a root does not
-count as inside it, and on Windows short 8.3 names and letter case do
-not matter.
+count as inside it. On Windows letter case does not matter. A short
+8.3 name matches the long one only while that entry is still on disk,
+which a parent directory is. The file's own short name does not match
+once the file is in the Recycle Bin; an exact
+.B rm
+needs the long name or
+.BR \-\-match=glob .
 A root that does not exist is ignored, so a list of missing roots
 allows nothing.
 .TP

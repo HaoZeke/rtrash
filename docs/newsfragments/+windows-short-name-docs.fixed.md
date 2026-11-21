@@ -1,0 +1,1 @@
+On Windows, the exact-path docs say that a file's own 8.3 name, such as `EXACTF~1.TXT`, does not match once the file is in the Recycle Bin. Type the long name, or pass `--match=glob`. A short name of a parent that is still on disk still matches.

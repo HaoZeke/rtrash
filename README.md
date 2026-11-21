@@ -500,6 +500,8 @@ The other `[du]` keys are `count`, `one_file_system`, `threads`, `git`, `exclude
 ### `rtrash rm PATTERN...` (also `trash-rm`)
 
 Permanently deletes trash entries whose original path is exactly `PATTERN`: the path `put` records, resolved from the current directory, with a trailing slash ignored. `rm ~/a` does not remove `~/ab` or `~/a/b`. When nothing matches, those longer paths are named and left in place.
+
+On Windows, a short 8.3 name of a parent that is still on disk matches the long name. The file's own short name does not, once the file is in the Recycle Bin: `EXACTF~1.TXT` is not `ExactFile.TXT`. Type the long name, or pass `--match=glob`.
 Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
 `--match=glob` is the shell glob of the original path, its basename or the trash name (quote globs from the shell), which is how an orphan is selected by its name in `files/` or its path there. `--regex` and `--match=substring` compare the whole original path. `--match=exact` is the same comparison as a bare `PATTERN`.
 Does **not** restore.
