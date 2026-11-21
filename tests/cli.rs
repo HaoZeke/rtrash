@@ -5979,7 +5979,9 @@ fn put_refuse_holds_only_the_unchecked_path_to_its_gap() {
 }
 
 /// Debug builds on Linux only: `who` counts the paths it could not check
-/// in full, and says nothing for a path it checked in full.
+/// in full, and says nothing for a path it checked in full. The debug seam
+/// marks every path with one file name, so two such paths count as two
+/// and one of them beside a whole path stays one.
 #[cfg(all(target_os = "linux", debug_assertions))]
 #[test]
 fn who_counts_only_the_paths_it_could_not_check() {
@@ -6001,6 +6003,24 @@ fn who_counts_only_the_paths_it_could_not_check() {
     let out = sb.run_env(&["who", "b.log"], &env);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stderr_of(&out), "");
+    fs::create_dir_all(sb.work().join("left")).unwrap();
+    fs::create_dir_all(sb.work().join("right")).unwrap();
+    sb.touch("left/a.log");
+    sb.touch("right/a.log");
+    let out = sb.run_env(&["who", "left/a.log", "right/a.log"], &env);
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("no holder seen, but 2 paths could not be checked in full"),
+        "{err}"
+    );
+    let out = sb.run_env(&["who", "left/a.log", "b.log"], &env);
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("no holder seen, but 1 path could not be checked in full"),
+        "{err}"
+    );
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
