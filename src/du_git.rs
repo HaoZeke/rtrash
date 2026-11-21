@@ -42,6 +42,218 @@ impl GitState {
     }
 }
 
+/// Git work a put can lose. `du` still ranks unpushed above dirty for a
+/// row's single state. This names dirty as well, so a checkout with both
+/// is never described only as unpushed. Unknown is git missing or failing
+/// to answer, and it is risky: it must not be treated as safe to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RiskyGit {
+    pub dirty: bool,
+    pub unpushed: bool,
+    pub unknown: bool,
+}
+
+impl RiskyGit {
+    /// Git is missing, or a probe could not answer.
+    pub fn unknown() -> Self {
+        Self {
+            dirty: false,
+            unpushed: false,
+            unknown: true,
+        }
+    }
+
+    pub fn is_risky(self) -> bool {
+        self.dirty || self.unpushed || self.unknown
+    }
+
+    /// Words after "with". Dirty is named whenever the checkout is dirty.
+    /// Unknown stays in the label when a probe also saw dirty or unpushed
+    /// work, so a partial failure is not described only as that work.
+    pub fn label(self) -> &'static str {
+        match (self.dirty, self.unpushed, self.unknown) {
+            (true, true, true) => "dirty, unpushed and unknown",
+            (true, true, false) => "dirty and unpushed",
+            (true, false, true) => "dirty and unknown",
+            (true, false, false) => "dirty",
+            (false, true, true) => "unpushed and unknown",
+            (false, true, false) => "unpushed",
+            _ => "unknown",
+        }
+    }
+
+    /// Both probes, so a fact either one saw is kept.
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            dirty: self.dirty || other.dirty,
+            unpushed: self.unpushed || other.unpushed,
+            unknown: self.unknown || other.unknown,
+        }
+    }
+}
+
+/// `Some` when either side is risky, with the bits combined.
+pub fn union_work(a: Option<RiskyGit>, b: Option<RiskyGit>) -> Option<RiskyGit> {
+    match (a, b) {
+        (None, x) | (x, None) => x.filter(|w| w.is_risky()),
+        (Some(a), Some(b)) => {
+            let u = a.union(b);
+            u.is_risky().then_some(u)
+        }
+    }
+}
+
+/// For a directory that holds a git repository at its top, the risky
+/// work in that repository, if any. Not a repository, or a clean one,
+/// is `None`. Git missing, or a probe that cannot answer, is
+/// [`RiskyGit::unknown`] and never `None`. Shared by put on Unix and on
+/// Windows: `safety` is Unix-only.
+pub fn risky_repo_state(abs: &Path) -> Option<RiskyGit> {
+    let is_repo = abs.join(".git").symlink_metadata().is_ok() || crate::du::is_bare_repo(abs);
+    if !is_repo {
+        return None;
+    }
+    let Some(bin) = find_git() else {
+        return Some(RiskyGit::unknown());
+    };
+    let probe = repo_probe(&bin, abs, status_shows_stash(&bin));
+    let work = RiskyGit {
+        dirty: probe.dirty,
+        unpushed: probe.unpushed,
+        unknown: probe.unknown || probe.state == GitState::Unknown,
+    };
+    work.is_risky().then_some(work)
+}
+
+/// Repositories kept from one tree. Past this, the rest are unscanned
+/// and the tree is unknown, the same cap `du` uses for nested repos.
+const REPO_CAP: usize = 64;
+
+/// Repositories at or under `root`, and whether every directory was read.
+struct RepoScan {
+    repos: Vec<PathBuf>,
+    complete: bool,
+}
+
+/// Bounded walk for git repositories. A directory that cannot be read,
+/// or that sits past [`crate::du::MAX_DEPTH`], leaves the scan incomplete
+/// so a removal hint does not treat the tree as safe.
+fn find_repos(root: &Path) -> RepoScan {
+    let mut repos = Vec::new();
+    let mut complete = true;
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > crate::du::MAX_DEPTH {
+            complete = false;
+            continue;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(_) => {
+                complete = false;
+                continue;
+            }
+        };
+        let mut names = Vec::new();
+        let mut children = Vec::new();
+        for ent in entries {
+            let Ok(ent) = ent else {
+                complete = false;
+                continue;
+            };
+            let name = ent.file_name();
+            let child = dir.join(&name);
+            let meta = match std::fs::symlink_metadata(&child) {
+                Ok(m) => m,
+                Err(_) => {
+                    complete = false;
+                    continue;
+                }
+            };
+            names.push(name.clone());
+            if meta.is_dir() && !meta.file_type().is_symlink() && name != ".git" {
+                children.push(child);
+            }
+        }
+        let has_dot_git = names.iter().any(|n| n == ".git");
+        let bare = !has_dot_git && crate::du::is_bare_repo(&dir);
+        if has_dot_git || bare {
+            if repos.len() >= REPO_CAP {
+                complete = false;
+            } else {
+                repos.push(dir.clone());
+            }
+            if bare {
+                continue;
+            }
+        }
+        if depth == crate::du::MAX_DEPTH {
+            if !children.is_empty() {
+                complete = false;
+            }
+            continue;
+        }
+        for child in children {
+            stack.push((child, depth + 1));
+        }
+    }
+    RepoScan { repos, complete }
+}
+
+/// Risky git work at or below `path`. A directory that is not fully
+/// scanned is unknown, so it is never described as safe to remove. Not a
+/// directory, or a fully scanned tree with nothing risky, is `None`.
+pub fn risky_tree(path: &Path) -> Option<RiskyGit> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return Some(RiskyGit::unknown()),
+    };
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return None;
+    }
+    let scan = find_repos(path);
+    let mut work = RiskyGit {
+        dirty: false,
+        unpushed: false,
+        unknown: !scan.complete,
+    };
+    if scan.repos.is_empty() {
+        after_probe_seam(path);
+        return work.is_risky().then_some(work);
+    }
+    let Some(bin) = find_git() else {
+        work.unknown = true;
+        after_probe_seam(path);
+        return Some(work);
+    };
+    let show = status_shows_stash(&bin);
+    for repo in &scan.repos {
+        let probe = repo_probe(&bin, repo, show);
+        let one = RiskyGit {
+            dirty: probe.dirty,
+            unpushed: probe.unpushed,
+            unknown: probe.unknown || probe.state == GitState::Unknown,
+        };
+        if one.is_risky() {
+            work = work.union(one);
+        }
+    }
+    after_probe_seam(path);
+    work.is_risky().then_some(work)
+}
+
+/// Debug-only: after the probe of `RTRASH_TEST_AFTER_PROBE`, write a file
+/// there so a later probe of the moved tree sees uncommitted work.
+fn after_probe_seam(dir: &Path) {
+    if cfg!(debug_assertions) {
+        if let Ok(target) = std::env::var("RTRASH_TEST_AFTER_PROBE") {
+            if Path::new(&target) == dir {
+                let _ = crate::file_replace::write_own(&dir.join(".rtrash-probe-seam"), b"x");
+            }
+        }
+    }
+}
+
 /// One listed row to classify.
 #[derive(Debug, Clone, Copy)]
 pub struct RowQuery<'a> {
@@ -159,11 +371,87 @@ pub fn status_is_dirty(out: &[u8]) -> bool {
         .any(|l| !l.starts_with(b"# ") || l.starts_with(b"# stash "))
 }
 
+/// What [`repo_state`] reports to `du`, plus whether the same probe saw
+/// uncommitted work. `du` still prefers unpushed over dirty. `dirty` stays
+/// set when both are true, so a trash hint does not drop the uncommitted work.
+struct RepoProbe {
+    state: GitState,
+    dirty: bool,
+    unpushed: bool,
+    /// A required status or stash probe failed. `du` still reads `state`.
+    unknown: bool,
+}
+
+impl RepoProbe {
+    fn unknown() -> Self {
+        Self {
+            state: GitState::Unknown,
+            dirty: false,
+            unpushed: false,
+            unknown: true,
+        }
+    }
+
+    fn unpushed(dirty: bool, unknown: bool) -> Self {
+        Self {
+            state: GitState::Unpushed,
+            dirty,
+            unpushed: true,
+            unknown,
+        }
+    }
+
+    fn dirty() -> Self {
+        Self {
+            state: GitState::Dirty,
+            dirty: true,
+            unpushed: false,
+            unknown: false,
+        }
+    }
+
+    fn clean() -> Self {
+        Self {
+            state: GitState::Clean,
+            dirty: false,
+            unpushed: false,
+            unknown: false,
+        }
+    }
+}
+
+/// `git rev-parse -q --verify refs/stash`: 0 is a stash, 1 is none, and
+/// any other status (128, a signal) did not answer.
+fn stash_from_code(code: Option<i32>) -> Option<bool> {
+    match code {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
 /// State of a whole repository. The unpushed and status probes run at the
 /// same time; a stash shows in the status output when git can print it.
 /// A bare repository (no `.git` entry) has no work tree to be dirty, so
-/// only its branches and stash count.
+/// only its branches and stash count. Unpushed still outranks dirty here;
+/// [`repo_probe`] keeps the dirty bit beside that ranking.
 fn repo_state(bin: &Path, repo: &Path, show_stash: bool) -> GitState {
+    repo_probe(bin, repo, show_stash).state
+}
+
+/// `Some(true)` when `refs/stash` exists, `Some(false)` when it does not,
+/// `None` when git could not be run.
+fn stash_dirty(bin: &Path, repo: &Path) -> Option<bool> {
+    let mut stash = git(bin, repo);
+    stash.args(["rev-parse", "-q", "--verify", "refs/stash"]);
+    stash.stdout(Stdio::null());
+    match stash.output() {
+        Ok(o) => stash_from_code(o.status.code()),
+        Err(_) => None,
+    }
+}
+
+fn repo_probe(bin: &Path, repo: &Path, show_stash: bool) -> RepoProbe {
     let bare = !matches!(
         crate::util::look(&repo.join(".git")),
         crate::util::Look::There(_)
@@ -194,35 +482,55 @@ fn repo_state(bin: &Path, repo: &Path, show_stash: bool) -> GitState {
     let log = log.and_then(|c| c.wait_with_output());
     let status = status.map(|s| s.and_then(|c| c.wait_with_output()));
     let Ok(log) = log else {
-        return GitState::Unknown;
+        return RepoProbe::unknown();
     };
     if !log.status.success() {
-        return GitState::Unknown;
+        return RepoProbe::unknown();
     }
-    if !log.stdout.iter().all(u8::is_ascii_whitespace) {
-        return GitState::Unpushed;
-    }
+    let unpushed = !log.stdout.iter().all(u8::is_ascii_whitespace);
     if let Some(status) = status {
         let Ok(status) = status else {
-            return GitState::Unknown;
+            return if unpushed {
+                RepoProbe::unpushed(false, true)
+            } else {
+                RepoProbe::unknown()
+            };
         };
         if !status.status.success() {
-            return GitState::Unknown;
+            return if unpushed {
+                RepoProbe::unpushed(false, true)
+            } else {
+                RepoProbe::unknown()
+            };
         }
-        if status_is_dirty(&status.stdout) {
-            return GitState::Dirty;
+        let from_status = status_is_dirty(&status.stdout);
+        if unpushed {
+            // Dirty is read even though du ranks unpushed first. A stash on
+            // an older git is not in the status output, so it is asked too.
+            // A stash probe that does not answer leaves the unknown bit set.
+            let stash = if show_stash {
+                None
+            } else {
+                stash_dirty(bin, repo)
+            };
+            let dirty = from_status || stash == Some(true);
+            let unknown = !show_stash && stash.is_none();
+            return RepoProbe::unpushed(dirty, unknown);
+        }
+        if from_status {
+            return RepoProbe::dirty();
         }
         if show_stash {
-            return GitState::Clean;
+            return RepoProbe::clean();
         }
+    } else if unpushed {
+        let stash = stash_dirty(bin, repo);
+        return RepoProbe::unpushed(stash == Some(true), stash.is_none());
     }
-    let mut stash = git(bin, repo);
-    stash.args(["rev-parse", "-q", "--verify", "refs/stash"]);
-    stash.stdout(Stdio::null());
-    match stash.output() {
-        Ok(o) if o.status.success() => GitState::Dirty,
-        Ok(_) => GitState::Clean,
-        Err(_) => GitState::Unknown,
+    match stash_dirty(bin, repo) {
+        Some(true) => RepoProbe::dirty(),
+        Some(false) => RepoProbe::clean(),
+        None => RepoProbe::unknown(),
     }
 }
 
@@ -556,5 +864,112 @@ mod tests {
     fn git_dir_detection() {
         assert!(inside_git_dir(Path::new("/r/.git/objects/pack")));
         assert!(!inside_git_dir(Path::new("/r/src/.gitignore")));
+    }
+
+    /// du still reports unpushed as the single state. The trash hint names
+    /// the uncommitted file as well, which a probe that returns on the first
+    /// unpushed commit would drop.
+    #[test]
+    fn a_dirty_unpushed_repo_stays_unpushed_for_du_and_names_both_for_a_hint() {
+        let Some(bin) = find_git() else { return };
+        let root = std::env::temp_dir().join(format!("rtrash-git-both-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("r");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            Command::new(&bin)
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "Trash Test")
+                .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+                .env("GIT_COMMITTER_NAME", "Trash Test")
+                .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        if !git(&["init", "-q"]) {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::fs::write(repo.join("f"), b"x").unwrap();
+        assert!(git(&["add", "f"]) && git(&["commit", "-qm", "work"]));
+        std::fs::write(repo.join("extra"), b"y").unwrap();
+        let repos = [repo.clone()];
+        let rows = [RowQuery {
+            path: &repo,
+            is_dir: true,
+            repos: &repos,
+        }];
+        let classified = classify_all(&rows).unwrap();
+        assert_eq!(
+            classified[0].as_ref().map(|(s, _)| *s),
+            Some(GitState::Unpushed)
+        );
+        let risk = risky_repo_state(&repo).unwrap();
+        assert!(risk.dirty && risk.unpushed && !risk.unknown);
+        assert_eq!(risk.label(), "dirty and unpushed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `.git` git cannot read is unknown, not the absence of risk.
+    #[test]
+    fn a_repo_git_cannot_read_is_unknown() {
+        let Some(_bin) = find_git() else { return };
+        let root = std::env::temp_dir().join(format!("rtrash-git-unk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("r");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let got = risky_repo_state(&repo);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(got, Some(RiskyGit::unknown()));
+        assert_eq!(RiskyGit::unknown().label(), "unknown");
+    }
+
+    #[test]
+    fn a_fatal_stash_probe_is_not_a_clean_stash() {
+        assert_eq!(stash_from_code(Some(0)), Some(true));
+        assert_eq!(stash_from_code(Some(1)), Some(false));
+        assert_eq!(stash_from_code(Some(128)), None);
+        assert_eq!(stash_from_code(None), None);
+    }
+
+    /// A parent that only contains a repository is risky, and a tree that
+    /// holds more repositories than the cap is not treated as fully scanned.
+    #[test]
+    fn a_nested_repo_is_risky_and_an_unscanned_tree_is_unknown() {
+        let Some(bin) = find_git() else { return };
+        let root = std::env::temp_dir().join(format!("rtrash-git-nest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let parent = root.join("parent");
+        let repo = parent.join("child");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            Command::new(&bin)
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "Trash Test")
+                .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+                .env("GIT_COMMITTER_NAME", "Trash Test")
+                .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+                .status()
+        };
+        assert!(git(&["init", "-q"]).unwrap().success());
+        std::fs::write(repo.join("f"), b"x").unwrap();
+        let risk = risky_tree(&parent).unwrap();
+        assert!(risk.dirty, "{risk:?}");
+        assert!(!risk.label().contains("only"));
+        let wide = root.join("wide");
+        std::fs::create_dir_all(&wide).unwrap();
+        for i in 0..=REPO_CAP {
+            let d = wide.join(format!("r{i}"));
+            std::fs::create_dir_all(d.join(".git")).unwrap();
+        }
+        let over = risky_tree(&wide).unwrap();
+        assert!(over.unknown, "{over:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

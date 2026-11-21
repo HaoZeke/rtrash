@@ -206,6 +206,8 @@ pub enum PathMatch {
     Substring(String),
     /// `restore --match=exact`: the whole original path.
     Exact(String),
+    /// `restore --match=id`: the `{id}` from `list --format`.
+    Id(String),
 }
 
 impl PathMatch {
@@ -216,6 +218,7 @@ impl PathMatch {
             Match::Glob => PathMatch::Glob(pat.to_string()),
             Match::Substring => PathMatch::Substring(pat.to_string()),
             Match::Exact => PathMatch::Exact(pat.to_string()),
+            Match::Id => PathMatch::Id(pat.to_string()),
             Match::Regex => match regex_lite::Regex::new(pat) {
                 Ok(re) => PathMatch::Regex(re),
                 Err(e) => return Err(format!("invalid regex '{pat}': {e}")),
@@ -254,6 +257,17 @@ impl PathMatch {
             PathMatch::Name(n) => base == *n,
             PathMatch::Substring(s) => full.contains(s.as_str()),
             PathMatch::Exact(s) => full == *s,
+            // The id needs the trash name and the date; [`keeps_record`].
+            PathMatch::Id(_) => false,
+        }
+    }
+
+    /// [`keeps`], and for [`PathMatch::Id`] the id of `name` at `date`
+    /// under `root`.
+    pub fn keeps_record(&self, original: &Path, name: &str, date: &str, root: &Path) -> bool {
+        match self {
+            PathMatch::Id(want) => want == &crate::filters::item_id(name, date, root),
+            _ => self.keeps(original),
         }
     }
 }

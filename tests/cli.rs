@@ -1476,7 +1476,9 @@ fn orphans_show_in_list_and_status_and_go_with_rm() {
     assert!(st.contains("\"items\":2,"), "{st}");
     assert!(st.contains("\"orphans\":1"), "{st}");
 
-    let out = sb.run(&["rm", "--home-only", "linux-6.9"]);
+    // The tree cannot be listed, so the git check calls it unknown and
+    // leaves it. -f is the override.
+    let out = sb.run(&["rm", "--home-only", "-f", "linux-6.9"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb).len(), 1);
     assert!(!orphan.exists());
@@ -1796,6 +1798,156 @@ fn trash_rm_match_takes_substring_and_exact() {
     let bad = sb.run(&["rm", "--match=fuzzy", "x"]);
     assert_eq!(bad.status.code(), Some(2), "{}", stderr_of(&bad));
     assert_eq!(trash_names(&sb), ["new.txt"]);
+}
+
+/// Original paths `list --json` shows, in list order. `rm --match=exact`
+/// compares against these, not against a basename or a glob.
+fn listed_originals(sb: &Sandbox) -> Vec<String> {
+    let text = stdout_of(&sb.run(&["list", "--home-only", "--json"]));
+    let key = "\"original\":\"";
+    let mut rest = text.as_str();
+    let mut out = Vec::new();
+    while let Some(i) = rest.find(key) {
+        rest = &rest[i + key.len()..];
+        let end = rest.find('"').expect("original value");
+        out.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    out
+}
+
+/// A name that is itself a glob matches only that listed path. `rm *.log`
+/// also takes every other `.log`, including by basename.
+#[test]
+fn rm_exact_path_keeps_a_glob_name_to_one_item() {
+    let sb = Sandbox::new("rm-exact-glob");
+    fs::write(sb.work().join("*.log"), b"star").unwrap();
+    fs::write(sb.work().join("notes.log"), b"notes").unwrap();
+    assert!(sb
+        .run(&["put", "--home-only", "*.log", "notes.log"])
+        .status
+        .success());
+    let dry = sb.run(&["rm", "--home-only", "-n", "*.log"]);
+    let shown = format!("{}{}", stdout_of(&dry), stderr_of(&dry));
+    assert!(
+        shown.contains("*.log")
+            && shown.contains("notes.log")
+            && shown.contains("Would permanently remove 2 items"),
+        "{shown}"
+    );
+    let star = listed_originals(&sb)
+        .into_iter()
+        .find(|p| p.ends_with("/*.log"))
+        .expect("listed *.log");
+    let asked = sb.run_with_stdin(
+        &[
+            "rm",
+            "--home-only",
+            "-i",
+            "--max-count=1",
+            "--match=exact",
+            &star,
+        ],
+        "",
+    );
+    let err = stderr_of(&asked);
+    assert!(
+        err.contains("(y/N)") && err.contains("nothing removed"),
+        "{err}"
+    );
+    assert_eq!(listed_originals(&sb).len(), 2);
+    let yes = sb.run_with_stdin(
+        &[
+            "rm",
+            "--home-only",
+            "-i",
+            "--max-count=1",
+            "--match=exact",
+            &star,
+        ],
+        "y\n",
+    );
+    assert!(yes.status.success(), "{}", stderr_of(&yes));
+    let left = listed_originals(&sb);
+    assert!(left.iter().all(|p| !p.ends_with("/*.log")), "{left:?}");
+    assert!(left.iter().any(|p| p.ends_with("/notes.log")), "{left:?}");
+}
+
+/// Two trashed files with the same basename: a bare name removes both,
+/// and the listed original path of one removes only that one.
+#[test]
+fn rm_exact_path_keeps_a_duplicate_basename() {
+    let sb = Sandbox::new("rm-exact-dup");
+    fs::create_dir(sb.work().join("a")).unwrap();
+    fs::create_dir(sb.work().join("b")).unwrap();
+    fs::write(sb.work().join("a/foo"), b"a").unwrap();
+    fs::write(sb.work().join("b/foo"), b"b").unwrap();
+    assert!(sb
+        .run(&["put", "--home-only", "a/foo", "b/foo"])
+        .status
+        .success());
+    let dry = sb.run(&["rm", "--home-only", "-n", "foo"]);
+    assert!(
+        stderr_of(&dry).contains("Would permanently remove 2 items"),
+        "{}",
+        stderr_of(&dry)
+    );
+    let wanted = listed_originals(&sb)
+        .into_iter()
+        .find(|p| p.ends_with("/a/foo"))
+        .expect("listed a/foo");
+    let yes = sb.run_with_stdin(
+        &[
+            "rm",
+            "--home-only",
+            "-i",
+            "--max-count=1",
+            "--match=exact",
+            &wanted,
+        ],
+        "y\n",
+    );
+    assert!(yes.status.success(), "{}", stderr_of(&yes));
+    let left = listed_originals(&sb);
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(left[0].ends_with("/b/foo"), "{left:?}");
+}
+
+/// Two copies of one original path: `--max-count=1` deletes neither.
+#[test]
+fn rm_exact_path_stops_at_one_copy_of_a_path() {
+    let sb = Sandbox::new("rm-exact-cap");
+    sb.touch("same.txt");
+    assert!(sb.run(&["put", "--home-only", "same.txt"]).status.success());
+    sb.touch("same.txt");
+    assert!(sb.run(&["put", "--home-only", "same.txt"]).status.success());
+    let paths = listed_originals(&sb);
+    assert_eq!(paths.len(), 2, "{paths:?}");
+    assert!(paths.iter().all(|p| p.ends_with("/same.txt")), "{paths:?}");
+    let dry = sb.run(&["rm", "--home-only", "-n", "--match=exact", &paths[0]]);
+    assert!(
+        stderr_of(&dry).contains("Would permanently remove 2 items"),
+        "{}",
+        stderr_of(&dry)
+    );
+    let out = sb.run_with_stdin(
+        &[
+            "rm",
+            "--home-only",
+            "-i",
+            "--max-count=1",
+            "--match=exact",
+            &paths[0],
+        ],
+        "y\n",
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("more than the cap of 1"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(listed_originals(&sb).len(), 2);
 }
 
 #[test]
@@ -6036,7 +6188,11 @@ fn put_warns_when_the_trash_grows_past_the_warn_size() {
     let out = put("a.txt", "1");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
-        stderr_of(&out).contains("past RTRASH_WARN_SIZE"),
+        stderr_of(&out).contains("past RTRASH_WARN_SIZE")
+            && stderr_of(&out).contains("rtrash list --sort=size")
+            && stderr_of(&out).contains("rtrash rm -i --max-count=1 --match=id ID")
+            && !stderr_of(&out).contains("rtrash empty")
+            && !stderr_of(&out).contains("would lose the work"),
         "{}",
         stderr_of(&out)
     );
@@ -6708,7 +6864,11 @@ fn status_warns_from_the_test_file_system_and_stops_once_it_is_freed() {
     fs::write(xdg.join("filler"), vec![1u8; 550_000]).unwrap();
     let out = status(false);
     assert!(
-        stderr_of(&out).contains("is low") && stderr_of(&out).contains("empty --until-free=10%"),
+        stderr_of(&out).contains("is low")
+            && stderr_of(&out).contains("rtrash list --sort=size")
+            && stderr_of(&out).contains("rtrash rm -i --max-count=1 --match=id ID")
+            && !stderr_of(&out).contains("rtrash empty")
+            && !stderr_of(&out).contains("would lose the work"),
         "{}",
         stderr_of(&out)
     );
@@ -8229,12 +8389,727 @@ fn put_warns_when_the_trash_file_system_is_low() {
     assert!(
         err.contains("is low (")
             && err.contains("trashing frees nothing")
-            && err.contains("empty --until-free=10%"),
+            && err.contains("rtrash list --sort=size")
+            && err.contains("rtrash rm -i --max-count=1 --match=id ID")
+            && !err.contains("rtrash empty")
+            && !err.contains("would lose the work"),
         "{err}"
     );
     let quiet = write_at(&sb.root, "work/ok.bin", "x");
     let out = sb.run(&["put", "--home-only", quiet.to_str().unwrap()]);
     assert!(!stderr_of(&out).contains("is low"), "{}", stderr_of(&out));
+}
+
+/// A put that just moved git work flagged dirty or unpushed must not
+/// suggest removing anything from the trash that received it. A plain
+/// file put beside the repository is not named. Unknown shares that
+/// flag (`GitState::is_risky`).
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn put_space_hint_keeps_flagged_git_work() {
+    let git = |repo: &Path, home: &Path, args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", home)
+            .env("GIT_AUTHOR_NAME", "Trash Test")
+            .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Trash Test")
+            .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+            .output()
+            .unwrap()
+    };
+    for (tag, commit) in [("unpushed", true), ("dirty", false)] {
+        let sb = Sandbox::new(&format!("put-git-{tag}"));
+        let repo = sb.work().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let init = git(&repo, &sb.root, &["init", "-q"]);
+        if !init.status.success() {
+            common::skip("git unavailable; skipping");
+            return;
+        }
+        fs::write(repo.join("f"), vec![b'x'; 90_000]).unwrap();
+        fs::write(sb.work().join("plain.txt"), b"ok").unwrap();
+        if commit {
+            let add = git(&repo, &sb.root, &["add", "f"]);
+            let committed = git(&repo, &sb.root, &["commit", "-qm", "work"]);
+            assert!(
+                add.status.success() && committed.status.success(),
+                "add: {}\ncommit: {}",
+                String::from_utf8_lossy(&add.stderr),
+                String::from_utf8_lossy(&committed.stderr)
+            );
+        }
+        let plain = sb.work().join("plain.txt");
+        let out = common::rtrash(&sb.root)
+            .args([
+                "put",
+                "--home-only",
+                "-r",
+                repo.to_str().unwrap(),
+                plain.to_str().unwrap(),
+            ])
+            .env_remove("RTRASH_WARN_SIZE")
+            .env("RTRASH_WARN_SIZE", "1")
+            .env_remove("RTRASH_MAX_SIZE")
+            .env("RTRASH_TEST_FS", format!("100000:{}", sb.root.display()))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{tag}: {}", stderr_of(&out));
+        let err = stderr_of(&out);
+        let remedy = if tag == "dirty" {
+            "uncommitted work is committed"
+        } else {
+            "until the work is pushed"
+        };
+        assert!(
+            err.contains(&format!("with {tag} work"))
+                && err.contains("permanently removing it would lose the work")
+                && err.contains(&repo.display().to_string())
+                && err.contains(remedy)
+                && err.contains("`rtrash undo` brings it back")
+                && err.contains("is low (")
+                && !err.contains("plain.txt")
+                && !err.contains("unrecoverable")
+                && !err.contains("rtrash empty")
+                && !err.contains("rtrash list")
+                && !err.contains("rtrash rm"),
+            "{tag}: {err}"
+        );
+        if tag == "dirty" {
+            assert!(!err.contains("until the work is pushed"), "{tag}: {err}");
+        }
+    }
+}
+
+/// A repository with both an unpushed commit and an uncommitted file is
+/// not described only as unpushed, and is not told only to wait for a push.
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn put_space_hint_names_dirty_work_that_is_also_unpushed() {
+    let sb = Sandbox::new("put-git-both");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", &sb.root)
+            .env("GIT_AUTHOR_NAME", "Trash Test")
+            .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Trash Test")
+            .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+            .output()
+            .unwrap()
+    };
+    let init = git(&["init", "-q"]);
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let add = git(&["add", "f"]);
+    let committed = git(&["commit", "-qm", "work"]);
+    assert!(add.status.success() && committed.status.success());
+    fs::write(repo.join("extra"), b"y").unwrap();
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r", repo.to_str().unwrap()])
+        .env_remove("RTRASH_WARN_SIZE")
+        .env("RTRASH_WARN_SIZE", "1")
+        .env_remove("RTRASH_MAX_SIZE")
+        .env("RTRASH_TEST_FS", format!("100000:{}", sb.root.display()))
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(
+        err.contains("with dirty and unpushed work")
+            && err.contains("uncommitted work is committed")
+            && err.contains("commits are pushed")
+            && err.contains("`rtrash undo` brings it back")
+            && !err.contains("with unpushed work")
+            && !err.contains("rtrash rm")
+            && !err.contains("rtrash list")
+            && !err.contains("rtrash empty"),
+        "{err}"
+    );
+}
+
+/// Git missing, and a repository git cannot read, are unknown. Neither
+/// warning suggests removing the item.
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn put_space_hint_keeps_a_repo_when_git_cannot_answer() {
+    let put_repo = |tag: &str, hide_git: bool| {
+        let sb = Sandbox::new(&format!("put-git-unk-{tag}"));
+        let repo = sb.work().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::write(repo.join("f"), vec![b'x'; 90_000]).unwrap();
+        let mut cmd = common::rtrash(&sb.root);
+        cmd.args(["put", "--home-only", "-r", repo.to_str().unwrap()])
+            .env_remove("RTRASH_WARN_SIZE")
+            .env("RTRASH_WARN_SIZE", "1")
+            .env_remove("RTRASH_MAX_SIZE")
+            .env("RTRASH_TEST_FS", format!("100000:{}", sb.root.display()));
+        if hide_git {
+            let empty = sb.root.join("no-git");
+            fs::create_dir_all(&empty).unwrap();
+            cmd.env("PATH", &empty);
+        }
+        let out = cmd.output().unwrap();
+        let err = stderr_of(&out);
+        assert!(out.status.success(), "{tag}: {err}");
+        assert!(
+            err.contains("with unknown work")
+                && err.contains("could not say")
+                && !err.contains("until the work is pushed")
+                && !err.contains("rtrash rm")
+                && !err.contains("rtrash list")
+                && !err.contains("rtrash empty"),
+            "{tag}: {err}"
+        );
+    };
+    put_repo("missing", true);
+    put_repo("failed", false);
+}
+
+/// Undo is named only once the item has moved. A dry run leaves it in place
+/// and does not promise to bring it back.
+#[test]
+fn a_dry_run_does_not_promise_undo_before_the_move() {
+    let sb = Sandbox::new("put-git-dry");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &sb.root)
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let dry = sb.run(&[
+        "put",
+        "--home-only",
+        "--dry-run",
+        "-r",
+        repo.to_str().unwrap(),
+    ]);
+    let err = stderr_of(&dry);
+    let out = stdout_of(&dry);
+    assert!(dry.status.success(), "{err}");
+    assert!(out.contains("would trash"), "{out}");
+    assert!(!err.contains("rtrash undo"), "{err}");
+    assert!(repo.join("f").is_file());
+    let moved = sb.run(&["put", "--home-only", "-r", repo.to_str().unwrap()]);
+    assert!(moved.status.success(), "{}", stderr_of(&moved));
+    assert!(
+        stderr_of(&moved).contains("`rtrash undo` brings it back"),
+        "{}",
+        stderr_of(&moved)
+    );
+    assert!(!repo.join("f").exists());
+}
+
+/// `put --json` keeps stderr to errors. The note about a trashed
+/// repository is left out, and the summary still lists the item.
+#[cfg(unix)]
+#[test]
+fn put_json_leaves_out_the_repository_note() {
+    let sb = Sandbox::new("put-repo-json");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let out = sb.run(&["put", "--json", "-r", "repo"]);
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(!repo.join("f").exists(), "{err}");
+    assert!(!err.contains("contains a git repository"), "{err}");
+    assert!(!err.contains("rtrash undo"), "{err}");
+    let json = stdout_of(&out);
+    assert!(
+        json.starts_with("{\"trashed\":[{\"original\":\"")
+            && json.contains("/repo\",\"name\":\"repo\"")
+            && json.trim_end().ends_with("\"failed\":0}"),
+        "{json}"
+    );
+}
+
+/// `--dry-run` does not claim to run the git work check.
+#[test]
+fn put_dry_run_help_does_not_claim_the_git_check() {
+    let out = common::rtrash_real(common::Real::NoTrash)
+        .args(["put", "--help"])
+        .output()
+        .unwrap();
+    let text = stdout_of(&out);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(text.contains("Git work is not reported"), "{text}");
+    assert!(!text.contains("failsafes, git work"), "{text}");
+}
+
+fn git_env<'a>(cmd: &'a mut Command, repo: &Path, home: &Path) -> &'a mut Command {
+    cmd.current_dir(repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", home)
+        .env("GIT_AUTHOR_NAME", "Trash Test")
+        .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+        .env("GIT_COMMITTER_NAME", "Trash Test")
+        .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+}
+
+/// A repository nested under the directory that was trashed is risky.
+/// The warning does not suggest `rtrash rm`.
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn put_of_a_parent_keeps_a_nested_dirty_repository() {
+    let sb = Sandbox::new("put-git-nested");
+    let repo = sb.work().join("parent").join("child");
+    fs::create_dir_all(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let parent = sb.work().join("parent");
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r", parent.to_str().unwrap()])
+        .env_remove("RTRASH_WARN_SIZE")
+        .env("RTRASH_WARN_SIZE", "1")
+        .env("RTRASH_TEST_FS", format!("100000:{}", sb.root.display()))
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(
+        err.contains("would lose the work")
+            && err.contains("uncommitted")
+            && !err.contains("rtrash rm")
+            && !err.contains("rtrash list"),
+        "{err}"
+    );
+}
+
+/// A git shim whose log succeeds and whose status or stash probe fails
+/// is unknown as well as unpushed. The warning does not suggest removal.
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn a_partial_git_probe_stays_unknown() {
+    let sb = Sandbox::new("put-git-shim");
+    let shim = sb.root.join("shim");
+    fs::create_dir(&shim).unwrap();
+    let git = shim.join("git");
+    fs::write(
+        &git,
+        "#!/bin/sh\n\
+         ver=\"${FAKE_GIT_VER:-2.47.0}\"\n\
+         for a in \"$@\"; do\n\
+           case \"$a\" in --version) printf 'git version %s\\n' \"$ver\"; exit 0 ;; esac\n\
+         done\n\
+         cmd=\n\
+         for a in \"$@\"; do\n\
+           case \"$a\" in log|status|rev-parse) cmd=$a ;; esac\n\
+         done\n\
+         case \"$cmd\" in\n\
+           log) printf 'abcdef\\n'; exit 0 ;;\n\
+           status) exit \"${FAKE_GIT_STATUS:-0}\" ;;\n\
+           rev-parse) exit \"${FAKE_GIT_REV:-1}\" ;;\n\
+         esac\n\
+         exit 0\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", shim.display(), std::env::var("PATH").unwrap());
+    for (tag, ver, status, rev) in [
+        ("status", "2.47.0", "2", "0"),
+        ("stash", "2.34.0", "0", "128"),
+    ] {
+        let repo = sb.work().join(tag);
+        let _ = fs::remove_dir_all(&repo);
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let out = common::rtrash(&sb.root)
+            .args(["put", "--home-only", "-r", repo.to_str().unwrap()])
+            .env("PATH", &path)
+            .env("FAKE_GIT_VER", ver)
+            .env("FAKE_GIT_STATUS", status)
+            .env("FAKE_GIT_REV", rev)
+            .env_remove("RTRASH_WARN_SIZE")
+            .env("RTRASH_WARN_SIZE", "1")
+            .env("RTRASH_TEST_FS", format!("100000:{}", sb.root.display()))
+            .output()
+            .unwrap();
+        let err = stderr_of(&out);
+        assert!(out.status.success(), "{tag}: {err}");
+        assert!(
+            err.contains("unpushed and unknown")
+                && err.contains("until the work is pushed")
+                && err.contains("could not say")
+                && !err.contains("rtrash rm"),
+            "{tag}: {err}"
+        );
+    }
+}
+
+/// A later status, and a later plain put into the same trash, still see
+/// the repository and do not suggest removing it.
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn a_later_status_and_put_keep_a_trashed_repository() {
+    let sb = Sandbox::new("put-git-later");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let fake = format!("100000:{}", sb.root.display());
+    let put = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r", repo.to_str().unwrap()])
+        .env("RTRASH_TEST_FS", &fake)
+        .env("RTRASH_WARN_SIZE", "1")
+        .output()
+        .unwrap();
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let status = common::rtrash(&sb.root)
+        .args(["status", "--home-only"])
+        .env("RTRASH_TEST_FS", &fake)
+        .output()
+        .unwrap();
+    let err = stderr_of(&status);
+    assert!(
+        err.contains("would lose the work") && !err.contains("rtrash rm"),
+        "{err}"
+    );
+    let plain = sb.work().join("plain.txt");
+    fs::write(&plain, b"ok").unwrap();
+    let again = common::rtrash(&sb.root)
+        .args(["put", "--home-only", plain.to_str().unwrap()])
+        .env("RTRASH_TEST_FS", &fake)
+        .env("RTRASH_WARN_SIZE", "1")
+        .output()
+        .unwrap();
+    let err = stderr_of(&again);
+    assert!(again.status.success(), "{err}");
+    assert!(
+        err.contains("would lose the work") && !err.contains("rtrash rm"),
+        "{err}"
+    );
+}
+
+/// rm leaves a payload that still holds risky git work, and `-f` removes it.
+#[cfg(unix)]
+#[test]
+fn rm_refuses_a_repository_that_still_holds_risky_work() {
+    let sb = Sandbox::new("rm-git-keep");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let path = repo.to_str().unwrap();
+    let put = sb.run(&["put", "--home-only", "-r", path]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let kept = sb.run(&["rm", "--home-only", "--match=exact", path]);
+    let err = stderr_of(&kept);
+    assert_eq!(kept.status.code(), Some(1), "{err}");
+    assert!(err.contains("refusing to remove"), "{err}");
+    assert!(err.contains("-f"), "{err}");
+    let listed = stdout_of(&sb.run(&["list", "--home-only"]));
+    assert!(listed.contains("repo"), "{listed}");
+    let forced = sb.run(&["rm", "--home-only", "-f", "--match=exact", path]);
+    assert!(forced.status.success(), "{}", stderr_of(&forced));
+    let listed = stdout_of(&sb.run(&["list", "--home-only"]));
+    assert!(!listed.contains("repo"), "{listed}");
+}
+
+/// A dangling record is removable: once the payload is gone, rm does not
+/// probe git work and does not refuse it as unknown.
+#[cfg(unix)]
+#[test]
+fn rm_removes_a_dangling_record_without_a_git_work_refusal() {
+    let sb = Sandbox::new("rm-git-dangling");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let path = repo.to_str().unwrap();
+    let put = sb.run(&["put", "--home-only", "-r", path]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let files = sb.trash().join("files");
+    let payload = fs::read_dir(&files)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::remove_dir_all(&payload).unwrap();
+    let rm = sb.run(&["rm", "--home-only", "--match=exact", path]);
+    let err = stderr_of(&rm);
+    assert!(rm.status.success(), "{err}");
+    assert!(!err.contains("it holds unknown git work"), "{err}");
+    let listed = stdout_of(&sb.run(&["list", "--home-only"]));
+    assert!(!listed.contains("repo"), "{listed}");
+}
+
+/// Work that appears after the first probe and before the move is kept.
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn work_created_after_the_probe_is_still_flagged() {
+    let sb = Sandbox::new("put-git-seam");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        git_env(&mut Command::new("git"), &repo, &sb.root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    if !git(&["init", "-q"]).status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    assert!(git(&["add", "f"]).status.success());
+    assert!(git(&["commit", "-qm", "work"]).status.success());
+    let abs = fs::canonicalize(&repo).unwrap();
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r", abs.to_str().unwrap()])
+        .env("RTRASH_TEST_AFTER_PROBE", abs.to_str().unwrap())
+        .env("RTRASH_WARN_SIZE", "1")
+        .env("RTRASH_TEST_FS", format!("100000:{}", sb.root.display()))
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(
+        err.contains("with dirty and unpushed work")
+            && err.contains("uncommitted")
+            && !err.contains("with unpushed work")
+            && !err.contains("rtrash rm"),
+        "{err}"
+    );
+}
+
+/// The id from `list` names that item. A later item at the same original
+/// path has another id, and `rm --match=id` of the first removes nothing.
+#[test]
+fn rm_by_id_leaves_a_later_item_at_the_same_path() {
+    let sb = Sandbox::new("rm-id");
+    let f = sb.work().join("same.txt");
+    fs::write(&f, b"one").unwrap();
+    assert!(sb
+        .run(&["put", "--home-only", f.to_str().unwrap()])
+        .status
+        .success());
+    let listed = stdout_of(&sb.run(&["list", "--home-only", "--format={id} {path}"]));
+    let id = listed.split_whitespace().next().unwrap().to_string();
+    assert!(id.contains('@'), "{listed}");
+    assert!(sb.run(&["undo"]).status.success());
+    common::next_trash_second();
+    fs::write(&f, b"two").unwrap();
+    assert!(sb
+        .run(&["put", "--home-only", f.to_str().unwrap()])
+        .status
+        .success());
+    let rm = sb.run(&["rm", "--home-only", "--match=id", &id]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    assert!(stdout_of(&rm).is_empty(), "{}", stdout_of(&rm));
+    let files = sb.trash().join("files");
+    let mut bodies = Vec::new();
+    for ent in fs::read_dir(&files).unwrap() {
+        bodies.push(fs::read(ent.unwrap().path()).unwrap());
+    }
+    assert_eq!(bodies, vec![b"two".to_vec()]);
+    assert!(!f.exists());
+}
+
+/// Two items with the same trash name and deletion second under different
+/// trash roots get different ids, and rm by one id removes only that item.
+#[test]
+fn rm_by_id_distinguishes_items_from_different_trash_roots() {
+    let sb = Sandbox::new("rm-id-roots");
+    let roots = [sb.root.join("t1"), sb.root.join("t2")];
+    let date = "2026-01-02T03:04:05";
+    for (i, root) in roots.iter().enumerate() {
+        fs::create_dir_all(root.join("files")).unwrap();
+        fs::create_dir_all(root.join("info")).unwrap();
+        fs::write(root.join("files/same.txt"), format!("v{i}")).unwrap();
+        fs::write(
+            root.join("info/same.txt.trashinfo"),
+            format!(
+                "[Trash Info]\nPath=/work/{i}/same.txt\nDeletionDate={date}\nX-Rtrash-Batch=1-1\n"
+            ),
+        )
+        .unwrap();
+    }
+    let pin = |p: &PathBuf| format!("--trash-dir={}", p.display());
+    let a = pin(&roots[0]);
+    let b = pin(&roots[1]);
+    let listed = stdout_of(&sb.run(&["list", &a, &b, "--format={id}\t{path}\n"]));
+    let rows: Vec<(&str, &str)> = listed.lines().filter_map(|l| l.split_once('\t')).collect();
+    assert_eq!(rows.len(), 2, "{listed}");
+    assert_ne!(rows[0].0, rows[1].0, "{listed}");
+    let rm = sb.run(&["rm", &a, &b, "--match=id", rows[0].0]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    let left: usize = roots
+        .iter()
+        .map(|r| fs::read_dir(r.join("files")).unwrap().count())
+        .sum();
+    assert_eq!(left, 1);
+}
+
+/// A symlinked parent that is retargeted after the path was resolved does
+/// not make put move the new target. The item that was checked moves.
+#[cfg(all(unix, debug_assertions))]
+#[test]
+fn a_retargeted_parent_does_not_change_what_put_moves() {
+    let sb = Sandbox::new("put-retarget");
+    let real = sb.work().join("real");
+    let other = sb.work().join("other");
+    fs::create_dir(&real).unwrap();
+    fs::create_dir(&other).unwrap();
+    fs::write(real.join("item"), b"orig").unwrap();
+    fs::write(other.join("item"), b"other").unwrap();
+    let link = sb.work().join("via");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let spec = format!("{}|{}", link.display(), other.display());
+    let operand = link.join("item");
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", operand.to_str().unwrap()])
+        .env("RTRASH_TEST_RETARGET", &spec)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!real.join("item").exists(), "the checked item moves");
+    assert_eq!(fs::read(other.join("item")).unwrap(), b"other");
+    let files = sb.trash().join("files");
+    let mut saw = false;
+    for ent in fs::read_dir(&files).unwrap() {
+        if fs::read(ent.unwrap().path()).unwrap() == b"orig" {
+            saw = true;
+        }
+    }
+    assert!(saw, "the trash holds the item that was checked");
+}
+
+/// A WSL put into the Windows Recycle Bin does not promise `rtrash undo`.
+#[cfg(unix)]
+#[test]
+fn a_wsl_put_of_a_risky_repo_names_wsl_restore() {
+    let sb = Sandbox::new("wsl-git");
+    let bin_dir = sb.root.join("bin");
+    fs::create_dir(&bin_dir).unwrap();
+    let write_exe = |name: &str, body: &str| {
+        let p = bin_dir.join(name);
+        fs::write(&p, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write_exe("wslpath", "#!/bin/sh\nprintf '%s\\n' \"$2\"\n");
+    write_exe(
+        "powershell.exe",
+        "#!/bin/sh\nrm -rf -- \"$RTRASH_WSL_TARGET\"\n",
+    );
+    let repo = sb.root.join("mnt").join("c").join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let conf = sb.root.join("wsl.conf");
+    fs::write(
+        &conf,
+        format!("[automount]\nroot = {}\n", sb.root.join("mnt").display()),
+    )
+    .unwrap();
+    let rel = sb.root.join("osrelease");
+    fs::write(&rel, "microsoft\n").unwrap();
+    let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
+    let out = common::rtrash(&sb.root)
+        .args(["put", "-r", repo.to_str().unwrap()])
+        .env("PATH", &path)
+        .env("RTRASH_WSL_RECYCLE", "1")
+        .env("RTRASH_WSL_OSRELEASE", &rel)
+        .env("RTRASH_WSL_CONF", &conf)
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(!repo.join("f").exists(), "{err}");
+    assert!(
+        err.contains("rtrash wsl restore")
+            && err.contains("Explorer")
+            && !err.contains("`rtrash undo` brings it back")
+            && !err.contains("rtrash rm"),
+        "{err}"
+    );
+}
+
+/// The Finder undo line is printed only after the log is written.
+#[cfg(unix)]
+#[test]
+fn a_finder_undo_log_that_cannot_be_written_does_not_promise_undo() {
+    let sb = Sandbox::new("finder-log");
+    let state = sb.root.join("state-file");
+    fs::write(&state, b"x").unwrap();
+    let target = sb.work().join("t");
+    fs::write(&target, b"z").unwrap();
+    let link = sb.work().join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let out = common::rtrash(&sb.root)
+        .args(["put", link.to_str().unwrap()])
+        .env("RTRASH_MACOS_TRASH", "finder")
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(!link.exists(), "{err}");
+    assert!(err.contains("could not be written"), "{err}");
+    assert!(err.contains("Finder Trash"), "{err}");
+    assert!(!err.contains("brings it back"), "{err}");
 }
 
 #[test]
@@ -9423,6 +10298,34 @@ fn rm_keeps_an_item_that_took_the_name_while_it_asked() {
     assert!(rest.contains("changed in the trash"), "{rest}");
     assert_eq!(fs::read(sb.trash().join("files/a.o")).unwrap(), b"second");
     assert!(sb.trash().join("info/a.o.trashinfo").is_file());
+}
+
+/// An id match is tied to the record that list read. Rewriting that record
+/// under the same trash name while rm asks makes the locked re-read refuse it.
+#[test]
+fn rm_by_id_refuses_a_record_rewritten_before_relock() {
+    let (sb, pin) = trashed_a_o("rm-id-rewritten");
+    let listed = stdout_of(&sb.run(&["list", &pin, "--format={id}\\n"]));
+    let id = listed.lines().next().unwrap_or_default().to_string();
+    assert!(!id.is_empty(), "{listed}");
+    let mut cmd = common::rtrash(&sb.root);
+    cmd.args(["rm", &pin, "-i", "--match=id", &id])
+        .current_dir(sb.work());
+    let mut rm = common::Asking::spawn(&mut cmd);
+    rm.wait_for("(y/N) ");
+
+    let record = sb.trash().join("info/a.o.trashinfo");
+    let before = fs::read_to_string(&record).unwrap();
+    let after = before.replace(
+        "DeletionDate=",
+        "DeletionDate=2001-01-01T00:00:00\nX-Rewritten-Date=",
+    );
+    fs::write(&record, after).unwrap();
+    let (status, rest) = rm.answer("y\n");
+    assert!(!status.success(), "{rest}");
+    assert!(rest.contains("changed in the trash"), "{rest}");
+    assert!(sb.trash().join("files/a.o").is_file());
+    assert!(record.is_file());
 }
 
 /// A trash pinned twice, however spelled, is one trash: a prune locks it

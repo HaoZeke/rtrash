@@ -310,8 +310,13 @@ pub(crate) fn read_log() -> Vec<Logged> {
 
 /// Add this put run's Finder items to the undo log, dropping lines whose
 /// item has left the trash, so the log stays as small as the trash.
-pub fn log_batch(batch: &str, items: &[(String, PathBuf, PathBuf)]) {
-    let Some(path) = log_path() else { return };
+pub fn log_batch(batch: &str, items: &[(String, PathBuf, PathBuf)]) -> std::io::Result<()> {
+    let Some(path) = log_path() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "HOME and XDG_STATE_HOME are unset",
+        ));
+    };
     let mut keep: Vec<Logged> = read_log()
         .into_iter()
         .filter(|l| l.trash.join(&l.name).symlink_metadata().is_ok())
@@ -338,9 +343,9 @@ pub fn log_batch(batch: &str, items: &[(String, PathBuf, PathBuf)]) {
         ));
     }
     if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
+        fs::create_dir_all(dir)?;
     }
-    let _ = crate::file_replace::write_own(&path, body.as_bytes());
+    crate::file_replace::write_own(&path, body.as_bytes())
 }
 
 /// Put runs whose items still sit in the trash, newest first.
@@ -623,17 +628,26 @@ pub fn stats(top: usize) -> Vec<crate::trash_stats::Stats> {
         .collect()
 }
 
+pub struct RmOpts<'a> {
+    pub batch: Option<&'a str>,
+    pub dry_run: bool,
+    pub force: bool,
+    pub verbose: bool,
+    pub json: bool,
+    pub filter: Filter,
+}
+
 /// `rm` on the Finder trashes: permanently remove the items whose Put Back
 /// place, its file name or the name in the trash matches a pattern.
-pub fn rm(
-    prog: &str,
-    patterns: &crate::filters::Patterns,
-    batch: Option<&str>,
-    dry_run: bool,
-    verbose: bool,
-    json: bool,
-    filter: Filter,
-) -> i32 {
+pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> i32 {
+    let RmOpts {
+        batch,
+        dry_run,
+        force,
+        verbose,
+        json,
+        filter,
+    } = opts;
     let rows = match entries() {
         Ok(r) => filter.apply(r),
         Err(e) => {
@@ -690,6 +704,9 @@ pub fn rm(
                 let path_s = nfc(&path_s);
                 regex.iter().any(|r| r.is_match(&path_s))
             }
+            crate::filters::Match::Id => {
+                texts.selects(&nfc(&path_s), &base, &name, &e.date, &e.trash)
+            }
             _ => texts.hit(&nfc(&path_s), &base, &name),
         }
     };
@@ -734,6 +751,31 @@ pub fn rm(
                 eprintln!("{prog}: {}", s.reason(&e.name));
                 status = 1;
                 continue;
+            }
+        };
+        if !force && !crate::util::is_gone(&path) {
+            if let Some(work) = crate::du_git::risky_tree(&path) {
+                eprintln!(
+                    "{prog}: refusing to remove '{}': it holds {} git work; \
+                     restore it, or pass -f to remove it anyway",
+                    crate::util::err_path(&e.shown),
+                    work.label()
+                );
+                status = 1;
+                continue;
+            }
+        }
+        let path = if dry_run {
+            path
+        } else {
+            match e.checked() {
+                Ok(p) => p,
+                Err(Stale::Gone) => continue,
+                Err(s) => {
+                    eprintln!("{prog}: {}", s.reason(&e.name));
+                    status = 1;
+                    continue;
+                }
             }
         };
         let m = crate::finder_total::measure_item(&path);

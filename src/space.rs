@@ -146,18 +146,107 @@ pub fn test_fs() -> Option<(std::path::PathBuf, Space)> {
     Some((dir, s))
 }
 
+/// How to keep flagged git work. Dirty is named even when commits are
+/// also unpushed, so the advice is never only "wait until it is pushed".
+/// Unknown is named even when another fact is known, and never names a
+/// removal command.
+fn keep_clause(one: bool, dirty: bool, unpushed: bool, unknown: bool) -> String {
+    let whom = if one { "it" } else { "them" };
+    let known = if dirty && unpushed {
+        format!(
+            "restore {whom} first, then leave {whom} until the uncommitted work is committed and the commits are pushed"
+        )
+    } else if dirty {
+        format!("restore {whom} first, then leave {whom} until the uncommitted work is committed")
+    } else if unpushed {
+        format!("restore {whom} first, then leave {whom} until the work is pushed")
+    } else {
+        String::new()
+    };
+    if !unknown {
+        return known;
+    }
+    if known.is_empty() {
+        format!("leave {whom}; git could not say what removing {whom} would lose")
+    } else {
+        format!("{known}; git could not say what else removing {whom} would lose")
+    }
+}
+
+/// Closing advice of a low-space or big-trash warning.
+///
+/// `risky` is the original paths in this trash whose git work was flagged.
+/// Empty means nothing there is that kind of work: the advice is to review
+/// the trash and remove one listed item by its stable id, which asks first
+/// and stops at a single id. Otherwise the advice names those paths and
+/// does not suggest removing them. Dirty work is described as uncommitted
+/// even when the same repository also has unpushed commits. Unknown stays
+/// in the advice when another item is dirty or unpushed, and is never
+/// pointed at a removal.
+pub fn warning_hint(risky: &[(&Path, crate::du_git::RiskyGit)]) -> String {
+    if risky.is_empty() {
+        return concat!(
+            "review the trash with `rtrash list --sort=size --format='{id} {path}\\n'` ",
+            "and remove that item with `rtrash rm -i --max-count=1 --match=id ID`",
+        )
+        .to_string();
+    }
+    let listed = risky
+        .iter()
+        .map(|(p, _)| format!("'{}'", crate::util::err_path(p)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let dirty = risky.iter().any(|(_, w)| w.dirty);
+    let unpushed = risky.iter().any(|(_, w)| w.unpushed);
+    let unknown = risky.iter().any(|(_, w)| w.unknown);
+    let clause = keep_clause(risky.len() == 1, dirty, unpushed, unknown);
+    if risky.len() == 1 {
+        format!("permanently removing it would lose the work ({listed}); {clause}")
+    } else {
+        format!("permanently removing them would lose the work ({listed}); {clause}")
+    }
+}
+
 /// The low-space warning for the file system of `what` (at `path`), or
 /// `None` when it has room or cannot be read.
 pub fn low_warning(what: &str, path: &Path) -> Option<String> {
+    low_warning_for(what, path, &[])
+}
+
+/// As [`low_warning`]. `risky` is passed to [`warning_hint`].
+pub fn low_warning_for(
+    what: &str,
+    path: &Path,
+    risky: &[(&Path, crate::du_git::RiskyGit)],
+) -> Option<String> {
     let lows = query(path).ok()?.lows(WARN_FREE_PERCENT);
-    (!lows.is_empty()).then(|| low_message(what, &lows))
+    (!lows.is_empty()).then(|| low_message(what, &lows, risky))
 }
 
 /// The text of a low-space warning about `what`.
-pub fn low_message(what: &str, lows: &[String]) -> String {
+pub fn low_message(
+    what: &str,
+    lows: &[String],
+    risky: &[(&Path, crate::du_git::RiskyGit)],
+) -> String {
     format!(
-        "the file system of {what} is low ({}); trashing frees nothing there until the trash is emptied (`rtrash empty --until-free=10%` takes only the oldest items it needs; `rtrash empty` takes all)",
-        lows.join(", ")
+        "the file system of {what} is low ({}); trashing frees nothing there; {}",
+        lows.join(", "),
+        warning_hint(risky)
+    )
+}
+
+/// The stderr line when `status` finds `what` (a trash root or a volume) low.
+/// `risky` is the git work still in that trash; empty is the ordinary review.
+pub fn status_low_warning(
+    what: &str,
+    lows: &[String],
+    risky: &[(&Path, crate::du_git::RiskyGit)],
+) -> String {
+    format!(
+        "rtrash: warning: {what} is low: {}; {}",
+        lows.join(", "),
+        warning_hint(risky)
     )
 }
 
@@ -430,6 +519,100 @@ mod tests {
         let s = disk(100 * G, 9 * G, Some((1000, 50)));
         assert_eq!(s.lows(10), ["9% of bytes free", "5% of inodes free"]);
         assert!(disk(100 * G, 50 * G, Some((1000, 500))).lows(10).is_empty());
+    }
+
+    #[test]
+    fn a_low_or_big_trash_hint_never_names_rtrash_empty() {
+        let lows = ["9% of bytes free".to_string()];
+        let review = warning_hint(&[]);
+        assert!(review.contains("rtrash list --sort=size"), "{review}");
+        assert!(review.contains("{id} {path}\\n"), "{review}");
+        assert!(
+            review.contains("rtrash rm -i --max-count=1 --match=id ID"),
+            "{review}"
+        );
+        assert!(!review.contains("rtrash rm NAME"), "{review}");
+        assert!(!review.contains("rtrash empty"), "{review}");
+        let repo = std::path::Path::new("/work/repo");
+        let unpushed = crate::du_git::RiskyGit {
+            dirty: false,
+            unpushed: true,
+            unknown: false,
+        };
+        let keep = warning_hint(&[(repo, unpushed)]);
+        assert!(
+            keep.contains("permanently removing it would lose the work"),
+            "{keep}"
+        );
+        assert!(keep.contains("'/work/repo'"), "{keep}");
+        assert!(keep.contains("until the work is pushed"), "{keep}");
+        assert!(!keep.contains("unrecoverable"), "{keep}");
+        assert!(!keep.contains("rtrash rm"), "{keep}");
+        assert!(!keep.contains("rtrash list"), "{keep}");
+        assert!(!keep.contains("rtrash empty"), "{keep}");
+        let notes = std::path::Path::new("/work/notes.txt");
+        let both = warning_hint(&[(repo, unpushed), (notes, unpushed)]);
+        assert!(
+            both.contains("permanently removing them would lose the work"),
+            "{both}"
+        );
+        assert!(both.contains("'/work/repo'"), "{both}");
+        assert!(both.contains("'/work/notes.txt'"), "{both}");
+        assert!(!both.contains("unrecoverable"), "{both}");
+        let msg = low_message("trash '/t'", &lows, &[(repo, unpushed)]);
+        assert!(msg.contains("trashing frees nothing"), "{msg}");
+        assert!(msg.contains(&keep), "{msg}");
+        assert!(!msg.contains("rtrash empty"), "{msg}");
+        let plain = low_message("trash '/t'", &lows, &[]);
+        assert!(plain.contains(&review), "{plain}");
+        let status = status_low_warning("/t", &lows, &[]);
+        assert!(status.contains(&review), "{status}");
+        assert!(!status.contains("rtrash empty"), "{status}");
+        assert!(status.starts_with("rtrash: warning: /t is low: 9% of bytes free; "));
+    }
+
+    /// A dirty checkout is not told only to wait for a push, including when
+    /// it also has unpushed commits. Unknown is not pointed at a removal.
+    #[test]
+    fn a_dirty_checkout_is_not_told_only_to_wait_for_a_push() {
+        let repo = std::path::Path::new("/work/repo");
+        let dirty = crate::du_git::RiskyGit {
+            dirty: true,
+            unpushed: false,
+            unknown: false,
+        };
+        let only = warning_hint(&[(repo, dirty)]);
+        assert!(only.contains("uncommitted work is committed"), "{only}");
+        assert!(!only.contains("until the work is pushed"), "{only}");
+        assert!(!only.contains("rtrash rm"), "{only}");
+        let both = crate::du_git::RiskyGit {
+            dirty: true,
+            unpushed: true,
+            unknown: false,
+        };
+        let named = warning_hint(&[(repo, both)]);
+        assert!(named.contains("uncommitted work is committed"), "{named}");
+        assert!(named.contains("commits are pushed"), "{named}");
+        assert!(!named.contains("rtrash rm"), "{named}");
+        let unknown = warning_hint(&[(repo, crate::du_git::RiskyGit::unknown())]);
+        assert!(unknown.contains("could not say"), "{unknown}");
+        assert!(!unknown.contains("until the work is pushed"), "{unknown}");
+        assert!(!unknown.contains("rtrash rm"), "{unknown}");
+        assert!(!unknown.contains("rtrash list"), "{unknown}");
+        let other = std::path::Path::new("/work/other");
+        let mixed = warning_hint(&[(repo, dirty), (other, crate::du_git::RiskyGit::unknown())]);
+        assert!(mixed.contains("uncommitted work is committed"), "{mixed}");
+        assert!(mixed.contains("could not say what else"), "{mixed}");
+        assert!(!mixed.contains("rtrash rm"), "{mixed}");
+        let pushed = crate::du_git::RiskyGit {
+            dirty: false,
+            unpushed: true,
+            unknown: true,
+        };
+        let partial = warning_hint(&[(repo, pushed)]);
+        assert!(partial.contains("until the work is pushed"), "{partial}");
+        assert!(partial.contains("could not say what else"), "{partial}");
+        assert!(!partial.contains("rtrash rm"), "{partial}");
     }
 
     #[cfg(windows)]

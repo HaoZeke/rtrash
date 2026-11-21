@@ -789,6 +789,46 @@ fn max_count_refuses_a_recycle_bin_rm_past_the_cap() {
     assert_eq!(after, 0);
 }
 
+/// Every match is checked together after the git-risk probe loop. An
+/// earlier item that changes while later items are probed is not purged.
+#[cfg(debug_assertions)]
+#[test]
+fn rm_rechecks_every_item_directly_before_the_multi_item_purge() {
+    let home = common::scratch_dir("names", "rm-final-recheck");
+    let files = [home.join("first.txt"), home.join("second.txt")];
+    for file in &files {
+        fs::write(file, b"x").unwrap();
+    }
+    let put = common::rtrash(&home)
+        .arg("put")
+        .args(&files)
+        .output()
+        .unwrap();
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+    let bin = common::test_bin(&home);
+    let changed = bin.join("$RT00000.txt");
+    let other = bin.join("$RT00001.txt");
+    assert!(changed.is_file() && other.is_file());
+
+    let rm = common::rtrash(&home)
+        .args(["rm", "-f", "-y", "*"])
+        .env("RTRASH_TEST_RM_RECHECK", &changed)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&rm.stderr);
+    assert_eq!(rm.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("changed in the trash after it was read"),
+        "{err}"
+    );
+    assert!(changed.is_file(), "the changed item was purged");
+    assert!(!other.exists(), "the unchanged item was not purged");
+}
+
 /// `RTRASH_ALLOW_ROOTS` on the Recycle Bin. The root and the paths may
 /// differ in letter case and in the short 8.3 %TEMP% against the long path
 /// the bin records, and still compare equal; a path outside is refused

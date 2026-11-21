@@ -1617,6 +1617,124 @@ fn volume_serial(path: &Path) -> Option<u32> {
     (ok != 0).then_some(info.dwVolumeSerialNumber)
 }
 
+/// Absolute path of an operand that may be a symlink. The parent is
+/// resolved and the final component stays as given, so the symlink itself
+/// remains the operand. `canonicalize` would follow it and attribute a
+/// repository behind the link to that other path.
+#[cfg(any(windows, test))]
+pub(crate) fn operand_path(path: &Path) -> PathBuf {
+    let Some(name) = path.file_name().filter(|n| !n.is_empty()) else {
+        return std::fs::canonicalize(path)
+            .map(|p| crate::util::plain_path(&p))
+            .unwrap_or_else(|_| path.to_path_buf());
+    };
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => match std::fs::canonicalize(p) {
+            Ok(c) => c,
+            Err(_) => return path.to_path_buf(),
+        },
+        _ => match std::env::current_dir() {
+            Ok(c) => c,
+            Err(_) => return path.to_path_buf(),
+        },
+    };
+    crate::util::plain_path(&parent.join(name))
+}
+
+/// Device and file index of `path`, when they can be read. On Unix that is
+/// the device and inode; on Windows the volume serial and the file index.
+#[cfg(any(windows, test))]
+pub(crate) fn file_identity(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        };
+        let file = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .ok()?;
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+        if ok == 0 {
+            return None;
+        }
+        let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+        Some((u64::from(info.dwVolumeSerialNumber), index))
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::symlink_metadata(path).ok()?;
+        Some((m.dev(), m.ino()))
+    }
+}
+
+/// `RTRASH_TEST_RETARGET=LINK|TARGET` replaces `LINK` with a directory
+/// symlink to `TARGET` after the operand's identity was read. Debug builds
+/// only. The handoff uses the path resolved before this runs.
+#[cfg(windows)]
+pub(crate) fn retarget_seam() {
+    if cfg!(debug_assertions) {
+        if let Ok(spec) = std::env::var("RTRASH_TEST_RETARGET") {
+            if let Some((link, target)) = spec.split_once('|') {
+                let link = Path::new(link);
+                let _ = std::fs::remove_file(link);
+                let _ = std::os::windows::fs::symlink_dir(target, link);
+            }
+        }
+    }
+}
+
+/// True when `path` is not the file `before` named. A missing side is a
+/// change: the handoff must not proceed on a path it can no longer check.
+#[cfg(any(windows, test))]
+pub(crate) fn identity_changed(before: Option<(u64, u64)>, path: &Path) -> bool {
+    match (before, file_identity(path)) {
+        (Some(a), Some(b)) => a != b,
+        (None, None) => true,
+        _ => true,
+    }
+}
+
+/// Merge `extra` risky repository notes into `owned` without duplicating
+/// paths already scanned in the Recycle Bin.
+#[cfg(any(windows, test))]
+pub(crate) fn merge_git_risks(
+    owned: &mut Vec<(PathBuf, crate::du_git::RiskyGit)>,
+    extra: impl IntoIterator<Item = (PathBuf, crate::du_git::RiskyGit)>,
+) {
+    for (path, work) in extra {
+        if let Some((_, existing)) = owned.iter_mut().find(|(p, _)| same_git_risk_path(p, &path)) {
+            *existing = existing.union(work);
+        } else {
+            owned.push((path, work));
+        }
+    }
+}
+
+/// Whether two spellings name one Windows path. Resolving the existing
+/// parent expands 8.3 names; the key also drops verbatim prefixes and case.
+#[cfg(any(windows, test))]
+fn same_git_risk_path(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let normalized =
+            |p: &Path| crate::allow_roots::resolve(p).unwrap_or_else(|| crate::util::plain_path(p));
+        let mounts = volume_mounts();
+        path_key(&normalized(a).to_string_lossy(), &mounts)
+            == path_key(&normalized(b).to_string_lossy(), &mounts)
+    }
+    #[cfg(not(windows))]
+    {
+        path_key(&a.to_string_lossy(), &[]) == path_key(&b.to_string_lossy(), &[])
+    }
+}
+
 // ---- Windows CLI surface (system Recycle Bin via `trash` crate) ----
 
 #[cfg(windows)]
@@ -1663,6 +1781,31 @@ mod os {
             })
             .collect();
         (kept, changed)
+    }
+
+    /// Debug-only seam: make one item's `$I` deletion time differ after
+    /// rm's git probes, so the final all-item recheck can be exercised.
+    fn rm_recheck_seam(items: &[TrashItem]) {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        let Some(payload) = std::env::var_os("RTRASH_TEST_RM_RECHECK").map(PathBuf::from) else {
+            return;
+        };
+        if !items.iter().any(|it| Path::new(&it.id) == payload) {
+            return;
+        }
+        let Some(index) = index_file_for(&payload) else {
+            return;
+        };
+        let Ok(mut body) = std::fs::read(&index) else {
+            return;
+        };
+        let Some(first_time_byte) = body.get_mut(16) else {
+            return;
+        };
+        *first_time_byte ^= 1;
+        let _ = crate::file_replace::write_own(&index, &body);
     }
 
     /// `list --depth=N`: what a deleted folder's `$R` payload holds, N
@@ -1872,6 +2015,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut failed = 0usize;
         let mut moved: Vec<PathBuf> = Vec::new();
         let mut roots: Vec<PathBuf> = Vec::new();
+        let mut restore_notes: Vec<(PathBuf, crate::du_git::RiskyGit)> = Vec::new();
         for f in &files {
             match crate::util::look(f) {
                 crate::util::Look::There(_) => {}
@@ -1893,11 +2037,13 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     continue;
                 }
             }
-            let abs = std::fs::canonicalize(f)
-                .map(|p| crate::util::plain_path(&p))
-                .unwrap_or_else(|_| f.clone());
+            // Parent only: the final component is the operand, symlink included.
+            // The handoff uses this path, not `f`, so a symlinked parent that
+            // is retargeted cannot make the shell move a different item.
+            let abs = super::operand_path(f);
+            let seen = super::file_identity(&abs);
             if let Some(snap) = &snap {
-                let holds = snap.under(f);
+                let holds = snap.under(&abs);
                 if !holds.is_empty() {
                     let who = crate::holders::describe(&holds);
                     if in_use == "refuse" {
@@ -1916,7 +2062,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     );
                 }
             }
-            if inspect && !inspect_ok(prog, f) {
+            if inspect && !inspect_ok(prog, &abs) {
                 continue;
             }
             if dry_run {
@@ -1943,7 +2089,22 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             }
             let root = test_bin_root().or_else(|| bin_root_of(&abs));
             let bin = verbose.then(|| root.clone()).flatten();
-            match crate::allow_roots::trash_delete_as(f, allow_permanent) {
+            // After the prompt and the dry run, and again on the payload
+            // once the move has succeeded.
+            super::retarget_seam();
+            let probed = repo_at(&abs);
+            let was_dir = std::fs::symlink_metadata(&abs)
+                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
+            if super::identity_changed(seen, &abs) {
+                eprintln!(
+                    "{prog}: cannot trash '{}': it changed after it was checked",
+                    crate::util::err_path(&abs)
+                );
+                status = status.max(1);
+                failed += 1;
+                continue;
+            }
+            match crate::allow_roots::trash_delete_as(&abs, allow_permanent) {
                 // Gone for good: no bin to name, nothing to undo.
                 Ok(false) => {
                     eprintln!(
@@ -1964,19 +2125,32 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                             removed_line(&crate::util::term_path(f), bin.as_deref())
                         );
                     }
-                    // The path as the user gave it, made absolute; the
-                    // canonical form can name a mounted folder by its
-                    // volume GUID.
-                    moved.push(
-                        std::path::absolute(f)
-                            .map(|p| crate::util::plain_path(&p))
-                            .unwrap_or_else(|_| abs.clone()),
-                    );
+                    // The same path the shell was given, which is what the
+                    // bin records and what the warning names.
+                    let kept = abs.clone();
+                    let located = super::list_items().ok().and_then(|items| {
+                        items
+                            .into_iter()
+                            .filter(|it| original_of(it) == kept)
+                            .max_by_key(|it| it.time_deleted)
+                    });
+                    let after = located
+                        .as_ref()
+                        .and_then(|it| crate::du_git::risky_tree(Path::new(&it.id)));
+                    let work = if was_dir && located.is_none() {
+                        crate::du_git::union_work(probed, Some(crate::du_git::RiskyGit::unknown()))
+                    } else {
+                        crate::du_git::union_work(probed, after)
+                    };
+                    if let Some(work) = work {
+                        restore_notes.push((kept.clone(), work));
+                    }
                     if let Some(r) = root {
                         if !roots.contains(&r) {
                             roots.push(r);
                         }
                     }
+                    moved.push(kept);
                 }
                 Err(e) => {
                     eprintln!(
@@ -1998,18 +2172,75 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             println!("{}", util::put_summary_json(&items, failed));
         }
         if !moved.is_empty() {
-            write_last_put(started, &moved);
+            // The restore hint is true only after last-put.txt is written.
+            // `rtrash undo` does not restore the Recycle Bin.
+            match write_last_put(started, &moved) {
+                Ok(()) if !json => {
+                    for (path, work) in &restore_notes {
+                        eprintln!(
+                            "{prog}: warning: '{}' contains a git repository with {} work; \
+                             `rtrash restore --batch=last` brings it back",
+                            crate::util::err_path(path),
+                            work.label()
+                        );
+                    }
+                }
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!(
+                        "{prog}: warning: the last-put record could not be written ({e}); \
+                         restore the items from the Recycle Bin. \
+                         `rtrash restore --batch=last` cannot see them yet",
+                    );
+                }
+            }
             prune_after_put(prog, &moved, json);
         }
         // The Recycle Bin keeps items on their own volume, so a full volume
-        // stays full.
-        for r in &roots {
-            let what = format!("the Recycle Bin of {}", r.display());
-            if let Some(w) = crate::space::low_warning(&what, r) {
-                eprintln!("{prog}: warning: {w}");
+        // stays full. `--json` leaves this out, as FreeDesktop leaves out
+        // its low-space and big-trash warnings.
+        if !json {
+            for r in &roots {
+                let Ok(space) = crate::space::query(r) else {
+                    continue;
+                };
+                let lows = space.lows(crate::space::WARN_FREE_PERCENT);
+                if lows.is_empty() {
+                    continue;
+                }
+                let what = format!("the Recycle Bin of {}", crate::util::err_path(r));
+                let mut owned = bin_git_risks_for_root(r);
+                super::merge_git_risks(
+                    &mut owned,
+                    restore_notes
+                        .iter()
+                        .filter(|(path, _)| same_volume(path, r))
+                        .cloned(),
+                );
+                let risky: Vec<(&Path, crate::du_git::RiskyGit)> = owned
+                    .iter()
+                    .map(|(path, work)| (path.as_path(), *work))
+                    .collect();
+                if let Some(w) = crate::space::low_warning_for(&what, r, &risky) {
+                    eprintln!("{prog}: warning: {w}");
+                }
             }
         }
         status
+    }
+
+    /// True when `a` and `b` are on the same Windows volume.
+    fn same_volume(a: &Path, b: &Path) -> bool {
+        super::volume_key(a) != 0 && super::volume_key(a) == super::volume_key(b)
+    }
+
+    /// Risky git work at `abs`, when `abs` is a directory. The caller prints
+    /// the undo line only after the move into the bin has succeeded.
+    fn repo_at(abs: &Path) -> Option<crate::du_git::RiskyGit> {
+        if !std::fs::symlink_metadata(abs).is_ok_and(|m| m.is_dir()) {
+            return None;
+        }
+        crate::du_git::risky_tree(abs)
     }
 
     /// Why a payload would not move: the processes that hold it open, named
@@ -2280,8 +2511,9 @@ List items in the Windows Recycle Bin (system trash).
       --show-trashpath  under each row, show the item's file in the
                    Recycle Bin ($R...; not with --format)
       --format=TEMPLATE  print each item through TEMPLATE: {{date}} {{epoch}}
-                   {{path}} {{name}} {{trash}} {{size}} (bytes); {{batch}} and
-                   {{owner}} print nothing here; \\t \\n \\0 escapes
+                   {{path}} {{name}} {{trash}} {{size}} {{id}} (bytes for
+                   {{size}}); {{batch}} and {{owner}} print nothing here;
+                   \\t \\n \\0 escapes
       --help     display this help and exit
       --version  output version information and exit
 
@@ -2335,10 +2567,21 @@ on Windows (there is no FreeDesktop layout here).
                     .into_iter()
                     .filter(|it| {
                         let o = original_of(it);
-                        matcher.as_ref().is_none_or(|m| m.keeps(&o))
-                            && cwd
-                                .as_ref()
-                                .is_none_or(|dirs| dirs.iter().any(|d| o.starts_with(d)))
+                        matcher.as_ref().is_none_or(|m| {
+                            let stable = Path::new(&it.id)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            let date = platform::epoch_to_iso_utc(it.time_deleted);
+                            m.keeps_record(
+                                &o,
+                                &stable,
+                                &date,
+                                bin_root_of(Path::new(&it.id)).unwrap_or_default().as_path(),
+                            )
+                        }) && cwd
+                            .as_ref()
+                            .is_none_or(|dirs| dirs.iter().any(|d| o.starts_with(d)))
                     })
                     .collect();
                 let mut items = filters.apply(items, |it| it.time_deleted, item_size);
@@ -2373,6 +2616,15 @@ on Windows (there is no FreeDesktop layout here).
                             .file_name()
                             .map(|n| n.to_string_lossy())
                             .unwrap_or_else(|| it.name.to_string_lossy());
+                        let stable = id
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let item_id = crate::filters::item_id(
+                            &stable,
+                            &date,
+                            &bin_root_of(Path::new(&it.id)).unwrap_or_default(),
+                        );
                         let row = crate::listfmt::FmtRow {
                             date: &date,
                             epoch: it.time_deleted,
@@ -2382,6 +2634,7 @@ on Windows (there is no FreeDesktop layout here).
                             batch: "",
                             size: Some(item_size(&it)),
                             owner: Some(""),
+                            id: &item_id,
                         };
                         out.write_all(&crate::listfmt::render_format(parts, &row))
                     } else if with_size {
@@ -2726,13 +2979,18 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         }
     }
 
-    fn write_last_put(since: i64, moved: &[PathBuf]) {
-        let Some(p) = last_put_path() else { return };
+    fn write_last_put(since: i64, moved: &[PathBuf]) -> std::io::Result<()> {
+        let Some(p) = last_put_path() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "LOCALAPPDATA is unset",
+            ));
+        };
         if let Some(d) = p.parent() {
-            let _ = std::fs::create_dir_all(d);
+            std::fs::create_dir_all(d)?;
         }
         let text = crate::budget::last_put_text(since, moved);
-        let _ = crate::file_replace::write_own(&p, text.as_bytes());
+        crate::file_replace::write_own(&p, text.as_bytes())
     }
 
     /// With a trash budget (`RTRASH_MAX_SIZE` or `policy.max_size`), trim
@@ -3031,7 +3289,9 @@ Without PATH, print a numbered list and read an index from stdin.
                 separator) or file name matches a shell glob
       --regex=RE  match items whose original path matches RE
   -m, --match=KIND  read PATH as a pattern of KIND, as trashy's -m does:
-                glob, regex, substring or exact (the whole original path)
+                glob, regex, substring, exact (the whole original path) or
+                id (the {{id}} from `list --format`, which includes
+                payload name, date and bin root)
       --to=DIR  restore into DIR, keeping each item's file name
       --older-than=AGE  only items deleted more than AGE ago; AGE is DAYS
                 or a duration such as 2h, 30m or 1d12h
@@ -3202,7 +3462,19 @@ Without PATH, print a numbered list and read an index from stdin.
             None => match &matcher {
                 Some(m) => items
                     .into_iter()
-                    .filter(|i| m.keeps(&original_of(i)))
+                    .filter(|i| {
+                        let stable = Path::new(&i.id)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let date = platform::epoch_to_iso_utc(i.time_deleted);
+                        m.keeps_record(
+                            &original_of(i),
+                            &stable,
+                            &date,
+                            bin_root_of(Path::new(&i.id)).unwrap_or_default().as_path(),
+                        )
+                    })
                     .collect(),
                 // Without PATH or a match, --cwd-only keeps the items that
                 // came from here or below, as on FreeDesktop.
@@ -3755,6 +4027,81 @@ registry), then the total and the free space on each (a warning under
         0
     }
 
+    /// Git work still in the Recycle Bin. A bin that cannot be listed is
+    /// unknown, so a low-space warning does not suggest removing it.
+    fn scoped_bin_git_risks<I, F>(
+        root: &Path,
+        items: I,
+        mut risky_tree: F,
+    ) -> Vec<(PathBuf, crate::du_git::RiskyGit)>
+    where
+        I: IntoIterator<Item = (PathBuf, PathBuf)>,
+        F: FnMut(&Path) -> Option<crate::du_git::RiskyGit>,
+    {
+        let mut out = Vec::new();
+        let test_root = test_bin_root();
+        for (id, original) in items {
+            let Some(item_root) = test_root.clone().or_else(|| bin_root_of(&id)) else {
+                continue;
+            };
+            if !same_volume(root, &item_root) {
+                continue;
+            }
+            if let Some(work) = risky_tree(&id) {
+                out.push((original, work));
+            }
+        }
+        out
+    }
+
+    fn bin_git_risks_for_root(root: &Path) -> Vec<(PathBuf, crate::du_git::RiskyGit)> {
+        let Ok(items) = super::list_items() else {
+            return vec![(root.to_path_buf(), crate::du_git::RiskyGit::unknown())];
+        };
+        scoped_bin_git_risks(
+            root,
+            items.into_iter().map(|it| {
+                let id = PathBuf::from(&it.id);
+                let original = original_of(&it);
+                (id, original)
+            }),
+            crate::du_git::risky_tree,
+        )
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn scoped_bin_git_risks_take_items_of_one_volume_only() {
+        let items = vec![
+            (
+                PathBuf::from(r"C:\$Recycle.Bin\S-1-1-0\$RA.txt"),
+                PathBuf::from(r"C:\on-c.txt"),
+            ),
+            (
+                PathBuf::from(r"D:\$Recycle.Bin\S-1-1-0\$RB.txt"),
+                PathBuf::from(r"D:\on-d.txt"),
+            ),
+        ];
+        let got = scoped_bin_git_risks(Path::new(r"C:\"), items, |_| {
+            Some(crate::du_git::RiskyGit {
+                dirty: false,
+                unpushed: true,
+                unknown: false,
+            })
+        });
+        assert_eq!(
+            got,
+            vec![(
+                PathBuf::from(r"C:\on-c.txt"),
+                crate::du_git::RiskyGit {
+                    dirty: false,
+                    unpushed: true,
+                    unknown: false
+                }
+            )]
+        );
+    }
+
     /// A `Free on` line per drive, and a warning for a drive under
     /// [`crate::space::WARN_FREE_PERCENT`] free.
     fn print_free(drives: &[PathBuf]) {
@@ -3769,10 +4116,12 @@ registry), then the total and the free space on each (a warning under
             );
             let lows = s.lows(crate::space::WARN_FREE_PERCENT);
             if !lows.is_empty() {
+                let owned = bin_git_risks_for_root(root);
+                let pairs: Vec<(&Path, crate::du_git::RiskyGit)> =
+                    owned.iter().map(|(p, w)| (p.as_path(), *w)).collect();
                 eprintln!(
-                    "rtrash: warning: {} is low: {}; free space with `rtrash empty --until-free=10%` (only the oldest items it needs) or `rtrash empty`",
-                    crate::util::err_path(&root),
-                    lows.join(", ")
+                    "{}",
+                    crate::space::status_low_warning(&crate::util::err_path(root), &lows, &pairs)
                 );
             }
         }
@@ -3879,7 +4228,9 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
       --regex   PATTERNs are regular expressions searched in the original
                    path (the same as --match=regex)
       --match=KIND  how to read PATTERNs (trashy's -m): glob (default),
-                   regex, substring or exact (the whole original path)
+                   regex, substring, exact (the whole original path) or id
+                   (the {{id}} from `list --format`, the payload name,
+                   date and bin root)
       --older-than=AGE  only match items deleted more than AGE ago: DAYS,
                    or a duration such as 2h, 30m or 1d12h
       --newer-than=AGE  only match items deleted within the last AGE
@@ -3892,6 +4243,8 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                    a terminal by default, naming the matches)
   -y, --yes      do not ask
   -f, --force    do not ask, and allow mass patterns (e.g. '*')
+                  also remove entries that still hold risky git work;
+                  without it, those entries are refused
       --max-count=N  refuse, deleting nothing, when more than N items
                    would go (also RTRASH_MAX_PERMANENT)
   -v, --verbose  print each path
@@ -3975,7 +4328,13 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                     .file_name()
                     .map(|f| f.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                pats.hit(&full, &base, &base)
+                let stable = Path::new(&it.id)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let date = platform::epoch_to_iso_utc(it.time_deleted);
+                let root = bin_root_of(Path::new(&it.id)).unwrap_or_default();
+                pats.selects(&full, &base, &stable, &date, &root)
             })
             .collect();
         // Size last: only the matches need their `$I` read.
@@ -4006,6 +4365,40 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
         } else {
             rechecked(prog, matched)
         };
+        let mut refused = 0u32;
+        let matched = if force {
+            matched
+        } else {
+            let mut kept = Vec::new();
+            for it in matched {
+                let payload = Path::new(&it.id);
+                if crate::util::is_gone(payload) {
+                    if dry_run {
+                        kept.push(it);
+                    }
+                    continue;
+                }
+                if let Some(work) = crate::du_git::risky_tree(payload) {
+                    eprintln!(
+                        "{prog}: refusing to remove '{}': it holds {} git work; \
+                         restore it, or pass -f to remove it anyway",
+                        crate::util::err_path(&original_of(&it)),
+                        work.label()
+                    );
+                    refused += 1;
+                } else {
+                    kept.push(it);
+                }
+            }
+            kept
+        };
+        let (matched, final_changed) = if dry_run {
+            (matched, 0)
+        } else {
+            rm_recheck_seam(&matched);
+            rechecked(prog, matched)
+        };
+        let changed = changed.saturating_add(final_changed);
         // Taken before the purge: the `$R` payloads are gone after it.
         let summary = json.then(|| {
             let names: Vec<String> = matched
@@ -4025,13 +4418,19 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             }
         }
         let code = if dry_run {
-            0
+            i32::from(refused > 0)
         } else if let Err(e) = crate::permanent_guard::gate_many(matched.len() as u64) {
             eprintln!("{prog}: {e}");
             1
         } else {
             match os_limited::purge_all(matched) {
-                Ok(()) => i32::from(changed > 0),
+                Ok(()) => {
+                    if refused > 0 {
+                        1
+                    } else {
+                        i32::from(changed > 0)
+                    }
+                }
                 Err(e) => {
                     eprintln!("{prog}: purge failed: {}", err_msg(e));
                     1
@@ -4415,12 +4814,113 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn identity_changes_when_another_file_is_checked() {
+        let dir = std::env::temp_dir().join(format!("rtrash-ident-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let a = dir.join("a");
+        let b = dir.join("b");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let ia = file_identity(&a).unwrap();
+        let ib = file_identity(&b).unwrap();
+        assert_ne!(ia, ib);
+        assert!(!identity_changed(Some(ia), &a));
+        assert!(identity_changed(Some(ia), &b));
+        assert!(identity_changed(None, &a));
+        let gone = dir.join("gone");
+        assert!(file_identity(&gone).is_none());
+        assert!(identity_changed(None, &gone));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The final component stays the operand. Canonicalizing the whole path
+    /// would follow a symlink and report the repository it points at.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_operand_is_not_the_repository_it_points_at() {
+        let top = std::env::temp_dir().join(format!("rtrash-operand-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&top);
+        let repo = top.join("real").join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let links = top.join("links");
+        std::fs::create_dir_all(&links).unwrap();
+        let link = links.join("shortcut");
+        std::os::unix::fs::symlink(&repo, &link).unwrap();
+        let op = operand_path(&link);
+        let canon = crate::util::plain_path(&std::fs::canonicalize(&link).unwrap());
+        assert_eq!(op.file_name(), Some(std::ffi::OsStr::new("shortcut")));
+        assert_ne!(op, canon);
+        assert!(std::fs::symlink_metadata(&op)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let flagged = |p: &Path| {
+            std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())
+                && crate::du_git::risky_repo_state(p).is_some()
+        };
+        assert!(!flagged(&op), "the symlink is not the repository");
+        assert!(flagged(&canon), "the target directory is the repository");
+        let via = top.join("via");
+        std::os::unix::fs::symlink(top.join("real"), &via).unwrap();
+        let through = operand_path(&via.join("repo"));
+        assert_eq!(through.file_name(), Some(std::ffi::OsStr::new("repo")));
+        assert!(
+            flagged(&through),
+            "a symlinked parent still names the repository"
+        );
+        let _ = std::fs::remove_dir_all(&top);
+    }
+
+    #[test]
     fn removed_line_names_the_bin_of_the_volume() {
         assert_eq!(
             removed_line(r"C:\mnt\data\a.txt", Some(Path::new(r"C:\mnt\data\"))),
             r"removed 'C:\mnt\data\a.txt' (Recycle Bin of C:\mnt\data\)"
         );
         assert_eq!(removed_line("a.txt", None), "removed 'a.txt'");
+    }
+
+    #[test]
+    fn merge_git_risks_unions_same_path_instead_of_duplicating() {
+        let dirty = crate::du_git::RiskyGit {
+            dirty: true,
+            unpushed: false,
+            unknown: false,
+        };
+        let unpushed = crate::du_git::RiskyGit {
+            dirty: false,
+            unpushed: true,
+            unknown: false,
+        };
+        let mut owned = vec![(PathBuf::from(r"C:\W\repo"), dirty)];
+        merge_git_risks(
+            &mut owned,
+            vec![
+                (PathBuf::from(r"\\?\c:\w\REPO"), unpushed),
+                (PathBuf::from(r"C:\w\other"), dirty),
+            ],
+        );
+        assert_eq!(owned.len(), 2);
+        assert_eq!(
+            owned[0],
+            (
+                PathBuf::from(r"C:\W\repo"),
+                crate::du_git::RiskyGit {
+                    dirty: true,
+                    unpushed: true,
+                    unknown: false,
+                }
+            )
+        );
+        assert_eq!(owned[1], (PathBuf::from(r"C:\w\other"), dirty));
+        let pairs: Vec<(&Path, crate::du_git::RiskyGit)> = owned
+            .iter()
+            .map(|(path, work)| (path.as_path(), *work))
+            .collect();
+        let hint = crate::space::warning_hint(&pairs);
+        assert!(hint.contains("uncommitted work is committed"), "{hint}");
+        assert!(hint.contains("commits are pushed"), "{hint}");
     }
 
     #[test]
