@@ -4123,12 +4123,21 @@ prints what would go.
 removes entries even when they still hold risky git work; without it,
 those entries are refused.
 .B rtrash wsl empty
-[\fB\-n\fR] [\fB\-\-all\fR] [\fB\-\-older\-than=\fIAGE\fR|\fIDAYS\fR|\fIPATH\fR]...
+[\fB\-n\fR] [\fB\-\-all\fR] [\fB\-\-older\-than=\fIAGE\fR] [\fIAGE\fR|\fIPATH\fR]...
 deletes items moved to the Recycle Bin more than
 .I AGE
 ago, the items whose original path is
 .I PATH
 exactly, or every item.
+A positional
+.I AGE
+is read by the same rules as
+.B \-\-older\-than
+.RI ( 7 ,
+.IR 2h ,
+.IR 30m ).
+A token that is not an age is a
+.IR PATH .
 rtrash keeps no record of which put sent an item there from WSL, so
 emptying everything asks on a terminal and otherwise refuses unless
 .B \-\-all

@@ -1,0 +1,1 @@
+`rtrash rm` and `rtrash empty` name an exact original path that is in the trash and outside the age or size window. A sibling that still matches stays in place, and the near-miss list is reserved for a path that is absent.

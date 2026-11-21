@@ -57,34 +57,75 @@ pub fn continues(want: &Path, original: &Path) -> bool {
     original != want && original.starts_with(&want)
 }
 
-/// When a wanted form matches nothing, name the originals that only start
-/// with it. An original that equals some other wanted form is a hit of
-/// that form, so it is not named here.
-pub fn hint(prog: &str, wants: &[String], have: &[PathBuf]) {
+/// The phrase for an exact path that is in the trash and fails the age
+/// filter, the size filter, or both.
+pub fn window(age: bool, size: bool) -> &'static str {
+    match (age, size) {
+        (true, true) => "the age or size window",
+        (false, true) => "the size window",
+        _ => "the age window",
+    }
+}
+
+/// What to say about one wanted form. `have` is every original in scope,
+/// before the age and size filters. `kept` is the subset those filters
+/// still allow.
+enum Notice {
+    /// The path is in `have` and missing from `kept`.
+    Outside,
+    /// The path is in neither, and these longer paths start with it.
+    Miss(Vec<PathBuf>),
+}
+
+fn notices(wants: &[String], have: &[PathBuf], kept: &[PathBuf]) -> Vec<(String, Notice)> {
     let got: Vec<String> = have.iter().map(|path| norm(path)).collect();
+    let stay: Vec<String> = kept.iter().map(|path| norm(path)).collect();
     let mut named = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
     for want in wants {
-        if got.iter().any(|one| one == want) {
+        if stay.iter().any(|one| one == want) {
             continue;
         }
-        let mut near: Vec<&Path> = Vec::new();
+        if got.iter().any(|one| one == want) {
+            out.push((want.clone(), Notice::Outside));
+            continue;
+        }
+        let mut near = Vec::new();
         for (path, one) in have.iter().zip(got.iter()) {
             let longer = one.starts_with(want.as_str()) && one != want;
             let exact_elsewhere = wants.iter().any(|w| w == one);
             if longer && !exact_elsewhere && named.insert(one.clone()) {
-                near.push(path);
+                near.push(path.clone());
             }
         }
         if near.is_empty() {
             continue;
         }
         near.sort_by_key(|path| norm(path));
-        eprintln!(
-            "{prog}: no exact match for '{}'",
-            crate::util::err_path(Path::new(want))
-        );
-        for path in near {
-            eprintln!("{prog}: near miss: '{}'", crate::util::err_path(path));
+        out.push((want.clone(), Notice::Miss(near)));
+    }
+    out
+}
+
+/// When a wanted form matches nothing in `kept`, either name it as outside
+/// `window` or name the longer paths in `have`. An original that equals
+/// some other wanted form is a hit of that form, so it is not named here.
+pub fn hint(prog: &str, wants: &[String], have: &[PathBuf], kept: &[PathBuf], window: &str) {
+    for (want, notice) in notices(wants, have, kept) {
+        match notice {
+            Notice::Outside => eprintln!(
+                "{prog}: '{}' is in the trash, outside {window}",
+                crate::util::err_path(Path::new(&want))
+            ),
+            Notice::Miss(near) => {
+                eprintln!(
+                    "{prog}: no exact match for '{}'",
+                    crate::util::err_path(Path::new(&want))
+                );
+                for path in near {
+                    eprintln!("{prog}: near miss: '{}'", crate::util::err_path(&path));
+                }
+            }
         }
     }
 }
@@ -222,5 +263,28 @@ mod tests {
             "{got:?} {recorded}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_exact_path_outside_the_window_is_not_a_near_miss() {
+        let exact = PathBuf::from("/home/u/a");
+        let sibling = PathBuf::from("/home/u/ab");
+        let child = PathBuf::from("/home/u/a/b");
+        let wants = vec![norm(&exact)];
+        let have = vec![exact.clone(), sibling.clone(), child.clone()];
+        let kept = vec![sibling.clone(), child.clone()];
+        let notes = notices(&wants, &have, &kept);
+        assert_eq!(notes.len(), 1);
+        assert!(matches!(notes[0].1, Notice::Outside));
+
+        let absent = notices(&wants, &[sibling.clone(), child.clone()], &[sibling, child]);
+        match &absent[0].1 {
+            Notice::Miss(near) => {
+                let names: Vec<_> = near.iter().map(|p| norm(p)).collect();
+                assert!(names.iter().any(|n| n.ends_with("/ab")));
+                assert!(names.iter().any(|n| n.ends_with("/a/b")));
+            }
+            Notice::Outside => panic!("a missing path is a near miss"),
+        }
     }
 }
