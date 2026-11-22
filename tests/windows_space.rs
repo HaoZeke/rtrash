@@ -432,11 +432,382 @@ fn put_warns_when_the_recycle_bin_volume_is_low() {
     assert!(
         err.contains("Recycle Bin of")
             && err.contains("is low (")
-            && err.contains("trashing frees nothing"),
+            && err.contains("trashing frees nothing")
+            && err.contains("rtrash list --sort=size")
+            && err.contains("rtrash rm -i --max-count=1 --match=id ID")
+            && !err.contains("rtrash empty")
+            && !err.contains("would lose the work"),
         "{err}"
     );
     let err = put("fine.txt", false);
     assert!(!err.contains("is low"), "{err}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A put of a dirty or unpushed repository on a short volume says that
+/// permanently removing it would lose the work, and does not suggest
+/// `rtrash rm`. A plain file put beside the repository is not named.
+/// The same check as the Unix put test.
+#[cfg(debug_assertions)]
+#[test]
+fn put_space_hint_keeps_flagged_git_work() {
+    let git = |repo: &std::path::Path, home: &std::path::Path, args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", home)
+            .env("GIT_AUTHOR_NAME", "Trash Test")
+            .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Trash Test")
+            .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+            .output()
+    };
+    for (tag, commit, case) in [
+        ("unpushed", true, "put-git-unpushed"),
+        ("dirty", false, "put-git-dirty"),
+    ] {
+        let base = common::scratch_dir("wingit", case);
+        let vol = base.join("vol");
+        std::fs::create_dir_all(&vol).unwrap();
+        std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+        let repo = base.join(tag);
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir(&repo).unwrap();
+        let init = match git(&repo, &base, &["init", "-q"]) {
+            Ok(out) => out,
+            Err(_) => {
+                common::skip("git unavailable; skipping");
+                let _ = std::fs::remove_dir_all(&base);
+                return;
+            }
+        };
+        if !init.status.success() {
+            common::skip("git unavailable; skipping");
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        std::fs::write(repo.join("f"), vec![b'x'; 90_000]).unwrap();
+        let plain = base.join("plain.txt");
+        std::fs::write(&plain, b"ok").unwrap();
+        if commit {
+            let add = git(&repo, &base, &["add", "f"]).unwrap();
+            let committed = git(&repo, &base, &["commit", "-qm", "work"]).unwrap();
+            assert!(
+                add.status.success() && committed.status.success(),
+                "add: {}\ncommit: {}",
+                String::from_utf8_lossy(&add.stderr),
+                String::from_utf8_lossy(&committed.stderr)
+            );
+        }
+        let out = common::rtrash(&base)
+            .args(["put", repo.to_str().unwrap(), plain.to_str().unwrap()])
+            .env("RTRASH_TEST_BIN_ROOT", &vol)
+            .env("RTRASH_IN_USE", "ignore")
+            .env("RTRASH_TEST_FS", format!("100000:{}", vol.display()))
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{tag}: {err}");
+        let lose = err
+            .split("permanently removing it would lose the work")
+            .nth(1)
+            .unwrap_or("");
+        let remedy = if tag == "dirty" {
+            "uncommitted work is committed"
+        } else {
+            "until the work is pushed"
+        };
+        assert!(
+            err.contains(&format!("with {tag} work"))
+                && err.contains(remedy)
+                && err.contains("`rtrash restore --batch=last` brings it back")
+                && err.contains("is low (")
+                && lose.contains(tag)
+                && !err.contains("plain.txt")
+                && !err.contains("unrecoverable")
+                && !err.contains("rtrash empty")
+                && !err.contains("rtrash list")
+                && !err.contains("rtrash rm"),
+            "{tag}: {err}"
+        );
+        if tag == "dirty" {
+            assert!(!err.contains("until the work is pushed"), "{tag}: {err}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+/// Undo is named only after the item is in the bin. A dry run does not
+/// promise it.
+#[cfg(debug_assertions)]
+#[test]
+fn a_dry_run_does_not_promise_undo_before_the_move() {
+    let base = common::scratch_dir("wingit", "put-git-dry");
+    let repo = base.join("repo");
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir(&repo).unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &base)
+        .output();
+    let Ok(init) = init else {
+        common::skip("git unavailable; skipping");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    };
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    std::fs::write(repo.join("f"), b"x").unwrap();
+    let dry = common::rtrash(&base)
+        .args(["put", "--dry-run", repo.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&dry.stderr);
+    let out = String::from_utf8_lossy(&dry.stdout);
+    assert!(dry.status.success(), "{err}");
+    assert!(out.contains("would trash"), "{out}");
+    assert!(!err.contains("rtrash undo"), "{err}");
+    assert!(repo.join("f").is_file());
+    let moved = common::rtrash(&base)
+        .args(["put", repo.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .output()
+        .unwrap();
+    let moved_err = String::from_utf8_lossy(&moved.stderr);
+    assert!(moved.status.success(), "{moved_err}");
+    assert!(
+        moved_err.contains("`rtrash restore --batch=last` brings it back"),
+        "{moved_err}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A junction operand is not reported as the repository it points at.
+/// A real put, so the warning that follows a move is what is checked.
+/// `mklink /J` needs no Developer Mode.
+#[test]
+fn put_does_not_attribute_a_junction_to_the_repository_it_points_at() {
+    let base = common::scratch_dir("wingit", "put-git-link");
+    let vol = base.join("vol");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+    let repo = base.join("real");
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join("f"), b"kept").unwrap();
+    let link = base.join("shortcut");
+    let _ = std::fs::remove_dir_all(&link);
+    common::mklink_junction(&link, &repo);
+    let out = common::rtrash(&base)
+        .args(["put", link.to_str().unwrap()])
+        .env("RTRASH_TEST_BIN_ROOT", &vol)
+        .env("RTRASH_IN_USE", "ignore")
+        .env("RTRASH_TEST_FS", format!("100000:{}", vol.display()))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(!err.contains("git repository"), "{err}");
+    assert!(!err.contains("would lose the work"), "{err}");
+    assert!(!err.contains("rtrash undo"), "{err}");
+    assert!(
+        err.contains("rtrash rm -i --max-count=1 --match=id ID"),
+        "{err}"
+    );
+    assert!(
+        repo.join("f").is_file(),
+        "the repository behind the junction stays"
+    );
+    assert_eq!(std::fs::read(repo.join("f")).unwrap(), b"kept");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The last-put record is what `restore --batch=last` reads. When it
+/// cannot be written, the warning does not name that command or `undo`.
+#[test]
+fn a_failed_last_put_record_does_not_promise_restore() {
+    let base = common::scratch_dir("wingit", "last-put-fail");
+    let lad = common::local_app_data(&base);
+    std::fs::write(&lad, b"not a directory").unwrap();
+    let f = base.join("a.txt");
+    std::fs::write(&f, b"x").unwrap();
+    let out = common::rtrash(&base)
+        .args(["put", f.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("could not be written"), "{err}");
+    assert!(err.contains("Recycle Bin"), "{err}");
+    assert!(err.contains("restore --batch=last"), "{err}");
+    assert!(err.contains("cannot see them yet"), "{err}");
+    assert!(!err.contains("rtrash undo"), "{err}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// `put --json` of a dirty repository keeps stderr to errors: no
+/// repository note, and no low-space warning from the faked volume.
+#[cfg(debug_assertions)]
+#[test]
+fn put_json_leaves_out_the_repository_note() {
+    let base = common::scratch_dir("wingit", "put-json");
+    let vol = base.join("vol");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+    let repo = base.join("repo");
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir(&repo).unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &base)
+        .env("GIT_AUTHOR_NAME", "Trash Test")
+        .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+        .env("GIT_COMMITTER_NAME", "Trash Test")
+        .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+        .output();
+    let Ok(init) = init else {
+        common::skip("git unavailable; skipping");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    };
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    std::fs::write(repo.join("f"), b"x").unwrap();
+    let out = common::rtrash(&base)
+        .args(["put", "--json", repo.to_str().unwrap()])
+        .env("RTRASH_TEST_BIN_ROOT", &vol)
+        .env("RTRASH_IN_USE", "ignore")
+        .env("RTRASH_TEST_FS", format!("100000:{}", vol.display()))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{err}");
+    assert!(!repo.join("f").exists(), "{err}");
+    assert!(!err.contains("contains a git repository"), "{err}");
+    assert!(!err.contains("brings it back"), "{err}");
+    assert!(!err.contains("is low"), "{err}");
+    assert!(
+        json.contains("\"trashed\":[")
+            && json.contains("\"name\":\"$R")
+            && json.trim_end().ends_with("\"failed\":0}"),
+        "{json}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Putting a plain directory by a differently cased spelling still finds its
+/// `$I` record: no false unknown git-work warning, the low-space rm hint
+/// stays, `put --json` keeps the `$R` payload name, and post-put budget
+/// trimming keeps the just-trashed item.
+#[cfg(debug_assertions)]
+#[test]
+fn put_plain_dir_with_mismatched_case_keeps_rm_hint_and_json_name() {
+    let base = common::scratch_dir("wingit", "put-case");
+    let vol = base.join("vol");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+
+    let real = base.join("PlainDir");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(real.join("note.txt"), vec![b'x'; 20_000]).unwrap();
+    let typed = base.join("plaindir");
+    let out = common::rtrash(&base)
+        .args(["put", typed.to_str().unwrap()])
+        .env("RTRASH_TEST_BIN_ROOT", &vol)
+        .env("RTRASH_IN_USE", "ignore")
+        .env("RTRASH_TEST_FS", format!("100000:{}", vol.display()))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(!real.exists(), "plain dir should be trashed");
+    assert!(!err.contains("contains a git repository"), "{err}");
+    assert!(!err.contains("would lose the work"), "{err}");
+    assert!(
+        err.contains("is low (") && err.contains("rtrash rm -i --max-count=1 --match=id ID"),
+        "{err}"
+    );
+
+    let real_json = base.join("PlainJsonDir");
+    std::fs::create_dir(&real_json).unwrap();
+    std::fs::write(real_json.join("note.txt"), b"ok").unwrap();
+    let typed_json = base.join("plainjsondir");
+    let out = common::rtrash(&base)
+        .args(["put", "--json", typed_json.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{err}");
+    assert!(
+        json.contains("\"trashed\":[")
+            && json.contains("\"name\":\"$R")
+            && json.trim_end().ends_with("\"failed\":0}"),
+        "{json}"
+    );
+
+    let real_budget = base.join("PlainBudgetDir");
+    std::fs::create_dir(&real_budget).unwrap();
+    std::fs::write(real_budget.join("note.txt"), vec![b'x'; 20_000]).unwrap();
+    let typed_budget = base.join("plainbudgetdir");
+    let out = common::rtrash(&base)
+        .args(["put", typed_budget.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .env("RTRASH_MAX_SIZE", "1")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let listed = common::rtrash(&base).args(["list"]).output().unwrap();
+    let list_out = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(list_out.contains("PlainBudgetDir"), "{list_out}");
+    assert!(!list_out.contains("PlainDir"), "{list_out}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The command the Windows warning names restores the repository.
+#[test]
+fn restore_batch_last_brings_back_the_repository_the_warning_names() {
+    let base = common::scratch_dir("wingit", "restore-last");
+    let repo = base.join("repo");
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::write(repo.join("f"), b"back").unwrap();
+    let put = common::rtrash(&base)
+        .args(["put", repo.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&put.stderr);
+    assert!(put.status.success(), "{err}");
+    assert!(!repo.join("f").exists());
+    let back = common::rtrash(&base)
+        .args(["restore", "--batch=last"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&back.stderr);
+    assert!(back.status.success(), "{err}");
+    assert_eq!(std::fs::read(repo.join("f")).unwrap(), b"back");
     let _ = std::fs::remove_dir_all(&base);
 }
 

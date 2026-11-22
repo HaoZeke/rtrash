@@ -308,7 +308,7 @@ export extern "rtrash restore" [
     --name: string@"nu-complete rtrash trashed names"  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original
     --regex: string  # match items whose original path contains REGEX
-    --match(-m): string  # read PATH as glob, regex, substring or exact
+    --match(-m): string  # read PATH as glob, regex, substring, exact or id
     --latest  # of several matches, restore the most recently trashed
     --dry-run(-n)  # show where each chosen item would go and change nothing
     --all  # of several matches, restore every one
@@ -343,7 +343,7 @@ export extern "rtrash rm" [
     --batch: string  # only items from one put run: an ID from `undo --list`, or `last`
     --max-count: string  # refuse when more than N items would go
     --regex  # PATTERNs are regular expressions on the original path
-    --match(-m): string  # how to read PATTERNs: glob, regex, substring or exact
+    --match(-m): string  # how to read PATTERNs: glob, regex, substring, exact or id
     --dry-run(-n)  # list matches and reclaimable size; do not delete
     --interactive(-i)  # ask before deleting, even when stdin is not a terminal
     --yes(-y)  # do not ask
@@ -408,10 +408,11 @@ export extern "rtrash wsl" [
     --glob: string  # items whose path (or name, without a slash) matches
     --regex: string  # items whose path matches
     --name: string@"nu-complete rtrash wsl names"  # items with exactly this file name
+    --match(-m): string  # read MATCH as glob, regex, substring, exact or id
     --older-than: string  # empty: items deleted more than AGE ago
     --all  # empty: every item, without asking
     --dry-run(-n)  # rm, empty: print what would go, delete nothing
-    --force(-f)  # restore over an existing file
+    --force(-f)  # restore: overwrite; rm: remove risky git work
     --help  # display this help and exit
     action?: string@"nu-complete rtrash wsl"
     ...paths: string@"nu-complete rtrash wsl items"
@@ -543,7 +544,7 @@ export extern "trash-restore" [
     --name: string@"nu-complete rtrash trashed names"  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original
     --regex: string  # match items whose original path contains REGEX
-    --match(-m): string  # read PATH as glob, regex, substring or exact
+    --match(-m): string  # read PATH as glob, regex, substring, exact or id
     --latest  # of several matches, restore the most recently trashed
     --dry-run(-n)  # show where each chosen item would go and change nothing
     --all  # of several matches, restore every one
@@ -566,7 +567,7 @@ export extern "trash-rm" [
     --batch: string  # only items from one put run: an ID from `undo --list`, or `last`
     --max-count: string  # refuse when more than N items would go
     --regex  # PATTERNs are regular expressions on the original path
-    --match(-m): string  # how to read PATTERNs: glob, regex, substring or exact
+    --match(-m): string  # how to read PATTERNs: glob, regex, substring, exact or id
     --interactive(-i)  # ask before deleting, even when stdin is not a terminal
     --yes(-y)  # do not ask
     --force(-f)  # do not ask, and allow mass patterns that match everything

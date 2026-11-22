@@ -73,6 +73,9 @@ pub(crate) struct Opts {
     pub home_only: bool,
     /// Suppress `-v` lines (stdout carries the `--json` summary instead).
     pub quiet: bool,
+    /// `--json`: stdout is the summary and stderr stays errors, so the
+    /// repository note and the space warnings are left out.
+    pub json: bool,
     /// Check for live processes holding the item. The browsers leave it off.
     pub in_use: InUse,
     /// `--dry-run`: run every check and say what would move, moving nothing.
@@ -88,6 +91,9 @@ pub struct Trashed {
     pub name: String,
     /// Trash root the item went to.
     pub trash_dir: PathBuf,
+    /// Git work put flagged on this item, when removing it could lose
+    /// dirty, unpushed or unknown work.
+    pub risky_git: Option<crate::du_git::RiskyGit>,
 }
 
 /// JSON summary for `put --json`: every trashed item plus the failure count.
@@ -112,6 +118,7 @@ impl Default for Opts {
             trash_pin: None,
             home_only: false,
             quiet: false,
+            json: false,
             in_use: InUse::Ignore,
             dry_run: false,
         }
@@ -135,9 +142,10 @@ to require CLI operands even on a TTY.
   -r, -R, --recursive   remove directories and their contents
   -d, --dir             remove empty directories
       --dry-run         run every check (protected paths, the home and
-                          mount-point failsafes, git work, holders) and
+                          mount-point failsafes, holders) and
                           print 'would trash PATH' for each item that would
-                          move, moving nothing
+                          move, moving nothing. Git work is not reported
+                          here; that warning is printed only after a move
   -v, --verbose         explain what is being done, naming the trash
                           directory each item went to
       --one-file-system accepted for rm compatibility (no-op: entries are
@@ -154,7 +162,9 @@ to require CLI operands even on a TTY.
                           inodes free, or under RTRASH_MIN_FREE bytes
       --in-use=WHEN     when a live process has an item open, mapped or as
                           its working directory: warn (the default), refuse,
-                          or ignore (skips the process scan)
+                          or ignore (skips the process scan); refuse also
+                          refuses an item when some process could not be
+                          inspected (without root), unless -f is given
       --json            print a JSON summary on stdout ({trashed, failed});
                           implies --plain and replaces -v output
       --help            display this help and exit
@@ -197,6 +207,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "--no-space-check" => crate::space::skip_check(true),
             "--json" => {
                 json = true;
+                opts.json = true;
                 opts.quiet = true;
             }
             // GNU rm: -f / -i / --interactive last flag wins for prompt vs force.
@@ -368,7 +379,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .iter()
             .map(|t| (t.name.clone(), t.original.clone(), t.trash_dir.clone()))
             .collect();
-        crate::finder_shared::log_batch(crate::info::batch_id(), &items);
+        let logged = crate::finder_shared::log_batch(crate::info::batch_id(), &items);
+        report_finder_undo(prog, &trashed, logged, json);
         let moved: Vec<(PathBuf, String)> = trashed
             .iter()
             .map(|t| (t.trash_dir.clone(), t.name.clone()))
@@ -379,7 +391,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         // A put into a Finder trash frees nothing on that disk either.
         if !(opts.quiet || json) {
             warn_big_finder_trash(prog, &trashed);
-            warn_low_space(prog, &trashed);
+            warn_low_space(prog, &trashed, true);
         }
     }
     // The Finder Trash keeps no .trashinfo; its own branch above warns
@@ -389,7 +401,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         prune_after_put(prog, &trashed, opts.quiet || json);
         if !(opts.quiet || json) {
             warn_big_trash(prog, &trashed);
-            warn_low_space(prog, &trashed);
+            warn_low_space(prog, &trashed, false);
         }
     }
     status
@@ -502,6 +514,72 @@ fn warn_size(prog: &str) -> Option<(WarnSize, &'static str)> {
     w.map(|w| (w, src))
 }
 
+/// Git work to name in a warning for `root`: this run's flags unioned with
+/// a scan of the trash. A FreeDesktop `files/` that cannot be listed is
+/// unknown, so the warning does not suggest removing anything. A Finder
+/// trash has no `files/`, so Finder runs scan `root` through `finder_shared`.
+fn risks_for(
+    root: &Path,
+    trashed: &[Trashed],
+    is_finder: bool,
+) -> Vec<(PathBuf, crate::du_git::RiskyGit)> {
+    let run: Vec<&Trashed> = trashed.iter().filter(|t| t.trash_dir == root).collect();
+    let from_run = |t: &Trashed| t.risky_git.map(|w| (t.original.clone(), w));
+    let Some(dir) = trashdir::TrashDir::from_root(root).ok() else {
+        return run.iter().filter_map(|t| from_run(t)).collect();
+    };
+    let scanned = if is_finder {
+        crate::finder_shared::entries_in(root).ok().map(|rows| {
+            rows.into_iter()
+                .filter_map(|e| {
+                    let payload = e.path();
+                    let work = crate::du_git::risky_tree(&payload)?;
+                    let original = e.original.unwrap_or(e.shown);
+                    Some((original, e.name, work))
+                })
+                .collect::<Vec<_>>()
+        })
+    } else {
+        crate::list::git_risks(&dir)
+    };
+    let Some(scanned) = scanned else {
+        let mut out: Vec<_> = run.iter().filter_map(|t| from_run(t)).collect();
+        out.push((root.to_path_buf(), crate::du_git::RiskyGit::unknown()));
+        return out;
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for t in &run {
+        seen.insert(t.name.as_str());
+        let disk = scanned
+            .iter()
+            .find(|(_, name, _)| name == &t.name)
+            .map(|(_, _, w)| *w);
+        if let Some(w) = crate::du_git::union_work(t.risky_git, disk) {
+            out.push((t.original.clone(), w));
+        }
+    }
+    for (orig, name, w) in scanned {
+        if seen.contains(name.as_str()) {
+            continue;
+        }
+        out.push((orig, w));
+    }
+    out
+}
+
+#[cfg(test)]
+fn risky_originals<'a>(
+    trashed: &'a [Trashed],
+    root: &Path,
+) -> Vec<(&'a Path, crate::du_git::RiskyGit)> {
+    trashed
+        .iter()
+        .filter(|t| t.trash_dir == root)
+        .filter_map(|t| t.risky_git.map(|w| (t.original.as_path(), w)))
+        .collect()
+}
+
 /// Warn when a trash this put used holds more than the warn size.
 fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
     let Some((limit, src)) = warn_size(prog) else {
@@ -525,10 +603,14 @@ fn warn_big_trash(prog: &str, trashed: &[Trashed]) {
             } else {
                 String::new()
             };
+            let owned = risks_for(&root, trashed, false);
+            let pairs: Vec<(&Path, crate::du_git::RiskyGit)> =
+                owned.iter().map(|(p, w)| (p.as_path(), *w)).collect();
+            let hint = crate::space::warning_hint(&pairs);
             eprintln!(
-                "{prog}: warning: trash '{}' holds {}{share}, past {src}; free it with `rtrash empty`",
+                "{prog}: warning: trash '{}' holds {}{share}, past {src}; {hint}",
                 crate::util::err_path(&root),
-                crate::fastdelete::format_bytes(bytes)
+                crate::fastdelete::format_bytes(bytes),
             );
         }
     }
@@ -559,21 +641,36 @@ fn warn_big_finder_trash(prog: &str, trashed: &[Trashed]) {
         let bytes = before.bytes.saturating_add(added);
         let disk = crate::space::query(&root).map_or(0, |s| s.total);
         if limit.exceeded(bytes, disk) {
+            let owned = risks_for(&root, trashed, true);
+            let pairs: Vec<(&Path, crate::du_git::RiskyGit)> =
+                owned.iter().map(|(p, w)| (p.as_path(), *w)).collect();
+            let hint = crate::space::warning_hint(&pairs);
             eprintln!(
-                "{prog}: warning: trash '{}' holds about {}, past {src}; free it with `rtrash empty --until-free=10%` or `rtrash empty`",
+                "{prog}: warning: trash '{}' holds about {}, past {src}; {hint}",
                 crate::util::err_path(&root),
-                crate::fastdelete::format_bytes(bytes)
+                crate::fastdelete::format_bytes(bytes),
             );
         }
     }
 }
 
-fn warn_low_space(prog: &str, trashed: &[Trashed]) {
+fn warn_low_space(prog: &str, trashed: &[Trashed], finder_backend: bool) {
     let mut roots: Vec<PathBuf> = trashed.iter().map(|t| t.trash_dir.clone()).collect();
     roots.sort();
     roots.dedup();
     for root in roots {
-        if let Some(w) = crate::space::low_warning(&format!("trash '{}'", root.display()), &root) {
+        let Ok(space) = crate::space::query(&root) else {
+            continue;
+        };
+        let lows = space.lows(crate::space::WARN_FREE_PERCENT);
+        if lows.is_empty() {
+            continue;
+        }
+        let owned = risks_for(&root, trashed, finder_backend);
+        let pairs: Vec<(&Path, crate::du_git::RiskyGit)> =
+            owned.iter().map(|(p, w)| (p.as_path(), *w)).collect();
+        let what = format!("trash '{}'", crate::util::err_path(&root));
+        if let Some(w) = crate::space::low_warning_for(&what, &root, &pairs) {
             eprintln!("{prog}: warning: {w}");
         }
     }
@@ -653,6 +750,68 @@ macro_rules! say {
     ($($arg:tt)*) => {
         say(format_args!($($arg)*))
     };
+}
+
+/// The undo line, printed only after the move has succeeded.
+fn say_undo(prog: &str, name: &str, work: Option<crate::du_git::RiskyGit>) {
+    let Some(work) = work else {
+        return;
+    };
+    say!(
+        "{prog}: warning: '{name}' contains a git repository with {} work; \
+         `rtrash undo` brings it back",
+        work.label()
+    );
+}
+
+/// WSL put the item in the Windows Recycle Bin. `rtrash undo` reads the
+/// FreeDesktop trash and would not bring this item back.
+fn say_wsl_restore(prog: &str, name: &str, work: Option<crate::du_git::RiskyGit>) {
+    let Some(work) = work else {
+        return;
+    };
+    say!(
+        "{prog}: warning: '{name}' contains a git repository with {} work; \
+         restore it with `rtrash wsl restore` or from Explorer. \
+         `rtrash undo` does not see the Windows Recycle Bin",
+        work.label()
+    );
+}
+
+/// `RTRASH_TEST_RETARGET=LINK|TARGET` replaces `LINK` with a symlink to
+/// `TARGET`. Debug builds only. The move has already resolved its path.
+fn retarget_seam() {
+    if cfg!(debug_assertions) {
+        if let Ok(spec) = std::env::var("RTRASH_TEST_RETARGET") {
+            if let Some((link, target)) = spec.split_once('|') {
+                let link = Path::new(link);
+                let _ = std::fs::remove_file(link);
+                #[cfg(unix)]
+                {
+                    let _ = std::os::unix::fs::symlink(target, link);
+                }
+            }
+        }
+    }
+}
+
+/// Finder undo is true only after the undo log has been written.
+fn report_finder_undo(prog: &str, trashed: &[Trashed], logged: std::io::Result<()>, json: bool) {
+    match logged {
+        Ok(()) if !json => {
+            for t in trashed {
+                let name = t.original.to_string_lossy();
+                say_undo(prog, name.as_ref(), t.risky_git);
+            }
+        }
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!(
+                "{prog}: warning: the Finder undo log could not be written ({e}); \
+                 restore the items from the Finder Trash. `rtrash undo` cannot see them yet"
+            );
+        }
+    }
 }
 
 /// Run `f` and return, with its result, every message `put_one` wrote
@@ -788,16 +947,9 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             return Err(1);
         }
     }
-    if meta.is_dir() {
-        if let Some(state) = crate::safety::risky_repo_state(&abs) {
-            say!(
-                "{prog}: warning: '{name}' contains a git repository with {} work; `rtrash undo` brings it back",
-                state.as_str()
-            );
-        }
-    }
     if opts.in_use != InUse::Ignore {
-        let holds = holders().under(&abs);
+        let probe = holders().probe(&abs);
+        let holds = probe.holds;
         if !holds.is_empty() {
             let who = crate::holders::describe(&holds);
             if opts.in_use == InUse::Refuse {
@@ -806,17 +958,40 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                 return Err(1);
             }
             say!("{prog}: warning: '{name}' is in use by {who}");
+        } else if opts.in_use == InUse::Refuse {
+            if let Some(gap) = holders().gap_of(usize::from(probe.unchecked)) {
+                if !opts.force {
+                    say!("{prog}: cannot trash '{name}': it may be in use; {gap}");
+                    say!("{prog}: use -f or --in-use=warn to trash it anyway");
+                    return Err(1);
+                }
+                say!("{prog}: warning: '{name}' may be in use; {gap}");
+            }
         }
     }
     if opts.dry_run {
         println!("would trash '{}'", crate::util::term_path(&abs));
         return Ok(None);
     }
+    // A test retargets a symlinked parent here. `abs` was already resolved,
+    // and the move uses that path, so the item that was checked is the one
+    // that moves.
+    retarget_seam();
+    // After the prompt and the dry run. The moved payload is probed
+    // again and unioned, so work that appears before the move is kept.
+    let probed = if meta.is_dir() {
+        crate::safety::risky_repo_state(&abs)
+    } else {
+        None
+    };
     // WSL, opted in: a file on a Windows drive goes to the Recycle Bin,
     // where Explorer restores it; rtrash list and undo do not see it.
     if opts.trash_pin.is_none() && crate::wsl::applies(&abs) {
         return match crate::wsl::recycle(&abs, meta.is_dir()) {
             Ok(()) => {
+                if !opts.json {
+                    say_wsl_restore(prog, name.as_ref(), probed);
+                }
                 if opts.verbose && !opts.quiet {
                     println!(
                         "removed '{}' (Windows Recycle Bin)",
@@ -840,6 +1015,12 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         let size = crate::finder_total::measure_item(&abs);
         return match crate::finder::put_item(&abs, &meta) {
             Ok((trash_name, trash_dir)) => {
+                let payload = trash_dir.join(&trash_name);
+                let after = meta
+                    .is_dir()
+                    .then(|| crate::du_git::risky_tree(&payload))
+                    .flatten();
+                let risky_git = crate::du_git::union_work(probed, after);
                 crate::finder_total::carry(&trash_dir, size, true);
                 if opts.verbose && !opts.quiet {
                     let to = crate::util::term_path(&trash_dir);
@@ -849,6 +1030,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                     original: abs,
                     name: trash_name,
                     trash_dir,
+                    risky_git,
                 }))
             }
             Err(e) => {
@@ -885,6 +1067,17 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
     }
     match trashdir::trash_move(&abs, &meta, &trash) {
         Ok(trash_name) => {
+            let payload = crate::util::join_name(&trash.files(), &trash_name);
+            let after = meta
+                .is_dir()
+                .then(|| crate::du_git::risky_tree(&payload))
+                .flatten();
+            let risky_git = crate::du_git::union_work(probed, after);
+            // The batch id is in the record trash_move just wrote.
+            // `--json` keeps stderr to errors, as it does for the space warnings.
+            if !opts.json {
+                say_undo(prog, name.as_ref(), risky_git);
+            }
             if opts.verbose && !opts.quiet {
                 // Name the trash the item went to: a file on another
                 // file system goes to that file system's trash.
@@ -902,6 +1095,7 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                 original: abs,
                 name: trash_name,
                 trash_dir: trash.root,
+                risky_git,
             }))
         }
         Err(e) => {
@@ -1034,6 +1228,7 @@ mod json_tests {
             original: PathBuf::from("/w/a \"q\".txt"),
             name: "a \"q\".txt".into(),
             trash_dir: PathBuf::from("/x/Trash"),
+            risky_git: None,
         };
         let s = summary_json(&[t], 2);
         assert_eq!(
@@ -1041,6 +1236,68 @@ mod json_tests {
             r#"{"trashed":[{"original":"/w/a \"q\".txt","name":"a \"q\".txt","trash_dir":"/x/Trash"}],"failed":2}"#
         );
         assert_eq!(summary_json(&[], 0), r#"{"trashed":[],"failed":0}"#);
+    }
+
+    #[test]
+    fn a_missing_non_finder_trash_is_unknown_not_safe() {
+        let root = PathBuf::from("rtrash-test-missing-risk-root");
+        let trashed = [Trashed {
+            original: PathBuf::from("/work/plain.txt"),
+            name: "plain.txt".into(),
+            trash_dir: root.clone(),
+            risky_git: None,
+        }];
+        assert_eq!(
+            super::risks_for(&root, &trashed, false),
+            vec![(root, crate::du_git::RiskyGit::unknown())]
+        );
+    }
+
+    #[test]
+    fn a_space_hint_names_only_the_risky_items_of_that_trash() {
+        let home = PathBuf::from("/work/t");
+        let vol = PathBuf::from("/mnt/vol");
+        let trashed = [
+            Trashed {
+                original: PathBuf::from("/work/repo"),
+                name: "repo".into(),
+                trash_dir: home.clone(),
+                risky_git: Some(crate::du_git::RiskyGit {
+                    dirty: true,
+                    unpushed: true,
+                    unknown: false,
+                }),
+            },
+            Trashed {
+                original: PathBuf::from("/work/plain.txt"),
+                name: "plain.txt".into(),
+                trash_dir: home.clone(),
+                risky_git: None,
+            },
+            Trashed {
+                original: PathBuf::from("/vol/plain"),
+                name: "plain".into(),
+                trash_dir: vol.clone(),
+                risky_git: None,
+            },
+        ];
+        let home_hint = crate::space::warning_hint(&super::risky_originals(&trashed, &home));
+        assert!(
+            home_hint.contains("permanently removing it would lose the work"),
+            "{home_hint}"
+        );
+        assert!(home_hint.contains("'/work/repo'"), "{home_hint}");
+        assert!(home_hint.contains("uncommitted"), "{home_hint}");
+        assert!(home_hint.contains("commits are pushed"), "{home_hint}");
+        assert!(!home_hint.contains("plain.txt"), "{home_hint}");
+        assert!(!home_hint.contains("rtrash rm"), "{home_hint}");
+        let vol_hint = crate::space::warning_hint(&super::risky_originals(&trashed, &vol));
+        assert!(
+            vol_hint.contains("rtrash rm -i --max-count=1 --match=id ID"),
+            "{vol_hint}"
+        );
+        assert!(!vol_hint.contains("would lose the work"), "{vol_hint}");
+        assert!(!vol_hint.contains("/vol/plain"), "{vol_hint}");
     }
 }
 

@@ -56,12 +56,13 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
                      and new fields only get added
       --format=TEMPLATE print each item through TEMPLATE, unescaped:
                      {date} {epoch} {path} {name} {trash} {batch}
-                     {size} (bytes) {owner}; {{ and }} for braces,
+                     {size} (bytes) {owner} {id}; {{ and }} for braces,
                      \\t \\n \\0 for tab, newline, NUL; no newline added
       --help            display this help and exit
       --version         output version information and exit
 ";
 
+#[derive(Clone)]
 pub struct Entry {
     pub date: Option<String>,
     pub epoch: i64,
@@ -70,6 +71,8 @@ pub struct Entry {
     pub dir: TrashDir,
     /// Put batch id from the `.trashinfo`, when rtrash wrote one.
     pub batch: Option<String>,
+    /// Whether this entry came from a `.trashinfo`, rather than `files/` alone.
+    pub(crate) recorded: bool,
 }
 
 impl Entry {
@@ -87,27 +90,35 @@ impl Entry {
     /// given its name to another item, which an action on the old scan
     /// would hit instead. A record whose payload is gone passes: rm takes
     /// such a record, and restore refuses it through [`Locked::gone`].
-    pub fn relock(&self) -> Result<Locked<'_>, Relock> {
+    pub fn relock(&self) -> Result<Locked, Relock> {
         let lock = trashdir::TrashLock::acquire(&self.dir.root).map_err(Relock::Lock)?;
-        let held = Locked {
-            entry: self,
-            _lock: lock,
-        };
-        if fs::symlink_metadata(held.record()).is_ok() {
-            let same = read_entry(&self.dir, &held.record(), &self.name, Pathless::Keep).is_ok_and(
-                |now| {
-                    now.original == self.original
-                        && now.date == self.date
-                        && now.batch == self.batch
-                },
-            );
-            return if same { Ok(held) } else { Err(Relock::Changed) };
+        let record = crate::util::join_info(&self.dir.info(), &self.name);
+        let payload = crate::util::join_name(&self.dir.files(), &self.name);
+        let orphan = !self.recorded;
+        if fs::symlink_metadata(&record).is_ok() {
+            if orphan {
+                return Err(Relock::Changed);
+            }
+            let now = read_entry(&self.dir, &record, &self.name, Pathless::Keep)
+                .map_err(|_| Relock::Changed)?;
+            let same =
+                now.original == self.original && now.date == self.date && now.batch == self.batch;
+            return if same {
+                Ok(Locked {
+                    entry: now,
+                    _lock: lock,
+                })
+            } else {
+                Err(Relock::Changed)
+            };
         }
-        let orphan = self.date.is_none() && self.batch.is_none();
-        match (held.gone(), orphan) {
+        match (crate::util::is_gone(&payload), orphan) {
             (true, _) => Err(Relock::Gone),
             // An orphan, read as one, is still one.
-            (false, true) => Ok(held),
+            (false, true) => Ok(Locked {
+                entry: self.clone(),
+                _lock: lock,
+            }),
             (false, false) => Err(Relock::Changed),
         }
     }
@@ -144,15 +155,15 @@ impl Relock {
 /// payload), so what is done through this is done to that item. The lock
 /// stays until this is dropped, so no put, rm or empty of that trash runs
 /// in between.
-pub struct Locked<'a> {
-    entry: &'a Entry,
+pub struct Locked {
+    entry: Entry,
     _lock: trashdir::TrashLock,
 }
 
-impl<'a> Locked<'a> {
+impl Locked {
     /// The entry, as checked.
-    pub fn entry(&self) -> &'a Entry {
-        self.entry
+    pub fn entry(&self) -> &Entry {
+        &self.entry
     }
 
     /// The item's payload under `files/`.
@@ -169,6 +180,27 @@ impl<'a> Locked<'a> {
     pub fn gone(&self) -> bool {
         crate::util::is_gone(&self.payload())
     }
+}
+
+/// Git work in this trash's payloads, as original path, trash name and
+/// risk. `None` when the files directory cannot be listed, which a removal
+/// hint treats as unknown rather than safe.
+pub fn git_risks(dir: &TrashDir) -> Option<Vec<(PathBuf, String, crate::du_git::RiskyGit)>> {
+    let rd = fs::read_dir(dir.files()).ok()?;
+    let mut out = Vec::new();
+    for ent in rd {
+        let ent = ent.ok()?;
+        let name = crate::util::str_from_os_ref(&ent.file_name());
+        let payload = crate::util::join_name(&dir.files(), &name);
+        let Some(work) = crate::du_git::risky_tree(&payload) else {
+            continue;
+        };
+        let original = entry_named(dir, &name)
+            .map(|e| e.original)
+            .unwrap_or(payload);
+        out.push((original, name, work));
+    }
+    Some(out)
 }
 
 /// The entry that record `name` in `dir` makes as it reads now, or `None`
@@ -323,6 +355,7 @@ fn read_entry(
         name: name.to_string(),
         dir: dir.clone(),
         batch: parsed.batch,
+        recorded: true,
     })
 }
 
@@ -499,6 +532,7 @@ pub fn orphans(dirs: &[TrashDir]) -> Vec<Entry> {
                     name,
                     dir: dir.clone(),
                     batch: None,
+                    recorded: false,
                 })
             })
             .collect();
@@ -546,12 +580,16 @@ pub fn entry_to_json_sized(e: &Entry, size: Option<u64>) -> String {
         None => "null".to_string(),
     };
     format!(
-        "{{\"deletion_date\":\"{}\",\"original\":\"{}\",\"name\":\"{}\",\"trash_dir\":\"{}\",\"batch\":{},\"missing\":{}{}}}",
+        concat!(
+            "{{\"deletion_date\":\"{}\",\"original\":\"{}\",\"name\":\"{}\",",
+            "\"trash_dir\":\"{}\",\"batch\":{},\"id\":\"{}\",\"missing\":{}{}}}"
+        ),
         json_escape(date),
         json_escape(&e.original.to_string_lossy()),
         json_escape(&crate::util::show_name(&e.name)),
         json_escape(&e.dir.root.to_string_lossy()),
         batch,
+        json_escape(&crate::filters::item_id(&e.name, date, &e.dir.root)),
         e.missing(),
         size,
     )
@@ -827,15 +865,16 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     // --glob/--regex/--name and --cwd-only, on the original path and the
     // name in the trash.
-    let keep = |original: &std::path::Path, name: &str| -> bool {
-        matcher
-            .as_ref()
-            .is_none_or(|m| m.matches_parts(original, name))
-            && cwd.as_ref().is_none_or(|d| {
-                original.starts_with(d)
-                    || std::fs::canonicalize(d).is_ok_and(|r| original.starts_with(r))
-            })
-    };
+    let keep_with_root =
+        |original: &std::path::Path, name: &str, date: &str, root: &std::path::Path| -> bool {
+            matcher
+                .as_ref()
+                .is_none_or(|m| m.matches_record(original, name, date, root))
+                && cwd.as_ref().is_none_or(|d| {
+                    original.starts_with(d)
+                        || std::fs::canonicalize(d).is_ok_and(|r| original.starts_with(r))
+                })
+        };
     // macOS lists the Finder Trash unless a pin or the setting says otherwise.
     if crate::finder::is_default(!trash_dirs.is_empty() || all_users) {
         let refused = if volumes || show_dirs {
@@ -855,11 +894,14 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         let shape = crate::finder::ListShape {
             json,
             format: format.as_deref(),
+            sort,
+            reverse,
+            with_size,
             last,
             depth,
             show_trash,
         };
-        return crate::finder::default_list(prog, shape, refused, filter, &keep);
+        return crate::finder::default_list(prog, shape, refused, filter, &keep_with_root);
     }
     if all_users && (home_only || !trash_dirs.is_empty()) {
         eprintln!("{prog}: --all-users takes no --home-only or --trash-dir");
@@ -905,16 +947,26 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let hints = folder_hints(prog, &dirs, &left, &strays, trash_cli);
     let mut unsized_rows = 0usize;
     let mut entries = filter_age_secs(collected, older_than, newer_than);
-    entries.retain(|e| keep(&e.original, &e.name));
+    entries.retain(|e| {
+        keep_with_root(
+            &e.original,
+            &e.name,
+            e.date.as_deref().unwrap_or(""),
+            &e.dir.root,
+        )
+    });
     // Orphans have no date, so only an unfiltered listing shows them; they
     // come last, after every recorded item.
     let mut recorded = entries.len();
     if older_than.is_none() && newer_than.is_none() {
-        entries.extend(
-            orphans(&dirs)
-                .into_iter()
-                .filter(|e| keep(&e.original, &e.name)),
-        );
+        entries.extend(orphans(&dirs).into_iter().filter(|e| {
+            keep_with_root(
+                &e.original,
+                &e.name,
+                e.date.as_deref().unwrap_or(""),
+                &e.dir.root,
+            )
+        }));
     }
     let with_size = with_size
         || sort == SortKey::Size
@@ -962,8 +1014,10 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         use std::io::Write;
         let mut out = std::io::BufWriter::new(std::io::stdout().lock());
         for (k, e) in rows.iter().enumerate() {
+            let date = e.date.as_deref().unwrap_or("");
+            let id = crate::filters::item_id(&e.name, date, &e.dir.root);
             let row = FmtRow {
-                date: e.date.as_deref().unwrap_or(""),
+                date,
                 epoch: e.epoch,
                 path: &e.original,
                 name: &e.name,
@@ -971,6 +1025,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 batch: e.batch.as_deref().unwrap_or(""),
                 size: row_sizes.as_ref().map(|s| s[k]),
                 owner: owners.as_ref().map(|o| o[k].as_str()),
+                id: &id,
             };
             if out.write_all(&render_format(parts, &row)).is_err() {
                 return 0;
@@ -1418,6 +1473,7 @@ mod tests {
                 topdir: None,
             },
             batch: None,
+            recorded: true,
         }
     }
 
@@ -1525,6 +1581,18 @@ mod tests {
         // An orphan that gained a record is another item.
         fs::write(root.join("info/stray.trashinfo"), body("3-3")).unwrap();
         assert!(matches!(strays[0].relock(), Err(Relock::Changed)));
+        // A recorded item with neither a date nor a batch does not become
+        // an orphan merely because its record disappears.
+        fs::write(root.join("files/nodate"), b"n").unwrap();
+        fs::write(
+            root.join("info/nodate.trashinfo"),
+            b"[Trash Info]\nPath=/tmp/nodate\n",
+        )
+        .unwrap();
+        let nodate = entry_named(&dirs[0], "nodate").unwrap();
+        assert!(nodate.date.is_none() && nodate.batch.is_none());
+        fs::remove_file(root.join("info/nodate.trashinfo")).unwrap();
+        assert!(matches!(nodate.relock(), Err(Relock::Changed)));
         let _ = fs::remove_dir_all(&root);
     }
 }

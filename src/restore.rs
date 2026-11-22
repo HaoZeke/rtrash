@@ -62,7 +62,8 @@ the index prompt. --newest-first and --oldest-first set the order for both.
       --regex=REGEX  match items whose original path contains REGEX
   -m, --match=KIND  read PATH as a pattern of KIND, as trashy's -m does:
                     glob, regex, substring (text in the original path) or
-                    exact (the whole original path)
+                    exact (the whole original path) or id (the {id} from
+                    `list --format`, which includes trash root and date)
       --latest    of several matches, restore the most recently trashed
       --all       of several matches, restore every one
   -n, --dry-run   show where each chosen item would go and change nothing;
@@ -129,6 +130,8 @@ pub(crate) enum Matcher {
     Substring(String),
     /// `--match=exact`: the whole original path.
     Exact(String),
+    /// `--match=id`: the `{id}` from `list --format`.
+    Id(String),
 }
 
 impl Matcher {
@@ -140,6 +143,7 @@ impl Matcher {
             Match::Glob => Matcher::Glob(pat),
             Match::Substring => Matcher::Substring(pat),
             Match::Exact => Matcher::Exact(pat),
+            Match::Id => Matcher::Id(pat),
             Match::Regex => match regex_lite::Regex::new(&pat) {
                 Ok(re) => Matcher::Regex(re),
                 Err(e) => return Err(format!("invalid regex '{pat}': {e}")),
@@ -163,11 +167,33 @@ impl Matcher {
                 full.contains(s.as_str())
             }
             Matcher::Exact(s) => crate::util::str_from_os_ref(original.as_os_str()) == *s,
+            // The date is not here; [`matches_record`] matches an id.
+            Matcher::Id(_) => false,
         }
     }
 
+    /// [`matches_parts`], and for [`Matcher::Id`] the id of `name` at `date`
+    /// under `root`.
+    pub(crate) fn matches_record(
+        &self,
+        original: &Path,
+        name: &str,
+        date: &str,
+        root: &Path,
+    ) -> bool {
+        if let Matcher::Id(want) = self {
+            return want == &crate::filters::item_id(name, date, root);
+        }
+        self.matches_parts(original, name)
+    }
+
     fn matches(&self, e: &list::Entry) -> bool {
-        self.matches_parts(&e.original, &e.name)
+        self.matches_record(
+            &e.original,
+            &e.name,
+            e.date.as_deref().unwrap_or(""),
+            &e.dir.root,
+        )
     }
 }
 
@@ -1279,6 +1305,7 @@ mod tests {
         let mut e = entry(out.join("item").to_str().unwrap(), 0);
         e.name = "item".into();
         e.dir = trash;
+        e.recorded = false;
         restore_one_to(&e, &out.join("item"), false).unwrap();
         assert_eq!(fs::read(out.join("item")).unwrap(), b"payload");
         assert_eq!(fs::read(&left).unwrap(), b"left behind");
@@ -1296,6 +1323,7 @@ mod tests {
                 topdir: None,
             },
             batch: None,
+            recorded: true,
         }
     }
 

@@ -116,26 +116,32 @@ pub fn scan(root: &Path, sid: &str) -> Vec<BinEntry> {
 }
 
 const USAGE: &str = "\
-Usage: rtrash wsl list [--json | --format=TEMPLATE] [MATCH]
+Usage: rtrash wsl list [--json | --format=TEMPLATE] [--match=KIND] [MATCH]
        rtrash wsl restore [-f] PATH...
-       rtrash wsl rm [-n] MATCH|PATH...
+       rtrash wsl rm [-n] [-f] [--match=KIND] MATCH|PATH...
        rtrash wsl empty [-n] [--all] [--older-than=AGE | DAYS]
 The Windows Recycle Bin from inside WSL: list its items by original path
 under the automount root, restore the newest item from each PATH, or
 delete items for good (rm by match, empty by age or all of them; a whole
-empty asks first, or needs --all). MATCH is --glob=PATTERN, --regex=RE or --name=NAME,
-tested against the original path as WSL sees it.
-      --json             list: a JSON array
+empty asks first, or needs --all). MATCH is read as glob, regex, name,
+substring, exact or id (with --match=KIND), and is tested against the
+original path as WSL sees it.
+      --json             list: a JSON array of {original, path, deleted,
+                         date, size, id}
       --format=TEMPLATE  list: each item through TEMPLATE, as list --format
                          does: {date} {epoch} {path} (under the automount
                          root) {name} ($R payload) {trash} (its bin) {size}
+                         {id}
       --glob=PATTERN     items whose path (or name, without a slash) matches
       --regex=RE         items whose path matches RE
       --name=NAME        items with exactly this file name
       --older-than=AGE   empty: items deleted more than AGE ago (2h, 7d)
       --all              empty: every item, without asking
   -n, --dry-run          rm, empty: print what would go, delete nothing
-  -f, --force            restore over an existing file
+  -m, --match=KIND       list, rm: read MATCH as glob (default), regex,
+                         substring, exact or id
+  -f, --force            restore over an existing file; rm removes entries
+                         even when they hold risky git work
   -h, --help             show this help
 ";
 
@@ -268,7 +274,22 @@ fn take_matcher(
     prog: &str,
     a: &str,
     slot: &mut Option<crate::budget::PathMatch>,
+    kind: &mut crate::filters::Match,
+    kind_set: &mut bool,
 ) -> Result<bool, i32> {
+    if let Some(parsed) = crate::filters::match_arg(a) {
+        match parsed {
+            Ok(k) => {
+                *kind = k;
+                *kind_set = true;
+                return Ok(true);
+            }
+            Err(e) => {
+                eprintln!("{prog}: {e}");
+                return Err(2);
+            }
+        }
+    }
     match crate::budget::PathMatch::parse(a) {
         Some(Ok(m)) if slot.is_none() => {
             *slot = Some(m);
@@ -288,10 +309,19 @@ fn take_matcher(
 
 /// `wsl list [--json | --format=TEMPLATE] [MATCH]`.
 fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
+    let args = match crate::filters::join_spaced(args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{prog}: list: {e}");
+            return 2;
+        }
+    };
     let mut json = false;
     let mut format = None;
     let mut matcher = None;
-    for a in args {
+    let mut kind = crate::filters::Match::Glob;
+    let mut kind_set = false;
+    for a in &args {
         if a == "--json" {
             json = true;
             continue;
@@ -306,8 +336,17 @@ fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
             }
             continue;
         }
-        match take_matcher(prog, a, &mut matcher) {
+        match take_matcher(prog, a, &mut matcher, &mut kind, &mut kind_set) {
             Ok(true) => {}
+            Ok(false) if kind_set && !a.starts_with('-') && matcher.is_none() => {
+                match crate::budget::PathMatch::of_kind(kind, a) {
+                    Ok(m) => matcher = Some(m),
+                    Err(e) => {
+                        eprintln!("{prog}: list: {e}");
+                        return 2;
+                    }
+                }
+            }
             Ok(false) => {
                 eprintln!("{prog}: list: unknown argument '{a}'");
                 return 2;
@@ -315,13 +354,17 @@ fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
             Err(c) => return c,
         }
     }
+    if kind_set && matcher.is_none() {
+        eprintln!("{prog}: list: --match requires a MATCH");
+        return 2;
+    }
     if json && format.is_some() {
         eprintln!("{prog}: list: give --json or --format, not both");
         return 2;
     }
     let shown: Vec<&BinEntry> = items
         .iter()
-        .filter(|it| matcher.as_ref().is_none_or(|m| m.keeps(&it.local)))
+        .filter(|it| matcher.as_ref().is_none_or(|m| bin_keeps(m, it)))
         .collect();
     if json {
         println!("{}", list_json(&shown));
@@ -348,6 +391,21 @@ fn list(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     0
 }
 
+fn bin_keeps(m: &crate::budget::PathMatch, it: &BinEntry) -> bool {
+    let name = it
+        .payload
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let date = crate::platform::epoch_to_iso_utc(it.deleted);
+    m.keeps_record(
+        &it.local,
+        &name,
+        &date,
+        it.payload.parent().unwrap_or(&it.payload),
+    )
+}
+
 /// One `wsl list --format` row: the path under the automount root, the
 /// `$R` payload's name and its bin; no batch or owner.
 pub fn format_row(parts: &[crate::listfmt::FmtPart], it: &BinEntry) -> Vec<u8> {
@@ -357,6 +415,7 @@ pub fn format_row(parts: &[crate::listfmt::FmtPart], it: &BinEntry) -> Vec<u8> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let id = crate::filters::item_id(&name, &date, it.payload.parent().unwrap_or(&it.payload));
     let row = crate::listfmt::FmtRow {
         date: &date,
         epoch: it.deleted,
@@ -366,6 +425,7 @@ pub fn format_row(parts: &[crate::listfmt::FmtPart], it: &BinEntry) -> Vec<u8> {
         batch: "",
         size: Some(it.size),
         owner: Some(""),
+        id: &id,
     };
     crate::listfmt::render_format(parts, &row)
 }
@@ -376,13 +436,22 @@ pub fn list_json(items: &[&BinEntry]) -> String {
     let rows: Vec<String> = items
         .iter()
         .map(|it| {
+            let name = it
+                .payload
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let date = crate::platform::epoch_to_iso_utc(it.deleted);
+            let id =
+                crate::filters::item_id(&name, &date, it.payload.parent().unwrap_or(&it.payload));
             format!(
-                r#"{{"original":"{}","path":"{}","deleted":{},"date":"{}","size":{}}}"#,
+                r#"{{"original":"{}","path":"{}","deleted":{},"date":"{}","size":{},"id":"{}"}}"#,
                 crate::util::json_escape(&it.original),
                 crate::util::json_escape(&it.local.to_string_lossy()),
                 it.deleted,
-                crate::platform::epoch_to_iso_utc(it.deleted),
-                it.size
+                date,
+                it.size,
+                crate::util::json_escape(&id)
             )
         })
         .collect();
@@ -393,16 +462,43 @@ pub fn list_json(items: &[&BinEntry]) -> String {
 /// `$R` payload and then its `$I` record. No match is not an error, as with
 /// `rtrash rm`.
 fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
+    let args = match crate::filters::join_spaced(args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("{prog}: rm: {e}");
+            return 2;
+        }
+    };
     let mut dry = false;
+    let mut force = false;
     let mut matcher = None;
+    let mut kind = crate::filters::Match::Glob;
+    let mut kind_set = false;
     let mut paths = Vec::new();
-    for a in args {
+    for a in &args {
         if matches!(a.as_str(), "-n" | "--dry-run") {
             dry = true;
             continue;
         }
-        match take_matcher(prog, a, &mut matcher) {
+        if matches!(a.as_str(), "-f" | "--force") {
+            force = true;
+            continue;
+        }
+        match take_matcher(prog, a, &mut matcher, &mut kind, &mut kind_set) {
             Ok(true) => {}
+            Ok(false) if kind_set && !a.starts_with('-') && matcher.is_none() => {
+                match crate::budget::PathMatch::of_kind(kind, a) {
+                    Ok(m) => matcher = Some(m),
+                    Err(e) => {
+                        eprintln!("{prog}: rm: {e}");
+                        return 2;
+                    }
+                }
+            }
+            Ok(false) if kind_set && !a.starts_with('-') => {
+                eprintln!("{prog}: rm: give one MATCH with --match");
+                return 2;
+            }
             Ok(false) if a.starts_with('-') && a != "-" => {
                 eprintln!("{prog}: rm: unknown option '{a}'");
                 return 2;
@@ -421,7 +517,7 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     let chosen: Vec<&BinEntry> = items
         .iter()
         .filter(|it| {
-            matcher.as_ref().is_some_and(|m| m.keeps(&it.local)) || paths.contains(&it.local)
+            matcher.as_ref().is_some_and(|m| bin_keeps(m, it)) || paths.contains(&it.local)
         })
         .collect();
     if chosen.is_empty() {
@@ -430,6 +526,18 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     }
     let mut status = 0;
     for it in chosen {
+        if !force && !crate::util::is_gone(&it.payload) {
+            if let Some(work) = crate::du_git::risky_tree(&it.payload) {
+                eprintln!(
+                    "{prog}: refusing to remove '{}': it holds {} git work; \
+                     restore it, or pass -f to remove it anyway",
+                    crate::util::err_path(&it.local),
+                    work.label()
+                );
+                status = 1;
+                continue;
+            }
+        }
         if dry {
             println!("would remove '{}'", crate::util::term_path(&it.local));
             continue;

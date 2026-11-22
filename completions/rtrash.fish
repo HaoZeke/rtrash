@@ -202,8 +202,9 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l format
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l glob -x -d 'items whose path or name matches'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l regex -x -d 'items whose path matches'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l name -x -a '(__rtrash_wsl_items | string replace -r ".*/" "")' -d 'items with exactly this file name'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s m -l match -x -a 'glob regex substring exact id' -d 'read MATCH as this kind'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s n -l dry-run -d 'rm: print what would go'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s f -l force -d 'restore over an existing file'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s f -l force -d 'restore: overwrite; rm: remove risky git work'
 
 # finder
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -f -a 'put list restore'
@@ -250,7 +251,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s n 
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l all -d 'of several matches, restore every one'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l glob -x -d 'match by shell pattern'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l regex -x -d 'match original paths by regex'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s m -l match -d 'read PATH as a pattern of KIND' -xa 'glob regex substring exact'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -s m -l match -d 'read PATH as a pattern of KIND' -xa 'glob regex substring exact id'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l to -x -a '(__fish_complete_directories)' -d 'restore into this directory'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l older-than -d 'only items older than AGE (DAYS, 2h, 1d12h)' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l newer-than -d 'only items within the last AGE' -r
@@ -270,7 +271,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l smaller
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l batch -d 'only items from one put run (an ID or last)' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l max-count -d 'refuse when more than N items would go' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l regex -d 'PATTERNs are regular expressions on the original path'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s m -l match -d 'how to read PATTERNs' -xa 'glob regex substring exact'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s m -l match -d 'how to read PATTERNs' -xa 'glob regex substring exact id'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s n -l dry-run -d 'list matches and reclaimable size; do not delete'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s i -l interactive -d 'ask before deleting, even off a terminal'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s y -l yes -d 'do not ask before deleting'
@@ -382,7 +383,7 @@ complete -c trash-restore -s n -l dry-run
 complete -c trash-restore -l all
 complete -c trash-restore -l glob -x
 complete -c trash-restore -l regex -x
-complete -c trash-restore -s m -l match -xa 'glob regex substring exact'
+complete -c trash-restore -s m -l match -xa 'glob regex substring exact id'
 complete -c trash-restore -l to -x -a '(__fish_complete_directories)'
 complete -c trash-restore -l older-than -r
 complete -c trash-restore -l newer-than -r
@@ -403,7 +404,7 @@ complete -c trash-rm -l smaller-than -r
 complete -c trash-rm -l batch -r
 complete -c trash-rm -l max-count -r
 complete -c trash-rm -l regex
-complete -c trash-rm -s m -l match -xa 'glob regex substring exact'
+complete -c trash-rm -s m -l match -xa 'glob regex substring exact id'
 complete -c trash-rm -l json
 complete -c trash-rm -s n -l dry-run
 complete -c trash-rm -s i -l interactive

@@ -65,6 +65,14 @@ fn base_name(p: &Path) -> Option<String> {
     p.file_name().map(|f| f.to_string_lossy().into_owned())
 }
 
+/// What `Snapshot::probe` found for one path.
+pub struct Probe {
+    pub holds: Vec<Hold>,
+    /// The answer may miss a holder: some file below the path was not
+    /// checked.
+    pub unchecked: bool,
+}
+
 /// Every hold of every readable process at one moment, keyed by path.
 #[derive(Debug, Default)]
 pub struct Snapshot {
@@ -145,13 +153,72 @@ impl Snapshot {
     /// Manager now.
     #[cfg(windows)]
     pub fn under(&self, path: &Path) -> Vec<Hold> {
+        self.probe(path).holds
+    }
+
+    /// `under`, and whether the answer covers every file below `path`. On
+    /// Windows the Restart Manager answers per path, and its query can fail
+    /// or stop at a file limit; elsewhere one scan covers every path.
+    #[cfg(windows)]
+    pub fn probe(&self, path: &Path) -> Probe {
         let _ = (&self.held, &self.roots, self.maps);
-        win::query(&resolve(path))
+        let (holds, complete) = win::query(&resolve(path));
+        Probe {
+            holds,
+            unchecked: !complete,
+        }
+    }
+
+    /// `under`, and whether the answer covers every file below `path`.
+    /// Always so here, but in debug builds `RTRASH_TEST_PARTIAL=NAME` makes
+    /// a path with that last component an unchecked one, which stands in
+    /// for a failed Windows query in tests.
+    #[cfg(unix)]
+    pub fn probe(&self, path: &Path) -> Probe {
+        let unchecked = cfg!(debug_assertions)
+            && std::env::var_os("RTRASH_TEST_PARTIAL")
+                .is_some_and(|n| path.file_name() == Some(n.as_os_str()));
+        Probe {
+            holds: self.under(path),
+            unchecked,
+        }
     }
 
     /// True when a live process holds `path` or anything below it.
     pub fn holds(&self, path: &Path) -> bool {
         !self.under(path).is_empty()
+    }
+
+    /// Why an empty answer from `under` does not prove a path is free:
+    /// the platform lists no holders, or some process (another user's,
+    /// without root) could not be inspected. None when every process was
+    /// seen. The paths a caller asked about are not counted; see `gap_of`.
+    pub fn gap(&self) -> Option<String> {
+        self.gap_of(0)
+    }
+
+    /// [`gap`](Snapshot::gap) for an answer in which `unchecked_paths`
+    /// paths were not checked in full (`Probe::unchecked`). The count comes
+    /// from the caller, so a path checked in full is never held to the
+    /// failure of another.
+    pub fn gap_of(&self, unchecked_paths: usize) -> Option<String> {
+        if !self.supported {
+            return Some("cannot tell which processes hold files on this platform".to_string());
+        }
+        let mut parts = Vec::new();
+        if self.unreadable > 0 {
+            parts.push(format!(
+                "{} could not be inspected",
+                crate::util::plural(self.unreadable as u64, "process", "processes")
+            ));
+        }
+        if unchecked_paths > 0 {
+            parts.push(format!(
+                "{} could not be checked in full",
+                crate::util::plural(unchecked_paths as u64, "path", "paths")
+            ));
+        }
+        (!parts.is_empty()).then(|| parts.join(", "))
     }
 }
 
@@ -196,12 +263,32 @@ pub fn alive(pid: u32) -> bool {
 #[cfg(target_os = "linux")]
 const SUPPORTED: bool = true;
 
+/// Where the process folders are: `/proc`, or in debug builds the folder
+/// `RTRASH_TEST_PROC` names, so a test can stand in a few processes. A
+/// process folder there that holds a file named `denied` reads as one
+/// this user may not inspect, which a test run as root cannot get from
+/// file modes.
+#[cfg(target_os = "linux")]
+fn proc_dir() -> PathBuf {
+    if cfg!(debug_assertions) {
+        if let Some(d) = std::env::var_os("RTRASH_TEST_PROC") {
+            return PathBuf::from(d);
+        }
+    }
+    PathBuf::from("/proc")
+}
+
 #[cfg(target_os = "linux")]
 fn scan(s: &mut Snapshot) {
+    scan_in(s, &proc_dir());
+}
+
+#[cfg(target_os = "linux")]
+fn scan_in(s: &mut Snapshot, procs: &Path) {
     use std::fs;
     use std::os::unix::fs::MetadataExt;
     let me = std::process::id();
-    let Ok(dir) = fs::read_dir("/proc") else {
+    let Ok(dir) = fs::read_dir(procs) else {
         s.supported = false;
         return;
     };
@@ -217,6 +304,10 @@ fn scan(s: &mut Snapshot) {
             continue;
         }
         let base = entry.path();
+        if procs != Path::new("/proc") && base.join("denied").exists() {
+            s.unreadable += 1;
+            continue;
+        }
         let mut found: Vec<(String, PathBuf)> = Vec::new();
         let mut denied = false;
         for link in ["cwd", "root", "exe"] {
@@ -546,6 +637,31 @@ struct VnodeFdinfoWithPath {
 #[cfg(target_os = "macos")]
 const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
 
+/// Whether a failed libproc inspection means the process exited after
+/// `proc_listallpids` listed it.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn process_is_gone(error: Option<i32>) -> bool {
+    error == Some(libc::ESRCH)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "macos", all(test, unix)))]
+enum ZeroList {
+    Empty,
+    Gone,
+    Unreadable,
+}
+
+/// What a zero-byte PROC_PIDLISTFDS result means after errno was cleared.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn zero_list(error: Option<i32>) -> ZeroList {
+    match error {
+        Some(0) => ZeroList::Empty,
+        Some(libc::ESRCH) => ZeroList::Gone,
+        _ => ZeroList::Unreadable,
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn vip_path(v: &libc::vnode_info_path) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
@@ -577,7 +693,7 @@ fn scan(s: &mut Snapshot) {
             return;
         }
         pids.truncate(got as usize);
-        for &pid in &pids {
+        'processes: for &pid in &pids {
             if pid <= 0 || pid as u32 == me {
                 continue;
             }
@@ -656,13 +772,21 @@ fn scan(s: &mut Snapshot) {
                     }
                 }
             } else {
+                let error = std::io::Error::last_os_error().raw_os_error();
+                if process_is_gone(error) {
+                    continue 'processes;
+                }
                 denied = true;
             }
+            // An empty descriptor list is a successful zero-byte result,
+            // so clear errno before distinguishing it from a failed query.
+            *libc::__error() = 0;
             let need = libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0);
             if need > 0 {
                 let count = need as usize / size_of::<libc::proc_fdinfo>() + 16;
                 let mut fds: Vec<libc::proc_fdinfo> = Vec::with_capacity(count);
                 let cap = (count * size_of::<libc::proc_fdinfo>()) as libc::c_int;
+                *libc::__error() = 0;
                 let got =
                     libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, fds.as_mut_ptr().cast(), cap);
                 if got > 0 {
@@ -673,24 +797,40 @@ fn scan(s: &mut Snapshot) {
                         }
                         let mut vi: VnodeFdinfoWithPath = zeroed();
                         let sz = size_of::<VnodeFdinfoWithPath>() as libc::c_int;
-                        if libc::proc_pidfdinfo(
+                        *libc::__error() = 0;
+                        let got = libc::proc_pidfdinfo(
                             pid,
                             fd.proc_fd,
                             PROC_PIDFDVNODEPATHINFO,
                             (&mut vi as *mut VnodeFdinfoWithPath).cast(),
                             sz,
-                        ) == sz
-                        {
+                        );
+                        if got == sz {
                             if let Some(p) = vip_path(&vi.pvip) {
                                 holds.push(hold(&format!("fd {}", fd.proc_fd), p));
+                            }
+                        } else {
+                            let error = std::io::Error::last_os_error().raw_os_error();
+                            if process_is_gone(error) {
+                                continue 'processes;
                             }
                         }
                     }
                 } else {
-                    denied = true;
+                    let error = std::io::Error::last_os_error().raw_os_error();
+                    match zero_list(error) {
+                        ZeroList::Empty => {}
+                        ZeroList::Gone => continue 'processes,
+                        ZeroList::Unreadable => denied = true,
+                    }
                 }
             } else {
-                denied = true;
+                let error = std::io::Error::last_os_error().raw_os_error();
+                match zero_list(error) {
+                    ZeroList::Empty => {}
+                    ZeroList::Gone => continue 'processes,
+                    ZeroList::Unreadable => denied = true,
+                }
             }
             for h in holds {
                 s.add(h);
@@ -734,9 +874,141 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
+/// The folder walk behind the Windows query, apart from the platform so
+/// that tests on Linux can run it: which regular files lie at or below a
+/// path, and whether the list is whole.
+#[cfg(any(windows, test))]
+mod listing {
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    /// At most this many files of a directory go to one query.
+    pub const MAX_FILES: usize = 4096;
+
+    pub enum Kind {
+        Dir,
+        File,
+        Other,
+        /// The type could not be read, so the entry is neither walked nor queried.
+        Unknown,
+    }
+
+    pub struct Item {
+        pub path: PathBuf,
+        pub kind: Kind,
+    }
+
+    pub type Items = Box<dyn Iterator<Item = Item>>;
+
+    /// The entries of the folder `d`, as the file system gives them.
+    pub fn read(d: &Path) -> io::Result<Items> {
+        Ok(typed(d, std::fs::read_dir(d)?))
+    }
+
+    /// `entries`, each with its kind. An entry the listing failed to give
+    /// is one more `Kind::Unknown` item, so the walk sees that something
+    /// was skipped instead of taking the folder for whole.
+    pub fn typed(
+        dir: &Path,
+        entries: impl Iterator<Item = io::Result<std::fs::DirEntry>> + 'static,
+    ) -> Items {
+        let dir = dir.to_path_buf();
+        Box::new(entries.map(move |e| match e {
+            Ok(e) => Item {
+                path: e.path(),
+                kind: match e.file_type() {
+                    Ok(t) if t.is_dir() => Kind::Dir,
+                    Ok(t) if t.is_file() => Kind::File,
+                    Ok(_) => Kind::Other,
+                    Err(_) => Kind::Unknown,
+                },
+            },
+            Err(_) => Item {
+                path: dir.clone(),
+                kind: Kind::Unknown,
+            },
+        }))
+    }
+
+    /// The regular files at or below `path`, never through a link, and
+    /// whether the list is whole: false when the path or a folder below it
+    /// could not be read, or a file beyond `MAX_FILES` was left out.
+    pub fn files(path: &Path) -> (Vec<PathBuf>, bool) {
+        let m = match crate::util::look(path) {
+            crate::util::Look::There(m) => m,
+            crate::util::Look::Gone => return (Vec::new(), true),
+            crate::util::Look::Unreachable(_) => return (Vec::new(), false),
+        };
+        if m.is_file() {
+            return (vec![path.to_path_buf()], true);
+        }
+        if !m.is_dir() {
+            return (Vec::new(), true);
+        }
+        walk(path, &read)
+    }
+
+    /// [`files`] for a folder, reading each folder below it through `read`.
+    pub fn walk(dir: &Path, read: &dyn Fn(&Path) -> io::Result<Items>) -> (Vec<PathBuf>, bool) {
+        let mut out = Vec::new();
+        let mut whole = true;
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(items) = read(&d) else {
+                whole = false;
+                continue;
+            };
+            for item in items {
+                match item.kind {
+                    Kind::Dir => stack.push(item.path),
+                    Kind::File => {
+                        if out.len() == MAX_FILES {
+                            return (out, false);
+                        }
+                        out.push(item.path);
+                    }
+                    Kind::Other => {}
+                    Kind::Unknown => whole = false,
+                }
+            }
+        }
+        (out, whole)
+    }
+}
+
+/// How one `RmGetList` call ended, apart from the Windows types.
+#[cfg(any(windows, test))]
+enum Reply {
+    /// It filled this many entries.
+    Done(usize),
+    /// The buffer was too small; this many entries are needed.
+    More(usize),
+    Failed,
+}
+
+/// The entries `get` fills, asking up to four times and growing a buffer of
+/// `blank` entries when it says more are needed. Entries come back only from
+/// a call that finished: a list that kept outgrowing the buffer gives None,
+/// not a buffer of blank entries.
+#[cfg(any(windows, test))]
+fn fill_list<T>(blank: impl Fn() -> T, mut get: impl FnMut(&mut [T]) -> Reply) -> Option<Vec<T>> {
+    let mut buf: Vec<T> = Vec::new();
+    for _ in 0..4 {
+        match get(&mut buf) {
+            Reply::Done(n) => {
+                buf.truncate(n);
+                return Some(buf);
+            }
+            Reply::More(need) => buf = (0..need + 4).map(|_| blank()).collect(),
+            Reply::Failed => return None,
+        }
+    }
+    None
+}
+
 #[cfg(windows)]
 mod win {
-    use super::{base_name, Hold};
+    use super::{base_name, fill_list, Hold, Reply};
     use std::os::windows::ffi::OsStringExt;
     use std::path::{Path, PathBuf};
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_MORE_DATA, ERROR_SUCCESS};
@@ -747,42 +1019,6 @@ mod win {
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
-
-    /// At most this many files of a directory go to one query.
-    const MAX_FILES: usize = 4096;
-
-    /// The regular files at or below `path`, never through a link.
-    fn files(path: &Path) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        let Ok(m) = std::fs::symlink_metadata(path) else {
-            return out;
-        };
-        if m.is_file() {
-            out.push(path.to_path_buf());
-            return out;
-        }
-        if !m.is_dir() {
-            return out;
-        }
-        let mut stack = vec![path.to_path_buf()];
-        while let Some(d) = stack.pop() {
-            let Ok(rd) = std::fs::read_dir(&d) else {
-                continue;
-            };
-            for e in rd.flatten() {
-                let Ok(t) = e.file_type() else { continue };
-                if t.is_dir() {
-                    stack.push(e.path());
-                } else if t.is_file() {
-                    out.push(e.path());
-                    if out.len() >= MAX_FILES {
-                        return out;
-                    }
-                }
-            }
-        }
-        out
-    }
 
     fn wide_str(w: &[u16]) -> String {
         let end = w.iter().position(|&c| c == 0).unwrap_or(w.len());
@@ -807,11 +1043,12 @@ mod win {
         }
     }
 
-    /// The processes that have `path`, or a file below it, open.
-    pub fn query(path: &Path) -> Vec<Hold> {
-        let files = files(path);
+    /// The processes that have `path`, or a file below it, open, and
+    /// whether the Restart Manager answered for every file it was given.
+    pub fn query(path: &Path) -> (Vec<Hold>, bool) {
+        let (files, mut complete) = super::listing::files(path);
         if files.is_empty() {
-            return Vec::new();
+            return (Vec::new(), complete);
         }
         let wide: Vec<Vec<u16>> = files
             .iter()
@@ -820,13 +1057,14 @@ mod win {
         let ptrs: Vec<*const u16> = wide.iter().map(|w| w.as_ptr()).collect();
         let me = std::process::id();
         let mut infos: Vec<RM_PROCESS_INFO> = Vec::new();
+        let mut answered = false;
         // SAFETY: every pointer handed over points into a live buffer of
         // the stated length, and the session always ends.
         unsafe {
             let mut session = 0u32;
             let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
             if RmStartSession(&mut session, 0, key.as_mut_ptr()) != ERROR_SUCCESS {
-                return Vec::new();
+                return (Vec::new(), false);
             }
             let n = u32::try_from(ptrs.len()).unwrap_or(u32::MAX);
             if RmRegisterResources(
@@ -839,30 +1077,31 @@ mod win {
                 std::ptr::null(),
             ) == ERROR_SUCCESS
             {
-                for _ in 0..4 {
-                    let mut needed = 0u32;
-                    let mut count = infos.len() as u32;
-                    let mut reasons = 0u32;
-                    let r = RmGetList(
-                        session,
-                        &mut needed,
-                        &mut count,
-                        infos.as_mut_ptr(),
-                        &mut reasons,
-                    );
-                    if r == ERROR_SUCCESS {
-                        infos.truncate(count as usize);
-                        break;
-                    }
-                    if r != ERROR_MORE_DATA {
-                        infos.clear();
-                        break;
-                    }
-                    infos = vec![std::mem::zeroed(); needed as usize + 4];
-                }
+                let got = fill_list(
+                    || std::mem::zeroed::<RM_PROCESS_INFO>(),
+                    |buf| {
+                        let mut needed = 0u32;
+                        let mut count = buf.len() as u32;
+                        let mut reasons = 0u32;
+                        match RmGetList(
+                            session,
+                            &mut needed,
+                            &mut count,
+                            buf.as_mut_ptr(),
+                            &mut reasons,
+                        ) {
+                            ERROR_SUCCESS => Reply::Done(count as usize),
+                            ERROR_MORE_DATA => Reply::More(needed as usize),
+                            _ => Reply::Failed,
+                        }
+                    },
+                );
+                answered = got.is_some();
+                infos = got.unwrap_or_default();
             }
             RmEndSession(session);
         }
+        complete &= answered;
         let mut out: Vec<Hold> = Vec::new();
         for info in &infos {
             let pid = info.Process.dwProcessId;
@@ -888,7 +1127,7 @@ mod win {
                 names,
             });
         }
-        out
+        (out, complete)
     }
 }
 
@@ -901,6 +1140,17 @@ fn scan(_s: &mut Snapshot) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_list_errors_tell_empty_from_gone_and_unreadable() {
+        assert_eq!(zero_list(Some(0)), ZeroList::Empty);
+        assert_eq!(zero_list(Some(libc::ESRCH)), ZeroList::Gone);
+        assert_eq!(zero_list(Some(libc::EPERM)), ZeroList::Unreadable);
+        assert_eq!(zero_list(Some(libc::EACCES)), ZeroList::Unreadable);
+        assert!(process_is_gone(Some(libc::ESRCH)));
+        assert!(!process_is_gone(Some(libc::EPERM)));
+    }
 
     /// 33(h): only a path the kernel marked deleted counts.
     #[test]
@@ -989,6 +1239,212 @@ mod tests {
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(found, "the child's descriptor was never seen");
+    }
+
+    #[test]
+    fn a_snapshot_names_the_gap_that_an_empty_answer_hides() {
+        let none = Snapshot::default();
+        assert!(none.gap().unwrap().contains("on this platform"));
+        let mut s = Snapshot {
+            supported: true,
+            ..Snapshot::default()
+        };
+        assert_eq!(s.gap(), None);
+        s.unreadable = 1;
+        assert_eq!(s.gap().unwrap(), "1 process could not be inspected");
+        s.unreadable = 7;
+        assert_eq!(s.gap().unwrap(), "7 processes could not be inspected");
+    }
+
+    #[test]
+    fn unchecked_paths_are_counted_by_the_caller_not_the_snapshot() {
+        let s = Snapshot {
+            supported: true,
+            ..Snapshot::default()
+        };
+        assert_eq!(s.gap_of(0), None);
+        assert_eq!(s.gap_of(1).unwrap(), "1 path could not be checked in full");
+        // One path's failure leaves no mark behind for the next one.
+        assert_eq!(s.gap(), None);
+        let mut blind = Snapshot {
+            supported: true,
+            ..Snapshot::default()
+        };
+        blind.unreadable = 2;
+        assert_eq!(
+            blind.gap_of(3).unwrap(),
+            "2 processes could not be inspected, 3 paths could not be checked in full"
+        );
+    }
+
+    /// A process folder this user may not enter counts as unreadable, and
+    /// one it may read does not. Root passes every mode, so it has no
+    /// folder to be refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_folder_the_user_may_not_read_is_counted() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rtrash-proc-denied-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let shut = dir.join("4000001");
+        std::fs::create_dir_all(shut.join("fd")).unwrap();
+        std::fs::create_dir_all(dir.join("4000002/fd")).unwrap();
+        std::fs::set_permissions(shut.join("fd"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut s = Snapshot {
+            supported: true,
+            ..Snapshot::default()
+        };
+        scan_in(&mut s, &dir);
+        std::fs::set_permissions(shut.join("fd"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(s.unreadable, 1);
+    }
+
+    fn item(path: &str, kind: listing::Kind) -> listing::Item {
+        listing::Item {
+            path: PathBuf::from(path),
+            kind,
+        }
+    }
+
+    #[test]
+    fn a_list_that_keeps_outgrowing_its_buffer_gives_no_blank_entries() {
+        let mut asks = 0;
+        let got = fill_list(
+            || 0u32,
+            |_| {
+                asks += 1;
+                Reply::More(3)
+            },
+        );
+        assert_eq!(got, None);
+        assert_eq!(asks, 4);
+    }
+
+    #[test]
+    fn a_list_that_fits_after_one_growth_is_cut_to_what_was_filled() {
+        let mut sizes = Vec::new();
+        let got = fill_list(
+            || 0u32,
+            |buf| {
+                sizes.push(buf.len());
+                if buf.is_empty() {
+                    return Reply::More(2);
+                }
+                buf[0] = 7;
+                buf[1] = 8;
+                Reply::Done(2)
+            },
+        );
+        assert_eq!(got, Some(vec![7, 8]));
+        assert_eq!(sizes, [0, 6]);
+        assert_eq!(fill_list(|| 0u32, |_| Reply::Done(0)), Some(vec![]));
+        assert_eq!(fill_list(|| 0u32, |_| Reply::Failed), None);
+    }
+
+    #[test]
+    fn a_walk_lists_the_files_at_every_depth() {
+        let dir = std::env::temp_dir().join(format!("rtrash-walk-whole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(dir.join("top"), b"x").unwrap();
+        std::fs::write(dir.join("a/b/deep"), b"x").unwrap();
+        let (mut files, whole) = listing::files(&dir);
+        let one = listing::files(&dir.join("top"));
+        let none = listing::files(&dir.join("absent"));
+        let _ = std::fs::remove_dir_all(&dir);
+        files.sort();
+        assert_eq!(files, [dir.join("a/b/deep"), dir.join("top")]);
+        assert!(whole);
+        assert_eq!(one, (vec![dir.join("top")], true));
+        assert_eq!(none, (Vec::new(), true));
+    }
+
+    #[test]
+    fn a_walk_that_stops_at_the_file_limit_says_so() {
+        let many = |_: &Path| -> std::io::Result<listing::Items> {
+            Ok(Box::new(
+                (0..listing::MAX_FILES + 5).map(|i| item(&format!("/w/f{i}"), listing::Kind::File)),
+            ))
+        };
+        let (files, whole) = listing::walk(Path::new("/w"), &many);
+        assert_eq!(files.len(), listing::MAX_FILES);
+        assert!(!whole);
+    }
+
+    #[test]
+    fn a_walk_of_exactly_the_file_limit_is_whole() {
+        let exact = |_: &Path| -> std::io::Result<listing::Items> {
+            Ok(Box::new(
+                (0..listing::MAX_FILES).map(|i| item(&format!("/w/f{i}"), listing::Kind::File)),
+            ))
+        };
+        let (files, whole) = listing::walk(Path::new("/w"), &exact);
+        assert_eq!(files.len(), listing::MAX_FILES);
+        assert!(whole);
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_read_leaves_the_walk_incomplete() {
+        let read = |d: &Path| -> std::io::Result<listing::Items> {
+            if d == Path::new("/w") {
+                Ok(Box::new(
+                    [
+                        item("/w/shut", listing::Kind::Dir),
+                        item("/w/a", listing::Kind::File),
+                    ]
+                    .into_iter(),
+                ))
+            } else {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            }
+        };
+        let (files, whole) = listing::walk(Path::new("/w"), &read);
+        assert_eq!(files, [PathBuf::from("/w/a")]);
+        assert!(!whole);
+    }
+
+    #[test]
+    fn an_entry_whose_type_cannot_be_read_leaves_the_walk_incomplete() {
+        let read = |_: &Path| -> std::io::Result<listing::Items> {
+            Ok(Box::new(
+                [
+                    item("/w/odd", listing::Kind::Unknown),
+                    item("/w/a", listing::Kind::File),
+                    item("/w/pipe", listing::Kind::Other),
+                ]
+                .into_iter(),
+            ))
+        };
+        let (files, whole) = listing::walk(Path::new("/w"), &read);
+        assert_eq!(files, [PathBuf::from("/w/a")]);
+        assert!(!whole);
+    }
+
+    #[test]
+    fn an_error_in_a_folder_listing_leaves_the_walk_incomplete() {
+        let dir = std::env::temp_dir().join(format!("rtrash-walk-err-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("one"), b"x").unwrap();
+        std::fs::write(dir.join("two"), b"x").unwrap();
+        // The listing fails after its entries, as a read of the folder can.
+        let read = |d: &Path| -> std::io::Result<listing::Items> {
+            let broken = std::fs::read_dir(d)?
+                .chain(std::iter::once(Err(std::io::Error::other("read failed"))));
+            Ok(listing::typed(d, broken))
+        };
+        let (mut files, whole) = listing::walk(&dir, &read);
+        let clean = listing::files(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        files.sort();
+        assert_eq!(files, [dir.join("one"), dir.join("two")]);
+        assert!(!whole);
+        assert!(clean.1);
     }
 
     #[test]

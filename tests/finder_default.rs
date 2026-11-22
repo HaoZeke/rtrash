@@ -226,6 +226,69 @@ fn list_last_keeps_the_newest_finder_items() {
 }
 
 #[test]
+fn finder_list_applies_each_sort_before_last() {
+    let b = Box_::new("list-sort");
+    let small = b.work().join("a/z-small.txt");
+    let large = b.work().join("z/a-large.txt");
+    fs::create_dir_all(small.parent().unwrap()).unwrap();
+    fs::create_dir_all(large.parent().unwrap()).unwrap();
+    fs::write(&small, b"x").unwrap();
+    fs::write(&large, vec![b'x'; 128 * 1024]).unwrap();
+    assert!(b.run(&["put", "a/z-small.txt"], "").status.success());
+    common::next_trash_second();
+    assert!(b.run(&["put", "z/a-large.txt"], "").status.success());
+    let recs: Vec<Record> = [("z-small.txt", &small), ("a-large.txt", &large)]
+        .iter()
+        .map(|(n, p)| Record {
+            name: (*n).into(),
+            code: *b"ptbL",
+            value: Value::Ustr(format!(
+                "{}/",
+                p.parent()
+                    .unwrap()
+                    .to_string_lossy()
+                    .trim_start_matches('/')
+            )),
+        })
+        .collect();
+    fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
+
+    let names = |args: &[&str]| {
+        let o = b.run(args, "");
+        assert!(o.status.success(), "{}", err(&o));
+        out(&o)
+    };
+    let by_size = names(&["list", "--sort=size", "--json"]);
+    let large_at = by_size
+        .find("a-large.txt")
+        .unwrap_or_else(|| panic!("{by_size}"));
+    let small_at = by_size
+        .find("z-small.txt")
+        .unwrap_or_else(|| panic!("{by_size}"));
+    assert!(
+        large_at < small_at && by_size.contains("\"size\":"),
+        "{by_size}"
+    );
+    let by_name = names(&["list", "--sort=name", "--format={name}\\n"]);
+    assert_eq!(
+        by_name.lines().collect::<Vec<_>>(),
+        ["a-large.txt", "z-small.txt"]
+    );
+    let by_path = names(&["list", "--sort=path", "--format={name}\\n"]);
+    assert_eq!(
+        by_path.lines().collect::<Vec<_>>(),
+        ["z-small.txt", "a-large.txt"]
+    );
+    let reversed = names(&["list", "--reverse", "--format={name}\\n"]);
+    assert_eq!(
+        reversed.lines().collect::<Vec<_>>(),
+        ["a-large.txt", "z-small.txt"]
+    );
+    let last = names(&["list", "--sort=size", "--last=1", "--format={name}\\n"]);
+    assert_eq!(last, "z-small.txt\n");
+}
+
+#[test]
 fn a_pin_or_the_setting_keeps_the_freedesktop_trash() {
     let b = Box_::new("pin");
     fs::write(b.work().join("x"), b"x").unwrap();
@@ -1043,9 +1106,46 @@ fn a_finder_put_warns_past_the_warn_size() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(!err(&o).contains("past RTRASH_WARN_SIZE"), "{}", err(&o));
     let o = put("second.bin", "1K");
-    assert!(err(&o).contains("past RTRASH_WARN_SIZE"), "{}", err(&o));
+    assert!(
+        err(&o).contains("past RTRASH_WARN_SIZE")
+            && err(&o).contains("rtrash list --sort=size")
+            && err(&o).contains("rtrash rm -i --max-count=1 --match=id ID")
+            && !err(&o).contains("rtrash empty")
+            && !err(&o).contains("would lose the work"),
+        "{}",
+        err(&o)
+    );
     let o = put("third.bin", "1G");
     assert!(!err(&o).contains("past"), "{}", err(&o));
+}
+
+#[test]
+fn a_finder_low_space_warning_scans_existing_risky_items() {
+    let b = Box_::new("finder-git-risk");
+    let repo = b.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::create_dir(repo.join(".git")).unwrap();
+    fs::write(repo.join("f"), b"x").unwrap();
+    // A low-space fake file system rooted at the sandbox: both the Finder
+    // trash and this ballast count against it.
+    fs::write(b.root.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+    let envs = [
+        ("RTRASH_TEST_FS", &*format!("100000:{}", b.root.display())),
+        ("RTRASH_WARN_SIZE", "1"),
+    ];
+    let first = b.run_env(&["put", "-r", repo.to_str().unwrap()], &envs);
+    assert!(first.status.success(), "{}", err(&first));
+
+    let plain = b.work().join("plain.txt");
+    fs::write(&plain, b"ok").unwrap();
+    let second = b.run_env(&["put", plain.to_str().unwrap()], &envs);
+    let err = err(&second);
+    assert!(second.status.success(), "{err}");
+    assert!(err.contains("would lose the work"), "{err}");
+    assert!(
+        !err.contains("rtrash rm -i --max-count=1 --match=id ID"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1195,6 +1295,61 @@ fn list_format_reads_the_finder_trash() {
     let (name, size) = line.split_once('|').expect("one row");
     assert_eq!(name, "x.log");
     assert!(size.parse::<u64>().unwrap() >= 3, "{line}");
+}
+
+#[test]
+fn finder_list_json_includes_scoped_id() {
+    let b = Box_::new("listjsonid");
+    fs::write(b.work().join("x.log"), b"abc").unwrap();
+    assert!(b.run(&["put", "x.log"], "").status.success());
+    let o = b.run(&["list", "--json"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let json = out(&o);
+    assert!(json.contains("\"id\":\""), "{json}");
+}
+
+#[test]
+fn finder_match_id_round_trips_a_decomposed_name() {
+    let b = Box_::new("idnfd");
+    let nfd = "ne\u{301}e.txt";
+    fs::write(b.work().join(nfd), b"x").unwrap();
+    assert!(b.run(&["put", nfd], "").status.success());
+    let listed = b.run(&["list", "--format={id}\\t{name}\\n"], "");
+    assert!(listed.status.success(), "{}", err(&listed));
+    let row = out(&listed).lines().next().unwrap_or_default().to_string();
+    let (id, name) = row.split_once('\t').expect("id and name");
+    assert_eq!(name, nfd, "{row}");
+    let rm = b.run(&["rm", "--match=id", id], "");
+    assert!(rm.status.success(), "{}", err(&rm));
+    assert!(!b.finder().join(nfd).exists());
+}
+
+#[test]
+fn finder_rm_refuses_risky_git_work_without_force_and_dry_run_reports_it() {
+    let b = Box_::new("rm-git-risk");
+    let repo = b.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    fs::create_dir(repo.join(".git")).unwrap();
+    fs::write(repo.join("f"), b"x").unwrap();
+    assert!(b.run(&["put", "-r", "repo"], "").status.success());
+
+    let dry = b.run(&["rm", "-n", "repo"], "");
+    assert_eq!(dry.status.code(), Some(1), "{}", err(&dry));
+    assert!(err(&dry).contains("refusing to remove"), "{}", err(&dry));
+
+    let blocked = b.run(&["rm", "repo"], "");
+    assert_eq!(blocked.status.code(), Some(1), "{}", err(&blocked));
+    assert!(
+        err(&blocked).contains("refusing to remove"),
+        "{}",
+        err(&blocked)
+    );
+    assert!(err(&blocked).contains("pass -f"), "{}", err(&blocked));
+    assert!(out(&b.run(&["list"], "")).contains("repo"));
+
+    let forced = b.run(&["rm", "-f", "repo"], "");
+    assert!(forced.status.success(), "{}", err(&forced));
+    assert!(!out(&b.run(&["list"], "")).contains("repo"));
 }
 
 #[test]

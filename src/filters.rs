@@ -463,6 +463,8 @@ pub enum Match {
     Substring,
     /// The whole original path, character for character.
     Exact,
+    /// One trash item: [`item_id`] of its name and deletion date.
+    Id,
 }
 
 impl Match {
@@ -472,8 +474,9 @@ impl Match {
             "regex" => Ok(Match::Regex),
             "substring" => Ok(Match::Substring),
             "exact" => Ok(Match::Exact),
+            "id" => Ok(Match::Id),
             _ => Err(format!(
-                "invalid --match '{s}' (use glob, regex, substring or exact)"
+                "invalid --match '{s}' (use glob, regex, substring, exact or id)"
             )),
         }
     }
@@ -486,6 +489,19 @@ pub struct Patterns {
     pub kind: Match,
     pub texts: Vec<String>,
     pub regex: Vec<regex_lite::Regex>,
+}
+
+/// The stable id `list` prints as `{id}`: the trash name, deletion date and
+/// the trash root. A later item that reuses the name and date under another
+/// root has another id.
+pub fn item_id(name: &str, date: &str, root: &std::path::Path) -> String {
+    let root = crate::util::str_from_os_ref(root.as_os_str());
+    let root = crate::util::url_encode(root.as_bytes());
+    format!(
+        "{}@{}@{root}",
+        crate::util::url_encode(name.as_bytes()),
+        date
+    )
 }
 
 impl Patterns {
@@ -515,8 +531,25 @@ impl Patterns {
                 .texts
                 .iter()
                 .any(|p| ["", "/", "\\"].contains(&p.as_str())),
-            Match::Exact => false,
+            Match::Exact | Match::Id => false,
         }
+    }
+
+    /// [`hit`], and for [`Match::Id`] the id of `name` at `date` under
+    /// `root`.
+    pub fn selects(
+        &self,
+        full: &str,
+        base: &str,
+        name: &str,
+        date: &str,
+        root: &std::path::Path,
+    ) -> bool {
+        if self.kind == Match::Id {
+            let id = item_id(name, date, root);
+            return self.texts.iter().any(|p| p == &id);
+        }
+        self.hit(full, base, name)
     }
 
     pub fn hit(&self, full: &str, base: &str, name: &str) -> bool {
@@ -529,6 +562,8 @@ impl Patterns {
             Match::Regex => self.regex.iter().any(|r| r.is_match(full)),
             Match::Substring => self.texts.iter().any(|p| full.contains(p.as_str())),
             Match::Exact => self.texts.iter().any(|p| p == full),
+            // The date is not here; [`selects`] matches an id.
+            Match::Id => false,
         }
     }
 }
@@ -597,6 +632,24 @@ mod pattern_tests {
     }
 
     #[test]
+    fn exact_match_ignores_globs_and_duplicate_basenames() {
+        let star = Patterns::new(vec!["/w/*.log".into()], Match::Exact).unwrap();
+        assert!(star.hit("/w/*.log", "*.log", "*.log"));
+        assert!(!star.hit("/w/notes.log", "notes.log", "notes.log"));
+        // The trash's internal name is not a second key.
+        assert!(!star.hit("/w/other", "other", "*.log"));
+        let dup = Patterns::new(vec!["/w/a/foo".into()], Match::Exact).unwrap();
+        assert!(dup.hit("/w/a/foo", "foo", "foo"));
+        assert!(!dup.hit("/w/b/foo", "foo", "foo.2"));
+        let glob = Patterns::new(vec!["foo".into()], Match::Glob).unwrap();
+        assert!(glob.hit("/w/a/foo", "foo", "foo"));
+        assert!(glob.hit("/w/b/foo", "foo", "foo.2"));
+        let gstar = Patterns::new(vec!["*.log".into()], Match::Glob).unwrap();
+        assert!(gstar.hit("/w/*.log", "*.log", "*.log"));
+        assert!(gstar.hit("/w/notes.log", "notes.log", "notes.log"));
+    }
+
+    #[test]
     fn rm_summary_json_lists_the_matches() {
         let sum = super::RmSummary {
             dry_run: true,
@@ -613,5 +666,18 @@ mod pattern_tests {
             bytes: 0,
         };
         assert!(none.json(&[]).ends_with("\"matches\": [\n  ]\n}\n"));
+    }
+
+    #[test]
+    fn item_ids_differ_across_trash_roots() {
+        let name = "same.txt";
+        let date = "2026-11-20T10:11:12";
+        let a = super::item_id(
+            name,
+            date,
+            std::path::Path::new("/fixture/home/.local/share/Trash"),
+        );
+        let b = super::item_id(name, date, std::path::Path::new("/mnt/disk/.Trash-1000"));
+        assert_ne!(a, b);
     }
 }

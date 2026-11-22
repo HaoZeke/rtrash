@@ -283,7 +283,7 @@ Accepts the common `rm(1)` flags with the same semantics, except that files move
 Safety rails beyond rm:
 
 - **safe-rm list.** Put skips safe-rm's built-in system directories and every path or shell pattern listed in `/etc/safe-rm.conf`, `/usr/local/etc/safe-rm.conf`, `$XDG_CONFIG_HOME/safe-rm` or `~/.safe-rm`, so an existing safe-rm setup keeps working.
-- **Repository warning.** Trashing a directory with a git repository at its top that has uncommitted or unpushed work prints a warning naming `rtrash undo`.
+- **Repository warning.** After a directory moves, a git repository at its top or nested inside it that has uncommitted, unpushed or unreadable work prints a warning. On the FreeDesktop trash it names `rtrash undo`. On Windows it names `rtrash restore --batch=last` once that record is written. On WSL it names `rtrash wsl restore` or Explorer. `put --json` leaves the warning out.
 
 As with GNU rm, **the last of `-f` / `-i` / `-I` (and the matching long forms) wins** for prompt vs force behavior.
 `-f` also ignores missing paths.
@@ -295,7 +295,7 @@ Names are reserved atomically, so concurrent invocations never clobber each othe
 
 **Script pins:** `--trash-dir=PATH` puts into that FreeDesktop root (creates `files/` and `info/` if needed); `--home-only` always uses the home trash.
 
-**Script output:** `--json` prints one object, `{"trashed": [...], "failed": N}`. Each trashed entry lists the original path, the name under `files/`, and the trash root, so a script can hand the names to `rtrash rm` or restore by path later.
+**Script output:** `--json` prints one object, `{"trashed": [...], "failed": N}`. Each trashed entry lists `original` (the original path), `name` (the payload name in the trash: under `files/` on FreeDesktop, in the Finder Trash, or `$R...` in the Windows Recycle Bin), and `trash_dir` (the trash root), so a script can hand the names to `rtrash rm` or restore by path later.
 
 Putting a **directory** updates that trash dir’s FreeDesktop `directorysizes` cache (`size mtime percent-encoded-name`).
 Sizes count allocated blocks the way `du -B1` does, the directories' own blocks included and each hard-linked file once.
@@ -328,7 +328,7 @@ In JSON they carry `"orphan": true`; an age filter leaves them out.
 
 | Flag | Meaning |
 |------|---------|
-| `--json` | JSON array of `{deletion_date, original, name, trash_dir, batch}` (plus `size` in bytes with `--size`) |
+| `--json` | JSON array of `{deletion_date, original, name, trash_dir, batch, id}` (plus `size` in bytes with `--size`) |
 | `--size` | Add each item's disk usage (payload plus `.trashinfo`, as `status` counts it). As `trash-list`, trash-cli's `SIZE PATH` rows: the payload's size in bytes in place of the date |
 | `--files` | `trash-list` only, as trash-cli's hidden option: add ` -> FILE`, the item in the trash, to each row |
 | `--sort=date\|size\|name\|path` | Row order; `size` lists the largest first and implies `--size` |
@@ -419,6 +419,7 @@ $ rtrash empty -n && rtrash empty 14                    # free the space
 | `printf '0-2,5\n' \| rtrash restore` | Piped selection without TUI: indices, ranges, commas, or `all` |
 | `rtrash restore --glob='*.rs' --all` | Restore every item whose file name matches; a pattern with a `/` matches the original path |
 | `rtrash restore --regex='/src/.*\.c$' --all` | Restore every item whose original path matches the regular expression |
+| `rtrash restore --match=id ID` | Restore one item by `{id}` from `rtrash list --format='{id} {path}\n'` (id includes name, date and trash root) |
 | `rtrash restore --to=DIR …` | Restore into `DIR`, keeping each file name |
 | `rtrash restore --conflict=rename\|skip\|overwrite …` | When the destination exists: restore as `NAME.1.EXT`, leave the item in the trash, or replace it (`-f`); the default refuses |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
@@ -501,7 +502,7 @@ Permanently deletes trash entries whose original path, basename, or trash name m
 Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
 An orphan matches by its name in `files/` or its path there.
 Does **not** restore.
-On a terminal it names the matches (the first 10, with sizes) and asks once before it deletes, as `rm -I` does and as trash-cli #383 asks of `trash-rm`. Only `y` or `yes` goes on. A script, whose stdin or stderr is not a terminal, is never asked, so pipelines and cron jobs work as before. `-i`/`--interactive` asks even then, with the reply read from stdin. `-y`/`--yes` and `-f`/`--force` never ask, and the last of the three wins.
+On a terminal it names the matches (the first 10, with sizes) and asks once before it deletes, as `rm -I` does and as trash-cli #383 asks of `trash-rm`. Only `y` or `yes` goes on. A script, whose stdin or stderr is not a terminal, is never asked, so pipelines and cron jobs work as before. `-i`/`--interactive` asks even then, with the reply read from stdin. `-y`/`--yes` and `-f`/`--force` never ask, and the last of the three wins. Without `-f`, rm refuses payloads with dirty, unpushed or unknown git work; `-n` reports the same refusal without deleting anything.
 Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-i`/`--interactive`, `-y`/`--yes`, `-f`/`--force` (no question, and mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).
 
 ### Prompts

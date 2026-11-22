@@ -381,6 +381,7 @@ mod tests {
                 topdir: None,
             },
             batch: batch.map(str::to_string),
+            recorded: true,
         }
     }
 

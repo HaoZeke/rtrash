@@ -21,6 +21,8 @@ matching *trash* entries — not a synonym for put.
 On a terminal, rm names the matches (the first 10, with sizes) and asks
 once before it deletes them, as rm -I does. A script whose stdin or
 stderr is not a terminal is not asked. The last of -i, -f and -y wins.
+Without -f, rm refuses an item whose payload holds dirty, unpushed or
+unknown git work; -n reports the same refusal without deleting anything.
 
       --trash-dir=PATH  only consider this trash directory (repeatable)
       --home-only  only the home trash (skip volume trash)
@@ -33,8 +35,9 @@ stderr is not a terminal is not asked. The last of -i, -f and -y wins.
       --regex      PATTERNs are regular expressions searched in the
                      original path (the same as --match=regex)
   -m, --match=KIND  how to read PATTERNs (trashy's -m): glob (default),
-                     regex, substring (text in the original path) or
-                     exact (the whole original path)
+                     regex, substring (text in the original path),
+                     exact (the whole original path) or id (the {id}
+                     from `list --format`, the trash name, date and root)
       --batch=ID   only items from one put run: an ID from `undo --list`,
                      or `last` for the latest; with no PATTERN, all of it
   -n, --dry-run    list matches and reclaimable size; do not delete
@@ -54,7 +57,8 @@ Examples:
   {prog} '*.o'
   {prog} -n '*.o'
   {prog} foo
-  {prog} /home/you/old-project
+  {prog} /work/old-project
+  {prog} -i --max-count=1 --match=id ID
   {prog} --regex '/build-[0-9]+/'
   {prog} --batch=last
 ";
@@ -110,7 +114,9 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "-m" | "--match" => {
                 i += 1;
                 let Some(v) = args.get(i) else {
-                    eprintln!("{prog}: {arg} requires a kind (glob, regex, substring, exact)");
+                    eprintln!(
+                        "{prog}: {arg} requires a kind (glob, regex, substring, exact or id)"
+                    );
                     return 2;
                 };
                 match crate::filters::Match::parse(v) {
@@ -262,11 +268,14 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         return crate::finder_shared::rm(
             prog,
             &pats,
-            batch.as_deref(),
-            dry_run,
-            verbose,
-            json,
-            filter,
+            crate::finder_shared::RmOpts {
+                batch: batch.as_deref(),
+                dry_run,
+                force,
+                verbose,
+                json,
+                filter,
+            },
         );
     }
     let mut entries = list::filter_age_secs(list::collect(&dirs), older_than, newer_than);
@@ -315,7 +324,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .file_name()
             .map(crate::util::str_from_os_ref)
             .unwrap_or_default();
-        pats.hit(path_s.as_ref(), base.as_str(), entry.name.as_str()) && size.keeps(size_of(entry))
+        pats.selects(
+            path_s.as_ref(),
+            base.as_str(),
+            entry.name.as_str(),
+            entry.date.as_deref().unwrap_or(""),
+            &entry.dir.root,
+        ) && size.keeps(size_of(entry))
     };
 
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
@@ -360,7 +375,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .file_name()
             .map(crate::util::str_from_os_ref)
             .unwrap_or_default();
-        let hit = pats.hit(path_s.as_ref(), base.as_str(), entry.name.as_str());
+        let hit = pats.selects(
+            path_s.as_ref(),
+            base.as_str(),
+            entry.name.as_str(),
+            entry.date.as_deref().unwrap_or(""),
+            &entry.dir.root,
+        );
         if !hit {
             continue;
         }
@@ -369,6 +390,19 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             continue;
         }
         if dry_run {
+            let payload_scanned = crate::util::join_name(&entry.dir.files(), &entry.name);
+            if !force && !crate::util::is_gone(&payload_scanned) {
+                if let Some(work) = crate::du_git::risky_tree(&payload_scanned) {
+                    eprintln!(
+                        "{prog}: refusing to remove '{}': it holds {} git work; \
+                         restore it, or pass -f to remove it anyway",
+                        crate::util::err_path(&entry.original),
+                        work.label()
+                    );
+                    status = 1;
+                    continue;
+                }
+            }
             bytes = bytes.saturating_add(sz);
             if !json {
                 if verbose {
@@ -398,6 +432,18 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
         };
         let (payload, info_path) = (held.payload(), held.record());
+        if !force && !held.gone() {
+            if let Some(work) = crate::du_git::risky_tree(&payload) {
+                eprintln!(
+                    "{prog}: refusing to remove '{}': it holds {} git work; \
+                     restore it, or pass -f to remove it anyway",
+                    crate::util::err_path(&entry.original),
+                    work.label()
+                );
+                status = 1;
+                continue;
+            }
+        }
         if let Err(e) = crate::permanent_guard::remove(&payload) {
             eprintln!(
                 "{prog}: cannot remove '{}': {e}",

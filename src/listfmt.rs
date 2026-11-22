@@ -35,6 +35,7 @@ pub enum Field {
     Batch,
     Size,
     Owner,
+    Id,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +70,7 @@ pub fn parse_format(t: &str) -> Result<Vec<FmtPart>, String> {
                     "batch" => Field::Batch,
                     "size" => Field::Size,
                     "owner" => Field::Owner,
+                    "id" => Field::Id,
                     _ => return Err(format!("--format: unknown field '{{{key}}}'")),
                 };
                 if !lit.is_empty() {
@@ -111,6 +113,8 @@ pub struct FmtRow<'a> {
     pub batch: &'a str,
     pub size: Option<u64>,
     pub owner: Option<&'a str>,
+    /// [`crate::filters::item_id`] of this item, already built by the caller.
+    pub id: &'a str,
 }
 
 /// One item through a parsed template; paths go out as raw bytes.
@@ -138,6 +142,7 @@ pub fn render_format(parts: &[FmtPart], r: &FmtRow) -> Vec<u8> {
                         .unwrap_or_else(|| owner_of(r.trash));
                     out.extend_from_slice(o.as_bytes());
                 }
+                Field::Id => out.extend_from_slice(r.id.as_bytes()),
             },
         }
     }
