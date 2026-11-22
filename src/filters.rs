@@ -715,20 +715,6 @@ fn regex_covers_root(r: &regex_lite::Regex, root: &str) -> bool {
     end_at.is_some()
 }
 
-fn pattern_covers_root(pats: &Patterns, root: &str) -> bool {
-    match pats.kind {
-        Match::Glob => pats.texts.iter().any(|p| glob_covers_root(p, root)),
-        Match::Regex => pats.regex.iter().any(|r| regex_covers_root(r, root)),
-        Match::Prefix => pats.texts.iter().any(|p| {
-            let key = crate::rm_match::match_key(std::path::Path::new(p));
-            crate::rm_match::scope_same(&key, std::path::Path::new(root))
-                || prefix_is_mass(&key.to_string_lossy())
-        }),
-        Match::Substring => pats.texts.iter().any(|p| substring_is_mass(p)),
-        Match::Exact | Match::Id => false,
-    }
-}
-
 fn probes_under(root: &str) -> Vec<String> {
     let root = root.trim_end_matches(['/', '\\']);
     let sep = if root.contains('\\') { '\\' } else { '/' };
@@ -745,62 +731,20 @@ fn probes_under(root: &str) -> Vec<String> {
         .collect()
 }
 
-/// The part of `paths` that every one of them shares, component by component.
-fn common_prefix(paths: &[std::path::PathBuf]) -> std::path::PathBuf {
-    let mut shared: Option<Vec<std::ffi::OsString>> = None;
-    for path in paths {
-        let next: Vec<std::ffi::OsString> = path
-            .components()
-            .map(|c| c.as_os_str().to_os_string())
-            .collect();
-        shared = Some(match shared {
-            None => next,
-            Some(prev) => prev
-                .into_iter()
-                .zip(next)
-                .take_while(|(a, b)| a == b)
-                .map(|(a, _)| a)
-                .collect(),
-        });
-    }
-    let mut out = std::path::PathBuf::new();
-    for c in shared.unwrap_or_default() {
-        out.push(c);
-    }
-    out
-}
-
-/// Whether `selected` is every considered entry and the pattern would also
-/// take every entry under the scope those paths share. An exact path is
-/// never this. A glob such as `*.o` is not, even when every current file
-/// happens to be one: the probes under that directory include other names.
-/// A prefix that stops above the shared directory is not either.
+/// Whether `selected` is every recorded original in `all`, or every
+/// original under a real scope root that has more than one entry. An exact
+/// path or an id is never this: naming the only item, or each item, is
+/// deliberate. The probe check ([`Patterns::is_mass`]) stays the early
+/// error; this one looks at the entries that are actually in the trash.
 pub fn selection_covers_scope(
     pats: &Patterns,
     selected: &[std::path::PathBuf],
-    considered: usize,
+    all: &[std::path::PathBuf],
 ) -> bool {
-    if pats.kind == Match::Exact || selected.is_empty() || selected.len() != considered {
+    if pats.kind == Match::Exact || pats.kind == Match::Id || selected.is_empty() {
         return false;
     }
-    if pats.is_mass() {
-        return true;
-    }
-    let common = common_prefix(selected);
-    if common.as_os_str().is_empty() {
-        return false;
-    }
-    let shown = common.to_string_lossy();
-    let volume = prefix_is_mass(&shown) || shown == "/" || shown == "\\";
-    let scope = crate::rm_match::known_scope_roots().is_some_and(|roots| {
-        roots
-            .iter()
-            .any(|root| crate::rm_match::scope_same(root, &common))
-    });
-    if !volume && !scope {
-        return false;
-    }
-    pattern_covers_root(pats, &shown)
+    crate::rm_match::selection_wipes(selected, all)
 }
 
 /// A substring every Unix absolute path contains, or every Windows path
@@ -1097,18 +1041,40 @@ mod pattern_tests {
     fn a_selection_of_every_entry_under_a_scope_is_mass() {
         let star = Patterns::new(vec!["*".into()], Match::Glob).unwrap();
         let files = vec![std::path::PathBuf::from("/tmp/proj/a.txt")];
-        assert!(super::selection_covers_scope(&star, &files, 1));
+        assert!(super::selection_covers_scope(&star, &files, &files));
         let exact = Patterns::new(vec!["/tmp/proj/a.txt".into()], Match::Exact).unwrap();
-        assert!(!super::selection_covers_scope(&exact, &files, 1));
+        assert!(!super::selection_covers_scope(&exact, &files, &files));
+        let by_id =
+            Patterns::new(vec!["a.txt@2020-01-01T00:00:00@/tmp".into()], Match::Id).unwrap();
+        assert!(!super::selection_covers_scope(&by_id, &files, &files));
         let objects = Patterns::new(vec!["*.o".into()], Match::Glob).unwrap();
         let two = vec![
             std::path::PathBuf::from("/tmp/proj/a.o"),
             std::path::PathBuf::from("/tmp/proj/b.o"),
         ];
-        assert!(!super::selection_covers_scope(&objects, &two, 2));
-        assert!(!super::selection_covers_scope(&objects, &two, 3));
+        let mut with_other = two.clone();
+        with_other.push(std::path::PathBuf::from("/tmp/proj/c.c"));
+        assert!(!super::selection_covers_scope(&objects, &two, &with_other));
+        assert!(super::selection_covers_scope(&objects, &two, &two));
         let prefix = Patterns::new(vec!["/tmp/proj".into()], Match::Prefix).unwrap();
         assert!(!prefix.is_mass());
-        assert!(!super::selection_covers_scope(&prefix, &two, 2));
+        assert!(!super::selection_covers_scope(&prefix, &two, &with_other));
+        let drives = vec![
+            std::path::PathBuf::from(r"E:\a.txt"),
+            std::path::PathBuf::from(r"E:\b.txt"),
+            std::path::PathBuf::from(r"C:\c.txt"),
+        ];
+        let on_e = vec![
+            std::path::PathBuf::from(r"E:\a.txt"),
+            std::path::PathBuf::from(r"E:\b.txt"),
+        ];
+        let glob = Patterns::new(vec![r"E:\*".into()], Match::Glob).unwrap();
+        assert!(!glob.is_mass());
+        assert!(super::selection_covers_scope(&glob, &on_e, &drives));
+        let one = vec![std::path::PathBuf::from(r"E:\a.txt")];
+        assert!(!super::selection_covers_scope(&glob, &one, &drives));
+        let regex = Patterns::new(vec![r"^E:\\.*".into()], Match::Regex).unwrap();
+        assert!(!regex.is_mass());
+        assert!(super::selection_covers_scope(&regex, &on_e, &drives));
     }
 }

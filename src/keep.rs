@@ -55,12 +55,13 @@ impl Keep {
 /// directory, or `~` with no home, is an error the caller refuses on.
 fn parse_keep_line(line: &str, home: Option<&Path>, cwd: Option<&Path>) -> io::Result<PathBuf> {
     if line == "~" {
-        return home.map(|h| h.to_path_buf()).ok_or_else(|| {
+        let home = home.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "keep file uses '~' but HOME is unset",
             )
-        });
+        })?;
+        return normalize_keep(home);
     }
     if let Some(rest) = line.strip_prefix("~/").or_else(|| line.strip_prefix("~\\")) {
         let home = home.ok_or_else(|| {
@@ -74,11 +75,11 @@ fn parse_keep_line(line: &str, home: Option<&Path>, cwd: Option<&Path>) -> io::R
         } else {
             home.join(rest)
         };
-        return Ok(normalize_keep(&joined));
+        return normalize_keep(&joined);
     }
     let path = PathBuf::from(line);
     if path.is_absolute() {
-        return Ok(normalize_keep(&path));
+        return normalize_keep(&path);
     }
     let cwd = cwd.ok_or_else(|| {
         io::Error::new(
@@ -86,11 +87,84 @@ fn parse_keep_line(line: &str, home: Option<&Path>, cwd: Option<&Path>) -> io::R
             format!("keep file path '{line}' is relative and the working directory cannot be read"),
         )
     })?;
-    Ok(normalize_keep(&cwd.join(path)))
+    normalize_keep(&cwd.join(path))
 }
 
-fn normalize_keep(path: &Path) -> PathBuf {
-    crate::util::absolute_keep_tail(&crate::rm_match::lexical_normalize(path))
+/// The path `put` would record: symlinks in the parents and, where the
+/// path exists, the final component. A leftover `..` in a tail that does
+/// not exist yet is applied only after that, so `..` across a symlink is
+/// the physical parent. A line that is `/` or a drive root is refused: it
+/// would protect every path and turn a permanent delete into a no-op.
+fn normalize_keep(path: &Path) -> io::Result<PathBuf> {
+    let resolved = resolve_keep(path, 0);
+    let lexical = crate::rm_match::lexical_normalize(&resolved);
+    let out = crate::util::plain_path(&crate::util::absolute_keep_tail(&lexical));
+    if keep_is_volume_root(&out) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "keep file path '{}' is a whole volume; name a file or directory inside it",
+                out.display()
+            ),
+        ));
+    }
+    Ok(out)
+}
+
+fn resolve_keep(path: &Path, depth: u8) -> PathBuf {
+    if depth > 8 {
+        return path.to_path_buf();
+    }
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return crate::util::plain_path(&canon);
+    }
+    if let Ok(target) = std::fs::read_link(path) {
+        let joined = if target.is_absolute() {
+            target
+        } else {
+            match path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent.join(target),
+                _ => target,
+            }
+        };
+        if joined != path {
+            return resolve_keep(&joined, depth + 1);
+        }
+    }
+    resolve_existing_keep(path)
+}
+
+/// Longest existing ancestor, with symlinks resolved, and the rest appended.
+/// The same shape as the path `put` records for a parent that exists.
+fn resolve_existing_keep(path: &Path) -> PathBuf {
+    for ancestor in path.ancestors() {
+        if ancestor.as_os_str().is_empty() {
+            break;
+        }
+        if let Ok(real) = ancestor.canonicalize() {
+            let real = crate::util::plain_path(&real);
+            return match path.strip_prefix(ancestor) {
+                Ok(rest) if !rest.as_os_str().is_empty() => real.join(rest),
+                _ => real,
+            };
+        }
+    }
+    path.to_path_buf()
+}
+
+fn keep_is_volume_root(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    if s == "/" || s == "\\" || s.is_empty() {
+        return true;
+    }
+    let b = s.as_bytes();
+    let shaped =
+        (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':') || s.starts_with(r"\\");
+    if cfg!(windows) || shaped {
+        let key = crate::win_recycle::path_key(&s, &[]);
+        return crate::win_recycle::mass_canonical_key(&key);
+    }
+    false
 }
 
 /// Whether `keep` covers `path`, in either direction and on a component
@@ -185,5 +259,95 @@ mod tests {
         assert!(keep.protects(Path::new(r"C:\Users\Alice")));
         assert!(!keep.protects(Path::new(r"C:\Users\Alice\WorkOut\file.txt")));
         assert!(!keep.protects(Path::new(r"D:\Users\Alice\Work\file.txt")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_keep_line_that_is_the_root_is_rejected() {
+        let err = parse_keep_line(".", None, Some(Path::new("/"))).unwrap_err();
+        assert!(err.to_string().contains("whole volume"), "{err}");
+        let err = parse_keep_line("/", None, None).unwrap_err();
+        assert!(err.to_string().contains("whole volume"), "{err}");
+    }
+
+    /// The file is already gone, as it is when `rm` reads the keep file
+    /// after `put`. The keep line still has to name the path put recorded.
+    #[cfg(unix)]
+    fn keep_of(line: &Path) -> Keep {
+        Keep {
+            paths: vec![parse_keep_line(line.to_str().unwrap(), None, None).unwrap()],
+        }
+    }
+
+    #[cfg(unix)]
+    fn keep_root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-keep-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::canonicalize(&root).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_parent_keep_protects_the_resolved_path() {
+        let root = keep_root();
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let secret = real.join("secret");
+        std::fs::write(&secret, b"s").unwrap();
+        std::fs::remove_file(&secret).unwrap();
+        let keep = keep_of(&link.join("secret"));
+        assert!(keep.protects(&secret), "{:?}", keep.paths);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_keep_protects_the_resolved_path() {
+        let root = keep_root();
+        let real = root.join("dir");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.join("dlink");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        std::fs::remove_dir(&real).unwrap();
+        let keep = keep_of(&link);
+        assert!(keep.protects(&real), "{:?}", keep.paths);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dotdot_across_a_symlink_keep_protects_the_resolved_path() {
+        let root = keep_root();
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let hole = root.join("hole");
+        std::fs::create_dir_all(&hole).unwrap();
+        let link = hole.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let secret = root.join("secret");
+        std::fs::write(&secret, b"s").unwrap();
+        std::fs::remove_file(&secret).unwrap();
+        let keep = keep_of(&link.join("..").join("secret"));
+        assert!(keep.protects(&secret), "{:?}", keep.paths);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_keep_line_that_is_a_drive_root_is_rejected() {
+        let err = parse_keep_line(r"C:\", None, None).unwrap_err();
+        assert!(err.to_string().contains("whole volume"), "{err}");
+        let err = parse_keep_line(r"\\server\share", None, None).unwrap_err();
+        assert!(err.to_string().contains("whole volume"), "{err}");
     }
 }

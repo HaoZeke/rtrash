@@ -1369,7 +1369,6 @@ pub(crate) fn canonical_volume_key(canon: &Path, mounts: &[(String, String)]) ->
     mass_canonical_key(&key).then_some(key)
 }
 
-#[cfg(any(windows, test))]
 pub(crate) fn mass_canonical_key(key: &str) -> bool {
     if key.is_empty() {
         return true;
@@ -5089,6 +5088,7 @@ left in place.
                 return 1;
             }
         };
+        let census: Vec<PathBuf> = items.iter().map(original_of).collect();
         let items = if batch.is_some() {
             match last_put_items(prog, &items) {
                 Ok(p) => p,
@@ -5099,7 +5099,6 @@ left in place.
         };
         let exact = pats.kind == crate::filters::Match::Exact;
         let have: Vec<PathBuf> = items.iter().map(original_of).collect();
-        let considered = items.len();
         let matched: Vec<TrashItem> = items
             .into_iter()
             .filter(|it| {
@@ -5170,7 +5169,7 @@ left in place.
         }
         if !force && !scoped {
             let originals: Vec<PathBuf> = matched.iter().map(original_of).collect();
-            if crate::filters::selection_covers_scope(&pats, &originals, considered) {
+            if crate::filters::selection_covers_scope(&pats, &originals, &census) {
                 eprintln!("{prog}: refusing a pattern that matches everything without --force");
                 return 2;
             }

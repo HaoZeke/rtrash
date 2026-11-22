@@ -1179,7 +1179,12 @@ fn finder_matching_ignores_unicode_normalization() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(f.exists());
 
-    // rm takes a composed glob for a decomposed name.
+    // rm takes a composed glob for a decomposed name. A second file keeps
+    // the glob from being every entry in the trash.
+    let other = b.work().join("other.dat");
+    fs::write(&other, b"o").unwrap();
+    assert!(b.run(&["put", "other.dat"], "").status.success());
+    b.put_back("other.dat", &other);
     assert!(b.run(&["put", nfd], "").status.success());
     b.put_back(nfd, &f);
     let o = b.run(&["rm", "--match=glob", "n\u{e9}*"], "");
@@ -1594,19 +1599,32 @@ fn max_count_refuses_finder_rm_and_empty_past_the_cap() {
     for n in names {
         fs::write(b.work().join(n), n).unwrap();
     }
-    assert!(b.run(&["put", "fc-a", "fc-b", "fc-c"], "").status.success());
+    fs::write(b.work().join("other.dat"), b"o").unwrap();
+    assert!(b
+        .run(&["put", "fc-a", "fc-b", "fc-c", "other.dat"], "")
+        .status
+        .success());
     let cap2 = [("RTRASH_MAX_PERMANENT", "2")];
-    for (args, envs) in [
+    for (args, envs, says) in [
         (
-            &["rm", "--match=glob", "--max-count=2", "fc-*"][..],
+            &["rm", "--max-count=2", "--glob", "fc-*"][..],
             &[][..],
+            "3 items would be deleted",
         ),
-        (&["rm", "--match=glob", "fc-*"][..], &cap2[..]),
-        (&["empty", "--all"][..], &cap2[..]),
+        (
+            &["rm", "--glob", "fc-*"][..],
+            &cap2[..],
+            "3 items would be deleted",
+        ),
+        (
+            &["empty", "--all"][..],
+            &cap2[..],
+            "4 items would be deleted",
+        ),
     ] {
         let o = b.run_env(args, envs);
         assert_eq!(o.status.code(), Some(2), "{args:?}: {}", err(&o));
-        assert!(err(&o).contains("3 items would be deleted"), "{}", err(&o));
+        assert!(err(&o).contains(says), "{}", err(&o));
         assert!(
             names.iter().all(|n| b.finder().join(n).exists()),
             "{args:?}"
@@ -1615,7 +1633,8 @@ fn max_count_refuses_finder_rm_and_empty_past_the_cap() {
     let o = b.run_env(&["rm", "--max-count=1", "fc-a"], &cap2);
     assert!(o.status.success(), "{}", err(&o));
     assert!(!b.finder().join("fc-a").exists());
-    let o = b.run_env(&["empty", "--all"], &cap2);
+    let cap3 = [("RTRASH_MAX_PERMANENT", "3")];
+    let o = b.run_env(&["empty", "--all"], &cap3);
     assert!(o.status.success(), "{}", err(&o));
     assert!(!b.finder().join("fc-b").exists() && !b.finder().join("fc-c").exists());
 }

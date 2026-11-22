@@ -47,9 +47,9 @@ pub fn match_key(path: &Path) -> PathBuf {
 }
 
 /// Whether `key` (already a [`match_key`]) is this user's home, the home
-/// trash, or `~/.Trash`. A prefix of one of those takes the whole place.
-/// When the home cannot be read, every key is treated as one: a prefix
-/// then fails closed instead of matching a scope the program could not see.
+/// trash, `~/.Trash`, or `$XDG_DATA_HOME`. A prefix of one of those takes
+/// the whole place. When neither the home nor an absolute `XDG_DATA_HOME`
+/// can be read, every key is treated as one: a prefix then fails closed.
 pub fn is_scope_root(key: &Path) -> bool {
     scope_listed(key, known_scope_roots().as_deref())
 }
@@ -122,29 +122,167 @@ pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// Home, `~/.Trash`, the home trash, and `$XDG_DATA_HOME/Trash` when that
-/// variable is absolute. `None` when the home cannot be read: callers
-/// fail closed rather than treat "no roots" as "nothing is in scope".
+/// Home, `~/.Trash`, the home trash, `$XDG_DATA_HOME` and its `Trash`,
+/// each also in the form `put` records (the directory itself resolved).
+/// `None` when neither an absolute home nor an absolute `XDG_DATA_HOME`
+/// is known: callers fail closed rather than treat "no roots" as "nothing
+/// is in scope".
 pub(crate) fn known_scope_roots() -> Option<Vec<PathBuf>> {
-    let home = crate::util::home_dir()?;
+    let home = crate::util::home_dir();
     let xdg = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
-    scope_roots_from(Some(&home), xdg.as_deref())
+    scope_roots_from(home.as_deref(), xdg.as_deref())
 }
 
 pub(crate) fn scope_roots_from(home: Option<&Path>, xdg: Option<&Path>) -> Option<Vec<PathBuf>> {
-    let home = home?;
-    if !home.is_absolute() {
+    let home = home.filter(|p| p.is_absolute());
+    let xdg = xdg.filter(|p| p.is_absolute());
+    if home.is_none() && xdg.is_none() {
         return None;
     }
-    let mut roots = vec![
-        home.to_path_buf(),
-        home.join(".Trash"),
-        home.join(".local").join("share").join("Trash"),
-    ];
-    if let Some(xdg) = xdg.filter(|p| p.is_absolute()) {
+    let mut roots = Vec::new();
+    if let Some(home) = home {
+        roots.push(home.to_path_buf());
+        roots.push(home.join(".Trash"));
+        roots.push(home.join(".local").join("share").join("Trash"));
+    }
+    if let Some(xdg) = xdg {
+        roots.push(xdg.to_path_buf());
         roots.push(xdg.join("Trash"));
     }
-    Some(roots.into_iter().map(|root| match_key(&root)).collect())
+    let mut forms = Vec::new();
+    for root in roots {
+        for form in scope_forms(&root) {
+            if !forms.contains(&form) {
+                forms.push(form);
+            }
+        }
+    }
+    Some(forms)
+}
+
+/// `path` as a scope root, and the same directory with symlinks resolved
+/// when it exists. `put` records a file under a symlinked home by the
+/// resolved directory, so both spellings are the same scope.
+fn scope_forms(path: &Path) -> Vec<PathBuf> {
+    let mut out = vec![match_key(path)];
+    if let Ok(real) = std::fs::canonicalize(path) {
+        let real = match_key(&crate::util::plain_path(&real));
+        if real != out[0] {
+            out.push(real);
+        }
+    }
+    out
+}
+
+/// Whether `selected` holds every recorded original, or every original
+/// under one scope root when that root has more than one entry.
+///
+/// The keys are the paths `put` records. On Windows, and for a
+/// Windows-shaped path, they are folded the way the Recycle Bin matcher
+/// folds them. An exact operand is not passed here.
+pub fn selection_wipes(selected: &[PathBuf], all: &[PathBuf]) -> bool {
+    if selected.is_empty() || all.is_empty() {
+        return false;
+    }
+    let sel: Vec<String> = selected.iter().map(|p| cover_key(p)).collect();
+    let every: Vec<String> = all.iter().map(|p| cover_key(p)).collect();
+    if every.iter().all(|k| sel.contains(k)) {
+        return true;
+    }
+    for root in coverage_roots(all) {
+        let under: Vec<&String> = every.iter().filter(|k| key_under(k, &root)).collect();
+        if under.len() > 1 && under.iter().all(|k| sel.contains(k)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn cover_key(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if cfg!(windows) || windows_shaped(&s) {
+        return crate::win_recycle::path_key(&s, &[]);
+    }
+    if s == "/" {
+        return s.into();
+    }
+    s.trim_end_matches('/').to_string()
+}
+
+fn windows_shaped(s: &str) -> bool {
+    let b = s.as_bytes();
+    (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+        || s.starts_with(r"\\")
+        || s.contains('\\')
+}
+
+fn key_under(path: &str, root: &str) -> bool {
+    if path == root {
+        return true;
+    }
+    if root == "/" {
+        return path.starts_with('/');
+    }
+    if windows_shaped(root) || windows_shaped(path) {
+        return crate::win_recycle::win_path_matches(
+            crate::filters::Match::Prefix,
+            path,
+            std::slice::from_ref(&root.to_string()),
+        );
+    }
+    let root = root.trim_end_matches('/');
+    !root.is_empty() && path.starts_with(root) && path[root.len()..].starts_with('/')
+}
+
+fn coverage_roots(entries: &[PathBuf]) -> Vec<String> {
+    let mut roots = Vec::new();
+    let mut push = |key: String| {
+        if !key.is_empty() && !roots.contains(&key) {
+            roots.push(key);
+        }
+    };
+    if let Some(home) = crate::util::home_dir() {
+        push(cover_key(&home));
+        if let Ok(real) = std::fs::canonicalize(&home) {
+            push(cover_key(&crate::util::plain_path(&real)));
+        }
+    }
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        let xdg = PathBuf::from(xdg);
+        if xdg.is_absolute() {
+            push(cover_key(&xdg));
+        }
+    }
+    if !cfg!(windows) {
+        push("/".to_string());
+    }
+    for entry in entries {
+        if let Some(vol) = volume_root_of(entry) {
+            push(vol);
+        }
+    }
+    roots
+}
+
+fn volume_root_of(path: &Path) -> Option<String> {
+    let s = path.to_string_lossy();
+    if cfg!(windows) || windows_shaped(&s) {
+        let key = crate::win_recycle::path_key(&s, &[]);
+        return drive_or_unc_root(&key);
+    }
+    s.starts_with('/').then(|| "/".to_string())
+}
+
+fn drive_or_unc_root(key: &str) -> Option<String> {
+    let b = key.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return Some(format!("{}:\\", char::from(b[0])));
+    }
+    let rest = key.strip_prefix(r"\\")?;
+    let mut parts = rest.split('\\').filter(|part| !part.is_empty());
+    let server = parts.next()?;
+    let share = parts.next()?;
+    Some(format!(r"\\{server}\{share}"))
 }
 
 /// The key [`refuse_ambiguous`] groups by. Windows spellings that differ
@@ -305,5 +443,17 @@ mod tests {
             std::path::Path::new(r"C:\anywhere"),
             None
         ));
+    }
+
+    #[test]
+    fn an_xdg_data_home_is_a_scope_root_without_home() {
+        let xdg = std::path::Path::new("/var/lib/xdg");
+        let roots = super::scope_roots_from(None, Some(xdg)).expect("xdg is a root");
+        assert!(super::scope_listed(&super::match_key(xdg), Some(&roots)));
+        assert!(!super::scope_listed(
+            &super::match_key(std::path::Path::new("/tmp/proj")),
+            Some(&roots)
+        ));
+        assert!(super::scope_roots_from(None, None).is_none());
     }
 }

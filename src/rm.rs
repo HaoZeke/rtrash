@@ -151,7 +151,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 i += 1;
                 let Some(v) = args.get(i) else {
                     eprintln!(
-                        "{prog}: {arg} requires a kind (exact, glob, regex, substring, prefix or id)"
+                        "{prog}: {arg} requires a kind \
+                         (exact, glob, regex, substring, prefix or id)"
                     );
                     return 2;
                 };
@@ -353,7 +354,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         .iter()
         .map(|e| (e.original.clone(), e.batch.clone()))
         .collect();
-    let mut entries = list::filter_age_secs(collected, older_than, newer_than);
+    let mut entries = collected;
     // Payloads with no .trashinfo match by their name or their path under
     // files/; having no date, they stay out of an age-filtered rm.
     let orphans = list::orphans(&dirs);
@@ -363,6 +364,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     if older_than.is_none() && newer_than.is_none() {
         entries.extend(orphans);
     }
+    let census: Vec<PathBuf> = entries.iter().map(|e| e.original.clone()).collect();
+    let mut entries = list::filter_age_secs(entries, older_than, newer_than);
     if let Some(want) = &batch {
         let id = if want == "last" {
             crate::undo::batches(&entries).first().map(|b| b.id.clone())
@@ -448,12 +451,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     if hits.is_empty() && !exact_no_hits {
         return crate::rm_match::no_matches(prog);
     }
-    // After the match: a pattern that took every entry, and would take
-    // every entry under the scope they share, is the same mass delete the
-    // probe check refuses. A prefix or glob that narrows stays.
+    // After the match: a selection that holds every entry, or every entry
+    // under a real scope root, is the same mass delete the probe check
+    // refuses. A prefix or glob that leaves an entry stays.
     if !force && !scoped {
         let originals: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
-        if crate::filters::selection_covers_scope(&pats, &originals, entries.len()) {
+        if crate::filters::selection_covers_scope(&pats, &originals, &census) {
             eprintln!(
                 "{prog}: refusing mass pattern {:?} without --force \
                  (would permanently delete matching trash entries)",

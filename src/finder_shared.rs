@@ -666,6 +666,7 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
             return 1;
         }
     };
+    let census: Vec<PathBuf> = all.iter().map(|e| e.shown.clone()).collect();
     // Shown paths before the age and size filters, so a path the window
     // leaves out is still visible to the hint.
     let mut pre: Vec<(PathBuf, PathBuf, String)> = all
@@ -763,7 +764,7 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
     }
     if refuse_covered {
         let originals: Vec<PathBuf> = hits.iter().map(|e| e.shown.clone()).collect();
-        if crate::filters::selection_covers_scope(patterns, &originals, rows.len()) {
+        if crate::filters::selection_covers_scope(patterns, &originals, &census) {
             eprintln!(
                 "{prog}: refusing mass pattern {:?} without --force \
                  (would permanently delete matching trash entries)",
