@@ -1938,7 +1938,7 @@ fn a_glob_is_refused_when_home_is_unset() {
         .unwrap();
     let err = stderr_of(&out);
     assert_eq!(out.status.code(), Some(2), "{err}");
-    assert!(err.contains("refusing mass pattern"), "{err}");
+    assert!(err.contains("When the scope is unknown"), "{err}");
     let mut left = trash_names(&sb);
     left.sort();
     assert_eq!(
@@ -1966,6 +1966,836 @@ fn a_basename_glob_stays_narrow_when_home_is_unset() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb), vec!["other.txt".to_string()]);
+}
+
+#[test]
+fn a_cache_prefix_glob_stays_narrow_when_home_is_unset() {
+    let sb = Sandbox::new("rm-cache-glob-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    for name in ["cache1.dat", "other.txt"] {
+        sb.touch(name);
+    }
+    let put = sb.run(&["put", &pin, "cache1.dat", "other.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--glob", "cache*"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), vec!["other.txt".to_string()]);
+}
+
+#[test]
+fn a_basename_glob_uses_full_paths_only_with_known_scope_roots() {
+    for roots_known in [true, false] {
+        let tag = if roots_known {
+            "rm-basename-glob-known-roots"
+        } else {
+            "rm-basename-glob-unknown-roots"
+        };
+        let sb = Sandbox::new(tag);
+        let pin = format!("--trash-dir={}", sb.trash().display());
+        let work = sb.work().join("work");
+        let other = sb.work().join("other");
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        for path in [
+            work.join("a.txt"),
+            work.join("b.txt"),
+            other.join("work.txt"),
+            sb.root.join("outside.txt"),
+        ] {
+            fs::write(path, b"x").unwrap();
+        }
+        let put = sb.run(&[
+            "put",
+            &pin,
+            work.join("a.txt").to_str().unwrap(),
+            work.join("b.txt").to_str().unwrap(),
+            other.join("work.txt").to_str().unwrap(),
+            sb.root.join("outside.txt").to_str().unwrap(),
+        ]);
+        assert!(put.status.success(), "{tag}: {}", stderr_of(&put));
+        let mut cmd = common::rtrash(&sb.root);
+        if roots_known {
+            let home = sb.root.join("hm");
+            fs::create_dir_all(&home).unwrap();
+            cmd.env("HOME", &home).env("USERPROFILE", &home);
+        } else {
+            cmd.env_remove("HOME")
+                .env_remove("USERPROFILE")
+                .env_remove("XDG_DATA_HOME");
+        }
+        let out = cmd
+            .args(["rm", &pin, "--glob", "*work*"])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{tag}: {}", stderr_of(&out));
+        let mut left = trash_names(&sb);
+        left.sort();
+        let expected = if roots_known {
+            vec!["outside.txt".to_string()]
+        } else {
+            vec![
+                "a.txt".to_string(),
+                "b.txt".to_string(),
+                "outside.txt".to_string(),
+            ]
+        };
+        assert_eq!(left, expected, "{tag}");
+    }
+}
+
+#[test]
+fn a_regex_directory_is_refused_when_home_is_unset() {
+    let sb = Sandbox::new("rm-regex-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    for name in ["inside.txt", "second.txt"] {
+        sb.touch(name);
+    }
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        sb.work().join("inside.txt").to_str().unwrap(),
+        sb.work().join("second.txt").to_str().unwrap(),
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let pattern = format!("^{}/.*", regex_escape(sb.work().to_str().unwrap()));
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--regex", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("When the scope is unknown"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec![
+            "inside.txt".to_string(),
+            "outside.txt".to_string(),
+            "second.txt".to_string()
+        ]
+    );
+}
+
+fn refuse_unknown_regex_scope(tag: &str, dir_name: &str, mode: &str) {
+    let sb = Sandbox::new(tag);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let dir = sb.work().join(dir_name);
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["a.txt", "b.txt"] {
+        fs::write(dir.join(name), name).unwrap();
+    }
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        dir.join("a.txt").to_str().unwrap(),
+        dir.join("b.txt").to_str().unwrap(),
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{tag}: {}", stderr_of(&put));
+    let pattern = match mode {
+        "raw" => format!("^{}/.*", dir.display()),
+        "escaped" => format!("^{}/.*", regex_escape(dir.to_str().unwrap())),
+        "parent-wildcard" => format!("^.*/{dir_name}/.*"),
+        _ => unreachable!("{mode}"),
+    };
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--regex", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{tag} {pattern}: {err}");
+    assert!(err.contains("When the scope is unknown"), "{tag}: {err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec![
+            "a.txt".to_string(),
+            "b.txt".to_string(),
+            "outside.txt".to_string()
+        ],
+        "{tag}: {err}"
+    );
+}
+
+#[test]
+fn a_regex_directory_with_a_dot_is_refused_without_scope_roots() {
+    refuse_unknown_regex_scope("rm-regex-dot-dir", "work.with.dot", "raw");
+}
+
+#[test]
+fn an_escaped_regex_directory_with_a_dot_is_refused_without_scope_roots() {
+    refuse_unknown_regex_scope("rm-regex-escaped-dot", "work.with.dot", "escaped");
+}
+
+#[test]
+fn a_regex_hidden_directory_is_refused_without_scope_roots() {
+    refuse_unknown_regex_scope("rm-regex-hidden", ".config", "raw");
+}
+
+#[test]
+fn an_escaped_regex_hidden_directory_is_refused_without_scope_roots() {
+    refuse_unknown_regex_scope("rm-regex-escaped-hidden", ".config", "escaped");
+}
+
+#[test]
+fn a_regex_directory_below_a_wildcard_parent_is_refused_without_scope_roots() {
+    refuse_unknown_regex_scope("rm-regex-wild-parent", "work", "parent-wildcard");
+}
+
+#[test]
+fn every_regex_needs_force_without_scope_roots() {
+    let sb = Sandbox::new("rm-regex-narrow-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    for name in ["a.o", "foo", "b.c", "keep.txt"] {
+        sb.touch(name);
+    }
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        "a.o",
+        "foo",
+        "b.c",
+        "keep.txt",
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let run = |pattern: &str| {
+        common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .args(["rm", &pin, "--regex", pattern])
+            .current_dir(sb.work())
+            .output()
+            .unwrap()
+    };
+    for pattern in [
+        r"\.o$".to_string(),
+        "o".to_string(),
+        "foo".to_string(),
+        format!(r"^{}/.*\.c$", regex_escape(sb.work().to_str().unwrap())),
+    ] {
+        let out = run(&pattern);
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(2), "{pattern}: {err}");
+        assert!(
+            err.contains("When the scope is unknown"),
+            "{pattern}: {err}"
+        );
+    }
+    assert_eq!(trash_names(&sb).len(), 5);
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--force", "--regex", r"\.o$"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec![
+            "b.c".to_string(),
+            "foo".to_string(),
+            "keep.txt".to_string(),
+            "outside.txt".to_string()
+        ]
+    );
+}
+
+fn remove_only_objects_without_scope_roots(tag: &str, flag: &str, pattern: &str, nested: bool) {
+    let sb = Sandbox::new(tag);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let (a, b) = if nested {
+        let a = sb.work().join("group/proj1/a.o");
+        let b = sb.work().join("group/proj2/b.o");
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        (a, b)
+    } else {
+        (sb.work().join("a.o"), sb.work().join("b.o"))
+    };
+    fs::write(&a, b"a").unwrap();
+    fs::write(&b, b"b").unwrap();
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{tag}: {}", stderr_of(&put));
+    let mut cmd = common::rtrash(&sb.root);
+    cmd.env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin]);
+    if flag == "--regex" {
+        cmd.arg("--force");
+    }
+    let out = cmd
+        .args([flag, pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{tag}: {}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), vec!["outside.txt".to_string()]);
+}
+
+#[test]
+fn a_basename_glob_can_remove_the_only_objects_below_a_directory() {
+    remove_only_objects_without_scope_roots("rm-objects-glob", "--glob", "*.o", false);
+}
+
+#[test]
+fn a_forced_basename_regex_can_remove_the_only_objects_below_a_directory() {
+    remove_only_objects_without_scope_roots("rm-objects-regex", "--regex", r"\.o$", false);
+}
+
+#[test]
+fn a_basename_glob_can_remove_objects_from_separate_subdirectories() {
+    remove_only_objects_without_scope_roots("rm-nested-objects-glob", "--glob", "*.o", true);
+}
+
+#[test]
+fn a_forced_basename_regex_can_remove_objects_from_separate_subdirectories() {
+    remove_only_objects_without_scope_roots("rm-nested-objects-regex", "--regex", r"\.o$", true);
+}
+
+#[test]
+fn an_unanchored_basename_regex_needs_force_without_scope_roots() {
+    let sb = Sandbox::new("rm-unanchored-basename");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let dir = sb.work().join("work");
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["foo.txt", "keep.txt"] {
+        fs::write(dir.join(name), name).unwrap();
+    }
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        dir.join("foo.txt").to_str().unwrap(),
+        dir.join("keep.txt").to_str().unwrap(),
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--regex", "foo"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("When the scope is unknown"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec![
+            "foo.txt".to_string(),
+            "keep.txt".to_string(),
+            "outside.txt".to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_directory_regex_refuses_its_only_entry_without_scope_roots() {
+    let sb = Sandbox::new("rm-regex-one-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let dir = sb.work().join("work");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("only.txt"), b"only").unwrap();
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        dir.join("only.txt").to_str().unwrap(),
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let pattern = format!("^{}/.*", regex_escape(dir.to_str().unwrap()));
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--regex", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("When the scope is unknown"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec!["only.txt".to_string(), "outside.txt".to_string()]
+    );
+}
+
+#[test]
+fn directory_glob_regex_and_substring_share_the_same_refusal() {
+    for (tag, flag) in [
+        ("rm-dir-kind-glob", "--glob"),
+        ("rm-dir-kind-regex", "--regex"),
+        ("rm-dir-kind-substring", "--substring"),
+    ] {
+        let sb = Sandbox::new(tag);
+        let pin = format!("--trash-dir={}", sb.trash().display());
+        let dir = sb.work().join("named");
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt"] {
+            fs::write(dir.join(name), name).unwrap();
+        }
+        fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+        let put = sb.run(&[
+            "put",
+            &pin,
+            dir.join("a.txt").to_str().unwrap(),
+            dir.join("b.txt").to_str().unwrap(),
+            sb.root.join("outside.txt").to_str().unwrap(),
+        ]);
+        assert!(put.status.success(), "{tag}: {}", stderr_of(&put));
+        let pattern = match flag {
+            "--glob" => format!("{}/*", dir.display()),
+            "--regex" => format!("^{}/.*", regex_escape(dir.to_str().unwrap())),
+            "--substring" => format!("{}/", dir.display()),
+            _ => unreachable!("{flag}"),
+        };
+        let out = common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .args(["rm", &pin, flag, &pattern])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(2), "{tag} {pattern}: {err}");
+        assert!(err.contains("When the scope is unknown"), "{tag}: {err}");
+        assert_eq!(trash_names(&sb).len(), 3, "{tag}: {err}");
+    }
+}
+
+#[test]
+fn directory_pattern_spellings_share_the_same_refusal() {
+    let mut failures = Vec::new();
+    for (n, mode) in [
+        "unanchored-path",
+        "wild-parent",
+        "wrapped-anchor",
+        "alternative-anchor",
+        "inline-flags",
+        "probe-bypass",
+        "glob-no-separator",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let tag = format!("rm-dir-spelling-{n}");
+        let sb = Sandbox::new(&tag);
+        let pin = format!("--trash-dir={}", sb.trash().display());
+        let dir = sb.work().join("work");
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt"] {
+            fs::write(dir.join(name), name).unwrap();
+        }
+        fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+        let put = sb.run(&[
+            "put",
+            &pin,
+            dir.join("a.txt").to_str().unwrap(),
+            dir.join("b.txt").to_str().unwrap(),
+            sb.root.join("outside.txt").to_str().unwrap(),
+        ]);
+        assert!(put.status.success(), "{mode}: {}", stderr_of(&put));
+        let escaped = regex_escape(dir.to_str().unwrap());
+        let (flag, pattern) = match mode {
+            "unanchored-path" => ("--regex", format!("{}/.*", dir.display())),
+            "wild-parent" => ("--regex", r".*/work/.*".to_string()),
+            "wrapped-anchor" => ("--regex", format!("(?:^{escaped}/.*)")),
+            "alternative-anchor" => ("--regex", format!("QQ|^{escaped}/.*")),
+            "inline-flags" => ("--regex", format!("(?i)^{escaped}/.*")),
+            "probe-bypass" => ("--regex", format!("^{escaped}/.*(?:o|[^/.]\\.)")),
+            "glob-no-separator" => ("--glob", "*work*".to_string()),
+            _ => unreachable!("{mode}"),
+        };
+        let out = common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .args(["rm", &pin, flag, &pattern])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        let mut left = trash_names(&sb);
+        left.sort();
+        let expected_status = if flag == "--glob" { Some(1) } else { Some(2) };
+        if out.status.code() != expected_status
+            || left
+                != vec![
+                    "a.txt".to_string(),
+                    "b.txt".to_string(),
+                    "outside.txt".to_string(),
+                ]
+        {
+            failures.push(format!(
+                "{mode} {pattern}: status {:?}, left {left:?}, stderr {}",
+                out.status.code(),
+                stderr_of(&out)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn matching_modes_follow_the_same_rule_with_known_and_unknown_roots() {
+    let cases = [
+        ("keep-glob", "--glob"),
+        ("cache-glob", "--glob"),
+        ("object-glob", "--glob"),
+        ("contains-o-glob", "--glob"),
+        ("narrow-glob", "--glob"),
+        ("ancestor-glob", "--glob"),
+        ("path-glob", "--glob"),
+        ("one-path-glob", "--glob"),
+        ("anchored-regex", "--regex"),
+        ("escaped-regex", "--regex"),
+        ("hidden-regex", "--regex"),
+        ("wild-parent-regex", "--regex"),
+        ("unanchored-regex", "--regex"),
+        ("wrapped-regex", "--regex"),
+        ("alternative-regex", "--regex"),
+        ("flags-regex", "--regex"),
+        ("probe-bypass-regex", "--regex"),
+        ("narrow-regex", "--regex"),
+        ("object-regex", "--regex"),
+        ("letter-regex", "--regex"),
+        ("one-path-regex", "--regex"),
+        ("directory-substring", "--substring"),
+        ("path-substring", "--substring"),
+    ];
+    for roots_known in [false, true] {
+        for (n, (mode, flag)) in cases.into_iter().enumerate() {
+            let tag = format!("rmtbl{}-{n}", usize::from(roots_known));
+            let sb = Sandbox::new(&tag);
+            let pin = format!("--trash-dir={}", sb.trash().display());
+            let dir = sb.work().join("wrk");
+            let hidden = sb.work().join(".config");
+            let one = sb.work().join("one");
+            for path in [&dir, &hidden, &one] {
+                fs::create_dir_all(path).unwrap();
+            }
+            fs::create_dir_all(dir.join("nest")).unwrap();
+            let files = [
+                dir.join("foo"),
+                dir.join("notes.txt"),
+                dir.join("nest/a.o"),
+                dir.join("b.c"),
+                dir.join("alpha.txt"),
+                dir.join("cache.bin"),
+                dir.join("keep.txt"),
+                hidden.join("hidden.txt"),
+                one.join("only.txt"),
+                sb.root.join("spared.txt"),
+            ];
+            for path in &files {
+                fs::write(path, b"x").unwrap();
+            }
+            let mut put_args = vec!["put".to_string(), pin.clone()];
+            put_args.extend(files.iter().map(|path| path.to_string_lossy().into_owned()));
+            let put_refs: Vec<&str> = put_args.iter().map(String::as_str).collect();
+            let put = sb.run(&put_refs);
+            assert!(put.status.success(), "{mode}: {}", stderr_of(&put));
+
+            let dir_text = dir.to_string_lossy();
+            let dir_regex = regex_escape(&dir_text);
+            let hidden_regex = regex_escape(hidden.to_str().unwrap());
+            let one_regex = regex_escape(one.to_str().unwrap());
+            let pattern = match mode {
+                "keep-glob" => "keep*".to_string(),
+                "cache-glob" => "cache*".to_string(),
+                "object-glob" => "*.o".to_string(),
+                "contains-o-glob" => "*o*".to_string(),
+                "narrow-glob" => "a*".to_string(),
+                "ancestor-glob" => "*wrk*".to_string(),
+                "path-glob" => format!("{dir_text}/*"),
+                "one-path-glob" => format!("{}/*", one.display()),
+                "anchored-regex" => format!("^{dir_text}/.*"),
+                "escaped-regex" => format!("^{dir_regex}/.*"),
+                "hidden-regex" => format!("^{hidden_regex}/.*"),
+                "wild-parent-regex" => r"^.*/wrk/.*".to_string(),
+                "unanchored-regex" => format!("{dir_text}/.*"),
+                "wrapped-regex" => format!("(?:^{dir_regex}/.*)"),
+                "alternative-regex" => format!("QQ|^{dir_regex}/.*"),
+                "flags-regex" => format!("(?i)^{dir_regex}/.*"),
+                "probe-bypass-regex" => {
+                    format!("^{dir_regex}/.*(?:o|[^/.]\\.)")
+                }
+                "narrow-regex" => format!("^{dir_regex}/f"),
+                "object-regex" => r"\.o$".to_string(),
+                "letter-regex" => "o".to_string(),
+                "one-path-regex" => format!("^{one_regex}/.*"),
+                "directory-substring" => format!("{dir_text}/"),
+                "path-substring" => dir.join("notes.txt").to_string_lossy().into_owned(),
+                _ => unreachable!("{mode}"),
+            };
+            let mut cmd = common::rtrash(&sb.root);
+            if roots_known {
+                let home = sb.root.join("home");
+                fs::create_dir_all(&home).unwrap();
+                cmd.env("HOME", &home).env("USERPROFILE", &home);
+            } else {
+                cmd.env_remove("HOME")
+                    .env_remove("USERPROFILE")
+                    .env_remove("XDG_DATA_HOME");
+            }
+            let out = cmd
+                .args(["rm", &pin, flag, &pattern])
+                .current_dir(sb.work())
+                .output()
+                .unwrap();
+            let basename_glob = flag == "--glob" && !pattern.contains(['/', '\\']);
+            if !roots_known && !basename_glob {
+                let err = stderr_of(&out);
+                assert_eq!(out.status.code(), Some(2), "{mode}: {err}");
+                assert!(err.contains("When the scope is unknown"), "{mode}: {err}");
+                assert_eq!(trash_names(&sb).len(), files.len(), "{mode}: {err}");
+            } else if roots_known && mode == "letter-regex" && out.status.code() == Some(2) {
+                let err = stderr_of(&out);
+                assert!(err.contains("refusing mass pattern"), "{mode}: {err}");
+                assert_eq!(trash_names(&sb).len(), files.len(), "{mode}: {err}");
+            } else {
+                assert_ne!(
+                    out.status.code(),
+                    Some(2),
+                    "{mode} ({pattern}): {}",
+                    stderr_of(&out)
+                );
+                assert!(
+                    trash_names(&sb).contains(&"spared.txt".to_string()),
+                    "{mode}: {}",
+                    stderr_of(&out)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn unknown_scope_narrow_patterns_are_deterministic() {
+    for n in 0..50 {
+        let sb = Sandbox::new(&format!("rmdet-{n}"));
+        let pin = format!("--trash-dir={}", sb.trash().display());
+        let dir = sb.work().join("wrk");
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["foo", "a.txt"] {
+            fs::write(dir.join(name), name).unwrap();
+        }
+        fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+        let put = sb.run(&[
+            "put",
+            &pin,
+            dir.join("foo").to_str().unwrap(),
+            dir.join("a.txt").to_str().unwrap(),
+            sb.root.join("outside.txt").to_str().unwrap(),
+        ]);
+        assert!(put.status.success(), "{n}: {}", stderr_of(&put));
+        let pattern = format!("^{}/f", regex_escape(dir.to_str().unwrap()));
+        let regex = common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .args(["rm", &pin, "--regex", &pattern])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        assert_eq!(regex.status.code(), Some(2), "{n}: {}", stderr_of(&regex));
+        let glob = common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .args(["rm", &pin, "--glob", "a*"])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        assert!(glob.status.success(), "{n}: {}", stderr_of(&glob));
+        let mut left = trash_names(&sb);
+        left.sort();
+        assert_eq!(
+            left,
+            vec!["foo".to_string(), "outside.txt".to_string()],
+            "{n}"
+        );
+    }
+}
+
+#[test]
+fn path_globs_and_substrings_need_force_without_scope_roots() {
+    for (n, mode) in ["glob", "substring"].into_iter().enumerate() {
+        let tag = format!("rm-narrow-path-{n}");
+        let sb = Sandbox::new(&tag);
+        let pin = format!("--trash-dir={}", sb.trash().display());
+        let dir = sb.work().join("work");
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["a.c", "b.c", "notes.txt"] {
+            fs::write(dir.join(name), name).unwrap();
+        }
+        fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+        let put = sb.run(&[
+            "put",
+            &pin,
+            dir.join("a.c").to_str().unwrap(),
+            dir.join("b.c").to_str().unwrap(),
+            dir.join("notes.txt").to_str().unwrap(),
+            sb.root.join("outside.txt").to_str().unwrap(),
+        ]);
+        assert!(put.status.success(), "{mode}: {}", stderr_of(&put));
+        let (flag, pattern) = match mode {
+            "glob" => ("--glob", format!("{}/*.c", dir.display())),
+            "substring" => (
+                "--substring",
+                dir.join("a.c").to_string_lossy().into_owned(),
+            ),
+            _ => unreachable!("{mode}"),
+        };
+        let out = common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .args(["rm", &pin, flag, &pattern])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(2), "{mode}: {err}");
+        assert!(err.contains("When the scope is unknown"), "{mode}: {err}");
+        let mut left = trash_names(&sb);
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "a.c".to_string(),
+                "b.c".to_string(),
+                "notes.txt".to_string(),
+                "outside.txt".to_string()
+            ],
+            "{mode}"
+        );
+    }
+}
+
+#[test]
+fn a_substring_directory_is_refused_when_home_is_unset() {
+    let sb = Sandbox::new("rm-substring-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let dir = sb.work().join("user");
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["b.log", "z.txt"] {
+        fs::write(dir.join(name), name).unwrap();
+    }
+    sb.touch("outside.txt");
+    let put = sb.run(&[
+        "put",
+        &pin,
+        dir.join("b.log").to_str().unwrap(),
+        dir.join("z.txt").to_str().unwrap(),
+        sb.work().join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let pattern = format!("{}/", dir.display());
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--substring", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("When the scope is unknown"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec![
+            "b.log".to_string(),
+            "outside.txt".to_string(),
+            "z.txt".to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_substring_directory_stays_narrow_when_scope_roots_are_known() {
+    let sb = Sandbox::new("rm-substring-known-home");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let home = sb.work().join("home");
+    let other = sb.work().join("other");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    fs::write(home.join("mine.txt"), b"mine").unwrap();
+    for name in ["a.txt", "b.txt"] {
+        fs::write(other.join(name), name).unwrap();
+    }
+    sb.touch("outside.txt");
+    let put = sb.run(&[
+        "put",
+        &pin,
+        home.join("mine.txt").to_str().unwrap(),
+        other.join("a.txt").to_str().unwrap(),
+        other.join("b.txt").to_str().unwrap(),
+        sb.work().join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let pattern = format!("{}/", other.display());
+    let out = common::rtrash(&sb.root)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .args(["rm", &pin, "--substring", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec!["mine.txt".to_string(), "outside.txt".to_string()]
+    );
 }
 
 fn regex_escape(s: &str) -> String {
@@ -2637,7 +3467,7 @@ fn trash_rm_match_takes_substring_and_exact() {
         sb.touch(f);
         assert!(sb.run(&["put", f]).status.success());
     }
-    let out = sb.run(&["rm", "-m", "substring", "/old-a"]);
+    let out = sb.run(&["rm", "-m", "substring", "old-a"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     // The original path exactly as put recorded it.
     let info = fs::read_to_string(sb.trash().join("info/old-b.txt.trashinfo")).unwrap();

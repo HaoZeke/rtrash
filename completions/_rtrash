@@ -319,7 +319,7 @@ rm_opts=(
   '(-n --dry-run)'{-n,--dry-run}'[list matches and reclaimable size; do not delete]'
   '(-i --interactive -y --yes)'{-i,--interactive}'[ask before deleting, even off a terminal]'
   '(-i --interactive -y --yes)'{-y,--yes}'[do not ask before deleting]'
-  '(-f --force)'{-f,--force}'[do not ask, and allow patterns that take every entry in the trash or under one scope root, including its last entry]'
+  '(-f --force)'{-f,--force}'[When the scope is unknown, regex and substring matching and globs containing a path separator require --force; use an exact path, --id, or a basename glob instead.]'
   '(-v --verbose)'{-v,--verbose}'[print each permanently removed original path]'
   '--json[emit a JSON summary with matches]'
   '(- *)'--help'[display help and exit]'

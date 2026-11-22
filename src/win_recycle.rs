@@ -4942,9 +4942,13 @@ left in place.
   -i, --interactive  ask even when stdin is not a terminal (rm asks on
                    a terminal by default, naming the matches)
   -y, --yes      do not ask
-  -f, --force    do not ask, and allow patterns that take every entry in
-                  the trash or under one scope root, including its last entry;
-                  also remove entries that still hold risky git work;
+  -f, --force    do not ask, and allow patterns that cover every name below
+                  a matched directory or take every entry in a known scope,
+                  including its last entry;
+                  When the scope is unknown, regex and substring matching and
+                  globs containing a path separator require --force; use an
+                  exact path, --id, or a basename glob instead.
+                  Also remove entries that still hold risky git work;
                   without it, those entries are refused
       --max-count=N  refuse, deleting nothing, when more than N items
                    would go (also RTRASH_MAX_PERMANENT)
@@ -5015,7 +5019,15 @@ left in place.
             pats.texts = crate::orig_path::expand(&pats.operands);
         }
         if pats.is_mass() && !force && !scoped {
-            eprintln!("{prog}: refusing a pattern that matches everything without --force");
+            if pats.unknown_scope_needs_force() {
+                crate::rm_match::refuse_unknown_scope(prog);
+                return 2;
+            }
+            eprintln!(
+                "{prog}: refusing mass pattern {:?} without --force \
+                 (covers every name below a matched directory or every entry in a known scope)",
+                pats.texts
+            );
             return 2;
         }
         let mounts = matches!(
@@ -5059,8 +5071,10 @@ left in place.
                         if let Some(k) = volume_root_key(&abs, &mounts) {
                             if !force && !scoped {
                                 eprintln!(
-                                    "{prog}: refusing a pattern that matches \
-                                     everything without --force"
+                                    "{prog}: refusing mass pattern {:?} without --force \
+                                     (covers every name below a matched directory or every entry \
+                                     in a known scope)",
+                                    pats.texts
                                 );
                                 return 2;
                             }
@@ -5079,7 +5093,11 @@ left in place.
         // every item there. The operand text was already checked; this
         // catches a form the path keys produced.
         if !force && !scoped && path_keys.iter().any(|k| super::mass_canonical_key(k)) {
-            eprintln!("{prog}: refusing a pattern that matches everything without --force");
+            eprintln!(
+                "{prog}: refusing mass pattern {:?} without --force \
+                 (covers every name below a matched directory or every entry in a known scope)",
+                pats.texts
+            );
             return 2;
         }
         let items = match super::list_items() {
@@ -5171,7 +5189,11 @@ left in place.
         if !force && !scoped {
             let originals: Vec<PathBuf> = matched.iter().map(original_of).collect();
             if crate::filters::selection_covers_scope(&pats, &originals, &census) {
-                eprintln!("{prog}: refusing a pattern that matches everything without --force");
+                eprintln!(
+                    "{prog}: refusing mass pattern {:?} without --force \
+                     (covers every name below a matched directory or every entry in a known scope)",
+                    pats.texts
+                );
                 return 2;
             }
         }

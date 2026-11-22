@@ -551,12 +551,27 @@ impl Patterns {
     /// or a trash root. The decision is what the pattern matches, not a
     /// list of spellings.
     pub fn is_mass(&self) -> bool {
+        if self.unknown_scope_needs_force() {
+            return true;
+        }
         match self.kind {
             Match::Glob => self.texts.iter().any(|p| glob_is_mass(p)),
             Match::Regex => self.regex.iter().any(regex_is_mass),
             Match::Substring => self.texts.iter().any(|p| substring_is_mass(p)),
             Match::Prefix => self.texts.iter().any(|p| prefix_pattern_is_mass(p)),
             Match::Exact | Match::Id => false,
+        }
+    }
+
+    /// Whether broad matching is unavailable because no scope root is known.
+    pub fn unknown_scope_needs_force(&self) -> bool {
+        if crate::rm_match::known_scope_roots().is_some() {
+            return false;
+        }
+        match self.kind {
+            Match::Regex | Match::Substring => true,
+            Match::Glob => self.texts.iter().any(|text| text.contains(['/', '\\'])),
+            Match::Prefix | Match::Exact | Match::Id => false,
         }
     }
 
@@ -579,11 +594,7 @@ impl Patterns {
 
     pub fn hit(&self, full: &str, base: &str, name: &str) -> bool {
         match self.kind {
-            Match::Glob => self.texts.iter().any(|p| {
-                crate::util::fnmatch(p, full)
-                    || crate::util::fnmatch(p, base)
-                    || crate::util::fnmatch(p, name)
-            }),
+            Match::Glob => self.glob_hit(full, base, name),
             Match::Regex => self.regex.iter().any(|r| r.is_match(full)),
             Match::Substring => self.texts.iter().any(|p| full.contains(p.as_str())),
             Match::Prefix => self
@@ -594,6 +605,18 @@ impl Patterns {
             // The date is not here; [`selects`] matches an id.
             Match::Id => false,
         }
+    }
+
+    pub(crate) fn glob_hit(&self, full: &str, base: &str, name: &str) -> bool {
+        self.texts.iter().any(|p| {
+            if !crate::rm_match::scope_roots_are_known() && !p.contains(['/', '\\']) {
+                crate::util::fnmatch(p, base) || crate::util::fnmatch(p, name)
+            } else {
+                crate::util::fnmatch(p, full)
+                    || crate::util::fnmatch(p, base)
+                    || crate::util::fnmatch(p, name)
+            }
+        })
     }
 }
 
@@ -660,14 +683,7 @@ fn covers_absolute(mut hit: impl FnMut(&str) -> bool) -> bool {
 /// home spelling is what made every probe match.
 fn glob_covers_any_scope(pat: &str) -> bool {
     let Some(roots) = crate::rm_match::known_scope_roots() else {
-        let literal: String = pat
-            .chars()
-            .take_while(|c| !matches!(c, '*' | '?' | '['))
-            .collect();
-        if !literal.contains(['/', '\\']) {
-            return false;
-        }
-        return glob_covers_root(pat, literal.trim_end_matches(['/', '\\']));
+        return false;
     };
     roots
         .iter()
@@ -755,7 +771,8 @@ pub fn selection_covers_scope(
 }
 
 /// A substring every Unix absolute path contains, or every Windows path
-/// contains. `.` is neither.
+/// contains. When no scope root is known, every substring needs `--force`
+/// before this content check matters.
 fn substring_is_mass(p: &str) -> bool {
     p.is_empty()
         || ["/", "/a", "/a/b"].iter().all(|s| s.contains(p))
@@ -824,6 +841,9 @@ mod pattern_tests {
         assert!(Patterns::new(vec![".*".into()], Match::Regex)
             .unwrap()
             .is_mass());
+        assert!(!Patterns::new(vec![r"\.o$".into()], Match::Regex)
+            .unwrap()
+            .is_mass());
         assert!(Patterns::new(vec!["(".into()], Match::Regex).is_err());
         let g = Patterns::new(vec!["*.o".into()], Match::Glob).unwrap();
         assert!(g.hit("/x/a.o", "a.o", "a.o"));
@@ -843,6 +863,14 @@ mod pattern_tests {
         let sub = Patterns::new(vec!["old-pro".into()], Match::Substring).unwrap();
         assert!(sub.hit("/home/u/old-project/a", "a", "a"));
         assert!(!sub.hit("/home/u/new/a", "a", "a"));
+        for narrow in ["notes", "b.log"] {
+            assert!(
+                !Patterns::new(vec![narrow.into()], Match::Substring)
+                    .unwrap()
+                    .is_mass(),
+                "{narrow}"
+            );
+        }
         assert!(Patterns::new(vec!["/".into()], Match::Substring)
             .unwrap()
             .is_mass());

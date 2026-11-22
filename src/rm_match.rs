@@ -133,6 +133,11 @@ pub(crate) fn known_scope_roots() -> Option<Vec<PathBuf>> {
     scope_roots_from(home.as_deref(), xdg.as_deref())
 }
 
+pub(crate) fn scope_roots_are_known() -> bool {
+    crate::util::home_dir().is_some_and(|path| path.is_absolute())
+        || std::env::var_os("XDG_DATA_HOME").is_some_and(|path| Path::new(&path).is_absolute())
+}
+
 pub(crate) fn scope_roots_from(home: Option<&Path>, xdg: Option<&Path>) -> Option<Vec<PathBuf>> {
     let home = home.filter(|p| p.is_absolute());
     let xdg = xdg.filter(|p| p.is_absolute());
@@ -373,6 +378,14 @@ pub fn refuse_ambiguous_keys(
 pub fn no_matches(prog: &str) -> i32 {
     eprintln!("{prog}: no trash items match");
     1
+}
+
+pub const UNKNOWN_SCOPE_RULE: &str = "When the scope is unknown, regex and substring matching and \
+globs containing a path separator require --force; use an exact path, --id, or a basename glob \
+instead.";
+
+pub fn refuse_unknown_scope(prog: &str) {
+    eprintln!("{prog}: {UNKNOWN_SCOPE_RULE}");
 }
 
 #[cfg(test)]

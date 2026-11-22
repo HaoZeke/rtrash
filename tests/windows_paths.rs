@@ -620,10 +620,7 @@ fn a_prefix_of_a_junction_to_a_drive_root_is_refused() {
     let refused = run(&home, &["rm", "--prefix", &junction]);
     let err = String::from_utf8_lossy(&refused.stderr);
     assert_eq!(refused.status.code(), Some(2), "{err}");
-    assert!(
-        err.contains("refusing a pattern that matches everything without --force"),
-        "{err}"
-    );
+    assert!(err.contains("refusing mass pattern"), "{err}");
     assert!(refused.stdout.is_empty(), "{}", text(&refused));
     assert_eq!(payloads(), 1, "a refused prefix purged the bin");
     let listed = ok(&run(&home, &["rm", "-n", "-f", "--prefix", &junction]));
@@ -708,7 +705,7 @@ fn a_differently_cased_home_prefix_is_refused() {
     let err = String::from_utf8_lossy(&out.stderr);
     let _ = fs::remove_dir_all(&home);
     assert_eq!(out.status.code(), Some(2), "{err}");
-    assert!(err.contains("matches everything"), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
 }
 
 /// Every match kept is a successful rm that deleted nothing. Exit 1 would

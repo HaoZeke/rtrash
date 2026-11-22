@@ -53,9 +53,12 @@ unknown git work; -n reports the same refusal without deleting anything.
   -i, --interactive  ask even when stdin is not a terminal (the reply is
                      read from stdin; no reply removes nothing)
   -y, --yes        do not ask
-  -f, --force      do not ask, and allow patterns that take every entry
-                     in the trash or under one scope root, including its
-                     last entry (e.g. '*')
+  -f, --force      do not ask, and allow patterns that cover every name
+                     below a matched directory or take every entry in a
+                     known scope, including its last entry (e.g. '*')
+                   When the scope is unknown, regex and substring matching
+                     and globs containing a path separator require --force;
+                     use an exact path, --id, or a basename glob instead.
       --max-count=N  refuse, deleting nothing, when more than N items
                      would go (also RTRASH_MAX_PERMANENT)
   -v, --verbose    print each permanently removed original path
@@ -294,8 +297,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
 
     // Refuse accidental host-wide permanent purge of the whole trash.
     if !force && !scoped && pats.is_mass() {
+        if pats.unknown_scope_needs_force() {
+            crate::rm_match::refuse_unknown_scope(prog);
+            return 2;
+        }
         eprintln!(
-            "{prog}: refusing mass pattern {:?} without --force (would permanently delete matching trash entries)",
+            "{prog}: refusing mass pattern {:?} without --force \
+             (covers every name below a matched directory or every entry in a known scope)",
             patterns
         );
         eprintln!("Try '{prog} --force …' only if you intend a full selective purge.");
@@ -460,7 +468,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         if crate::filters::selection_covers_scope(&pats, &originals, &census) {
             eprintln!(
                 "{prog}: refusing mass pattern {:?} without --force \
-                 (would permanently delete matching trash entries)",
+                 (covers every name below a matched directory or every entry in a known scope)",
                 patterns
             );
             eprintln!("Try '{prog} --force …' only if you intend a full selective purge.");

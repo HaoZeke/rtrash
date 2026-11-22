@@ -717,15 +717,8 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
             .unwrap_or_default();
         let name = nfc(&e.name);
         let pattern_hit = match patterns.kind {
-            crate::filters::Match::Exact => {
-                crate::orig_path::selects(&patterns.texts, &e.shown)
-            }
-            crate::filters::Match::Glob => patterns.texts.iter().any(|p| {
-                let p = nfc(p);
-                crate::util::fnmatch(&p, &path_s)
-                    || crate::util::fnmatch(&p, &base)
-                    || crate::util::fnmatch(&p, &name)
-            }),
+            crate::filters::Match::Exact => crate::orig_path::selects(&patterns.texts, &e.shown),
+            crate::filters::Match::Glob => texts.glob_hit(&path_s, &base, &name),
             crate::filters::Match::Regex => {
                 let path_s = nfc(&path_s);
                 regex.iter().any(|r| r.is_match(&path_s))
@@ -767,7 +760,7 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         if crate::filters::selection_covers_scope(patterns, &originals, &census) {
             eprintln!(
                 "{prog}: refusing mass pattern {:?} without --force \
-                 (would permanently delete matching trash entries)",
+                 (covers every name below a matched directory or every entry in a known scope)",
                 patterns.texts
             );
             eprintln!("Try '{prog} --force …' only if you intend a full selective purge.");
