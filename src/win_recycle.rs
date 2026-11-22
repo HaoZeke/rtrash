@@ -4048,6 +4048,9 @@ Without PATH, print a numbered list and read an index from stdin.
         dest: &Path,
     ) -> Result<(), String> {
         crate::allow_roots::check(dest).map_err(|e| e.to_string())?;
+        if let Err(e) = crate::permanent_guard::gate() {
+            return Err(format!("cannot replace '{}': {e}", dest.display()));
+        }
         let payload = Path::new(&it.id);
         let parent = dest
             .parent()
@@ -4102,13 +4105,6 @@ Without PATH, print a numbered list and read an index from stdin.
         if let Err(e) = std::fs::rename(dest, &backup) {
             return Err(put_staged_back(
                 format!("cannot stage existing '{}': {e}", dest.display()),
-                &dest_stage,
-                payload,
-            ));
-        }
-        if let Err(e) = crate::permanent_guard::gate() {
-            return Err(put_staged_back(
-                format!("cannot replace '{}': {e}", dest.display()),
                 &dest_stage,
                 payload,
             ));
