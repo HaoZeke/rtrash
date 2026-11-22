@@ -3519,6 +3519,32 @@ fn empty_names_an_exact_path_outside_the_age_window() {
     assert_eq!(names, vec!["a".to_string(), "ab".to_string()]);
 }
 
+#[test]
+fn empty_i_of_a_path_asks_before_it_removes() {
+    let sb = Sandbox::new("empty-i-path");
+    fs::write(sb.work().join("chosen.txt"), b"chosen").unwrap();
+    fs::write(sb.work().join("kept.txt"), b"kept").unwrap();
+    assert!(sb.run(&["put", "chosen.txt", "kept.txt"]).status.success());
+
+    let no = sb.run_with_stdin(&["empty", "--home-only", "-i", "chosen.txt"], "no\n");
+    assert!(no.status.success(), "{}", stderr_of(&no));
+    assert!(
+        stderr_of(&no).contains("Permanently remove 1 item"),
+        "{}",
+        stderr_of(&no)
+    );
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["chosen.txt".to_string(), "kept.txt".to_string()]
+    );
+
+    let yes = sb.run_with_stdin(&["empty", "--home-only", "-i", "chosen.txt"], "y\n");
+    assert!(yes.status.success(), "{}", stderr_of(&yes));
+    assert_eq!(trash_names(&sb), vec!["kept.txt".to_string()]);
+}
+
 /// `a` and `ab` are far under `--larger-than=1G`, so the exact path is in
 /// the trash and outside the size window. The hint says so and leaves
 /// both items in place.
@@ -9743,6 +9769,54 @@ fn rm_resolves_a_trailing_dot_dot_after_a_link_physically() {
     assert!(rm.status.success(), "{}", stderr_of(&rm));
     let left = listed_originals(&sb);
     assert_eq!(left, vec![holder.to_str().unwrap().to_string()], "{left:?}");
+}
+
+/// `link/..`, with `link` pointing at `../real`, names the physical parent.
+/// put refuses that `..` operand. rm and empty must leave a decoy that was
+/// put at the lexical parent.
+#[test]
+fn rm_and_empty_leave_a_decoy_at_the_lexical_parent_of_link_dotdot() {
+    let sb = Sandbox::new("link-dotdot");
+    let work = sb.work();
+    fs::create_dir(work.join("real")).unwrap();
+    fs::write(work.join("real/inside"), b"in").unwrap();
+    fs::create_dir(work.join("sub")).unwrap();
+    fs::write(work.join("sub/decoy"), b"decoy").unwrap();
+    let put = sb.run(&["put", "--home-only", "-r", "sub"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    assert!(sb.trash().join("files/sub/decoy").is_file());
+
+    fs::create_dir(work.join("sub")).unwrap();
+    std::os::unix::fs::symlink("../real", work.join("sub/link")).unwrap();
+    let refused = sb.run(&["put", "--home-only", "-r", "sub/link/.."]);
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr_of(&refused));
+    assert!(
+        stderr_of(&refused).contains("'.' or '..'"),
+        "{}",
+        stderr_of(&refused)
+    );
+    assert!(sb.trash().join("files/sub/decoy").is_file());
+
+    let dry = sb.run(&["rm", "--home-only", "-n", "sub/link/.."]);
+    let shown = format!("{}{}", stdout_of(&dry), stderr_of(&dry));
+    assert!(
+        shown.contains("Would permanently remove 0 items"),
+        "{shown}"
+    );
+    let rm = sb.run(&["rm", "--home-only", "-f", "sub/link/.."]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    assert!(
+        sb.trash().join("files/sub/decoy").is_file(),
+        "{}",
+        stderr_of(&rm)
+    );
+    let empty = sb.empty(&["sub/link/.."]);
+    assert!(empty.status.success(), "{}", stderr_of(&empty));
+    assert!(
+        sb.trash().join("files/sub/decoy").is_file(),
+        "{}",
+        stderr_of(&empty)
+    );
 }
 
 /// A symlinked parent that is retargeted after the path was resolved does

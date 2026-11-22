@@ -806,6 +806,27 @@ mod tests {
         assert_eq!(chosen[0].local, old);
     }
 
+    /// Empty forms are not "no operand". Two bin items must stay when the
+    /// caller passed a path and `forms` produced nothing.
+    #[test]
+    fn an_operand_with_no_forms_does_not_select_the_whole_bin() {
+        let now = 1_700_000_000i64;
+        let items = vec![
+            bin(PathBuf::from("/home/u/a.txt"), now - 10),
+            bin(PathBuf::from("/home/u/b.txt"), now - 10),
+        ];
+        let paths = vec![String::new()];
+        let wants = crate::orig_path::expand(&paths);
+        assert!(wants.is_empty(), "{wants:?}");
+        let chosen = matching(&items, None, &wants, true, now);
+        assert!(
+            chosen.is_empty(),
+            "empty forms selected {} of {} items",
+            chosen.len(),
+            items.len()
+        );
+    }
+
     #[test]
     fn wsl_rm_refuses_an_empty_operand() {
         assert_eq!(rm("rtrash", &[String::new()], &[]), 2);
