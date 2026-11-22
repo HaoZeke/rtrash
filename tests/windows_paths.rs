@@ -60,6 +60,20 @@ fn ok(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
 
+/// Removes the junction before the tree, including when a test panics.
+/// A junction to a drive root must not be walked.
+struct DropJunction {
+    link: PathBuf,
+    home: PathBuf,
+}
+
+impl Drop for DropJunction {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.link);
+        let _ = fs::remove_dir_all(&self.home);
+    }
+}
+
 #[test]
 fn put_list_rm_and_restore_reach_a_file_past_max_path() {
     let home = home("deep-file");
@@ -502,4 +516,62 @@ fn empty_takes_a_double_dash_as_the_end_of_its_options() {
     assert!(!shown.contains("Would remove"), "{shown}");
     let listed = ok(&run(&home, &["list"]));
     assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
+}
+
+/// `--prefix` of a junction whose target is a drive root canonicalizes to
+/// that root and would match every Recycle Bin item on the drive. Without
+/// `--force` rm refuses it and leaves the item. With `--force` the dry run
+/// lists the item, so the canonical key is what the guard stopped.
+#[test]
+fn a_prefix_of_a_junction_to_a_drive_root_is_refused() {
+    let home = home("drive-root");
+    let link = home.join("safe-junction");
+    let _cleanup = DropJunction {
+        link: link.clone(),
+        home: home.clone(),
+    };
+    let text_home = s(&home);
+    let bytes = text_home.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
+        common::skip("the scratch dir is not on a drive letter; skipping");
+        return;
+    }
+    let root = format!(r"{}:\", char::from(bytes[0].to_ascii_uppercase()));
+    let file = home.join("keep.txt");
+    fs::write(&file, "k").unwrap();
+    ok(&run(&home, &["put", &s(&file)]));
+    common::mklink_junction(&link, Path::new(&root)).unwrap();
+    let canon = s(&fs::canonicalize(&link).unwrap());
+    let canon = canon
+        .trim_start_matches(r"\\?\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase();
+    assert_eq!(
+        canon,
+        root.trim_end_matches('\\').to_ascii_lowercase(),
+        "the junction did not resolve to the drive root"
+    );
+    let payloads = || {
+        fs::read_dir(common::test_bin(&home))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("$R"))
+            .count()
+    };
+    assert_eq!(payloads(), 1);
+    let junction = s(&link);
+    let refused = run(&home, &["rm", "--prefix", &junction]);
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("refusing a pattern that matches everything without --force"),
+        "{err}"
+    );
+    assert!(refused.stdout.is_empty(), "{}", text(&refused));
+    assert_eq!(payloads(), 1, "a refused prefix purged the bin");
+    let listed = ok(&run(&home, &["rm", "-n", "-f", "--prefix", &junction]));
+    assert!(listed.lines().any(|l| l.ends_with("keep.txt")), "{listed}");
+    assert_eq!(payloads(), 1, "the dry run purged the bin");
+    let narrow = ok(&run(&home, &["rm", "-n", "--prefix", &text_home]));
+    assert!(narrow.lines().any(|l| l.ends_with("keep.txt")), "{narrow}");
 }

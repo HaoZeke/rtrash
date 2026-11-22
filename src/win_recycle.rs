@@ -1319,6 +1319,27 @@ pub fn long_path(path: &Path) -> Option<PathBuf> {
     )))
 }
 
+/// Whether a [`path_key`] names a whole volume: a drive root (`c:` or
+/// `c:\`), a UNC share root (`\\server\share`, or a server with nothing
+/// below it) or an empty key. A prefix match on one of these takes every
+/// Recycle Bin item on that volume. Canonicalizing follows a junction, so
+/// a junction to a drive root contributes that root beside the path as typed.
+#[cfg(any(windows, test))]
+fn mass_canonical_key(key: &str) -> bool {
+    if key.is_empty() {
+        return true;
+    }
+    let b = key.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return b[2..].iter().all(|c| *c == b'\\');
+    }
+    let Some(rest) = key.strip_prefix(r"\\") else {
+        return false;
+    };
+    let parts = rest.split('\\').filter(|part| !part.is_empty()).count();
+    (1..=2).contains(&parts)
+}
+
 /// Whether a Recycle Bin item's normalized [`path_key`] matches any of
 /// `want_keys` under `Match::Exact` or `Match::Prefix`.
 pub fn win_path_matches(kind: crate::filters::Match, orig_key: &str, want_keys: &[String]) -> bool {
@@ -4937,6 +4958,13 @@ left in place.
             }
             _ => Vec::new(),
         };
+        // dir_forms follows a junction. A prefix whose key is a drive root,
+        // a UNC share root or empty matches every item there, which the
+        // operand text does not say.
+        if !force && !scoped && path_keys.iter().any(|k| super::mass_canonical_key(k)) {
+            eprintln!("{prog}: refusing a pattern that matches everything without --force");
+            return 2;
+        }
         let items = match super::list_items() {
             Ok(i) => i,
             Err(e) => {
@@ -6424,6 +6452,52 @@ mod tests {
         assert_eq!(path_key(r"\\?\UNC\srv\share\f", &[]), r"\\srv\share\f");
         assert_eq!(path_key("C:/x/y/", &[]), r"c:\x\y");
         assert_eq!(path_key(r"C:\", &[]), r"c:\");
+    }
+
+    /// `dir_forms` follows a junction. The path as typed stays narrow, and
+    /// the canonical form of a junction to a drive root is that root. The
+    /// mass guard refuses the root, a UNC share root and an empty key.
+    #[test]
+    fn a_canonical_drive_root_key_is_a_mass_prefix() {
+        let typed = path_key(r"C:\safe-junction", &[]);
+        let canonical = path_key(r"C:\", &[]);
+        assert_eq!(typed, r"c:\safe-junction");
+        assert_eq!(canonical, r"c:\");
+        assert!(!mass_canonical_key(&typed));
+        assert!(mass_canonical_key(&canonical));
+        assert!(mass_canonical_key(&path_key("C:", &[])));
+        assert!(mass_canonical_key(&path_key(r"\\?\C:\", &[])));
+        assert_eq!(path_key(r"\\server\share\", &[]), r"\\server\share");
+        assert!(mass_canonical_key(&path_key(r"\\server\share\", &[])));
+        assert!(mass_canonical_key(&path_key(r"\\?\UNC\Server\Share", &[])));
+        assert!(mass_canonical_key(&path_key(r"\\server", &[])));
+        assert!(mass_canonical_key(&path_key("", &[])));
+        assert!(mass_canonical_key(&path_key(r"\", &[])));
+        assert!(!mass_canonical_key(&path_key(
+            r"C:\safe-junction\keep.txt",
+            &[]
+        )));
+        assert!(!mass_canonical_key(&path_key(r"D:\work", &[])));
+        assert!(!mass_canonical_key(&path_key(r"\\server\share\dir", &[])));
+        let keys = [typed, canonical.clone()];
+        assert!(keys.iter().any(|k| mass_canonical_key(k)));
+        let item = path_key(r"C:\Users\a\file.txt", &[]);
+        assert!(win_path_matches(
+            crate::filters::Match::Prefix,
+            &item,
+            &keys
+        ));
+        assert!(!win_path_matches(
+            crate::filters::Match::Prefix,
+            &path_key(r"D:\x.txt", &[]),
+            &keys
+        ));
+        // The root matches every item on its drive and nothing on another.
+        assert!(win_path_matches(
+            crate::filters::Match::Prefix,
+            &item,
+            &[canonical]
+        ));
     }
 
     #[test]
