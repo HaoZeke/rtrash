@@ -937,8 +937,9 @@ pub fn test_bin_put(dir: &Path, p: &Path) -> io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
     // The plain form with on-disk name casing, as the shell records it,
-    // even for a `\\?\` operand or a differently cased path.
-    let abs = crate::util::plain_path(&std::path::absolute(p)?);
+    // even for a `\\?\` operand or a differently cased path. The last
+    // component keeps a trailing dot or space.
+    let abs = crate::util::plain_path(&crate::util::absolute_keep_tail(p));
     let original = on_disk_entry(&abs);
     let fixed = if cfg!(debug_assertions) {
         std::env::var("RTRASH_TEST_BIN_TIME")
@@ -1241,10 +1242,32 @@ pub fn volume_mounts() -> Vec<(String, String)> {
     out
 }
 
+/// NTFS compares by a one-to-one uppercase table, not by Unicode case
+/// folding. `k` and U+212A KELVIN SIGN both lowercase to `k`, and `ß`
+/// uppercases to `SS`; either fold would merge names NTFS keeps apart.
+/// A character whose simple uppercase is a single character maps to it,
+/// and every other character stays as it is.
+fn ntfs_fold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let mut upper = c.to_uppercase();
+        let Some(first) = upper.next() else {
+            out.push(c);
+            continue;
+        };
+        if upper.next().is_none() {
+            out.push(first);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// A comparison key for a Windows path: the verbatim prefix gone, a volume
 /// GUID path read as its mount point (`mounts` from `volume_mounts`),
-/// forward slashes turned back, no trailing separator, and lower case,
-/// since Windows file names compare without case.
+/// forward slashes turned back, no trailing separator, and folded with
+/// [`ntfs_fold`].
 pub fn path_key(path: &str, mounts: &[(String, String)]) -> String {
     let mut s = path.replace('/', "\\");
     let lower = s.to_ascii_lowercase();
@@ -1268,7 +1291,20 @@ pub fn path_key(path: &str, mounts: &[(String, String)]) -> String {
     } else {
         t
     };
-    t.to_lowercase()
+    ntfs_fold(t)
+}
+
+/// The forms of `abs` that exact and prefix matching share: the path as
+/// given, and the same final component under its parent once that parent
+/// is resolved. The last component stays as named, so a junction or
+/// symlink there is not followed.
+#[cfg(any(windows, test))]
+fn forms_keeping_last(abs: &Path, parent_canon: Option<&Path>) -> Vec<PathBuf> {
+    let mut forms = vec![abs.to_path_buf()];
+    if let (Some(dir), Some(name)) = (parent_canon, abs.file_name()) {
+        forms.push(crate::util::plain_path(dir).join(name));
+    }
+    forms
 }
 
 /// The 8.3 path of `path`, when the volume has one. None when the path is
@@ -1405,7 +1441,7 @@ fn key_of(s: &str) -> u64 {
     if let Some(rest) = s.strip_prefix(r"\\") {
         let share: Vec<&str> = rest.splitn(3, '\\').take(2).collect();
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for c in share.join("\\").to_lowercase().bytes() {
+        for c in ntfs_fold(&share.join("\\")).bytes() {
             h = (h ^ u64::from(c)).wrapping_mul(0x100_0000_01b3);
         }
         return h | 1 << 63;
@@ -2648,7 +2684,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
     /// path, which no original path starts with. A directory that is gone
     /// keeps only its absolute form.
     fn dir_forms(dir: &Path) -> Vec<PathBuf> {
-        let abs = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let abs = crate::util::absolute_keep_tail(dir);
         let mut dirs = vec![crate::util::plain_path(&abs)];
         if let Ok(c) = std::fs::canonicalize(dir) {
             dirs.push(crate::util::plain_path(&c));
@@ -2660,13 +2696,20 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
     /// with its parent resolved. A short (8.3) name such as `RUNNER~1` in
     /// %TEMP% names the same folder as the long name the shell records,
     /// and the item itself is gone from there, so only the parent resolves.
+    /// The last component is not resolved, so a junction or symlink there
+    /// is not followed.
     fn path_forms(abs: &Path) -> Vec<PathBuf> {
-        let mut forms = vec![abs.to_path_buf()];
         let parent = abs.parent().and_then(|p| std::fs::canonicalize(p).ok());
-        if let (Some(dir), Some(name)) = (parent, abs.file_name()) {
-            forms.push(crate::util::plain_path(&dir).join(name));
-        }
-        forms
+        super::forms_keeping_last(abs, parent.as_deref())
+    }
+
+    /// The canonical key of `path` when that path is a junction or symlink
+    /// to a volume root, which a prefix would otherwise hide behind the
+    /// link's own name.
+    fn volume_root_key(path: &Path, mounts: &[(String, String)]) -> Option<String> {
+        let canon = std::fs::canonicalize(path).ok()?;
+        let key = super::path_key(&crate::util::plain_path(&canon).to_string_lossy(), mounts);
+        super::mass_canonical_key(&key).then_some(key)
     }
 
     /// The value of --directory=DIR: absolute from here, or an error.
@@ -2675,9 +2718,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             return Err("--directory needs a non-empty DIR".into());
         }
         let d = crate::util::arg_path(v);
-        Ok(crate::util::plain_path(
-            &std::path::absolute(&d).unwrap_or(d),
-        ))
+        Ok(crate::util::plain_path(&crate::util::absolute_keep_tail(
+            &d,
+        )))
     }
 
     pub fn list_run(prog: &str, args: &[String]) -> i32 {
@@ -3842,7 +3885,7 @@ Without PATH, print a numbered list and read an index from stdin.
         let mut matches: Vec<TrashItem> = match &target {
             Some(t) => {
                 let mounts = super::volume_mounts();
-                let abs = std::path::absolute(t).unwrap_or_else(|_| t.clone());
+                let abs = crate::util::absolute_keep_tail(t);
                 let abs = crate::util::plain_path(&abs);
                 let want: Vec<PathBuf> = path_forms(&abs)
                     .iter()
@@ -4929,6 +4972,7 @@ left in place.
         )
         .then(super::volume_mounts)
         .unwrap_or_default();
+        let mut exact_groups: Vec<Vec<String>> = Vec::new();
         let path_keys: Vec<String> = match kind {
             crate::filters::Match::Exact | crate::filters::Match::Prefix => {
                 let mut keys = Vec::new();
@@ -4937,30 +4981,51 @@ left in place.
                         continue;
                     }
                     let path = crate::util::arg_path(p);
-                    let abs = std::path::absolute(&path).unwrap_or(path);
+                    let abs = crate::util::absolute_keep_tail(&path);
                     let abs = crate::util::plain_path(&abs);
-                    let mut forms = if kind == crate::filters::Match::Prefix {
-                        dir_forms(&abs)
-                    } else {
-                        path_forms(&abs)
-                    };
+                    // Prefix and exact both leave the last component as
+                    // named. dir_forms would follow a final junction, so a
+                    // prefix of `vendor` would take everything under the
+                    // directory that junction names.
+                    let mut forms = path_forms(&abs);
                     if let Some(resolved) = crate::allow_roots::resolve(&abs) {
                         forms.push(resolved);
                     }
+                    let mut group = Vec::new();
                     for form in forms {
                         let k = super::path_key(&form.to_string_lossy(), &mounts);
+                        if !group.contains(&k) {
+                            group.push(k.clone());
+                        }
                         if !keys.contains(&k) {
                             keys.push(k);
                         }
                     }
+                    // A final junction whose target is a volume root is a
+                    // mass prefix. --force is what allows that root as a key.
+                    if kind == crate::filters::Match::Prefix {
+                        if let Some(k) = volume_root_key(&abs, &mounts) {
+                            if !force && !scoped {
+                                eprintln!(
+                                    "{prog}: refusing a pattern that matches \
+                                     everything without --force"
+                                );
+                                return 2;
+                            }
+                            if !keys.contains(&k) {
+                                keys.push(k);
+                            }
+                        }
+                    }
+                    exact_groups.push(group);
                 }
                 keys
             }
             _ => Vec::new(),
         };
-        // dir_forms follows a junction. A prefix whose key is a drive root,
-        // a UNC share root or empty matches every item there, which the
-        // operand text does not say.
+        // A key that is a drive root, a UNC share root or empty matches
+        // every item there. The operand text was already checked; this
+        // catches a form the path keys produced.
         if !force && !scoped && path_keys.iter().any(|k| super::mass_canonical_key(k)) {
             eprintln!("{prog}: refusing a pattern that matches everything without --force");
             return 2;
@@ -5028,14 +5093,17 @@ left in place.
         }
         if exact
             && ids.is_empty()
-            && crate::rm_match::refuse_ambiguous(
+            && crate::rm_match::refuse_ambiguous_keys(
                 prog,
-                matched
+                &exact_groups,
+                &matched
                     .iter()
-                    .map(original_of)
-                    .collect::<Vec<_>>()
-                    .iter()
-                    .map(|path| path.as_path()),
+                    .map(|it| {
+                        let orig = original_of(it);
+                        let key = super::path_key(&orig.to_string_lossy(), &mounts);
+                        (key, orig)
+                    })
+                    .collect::<Vec<_>>(),
                 all_matches,
             )
         {
@@ -5560,7 +5628,7 @@ pub fn purge_oldest_on(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn rm_options_stop_at_a_double_dash() {
@@ -6442,16 +6510,26 @@ mod tests {
         );
         assert_eq!(
             path_key(r"\\?\Volume{1234-ab}\d\x.txt", &mounts),
-            r"c:\rtrash-mnt\d\x.txt"
+            r"C:\RTRASH-MNT\D\X.TXT"
         );
     }
 
     #[test]
     fn path_key_strips_verbatim_and_case() {
-        assert_eq!(path_key(r"\\?\C:\Users\A\B.TXT", &[]), r"c:\users\a\b.txt");
-        assert_eq!(path_key(r"\\?\UNC\srv\share\f", &[]), r"\\srv\share\f");
-        assert_eq!(path_key("C:/x/y/", &[]), r"c:\x\y");
-        assert_eq!(path_key(r"C:\", &[]), r"c:\");
+        assert_eq!(path_key(r"\\?\C:\Users\A\B.TXT", &[]), r"C:\USERS\A\B.TXT");
+        assert_eq!(path_key(r"\\?\UNC\srv\share\f", &[]), r"\\SRV\SHARE\F");
+        assert_eq!(path_key("C:/x/y/", &[]), r"C:\X\Y");
+        assert_eq!(path_key(r"C:\", &[]), r"C:\");
+        // NTFS keeps U+212A apart from `k`, and `ß` apart from `ss`.
+        assert_ne!(
+            path_key("C:\\\u{212A}.txt", &[]),
+            path_key(r"C:\k.txt", &[])
+        );
+        assert_ne!(path_key("C:\\\u{00DF}", &[]), path_key(r"C:\ss", &[]));
+        assert_eq!(
+            path_key(r"C:\Temp\x.txt", &[]),
+            path_key(r"c:\temp\X.TXT", &[])
+        );
     }
 
     /// `dir_forms` follows a junction. The path as typed stays narrow, and
@@ -6461,13 +6539,13 @@ mod tests {
     fn a_canonical_drive_root_key_is_a_mass_prefix() {
         let typed = path_key(r"C:\safe-junction", &[]);
         let canonical = path_key(r"C:\", &[]);
-        assert_eq!(typed, r"c:\safe-junction");
-        assert_eq!(canonical, r"c:\");
+        assert_eq!(typed, r"C:\SAFE-JUNCTION");
+        assert_eq!(canonical, r"C:\");
         assert!(!mass_canonical_key(&typed));
         assert!(mass_canonical_key(&canonical));
         assert!(mass_canonical_key(&path_key("C:", &[])));
         assert!(mass_canonical_key(&path_key(r"\\?\C:\", &[])));
-        assert_eq!(path_key(r"\\server\share\", &[]), r"\\server\share");
+        assert_eq!(path_key(r"\\server\share\", &[]), r"\\SERVER\SHARE");
         assert!(mass_canonical_key(&path_key(r"\\server\share\", &[])));
         assert!(mass_canonical_key(&path_key(r"\\?\UNC\Server\Share", &[])));
         assert!(mass_canonical_key(&path_key(r"\\server", &[])));
@@ -6497,6 +6575,66 @@ mod tests {
             crate::filters::Match::Prefix,
             &item,
             &[canonical]
+        ));
+    }
+
+    /// A prefix keeps the final component, so a junction named `vendor`
+    /// does not take the directory it points at. A drive-root key still
+    /// matches every item on that drive.
+    #[test]
+    fn a_prefix_keeps_its_last_component() {
+        // Slashes, so the split is the same on Linux as on Windows.
+        let forms = forms_keeping_last(Path::new("/work/vendor"), Some(Path::new("/work")));
+        let keys: Vec<String> = forms
+            .iter()
+            .map(|f| path_key(&f.to_string_lossy(), &[]))
+            .collect();
+        assert!(keys.iter().all(|k| k.ends_with(r"\VENDOR")), "{keys:?}");
+        assert!(!win_path_matches(
+            crate::filters::Match::Prefix,
+            &path_key(r"C:\Users\me\a.txt", &[]),
+            &keys
+        ));
+        assert!(win_path_matches(
+            crate::filters::Match::Prefix,
+            &path_key("/work/vendor/a.txt", &[]),
+            &keys
+        ));
+        assert!(!mass_canonical_key(&path_key(r"C:\Users\me", &[])));
+        assert!(mass_canonical_key(&path_key(r"C:\", &[])));
+    }
+
+    /// Two originals that share a match key are one exact selection, and
+    /// so are a short name and the long name of the same parent.
+    #[test]
+    fn one_place_spelled_two_ways_is_one_exact_selection() {
+        let typed = PathBuf::from(r"C:\Temp\x.txt");
+        let other = PathBuf::from(r"c:\temp\X.TXT");
+        assert!(!crate::rm_match::refuse_ambiguous(
+            "rtrash",
+            [typed.as_path(), other.as_path()],
+            false
+        ));
+        let key = path_key(r"C:\Temp\x.txt", &[]);
+        assert_eq!(key, path_key(r"c:\temp\X.TXT", &[]));
+        let items = vec![(key.clone(), typed), (key.clone(), other)];
+        let groups = vec![vec![key]];
+        assert!(crate::rm_match::refuse_ambiguous_keys(
+            "rtrash", &groups, &items, false
+        ));
+        assert!(!crate::rm_match::refuse_ambiguous_keys(
+            "rtrash", &groups, &items, true
+        ));
+        let short = path_key(r"C:\Users\RUNNER~1\x.txt", &[]);
+        let long = path_key(r"C:\Users\runneradmin\x.txt", &[]);
+        assert_ne!(short, long);
+        let items = vec![
+            (short.clone(), PathBuf::from(r"C:\Users\RUNNER~1\x.txt")),
+            (long.clone(), PathBuf::from(r"C:\Users\runneradmin\x.txt")),
+        ];
+        let groups = vec![vec![short, long]];
+        assert!(crate::rm_match::refuse_ambiguous_keys(
+            "rtrash", &groups, &items, false
         ));
     }
 

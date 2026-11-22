@@ -260,6 +260,30 @@ pub fn verbatim_to_plain(s: &str) -> Option<String> {
     drive.then(|| rest.to_string())
 }
 
+/// `std::path::absolute`, keeping a trailing dot or space on the last
+/// component. On Windows `absolute` drops those, and NTFS keeps them
+/// when the name is not made only of dots.
+pub fn absolute_keep_tail(path: &std::path::Path) -> std::path::PathBuf {
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return abs;
+    };
+    let stem = name.trim_end_matches(['.', ' ']);
+    if stem.is_empty() || stem.len() == name.len() {
+        return abs;
+    }
+    let tail = &name[stem.len()..];
+    let Some(abs_name) = abs.file_name().and_then(|n| n.to_str()) else {
+        return abs;
+    };
+    if abs_name.ends_with(tail) || abs_name != stem {
+        return abs;
+    }
+    let mut fixed = std::ffi::OsString::from(abs_name);
+    fixed.push(tail);
+    abs.with_file_name(fixed)
+}
+
 /// `p` without the verbatim prefix that `fs::canonicalize` gives and a
 /// user may type on Windows ([`verbatim_to_plain`]), so paths print, match
 /// and are recorded in one form. Elsewhere `p` comes back as it is: there
@@ -1085,6 +1109,36 @@ mod tests {
             r"\\?\C:\Users\me"
         };
         assert_eq!(plain_path(typed), std::path::PathBuf::from(want));
+    }
+
+    #[test]
+    fn absolute_keeps_a_trailing_dot_or_space_on_the_last_name() {
+        let top = std::env::temp_dir().join(format!("rtrash-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&top);
+        std::fs::create_dir_all(&top).unwrap();
+        let dotted = top.join("notes.txt.");
+        let spaced = top.join("notes.txt ");
+        let plain = top.join("notes.txt");
+        std::fs::write(&plain, b"x").unwrap();
+        let kept_dot = super::absolute_keep_tail(&dotted);
+        let kept_space = super::absolute_keep_tail(&spaced);
+        assert!(
+            kept_dot.file_name().and_then(|n| n.to_str()) == Some("notes.txt."),
+            "{}",
+            kept_dot.display()
+        );
+        assert!(
+            kept_space.file_name().and_then(|n| n.to_str()) == Some("notes.txt "),
+            "{}",
+            kept_space.display()
+        );
+        assert_eq!(
+            super::absolute_keep_tail(&plain)
+                .file_name()
+                .and_then(|n| n.to_str()),
+            Some("notes.txt")
+        );
+        std::fs::remove_dir_all(&top).unwrap();
     }
 
     #[test]

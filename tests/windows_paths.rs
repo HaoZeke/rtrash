@@ -575,3 +575,63 @@ fn a_prefix_of_a_junction_to_a_drive_root_is_refused() {
     let narrow = ok(&run(&home, &["rm", "-n", "--prefix", &text_home]));
     assert!(narrow.lines().any(|l| l.ends_with("keep.txt")), "{narrow}");
 }
+
+/// `--prefix` of a junction keeps the junction's own name. Items whose
+/// original path is the target are not matches, and they stay in the bin.
+#[test]
+fn a_prefix_of_a_final_junction_does_not_take_its_target() {
+    let home = home("junction-final");
+    let link = home.join("vendor");
+    let _cleanup = DropJunction {
+        link: link.clone(),
+        home: home.clone(),
+    };
+    let real = home.join("real");
+    fs::create_dir_all(&real).unwrap();
+    let file = real.join("keep.txt");
+    fs::write(&file, "k").unwrap();
+    ok(&run(&home, &["put", &s(&file)]));
+    common::mklink_junction(&link, &real).unwrap();
+    let missed = run(&home, &["rm", "-n", "--prefix", &s(&link)]);
+    let missed_text = text(&missed);
+    assert_eq!(missed.status.code(), Some(1), "{missed_text}");
+    assert!(!missed_text.contains("keep.txt"), "{missed_text}");
+    let listed = ok(&run(&home, &["rm", "-n", "--prefix", &s(&real)]));
+    assert!(listed.lines().any(|l| l.ends_with("keep.txt")), "{listed}");
+    let left = fs::read_dir(common::test_bin(&home))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("$R"))
+        .count();
+    assert_eq!(left, 1);
+}
+
+/// `C:\Temp\x.txt` and `c:\temp\X.TXT` are one place. Exact rm refuses
+/// both unless `--all-matches` is given.
+#[test]
+fn two_spellings_of_one_path_need_all_matches() {
+    let home = home("two-spellings");
+    let bin = common::test_bin(&home);
+    fs::create_dir_all(&bin).unwrap();
+    let ft = rtrash::win_recycle::FILETIME_UNIX_EPOCH;
+    for (id, orig) in [
+        ("AAAAAA.txt", r"C:\Temp\x.txt"),
+        ("BBBBBB.txt", r"c:\temp\X.TXT"),
+    ] {
+        let rec = rtrash::win_recycle::encode_recycle_i_v2(Path::new(orig), 1, ft);
+        fs::write(bin.join(format!("$I{id}")), rec).unwrap();
+        fs::write(bin.join(format!("$R{id}")), b"x").unwrap();
+    }
+    let out = run(&home, &["rm", "-n", r"C:\Temp\x.txt"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    let left = fs::read_dir(&bin)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("$R"))
+        .count();
+    let _ = fs::remove_dir_all(&home);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing 2 trash items"), "{err}");
+    assert!(err.contains("--all-matches"), "{err}");
+    assert_eq!(left, 2, "a refused rm purged the bin");
+}

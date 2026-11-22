@@ -484,6 +484,18 @@ impl Match {
     }
 }
 
+/// A prefix that names a whole volume: `/`, `\`, or a drive root in any
+/// of the spellings Windows accepts (`C:\`, `C:/`, `C:`, `\\?\C:\`).
+fn prefix_is_mass(p: &str) -> bool {
+    if p == "/" || p == "\\" {
+        return true;
+    }
+    let bare = p.strip_prefix(r"\\?\").unwrap_or(p);
+    let s = bare.replace('/', "\\");
+    let b = s.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2..].iter().all(|c| *c == b'\\')
+}
+
 /// The PATTERN operands of `rm`, read as `kind` says. `texts` keeps them
 /// as given; `regex` holds them compiled when `kind` is [`Match::Regex`].
 #[derive(Debug, Clone, Default)]
@@ -546,7 +558,7 @@ impl Patterns {
                 .texts
                 .iter()
                 .any(|p| ["", "/", "\\"].contains(&p.as_str())),
-            Match::Prefix => self.texts.iter().any(|p| p == "/" || p == "\\"),
+            Match::Prefix => self.texts.iter().any(|p| prefix_is_mass(p)),
             Match::Exact | Match::Id => false,
         }
     }
@@ -667,6 +679,34 @@ mod pattern_tests {
         let gstar = Patterns::new(vec!["*.log".into()], Match::Glob).unwrap();
         assert!(gstar.hit("/w/*.log", "*.log", "*.log"));
         assert!(gstar.hit("/w/notes.log", "notes.log", "notes.log"));
+    }
+
+    #[test]
+    fn drive_root_prefixes_are_mass() {
+        for p in [
+            r"C:\", "C:/", "c:\\", "D:", r"\\?\C:\", r"\\?\C:/", r"\\?\d:",
+        ] {
+            assert!(
+                Patterns::new(vec![p.into()], Match::Prefix)
+                    .unwrap()
+                    .is_mass(),
+                "{p}"
+            );
+        }
+        assert!(!Patterns::new(vec![r"C:\Users".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+        assert!(
+            !Patterns::new(vec![r"C:\safe-junction".into()], Match::Prefix)
+                .unwrap()
+                .is_mass()
+        );
+        assert!(Patterns::new(vec!["/".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+        assert!(Patterns::new(vec![r"\".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
     }
 
     #[test]
