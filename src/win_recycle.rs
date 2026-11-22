@@ -191,6 +191,11 @@ pub fn restore_payload(payload: &Path, dest: &Path) -> std::io::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    move_payload(payload, dest)?;
+    remove_index(payload)
+}
+
+fn move_payload(payload: &Path, dest: &Path) -> std::io::Result<()> {
     match std::fs::rename(payload, dest) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
@@ -205,6 +210,10 @@ pub fn restore_payload(payload: &Path, dest: &Path) -> std::io::Result<()> {
         }
         Err(e) => return Err(e),
     }
+    Ok(())
+}
+
+fn remove_index(payload: &Path) -> std::io::Result<()> {
     if let Some(index) = index_file_for(payload) {
         match std::fs::remove_file(&index) {
             Ok(()) => {}
@@ -460,6 +469,15 @@ pub fn recheck_bin_item(
     if crate::util::is_gone(payload) {
         return Err(Stale::Gone);
     }
+    recheck_bin_record(payload, deleted, same_original)
+}
+
+fn recheck_bin_record(
+    payload: &Path,
+    deleted: i64,
+    same_original: impl Fn(&Path) -> bool,
+) -> Result<(), crate::util::Stale> {
+    use crate::util::Stale;
     let Some(index) = index_file_for(payload) else {
         return Err(Stale::Changed);
     };
@@ -482,6 +500,14 @@ pub fn recheck_bin_item(
 #[cfg(windows)]
 pub(crate) fn recheck_item(it: &trash::TrashItem) -> Result<(), crate::util::Stale> {
     recheck_bin_item(Path::new(&it.id), it.time_deleted, |o| {
+        o.file_name().unwrap_or_default() == std::ffi::OsStr::new(&it.name)
+            && o.parent().unwrap_or(Path::new("")) == it.original_parent.as_path()
+    })
+}
+
+#[cfg(windows)]
+fn recheck_item_record(it: &trash::TrashItem) -> Result<(), crate::util::Stale> {
+    recheck_bin_record(Path::new(&it.id), it.time_deleted, |o| {
         o.file_name().unwrap_or_default() == std::ffi::OsStr::new(&it.name)
             && o.parent().unwrap_or(Path::new("")) == it.original_parent.as_path()
     })
@@ -3910,10 +3936,10 @@ Without PATH, print a numbered list and read an index from stdin.
                         dest.display()
                     ));
                 }
-                crate::permanent_guard::remove(dest)
-                    .map_err(|e| format!("cannot replace '{}': {e}", dest.display()))?;
+                restore_overwrite(&self.item, self.payload, dest)?;
+                return Ok((dest.clone(), Vec::new()));
             }
-            super::restore_payload(Path::new(&self.item.id), dest)
+            super::restore_payload(payload, dest)
                 .map(|()| (dest.clone(), Vec::new()))
                 .map_err(|e| format!("restore failed: {e}"))
         }
@@ -3975,6 +4001,145 @@ Without PATH, print a numbered list and read an index from stdin.
             })
             .find(|p| crate::util::is_gone(p))
             .unwrap_or_else(|| dest.to_path_buf())
+    }
+
+    fn hidden_restore_name(parent: &Path, name: &std::ffi::OsStr, role: &str) -> PathBuf {
+        let pid = std::process::id();
+        (0u32..)
+            .map(|n| {
+                let suffix = if n == 0 {
+                    String::new()
+                } else {
+                    format!("-{n}")
+                };
+                parent.join(format!(
+                    ".rtrash-{role}-{pid}{suffix}-{}",
+                    name.to_string_lossy()
+                ))
+            })
+            .find(|path| crate::util::is_gone(path))
+            .unwrap_or_else(|| parent.join(format!(".rtrash-{role}-{pid}")))
+    }
+
+    fn put_staged_back(why: String, staged: &Path, payload: &Path) -> String {
+        match super::move_payload(staged, payload) {
+            Ok(()) => format!("{why}; the item stays in the Recycle Bin"),
+            Err(e) => format!(
+                "{why}; the item is now at '{}', since it could not go back to '{}': {e}",
+                staged.display(),
+                payload.display()
+            ),
+        }
+    }
+
+    /// Move the selected payload out of its public `$R` name before replacing
+    /// an existing destination. The old destination is renamed aside until
+    /// the staged payload is in place, so a failed swap can put both back.
+    fn restore_overwrite(
+        it: &TrashItem,
+        expected: Option<crate::util::Fingerprint>,
+        dest: &Path,
+    ) -> Result<(), String> {
+        crate::allow_roots::check(dest).map_err(|e| e.to_string())?;
+        let payload = Path::new(&it.id);
+        let parent = dest
+            .parent()
+            .ok_or_else(|| format!("'{}' has no parent", dest.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create '{}': {e}", parent.display()))?;
+        let payload_parent = payload
+            .parent()
+            .ok_or_else(|| format!("'{}' has no parent", payload.display()))?;
+        let name = payload.file_name().unwrap_or_default();
+        let bin_stage = hidden_restore_name(payload_parent, name, "bin-stage");
+
+        crate::util::replace_payload_after_overwrite_seam(payload);
+        std::fs::rename(payload, &bin_stage)
+            .map_err(|e| format!("cannot stage '{}': {e}", payload.display()))?;
+        if expected != crate::util::fingerprint(&bin_stage) {
+            return Err(put_staged_back(
+                format!(
+                    "'{}' changed in the Recycle Bin before it could be staged",
+                    payload.display()
+                ),
+                &bin_stage,
+                payload,
+            ));
+        }
+        if let Err(stale) = super::recheck_item_record(it) {
+            return Err(put_staged_back(
+                stale.reason(&original_of(it).to_string_lossy()),
+                &bin_stage,
+                payload,
+            ));
+        }
+
+        let dest_stage = hidden_restore_name(parent, name, "restore-stage");
+        if let Err(e) = super::move_payload(&bin_stage, &dest_stage) {
+            return Err(put_staged_back(
+                format!("cannot move the payload to '{}': {e}", dest_stage.display()),
+                &bin_stage,
+                payload,
+            ));
+        }
+        let staged = crate::util::fingerprint(&dest_stage);
+        if !matches!((expected, staged), (Some(a), Some(b)) if a.matches_move(b)) {
+            return Err(put_staged_back(
+                "the staged payload changed before the destination swap".to_string(),
+                &dest_stage,
+                payload,
+            ));
+        }
+
+        let backup = hidden_restore_name(parent, dest.file_name().unwrap_or_default(), "backup");
+        if let Err(e) = std::fs::rename(dest, &backup) {
+            return Err(put_staged_back(
+                format!("cannot stage existing '{}': {e}", dest.display()),
+                &dest_stage,
+                payload,
+            ));
+        }
+        let block_swap = cfg!(debug_assertions)
+            && std::env::var_os("RTRASH_TEST_BLOCK_RESTORE_SWAP").as_deref()
+                == Some(dest.as_os_str());
+        let swapped = if block_swap {
+            Err(std::io::Error::other("injected destination swap failure"))
+        } else {
+            std::fs::rename(&dest_stage, dest)
+        };
+        if let Err(e) = swapped {
+            let restore_dest = std::fs::rename(&backup, dest);
+            let why = match restore_dest {
+                Ok(()) => format!("cannot place restored file at '{}': {e}", dest.display()),
+                Err(back) => format!(
+                    "cannot place restored file at '{}': {e}; cannot put its old value back: \
+                     {back}",
+                    dest.display()
+                ),
+            };
+            return Err(put_staged_back(why, &dest_stage, payload));
+        }
+        if let Err(e) = crate::permanent_guard::remove(&backup) {
+            let staged_again = std::fs::rename(dest, &dest_stage);
+            let restored_dest = std::fs::rename(&backup, dest);
+            let why = format!(
+                "cannot remove staged old destination '{}': {e}",
+                backup.display()
+            );
+            if staged_again.is_ok() && restored_dest.is_ok() {
+                return Err(put_staged_back(why, &dest_stage, payload));
+            }
+            return Err(format!(
+                "{why}; rollback failed (new destination: {staged_again:?}, old destination: \
+                 {restored_dest:?})"
+            ));
+        }
+        super::remove_index(payload).map_err(|e| {
+            format!(
+                "restored '{}' but cannot remove its record: {e}",
+                dest.display()
+            )
+        })
     }
 
     /// `{restored, failed, skipped}` as the FreeDesktop restore prints it,
@@ -4129,17 +4294,16 @@ Without PATH, print a numbered list and read an index from stdin.
                 continue;
             }
             if o.conflict == Conflict::Overwrite && dest.symlink_metadata().is_ok() {
-                let gone = crate::permanent_guard::remove(&dest);
-                if let Err(e) = gone {
+                let expected = o.seen.get(&it.id).copied().flatten();
+                if let Err(e) = restore_overwrite(it, expected, &dest) {
                     eprintln!(
-                        "{prog}: cannot replace '{}': {e}",
+                        "{prog}: cannot restore '{}': {e}",
                         crate::util::err_path(&dest)
                     );
                     failed += 1;
                     continue;
                 }
-            }
-            if let Err(e) = super::restore_payload(Path::new(&it.id), &dest) {
+            } else if let Err(e) = super::restore_payload(Path::new(&it.id), &dest) {
                 let why = held_reason(Path::new(&it.id), &e);
                 eprintln!(
                     "{prog}: cannot restore '{}': {why}",

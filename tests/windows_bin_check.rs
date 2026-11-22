@@ -495,6 +495,75 @@ fn restore_by_id_rechecks_the_payload_instance_before_it_moves() {
     assert!(!b.work.join("rj-good.txt").exists());
 }
 
+/// A replacement made after the listing is staged and rejected before an
+/// overwrite touches the existing destination.
+#[test]
+fn restore_overwrite_stages_and_rechecks_before_touching_the_destination() {
+    let b = FlaggedBin::new("restore-overwrite-replaced");
+    let payload = b.bin.join("$RRJGOOD.txt");
+    let dest = b.work.join("rj-good.txt");
+    fs::write(&dest, b"existing").unwrap();
+    let listed = b.run(&["list", "--format={id}"]);
+    assert!(listed.status.success(), "{}", common::stderr_text(&listed));
+    let id = String::from_utf8_lossy(&listed.stdout).trim().to_string();
+    let out = common::rtrash(&b.home)
+        .env("RTRASH_TEST_BIN_DIR", &b.bin)
+        .env("LOCALAPPDATA", &b.local)
+        .env("RTRASH_TEST_REPLACE_PAYLOAD_AFTER_OVERWRITE", &payload)
+        .args(["restore", "--conflict=overwrite", "--match=id", &id])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", common::stderr_text(&out));
+    assert!(
+        common::stderr_text(&out).contains("changed in the Recycle Bin before it could be staged"),
+        "{}",
+        common::stderr_text(&out)
+    );
+    assert_eq!(fs::read(&payload).unwrap(), b"replacement");
+    assert!(b.bin.join("$IRJGOOD.txt").exists());
+    assert_eq!(fs::read(&dest).unwrap(), b"existing");
+
+    let restored = b.run(&["restore", "--conflict=overwrite", "--match=id", &id]);
+    assert!(
+        restored.status.success(),
+        "{}",
+        common::stderr_text(&restored)
+    );
+    assert_eq!(fs::read(&dest).unwrap(), b"replacement");
+    assert!(!payload.exists());
+    assert!(!b.bin.join("$IRJGOOD.txt").exists());
+}
+
+/// If the final staged rename fails, both the old destination and the
+/// selected Recycle Bin item are put back.
+#[test]
+fn restore_overwrite_rolls_back_a_failed_swap() {
+    let b = FlaggedBin::new("restore-overwrite-rollback");
+    let payload = b.bin.join("$RRJGOOD.txt");
+    let dest = b.work.join("rj-good.txt");
+    fs::write(&dest, b"existing").unwrap();
+    let out = common::rtrash(&b.home)
+        .env("RTRASH_TEST_BIN_DIR", &b.bin)
+        .env("LOCALAPPDATA", &b.local)
+        .env("RTRASH_TEST_BLOCK_RESTORE_SWAP", &dest)
+        .args(["restore", "--conflict=overwrite", dest.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", common::stderr_text(&out));
+    assert_eq!(fs::read(&dest).unwrap(), b"existing");
+    assert_eq!(fs::read(&payload).unwrap(), b"good");
+    assert!(b.bin.join("$IRJGOOD.txt").exists());
+    for dir in [&b.work, &b.bin] {
+        let litter: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".rtrash-"))
+            .collect();
+        assert!(litter.is_empty(), "{dir:?}: {litter:?}");
+    }
+}
+
 /// Post-put lookup identifies the payload added by this handoff, not an
 /// older item of the same original path and deletion second.
 #[test]

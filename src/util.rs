@@ -943,11 +943,36 @@ pub fn fingerprint(path: &std::path::Path) -> Option<Fingerprint> {
     })
 }
 
+impl Fingerprint {
+    /// Whether a staged payload is the same one after a move. A rename on
+    /// one volume keeps its identity; a cross-volume copy keeps the file
+    /// attributes the fingerprint records but necessarily gets a new id.
+    pub fn matches_move(self, staged: Self) -> bool {
+        if self.id.0 == staged.id.0 {
+            self == staged
+        } else {
+            self.len == staged.len && self.mtime == staged.mtime
+        }
+    }
+}
+
 /// Debug-only seam: replace the payload named by `RTRASH_TEST_REPLACE_PAYLOAD`
 /// with another file, as a swap between a check and the act that follows it.
 pub fn replace_payload_seam(path: &std::path::Path) {
     if cfg!(debug_assertions)
         && std::env::var_os("RTRASH_TEST_REPLACE_PAYLOAD").as_deref() == Some(path.as_os_str())
+    {
+        let _ = crate::permanent_guard::remove(path);
+        let _ = crate::file_replace::write_own(path, b"replacement");
+    }
+}
+
+/// Debug-only seam: replace a Recycle Bin payload as an overwrite begins,
+/// so staging must reject it before touching the destination.
+pub fn replace_payload_after_overwrite_seam(path: &std::path::Path) {
+    if cfg!(debug_assertions)
+        && std::env::var_os("RTRASH_TEST_REPLACE_PAYLOAD_AFTER_OVERWRITE").as_deref()
+            == Some(path.as_os_str())
     {
         let _ = crate::permanent_guard::remove(path);
         let _ = crate::file_replace::write_own(path, b"replacement");

@@ -1123,7 +1123,8 @@ PERMANENT_ALLOW = {
     ("win_recycle.rs", "purge_oldest_on"): (1, BATCH),
     ("win_recycle.rs", "remove_retry"): (3, PRIMITIVE + " (under remove_forcing)"),
     ("win_recycle.rs", "test_bin_put"): (1, OWN + ": the $I record it just wrote, when the move fails"),
-    ("win_recycle.rs", "restore_payload"): (3, MOVE + "; then the $I record of the restored item"),
+    ("win_recycle.rs", "move_payload"): (2, MOVE),
+    ("win_recycle.rs", "remove_index"): (1, "the record of the restored Recycle Bin item"),
     ("win_recycle.rs", "rm_run"): (1, BATCH),
     ("wsl_bin.rs", "remove_entry"): (1, RECORD),
     ("put.rs", "retarget_seam"): (1, "a debug seam replacing a symlink the test created, "
