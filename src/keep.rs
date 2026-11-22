@@ -44,11 +44,31 @@ impl Keep {
 
     /// Whether `path` is one of the configured paths or below one.
     pub fn protects(&self, path: &Path) -> bool {
-        !path.as_os_str().is_empty() && self.paths.iter().any(|keep| path.starts_with(keep))
+        !path.as_os_str().is_empty() && self.paths.iter().any(|keep| keep_covers(keep, path))
     }
 
     pub fn is_empty(&self) -> bool {
         self.paths.is_empty()
+    }
+}
+
+/// Whether `keep` covers `path`. On Windows the comparison is the same
+/// case-insensitive key the Recycle Bin matcher uses, and it still ends
+/// on a path component. Elsewhere it is `starts_with`.
+fn keep_covers(keep: &Path, path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let path_key = crate::win_recycle::path_key(&path.to_string_lossy(), &[]);
+        let keep_key = crate::win_recycle::path_key(&keep.to_string_lossy(), &[]);
+        crate::win_recycle::win_path_matches(
+            crate::filters::Match::Prefix,
+            &path_key,
+            std::slice::from_ref(&keep_key),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(keep)
     }
 }
 
@@ -69,5 +89,19 @@ mod tests {
         assert!(keep.protects(Path::new("/srv/data")));
         assert!(keep.protects(Path::new("/srv/data/x")));
         assert!(!keep.protects(Path::new("/srv/database")));
+    }
+
+    /// Windows keep paths compare without case, and still stop at a
+    /// component, so `Work` does not cover `WorkOut`.
+    #[cfg(windows)]
+    #[test]
+    fn keep_paths_match_without_case() {
+        let keep = Keep {
+            paths: vec![PathBuf::from(r"C:\Users\Alice\Work")],
+        };
+        assert!(keep.protects(Path::new(r"c:\users\alice\work\file.txt")));
+        assert!(keep.protects(Path::new(r"C:/Users/Alice/Work")));
+        assert!(!keep.protects(Path::new(r"C:\Users\Alice\WorkOut\file.txt")));
+        assert!(!keep.protects(Path::new(r"D:\Users\Alice\Work\file.txt")));
     }
 }
