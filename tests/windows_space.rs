@@ -538,6 +538,55 @@ fn put_space_hint_keeps_flagged_git_work() {
     }
 }
 
+/// A put of a plain file on a short volume still names git work that an
+/// earlier put left in that bin, and does not point at removing it.
+#[cfg(debug_assertions)]
+#[test]
+fn a_low_space_put_names_risky_work_already_in_the_bin() {
+    let base = common::scratch_dir("wingit", "put-old-risk");
+    let vol = base.join("vol");
+    let repo = base.join("oldrepo");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+    let git = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &base)
+        .output();
+    if !git.is_ok_and(|o| o.status.success()) {
+        common::skip("git unavailable; skipping");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    std::fs::write(repo.join("f"), b"dirty").unwrap();
+    let put = |path: &std::path::Path, low: bool| {
+        let mut c = common::rtrash(&base);
+        c.args(["put", path.to_str().unwrap()])
+            .env("RTRASH_TEST_BIN_ROOT", &vol)
+            .env("RTRASH_IN_USE", "ignore");
+        if low {
+            c.env("RTRASH_TEST_FS", format!("100000:{}", vol.display()));
+        }
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{}", common::stderr_text(&out));
+        common::stderr_text(&out)
+    };
+    put(&repo, false);
+    let plain = base.join("plain.txt");
+    std::fs::write(&plain, b"ok").unwrap();
+    let err = put(&plain, true);
+    assert!(
+        err.contains("is low (")
+            && err.contains("would lose the work")
+            && err.contains("oldrepo")
+            && !err.contains("rtrash rm"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Undo is named only after the item is in the bin. A dry run does not
 /// promise it.
 #[cfg(debug_assertions)]

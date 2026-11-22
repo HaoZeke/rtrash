@@ -1712,3 +1712,49 @@ fn a_finder_id_hashes_the_composed_name() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(!b.finder().join(nfd).exists());
 }
+
+/// A low-space put names git work an earlier put left in the Finder trash,
+/// not only the work of this put, and does not point at removing it.
+#[test]
+fn a_low_space_finder_put_names_risky_work_already_in_the_trash() {
+    let b = Box_::new("low-old-risk");
+    let repo = b.work().join("old-repo");
+    fs::create_dir(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &b.root)
+        .output();
+    if !init.is_ok_and(|o| o.status.success()) {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let o = b.run(&["put", "-r", "old-repo"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let plain = b.work().join("plain.bin");
+    fs::write(&plain, "z".repeat(20_000)).unwrap();
+    let mut c = common::rtrash_real(common::Real::Finder);
+    c.arg("put")
+        .arg(&plain)
+        .current_dir(b.work())
+        .env("HOME", &b.root)
+        .env("XDG_DATA_HOME", b.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", b.root.join(".config"))
+        .env("XDG_STATE_HOME", b.root.join("state"))
+        .env("RTRASH_MACOS_TRASH", "finder")
+        .env("RTRASH_OSASCRIPT", b.root.join("osascript"))
+        .env("RTRASH_TEST_FS", format!("45000:{}", b.root.display()));
+    let o = c.output().unwrap();
+    assert!(o.status.success(), "{}", err(&o));
+    let text = err(&o);
+    assert!(
+        text.contains("is low (")
+            && text.contains("would lose the work")
+            && text.contains("old-repo")
+            && !text.contains("plain.bin")
+            && !text.contains("rtrash rm"),
+        "{text}"
+    );
+}
