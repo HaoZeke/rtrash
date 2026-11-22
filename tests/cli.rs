@@ -3426,6 +3426,35 @@ fn rm_resolves_a_link_before_climbing_to_the_original_path() {
     assert_eq!(left, vec![b"decoy".to_vec()]);
 }
 
+/// A relative exact path still matches after its first component is gone.
+#[test]
+fn rm_matches_a_relative_path_whose_first_component_is_gone() {
+    let sb = Sandbox::new("exact-gone-first");
+    fs::create_dir(sb.work().join("gone")).unwrap();
+    fs::write(sb.work().join("gone/foo.txt"), b"wanted").unwrap();
+    assert!(sb.run(&["put", "gone/foo.txt"]).status.success());
+    fs::remove_dir(sb.work().join("gone")).unwrap();
+
+    let out = sb.run(&["rm", "--home-only", "gone/foo.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty(), "{}", stderr_of(&out));
+}
+
+/// A relative path with `..` still matches when the component before it
+/// no longer exists.
+#[test]
+fn rm_matches_dotdot_after_a_missing_first_component() {
+    let sb = Sandbox::new("exact-missing-up");
+    fs::create_dir(sb.work().join("a")).unwrap();
+    fs::write(sb.work().join("b.txt"), b"wanted").unwrap();
+    assert!(sb.run(&["put", "a/../b.txt"]).status.success());
+    fs::remove_dir(sb.work().join("a")).unwrap();
+
+    let out = sb.run(&["rm", "--home-only", "a/../b.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty(), "{}", stderr_of(&out));
+}
+
 fn set_deletion_date(sb: &Sandbox, name: &str, date: &str) {
     let path = sb.trash().join(format!("info/{name}.trashinfo"));
     let text = fs::read_to_string(&path).unwrap();

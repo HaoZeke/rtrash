@@ -297,28 +297,33 @@ fn push_windows_forms(out: &mut Vec<String>, abs: &Path) {
 }
 
 fn resolve_parent(parent: &Path) -> PathBuf {
-    let mut missing = Vec::new();
-    let mut cur = parent.to_path_buf();
-    loop {
-        if cur.as_os_str().is_empty() {
-            break;
-        }
-        if let Ok(real) = std::fs::canonicalize(&cur) {
-            let mut out = crate::util::plain_path(&real);
-            for name in missing.iter().rev() {
-                out.push(name);
-            }
-            return out;
-        }
-        match cur.file_name() {
-            Some(name) => {
-                missing.push(name.to_os_string());
-                cur.pop();
-            }
-            None => break,
+    if let Ok(real) = std::fs::canonicalize(parent) {
+        return crate::util::plain_path(&real);
+    }
+    let components: Vec<_> = parent.components().collect();
+    let mut prefix = PathBuf::new();
+    let mut resolved = PathBuf::new();
+    let mut used = 0usize;
+    for (i, component) in components.iter().enumerate() {
+        prefix.push(component.as_os_str());
+        if let Ok(real) = std::fs::canonicalize(&prefix) {
+            resolved = crate::util::plain_path(&real);
+            used = i + 1;
         }
     }
-    crate::util::plain_path(parent)
+    if used == 0 {
+        return crate::util::plain_path(parent);
+    }
+    for component in &components[used..] {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    resolved
 }
 
 /// Mounts for [`crate::win_recycle::path_key`], read once. An empty list
