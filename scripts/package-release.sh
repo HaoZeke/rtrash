@@ -81,6 +81,7 @@ package_windows() {
   cp "$ROOT/CHANGELOG.md" "$ROOT/LICENSE" "$ROOT/README.md" "$STAGE/"
 
   local ZIP="$OUT_DIR/${NAME}.zip"
+  [[ "$ZIP" = /* ]] || ZIP="$ROOT/$ZIP"
   rm -f "$ZIP"
   if command -v zip >/dev/null 2>&1; then
     (cd "$STAGE" && zip -qr "$ZIP" .)
