@@ -1316,8 +1316,8 @@ mod tests {
     use std::path::PathBuf;
 
     /// A payload whose name is not UTF-8 is probed under its real name, so
-    /// it is not reported as unknown git work because a lossy copy of the
-    /// name does not exist.
+    /// its dirty repository is found; a lossy copy of the name is a path
+    /// that does not exist.
     #[cfg(unix)]
     #[test]
     fn git_risks_probes_a_non_utf8_name_under_its_real_name() {
@@ -1329,10 +1329,25 @@ mod tests {
             topdir: None,
         };
         trash.ensure().unwrap();
-        let name = std::ffi::OsStr::from_bytes(b"bad-\xff-dir");
-        fs::create_dir(trash.files().join(name)).unwrap();
+        let Some(git) = crate::du_git::find_git() else {
+            return;
+        };
+        let name = std::ffi::OsStr::from_bytes(b"bad-\xff-repo");
+        let repo = trash.files().join(name);
+        fs::create_dir(&repo).unwrap();
+        let init = std::process::Command::new(git)
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status();
+        if !init.is_ok_and(|s| s.success()) {
+            return;
+        }
+        fs::write(repo.join("f"), b"work").unwrap();
         let risks = git_risks(&trash).unwrap();
-        assert!(risks.is_empty(), "{risks:?}");
+        assert_eq!(risks.len(), 1, "{risks:?}");
+        assert!(risks[0].2.dirty, "{risks:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 
