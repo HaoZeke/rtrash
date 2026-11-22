@@ -9240,6 +9240,229 @@ fn put_does_not_run_a_repository_fsmonitor() {
     assert!(!mark.exists(), "repository core.fsmonitor ran");
 }
 
+/// Status can run a repository's named clean or process filter while it
+/// hashes a tracked file. A put's work probe must disable that command too.
+#[test]
+fn put_does_not_run_a_repository_filter_process() {
+    let sb = Sandbox::new("put-git-filter");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        git_env(&mut Command::new("git"), &repo, &sb.root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let init = git(&["init", "-q"]);
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join(".gitattributes"), "tracked filter=hostile\n").unwrap();
+    fs::write(repo.join("tracked"), b"first").unwrap();
+    assert!(git(&["add", ".gitattributes", "tracked"]).status.success());
+    assert!(git(&["commit", "-qm", "base"]).status.success());
+
+    let filter = sb.root.join("malicious-filter");
+    fs::write(
+        &filter,
+        "#!/bin/sh\nprintf 'ran\\n' > \"$RTRASH_TEST_FILTER_MARK\"\nexit 1\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    let configured = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["config", "filter.hostile.process"])
+        .arg(&filter)
+        .output()
+        .unwrap();
+    assert!(configured.status.success(), "{configured:?}");
+    fs::write(repo.join("tracked"), b"other").unwrap();
+
+    let mark = sb.root.join("filter-ran");
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r"])
+        .arg(&repo)
+        .env("RTRASH_TEST_FILTER_MARK", &mark)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!mark.exists(), "repository filter process ran");
+}
+
+/// `git log` honors `log.showSignature`, but a repository cannot make the
+/// probe run its configured signature verifier.
+#[test]
+fn put_does_not_run_a_repository_signature_verifier() {
+    let sb = Sandbox::new("put-git-signature");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        git_env(&mut Command::new("git"), &repo, &sb.root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    if !git(&["init", "-q"]).status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("tracked"), b"work").unwrap();
+    assert!(git(&["add", "tracked"]).status.success());
+    let tree = String::from_utf8_lossy(&git(&["write-tree"]).stdout)
+        .trim()
+        .to_string();
+    let commit = format!(
+        "tree {tree}\n\
+author Trash Test <trash-test@example.com> 1 +0000\n\
+committer Trash Test <trash-test@example.com> 1 +0000\n\
+gpgsig -----BEGIN PGP SIGNATURE-----\n invalid\n -----END PGP SIGNATURE-----\n\n\
+signed\n"
+    );
+    let mut hash = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hash.stdin
+        .take()
+        .unwrap()
+        .write_all(commit.as_bytes())
+        .unwrap();
+    let hash = hash.wait_with_output().unwrap();
+    assert!(hash.status.success(), "{hash:?}");
+    let oid = String::from_utf8_lossy(&hash.stdout).trim().to_string();
+    assert!(git(&["update-ref", "HEAD", &oid]).status.success());
+
+    let verifier = sb.root.join("malicious-verifier");
+    fs::write(
+        &verifier,
+        "#!/bin/sh\nprintf 'ran\\n' > \"$RTRASH_TEST_GPG_MARK\"\nexit 0\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&verifier, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["config", "log.showSignature", "true"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["config", "gpg.program"])
+        .arg(&verifier)
+        .status()
+        .unwrap()
+        .success());
+
+    let mark = sb.root.join("gpg-ran");
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r"])
+        .arg(&repo)
+        .env("RTRASH_TEST_GPG_MARK", &mark)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!mark.exists(), "repository gpg.program ran");
+}
+
+/// Environment-pair overrides keep the whole key when a filter subsection
+/// contains `=`; `-c key=` would split it at the wrong byte.
+#[test]
+fn put_does_not_run_a_filter_whose_subsection_contains_equals() {
+    let sb = Sandbox::new("put-git-filter-equals");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        git_env(&mut Command::new("git"), &repo, &sb.root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    if !git(&["init", "-q"]).status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join(".gitattributes"), "tracked filter=x=y\n").unwrap();
+    fs::write(repo.join("tracked"), b"first").unwrap();
+    assert!(git(&["add", ".gitattributes", "tracked"]).status.success());
+    assert!(git(&["commit", "-qm", "base"]).status.success());
+    let filter = sb.root.join("malicious-equals-filter");
+    fs::write(
+        &filter,
+        "#!/bin/sh\nprintf 'ran\\n' > \"$RTRASH_TEST_FILTER_MARK\"\nexit 1\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["config", "filter.x=y.process"])
+        .arg(&filter)
+        .status()
+        .unwrap()
+        .success());
+    fs::write(repo.join("tracked"), b"other").unwrap();
+
+    let mark = sb.root.join("equals-filter-ran");
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r"])
+        .arg(&repo)
+        .env("RTRASH_TEST_FILTER_MARK", &mark)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!mark.exists(), "repository filter.x=y.process ran");
+}
+
+/// `GIT_CONFIG` cannot hide repository program keys from the config scan
+/// while status still reads and runs them.
+#[test]
+fn put_clears_git_config_before_scanning_repository_programs() {
+    let sb = Sandbox::new("put-git-config-env");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        git_env(&mut Command::new("git"), &repo, &sb.root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    if !git(&["init", "-q"]).status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join(".gitattributes"), "tracked filter=hostile\n").unwrap();
+    fs::write(repo.join("tracked"), b"first").unwrap();
+    assert!(git(&["add", ".gitattributes", "tracked"]).status.success());
+    assert!(git(&["commit", "-qm", "base"]).status.success());
+    let filter = sb.root.join("malicious-hidden-filter");
+    fs::write(
+        &filter,
+        "#!/bin/sh\nprintf 'ran\\n' > \"$RTRASH_TEST_FILTER_MARK\"\nexit 1\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["config", "filter.hostile.process"])
+        .arg(&filter)
+        .status()
+        .unwrap()
+        .success());
+    fs::write(repo.join("tracked"), b"other").unwrap();
+
+    let mark = sb.root.join("hidden-filter-ran");
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r"])
+        .arg(&repo)
+        .env("GIT_CONFIG", "/dev/null")
+        .env("RTRASH_TEST_FILTER_MARK", &mark)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!mark.exists(), "GIT_CONFIG hid the repository filter");
+}
+
 /// Undo is named only once the item has moved. A dry run leaves it in place
 /// and does not promise to bring it back.
 #[test]

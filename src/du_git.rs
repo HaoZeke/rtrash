@@ -289,28 +289,87 @@ fn is_executable(p: &Path) -> bool {
     std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false)
 }
 
-fn git(bin: &Path, repo: &Path) -> Command {
-    let mut c = Command::new(bin);
-    c.arg("--no-pager")
-        // These read-only commands need repository data, but none may run a
-        // program selected by an untrusted repository configuration.
-        .args(["-c", "core.fsmonitor=false"])
-        .args(["-c", "core.hooksPath="])
-        .args(["-c", "diff.external="])
-        .arg("-C")
-        .arg(repo)
-        .env_remove("GIT_DIR")
+struct GitConfig {
+    pairs: Vec<(String, String)>,
+}
+
+fn config_names(out: &[u8]) -> Vec<String> {
+    out.split(|b| *b == 0)
+        .filter(|key| !key.is_empty())
+        .map(|key| crate::util::str_from_bytes(key.to_vec()))
+        .collect()
+}
+
+impl GitConfig {
+    fn read(bin: &Path, repo: &Path) -> Option<Self> {
+        let mut pairs = vec![
+            ("core.fsmonitor".to_string(), "false".to_string()),
+            ("core.hooksPath".to_string(), String::new()),
+            ("diff.external".to_string(), String::new()),
+            ("log.showSignature".to_string(), "false".to_string()),
+        ];
+        let out = config_git(bin, repo)
+            .args([
+                "config",
+                "--null",
+                "--name-only",
+                "--get-regexp",
+                r"^(filter\..*\.(clean|smudge|process)|diff\..*\.(command|textconv))$",
+            ])
+            .output()
+            .ok()?;
+        if !matches!(out.status.code(), Some(0 | 1)) {
+            return None;
+        }
+        for key in config_names(&out.stdout) {
+            pairs.push((key, String::new()));
+        }
+        Some(Self { pairs })
+    }
+
+    fn apply(&self, c: &mut Command) {
+        c.env("GIT_CONFIG_COUNT", self.pairs.len().to_string());
+        for (n, (key, value)) in self.pairs.iter().enumerate() {
+            c.env(format!("GIT_CONFIG_KEY_{n}"), key);
+            c.env(format!("GIT_CONFIG_VALUE_{n}"), value);
+        }
+    }
+}
+
+fn is_git_config_environment(key: &OsStr) -> bool {
+    let key = key.to_string_lossy();
+    let bytes = key.as_bytes();
+    bytes.eq_ignore_ascii_case(b"GIT_CONFIG")
+        || bytes
+            .get(..b"GIT_CONFIG_".len())
+            .is_some_and(|part| part.eq_ignore_ascii_case(b"GIT_CONFIG_"))
+}
+
+fn clear_git_environment(c: &mut Command) {
+    c.env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_CONFIG_COUNT")
-        .env_remove("GIT_CONFIG_PARAMETERS")
-        .env_remove("GIT_EXTERNAL_DIFF")
+        .env_remove("GIT_EXTERNAL_DIFF");
+    for (key, _) in std::env::vars_os() {
+        if is_git_config_environment(&key) {
+            c.env_remove(key);
+        }
+    }
+}
+
+fn git(bin: &Path, repo: &Path, config: &GitConfig) -> Command {
+    let mut c = Command::new(bin);
+    c.arg("--no-pager")
+        .arg("-C")
+        .arg(repo)
         .env("GIT_PAGER", "cat")
         // Read-only probes: never take the index lock to refresh stat data.
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    clear_git_environment(&mut c);
+    config.apply(&mut c);
     c
 }
 
@@ -318,6 +377,21 @@ fn git(bin: &Path, repo: &Path) -> Command {
 /// `git config`, which prints configuration data and does not run programs
 /// named by it.
 fn config_git(bin: &Path, repo: &Path) -> Command {
+    let mut c = Command::new(bin);
+    c.arg("--no-pager")
+        .arg("-C")
+        .arg(repo)
+        .env("GIT_PAGER", "cat")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    clear_git_environment(&mut c);
+    c
+}
+
+/// A config query for user-facing Git settings. Unlike repository probes,
+/// this honors the caller's `GIT_CONFIG_*` selection.
+fn config_path_git(bin: &Path, repo: &Path) -> Command {
     let mut c = Command::new(bin);
     c.arg("--no-pager")
         .arg("-C")
@@ -340,7 +414,7 @@ fn config_git(bin: &Path, repo: &Path) -> Command {
 pub fn config_path(repo: &Path, key: &str) -> Option<Option<String>> {
     let bin = find_git()?;
     let ask = |dir: &Path| {
-        let out = config_git(&bin, dir)
+        let out = config_path_git(&bin, dir)
             .args(["config", "--path", "--get", key])
             .output()
             .ok()?;
@@ -472,8 +546,8 @@ fn repo_state(bin: &Path, repo: &Path, show_stash: bool) -> GitState {
 
 /// `Some(true)` when `refs/stash` exists, `Some(false)` when it does not,
 /// `None` when git could not be run.
-fn stash_dirty(bin: &Path, repo: &Path) -> Option<bool> {
-    let mut stash = git(bin, repo);
+fn stash_dirty_with(bin: &Path, repo: &Path, config: &GitConfig) -> Option<bool> {
+    let mut stash = git(bin, repo, config);
     stash.args(["rev-parse", "-q", "--verify", "refs/stash"]);
     stash.stdout(Stdio::null());
     match stash.output() {
@@ -483,12 +557,15 @@ fn stash_dirty(bin: &Path, repo: &Path) -> Option<bool> {
 }
 
 fn repo_probe(bin: &Path, repo: &Path, show_stash: bool) -> RepoProbe {
+    let Some(config) = GitConfig::read(bin, repo) else {
+        return RepoProbe::unknown();
+    };
     let bare = !matches!(
         crate::util::look(&repo.join(".git")),
         crate::util::Look::There(_)
     );
     // Commits reachable from a local branch but from no remote ref.
-    let mut log = git(bin, repo);
+    let mut log = git(bin, repo, &config);
     log.args([
         "log",
         "--branches",
@@ -497,12 +574,13 @@ fn repo_probe(bin: &Path, repo: &Path, show_stash: bool) -> RepoProbe {
         "-n1",
         "--format=%H",
     ]);
-    let mut status = git(bin, repo);
+    let mut status = git(bin, repo, &config);
     status.args([
         "status",
         "--porcelain=v2",
         "--untracked-files=normal",
         "--ignored=no",
+        "--ignore-submodules=all",
         "--no-renames",
     ]);
     if show_stash {
@@ -542,7 +620,7 @@ fn repo_probe(bin: &Path, repo: &Path, show_stash: bool) -> RepoProbe {
             let stash = if show_stash {
                 None
             } else {
-                stash_dirty(bin, repo)
+                stash_dirty_with(bin, repo, &config)
             };
             let dirty = from_status || stash == Some(true);
             let unknown = !show_stash && stash.is_none();
@@ -555,10 +633,10 @@ fn repo_probe(bin: &Path, repo: &Path, show_stash: bool) -> RepoProbe {
             return RepoProbe::clean();
         }
     } else if unpushed {
-        let stash = stash_dirty(bin, repo);
+        let stash = stash_dirty_with(bin, repo, &config);
         return RepoProbe::unpushed(stash == Some(true), stash.is_none());
     }
-    match stash_dirty(bin, repo) {
+    match stash_dirty_with(bin, repo, &config) {
         Some(true) => RepoProbe::dirty(),
         Some(false) => RepoProbe::clean(),
         None => RepoProbe::unknown(),
@@ -651,7 +729,10 @@ impl Prefetch {
 /// Paths relative to `repo` (a trailing slash marks a directory) that match
 /// an ignore rule, from one `git check-ignore --stdin -z` run.
 fn ignored_in(bin: &Path, repo: &Path, rels: &[OsString]) -> HashSet<OsString> {
-    let mut c = git(bin, repo);
+    let Some(config) = GitConfig::read(bin, repo) else {
+        return HashSet::new();
+    };
+    let mut c = git(bin, repo, &config);
     c.args(["check-ignore", "--stdin", "-z"])
         .stdin(Stdio::piped());
     let Ok(mut child) = c.spawn() else {
@@ -854,6 +935,27 @@ mod tests {
         assert!(status_is_dirty(
             b"1 .M N... 100644 100644 100644 a b src/x.rs\n"
         ));
+    }
+
+    #[test]
+    fn nul_config_names_keep_equals_and_newlines_inside_a_key() {
+        assert_eq!(
+            config_names(b"filter.x=y.process\0filter.x\ny.clean\0"),
+            ["filter.x=y.process", "filter.x\ny.clean"]
+        );
+    }
+
+    #[test]
+    fn config_environment_names_ignore_ascii_case() {
+        for key in [
+            "GIT_CONFIG",
+            "git_config",
+            "Git_Config_Count",
+            "gIt_CoNfIg_KeY_0",
+        ] {
+            assert!(is_git_config_environment(OsStr::new(key)), "{key}");
+        }
+        assert!(!is_git_config_environment(OsStr::new("GIT_CONFIGURE")));
     }
 
     #[test]
