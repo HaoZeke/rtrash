@@ -175,7 +175,7 @@ fn scope_forms(path: &Path) -> Vec<PathBuf> {
 }
 
 /// Whether `selected` holds every recorded original, or every original
-/// under one scope root when that root has more than one entry.
+/// under one scope root.
 ///
 /// The keys are the paths `put` records. On Windows, and for a
 /// Windows-shaped path, they are folded the way the Recycle Bin matcher
@@ -191,7 +191,7 @@ pub fn selection_wipes(selected: &[PathBuf], all: &[PathBuf]) -> bool {
     }
     for root in coverage_roots(all) {
         let under: Vec<&String> = every.iter().filter(|k| key_under(k, &root)).collect();
-        if under.len() > 1 && under.iter().all(|k| sel.contains(k)) {
+        if !under.is_empty() && under.iter().all(|k| sel.contains(k)) {
             return true;
         }
     }

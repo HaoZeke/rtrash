@@ -739,7 +739,7 @@ fn probes_under(root: &str) -> Vec<String> {
 }
 
 /// Whether `selected` is every recorded original in `all`, or every
-/// original under a real scope root that has more than one entry. An exact
+/// original under a real scope root. An exact
 /// path or an id is never this: naming the only item, or each item, is
 /// deliberate. The probe check ([`Patterns::is_mass`]) stays the early
 /// error; this one looks at the entries that are actually in the trash.

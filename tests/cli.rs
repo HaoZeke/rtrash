@@ -2048,6 +2048,43 @@ fn a_home_glob_with_no_literal_does_not_wipe_home() {
 }
 
 #[test]
+fn a_broad_pattern_cannot_empty_a_scope_one_item_at_a_time() {
+    let sb = Sandbox::new("rm-last-scope-item");
+    let home = sb.work().join("user");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join("a.log"), b"a").unwrap();
+    fs::write(home.join("b.log"), b"b").unwrap();
+    fs::write(sb.work().join("outside.txt"), b"outside").unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let put = sb.run(&[
+        "put",
+        &pin,
+        home.join("a.log").to_str().unwrap(),
+        home.join("b.log").to_str().unwrap(),
+        sb.work().join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let run = |pattern: String| {
+        common::rtrash(&sb.root)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .args(["rm", &pin, "--glob", &pattern])
+            .current_dir(sb.work())
+            .output()
+            .unwrap()
+    };
+    let first = run(format!("{}/a.*", home.display()));
+    assert!(first.status.success(), "{}", stderr_of(&first));
+    let last = run(format!("{}/b.*", home.display()));
+    let err = stderr_of(&last);
+    assert_eq!(last.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(left, vec!["b.log".to_string(), "outside.txt".to_string()]);
+}
+
+#[test]
 fn a_prefix_of_the_resolved_home_does_not_wipe_it() {
     let sb = Sandbox::new("rm-prefix-real-home");
     let real = sb.root.join("real_home");

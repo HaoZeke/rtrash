@@ -53,8 +53,9 @@ unknown git work; -n reports the same refusal without deleting anything.
   -i, --interactive  ask even when stdin is not a terminal (the reply is
                      read from stdin; no reply removes nothing)
   -y, --yes        do not ask
-  -f, --force      do not ask, and allow mass patterns that match
-                     everything (e.g. '*')
+  -f, --force      do not ask, and allow patterns that take every entry
+                     in the trash or under one scope root, including its
+                     last entry (e.g. '*')
       --max-count=N  refuse, deleting nothing, when more than N items
                      would go (also RTRASH_MAX_PERMANENT)
   -v, --verbose    print each permanently removed original path

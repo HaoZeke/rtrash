@@ -280,7 +280,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l all-mat
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s n -l dry-run -d 'list matches and reclaimable size; do not delete'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s i -l interactive -d 'ask before deleting, even off a terminal'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s y -l yes -d 'do not ask before deleting'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s f -l force -d 'do not ask, and allow mass patterns that match everything'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s f -l force -d 'do not ask, and allow patterns that take every entry in the trash or under one scope root, including its last entry'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s v -l verbose -d 'print each permanently removed original path'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l json -d 'JSON summary with matches'
 

@@ -4942,7 +4942,8 @@ left in place.
   -i, --interactive  ask even when stdin is not a terminal (rm asks on
                    a terminal by default, naming the matches)
   -y, --yes      do not ask
-  -f, --force    do not ask, and allow mass patterns (e.g. '*')
+  -f, --force    do not ask, and allow patterns that take every entry in
+                  the trash or under one scope root, including its last entry;
                   also remove entries that still hold risky git work;
                   without it, those entries are refused
       --max-count=N  refuse, deleting nothing, when more than N items

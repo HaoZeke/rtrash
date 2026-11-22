@@ -352,7 +352,7 @@ export extern "rtrash rm" [
     --dry-run(-n)  # list matches and reclaimable size; do not delete
     --interactive(-i)  # ask before deleting, even when stdin is not a terminal
     --yes(-y)  # do not ask
-    --force(-f)  # do not ask, and allow mass patterns that match everything
+    --force(-f)  # do not ask, and allow patterns that take every entry in the trash or under one scope root, including its last entry
     --verbose(-v)  # print each permanently removed original path
     --json  # emit a JSON summary (and matched originals array)
     --help  # display this help and exit
@@ -580,7 +580,7 @@ export extern "trash-rm" [
     --all-matches  # allow duplicate original paths
     --interactive(-i)  # ask before deleting, even when stdin is not a terminal
     --yes(-y)  # do not ask
-    --force(-f)  # do not ask, and allow mass patterns that match everything
+    --force(-f)  # do not ask, and allow patterns that take every entry in the trash or under one scope root, including its last entry
     --verbose(-v)  # print each permanently removed original path
     --json  # emit a JSON summary (and matched originals array)
     --help  # display this help and exit
