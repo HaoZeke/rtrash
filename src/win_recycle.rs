@@ -940,9 +940,18 @@ pub fn test_bin_put(dir: &Path, p: &Path) -> io::Result<()> {
     // even for a `\\?\` operand or a differently cased path.
     let abs = crate::util::plain_path(&std::path::absolute(p)?);
     let original = on_disk_entry(&abs);
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    let fixed = if cfg!(debug_assertions) {
+        std::env::var("RTRASH_TEST_BIN_TIME")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    } else {
+        None
+    };
+    let secs = fixed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs())
+    });
     let record = encode_recycle_i_v2(
         &original,
         tree_bytes(p),
@@ -1890,6 +1899,34 @@ fn same_git_risk_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// The item a put just moved: its file identity when the file system keeps
+/// that through the move, else the newest matching record from this put.
+#[cfg(any(windows, test))]
+fn moved_item_index<T>(
+    items: &[T],
+    seen: Option<(u64, u64)>,
+    started: i64,
+    same_original: impl Fn(&T) -> bool,
+    identity_of: impl Fn(&T) -> Option<(u64, u64)>,
+    deleted: impl Fn(&T) -> i64,
+) -> Option<usize> {
+    if let Some(seen) = seen {
+        if let Some((index, _)) = items
+            .iter()
+            .enumerate()
+            .find(|(_, item)| same_original(item) && identity_of(item) == Some(seen))
+        {
+            return Some(index);
+        }
+    }
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| same_original(item) && deleted(item) >= started)
+        .max_by_key(|(_, item)| deleted(item))
+        .map(|(index, _)| index)
+}
+
 // ---- Windows CLI surface (system Recycle Bin via `trash` crate) ----
 
 #[cfg(windows)]
@@ -2364,7 +2401,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     // bin records and what the warning names.
                     let kept = abs.clone();
                     let located = super::list_items().ok().and_then(|items| {
-                        items
+                        let items: Vec<TrashItem> = items
                             .into_iter()
                             .filter(|it| super::same_git_risk_path(&original_of(it), &kept))
                             .filter(|it| {
@@ -2372,7 +2409,16 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                                     *was != crate::util::fingerprint(Path::new(&it.id))
                                 })
                             })
-                            .max_by_key(|it| it.time_deleted)
+                            .collect();
+                        let index = super::moved_item_index(
+                            &items,
+                            seen,
+                            started,
+                            |_| true,
+                            |it| super::file_identity(Path::new(&it.id)),
+                            |it| it.time_deleted,
+                        );
+                        index.and_then(|index| items.into_iter().nth(index))
                     });
                     found.push(trashed_as(&kept, located.as_ref()));
                     let after = located
@@ -2538,7 +2584,6 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         };
         (orig.to_path_buf(), name, dir)
     }
-
     /// What Windows `list --sort` orders by, as on FreeDesktop.
     #[derive(Clone, Copy)]
     enum ListSort {
@@ -5389,6 +5434,41 @@ mod tests {
                 && !off.contains("restore --batch=last"),
             "{off}"
         );
+    }
+
+    #[test]
+    fn moved_item_falls_back_after_an_identity_miss() {
+        struct Item {
+            original: &'static str,
+            deleted: i64,
+        }
+        let items = [
+            Item {
+                original: r"C:\work\same",
+                deleted: 99,
+            },
+            Item {
+                original: r"C:\work\same",
+                deleted: 100,
+            },
+            Item {
+                original: r"C:\work\same",
+                deleted: 101,
+            },
+            Item {
+                original: r"C:\work\other",
+                deleted: 102,
+            },
+        ];
+        let found = moved_item_index(
+            &items,
+            Some((7, 11)),
+            100,
+            |item| same_git_risk_path(Path::new(item.original), Path::new(r"C:\work\same")),
+            |_| None,
+            |item| item.deleted,
+        );
+        assert_eq!(found, Some(2));
     }
 
     /// The final component stays the operand. Canonicalizing the whole path

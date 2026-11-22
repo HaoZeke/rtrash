@@ -8,6 +8,14 @@
 
 mod common;
 
+use std::path::{Path, PathBuf};
+
+#[cfg(debug_assertions)]
+fn canonical_plain(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    rtrash::util::plain_path(&canonical)
+}
+
 #[test]
 fn status_shows_free_space_on_each_drive() {
     let out = common::rtrash_real(common::Real::RecycleBin)
@@ -856,6 +864,131 @@ fn a_failed_last_put_record_still_names_the_git_work() {
     assert!(err.contains("contains a git repository with"), "{err}");
     assert!(err.contains("cannot see them yet"), "{err}");
     assert!(!err.contains("brings it back"), "{err}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Two puts of the same path in one deletion second still report the payload
+/// from the second move, not the older payload that sorts after it by name.
+#[cfg(debug_assertions)]
+#[test]
+fn two_quick_puts_of_one_path_find_the_second_payload() {
+    let base = common::scratch_dir("wingit", "put-same-second");
+    let fixed = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 86_400)
+        .to_string();
+    let home = base.join("file");
+    std::fs::create_dir_all(&home).unwrap();
+    let file = home.join("same");
+    std::fs::write(&file, b"old").unwrap();
+    let first = common::rtrash(&home)
+        .args(["put", file.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .env("RTRASH_TEST_BIN_TIME", &fixed)
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let bin = common::test_bin(&home);
+    let first_payload = std::fs::read_dir(&bin)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("$R"))
+        .unwrap();
+    let first_index = rtrash::win_recycle::index_file_for(&first_payload).unwrap();
+    let old_payload = bin.join("$RZOLD");
+    let old_index = bin.join("$IZOLD");
+    std::fs::rename(first_payload, &old_payload).unwrap();
+    std::fs::rename(first_index, &old_index).unwrap();
+
+    std::fs::write(&file, b"new").unwrap();
+    let second = common::rtrash(&home)
+        .args(["put", "--json", file.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .env("RTRASH_TEST_BIN_TIME", &fixed)
+        .output()
+        .unwrap();
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let json = String::from_utf8_lossy(&second.stdout);
+    assert!(json.contains(r#""name":"$RT00000""#), "{json}");
+    let new_index = bin.join("$IT00000");
+    let deleted = |index: &std::path::Path| match rtrash::win_recycle::read_bin_index(index) {
+        rtrash::win_recycle::IndexRead::Record(meta) => meta.delete_filetime,
+        other => panic!("cannot read {}: {other:?}", index.display()),
+    };
+    assert_eq!(deleted(&old_index), deleted(&new_index));
+
+    let home = base.join("git");
+    let repo = home.join("repo");
+    let git = |repo: &std::path::Path, args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", &home)
+            .env("GIT_AUTHOR_NAME", "Trash Test")
+            .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Trash Test")
+            .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+            .output()
+    };
+    let make_repo = || {
+        std::fs::create_dir_all(&repo).unwrap();
+        let Ok(init) = git(&repo, &["init", "-q"]) else {
+            return false;
+        };
+        if !init.status.success() {
+            return false;
+        }
+        std::fs::write(repo.join("f"), b"x").unwrap();
+        git(&repo, &["add", "f"]).unwrap().status.success()
+            && git(&repo, &["commit", "-qm", "work"])
+                .unwrap()
+                .status
+                .success()
+    };
+    if !make_repo() {
+        common::skip("git unavailable; skipping directory case");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    let first = common::rtrash(&home)
+        .args(["put", repo.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .env("RTRASH_TEST_BIN_TIME", &fixed)
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let bin = common::test_bin(&home);
+    std::fs::rename(bin.join("$RT00000"), bin.join("$RZOLD")).unwrap();
+    std::fs::rename(bin.join("$IT00000"), bin.join("$IZOLD")).unwrap();
+    assert!(make_repo());
+    let second = common::rtrash(&home)
+        .args(["put", repo.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .env("RTRASH_TEST_BIN_TIME", &fixed)
+        .env("RTRASH_TEST_AFTER_PROBE", canonical_plain(&repo))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&second.stderr);
+    assert!(second.status.success(), "{err}");
+    assert!(err.contains("dirty and unpushed work"), "{err}");
+    assert!(bin.join("$RT00000/.rtrash-probe-seam").is_file(), "{err}");
     let _ = std::fs::remove_dir_all(&base);
 }
 
