@@ -89,20 +89,33 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut batch: Option<String> = None;
     let mut size = list::SizeFilter::default();
 
+    let mut no_more_opts = false;
     let mut i = 0usize;
     while i < args.len() {
-        match size.take(args, &mut i) {
-            Some(Ok(())) => {
-                i += 1;
-                continue;
+        if !no_more_opts {
+            match size.take(args, &mut i) {
+                Some(Ok(())) => {
+                    i += 1;
+                    continue;
+                }
+                Some(Err(e)) => {
+                    eprintln!("{prog}: {e}");
+                    return 2;
+                }
+                None => {}
             }
-            Some(Err(e)) => {
-                eprintln!("{prog}: {e}");
-                return 2;
-            }
-            None => {}
         }
         let arg = &args[i];
+        if no_more_opts {
+            if arg.is_empty() {
+                eprintln!("{prog}: '' is not a path");
+                eprintln!("Try '{prog} --help' for more information.");
+                return 2;
+            }
+            patterns.push(arg.to_string());
+            i += 1;
+            continue;
+        }
         match arg.as_str() {
             "-v" | "--verbose" => verbose = true,
             "-f" | "--force" => {
@@ -207,6 +220,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 eprintln!("Try '{prog} --help' for more information.");
                 return 2;
             }
+            "--" => no_more_opts = true,
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
                 eprintln!("Try '{prog} --help' for more information.");

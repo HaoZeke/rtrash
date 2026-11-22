@@ -1407,7 +1407,13 @@ fn rm_option_args(args: &[String]) -> (Vec<String>, Vec<String>, Option<String>)
         Some(at) => (&args[..at], args[at + 1..].to_vec()),
         None => (args, Vec::new()),
     };
-    let (mut rest, mut error) = (Vec::new(), None);
+    let (mut rest, mut error) = (
+        Vec::new(),
+        operands
+            .iter()
+            .any(String::is_empty)
+            .then(|| "'' is not a path".to_string()),
+    );
     let mut i = 0usize;
     while i < opts.len() {
         let arg = &opts[i];

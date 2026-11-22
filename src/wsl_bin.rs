@@ -478,10 +478,19 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     let mut kind = crate::filters::Match::Glob;
     let mut kind_set = false;
     let mut paths = Vec::new();
+    let mut no_more_opts = false;
     for a in &args {
         if a.is_empty() {
             eprintln!("{prog}: '' is not a path");
             return 2;
+        }
+        if no_more_opts {
+            paths.push(a.to_string());
+            continue;
+        }
+        if a == "--" {
+            no_more_opts = true;
+            continue;
         }
         if matches!(a.as_str(), "-n" | "--dry-run") {
             dry = true;
@@ -833,9 +842,22 @@ mod tests {
     }
 
     #[test]
+    fn wsl_rm_refuses_an_empty_operand_after_a_double_dash() {
+        assert_eq!(rm("rtrash", &["--".into(), String::new()], &[]), 2);
+    }
+
+    #[test]
     fn an_empty_wsl_operand_is_refused() {
         assert!(matches!(
             parse_empty_args("rtrash", &[String::new()]),
+            Err(2)
+        ));
+    }
+
+    #[test]
+    fn wsl_empty_refuses_an_empty_operand_after_a_double_dash() {
+        assert!(matches!(
+            parse_empty_args("rtrash", &["--".into(), String::new()]),
             Err(2)
         ));
     }

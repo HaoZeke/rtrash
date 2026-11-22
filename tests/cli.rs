@@ -9694,6 +9694,7 @@ fn an_empty_operand_is_not_the_working_directory() {
     for mode in [
         &["rm", "--home-only", "--match=exact", ""][..],
         &["rm", "--home-only", ""][..],
+        &["rm", "--home-only", "--", ""][..],
     ] {
         let rm = common::rtrash(&sb.root)
             .args(mode)
@@ -9712,21 +9713,26 @@ fn an_empty_operand_is_not_the_working_directory() {
         );
     }
     let pin = format!("--trash-dir={}", sb.trash().display());
-    let empty = common::rtrash(&sb.root)
-        .args(["empty", &pin, ""])
-        .current_dir(&dir)
-        .output()
-        .unwrap();
-    assert_eq!(empty.status.code(), Some(2), "{}", stderr_of(&empty));
-    assert!(
-        stderr_of(&empty).contains("'' is not a path"),
-        "{}",
-        stderr_of(&empty)
-    );
-    assert_eq!(
-        listed_originals(&sb),
-        vec![dir.to_str().unwrap().to_string()]
-    );
+    for mode in [
+        vec!["empty", pin.as_str(), ""],
+        vec!["empty", pin.as_str(), "--", ""],
+    ] {
+        let empty = common::rtrash(&sb.root)
+            .args(mode)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(empty.status.code(), Some(2), "{}", stderr_of(&empty));
+        assert!(
+            stderr_of(&empty).contains("'' is not a path"),
+            "{}",
+            stderr_of(&empty)
+        );
+        assert_eq!(
+            listed_originals(&sb),
+            vec![dir.to_str().unwrap().to_string()]
+        );
+    }
 }
 
 /// `--` ends empty's options, so `-n` after it is a path.
