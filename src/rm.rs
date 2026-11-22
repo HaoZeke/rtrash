@@ -213,7 +213,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 }
             }
         }
-        if let Err(e) = trashdir::remove_any_path(&payload) {
+        if let Err(e) = trashdir::remove_trash_payload(&entry.dir, &payload) {
             eprintln!("{prog}: cannot remove '{}': {e}", payload.display());
             status = 1;
             continue;

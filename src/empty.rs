@@ -444,7 +444,7 @@ fn empty_one(
             removed.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        match trashdir::remove_any_path(target) {
+        match trashdir::remove_trash_payload(dir, target) {
             Ok(()) => {
                 if let Some(ip) = info_path {
                     match fs::remove_file(ip) {
@@ -529,10 +529,14 @@ fn full_empty_wipe(
         }
     }
 
+    // Large directory payloads may go to mpifileutils drm first; whatever it
+    // leaves (failures, small payloads, files) the native wipe handles.
+    let n_drm = crate::drm::purge_children(&files_dir);
+
     match crate::fastdelete::wipe_two_parallel(&files_dir, &info_dir) {
         Ok((n_files, _n_info)) => {
             // Top-level `files/` children ≈ trashed items (incl. orphans).
-            removed.fetch_add(n_files, Ordering::Relaxed);
+            removed.fetch_add(n_files + n_drm, Ordering::Relaxed);
         }
         Err(e) => {
             eprintln!(
@@ -687,9 +691,8 @@ fn empty_max_bytes(
                     continue;
                 }
             };
-            dir_victims
-                .par_iter()
-                .for_each(|v| match trashdir::remove_any_path(&v.target) {
+            dir_victims.par_iter().for_each(|v| {
+                match trashdir::remove_trash_payload(&v.dir, &v.target) {
                     Ok(()) => {
                         if let Some(ip) = &v.info {
                             match fs::remove_file(ip) {
@@ -711,7 +714,8 @@ fn empty_max_bytes(
                         eprintln!("{prog}: cannot remove '{}': {e}", v.display.display());
                         errors.fetch_add(1, Ordering::Relaxed);
                     }
-                });
+                }
+            });
             let drop_names: std::collections::HashSet<&str> =
                 dir_victims.iter().map(|v| v.name.as_str()).collect();
             let kept: Vec<String> = all_names_by_root

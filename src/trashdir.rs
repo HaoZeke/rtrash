@@ -1116,6 +1116,14 @@ pub fn remove_any_path(path: &Path) -> io::Result<()> {
     crate::fastdelete::remove_path(path)
 }
 
+/// Permanently remove a payload that lives directly in `dir.files()` (rm,
+/// empty, TUI purge). Large trees may be delegated to mpifileutils `drm`
+/// (see [`crate::drm`]); everything else, and any drm failure, uses
+/// [`remove_any_path`]. Callers unlink the `.trashinfo` only after `Ok`.
+pub fn remove_trash_payload(dir: &TrashDir, payload: &Path) -> io::Result<()> {
+    crate::drm::remove_payload(&dir.files(), payload)
+}
+
 /// Move `src` to `dest`, falling back to copy+delete across devices (EXDEV).
 /// Used by restore when the trash entry lives on a different filesystem than
 /// the original path (e.g. home-trash fallback after a volume was full).

@@ -47,7 +47,7 @@ impl RemoveBatchResult {
 }
 
 /// Permanently remove the given trash entries (real FreeDesktop paths).
-/// Does not reimplement wipe logic: uses `trashdir::remove_any_path` + info unlink.
+/// Does not reimplement wipe logic: uses `trashdir::remove_trash_payload` + info unlink.
 pub fn permanently_remove_entries(
     prog: &str,
     entries: &[&Entry],
@@ -72,7 +72,7 @@ pub fn permanently_remove_entries(
             succeeded.push(true);
             continue;
         }
-        if let Err(e) = trashdir::remove_any_path(&payload) {
+        if let Err(e) = trashdir::remove_trash_payload(&entry.dir, &payload) {
             eprintln!("{prog}: cannot remove '{}': {e}", payload.display());
             succeeded.push(false);
             continue;

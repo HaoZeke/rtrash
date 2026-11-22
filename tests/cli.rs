@@ -2150,3 +2150,222 @@ fn scan_lists_artifact_dirs_skips_zotero_and_git() {
     let h = stdout_of(&help);
     assert!(h.contains("--xdev") || h.contains("xdev"), "{h}");
 }
+
+// ---- mpifileutils drm backend (fake launcher + drm on PATH; no real MPI) ----
+
+/// Fake `mpirun` and `drm` that log their argv. `RTRASH_FAKE_DRM=fail` makes
+/// drm exit 3 untouched; `keep` exits 0 without deleting.
+fn fake_mpi_bin(sb: &Sandbox) -> PathBuf {
+    let bin = sb.root.join("fakebin");
+    fs::create_dir_all(&bin).unwrap();
+    let mpirun = "#!/bin/sh\n\
+        printf '%s\\n' \"$@\" >> \"$RTRASH_FAKE_LOG/mpirun.argv\"\n\
+        [ \"$1\" = -np ] || exit 90\n\
+        shift 2\n\
+        exec \"$@\"\n";
+    let drm = "#!/bin/sh\n\
+        printf '%s\\n' \"$@\" >> \"$RTRASH_FAKE_LOG/drm.argv\"\n\
+        [ \"$1\" = -- ] || exit 91\n\
+        shift\n\
+        case \"$RTRASH_FAKE_DRM\" in fail) exit 3 ;; keep) exit 0 ;; esac\n\
+        rm -rf -- \"$1\"\n";
+    for (name, body) in [("mpirun", mpirun), ("drm", drm)] {
+        let p = bin.join(name);
+        fs::write(&p, body).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::create_dir_all(sb.root.join("fakelog")).unwrap();
+    bin
+}
+
+fn run_drm_env(sb: &Sandbox, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let fakebin = fake_mpi_bin(sb);
+    let path = format!(
+        "{}:{}",
+        fakebin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut cmd = Command::new(bin());
+    cmd.args(args)
+        .current_dir(sb.work())
+        .env("XDG_DATA_HOME", sb.root.join("xdg"))
+        .env("XDG_CACHE_HOME", sb.root.join("xdg-cache"))
+        .env("XDG_CONFIG_HOME", sb.root.join("xdg-config"))
+        .env("RTRASH_LIST_TSV", "0")
+        .env("HOME", &sb.root)
+        .env("PATH", path)
+        .env("RTRASH_FAKE_LOG", sb.root.join("fakelog"))
+        .env_remove("RTRASH_DRM")
+        .env_remove("RTRASH_DRM_NP")
+        .env_remove("RTRASH_DRM_LAUNCHER")
+        .env_remove("RTRASH_DRM_LAUNCHER_ARGS")
+        .env_remove("RTRASH_DRM_MIN_ENTRIES")
+        .env_remove("RTRASH_DRM_LOCAL_MIN_ENTRIES")
+        .env_remove("SLURM_JOB_ID");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("failed to run rtrash")
+}
+
+fn fake_log(sb: &Sandbox, which: &str) -> Option<Vec<String>> {
+    fs::read_to_string(sb.root.join("fakelog").join(format!("{which}.argv")))
+        .ok()
+        .map(|s| s.lines().map(str::to_string).collect())
+}
+
+fn put_tree(sb: &Sandbox, name: &str) {
+    let d = sb.work().join(name);
+    fs::create_dir_all(d.join("sub")).unwrap();
+    for i in 0..8 {
+        fs::write(d.join(format!("sub/f{i}")), b"x").unwrap();
+    }
+    let out = sb.run(&["put", "-r", "--", name]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+}
+
+#[test]
+fn drm_always_rm_passes_trash_path_after_double_dash() {
+    let sb = Sandbox::new("drm-rm-argv");
+    put_tree(&sb, "-tree name");
+    let canon_files = fs::canonicalize(sb.trash().join("files")).unwrap();
+    let out = run_drm_env(
+        &sb,
+        &["rm", "--home-only", "?tree name"],
+        &[("RTRASH_DRM", "always"), ("RTRASH_DRM_NP", "3")],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let drm_bin = sb.root.join("fakebin/drm");
+    assert_eq!(
+        fake_log(&sb, "mpirun").unwrap(),
+        vec![
+            "-np".to_string(),
+            "3".into(),
+            drm_bin.display().to_string(),
+            "--".into(),
+            canon_files.join("-tree name").display().to_string(),
+        ]
+    );
+    assert_eq!(
+        fake_log(&sb, "drm").unwrap(),
+        vec![
+            "--".to_string(),
+            canon_files.join("-tree name").display().to_string()
+        ]
+    );
+    assert!(trash_names(&sb).is_empty());
+    assert!(!sb.trash().join("info/-tree name.trashinfo").exists());
+}
+
+#[test]
+fn drm_failure_falls_back_to_native_and_reports_status() {
+    let sb = Sandbox::new("drm-fail");
+    put_tree(&sb, "t");
+    let out = run_drm_env(
+        &sb,
+        &["rm", "--home-only", "t"],
+        &[("RTRASH_DRM", "always"), ("RTRASH_FAKE_DRM", "fail")],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(err.contains("exit status 3"), "{err}");
+    assert!(err.contains("falling back"), "{err}");
+    assert!(fake_log(&sb, "drm").is_some(), "drm was tried");
+    assert!(!sb.trash().join("files/t").exists());
+    assert!(!sb.trash().join("info/t.trashinfo").exists());
+}
+
+#[test]
+fn drm_zero_exit_with_path_left_falls_back() {
+    let sb = Sandbox::new("drm-keep");
+    put_tree(&sb, "t");
+    let out = run_drm_env(
+        &sb,
+        &["rm", "--home-only", "t"],
+        &[("RTRASH_DRM", "always"), ("RTRASH_FAKE_DRM", "keep")],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("still exists"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert!(!sb.trash().join("files/t").exists());
+    assert!(!sb.trash().join("info/t.trashinfo").exists());
+}
+
+#[test]
+fn drm_never_and_auto_small_do_not_launch() {
+    let sb = Sandbox::new("drm-never");
+    put_tree(&sb, "a");
+    put_tree(&sb, "b");
+    let out = run_drm_env(&sb, &["rm", "--home-only", "a"], &[("RTRASH_DRM", "never")]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    // Default auto: a 10-entry tree on the test filesystem is below threshold.
+    let out = run_drm_env(&sb, &["rm", "--home-only", "b"], &[]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(fake_log(&sb, "mpirun").is_none());
+    assert!(trash_names(&sb).is_empty());
+}
+
+#[test]
+fn drm_config_file_and_empty_full_wipe() {
+    let sb = Sandbox::new("drm-empty");
+    put_tree(&sb, "big");
+    sb.touch("small");
+    assert!(sb.run(&["put", "small"]).status.success());
+    let cfg = sb.root.join("xdg-config/rtrash");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(
+        cfg.join("config.toml"),
+        "[drm]\nmode = \"always\"\nnp = 2\n",
+    )
+    .unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = run_drm_env(&sb, &["empty", &pin], &[]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let drm = fake_log(&sb, "drm").unwrap();
+    // Only the directory payload; the plain file stays on the native path.
+    assert_eq!(drm.len(), 2, "{drm:?}");
+    assert!(drm[1].ends_with("/files/big"), "{drm:?}");
+    assert_eq!(fake_log(&sb, "mpirun").unwrap()[1], "2");
+    assert!(trash_names(&sb).is_empty());
+    assert!(fs::read_dir(sb.trash().join("info"))
+        .unwrap()
+        .next()
+        .is_none());
+}
+
+#[test]
+fn drm_never_sees_symlink_payloads_or_restore_overwrites() {
+    let sb = Sandbox::new("drm-safety");
+    // A trashed symlink to a directory outside the trash.
+    let outside = sb.root.join("precious");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("keep"), b"k").unwrap();
+    std::os::unix::fs::symlink(&outside, sb.work().join("ln")).unwrap();
+    assert!(sb.run(&["put", "ln"]).status.success());
+    let out = run_drm_env(
+        &sb,
+        &["rm", "--home-only", "ln"],
+        &[("RTRASH_DRM", "always")],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(outside.join("keep").exists(), "symlink target untouched");
+
+    // restore -f replacing a directory at the destination is not a trash purge.
+    sb.touch("x");
+    assert!(sb.run(&["put", "x"]).status.success());
+    fs::create_dir(sb.work().join("x")).unwrap();
+    fs::write(sb.work().join("x/inner"), b"blocker").unwrap();
+    let out = run_drm_env(
+        &sb,
+        &["restore", "--home-only", "-f", "x"],
+        &[("RTRASH_DRM", "always")],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(fs::read(sb.work().join("x")).unwrap(), b"payload");
+
+    assert!(fake_log(&sb, "mpirun").is_none(), "drm must not run");
+    assert!(fake_log(&sb, "drm").is_none(), "drm must not run");
+}

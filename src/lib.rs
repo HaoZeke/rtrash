@@ -16,6 +16,8 @@ pub mod catalog_cache;
 #[cfg(unix)]
 pub mod desktop;
 #[cfg(unix)]
+pub mod drm;
+#[cfg(unix)]
 pub mod empty;
 #[cfg(all(unix, feature = "tui"))]
 pub mod empty_tui;
