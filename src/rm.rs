@@ -363,14 +363,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     if kind == crate::filters::Match::Exact {
         let kept: Vec<PathBuf> = entries
             .iter()
-            .filter(|entry| size.keeps(size_of(entry)))
+            .filter(|entry| !size.is_set() || size.keeps(size_of(entry)))
             .map(|entry| entry.original.clone())
             .collect();
         let window =
             crate::orig_path::window(older_than.is_some() || newer_than.is_some(), size.is_set());
         crate::orig_path::hint(prog, &pats.operands, &have, &kept, window);
     }
-    let wanted = |entry: &list::Entry| -> bool { path_hit(entry) && size.keeps(size_of(entry)) };
+    let wanted = |entry: &list::Entry| -> bool {
+        path_hit(entry) && (!size.is_set() || size.keeps(size_of(entry)))
+    };
 
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
     // they came from, so a refused rm deletes nothing.
