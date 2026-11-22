@@ -821,7 +821,7 @@ fn rm_rechecks_every_item_directly_before_the_multi_item_purge() {
     assert!(changed.is_file() && other.is_file());
 
     let rm = common::rtrash(&home)
-        .args(["rm", "-f", "-y", "*"])
+        .args(["rm", "-f", "-y", "--match=glob", "*"])
         .env("RTRASH_TEST_RM_RECHECK", &changed)
         .output()
         .unwrap();
