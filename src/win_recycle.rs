@@ -3511,8 +3511,8 @@ Without PATH, print a numbered list and read an index from stdin.
       --regex=RE  match items whose original path matches RE
   -m, --match=KIND  read PATH as a pattern of KIND, as trashy's -m does:
                 glob, regex, substring, exact (the whole original path) or
-                id (the {{id}} from `list --format`, which includes
-                payload name, date and bin root)
+                id (the {{id}} from `list --format`, the trash name,
+                deletion date and trash root)
       --to=DIR  restore into DIR, keeping each item's file name
       --older-than=AGE  only items deleted more than AGE ago; AGE is DAYS
                 or a duration such as 2h, 30m or 1d12h
@@ -4486,8 +4486,8 @@ left in place.
                    path (the same as --match=regex)
       --match=KIND  how to read PATTERNs (trashy's -m): exact (the
                    default), glob, regex, substring or id (the {{id}}
-                   from `list --format`, the payload name, date and bin
-                   root)
+                   from `list --format`, the trash name, deletion date
+                   and trash root)
       --older-than=AGE  only match items deleted more than AGE ago: DAYS,
                    or a duration such as 2h, 30m or 1d12h
       --newer-than=AGE  only match items deleted within the last AGE

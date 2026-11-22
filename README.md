@@ -420,7 +420,7 @@ $ rtrash empty -n && rtrash empty 14                    # free the space
 | `printf '0-2,5\n' \| rtrash restore` | Piped selection without TUI: indices, ranges, commas, or `all` |
 | `rtrash restore --glob='*.rs' --all` | Restore every item whose file name matches; a pattern with a `/` matches the original path |
 | `rtrash restore --regex='/src/.*\.c$' --all` | Restore every item whose original path matches the regular expression |
-| `rtrash restore --match=id ID` | Restore one item by `{id}` from `rtrash list --format='{id} {path}\n'` (id includes name, date and trash root) |
+| `rtrash restore --match=id ID` | Restore one item by `{id}` from `rtrash list --format='{id} {path}\n'` (the id is the trash name, deletion date and trash root) |
 | `rtrash restore --to=DIR …` | Restore into `DIR`, keeping each file name |
 | `rtrash restore --conflict=rename\|skip\|overwrite …` | When the destination exists: restore as `NAME.1.EXT`, leave the item in the trash, or replace it (`-f`); the default refuses |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |

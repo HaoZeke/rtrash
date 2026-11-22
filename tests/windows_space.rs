@@ -718,7 +718,7 @@ fn put_does_not_attribute_a_junction_to_the_repository_it_points_at() {
     std::fs::write(repo.join("f"), b"kept").unwrap();
     let link = base.join("shortcut");
     let _ = std::fs::remove_dir_all(&link);
-    common::mklink_junction(&link, &repo);
+    common::mklink_junction(&link, &repo).expect("make a junction to the repository");
     let out = common::rtrash(&base)
         .args(["put", link.to_str().unwrap()])
         .env("RTRASH_TEST_BIN_ROOT", &vol)
