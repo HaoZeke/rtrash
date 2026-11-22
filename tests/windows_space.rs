@@ -538,6 +538,71 @@ fn put_space_hint_keeps_flagged_git_work() {
     }
 }
 
+/// An unpushed repository and a dirty one in one bin: a low-space put names
+/// both, in the plural advice, so neither is dropped when the other is
+/// flagged too.
+#[cfg(debug_assertions)]
+#[test]
+fn put_space_hint_names_every_flagged_repository_in_the_bin() {
+    let git = |repo: &std::path::Path, home: &std::path::Path, args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", home)
+            .env("GIT_AUTHOR_NAME", "Trash Test")
+            .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Trash Test")
+            .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+            .output()
+    };
+    let base = common::scratch_dir("wingit", "put-git-both");
+    let vol = base.join("vol");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+    for (tag, commit) in [("unpushed", true), ("dirty", false)] {
+        let repo = base.join(tag);
+        std::fs::create_dir(&repo).unwrap();
+        if !git(&repo, &base, &["init", "-q"]).is_ok_and(|o| o.status.success()) {
+            common::skip("git unavailable; skipping");
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        std::fs::write(repo.join("f"), b"x").unwrap();
+        if commit {
+            let add = git(&repo, &base, &["add", "f"]).unwrap();
+            let done = git(&repo, &base, &["commit", "-qm", "work"]).unwrap();
+            assert!(add.status.success() && done.status.success());
+        }
+    }
+    let put = |path: &std::path::Path, low: bool| {
+        let mut c = common::rtrash(&base);
+        c.args(["put", path.to_str().unwrap()])
+            .env("RTRASH_TEST_BIN_ROOT", &vol)
+            .env("RTRASH_IN_USE", "ignore");
+        if low {
+            c.env("RTRASH_TEST_FS", format!("100000:{}", vol.display()));
+        }
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{}", common::stderr_text(&out));
+        common::stderr_text(&out)
+    };
+    put(&base.join("unpushed"), false);
+    let err = put(&base.join("dirty"), true);
+    assert!(
+        err.contains("is low (")
+            && err.contains("with dirty work")
+            && err.contains("would lose the work")
+            && err.contains("'")
+            && err.contains("unpushed")
+            && err.contains("dirty")
+            && err.contains("uncommitted work is committed")
+            && !err.contains("rtrash rm"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// A put of a plain file on a short volume still names git work that an
 /// earlier put left in that bin, and does not point at removing it.
 #[cfg(debug_assertions)]
