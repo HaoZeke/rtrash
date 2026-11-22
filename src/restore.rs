@@ -1176,6 +1176,12 @@ pub(crate) fn restore_one_to(
     if let Err(e) = fs::create_dir_all(parent) {
         return Err(format!("cannot create '{}': {e}", parent.display()));
     }
+    // Still the file the lock was taken on, now that nothing else is left to
+    // wait for before the move.
+    crate::util::replace_payload_seam(&src);
+    if held.swapped() {
+        return Err(list::Relock::Changed.reason(entry));
+    }
 
     // What leaving the trash takes off a running total that is current.
     let size = crate::trash_total::cached(&entry.dir)
@@ -1324,6 +1330,7 @@ mod tests {
             },
             batch: None,
             recorded: true,
+            payload: None,
         }
     }
 

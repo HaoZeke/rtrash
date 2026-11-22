@@ -909,6 +909,51 @@ pub fn is_gone(path: &std::path::Path) -> bool {
     matches!(look(path), Look::Gone)
 }
 
+/// Which file a payload was when a scan or a match read it: its device and
+/// inode (Unix) or volume and file index (Windows), and for a file its
+/// length and modification time. A payload that another item replaced
+/// under the same name, with its record unchanged, reads as another file.
+/// A folder keeps only its identity: its own modification time moves when
+/// something is added inside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fingerprint {
+    id: (u64, u64),
+    len: u64,
+    mtime: Option<std::time::SystemTime>,
+}
+
+/// The [`Fingerprint`] of `path` without following a final link, or `None`
+/// when it cannot be read.
+pub fn fingerprint(path: &std::path::Path) -> Option<Fingerprint> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    #[cfg(unix)]
+    let id = {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
+    };
+    #[cfg(windows)]
+    let id = crate::win_recycle::file_identity(path)?;
+    #[cfg(not(any(unix, windows)))]
+    let id = (0, 0);
+    let file = !meta.is_dir();
+    Some(Fingerprint {
+        id,
+        len: if file { meta.len() } else { 0 },
+        mtime: if file { meta.modified().ok() } else { None },
+    })
+}
+
+/// Debug-only seam: replace the payload named by `RTRASH_TEST_REPLACE_PAYLOAD`
+/// with another file, as a swap between a check and the act that follows it.
+pub fn replace_payload_seam(path: &std::path::Path) {
+    if cfg!(debug_assertions)
+        && std::env::var_os("RTRASH_TEST_REPLACE_PAYLOAD").as_deref() == Some(path.as_os_str())
+    {
+        let _ = crate::permanent_guard::remove(path);
+        let _ = crate::file_replace::write_own(path, b"replacement");
+    }
+}
+
 /// Whether `e` says that a path is not there: ENOENT, or ENOTDIR when a
 /// part of the path is a file (Windows: file or path not found).
 pub fn is_missing(e: &io::Error) -> bool {

@@ -73,6 +73,9 @@ pub struct Entry {
     pub batch: Option<String>,
     /// Whether this entry came from a `.trashinfo`, rather than `files/` alone.
     pub(crate) recorded: bool,
+    /// Which file the payload was when this entry was read, for
+    /// [`Entry::relock`]; `None` when it was not there or not read.
+    pub(crate) payload: Option<crate::util::Fingerprint>,
 }
 
 impl Entry {
@@ -95,19 +98,23 @@ impl Entry {
         let record = crate::util::join_info(&self.dir.info(), &self.name);
         let payload = crate::util::join_name(&self.dir.files(), &self.name);
         let orphan = !self.recorded;
+        // The record can read as the scan read it while another file took
+        // the payload's name: a payload that is there must be the file the
+        // scan saw. One that is gone is for the caller to judge.
+        let now = crate::util::fingerprint(&payload);
+        let swapped = matches!((self.payload, now), (Some(seen), Some(now)) if seen != now);
         if fs::symlink_metadata(&record).is_ok() {
             if orphan {
                 return Err(Relock::Changed);
             }
-            let now = read_entry(&self.dir, &record, &self.name, Pathless::Keep)
+            let mut entry = read_entry(&self.dir, &record, &self.name, Pathless::Keep)
                 .map_err(|_| Relock::Changed)?;
-            let same =
-                now.original == self.original && now.date == self.date && now.batch == self.batch;
-            return if same {
-                Ok(Locked {
-                    entry: now,
-                    _lock: lock,
-                })
+            let same = entry.original == self.original
+                && entry.date == self.date
+                && entry.batch == self.batch;
+            return if same && !swapped {
+                entry.payload = now;
+                Ok(Locked { entry, _lock: lock })
             } else {
                 Err(Relock::Changed)
             };
@@ -115,11 +122,12 @@ impl Entry {
         match (crate::util::is_gone(&payload), orphan) {
             (true, _) => Err(Relock::Gone),
             // An orphan, read as one, is still one.
-            (false, true) => Ok(Locked {
-                entry: self.clone(),
-                _lock: lock,
-            }),
-            (false, false) => Err(Relock::Changed),
+            (false, true) if !swapped => {
+                let mut entry = self.clone();
+                entry.payload = now;
+                Ok(Locked { entry, _lock: lock })
+            }
+            (false, _) => Err(Relock::Changed),
         }
     }
 }
@@ -179,6 +187,20 @@ impl Locked {
     /// Whether the payload is gone from `files/`, read under the lock.
     pub fn gone(&self) -> bool {
         crate::util::is_gone(&self.payload())
+    }
+
+    /// Whether the payload is now another file than the one this entry was
+    /// locked on: a swap made while the lock was held, such as during a git
+    /// scan, which only an outside process can do. A payload that is gone
+    /// is not a swap.
+    pub fn swapped(&self) -> bool {
+        match (
+            self.entry.payload,
+            crate::util::fingerprint(&self.payload()),
+        ) {
+            (Some(seen), Some(now)) => seen != now,
+            _ => false,
+        }
     }
 }
 
@@ -356,6 +378,7 @@ fn read_entry(
         dir: dir.clone(),
         batch: parsed.batch,
         recorded: true,
+        payload: crate::util::fingerprint(&crate::util::join_name(&dir.files(), name)),
     })
 }
 
@@ -533,6 +556,7 @@ pub fn orphans(dirs: &[TrashDir]) -> Vec<Entry> {
                     dir: dir.clone(),
                     batch: None,
                     recorded: false,
+                    payload: crate::util::fingerprint(&ent.path()),
                 })
             })
             .collect();
@@ -1510,6 +1534,7 @@ mod tests {
             },
             batch: None,
             recorded: true,
+            payload: None,
         }
     }
 
@@ -1629,6 +1654,44 @@ mod tests {
         assert!(nodate.date.is_none() && nodate.batch.is_none());
         fs::remove_file(root.join("info/nodate.trashinfo")).unwrap();
         assert!(matches!(nodate.relock(), Err(Relock::Changed)));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The record can read as the scan read it while another file took the
+    /// payload's name: relock refuses that, and `swapped` sees a swap made
+    /// after the lock was taken. A payload that merely went is not a swap.
+    #[test]
+    fn relock_refuses_a_payload_swapped_under_an_unchanged_record() {
+        let root = std::env::temp_dir().join(format!("rtrash-swap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("info")).unwrap();
+        fs::create_dir_all(root.join("files")).unwrap();
+        let payload = root.join("files/a.txt");
+        fs::write(&payload, b"old").unwrap();
+        fs::write(
+            root.join("info/a.txt.trashinfo"),
+            "[Trash Info]\nPath=/tmp/a.txt\nDeletionDate=2026-01-02T03:04:05\n",
+        )
+        .unwrap();
+        let dirs = [TrashDir {
+            root: root.clone(),
+            topdir: None,
+        }];
+        let seen = collect(&dirs);
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].payload.is_some());
+        assert!(!seen[0].relock().unwrap().swapped());
+
+        let held = seen[0].relock().unwrap();
+        fs::remove_file(&payload).unwrap();
+        assert!(!held.swapped(), "a payload that went is not a swap");
+        fs::write(&payload, b"replacement").unwrap();
+        assert!(held.swapped());
+        drop(held);
+
+        assert!(matches!(seen[0].relock(), Err(Relock::Changed)));
+        let fresh = collect(&dirs);
+        assert!(fresh[0].relock().is_ok());
         let _ = fs::remove_dir_all(&root);
     }
 }

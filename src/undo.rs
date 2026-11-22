@@ -382,6 +382,7 @@ mod tests {
             },
             batch: batch.map(str::to_string),
             recorded: true,
+            payload: None,
         }
     }
 

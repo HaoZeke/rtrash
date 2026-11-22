@@ -10993,6 +10993,68 @@ fn rm_keeps_an_item_that_took_the_name_while_it_asked() {
     assert!(sb.trash().join("info/a.o.trashinfo").is_file());
 }
 
+/// The record can stay as list read it while another file takes the
+/// payload's name. rm asks, the payload is swapped, and the answer is yes:
+/// the swapped-in file stays, with its record.
+#[test]
+fn rm_keeps_a_payload_swapped_while_it_asked() {
+    let (sb, pin) = trashed_a_o("rm-payload-swapped");
+    let payload = sb.trash().join("files/a.o");
+    let mut cmd = common::rtrash(&sb.root);
+    cmd.args(["rm", &pin, "-i", "a.o"]).current_dir(sb.work());
+    let mut rm = common::Asking::spawn(&mut cmd);
+    rm.wait_for("(y/N) ");
+    fs::remove_file(&payload).unwrap();
+    fs::write(&payload, b"replacement").unwrap();
+    let (status, rest) = rm.answer("y\n");
+    assert!(!status.success(), "{rest}");
+    assert!(rest.contains("changed in the trash"), "{rest}");
+    assert_eq!(fs::read(&payload).unwrap(), b"replacement");
+    assert!(sb.trash().join("info/a.o.trashinfo").is_file());
+}
+
+/// A payload swapped after rm's last read, with the record unchanged, stays.
+/// The debug-only seam swaps it where the git scan has just ended.
+#[test]
+fn rm_rechecks_the_payload_after_the_scan() {
+    let (sb, pin) = trashed_a_o("rm-payload-after-scan");
+    let payload = sb.trash().join("files/a.o");
+    let out = sb.run_env(
+        &["rm", &pin, "a.o"],
+        &[("RTRASH_TEST_REPLACE_PAYLOAD", payload.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("changed in the trash"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(fs::read(&payload).unwrap(), b"replacement");
+    assert!(sb.trash().join("info/a.o.trashinfo").is_file());
+}
+
+/// restore moves the file list read. A payload swapped in under the same
+/// name, with the record unchanged, is left in the trash and nothing is
+/// restored.
+#[test]
+fn restore_keeps_a_payload_swapped_before_it_moves() {
+    let (sb, pin) = trashed_a_o("restore-payload-swapped");
+    let payload = sb.trash().join("files/a.o");
+    let out = sb.run_env(
+        &["restore", &pin, sb.work().join("a.o").to_str().unwrap()],
+        &[("RTRASH_TEST_REPLACE_PAYLOAD", payload.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("changed in the trash"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(fs::read(&payload).unwrap(), b"replacement");
+    assert!(sb.trash().join("info/a.o.trashinfo").is_file());
+    assert!(!sb.work().join("a.o").exists());
+}
+
 /// An id match is tied to the record that list read. Rewriting that record
 /// under the same trash name while rm asks makes the locked re-read refuse it.
 #[test]

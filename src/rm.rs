@@ -465,6 +465,17 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 continue;
             }
         }
+        // The scan above can take long. The payload must still be the file
+        // the lock was taken on, or whatever took its name stays.
+        crate::util::replace_payload_seam(&payload);
+        if held.swapped() {
+            eprintln!(
+                "{prog}: {}",
+                crate::util::err_text(&list::Relock::Changed.reason(entry))
+            );
+            status = 1;
+            continue;
+        }
         if let Err(e) = crate::permanent_guard::remove(&payload) {
             eprintln!(
                 "{prog}: cannot remove '{}': {e}",
