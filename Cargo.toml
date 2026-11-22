@@ -39,6 +39,11 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-aarch64-
 pkg-fmt = "tgz"
 bin-dir = "{ name }-{ version }-aarch64-unknown-linux-musl/bin/{ bin }{ binary-ext }"
 
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-x86_64-pc-windows-msvc.zip"
+pkg-fmt = "zip"
+bin-dir = "{ bin }{ binary-ext }"
+
 [lib]
 name = "rtrash"
 path = "src/lib.rs"

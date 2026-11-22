@@ -18,8 +18,8 @@
 #   release:  $repo/releases/download/v{version}/...
 # Tag releases as v$VERSION so cargo-binstall can resolve assets without flags.
 # Windows is the exception: it ships the asset name cargo-dist plans,
-#   rtrash-x86_64-pc-windows-msvc.zip (+ .sha256), holding one folder of the same
-#   name with rtrash.exe, CHANGELOG.md, LICENSE and README.md.
+#   rtrash-x86_64-pc-windows-msvc.zip (+ .sha256), with rtrash.exe,
+#   CHANGELOG.md, LICENSE and README.md at the archive root.
 # Supported release targets (CI): x86_64/aarch64 Linux musl, Apple Darwin and
 # x86_64 Windows MSVC.
 set -euo pipefail
@@ -83,13 +83,13 @@ package_windows() {
   local ZIP="$OUT_DIR/${NAME}.zip"
   rm -f "$ZIP"
   if command -v zip >/dev/null 2>&1; then
-    (cd "$OUT_DIR" && zip -qr "${NAME}.zip" "$NAME")
+    (cd "$STAGE" && zip -qr "$ZIP" .)
   elif command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import shutil, sys; shutil.make_archive(sys.argv[1], "zip", sys.argv[2], sys.argv[3])' \
-      "$OUT_DIR/${NAME}" "$OUT_DIR" "$NAME"
+    python3 -c 'import shutil, sys; shutil.make_archive(sys.argv[1], "zip", sys.argv[2])' \
+      "$OUT_DIR/${NAME}" "$STAGE"
   elif command -v python >/dev/null 2>&1; then
-    python -c 'import shutil, sys; shutil.make_archive(sys.argv[1], "zip", sys.argv[2], sys.argv[3])' \
-      "$OUT_DIR/${NAME}" "$OUT_DIR" "$NAME"
+    python -c 'import shutil, sys; shutil.make_archive(sys.argv[1], "zip", sys.argv[2])' \
+      "$OUT_DIR/${NAME}" "$STAGE"
   else
     echo "error: neither zip nor python is available to make ${ZIP}" >&2
     return 1
