@@ -301,14 +301,22 @@ fn config_names(out: &[u8]) -> Vec<String> {
 }
 
 impl GitConfig {
+    fn fixed() -> Self {
+        Self {
+            pairs: vec![
+                ("core.fsmonitor".to_string(), "false".to_string()),
+                ("core.hooksPath".to_string(), String::new()),
+                ("diff.external".to_string(), String::new()),
+                ("log.showSignature".to_string(), "false".to_string()),
+            ],
+        }
+    }
+
     fn read(bin: &Path, repo: &Path) -> Option<Self> {
-        let mut pairs = vec![
-            ("core.fsmonitor".to_string(), "false".to_string()),
-            ("core.hooksPath".to_string(), String::new()),
-            ("diff.external".to_string(), String::new()),
-            ("log.showSignature".to_string(), "false".to_string()),
-        ];
-        let out = config_git(bin, repo)
+        let mut config = Self::fixed();
+        let mut scan = config_git(bin, repo);
+        config.apply(&mut scan);
+        let out = scan
             .args([
                 "config",
                 "--null",
@@ -322,9 +330,9 @@ impl GitConfig {
             return None;
         }
         for key in config_names(&out.stdout) {
-            pairs.push((key, String::new()));
+            config.pairs.push((key, String::new()));
         }
-        Some(Self { pairs })
+        Some(config)
     }
 
     fn apply(&self, c: &mut Command) {
@@ -355,6 +363,7 @@ fn clear_git_environment(c: &mut Command) {
             c.env_remove(key);
         }
     }
+    c.env("GIT_CONFIG_NOSYSTEM", "1");
 }
 
 fn git(bin: &Path, repo: &Path, config: &GitConfig) -> Command {
@@ -458,10 +467,12 @@ pub fn parse_version(s: &str) -> Option<(u32, u32)> {
 
 /// Porcelain v2 prints `# stash N` with `--show-stash` from git 2.35 on.
 fn status_shows_stash(bin: &Path) -> bool {
-    Command::new(bin)
+    let mut command = Command::new(bin);
+    command.stdin(Stdio::null()).stderr(Stdio::null());
+    clear_git_environment(&mut command);
+    GitConfig::fixed().apply(&mut command);
+    command
         .arg("--version")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
         .output()
         .ok()
         .and_then(|o| parse_version(&String::from_utf8_lossy(&o.stdout)))

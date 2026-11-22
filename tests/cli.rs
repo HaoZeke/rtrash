@@ -9198,6 +9198,24 @@ fn put_space_hint_keeps_a_repo_when_git_cannot_answer() {
     put_repo("failed", false);
 }
 
+fn configure_test_fsmonitor(repo: &Path, home: &Path) -> PathBuf {
+    let monitor = home.join("malicious-monitor");
+    fs::write(
+        &monitor,
+        "#!/bin/sh\nprintf 'ran\\n' > \"$RTRASH_TEST_MONITOR_MARK\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+    let configured = git_env(&mut Command::new("git"), repo, home)
+        .args(["config", "core.fsmonitor"])
+        .arg(&monitor)
+        .output()
+        .unwrap();
+    assert!(configured.status.success(), "{configured:?}");
+    home.join("monitor-ran")
+}
+
 /// A repository can name a command as its file-system monitor. The Git
 /// probes that inspect work before and after a put must not run it.
 #[test]
@@ -9213,23 +9231,9 @@ fn put_does_not_run_a_repository_fsmonitor() {
         common::skip("git unavailable; skipping");
         return;
     }
-    let monitor = sb.root.join("malicious-monitor");
-    fs::write(
-        &monitor,
-        "#!/bin/sh\nprintf 'ran\\n' > \"$RTRASH_TEST_MONITOR_MARK\"\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
-    let configured = git_env(&mut Command::new("git"), &repo, &sb.root)
-        .args(["config", "core.fsmonitor"])
-        .arg(&monitor)
-        .output()
-        .unwrap();
-    assert!(configured.status.success(), "{configured:?}");
+    let mark = configure_test_fsmonitor(&repo, &sb.root);
     fs::write(repo.join("untracked"), b"work").unwrap();
 
-    let mark = sb.root.join("monitor-ran");
     let out = common::rtrash(&sb.root)
         .args(["put", "--home-only", "-r"])
         .arg(&repo)
@@ -9238,6 +9242,81 @@ fn put_does_not_run_a_repository_fsmonitor() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!mark.exists(), "repository core.fsmonitor ran");
+}
+
+/// An rm probe of a repository already in the trash must not run the
+/// repository's file-system monitor.
+#[test]
+fn rm_does_not_run_a_trashed_repository_fsmonitor() {
+    let sb = Sandbox::new("rm-git-fsmonitor");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("untracked"), b"work").unwrap();
+    let original = repo.display().to_string();
+    let put = sb.run(&["put", "--home-only", "-r", &original]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+
+    let payload = sb.trash().join("files/repo");
+    let mark = configure_test_fsmonitor(&payload, &sb.root);
+    let out = common::rtrash(&sb.root)
+        .args(["rm", "--home-only", "--match=exact", &original])
+        .env("RTRASH_TEST_MONITOR_MARK", &mark)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(!mark.exists(), "repository core.fsmonitor ran during rm");
+    assert!(payload.exists());
+}
+
+/// A low-space hint probes repositories already in the trash without
+/// running their configured file-system monitors.
+#[cfg(debug_assertions)]
+#[test]
+fn put_space_hint_does_not_run_a_trashed_repository_fsmonitor() {
+    let sb = Sandbox::new("space-git-fsmonitor");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("untracked"), b"work").unwrap();
+    let put = sb.run(&["put", "--home-only", "-r", repo.to_str().unwrap()]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+
+    let payload = sb.trash().join("files/repo");
+    let mark = configure_test_fsmonitor(&payload, &sb.root);
+    let plain = sb.work().join("plain.bin");
+    fs::write(&plain, vec![b'x'; 90_000]).unwrap();
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only"])
+        .arg(&plain)
+        .env_remove("RTRASH_WARN_SIZE")
+        .env("RTRASH_WARN_SIZE", "1")
+        .env_remove("RTRASH_MAX_SIZE")
+        .env("RTRASH_TEST_FS", format!("100000:{}", sb.root.display()))
+        .env("RTRASH_TEST_MONITOR_MARK", &mark)
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("would lose the work"), "{err}");
+    assert!(
+        !mark.exists(),
+        "repository core.fsmonitor ran during a space hint"
+    );
 }
 
 /// Status can run a repository's named clean or process filter while it
