@@ -1122,6 +1122,8 @@ PERMANENT_ALLOW = {
                                           "reparse data does not take"),
     ("win_recycle.rs", "purge_oldest_on"): (1, BATCH),
     ("win_recycle.rs", "remove_retry"): (3, PRIMITIVE + " (under remove_forcing)"),
+    ("win_recycle.rs", "restore_overwrite"): (1, "the staged old destination after one "
+                                              "permanent_guard::gate"),
     ("win_recycle.rs", "test_bin_put"): (1, OWN + ": the $I record it just wrote, when the move fails"),
     ("win_recycle.rs", "move_payload"): (2, MOVE),
     ("win_recycle.rs", "remove_index"): (1, "the record of the restored Recycle Bin item"),

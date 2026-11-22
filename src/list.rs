@@ -1358,7 +1358,14 @@ mod tests {
         };
         let name = std::ffi::OsStr::from_bytes(b"bad-\xff-repo");
         let repo = trash.files().join(name);
-        fs::create_dir(&repo).unwrap();
+        if let Err(e) = fs::create_dir(&repo) {
+            // APFS rejects non-UTF-8 names (`EILSEQ`), so this probe case
+            // is not representable there.
+            if e.raw_os_error() == Some(libc::EILSEQ) {
+                return;
+            }
+            panic!("cannot create {:?}: {e}", repo);
+        }
         let init = std::process::Command::new(git)
             .args(["init", "-q"])
             .current_dir(&repo)

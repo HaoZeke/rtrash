@@ -460,7 +460,7 @@ mod tests {
         let dir = scratch("group");
         std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
         let operand = format!("{}/link/a", dir.display());
-        let real = dir.join("real/a");
+        let real = std::fs::canonicalize(dir.join("link")).unwrap().join("a");
         let have = vec![real.clone(), dir.join("link/ab")];
         let notes = notices(&[operand], &have, &[real]);
         assert!(notes.is_empty(), "{notes:?}");
@@ -473,7 +473,8 @@ mod tests {
         let dir = scratch("group2");
         std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
         let operand = format!("{}/link/a", dir.display());
-        let have = vec![dir.join("link/ab"), dir.join("real/ab")];
+        let real = std::fs::canonicalize(dir.join("link")).unwrap().join("ab");
+        let have = vec![dir.join("link/ab"), real];
         let notes = notices(&[operand], &have, &have);
         assert_eq!(notes.len(), 1, "{notes:?}");
         match &notes[0].1 {
@@ -501,7 +502,11 @@ mod tests {
         let dir = scratch("link");
         std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
         let got = forms(&format!("{}/link/a.txt", dir.display()));
-        let recorded = norm(&dir.join("real/a.txt"));
+        let recorded = norm(
+            &std::fs::canonicalize(dir.join("link"))
+                .unwrap()
+                .join("a.txt"),
+        );
         assert!(
             got.iter().any(|form| form == &recorded),
             "{got:?} {recorded}"

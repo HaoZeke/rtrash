@@ -1988,7 +1988,14 @@ mod os {
         let Some(payload) = std::env::var_os("RTRASH_TEST_RM_RECHECK").map(PathBuf::from) else {
             return;
         };
-        if !items.iter().any(|it| Path::new(&it.id) == payload) {
+        // The seam path may differ in letter case, separators or verbatim
+        // prefix from the listed `$R` name. Compare with path_key semantics.
+        let mounts = volume_mounts();
+        let want = path_key(&payload.to_string_lossy(), &mounts);
+        if !items
+            .iter()
+            .any(|it| path_key(&it.id.to_string_lossy(), &mounts) == want)
+        {
             return;
         }
         let Some(index) = index_file_for(&payload) else {
@@ -4099,6 +4106,13 @@ Without PATH, print a numbered list and read an index from stdin.
                 payload,
             ));
         }
+        if let Err(e) = crate::permanent_guard::gate() {
+            return Err(put_staged_back(
+                format!("cannot replace '{}': {e}", dest.display()),
+                &dest_stage,
+                payload,
+            ));
+        }
         let block_swap = cfg!(debug_assertions)
             && std::env::var_os("RTRASH_TEST_BLOCK_RESTORE_SWAP").as_deref()
                 == Some(dest.as_os_str());
@@ -4119,7 +4133,7 @@ Without PATH, print a numbered list and read an index from stdin.
             };
             return Err(put_staged_back(why, &dest_stage, payload));
         }
-        if let Err(e) = crate::permanent_guard::remove(&backup) {
+        if let Err(e) = crate::win_recycle::remove_forcing(&backup) {
             let staged_again = std::fs::rename(dest, &dest_stage);
             let restored_dest = std::fs::rename(&backup, dest);
             let why = format!(
