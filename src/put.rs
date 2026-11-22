@@ -1004,10 +1004,35 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
     // WSL, opted in: a file on a Windows drive goes to the Recycle Bin,
     // where Explorer restores it; rtrash list and undo do not see it.
     if opts.trash_pin.is_none() && crate::wsl::applies(&abs) {
+        let before = meta.is_dir().then(|| {
+            crate::wsl_bin::user_sid().ok().map(|sid| {
+                let root = crate::wsl::automount_root();
+                let items = crate::wsl_bin::scan(&root, &sid);
+                let newest = items.iter().map(|it| it.deleted).max();
+                let payloads = items.into_iter().map(|it| it.payload).collect::<Vec<_>>();
+                (root, sid, newest, payloads)
+            })
+        });
         return match crate::wsl::recycle(&abs, meta.is_dir()) {
             Ok(()) => {
+                let located = before.as_ref().and_then(|before| {
+                    before.as_ref().and_then(|(root, sid, newest, payloads)| {
+                        crate::wsl_bin::scan(root, sid)
+                            .into_iter()
+                            .filter(|it| newest.is_none_or(|deleted| it.deleted >= deleted))
+                            .find(|it| it.local == abs && !payloads.contains(&it.payload))
+                    })
+                });
+                let after = located
+                    .as_ref()
+                    .and_then(|it| crate::du_git::risky_tree(&it.payload));
+                let work = if meta.is_dir() && located.is_none() {
+                    crate::du_git::union_work(probed, Some(crate::du_git::RiskyGit::unknown()))
+                } else {
+                    crate::du_git::union_work(probed, after)
+                };
                 if !opts.json {
-                    say_wsl_restore(prog, name.as_ref(), probed);
+                    say_wsl_restore(prog, name.as_ref(), work);
                 }
                 if opts.verbose && !opts.quiet {
                     println!(
