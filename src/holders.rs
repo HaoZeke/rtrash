@@ -637,6 +637,31 @@ struct VnodeFdinfoWithPath {
 #[cfg(target_os = "macos")]
 const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
 
+/// Whether a failed libproc inspection means the process exited after
+/// `proc_listallpids` listed it.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn process_is_gone(error: Option<i32>) -> bool {
+    error == Some(libc::ESRCH)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "macos", all(test, unix)))]
+enum ZeroList {
+    Empty,
+    Gone,
+    Unreadable,
+}
+
+/// What a zero-byte PROC_PIDLISTFDS result means after errno was cleared.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn zero_list(error: Option<i32>) -> ZeroList {
+    match error {
+        Some(0) => ZeroList::Empty,
+        Some(libc::ESRCH) => ZeroList::Gone,
+        _ => ZeroList::Unreadable,
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn vip_path(v: &libc::vnode_info_path) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
@@ -668,7 +693,7 @@ fn scan(s: &mut Snapshot) {
             return;
         }
         pids.truncate(got as usize);
-        for &pid in &pids {
+        'processes: for &pid in &pids {
             if pid <= 0 || pid as u32 == me {
                 continue;
             }
@@ -747,13 +772,21 @@ fn scan(s: &mut Snapshot) {
                     }
                 }
             } else {
+                let error = std::io::Error::last_os_error().raw_os_error();
+                if process_is_gone(error) {
+                    continue 'processes;
+                }
                 denied = true;
             }
+            // An empty descriptor list is a successful zero-byte result,
+            // so clear errno before distinguishing it from a failed query.
+            *libc::__error() = 0;
             let need = libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0);
             if need > 0 {
                 let count = need as usize / size_of::<libc::proc_fdinfo>() + 16;
                 let mut fds: Vec<libc::proc_fdinfo> = Vec::with_capacity(count);
                 let cap = (count * size_of::<libc::proc_fdinfo>()) as libc::c_int;
+                *libc::__error() = 0;
                 let got =
                     libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, fds.as_mut_ptr().cast(), cap);
                 if got > 0 {
@@ -764,24 +797,40 @@ fn scan(s: &mut Snapshot) {
                         }
                         let mut vi: VnodeFdinfoWithPath = zeroed();
                         let sz = size_of::<VnodeFdinfoWithPath>() as libc::c_int;
-                        if libc::proc_pidfdinfo(
+                        *libc::__error() = 0;
+                        let got = libc::proc_pidfdinfo(
                             pid,
                             fd.proc_fd,
                             PROC_PIDFDVNODEPATHINFO,
                             (&mut vi as *mut VnodeFdinfoWithPath).cast(),
                             sz,
-                        ) == sz
-                        {
+                        );
+                        if got == sz {
                             if let Some(p) = vip_path(&vi.pvip) {
                                 holds.push(hold(&format!("fd {}", fd.proc_fd), p));
+                            }
+                        } else {
+                            let error = std::io::Error::last_os_error().raw_os_error();
+                            if process_is_gone(error) {
+                                continue 'processes;
                             }
                         }
                     }
                 } else {
-                    denied = true;
+                    let error = std::io::Error::last_os_error().raw_os_error();
+                    match zero_list(error) {
+                        ZeroList::Empty => {}
+                        ZeroList::Gone => continue 'processes,
+                        ZeroList::Unreadable => denied = true,
+                    }
                 }
             } else {
-                denied = true;
+                let error = std::io::Error::last_os_error().raw_os_error();
+                match zero_list(error) {
+                    ZeroList::Empty => {}
+                    ZeroList::Gone => continue 'processes,
+                    ZeroList::Unreadable => denied = true,
+                }
             }
             for h in holds {
                 s.add(h);
@@ -1091,6 +1140,17 @@ fn scan(_s: &mut Snapshot) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_list_errors_tell_empty_from_gone_and_unreadable() {
+        assert_eq!(zero_list(Some(0)), ZeroList::Empty);
+        assert_eq!(zero_list(Some(libc::ESRCH)), ZeroList::Gone);
+        assert_eq!(zero_list(Some(libc::EPERM)), ZeroList::Unreadable);
+        assert_eq!(zero_list(Some(libc::EACCES)), ZeroList::Unreadable);
+        assert!(process_is_gone(Some(libc::ESRCH)));
+        assert!(!process_is_gone(Some(libc::EPERM)));
+    }
 
     /// 33(h): only a path the kernel marked deleted counts.
     #[test]
