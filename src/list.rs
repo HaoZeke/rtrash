@@ -1329,7 +1329,7 @@ mod tests {
             topdir: None,
         };
         trash.ensure().unwrap();
-        let name = std::ffi::OsStr::from_bytes(b"caf\xe9-dir");
+        let name = std::ffi::OsStr::from_bytes(b"bad-\xff-dir");
         fs::create_dir(trash.files().join(name)).unwrap();
         let risks = git_risks(&trash).unwrap();
         assert!(risks.is_empty(), "{risks:?}");
