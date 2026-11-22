@@ -982,6 +982,7 @@ fn two_quick_puts_of_one_path_find_the_second_payload() {
         .args(["put", repo.to_str().unwrap()])
         .env("RTRASH_IN_USE", "ignore")
         .env("RTRASH_TEST_BIN_TIME", &fixed)
+        .env("RTRASH_TEST_BIN_TIME", &fixed)
         .env("RTRASH_TEST_AFTER_PROBE", canonical_plain(&repo))
         .output()
         .unwrap();

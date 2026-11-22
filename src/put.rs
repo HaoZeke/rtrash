@@ -852,6 +852,47 @@ pub fn why(prog: &str, said: &[String]) -> String {
         .map_or_else(|| "not trashed".to_string(), str::to_string)
 }
 
+fn locate_wsl_recycled(
+    abs: &Path,
+    payloads: &[PathBuf],
+    items: Vec<crate::wsl_bin::BinEntry>,
+) -> Option<crate::wsl_bin::BinEntry> {
+    let want = wsl_match_key(abs);
+    items
+        .into_iter()
+        .filter(|it| !payloads.contains(&it.payload))
+        .filter(|it| wsl_match_key(&it.local) == want)
+        .max_by_key(|it| it.deleted)
+}
+
+fn wsl_match_key(path: &Path) -> String {
+    crate::win_recycle::path_key(&wsl_windows_path(path), &[])
+}
+
+fn wsl_windows_path(path: &Path) -> String {
+    let root = crate::wsl::automount_root();
+    let Ok(rest) = path.strip_prefix(&root) else {
+        return path.to_string_lossy().into_owned();
+    };
+    let mut parts = rest.components();
+    let Some(std::path::Component::Normal(drive)) = parts.next() else {
+        return path.to_string_lossy().into_owned();
+    };
+    let letter = drive.to_string_lossy();
+    if letter.len() != 1 || !letter.as_bytes()[0].is_ascii_alphabetic() {
+        return path.to_string_lossy().into_owned();
+    }
+    let mut out = format!("{}:", letter.to_ascii_uppercase());
+    for comp in parts {
+        let std::path::Component::Normal(name) = comp else {
+            return path.to_string_lossy().into_owned();
+        };
+        out.push('\\');
+        out.push_str(&name.to_string_lossy());
+    }
+    out
+}
+
 /// Trash one path. `Ok(None)` means nothing moved without an error (missing
 /// file under `-f`, or a declined prompt).
 pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Trashed>, i32> {
@@ -1008,19 +1049,15 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             crate::wsl_bin::user_sid().ok().map(|sid| {
                 let root = crate::wsl::automount_root();
                 let items = crate::wsl_bin::scan(&root, &sid);
-                let newest = items.iter().map(|it| it.deleted).max();
                 let payloads = items.into_iter().map(|it| it.payload).collect::<Vec<_>>();
-                (root, sid, newest, payloads)
+                (root, sid, payloads)
             })
         });
         return match crate::wsl::recycle(&abs, meta.is_dir()) {
             Ok(()) => {
                 let located = before.as_ref().and_then(|before| {
-                    before.as_ref().and_then(|(root, sid, newest, payloads)| {
-                        crate::wsl_bin::scan(root, sid)
-                            .into_iter()
-                            .filter(|it| newest.is_none_or(|deleted| it.deleted >= deleted))
-                            .find(|it| it.local == abs && !payloads.contains(&it.payload))
+                    before.as_ref().and_then(|(root, sid, payloads)| {
+                        locate_wsl_recycled(&abs, payloads, crate::wsl_bin::scan(root, sid))
                     })
                 });
                 let after = located
@@ -1340,6 +1377,64 @@ mod json_tests {
         );
         assert!(!vol_hint.contains("would lose the work"), "{vol_hint}");
         assert!(!vol_hint.contains("/vol/plain"), "{vol_hint}");
+    }
+
+    fn wsl_item(local: &str, payload: &str, deleted: i64) -> crate::wsl_bin::BinEntry {
+        crate::wsl_bin::BinEntry {
+            payload: PathBuf::from(payload),
+            original: String::new(),
+            local: PathBuf::from(local),
+            deleted,
+            size: 0,
+        }
+    }
+
+    #[test]
+    fn wsl_locate_picks_the_newest_candidate() {
+        let got = locate_wsl_recycled(
+            Path::new("/mnt/c/work/repo"),
+            &[],
+            vec![
+                wsl_item("/mnt/c/work/repo", "/mnt/c/$Recycle.Bin/S-1/$Rold", 10),
+                wsl_item("/mnt/c/work/repo", "/mnt/c/$Recycle.Bin/S-1/$Rnew", 11),
+            ],
+        );
+        assert_eq!(
+            got.map(|it| it.payload),
+            Some(PathBuf::from("/mnt/c/$Recycle.Bin/S-1/$Rnew"))
+        );
+    }
+
+    #[test]
+    fn wsl_locate_does_not_drop_an_item_older_than_the_previous_newest() {
+        let got = locate_wsl_recycled(
+            Path::new("/mnt/c/work/repo"),
+            &[PathBuf::from("/mnt/c/$Recycle.Bin/S-1/$Rprev")],
+            vec![
+                wsl_item("/mnt/c/work/repo", "/mnt/c/$Recycle.Bin/S-1/$Rprev", 80),
+                wsl_item("/mnt/c/work/repo", "/mnt/c/$Recycle.Bin/S-1/$Rlate", 49),
+            ],
+        );
+        assert_eq!(
+            got.map(|it| it.payload),
+            Some(PathBuf::from("/mnt/c/$Recycle.Bin/S-1/$Rlate"))
+        );
+    }
+
+    #[test]
+    fn wsl_locate_matches_windows_drive_paths_to_mnt_paths() {
+        let got = locate_wsl_recycled(
+            Path::new("/mnt/C/work/repo"),
+            &[],
+            vec![
+                wsl_item("/mnt/c/work/repo", "/mnt/c/$Recycle.Bin/S-1/$Rcase", 11),
+                wsl_item(r"C:\Work\Repo", "/mnt/c/$Recycle.Bin/S-1/$Rdrive", 12),
+            ],
+        );
+        assert_eq!(
+            got.map(|it| it.payload),
+            Some(PathBuf::from("/mnt/c/$Recycle.Bin/S-1/$Rdrive"))
+        );
     }
 }
 

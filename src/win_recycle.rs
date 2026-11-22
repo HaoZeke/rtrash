@@ -1910,11 +1910,14 @@ fn moved_item_index<T>(
     identity_of: impl Fn(&T) -> Option<(u64, u64)>,
     deleted: impl Fn(&T) -> i64,
 ) -> Option<usize> {
-    if let Some(seen) = seen {
+    if let Some(seen) = seen.filter(|(_, file_index)| *file_index != 0) {
         if let Some((index, _)) = items
             .iter()
             .enumerate()
-            .find(|(_, item)| same_original(item) && identity_of(item) == Some(seen))
+            .filter(|(_, item)| same_original(item) && deleted(item) >= started)
+            .filter(|(_, item)| identity_of(item).is_some_and(|(_, file_index)| file_index != 0))
+            .filter(|(_, item)| identity_of(item) == Some(seen))
+            .max_by_key(|(_, item)| deleted(item))
         {
             return Some(index);
         }
@@ -5469,6 +5472,71 @@ mod tests {
             |item| item.deleted,
         );
         assert_eq!(found, Some(2));
+    }
+
+    #[test]
+    fn moved_item_identity_uses_the_newest_match_after_start() {
+        struct Item {
+            original: &'static str,
+            deleted: i64,
+            identity: Option<(u64, u64)>,
+        }
+        let items = [
+            Item {
+                original: r"C:\work\same",
+                deleted: 99,
+                identity: Some((7, 11)),
+            },
+            Item {
+                original: r"C:\work\same",
+                deleted: 100,
+                identity: Some((7, 11)),
+            },
+            Item {
+                original: r"C:\work\same",
+                deleted: 101,
+                identity: Some((7, 11)),
+            },
+        ];
+        let found = moved_item_index(
+            &items,
+            Some((7, 11)),
+            100,
+            |item| same_git_risk_path(Path::new(item.original), Path::new(r"C:\work\same")),
+            |item| item.identity,
+            |item| item.deleted,
+        );
+        assert_eq!(found, Some(2));
+    }
+
+    #[test]
+    fn moved_item_zero_file_index_identity_is_treated_as_unknown() {
+        struct Item {
+            original: &'static str,
+            deleted: i64,
+            identity: Option<(u64, u64)>,
+        }
+        let items = [
+            Item {
+                original: r"C:\work\same",
+                deleted: 100,
+                identity: Some((7, 0)),
+            },
+            Item {
+                original: r"C:\work\same",
+                deleted: 101,
+                identity: Some((7, 22)),
+            },
+        ];
+        let found = moved_item_index(
+            &items,
+            Some((7, 0)),
+            100,
+            |item| same_git_risk_path(Path::new(item.original), Path::new(r"C:\work\same")),
+            |item| item.identity,
+            |item| item.deleted,
+        );
+        assert_eq!(found, Some(1));
     }
 
     /// The final component stays the operand. Canonicalizing the whole path
