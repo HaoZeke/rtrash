@@ -254,8 +254,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: {e}");
         return 2;
     }
-    // A put run is a scope of its own: with no PATTERN, take all of it.
-    let scoped = batch.is_some() && patterns.is_empty();
+    // A put run is a scope of its own: with no PATTERN and no --id, take
+    // all of it. An id is a selection, so the run is not then taken as `*`.
+    let scoped = crate::rm_match::batch_takes_the_whole_run(
+        batch.is_some(),
+        patterns.is_empty(),
+        ids.is_empty(),
+    );
     if scoped {
         kind = crate::filters::Match::Glob;
         patterns.push("*".into());
@@ -330,6 +335,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 verbose,
                 json,
                 filter,
+                refuse_covered: !force && !scoped,
             },
         );
     }
@@ -392,23 +398,29 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     };
 
-    let path_hit = |entry: &list::Entry| -> bool {
-        if kind == crate::filters::Match::Exact {
-            return crate::orig_path::selects(&pats.texts, &entry.original);
-        }
+    let matched = |entry: &list::Entry| -> bool {
         let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
         let base = entry
             .original
             .file_name()
             .map(crate::util::str_from_os_ref)
             .unwrap_or_default();
-        pats.selects(
-            path_s.as_ref(),
-            base.as_str(),
-            entry.name.as_str(),
-            entry.date.as_deref().unwrap_or(""),
-            &entry.dir.root,
-        )
+        let pattern_hit = if kind == crate::filters::Match::Exact {
+            crate::orig_path::selects(&pats.texts, &entry.original)
+        } else {
+            pats.selects(
+                path_s.as_ref(),
+                base.as_str(),
+                entry.name.as_str(),
+                entry.date.as_deref().unwrap_or(""),
+                &entry.dir.root,
+            )
+        };
+        crate::rm_match::chosen(
+            pattern_hit,
+            crate::rm_match::id_hit(&ids, &entry.name),
+            !ids.is_empty(),
+        ) && size.keeps(size_of(entry))
     };
     if kind == crate::filters::Match::Exact {
         let kept: Vec<PathBuf> = entries
@@ -420,25 +432,55 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             crate::orig_path::window(older_than.is_some() || newer_than.is_some(), size.is_set());
         crate::orig_path::hint(prog, &pats.operands, &have, &kept, window);
     }
-    let wanted = |entry: &list::Entry| -> bool {
-        (path_hit(entry) || crate::rm_match::id_hit(&ids, &entry.name))
-            && (!size.is_set() || size.keeps(size_of(entry)))
-    };
 
-    let selected: Vec<&list::Entry> = entries.iter().filter(|e| wanted(e)).collect();
+    let hits: Vec<&list::Entry> = entries.iter().filter(|e| matched(e)).collect();
     if kind == crate::filters::Match::Exact
         && ids.is_empty()
         && crate::rm_match::refuse_ambiguous(
             prog,
-            selected.iter().map(|e| e.original.as_path()),
+            hits.iter().map(|e| e.original.as_path()),
             all_matches,
         )
     {
         return 2;
     }
-    if selected.is_empty() {
+    let exact_no_hits = hits.is_empty() && kind == crate::filters::Match::Exact && ids.is_empty();
+    if hits.is_empty() && !exact_no_hits {
         return crate::rm_match::no_matches(prog);
     }
+    // After the match: a pattern that took every entry, and would take
+    // every entry under the scope they share, is the same mass delete the
+    // probe check refuses. A prefix or glob that narrows stays.
+    if !force && !scoped {
+        let originals: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
+        if crate::filters::selection_covers_scope(&pats, &originals, entries.len()) {
+            eprintln!(
+                "{prog}: refusing mass pattern {:?} without --force \
+                 (would permanently delete matching trash entries)",
+                patterns
+            );
+            eprintln!("Try '{prog} --force …' only if you intend a full selective purge.");
+            return 2;
+        }
+    }
+    for entry in hits.iter().filter(|e| keep.protects(&e.original)) {
+        eprintln!(
+            "{prog}: kept '{}' (listed in the keep file)",
+            crate::util::err_path(&entry.original)
+        );
+    }
+    let selected: Vec<&list::Entry> = hits
+        .into_iter()
+        .filter(|e| !keep.protects(&e.original))
+        .collect();
+    if selected.is_empty() && !exact_no_hits {
+        return 0;
+    }
+    let deletable = |entry: &list::Entry| {
+        selected
+            .iter()
+            .any(|s| s.name == entry.name && s.dir.root == entry.dir.root)
+    };
     let seen: Vec<trashdir::Seen> = dirs.iter().map(trashdir::Seen::take).collect();
 
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
@@ -458,7 +500,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     if crate::rm_ask::would_ask(dry_run, json) {
         let named: Vec<(String, u64)> = entries
             .iter()
-            .filter(|e| wanted(e))
+            .filter(|e| deletable(e))
             .map(|e| (crate::util::term_path(&e.original), size_of(e)))
             .collect();
         if !crate::rm_ask::confirm(prog, &named) {
@@ -473,20 +515,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut not_reached: Option<usize> = None;
     for (k, entry) in entries.iter().enumerate() {
         if crate::interrupt::requested() {
-            not_reached = Some(entries[k..].iter().filter(|e| wanted(e)).count());
+            not_reached = Some(entries[k..].iter().filter(|e| deletable(e)).count());
             break;
         }
-        if !wanted(entry) {
+        if !deletable(entry) {
             continue;
         }
         let sz = size_of(entry);
-        if keep.protects(&entry.original) {
-            eprintln!(
-                "{prog}: kept '{}' (listed in the keep file)",
-                crate::util::err_path(&entry.original)
-            );
-            continue;
-        }
         if dry_run {
             let payload_scanned = crate::util::join_name(&entry.dir.files(), &entry.name);
             if !force && !crate::util::is_gone(&payload_scanned) {

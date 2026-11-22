@@ -20,7 +20,9 @@ A PATH removes only the items whose original path is that path, exactly,
 the way put records it. A relative PATH is resolved from the current
 directory, and a trailing slash is ignored. `empty ~/a` does not remove
 `~/ab` or `~/a/b`. When nothing matches, those longer paths are named
-and left in place. A number or a duration is an age, not a path.
+and left in place. When two items have the same original path, empty
+refuses; use rm --id=NAME for one or rm --all-matches for all. A number
+or a duration is an age, not a path.
 An item that cannot be removed stays; each one is listed at the end, with
 the reason, and the exit status is 1.
 On a TTY without DAYS, opens the interactive empty browser (multi-select
@@ -1031,14 +1033,32 @@ fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
         .iter()
         .filter(|e| crate::orig_path::selects(&wants, &e.original))
         .collect();
-    let kept: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
+    let matched: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
     crate::orig_path::hint(
         prog,
         &opts.paths,
         &have,
-        &kept,
+        &matched,
         crate::orig_path::window(opts.days.is_some(), false),
     );
+    if crate::rm_match::refuse_ambiguous(prog, hits.iter().map(|e| e.original.as_path()), false) {
+        return 2;
+    }
+    let exact = crate::filters::Patterns::new(opts.paths.clone(), crate::filters::Match::Exact)
+        .expect("exact paths are valid patterns");
+    if crate::filters::selection_covers_scope(&exact, &matched, &have) {
+        return 2;
+    }
+    for entry in hits.iter().filter(|e| opts.keep.protects(&e.original)) {
+        eprintln!(
+            "{prog}: kept '{}' (listed in the keep file)",
+            crate::util::err_path(&entry.original)
+        );
+    }
+    let hits: Vec<&list::Entry> = hits
+        .into_iter()
+        .filter(|e| !opts.keep.protects(&e.original))
+        .collect();
     if opts.interactive && !opts.dry_run {
         let named: Vec<(String, u64)> = hits
             .iter()

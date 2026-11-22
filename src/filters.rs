@@ -544,11 +544,12 @@ impl Patterns {
         })
     }
 
-    /// A pattern whose effective scope is the whole trash: a glob that
-    /// matches every name or every absolute path, a regex that matches
-    /// the empty string or every probed path, a substring every absolute
-    /// path contains, or a prefix whose match key is empty, a volume
-    /// root, the home directory or a trash root.
+    /// A pattern whose effective scope is the whole trash, or every entry
+    /// under one scope root: a glob or regex that matches every probed
+    /// path in such a set, a substring every absolute path contains, or a
+    /// prefix whose match key is empty, a volume root, the home directory
+    /// or a trash root. The decision is what the pattern matches, not a
+    /// list of spellings.
     pub fn is_mass(&self) -> bool {
         match self.kind {
             Match::Glob => self.texts.iter().any(|p| glob_is_mass(p)),
@@ -596,18 +597,21 @@ impl Patterns {
     }
 }
 
-/// Names and absolute paths a glob has to match before it counts as
-/// taking every item. `*.*` stays mass because its only literal is `.`
-/// and it matches every dotted name.
+/// Names a glob has to match before it counts as taking every item, and
+/// absolute paths a glob or regex has to match before it counts as taking
+/// every entry, or every entry on one volume or under one scope root.
+/// `*.*` stays mass because its only literal is `.` and it matches every
+/// dotted name. The absolute probes leave out a bare `/` and a one-letter
+/// name, so a pattern that matches every real path (`/?*`, `/`, `..`) is
+/// mass and one that matches a single letter is not.
 fn glob_is_mass(p: &str) -> bool {
     const NAMES: &[&str] = &[
         "a", "b", "z", "0", "9", ".", "-", "_", " ", "ab", "a.b", ".a", "a.", "foo", "*", "?",
     ];
-    const ABSOLUTE: &[&str] = &["/", "/a", "/a/b", "/.a", "/a.b", "//x", "/tmp/x"];
     if NAMES.iter().all(|n| crate::util::fnmatch(p, n)) {
         return true;
     }
-    if ABSOLUTE.iter().all(|n| crate::util::fnmatch(p, n)) {
+    if covers_absolute(|full| crate::util::fnmatch(p, full)) || glob_covers_any_scope(p) {
         return true;
     }
     let only_dot = p.bytes().any(|c| c == b'.')
@@ -619,13 +623,184 @@ fn glob_is_mass(p: &str) -> bool {
             .all(|n| crate::util::fnmatch(p, n))
 }
 
-/// A regex that matches the empty string, or every non-empty probe, so
-/// `.` and `.+` are mass and `foo` is not.
+/// A regex that matches the empty string, or every path in one probe set,
+/// so `.`, `/`, `..` and `.{2}` are mass and `foo` is not.
 fn regex_is_mass(r: &regex_lite::Regex) -> bool {
-    const PROBES: &[&str] = &[
-        "a", "/", "/a", "/a/b", r"C:\a", ".", "foo.bar", " ", "*", "0",
+    r.is_match("") || covers_absolute(|full| r.is_match(full)) || regex_covers_any_scope(r)
+}
+
+fn every(probes: &[&str], hit: &mut impl FnMut(&str) -> bool) -> bool {
+    probes.iter().all(|p| hit(p))
+}
+
+/// True when `hit` accepts every Unix absolute probe, every drive-letter
+/// probe, or every probe on one drive.
+fn covers_absolute(mut hit: impl FnMut(&str) -> bool) -> bool {
+    const UNIX: &[&str] = &[
+        "/a",
+        "/b/c",
+        "/tmp/x",
+        "/var/y",
+        "/.a",
+        "/home/u/a",
+        "/x.y",
+        "//x",
     ];
-    r.is_match("") || PROBES.iter().all(|p| r.is_match(p))
+    const WIN_ANY: &[&str] = &[r"C:\a", r"D:\x", r"E:\z.y", r"C:\b\c"];
+    const WIN_C: &[&str] = &[r"C:\a", r"C:\b\c", r"C:\Users\q", r"C:\z.y"];
+    const WIN_D: &[&str] = &[r"D:\a", r"D:\b\c", r"D:\q"];
+    every(UNIX, &mut hit)
+        || every(WIN_ANY, &mut hit)
+        || every(WIN_C, &mut hit)
+        || every(WIN_D, &mut hit)
+}
+
+/// A glob that matches every entry under a known scope root and names that
+/// directory literally. `*e*` is not this: it has no directory, and the
+/// home spelling is what made every probe match.
+fn glob_covers_any_scope(pat: &str) -> bool {
+    let Some(roots) = crate::rm_match::known_scope_roots() else {
+        return false;
+    };
+    roots
+        .iter()
+        .any(|root| glob_covers_root(pat, &root.to_string_lossy()))
+}
+
+fn glob_covers_root(pat: &str, root: &str) -> bool {
+    let probes = probes_under(root);
+    if !probes.iter().all(|p| crate::util::fnmatch(pat, p)) {
+        return false;
+    }
+    let literal: String = pat
+        .chars()
+        .take_while(|c| !matches!(c, '*' | '?' | '['))
+        .collect();
+    let literal = literal.trim_end_matches(['/', '\\']);
+    if literal.is_empty() {
+        return false;
+    }
+    let root = root.trim_end_matches(['/', '\\']);
+    root.starts_with(literal) || literal.starts_with(root)
+}
+
+/// A regex whose match on every probe under a scope root starts at the
+/// first character and ends at the same place. That is a prefix of the
+/// scope (`^/home/u`), not a letter that happens to sit in the root.
+fn regex_covers_any_scope(r: &regex_lite::Regex) -> bool {
+    let Some(roots) = crate::rm_match::known_scope_roots() else {
+        return false;
+    };
+    roots
+        .iter()
+        .any(|root| regex_covers_root(r, &root.to_string_lossy()))
+}
+
+fn regex_covers_root(r: &regex_lite::Regex, root: &str) -> bool {
+    let probes = probes_under(root);
+    let mut end_at: Option<usize> = None;
+    for probe in &probes {
+        let Some(found) = r.find(probe) else {
+            return false;
+        };
+        if found.start() != 0 {
+            return false;
+        }
+        match end_at {
+            None => end_at = Some(found.end()),
+            Some(end) if end == found.end() => {}
+            Some(_) => return false,
+        }
+    }
+    end_at.is_some()
+}
+
+fn pattern_covers_root(pats: &Patterns, root: &str) -> bool {
+    match pats.kind {
+        Match::Glob => pats.texts.iter().any(|p| glob_covers_root(p, root)),
+        Match::Regex => pats.regex.iter().any(|r| regex_covers_root(r, root)),
+        Match::Prefix => pats.texts.iter().any(|p| {
+            let key = crate::rm_match::match_key(std::path::Path::new(p));
+            crate::rm_match::scope_same(&key, std::path::Path::new(root))
+                || prefix_is_mass(&key.to_string_lossy())
+        }),
+        Match::Substring => pats.texts.iter().any(|p| substring_is_mass(p)),
+        Match::Exact | Match::Id => false,
+    }
+}
+
+fn probes_under(root: &str) -> Vec<String> {
+    let root = root.trim_end_matches(['/', '\\']);
+    let sep = if root.contains('\\') { '\\' } else { '/' };
+    ["a", "b/c", "z.y", ".q"]
+        .into_iter()
+        .map(|tail| {
+            let tail = if sep == '\\' {
+                tail.replace('/', "\\")
+            } else {
+                tail.to_string()
+            };
+            format!("{root}{sep}{tail}")
+        })
+        .collect()
+}
+
+/// The part of `paths` that every one of them shares, component by component.
+fn common_prefix(paths: &[std::path::PathBuf]) -> std::path::PathBuf {
+    let mut shared: Option<Vec<std::ffi::OsString>> = None;
+    for path in paths {
+        let next: Vec<std::ffi::OsString> = path
+            .components()
+            .map(|c| c.as_os_str().to_os_string())
+            .collect();
+        shared = Some(match shared {
+            None => next,
+            Some(prev) => prev
+                .into_iter()
+                .zip(next)
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| a)
+                .collect(),
+        });
+    }
+    let mut out = std::path::PathBuf::new();
+    for c in shared.unwrap_or_default() {
+        out.push(c);
+    }
+    out
+}
+
+/// Whether `selected` is every considered entry and the pattern would also
+/// take every entry under the scope those paths share. An exact path is
+/// never this. A glob such as `*.o` is not, even when every current file
+/// happens to be one: the probes under that directory include other names.
+/// A prefix that stops above the shared directory is not either.
+pub fn selection_covers_scope(
+    pats: &Patterns,
+    selected: &[std::path::PathBuf],
+    considered: usize,
+) -> bool {
+    if pats.kind == Match::Exact || selected.is_empty() || selected.len() != considered {
+        return false;
+    }
+    if pats.is_mass() {
+        return true;
+    }
+    let common = common_prefix(selected);
+    if common.as_os_str().is_empty() {
+        return false;
+    }
+    let shown = common.to_string_lossy();
+    let volume = prefix_is_mass(&shown) || shown == "/" || shown == "\\";
+    let scope = crate::rm_match::known_scope_roots().is_some_and(|roots| {
+        roots
+            .iter()
+            .any(|root| crate::rm_match::scope_same(root, &common))
+    });
+    if !volume && !scope {
+        return false;
+    }
+    pattern_covers_root(pats, &shown)
 }
 
 /// A substring every Unix absolute path contains, or every Windows path
@@ -876,5 +1051,64 @@ mod pattern_tests {
         );
         let b = super::item_id(name, date, std::path::Path::new("/mnt/disk/.Trash-1000"));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_regex_that_matches_every_path_is_mass() {
+        for mass in ["/", "^/", "..", ".{2}", r"\\"] {
+            assert!(
+                Patterns::new(vec![mass.into()], Match::Regex)
+                    .unwrap()
+                    .is_mass(),
+                "{mass}"
+            );
+        }
+        for narrow in ["foo", "^/tmp", "a", r"^/home/u/proj"] {
+            assert!(
+                !Patterns::new(vec![narrow.into()], Match::Regex)
+                    .unwrap()
+                    .is_mass(),
+                "{narrow}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_glob_that_matches_every_path_is_mass() {
+        for mass in ["/?*", "/*?", "**/?*", "*/?*", "?:\\*"] {
+            assert!(
+                Patterns::new(vec![mass.into()], Match::Glob)
+                    .unwrap()
+                    .is_mass(),
+                "{mass}"
+            );
+        }
+        for narrow in ["*.o", "/tmp/*", r"C:\Users\*", "foo"] {
+            assert!(
+                !Patterns::new(vec![narrow.into()], Match::Glob)
+                    .unwrap()
+                    .is_mass(),
+                "{narrow}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_selection_of_every_entry_under_a_scope_is_mass() {
+        let star = Patterns::new(vec!["*".into()], Match::Glob).unwrap();
+        let files = vec![std::path::PathBuf::from("/tmp/proj/a.txt")];
+        assert!(super::selection_covers_scope(&star, &files, 1));
+        let exact = Patterns::new(vec!["/tmp/proj/a.txt".into()], Match::Exact).unwrap();
+        assert!(!super::selection_covers_scope(&exact, &files, 1));
+        let objects = Patterns::new(vec!["*.o".into()], Match::Glob).unwrap();
+        let two = vec![
+            std::path::PathBuf::from("/tmp/proj/a.o"),
+            std::path::PathBuf::from("/tmp/proj/b.o"),
+        ];
+        assert!(!super::selection_covers_scope(&objects, &two, 2));
+        assert!(!super::selection_covers_scope(&objects, &two, 3));
+        let prefix = Patterns::new(vec!["/tmp/proj".into()], Match::Prefix).unwrap();
+        assert!(!prefix.is_mass());
+        assert!(!super::selection_covers_scope(&prefix, &two, 2));
     }
 }

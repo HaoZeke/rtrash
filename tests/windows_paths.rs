@@ -501,6 +501,63 @@ fn empty_refuses_an_empty_operand_after_a_double_dash() {
     assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
 }
 
+#[test]
+fn windows_empty_exact_keeps_a_protected_path() {
+    let home = home("empty-exact-keep");
+    fs::create_dir_all(home.join(".config/rtrash")).unwrap();
+    let kept = home.join("kept.txt");
+    let other = home.join("other.txt");
+    fs::write(
+        home.join(".config/rtrash/keep"),
+        format!("{}\n", kept.display()),
+    )
+    .unwrap();
+    fs::write(&kept, b"kept").unwrap();
+    fs::write(&other, b"other").unwrap();
+    ok(&run(&home, &["put", &s(&kept), &s(&other)]));
+
+    let out = run(&home, &["empty", "-f", &s(&kept)]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("listed in the keep file"),
+        "{}",
+        text(&out)
+    );
+    let listed = ok(&run(&home, &["list"]));
+    assert!(listed.contains(&s(&kept)), "{listed}");
+    assert!(listed.contains(&s(&other)), "{listed}");
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn windows_empty_exact_refuses_duplicate_originals_until_an_id_selects_one() {
+    let home = home("empty-exact-ambiguous");
+    let same = home.join("same.txt");
+    fs::write(&same, b"first").unwrap();
+    ok(&run(&home, &["put", &s(&same)]));
+    fs::write(&same, b"second").unwrap();
+    ok(&run(&home, &["put", &s(&same)]));
+
+    let refused = run(&home, &["empty", "-f", &s(&same)]);
+    assert_eq!(refused.status.code(), Some(2), "{}", text(&refused));
+    assert!(
+        text(&refused).contains("refusing 2 trash items with original path"),
+        "{}",
+        text(&refused)
+    );
+    let ids = ok(&run(&home, &["list", "--format={id}\\n"]));
+    let id = ids.lines().next().unwrap();
+    let removed = run(&home, &["rm", "--yes", "--match=id", id]);
+    assert!(removed.status.success(), "{}", text(&removed));
+    assert_eq!(
+        ok(&run(&home, &["list", "--format={id}\\n"]))
+            .lines()
+            .count(),
+        1
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
 /// `--` ends empty's options, so `-n` after it is a path and the item stays.
 #[test]
 fn empty_takes_a_double_dash_as_the_end_of_its_options() {
@@ -634,4 +691,49 @@ fn two_spellings_of_one_path_need_all_matches() {
     assert!(err.contains("refusing 2 trash items"), "{err}");
     assert!(err.contains("--all-matches"), "{err}");
     assert_eq!(left, 2, "a refused rm purged the bin");
+}
+
+/// `C:\Users\Alice` and `c:\users\alice` are one home. A prefix of the
+/// other spelling is the whole scope and needs `--force`.
+#[test]
+fn a_differently_cased_home_prefix_is_refused() {
+    let home = home("case-scope");
+    let out = common::rtrash(&home)
+        .env("HOME", r"C:\Users\Alice")
+        .env("USERPROFILE", r"C:\Users\Alice")
+        .args(["rm", "--prefix", r"c:\users\alice"])
+        .current_dir(&home)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let _ = fs::remove_dir_all(&home);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("matches everything"), "{err}");
+}
+
+/// Every match kept is a successful rm that deleted nothing. Exit 1 would
+/// say the path matched nothing.
+#[test]
+fn rm_of_only_a_kept_item_exits_success() {
+    let home = home("kept-only");
+    fs::create_dir_all(home.join(".config/rtrash")).unwrap();
+    let file = home.join("secret.txt");
+    fs::write(&file, b"s").unwrap();
+    fs::write(
+        home.join(".config/rtrash/keep"),
+        format!("{}\n", file.display()),
+    )
+    .unwrap();
+    ok(&run(&home, &["put", &s(&file)]));
+    let out = run(&home, &["rm", &s(&file)]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    let left = fs::read_dir(common::test_bin(&home))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("$R"))
+        .count();
+    let _ = fs::remove_dir_all(&home);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("listed in the keep file"), "{err}");
+    assert_eq!(left, 1);
 }

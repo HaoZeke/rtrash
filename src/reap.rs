@@ -641,6 +641,13 @@ fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Wal
                     return w;
                 }
             };
+            if ctx.keep.protects(&p) {
+                w.keep = Some(format!(
+                    "holds '{}', listed in the keep file",
+                    crate::util::err_path(&p)
+                ));
+                return w;
+            }
             if plat::dev(&m) != dev {
                 w.keep = Some(format!("holds the mount point '{}'", p.display()));
                 return w;

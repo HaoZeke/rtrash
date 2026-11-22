@@ -308,7 +308,7 @@ Putting ordinary files does not add directory lines.
 
 Purges every trash directory visible to the user (home trash plus mounted volumes).
 With `DAYS` (or `--older-than=DAYS`), only items trashed more than `DAYS` days ago go.
-A `PATH` removes only the items whose original path is that path, exactly, the way `put` records it (a relative path is resolved from the current directory, and a trailing slash is ignored). `empty ~/a` does not remove `~/ab` or `~/a/b`; when nothing matches, those longer paths are named and left in place. A number or a duration is an age, not a path.
+A `PATH` removes only the items whose original path is that path, exactly, the way `put` records it (a relative path is resolved from the current directory, and a trailing slash is ignored). `empty ~/a` does not remove `~/ab` or `~/a/b`; when nothing matches, those longer paths are named and left in place. When two items have the same original path, `empty` refuses; use `rm --id=NAME` for one or `rm --all-matches` for all. A number or a duration is an age, not a path.
 Entries are removed in parallel.
 Orphaned `files/` entries (no `.trashinfo`) and entries with broken metadata are purged on a full empty, and the `directorysizes` cache is pruned when present.
 A directory you own but cannot list or change, such as a build tree's `pkg` at mode 0311, gets owner `rwx` back and then goes.

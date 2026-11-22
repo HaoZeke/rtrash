@@ -458,6 +458,13 @@ does not remove
 or
 .IR ~/a/b .
 When nothing matches, those longer paths are named and left in place.
+When two items have the same original path,
+.B empty
+refuses; use
+.B rm \-\-id=NAME
+for one or
+.B rm \-\-all\-matches
+for all.
 A number or a duration is an age, not a path.
 .PP
 One run covers the home trash and this user's trash on every mounted

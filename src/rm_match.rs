@@ -8,6 +8,23 @@ pub fn id_hit(ids: &[String], id: &str) -> bool {
     ids.iter().any(|want| want == id)
 }
 
+/// An `--id` selects that entry and no other. A path beside it does not
+/// widen the selection, and it does not turn the duplicate check off for
+/// every path match.
+pub fn chosen(pattern_hit: bool, id_hit: bool, ids_given: bool) -> bool {
+    if ids_given {
+        id_hit
+    } else {
+        pattern_hit
+    }
+}
+
+/// `--batch` with no pattern and no `--id` is the whole put run. An id
+/// is a selection of its own, so the run is not then taken as `*`.
+pub fn batch_takes_the_whole_run(has_batch: bool, no_pattern: bool, no_id: bool) -> bool {
+    has_batch && no_pattern && no_id
+}
+
 /// The path exact and prefix matching treat as one place.
 ///
 /// `~` is this user's home. `.` and `..` are applied, and a symlink in a
@@ -31,8 +48,38 @@ pub fn match_key(path: &Path) -> PathBuf {
 
 /// Whether `key` (already a [`match_key`]) is this user's home, the home
 /// trash, or `~/.Trash`. A prefix of one of those takes the whole place.
+/// When the home cannot be read, every key is treated as one: a prefix
+/// then fails closed instead of matching a scope the program could not see.
 pub fn is_scope_root(key: &Path) -> bool {
-    scope_roots().iter().any(|root| root == key)
+    scope_listed(key, known_scope_roots().as_deref())
+}
+
+pub(crate) fn scope_listed(key: &Path, roots: Option<&[PathBuf]>) -> bool {
+    let Some(roots) = roots else {
+        return true;
+    };
+    roots.iter().any(|root| scope_same(root, key))
+}
+
+pub(crate) fn scope_same(root: &Path, key: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        windows_scope_same(root, key)
+    }
+    #[cfg(not(windows))]
+    {
+        root == key
+    }
+}
+
+/// Windows scope roots compare by [`crate::win_recycle::path_key`], so
+/// `C:\Users\Alice` and `c:\users\alice` are one home. A longer name is
+/// not: `Alice` does not cover `Alice2`.
+#[cfg(any(windows, test))]
+pub(crate) fn windows_scope_same(root: &Path, key: &Path) -> bool {
+    let mounts = &[];
+    crate::win_recycle::path_key(&root.to_string_lossy(), mounts)
+        == crate::win_recycle::path_key(&key.to_string_lossy(), mounts)
 }
 
 fn expand_tilde(path: &Path) -> PathBuf {
@@ -54,7 +101,7 @@ fn expand_tilde(path: &Path) -> PathBuf {
 }
 
 /// Drop `.`, apply `..`, and leave a rooted path at its root.
-fn lexical_normalize(path: &Path) -> PathBuf {
+pub(crate) fn lexical_normalize(path: &Path) -> PathBuf {
     use std::path::Component::{Normal, ParentDir};
     let mut out = PathBuf::new();
     for c in path.components() {
@@ -75,22 +122,29 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     out
 }
 
-fn scope_roots() -> Vec<PathBuf> {
-    let Some(home) = crate::util::home_dir() else {
-        return Vec::new();
-    };
+/// Home, `~/.Trash`, the home trash, and `$XDG_DATA_HOME/Trash` when that
+/// variable is absolute. `None` when the home cannot be read: callers
+/// fail closed rather than treat "no roots" as "nothing is in scope".
+pub(crate) fn known_scope_roots() -> Option<Vec<PathBuf>> {
+    let home = crate::util::home_dir()?;
+    let xdg = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+    scope_roots_from(Some(&home), xdg.as_deref())
+}
+
+pub(crate) fn scope_roots_from(home: Option<&Path>, xdg: Option<&Path>) -> Option<Vec<PathBuf>> {
+    let home = home?;
+    if !home.is_absolute() {
+        return None;
+    }
     let mut roots = vec![
-        home.clone(),
+        home.to_path_buf(),
         home.join(".Trash"),
         home.join(".local").join("share").join("Trash"),
     ];
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
-        let xdg = PathBuf::from(xdg);
-        if xdg.is_absolute() {
-            roots.push(xdg.join("Trash"));
-        }
+    if let Some(xdg) = xdg.filter(|p| p.is_absolute()) {
+        roots.push(xdg.join("Trash"));
     }
-    roots.into_iter().map(|root| match_key(&root)).collect()
+    Some(roots.into_iter().map(|root| match_key(&root)).collect())
 }
 
 /// The key [`refuse_ambiguous`] groups by. Windows spellings that differ
@@ -200,5 +254,56 @@ mod tests {
             super::refuse_ambiguous("rtrash", [via_real.as_path(), via_link.as_path()], false);
         let _ = std::fs::remove_dir_all(&root);
         assert!(refused);
+    }
+
+    #[test]
+    fn an_id_is_the_whole_selection_and_a_batch_needs_no_id() {
+        assert!(super::chosen(true, false, false));
+        assert!(!super::chosen(true, false, true));
+        assert!(super::chosen(false, true, true));
+        assert!(super::batch_takes_the_whole_run(true, true, true));
+        assert!(!super::batch_takes_the_whole_run(true, true, false));
+        assert!(!super::batch_takes_the_whole_run(true, false, true));
+    }
+
+    #[test]
+    fn an_unknown_home_treats_every_prefix_as_a_scope_root() {
+        assert!(super::scope_listed(std::path::Path::new("/tmp/proj"), None));
+        let home = std::path::PathBuf::from("/home/u");
+        let roots = super::scope_roots_from(Some(&home), None).unwrap();
+        assert!(super::scope_listed(&super::match_key(&home), Some(&roots)));
+        assert!(!super::scope_listed(
+            &super::match_key(&home.join("proj")),
+            Some(&roots)
+        ));
+    }
+
+    #[test]
+    fn windows_scope_roots_match_without_case() {
+        let home = std::path::PathBuf::from(r"C:\Users\Alice");
+        let roots = [home.clone()];
+        assert!(super::windows_scope_same(
+            &home,
+            std::path::Path::new(r"c:\users\alice")
+        ));
+        assert!(super::windows_scope_same(
+            &home,
+            std::path::Path::new(r"C:/Users/Alice")
+        ));
+        assert!(!super::windows_scope_same(
+            &home,
+            std::path::Path::new(r"C:\Users\Alice2")
+        ));
+        assert!(!super::windows_scope_same(
+            &home,
+            std::path::Path::new(r"D:\Users\Alice")
+        ));
+        assert!(roots
+            .iter()
+            .any(|root| super::windows_scope_same(root, std::path::Path::new(r"c:\users\alice"))));
+        assert!(super::scope_listed(
+            std::path::Path::new(r"C:\anywhere"),
+            None
+        ));
     }
 }

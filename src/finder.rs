@@ -1340,6 +1340,7 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
         }
     };
     let wants = crate::orig_path::expand(&o.paths);
+    let census: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
     let have: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
     let rows: Vec<_> = rows
         .into_iter()
@@ -1367,6 +1368,33 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
     let mut bytes = 0u64;
     let mut failed = 0u64;
     let picked = empty_pick(rows, o.cutoff, o.max_size, o.prune);
+    if !o.paths.is_empty()
+        && crate::rm_match::refuse_ambiguous(
+            prog,
+            picked.iter().map(|(e, _)| e.shown.as_path()),
+            false,
+        )
+    {
+        return 2;
+    }
+    if !o.paths.is_empty() {
+        let exact = crate::filters::Patterns::new(o.paths.clone(), crate::filters::Match::Exact)
+            .expect("exact paths are valid patterns");
+        let selected: Vec<PathBuf> = picked.iter().map(|(e, _)| e.shown.clone()).collect();
+        if crate::filters::selection_covers_scope(&exact, &selected, &census) {
+            return 2;
+        }
+    }
+    for (e, _) in picked.iter().filter(|(e, _)| keep.protects(&e.shown)) {
+        eprintln!(
+            "{prog}: kept '{}' (listed in the keep file)",
+            crate::util::err_path(&e.shown)
+        );
+    }
+    let picked: Vec<_> = picked
+        .into_iter()
+        .filter(|(e, _)| !keep.protects(&e.shown))
+        .collect();
     if o.interactive && !dry_run && !o.paths.is_empty() {
         let named: Vec<(String, u64)> = picked
             .iter()
@@ -1383,13 +1411,6 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
         }
     }
     for (e, b) in picked {
-        if keep.protects(&e.shown) {
-            eprintln!(
-                "{prog}: kept '{}' (listed in the keep file)",
-                crate::util::err_path(&e.shown)
-            );
-            continue;
-        }
         // After the count and any question: the item must still be the
         // one listed. One already gone needs nothing done; another in its
         // place stays, and the run says so.

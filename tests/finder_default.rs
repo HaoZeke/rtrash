@@ -468,7 +468,7 @@ fn volume_trashes_join_list_restore_rm_and_status() {
     assert!(!vt.join("v.bin").exists());
     assert!(vt.join(".DS_Store").exists());
     let o = run(&["rm", "--match=glob", "--older-than=1d", "*", "--force"]);
-    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
 }
 
 #[test]
@@ -1394,6 +1394,77 @@ fn interactive_finder_empty_of_an_exact_path_honors_the_reply() {
     assert!(b.finder().join("kept.txt").exists());
 }
 
+#[test]
+fn finder_empty_exact_keeps_a_protected_path() {
+    let b = Box_::new("emptyexactkeep");
+    fs::create_dir_all(b.root.join(".config/rtrash")).unwrap();
+    let kept = b.work().join("kept.txt");
+    fs::write(
+        b.root.join(".config/rtrash/keep"),
+        format!("{}\n", kept.display()),
+    )
+    .unwrap();
+    fs::write(&kept, b"kept").unwrap();
+    fs::write(b.work().join("other.txt"), b"other").unwrap();
+    assert!(b
+        .run(&["put", "kept.txt", "other.txt"], "")
+        .status
+        .success());
+
+    let o = b.run(&["empty", "-f", kept.to_str().unwrap()], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(err(&o).contains("listed in the keep file"), "{}", err(&o));
+    assert!(b.finder().join("kept.txt").exists());
+    assert!(b.finder().join("other.txt").exists());
+}
+
+#[test]
+fn finder_empty_exact_refuses_duplicate_originals_until_an_id_selects_one() {
+    let b = Box_::new("emptyexactambiguous");
+    fs::create_dir_all(b.finder()).unwrap();
+    for name in ["same one", "same two"] {
+        fs::write(b.finder().join(name), name).unwrap();
+    }
+    let folder = format!("{}/", b.work().to_string_lossy().trim_start_matches('/'));
+    let records: Vec<Record> = ["same one", "same two"]
+        .into_iter()
+        .flat_map(|name| {
+            [
+                Record {
+                    name: name.into(),
+                    code: *b"ptbL",
+                    value: Value::Ustr(folder.clone()),
+                },
+                Record {
+                    name: name.into(),
+                    code: *b"ptbN",
+                    value: Value::Ustr("same.txt".into()),
+                },
+            ]
+        })
+        .collect();
+    fs::write(b.finder().join(".DS_Store"), ds_store::write(&records)).unwrap();
+    let original = b.work().join("same.txt");
+
+    let refused = b.run(&["empty", "-f", original.to_str().unwrap()], "");
+    assert_eq!(refused.status.code(), Some(2), "{}", err(&refused));
+    assert!(
+        err(&refused).contains("refusing 2 trash items with original path"),
+        "{}",
+        err(&refused)
+    );
+    assert!(b.finder().join("same one").exists());
+    assert!(b.finder().join("same two").exists());
+
+    let removed = b.run(
+        &["rm", "--id=same one", original.to_str().unwrap(), "--yes"],
+        "",
+    );
+    assert!(removed.status.success(), "{}", err(&removed));
+    assert!(!b.finder().join("same one").exists());
+    assert!(b.finder().join("same two").exists());
+}
+
 /// Odd but valid file names (APFS takes no invalid UTF-8) through put,
 /// every list form, restore, rm and empty on the Finder Trash. Each
 /// command must finish without a panic; restore brings back the bytes.
@@ -1741,7 +1812,8 @@ fn finder_rm_refuses_a_repository_that_holds_risky_work() {
         return;
     }
     fs::write(repo.join("f"), b"x").unwrap();
-    let o = b.run(&["put", "-r", "fr-repo"], "");
+    fs::write(b.work().join("spared.txt"), b"spared").unwrap();
+    let o = b.run(&["put", "-r", "fr-repo", "spared.txt"], "");
     assert!(o.status.success(), "{}", err(&o));
     let kept = b.finder().join("fr-repo");
     assert!(kept.join("f").exists());

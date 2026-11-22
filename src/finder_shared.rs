@@ -640,6 +640,8 @@ pub struct RmOpts<'a> {
     pub verbose: bool,
     pub json: bool,
     pub filter: Filter,
+    /// Refuse when the selection covers every listed entry under a scope.
+    pub refuse_covered: bool,
 }
 
 /// `rm` on the Finder trashes: permanently remove the items whose Put Back
@@ -655,6 +657,7 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         verbose,
         json,
         filter,
+        refuse_covered,
     } = opts;
     let all = match entries() {
         Ok(r) => r,
@@ -712,26 +715,30 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
             .map(|b| b.to_string_lossy().into_owned())
             .unwrap_or_default();
         let name = nfc(&e.name);
-        crate::rm_match::id_hit(ids, &e.name)
-            || match patterns.kind {
-                crate::filters::Match::Exact => {
-                    crate::orig_path::selects(&patterns.texts, &e.shown)
-                }
-                crate::filters::Match::Glob => patterns.texts.iter().any(|p| {
-                    let p = nfc(p);
-                    crate::util::fnmatch(&p, &path_s)
-                        || crate::util::fnmatch(&p, &base)
-                        || crate::util::fnmatch(&p, &name)
-                }),
-                crate::filters::Match::Regex => {
-                    let path_s = nfc(&path_s);
-                    regex.iter().any(|r| r.is_match(&path_s))
-                }
-                crate::filters::Match::Id => {
-                    texts.selects(&nfc(&path_s), &base, &name, &e.date, &e.trash)
-                }
-                _ => texts.hit(&nfc(&path_s), &base, &name),
+        let pattern_hit = match patterns.kind {
+            crate::filters::Match::Exact => {
+                crate::orig_path::selects(&patterns.texts, &e.shown)
             }
+            crate::filters::Match::Glob => patterns.texts.iter().any(|p| {
+                let p = nfc(p);
+                crate::util::fnmatch(&p, &path_s)
+                    || crate::util::fnmatch(&p, &base)
+                    || crate::util::fnmatch(&p, &name)
+            }),
+            crate::filters::Match::Regex => {
+                let path_s = nfc(&path_s);
+                regex.iter().any(|r| r.is_match(&path_s))
+            }
+            crate::filters::Match::Id => {
+                texts.selects(&nfc(&path_s), &base, &name, &e.date, &e.trash)
+            }
+            _ => texts.hit(&nfc(&path_s), &base, &name),
+        };
+        crate::rm_match::chosen(
+            pattern_hit,
+            crate::rm_match::id_hit(ids, &e.name),
+            !ids.is_empty(),
+        )
     };
     if patterns.kind == crate::filters::Match::Exact {
         let kept: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
@@ -749,8 +756,35 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
     {
         return 2;
     }
-    if hits.is_empty() {
+    let exact_no_hits =
+        hits.is_empty() && patterns.kind == crate::filters::Match::Exact && ids.is_empty();
+    if hits.is_empty() && !exact_no_hits {
         return crate::rm_match::no_matches(prog);
+    }
+    if refuse_covered {
+        let originals: Vec<PathBuf> = hits.iter().map(|e| e.shown.clone()).collect();
+        if crate::filters::selection_covers_scope(patterns, &originals, rows.len()) {
+            eprintln!(
+                "{prog}: refusing mass pattern {:?} without --force \
+                 (would permanently delete matching trash entries)",
+                patterns.texts
+            );
+            eprintln!("Try '{prog} --force …' only if you intend a full selective purge.");
+            return 2;
+        }
+    }
+    for e in hits.iter().filter(|e| keep.protects(&e.shown)) {
+        eprintln!(
+            "{prog}: kept '{}' (listed in the keep file)",
+            crate::util::err_path(&e.shown)
+        );
+    }
+    let hits: Vec<&Entry> = hits
+        .into_iter()
+        .filter(|e| !keep.protects(&e.shown))
+        .collect();
+    if hits.is_empty() && !exact_no_hits {
+        return 0;
     }
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
     // they came from (an item with no Put Back place counts as outside),
@@ -782,13 +816,6 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
     }
     for e in hits {
         let path_s = e.shown.to_string_lossy();
-        if keep.protects(&e.shown) {
-            eprintln!(
-                "{prog}: kept '{}' (listed in the keep file)",
-                crate::util::err_path(&e.shown)
-            );
-            continue;
-        }
         // The git scan reads the whole tree and can take a while, so it comes
         // first; the item must still be the one listed after it, and after
         // the question. One already gone needs nothing done; another in its
