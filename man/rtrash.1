@@ -696,6 +696,67 @@ when unset.
 .TP
 .B HOME
 Used when resolving the default data home.
+.TP
+.B RTRASH_DRM
+.BR auto " (default), " always ", or " never .
+Permanent deletes
+.RB ( rm ,
+.BR empty )
+of directory payloads may run mpifileutils
+.B drm
+as
+.I LAUNCHER
+.B \-np
+.I N
+.B drm \-\-
+.IR PATH ,
+when
+.B drm
+and
+.BR mpirun ,
+.BR mpiexec ,
+or (inside a Slurm allocation)
+.B srun
+are on
+.BR PATH .
+.B auto
+uses drm on Lustre, GPFS, BeeGFS, NFS, SMB, CephFS, PanFS, or OrangeFS payloads with at least
+.B RTRASH_DRM_MIN_ENTRIES
+entries, and on local filesystems with at least
+.BR RTRASH_DRM_LOCAL_MIN_ENTRIES .
+btrfs subvolume roots keep the subvolume ioctl.
+Only real directories directly under a trash
+.I files/
+directory are passed to drm; the
+.I .trashinfo
+is removed after drm exits 0 and the path is gone.
+On failure the exit status is reported and the native walker finishes the delete.
+Same keys under
+.B [drm]
+in
+.IR $XDG_CONFIG_HOME/rtrash/config.toml ;
+the environment wins.
+.TP
+.B RTRASH_DRM_NP
+MPI ranks (default: CPU count, at most 16).
+.TP
+.B RTRASH_DRM_LAUNCHER
+Launcher name or absolute path (default: probe
+.BR mpirun ,
+.BR mpiexec ,
+then
+.B srun
+inside an allocation).
+.TP
+.B RTRASH_DRM_LAUNCHER_ARGS
+Extra launcher arguments, whitespace-separated (for example
+.BR \-\-oversubscribe ).
+.TP
+.B RTRASH_DRM_MIN_ENTRIES
+Entry threshold on parallel/network filesystems (default 10000).
+.TP
+.B RTRASH_DRM_LOCAL_MIN_ENTRIES
+Entry threshold on local filesystems (default 1000000).
 .SH FILES
 .TP
 .I $XDG_DATA_HOME/Trash
@@ -709,6 +770,12 @@ and optional lock file.
 or
 .IR $top /.Trash\- $uid
 Per-volume trash on other mounts (see the Trash specification).
+.TP
+.I $XDG_CONFIG_HOME/rtrash/config.toml
+Optional
+.B [drm]
+table (see
+.BR RTRASH_DRM ).
 .SH EXIT STATUS
 .TP
 .B 0

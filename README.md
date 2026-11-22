@@ -381,6 +381,26 @@ Full empty skips a pre-scan when not verbose, uses `d_type`-fast `unlinkat` for 
 On btrfs, a real subvolume-root payload uses `BTRFS_IOC_SNAP_DESTROY` instead of walking the tree.
 Interactive `put` mainly wins on process startup versus trash-cli.
 
+### Parallel filesystems: mpifileutils `drm`
+
+On HPC clusters, permanent deletes (`rtrash rm`, `rtrash empty`, the empty TUI) can hand large directory payloads to [mpifileutils](https://github.com/hpc/mpifileutils) `drm`, run as `LAUNCHER -np N drm -- PATH` (argv, no shell).
+It needs `drm` plus `mpirun`, `mpiexec`, or (inside a Slurm allocation) `srun` on `PATH`; without them nothing changes.
+
+| Variable / `[drm]` key | Default | Meaning |
+|------------------------|---------|---------|
+| `RTRASH_DRM` / `mode` | `auto` | `auto`, `always`, or `never` |
+| `RTRASH_DRM_NP` / `np` | CPUs, max 16 | MPI ranks (`-np`, or `-n` for `srun`) |
+| `RTRASH_DRM_LAUNCHER` / `launcher` | probe | launcher name or absolute path |
+| `RTRASH_DRM_LAUNCHER_ARGS` / `launcher_args` | empty | extra launcher arguments (whitespace-separated), e.g. `--oversubscribe` |
+| `RTRASH_DRM_MIN_ENTRIES` / `min_entries` | `10000` | entries needed on Lustre, GPFS, BeeGFS, NFS, SMB, CephFS, PanFS, OrangeFS |
+| `RTRASH_DRM_LOCAL_MIN_ENTRIES` / `local_min_entries` | `1000000` | entries needed on local filesystems |
+
+Keys live under `[drm]` in `$XDG_CONFIG_HOME/rtrash/config.toml`; environment variables win.
+`auto` counts entries only up to the threshold, so small deletes never start MPI.
+btrfs subvolume roots always keep the subvolume ioctl.
+drm only ever receives a real directory directly inside a trash `files/` directory that rtrash resolved (never a user path or a symlink target); the `.trashinfo` is removed only after drm exits 0 and the path is gone.
+If drm fails, rtrash reports its exit status and finishes with the native walker.
+
 ## Development
 
 ```console

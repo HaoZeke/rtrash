@@ -1,0 +1,1 @@
+`rm` and `empty` can delegate large directory payloads to mpifileutils `drm` under an MPI launcher on parallel filesystems (`RTRASH_DRM=auto|always|never`, `RTRASH_DRM_NP`, `RTRASH_DRM_LAUNCHER`, `RTRASH_DRM_LAUNCHER_ARGS`, `RTRASH_DRM_MIN_ENTRIES`, `RTRASH_DRM_LOCAL_MIN_ENTRIES`, or `[drm]` in `config.toml`), falling back to the native walker on failure.
