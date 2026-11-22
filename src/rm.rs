@@ -296,17 +296,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     }
 
     // Refuse accidental host-wide permanent purge of the whole trash.
-    if !force && !scoped && pats.is_mass() {
-        if pats.unknown_scope_needs_force() {
-            crate::rm_match::refuse_unknown_scope(prog);
-            return 2;
-        }
-        eprintln!(
-            "{prog}: refusing mass pattern {:?} without --force \
-             (covers every name below a matched directory or every entry in a known scope)",
-            patterns
-        );
-        eprintln!("Try '{prog} --force …' only if you intend a full selective purge.");
+    if crate::rm_match::refuse_pattern_selection(prog, &pats, &patterns, force, scoped, &[], &[]) {
         return 2;
     }
 
@@ -463,17 +453,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     // After the match: a selection that holds every entry, or every entry
     // under a real scope root, is the same mass delete the probe check
     // refuses. A prefix or glob that leaves an entry stays.
-    if !force && !scoped {
-        let originals: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
-        if crate::filters::selection_covers_scope(&pats, &originals, &census) {
-            eprintln!(
-                "{prog}: refusing mass pattern {:?} without --force \
-                 (covers every name below a matched directory or every entry in a known scope)",
-                patterns
-            );
-            eprintln!("Try '{prog} --force …' only if you intend a full selective purge.");
-            return 2;
-        }
+    let originals: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
+    if crate::rm_match::refuse_pattern_selection(
+        prog, &pats, &patterns, force, scoped, &originals, &census,
+    ) {
+        return 2;
     }
     for entry in hits.iter().filter(|e| keep.protects(&e.original)) {
         eprintln!(

@@ -417,7 +417,7 @@ export extern "rtrash wsl" [
     --older-than: string  # empty: items deleted more than AGE ago
     --all  # empty: every item, without asking
     --dry-run(-n)  # rm, empty: print what would go, delete nothing
-    --force(-f)  # restore: overwrite; rm: remove risky git work
+    --force(-f)  # restore: overwrite; rm: permit broad patterns and remove risky git work
     --help  # display this help and exit
     action?: string@"nu-complete rtrash wsl"
     ...paths: string@"nu-complete rtrash wsl items"

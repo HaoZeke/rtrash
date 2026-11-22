@@ -231,7 +231,7 @@ wsl_opts=(
   '-m+[read MATCH as KIND]:kind:(glob regex substring exact id)'
   '--match=[read MATCH as KIND]:kind:(glob regex substring exact id)'
   '(-n --dry-run)'{-n,--dry-run}'[rm, empty: print what would go]'
-  '(-f --force)'{-f,--force}'[restore: overwrite; rm: remove risky git work]'
+  '(-f --force)'{-f,--force}'[restore: overwrite; rm: permit broad patterns and remove risky git work]'
   '(- *)'--help'[display help and exit]'
   '*:item:_rtrash_wsl_item'
 )

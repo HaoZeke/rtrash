@@ -45,15 +45,32 @@ impl Fake {
     }
 
     fn run(&self, args: &[&str]) -> std::process::Output {
-        common::rtrash(&self.top)
-            .arg("wsl")
+        self.command()
             .args(args)
-            .env("RTRASH_WSL_OSRELEASE", self.top.join("osrelease"))
-            .env("RTRASH_WSL_CONF", self.top.join("wsl.conf"))
-            .env("RTRASH_WSL_SID", SID)
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap()
+    }
+
+    fn run_without_scope_roots(&self, args: &[&str]) -> std::process::Output {
+        self.command()
+            .args(args)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    }
+
+    fn command(&self) -> std::process::Command {
+        let mut command = common::rtrash(&self.top);
+        command
+            .arg("wsl")
+            .env("RTRASH_WSL_OSRELEASE", self.top.join("osrelease"))
+            .env("RTRASH_WSL_CONF", self.top.join("wsl.conf"))
+            .env("RTRASH_WSL_SID", SID);
+        command
     }
 
     /// `run` with `RTRASH_ALLOW_ROOTS` set to `roots`.
@@ -283,6 +300,7 @@ fn wsl_rm_refuses_risky_git_work_without_force_and_dry_run_reports_it() {
         FILETIME_UNIX_EPOCH + 1_700_000_000 * 10_000_000,
     );
     fs::write(f.bin().join(format!("$I{id}")), rec).unwrap();
+    f.recycle("EF34GH.txt", r"C:\apart.txt", b"apart", 1_700_000_100);
 
     let dry = f.run(&["rm", "-n", "--name=repo"]);
     let dry_err = String::from_utf8_lossy(&dry.stderr);
@@ -358,6 +376,281 @@ fn wsl_list_and_rm_accept_match_id() {
     assert_eq!(missing_match.status.code(), Some(2));
 }
 
+fn exact_kept(tag: &str) -> (Fake, PathBuf) {
+    let f = Fake::new(tag);
+    let kept = f.root.join("c/Users/me/kept.txt");
+    fs::create_dir_all(f.top.join(".config/rtrash")).unwrap();
+    fs::write(
+        f.top.join(".config/rtrash/keep"),
+        format!("{}\n", kept.display()),
+    )
+    .unwrap();
+    f.recycle(
+        "AB12CD.txt",
+        r"C:\Users\me\kept.txt",
+        b"kept",
+        1_700_000_000,
+    );
+    (f, kept)
+}
+
+fn assert_kept(f: &Fake, kept: &Path, command: &str) {
+    let out = f.run(&[command, &kept.display().to_string()]);
+    assert!(
+        out.status.success(),
+        "{command}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("listed in the keep file"),
+        "{command}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        f.bin().join("$RAB12CD.txt").exists(),
+        "{command} removed the kept payload"
+    );
+}
+
+#[test]
+fn wsl_rm_keeps_an_exact_protected_path() {
+    let (f, kept) = exact_kept("rm-exact-keep");
+    assert_kept(&f, &kept, "rm");
+}
+
+#[test]
+fn wsl_empty_keeps_an_exact_protected_path() {
+    let (f, kept) = exact_kept("empty-exact-keep");
+    assert_kept(&f, &kept, "empty");
+}
+
+fn exact_duplicates(tag: &str) -> (Fake, PathBuf) {
+    let f = Fake::new(tag);
+    f.recycle(
+        "AB12CD.txt",
+        r"C:\Users\me\same.txt",
+        b"first",
+        1_700_000_000,
+    );
+    f.recycle(
+        "EF34GH.txt",
+        r"C:\Users\me\same.txt",
+        b"second",
+        1_700_000_100,
+    );
+    let same = f.root.join("c/Users/me/same.txt");
+    (f, same)
+}
+
+fn assert_duplicates_refused(f: &Fake, same: &Path, command: &str) {
+    let out = f.run(&[command, "-n", &same.display().to_string()]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{command}: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("refusing 2 trash items with original path"),
+        "{command}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(f.bin().join("$RAB12CD.txt").exists());
+    assert!(f.bin().join("$REF34GH.txt").exists());
+}
+
+#[test]
+fn wsl_rm_refuses_duplicate_exact_originals_until_id_selects_one() {
+    let (f, same) = exact_duplicates("rm-exact-ambiguous");
+    assert_duplicates_refused(&f, &same, "rm");
+    let exact = f.run(&["rm", "-n", "--match=exact", &same.display().to_string()]);
+    assert_eq!(
+        exact.status.code(),
+        Some(2),
+        "{}{}",
+        String::from_utf8_lossy(&exact.stdout),
+        String::from_utf8_lossy(&exact.stderr)
+    );
+
+    let json = f.run(&["list", "--json"]);
+    let body = String::from_utf8_lossy(&json.stdout);
+    let key = r#""id":""#;
+    let start = body.find(key).expect("id field in json") + key.len();
+    let end = body[start..].find('"').expect("id close quote") + start;
+    let id = &body[start..end];
+    let removed = f.run(&["rm", "--match=id", id]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert_eq!(
+        [f.bin().join("$RAB12CD.txt"), f.bin().join("$REF34GH.txt")]
+            .into_iter()
+            .filter(|path| path.exists())
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn wsl_empty_refuses_duplicate_exact_originals() {
+    let (f, same) = exact_duplicates("empty-exact-ambiguous");
+    assert_duplicates_refused(&f, &same, "empty");
+}
+
+fn refusal(out: &std::process::Output) -> String {
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn refusal_reason(out: &std::process::Output) -> String {
+    refusal(out)
+        .split_once(": ")
+        .map(|(_, reason)| reason)
+        .unwrap()
+        .replace("rtrash wsl", "rtrash")
+        .replace("rtrash rm", "rtrash")
+}
+
+#[test]
+fn wsl_pattern_modes_share_the_mass_scope_and_unknown_root_guards() {
+    let f = Fake::new("pattern-guards");
+    f.recycle("AB12CD.txt", r"C:\Users\me\a.txt", b"a", 1_700_000_000);
+    f.recycle("EF34GH.txt", r"C:\Users\me\b.txt", b"b", 1_700_000_100);
+    let slash_glob = format!("{}/*", f.root.join("c/Users/me").display());
+    let slash_option = format!("--glob={slash_glob}");
+    let mut missed = Vec::new();
+    for args in [
+        vec!["rm", "-n", "--regex=.*"],
+        vec!["rm", "-n", "--match=regex", ".*"],
+        vec!["rm", "-n", slash_option.as_str()],
+        vec!["rm", "-n", "--match=substring", "Users"],
+    ] {
+        let out = f.run_without_scope_roots(&args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        if out.status.code() != Some(2) || !err.contains("When the scope is unknown") {
+            missed.push(format!("{args:?}: status {:?}: {err}", out.status.code()));
+        }
+    }
+    for args in [&["rm", "-n", "--glob=*"][..], &["rm", "-n", "--glob=*.txt"]] {
+        let out = f.run(args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        if out.status.code() != Some(2) || !err.contains("refusing mass pattern") {
+            missed.push(format!("{args:?}: status {:?}: {err}", out.status.code()));
+        }
+    }
+    let exact = f.root.join("c/Users/me/a.txt").display().to_string();
+    let mixed = ["rm", "-n", "--glob=b*", exact.as_str()];
+    let out = f.run(&mixed);
+    let err = String::from_utf8_lossy(&out.stderr);
+    if out.status.code() != Some(2) || !err.contains("refusing mass pattern") {
+        missed.push(format!("{mixed:?}: status {:?}: {err}", out.status.code()));
+    }
+    assert!(missed.is_empty(), "{missed:#?}");
+
+    let narrow = f.run_without_scope_roots(&["rm", "-n", "--glob=a*"]);
+    assert!(
+        narrow.status.success(),
+        "{}",
+        String::from_utf8_lossy(&narrow.stderr)
+    );
+    let shown = String::from_utf8_lossy(&narrow.stdout);
+    assert!(
+        shown.contains("a.txt") && !shown.contains("b.txt"),
+        "{shown}"
+    );
+
+    let forced = f.run_without_scope_roots(&["rm", "-n", "-f", "--regex=.*"]);
+    assert!(
+        forced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&forced.stdout)
+            .lines()
+            .filter(|line| line.contains("would remove"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn wsl_rm_and_freedesktop_rm_give_the_same_pattern_refusals() {
+    let f = Fake::new("pattern-parity");
+    f.recycle("AB12CD.txt", r"C:\Users\me\a.txt", b"a", 1_700_000_000);
+    f.recycle("EF34GH.txt", r"C:\Users\me\b.txt", b"b", 1_700_000_100);
+    let source = f.root.join("c/Users/me");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("a.txt"), b"a").unwrap();
+    fs::write(source.join("b.txt"), b"b").unwrap();
+    let trash = f.top.join("freedesktop-trash");
+    let pin = format!("--trash-dir={}", trash.display());
+    let put = common::rtrash(&f.top)
+        .args([
+            "put",
+            pin.as_str(),
+            source.join("a.txt").to_str().unwrap(),
+            source.join("b.txt").to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        put.status.success(),
+        "{}",
+        String::from_utf8_lossy(&put.stderr)
+    );
+
+    let slash_glob = format!("{}/*", source.display());
+    let slash_option = format!("--glob={slash_glob}");
+    let cases = [
+        (vec!["--regex=.*"], vec!["--regex", ".*"], false),
+        (
+            vec![slash_option.as_str()],
+            vec!["--match=glob", slash_glob.as_str()],
+            false,
+        ),
+        (
+            vec!["--match=substring", "Users"],
+            vec!["--match=substring", "Users"],
+            false,
+        ),
+        (vec!["--glob=*"], vec!["--match=glob", "*"], true),
+        (vec!["--glob=*.txt"], vec!["--match=glob", "*.txt"], true),
+    ];
+    for (wsl_selection, plain_selection, roots_known) in cases {
+        let mut wsl_args = vec!["rm", "-n"];
+        wsl_args.extend(wsl_selection.iter().copied());
+        let wsl = if roots_known {
+            f.run(&wsl_args)
+        } else {
+            f.run_without_scope_roots(&wsl_args)
+        };
+
+        let mut plain = common::rtrash(&f.top);
+        plain.args(["rm", "-n", pin.as_str()]);
+        plain.args(&plain_selection);
+        if !roots_known {
+            plain
+                .env_remove("HOME")
+                .env_remove("USERPROFILE")
+                .env_remove("XDG_DATA_HOME");
+        }
+        let plain = plain.output().unwrap();
+        let wsl_err = refusal_reason(&wsl);
+        let plain_err = refusal_reason(&plain);
+        assert_eq!(wsl_err, plain_err, "{wsl_selection:?}");
+    }
+}
+
 #[test]
 fn wsl_empty_goes_by_age_and_guards_the_whole_bin() {
     let f = Fake::new("empty");
@@ -411,6 +704,7 @@ fn wsl_empty_goes_by_age_and_guards_the_whole_bin() {
 fn wsl_rm_empty_and_overwrite_refuse_under_no_permanent() {
     let f = Fake::new("noperm");
     f.recycle("AB12CD.txt", r"C:\a.txt", b"old", 1_700_000_000);
+    f.recycle("EF34GH.txt", r"C:\apart.txt", b"apart", 1_700_000_100);
     let payload = f.bin().join("$RAB12CD.txt");
     for args in [&["rm", "--name=a.txt"][..], &["empty", "--all"]] {
         let out = f.run_guarded(args);

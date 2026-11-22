@@ -204,7 +204,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l regex 
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l name -x -a '(__rtrash_wsl_items | string replace -r ".*/" "")' -d 'items with exactly this file name'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s m -l match -x -a 'glob regex substring exact id' -d 'read MATCH as this kind'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s n -l dry-run -d 'rm: print what would go'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s f -l force -d 'restore: overwrite; rm: remove risky git work'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s f -l force -d 'restore: overwrite; rm: permit broad patterns and remove risky git work'
 
 # finder
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -f -a 'put list restore'

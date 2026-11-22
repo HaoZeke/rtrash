@@ -497,8 +497,8 @@ paths = ["/srv/data", "/home/*/keep"]   # put refuses these, like safe-rm entrie
 
 Permanent-deletion commands also read `$XDG_CONFIG_HOME/rtrash/keep`
 (`%APPDATA%\\rtrash\\keep` on Windows). Each non-comment line is an
-original path or path prefix that `rm`, `empty`, permanent `reap`, and
-retention pruning always keep.
+original path or path prefix that `rm`, `empty`, `wsl rm`, `wsl empty`,
+permanent `reap`, and retention pruning always keep.
 
 The other `[du]` keys are `count`, `one_file_system`, `threads`, `git`, `exclude_regex`, `include_regex`, `exclude_caches`, `no_delete`, `si`, `notify` and `notify_after`, and `[list]` also takes `reverse`. `[policy]` also takes `min_free`, `warn_size` and `in_use` (as `RTRASH_MIN_FREE`, `RTRASH_WARN_SIZE` and `RTRASH_IN_USE`), `[macos]` takes `trash` (as `RTRASH_MACOS_TRASH`) and `[wsl]` takes `recycle` (as `RTRASH_WSL_RECYCLE`); `man rtrash` explains each one. Unknown keys and values of the wrong type earn a warning and are skipped, and the rest of the file still applies.
 
@@ -514,6 +514,7 @@ Does **not** restore.
 On a terminal it names the matches (the first 10, with sizes) and asks once before it deletes, as `rm -I` does and as trash-cli #383 asks of `trash-rm`. Only `y` or `yes` goes on. A script, whose stdin or stderr is not a terminal, is never asked, so pipelines and cron jobs work as before. `-i`/`--interactive` asks even then, with the reply read from stdin. `-y`/`--yes` and `-f`/`--force` never ask, and the last of the three wins. Without `-f`, rm refuses payloads with dirty, unpushed or unknown git work; `-n` reports the same refusal without deleting anything.
 Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-i`/`--interactive`, `-y`/`--yes`, `-f`/`--force` (no question, and patterns that cover every name below a matched directory or take every entry in a known scope, including its last entry), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).
 When the scope is unknown, regex and substring matching and globs containing a path separator require --force; use an exact path, --id, or a basename glob instead.
+These matching safeguards also apply to `wsl rm`.
 
 ### Prompts
 

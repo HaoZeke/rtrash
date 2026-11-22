@@ -380,6 +380,45 @@ pub fn no_matches(prog: &str) -> i32 {
     1
 }
 
+/// Apply rm's pattern safeguards before scanning (`selected` and `census`
+/// empty) or after matching. Every backend calls this same decision.
+pub fn refuse_pattern_selection(
+    prog: &str,
+    patterns: &crate::filters::Patterns,
+    shown: &[String],
+    force: bool,
+    scoped: bool,
+    selected: &[PathBuf],
+    census: &[PathBuf],
+) -> bool {
+    if force || scoped {
+        return false;
+    }
+    if patterns.is_mass() {
+        if patterns.unknown_scope_needs_force() {
+            refuse_unknown_scope(prog);
+        } else {
+            eprintln!(
+                "{prog}: refusing mass pattern {:?} without --force \
+                 (covers every name below a matched directory or every entry in a known scope)",
+                shown
+            );
+            eprintln!("Try '{prog} --force …' only if you intend a full selective purge.");
+        }
+        return true;
+    }
+    if crate::filters::selection_covers_scope(patterns, selected, census) {
+        eprintln!(
+            "{prog}: refusing mass pattern {:?} without --force \
+             (covers every name below a matched directory or every entry in a known scope)",
+            shown
+        );
+        eprintln!("Try '{prog} --force …' only if you intend a full selective purge.");
+        return true;
+    }
+    false
+}
+
 pub const UNKNOWN_SCOPE_RULE: &str = "When the scope is unknown, regex and substring matching and \
 globs containing a path separator require --force; use an exact path, --id, or a basename glob \
 instead.";

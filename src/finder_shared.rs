@@ -757,13 +757,15 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
     }
     if refuse_covered {
         let originals: Vec<PathBuf> = hits.iter().map(|e| e.shown.clone()).collect();
-        if crate::filters::selection_covers_scope(patterns, &originals, &census) {
-            eprintln!(
-                "{prog}: refusing mass pattern {:?} without --force \
-                 (covers every name below a matched directory or every entry in a known scope)",
-                patterns.texts
-            );
-            eprintln!("Try '{prog} --force …' only if you intend a full selective purge.");
+        if crate::rm_match::refuse_pattern_selection(
+            prog,
+            patterns,
+            &patterns.texts,
+            false,
+            false,
+            &originals,
+            &census,
+        ) {
             return 2;
         }
     }
