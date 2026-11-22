@@ -1751,6 +1751,8 @@ pub(crate) fn file_identity(path: &Path) -> Option<(u64, u64)> {
             GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
             FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
         };
+        // The reparse point itself, as symlink_metadata reads a link on Unix:
+        // an operand that is a link must not take the identity of its target.
         let file = std::fs::OpenOptions::new()
             .access_mode(FILE_READ_ATTRIBUTES)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
@@ -1788,13 +1790,13 @@ pub(crate) fn retarget_seam() {
     }
 }
 
-/// True when `path` is not the file `before` named. A missing side is a
-/// change: the handoff must not proceed on a path it can no longer check.
+/// True when `path` is not the file `before` named. A side that cannot be
+/// read, either one, is a change: the handoff must not proceed on a path
+/// whose identity it never had or can no longer check.
 #[cfg(any(windows, test))]
 pub(crate) fn identity_changed(before: Option<(u64, u64)>, path: &Path) -> bool {
     match (before, file_identity(path)) {
         (Some(a), Some(b)) => a != b,
-        (None, None) => true,
         _ => true,
     }
 }
@@ -5023,6 +5025,52 @@ mod tests {
         let gone = dir.join("gone");
         assert!(file_identity(&gone).is_none());
         assert!(identity_changed(None, &gone));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path whose identity was never read cannot be checked, so a path that
+    /// still cannot be read is a change, not a match.
+    #[test]
+    fn a_path_that_cannot_be_read_before_or_after_is_changed() {
+        let dir = std::env::temp_dir().join(format!("rtrash-ident-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let missing = dir.join("missing");
+        assert_eq!(file_identity(&missing), None);
+        assert!(identity_changed(None, &missing));
+        let there = dir.join("there");
+        std::fs::write(&there, b"x").unwrap();
+        assert!(identity_changed(None, &there));
+        let seen = file_identity(&there);
+        std::fs::remove_file(&there).unwrap();
+        assert!(identity_changed(seen, &there));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A link is its own file: it does not take the identity of the folder it
+    /// names. On Windows a junction is the case that needs no privilege.
+    #[test]
+    fn a_link_has_an_identity_of_its_own() {
+        let dir = std::env::temp_dir().join(format!("rtrash-ident-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        let link = dir.join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("target"), &link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(dir.join("target"))
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "{made:?}");
+        }
+        let target = file_identity(&dir.join("target")).unwrap();
+        let of_link = file_identity(&link).unwrap();
+        assert_ne!(of_link, target);
+        assert!(identity_changed(Some(target), &link));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
