@@ -1914,6 +1914,60 @@ fn a_prefix_is_refused_when_home_is_unset() {
     assert_eq!(trash_names(&sb), vec!["keep.txt".to_string()]);
 }
 
+#[test]
+fn a_glob_is_refused_when_home_is_unset() {
+    let sb = Sandbox::new("rm-glob-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("inside.txt");
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        sb.work().join("inside.txt").to_str().unwrap(),
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let pattern = format!("{}/*", sb.work().display());
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--glob", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec!["inside.txt".to_string(), "outside.txt".to_string()]
+    );
+}
+
+#[test]
+fn a_basename_glob_stays_narrow_when_home_is_unset() {
+    let sb = Sandbox::new("rm-basename-glob-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    for name in ["keep.txt", "other.txt"] {
+        sb.touch(name);
+    }
+    let put = sb.run(&["put", &pin, "keep.txt", "other.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--glob", "keep*"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), vec!["other.txt".to_string()]);
+}
+
 fn regex_escape(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {

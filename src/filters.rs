@@ -660,7 +660,14 @@ fn covers_absolute(mut hit: impl FnMut(&str) -> bool) -> bool {
 /// home spelling is what made every probe match.
 fn glob_covers_any_scope(pat: &str) -> bool {
     let Some(roots) = crate::rm_match::known_scope_roots() else {
-        return false;
+        let literal: String = pat
+            .chars()
+            .take_while(|c| !matches!(c, '*' | '?' | '['))
+            .collect();
+        if !literal.contains(['/', '\\']) {
+            return false;
+        }
+        return glob_covers_root(pat, literal.trim_end_matches(['/', '\\']));
     };
     roots
         .iter()
