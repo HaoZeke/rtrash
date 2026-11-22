@@ -376,6 +376,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "--older-than" => {
                 return usage_err(prog, "--older-than requires an AGE (use --older-than=AGE)");
             }
+            "" => return usage_err(prog, "'' is not a path"),
             a if !a.starts_with('-') => match crate::filters::parse_age_secs(a) {
                 Ok(secs) => opts.days = Some(secs),
                 Err(_) => opts.paths.push(a.to_string()),

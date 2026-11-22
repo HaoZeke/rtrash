@@ -429,3 +429,31 @@ fn a_volume_guid_operand_selects_the_drive_letter_original() {
     assert!(rtrash::allow_roots::under(letter_p, &volume_root));
     assert!(rtrash::allow_roots::under(volume_p, &volume_root));
 }
+
+/// `rm ""` is not a path, and it removes nothing.
+#[test]
+fn rm_refuses_an_empty_operand() {
+    let home = home("rm-blank");
+    let kept = home.join("keep.txt");
+    fs::write(&kept, b"keep").unwrap();
+    ok(&run(&home, &["put", &s(&kept)]));
+    let out = run(&home, &["rm", ""]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(text(&out).contains("'' is not a path"), "{}", text(&out));
+    let listed = ok(&run(&home, &["list"]));
+    assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
+}
+
+/// `empty ""` is not a path, and it removes nothing.
+#[test]
+fn empty_refuses_an_empty_operand() {
+    let home = home("empty-blank");
+    let kept = home.join("keep.txt");
+    fs::write(&kept, b"keep").unwrap();
+    ok(&run(&home, &["put", &s(&kept)]));
+    let out = run(&home, &["empty", ""]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(text(&out).contains("'' is not a path"), "{}", text(&out));
+    let listed = ok(&run(&home, &["list"]));
+    assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
+}

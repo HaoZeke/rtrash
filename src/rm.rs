@@ -202,6 +202,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                     }
                 }
             }
+            "" => {
+                eprintln!("{prog}: '' is not a path");
+                eprintln!("Try '{prog} --help' for more information.");
+                return 2;
+            }
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
                 eprintln!("Try '{prog} --help' for more information.");

@@ -2983,6 +2983,10 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                     return 0;
                 }
                 a if a.starts_with("--trash-dir=") => {}
+                "" => {
+                    eprintln!("{prog}: '' is not a path");
+                    return 2;
+                }
                 a if !a.starts_with('-') => match crate::filters::parse_age_secs(a) {
                     Ok(d) => age.older_than = Some(d),
                     Err(_) => paths.push(a.to_string()),
@@ -4516,6 +4520,10 @@ left in place.
                     return Some(0);
                 }
                 a if a.starts_with("--trash-dir=") => {}
+                "" => {
+                    eprintln!("{prog}: '' is not a path");
+                    return Some(2);
+                }
                 a if a.starts_with('-') => {
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return Some(2);

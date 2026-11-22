@@ -479,6 +479,10 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     let mut kind_set = false;
     let mut paths = Vec::new();
     for a in &args {
+        if a.is_empty() {
+            eprintln!("{prog}: '' is not a path");
+            return 2;
+        }
         if matches!(a.as_str(), "-n" | "--dry-run") {
             dry = true;
             continue;
@@ -647,6 +651,10 @@ fn parse_empty_args(prog: &str, args: &[String]) -> Result<EmptyArgs, i32> {
         match a {
             "-n" | "--dry-run" => dry = true,
             "--all" => all = true,
+            "" => {
+                eprintln!("{prog}: '' is not a path");
+                return Err(2);
+            }
             _ if !a.starts_with('-') => match crate::filters::parse_age_secs(a) {
                 Ok(_) => set_age(prog, a, &mut age)?,
                 Err(_) => paths.push(a.to_string()),
@@ -791,5 +799,18 @@ mod tests {
         let chosen = matching(&items, scope.age, &wants, !scope.paths.is_empty(), now);
         assert_eq!(chosen.len(), 1, "{chosen:?}");
         assert_eq!(chosen[0].local, old);
+    }
+
+    #[test]
+    fn wsl_rm_refuses_an_empty_operand() {
+        assert_eq!(rm("rtrash", &[String::new()], &[]), 2);
+    }
+
+    #[test]
+    fn an_empty_wsl_operand_is_refused() {
+        assert!(matches!(
+            parse_empty_args("rtrash", &[String::new()]),
+            Err(2)
+        ));
     }
 }

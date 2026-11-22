@@ -9654,11 +9654,10 @@ fn rm_exact_keeps_a_name_that_differs_by_a_trailing_backslash() {
     assert!(listed_originals(&sb).is_empty());
 }
 
-/// An empty operand is no path. It is not the current directory, so rm
-/// of "" keeps an item that was trashed from there and says nothing matched.
-#[cfg(unix)]
+/// `""` is not the working directory. rm and empty refuse it, and a
+/// trashed copy of that directory stays.
 #[test]
-fn rm_of_an_empty_operand_matches_nothing_even_in_the_original_directory() {
+fn an_empty_operand_is_not_the_working_directory() {
     let sb = Sandbox::new("rm-empty-operand");
     let dir = sb.work().join("here");
     fs::create_dir(&dir).unwrap();
@@ -9675,8 +9674,9 @@ fn rm_of_an_empty_operand_matches_nothing_even_in_the_original_directory() {
             .current_dir(&dir)
             .output()
             .unwrap();
+        assert_eq!(rm.status.code(), Some(2), "{}", stderr_of(&rm));
         assert!(
-            stderr_of(&rm).contains("no match for an empty path"),
+            stderr_of(&rm).contains("'' is not a path"),
             "{}",
             stderr_of(&rm)
         );
@@ -9685,6 +9685,22 @@ fn rm_of_an_empty_operand_matches_nothing_even_in_the_original_directory() {
             vec![dir.to_str().unwrap().to_string()]
         );
     }
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let empty = common::rtrash(&sb.root)
+        .args(["empty", &pin, ""])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(empty.status.code(), Some(2), "{}", stderr_of(&empty));
+    assert!(
+        stderr_of(&empty).contains("'' is not a path"),
+        "{}",
+        stderr_of(&empty)
+    );
+    assert_eq!(
+        listed_originals(&sb),
+        vec![dir.to_str().unwrap().to_string()]
+    );
 }
 
 /// `link/..` is the directory above the link's target, as put resolves a
