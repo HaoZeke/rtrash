@@ -1690,6 +1690,36 @@ fn finder_rm_keeps_a_repository_that_took_the_name_while_it_asked() {
     assert_eq!(fs::read(b.finder().join("rr").join("f")).unwrap(), b"work");
 }
 
+/// The Git scan can take long enough for a Finder name to change hands.
+/// A change made at the end of that scan must fail the identity check that
+/// immediately follows it.
+#[test]
+fn finder_rm_rechecks_identity_after_the_git_scan() {
+    let b = Box_::new("rm-recheck-after-git");
+    let repo = b.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &b.root)
+        .output();
+    if !init.is_ok_and(|o| o.status.success()) {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    let put = b.run(&["put", "-r", "repo"], "");
+    assert!(put.status.success(), "{}", err(&put));
+    let payload = b.finder().join("repo");
+    let out = b.run_env(
+        &["rm", "-y", "repo"],
+        &[("RTRASH_TEST_AFTER_PROBE", payload.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", err(&out));
+    assert!(err(&out).contains("changed in the trash"), "{}", err(&out));
+    assert!(payload.join(".rtrash-probe-seam").is_file());
+}
+
 /// Finder rm refuses an item that holds dirty git work, as rm on a
 /// FreeDesktop trash does, in a dry run too; `-f` removes it.
 #[test]
