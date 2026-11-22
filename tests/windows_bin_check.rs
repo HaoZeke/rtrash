@@ -363,7 +363,7 @@ impl FlaggedBin {
         assert!(rows.trim_end().ends_with("rj-good.txt"), "{rows}");
 
         let dry = common::assert_refused_unchanged(&"rm -n", &watch, 0, &[], || {
-            self.run(&["rm", "-n", "-f", "*"])
+            self.run(&["rm", "-n", "-f", "--match=glob", "*"])
         });
         let matched = out_text(&dry);
         assert_eq!(matched.lines().count(), 1, "{matched}");
@@ -390,6 +390,210 @@ impl Drop for FlaggedBin {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.home);
     }
+}
+
+/// A payload replaced under the same `$R` name and deletion second keeps its
+/// id: the id is the root-scoped name, date and root, not the file. The
+/// short spaced matcher still finds the item either way, and what tells the
+/// replacement apart is the file identity rm and restore read at the match.
+#[test]
+fn rm_short_id_match_distinguishes_a_same_second_replacement() {
+    let b = FlaggedBin::new("id-replaced");
+    let list_id = || {
+        let out = b.run(&["list", "--format={id}"]);
+        assert!(out.status.success(), "{}", common::stderr_text(&out));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let old = list_id();
+    let payload = b.bin.join("$RRJGOOD.txt");
+    let before = rtrash::util::fingerprint(&payload).unwrap();
+    fs::remove_file(&payload).unwrap();
+    fs::write(&payload, b"replacement").unwrap();
+    assert_ne!(rtrash::util::fingerprint(&payload), Some(before));
+    assert_eq!(list_id(), old);
+
+    let dry = b.run(&["rm", "-n", "-m", "id", &old]);
+    assert!(dry.status.success(), "{}", common::stderr_text(&dry));
+    assert!(
+        String::from_utf8_lossy(&dry.stdout).contains("rj-good.txt"),
+        "{}",
+        String::from_utf8_lossy(&dry.stdout)
+    );
+    assert_eq!(fs::read(&payload).unwrap(), b"replacement");
+}
+
+/// The `$I` record can stay unchanged while another `$R` payload takes
+/// the name during rm's git scan. The replacement must stay.
+#[test]
+fn rm_rechecks_the_payload_instance_after_the_git_scan() {
+    let b = FlaggedBin::new("payload-replaced");
+    let payload = b.bin.join("$RRJGOOD.txt");
+    let out = common::rtrash(&b.home)
+        .env("RTRASH_TEST_BIN_DIR", &b.bin)
+        .env("LOCALAPPDATA", &b.local)
+        .env("RTRASH_TEST_REPLACE_PAYLOAD", &payload)
+        .args(["rm", "-f", b.work.join("rj-good.txt").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", common::stderr_text(&out));
+    assert!(
+        common::stderr_text(&out).contains("changed in the Recycle Bin"),
+        "{}",
+        common::stderr_text(&out)
+    );
+    assert_eq!(fs::read(&payload).unwrap(), b"replacement");
+    assert!(b.bin.join("$IRJGOOD.txt").exists());
+}
+
+/// A `$R` payload swapped under the same name and second while rm waits for
+/// its answer stays: the file the match saw is the one rm may purge, and
+/// the unchanged `$I` record does not vouch for the replacement.
+#[test]
+fn rm_keeps_a_payload_swapped_while_it_asked() {
+    let b = FlaggedBin::new("payload-swapped-asking");
+    let payload = b.bin.join("$RRJGOOD.txt");
+    let mut cmd = common::rtrash(&b.home);
+    cmd.env("RTRASH_TEST_BIN_DIR", &b.bin)
+        .env("LOCALAPPDATA", &b.local)
+        .args(["rm", "-i", b.work.join("rj-good.txt").to_str().unwrap()]);
+    let mut rm = common::Asking::spawn(&mut cmd);
+    rm.wait_for("(y/N) ");
+    fs::remove_file(&payload).unwrap();
+    fs::write(&payload, b"replacement").unwrap();
+    let (status, rest) = rm.answer("y\n");
+    assert!(!status.success(), "{rest}");
+    assert!(rest.contains("changed in the Recycle Bin"), "{rest}");
+    assert_eq!(fs::read(&payload).unwrap(), b"replacement");
+    assert!(b.bin.join("$IRJGOOD.txt").exists());
+}
+
+/// restore by id names the `$R` file the listing saw. The `$I` record can
+/// stay unchanged while another payload takes the name before the restore
+/// moves it; the replacement must stay in the bin.
+#[test]
+fn restore_by_id_rechecks_the_payload_instance_before_it_moves() {
+    let b = FlaggedBin::new("restore-id-replaced");
+    let payload = b.bin.join("$RRJGOOD.txt");
+    let listed = b.run(&["list", "--format={id}"]);
+    assert!(listed.status.success(), "{}", common::stderr_text(&listed));
+    let id = String::from_utf8_lossy(&listed.stdout).trim().to_string();
+    let out = common::rtrash(&b.home)
+        .env("RTRASH_TEST_BIN_DIR", &b.bin)
+        .env("LOCALAPPDATA", &b.local)
+        .env("RTRASH_TEST_REPLACE_PAYLOAD", &payload)
+        .args(["restore", "--match=id", &id])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", common::stderr_text(&out));
+    assert!(
+        common::stderr_text(&out).contains("changed in the Recycle Bin"),
+        "{}",
+        common::stderr_text(&out)
+    );
+    assert_eq!(fs::read(&payload).unwrap(), b"replacement");
+    assert!(b.bin.join("$IRJGOOD.txt").exists());
+    assert!(!b.work.join("rj-good.txt").exists());
+}
+
+/// A replacement made after the listing is staged and rejected before an
+/// overwrite touches the existing destination.
+#[test]
+fn restore_overwrite_stages_and_rechecks_before_touching_the_destination() {
+    let b = FlaggedBin::new("restore-overwrite-replaced");
+    let payload = b.bin.join("$RRJGOOD.txt");
+    let dest = b.work.join("rj-good.txt");
+    fs::write(&dest, b"existing").unwrap();
+    let listed = b.run(&["list", "--format={id}"]);
+    assert!(listed.status.success(), "{}", common::stderr_text(&listed));
+    let id = String::from_utf8_lossy(&listed.stdout).trim().to_string();
+    let out = common::rtrash(&b.home)
+        .env("RTRASH_TEST_BIN_DIR", &b.bin)
+        .env("LOCALAPPDATA", &b.local)
+        .env("RTRASH_TEST_REPLACE_PAYLOAD_AFTER_OVERWRITE", &payload)
+        .args(["restore", "--conflict=overwrite", "--match=id", &id])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", common::stderr_text(&out));
+    assert!(
+        common::stderr_text(&out).contains("changed in the Recycle Bin before it could be staged"),
+        "{}",
+        common::stderr_text(&out)
+    );
+    assert_eq!(fs::read(&payload).unwrap(), b"replacement");
+    assert!(b.bin.join("$IRJGOOD.txt").exists());
+    assert_eq!(fs::read(&dest).unwrap(), b"existing");
+
+    let restored = b.run(&["restore", "--conflict=overwrite", "--match=id", &id]);
+    assert!(
+        restored.status.success(),
+        "{}",
+        common::stderr_text(&restored)
+    );
+    assert_eq!(fs::read(&dest).unwrap(), b"replacement");
+    assert!(!payload.exists());
+    assert!(!b.bin.join("$IRJGOOD.txt").exists());
+}
+
+/// If the final staged rename fails, both the old destination and the
+/// selected Recycle Bin item are put back.
+#[test]
+fn restore_overwrite_rolls_back_a_failed_swap() {
+    let b = FlaggedBin::new("restore-overwrite-rollback");
+    let payload = b.bin.join("$RRJGOOD.txt");
+    let dest = b.work.join("rj-good.txt");
+    fs::write(&dest, b"existing").unwrap();
+    let out = common::rtrash(&b.home)
+        .env("RTRASH_TEST_BIN_DIR", &b.bin)
+        .env("LOCALAPPDATA", &b.local)
+        .env("RTRASH_TEST_BLOCK_RESTORE_SWAP", &dest)
+        .args(["restore", "--conflict=overwrite", dest.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", common::stderr_text(&out));
+    assert_eq!(fs::read(&dest).unwrap(), b"existing");
+    assert_eq!(fs::read(&payload).unwrap(), b"good");
+    assert!(b.bin.join("$IRJGOOD.txt").exists());
+    for dir in [&b.work, &b.bin] {
+        let litter: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".rtrash-"))
+            .collect();
+        assert!(litter.is_empty(), "{dir:?}: {litter:?}");
+    }
+}
+
+/// Post-put lookup identifies the payload added by this handoff, not an
+/// older item of the same original path and deletion second.
+#[test]
+fn put_reports_the_new_payload_when_an_older_item_has_the_same_time() {
+    let home = common::scratch_dir("bincheck", "put-new-id");
+    let bin = common::test_bin(&home);
+    let work = home.join("work");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    let original = work.join("same.txt");
+    common::next_trash_second();
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let time = rtrash::win_recycle::FILETIME_UNIX_EPOCH + secs * 10_000_000;
+    let record = rtrash::win_recycle::encode_recycle_i_v2(&original, 3, time);
+    fs::write(bin.join("$IOLD00.txt"), record).unwrap();
+    fs::write(bin.join("$ROLD00.txt"), b"old").unwrap();
+    fs::write(&original, b"new").unwrap();
+
+    let out = common::rtrash(&home)
+        .args(["put", "--json", original.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", common::stderr_text(&out));
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(json.contains(r#""name":"$RT00000.txt""#), "{json}");
+    assert!(!json.contains("$ROLD00.txt"), "{json}");
 }
 
 /// A `$I` padded past the record cap still parses, but `status --check`

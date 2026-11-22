@@ -191,6 +191,11 @@ pub fn restore_payload(payload: &Path, dest: &Path) -> std::io::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    move_payload(payload, dest)?;
+    remove_index(payload)
+}
+
+fn move_payload(payload: &Path, dest: &Path) -> std::io::Result<()> {
     match std::fs::rename(payload, dest) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
@@ -205,6 +210,10 @@ pub fn restore_payload(payload: &Path, dest: &Path) -> std::io::Result<()> {
         }
         Err(e) => return Err(e),
     }
+    Ok(())
+}
+
+fn remove_index(payload: &Path) -> std::io::Result<()> {
     if let Some(index) = index_file_for(payload) {
         match std::fs::remove_file(&index) {
             Ok(()) => {}
@@ -460,6 +469,15 @@ pub fn recheck_bin_item(
     if crate::util::is_gone(payload) {
         return Err(Stale::Gone);
     }
+    recheck_bin_record(payload, deleted, same_original)
+}
+
+fn recheck_bin_record(
+    payload: &Path,
+    deleted: i64,
+    same_original: impl Fn(&Path) -> bool,
+) -> Result<(), crate::util::Stale> {
+    use crate::util::Stale;
     let Some(index) = index_file_for(payload) else {
         return Err(Stale::Changed);
     };
@@ -482,6 +500,14 @@ pub fn recheck_bin_item(
 #[cfg(windows)]
 pub(crate) fn recheck_item(it: &trash::TrashItem) -> Result<(), crate::util::Stale> {
     recheck_bin_item(Path::new(&it.id), it.time_deleted, |o| {
+        o.file_name().unwrap_or_default() == std::ffi::OsStr::new(&it.name)
+            && o.parent().unwrap_or(Path::new("")) == it.original_parent.as_path()
+    })
+}
+
+#[cfg(windows)]
+fn recheck_item_record(it: &trash::TrashItem) -> Result<(), crate::util::Stale> {
+    recheck_bin_record(Path::new(&it.id), it.time_deleted, |o| {
         o.file_name().unwrap_or_default() == std::ffi::OsStr::new(&it.name)
             && o.parent().unwrap_or(Path::new("")) == it.original_parent.as_path()
     })
@@ -1236,6 +1262,54 @@ pub fn path_key(path: &str, mounts: &[(String, String)]) -> String {
     t.to_lowercase()
 }
 
+/// The 8.3 path of `path`, when the volume has one. None when the path is
+/// gone or the call fails. A directory that still exists can be asked
+/// after a file inside it has moved; the file's own short name cannot,
+/// because that directory entry is gone and a `$I` record stores one path.
+#[cfg(windows)]
+pub fn short_path(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    let wide = crate::util::win_path(path);
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: `wide` is NUL-terminated and `buf` is as long as the length passed.
+    let mut n = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    if n as usize >= buf.len() {
+        buf.resize(n as usize, 0);
+        // SAFETY: as above, with the size the first call asked for.
+        n = unsafe { GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    }
+    if n == 0 || n as usize >= buf.len() {
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_wide(
+        &buf[..n as usize],
+    )))
+}
+
+/// The long path of `path`, when it is on disk. None when the path is
+/// gone or the call fails. This is the other spelling of [`short_path`].
+#[cfg(windows)]
+pub fn long_path(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+    let wide = crate::util::win_path(path);
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: `wide` is NUL-terminated and `buf` is as long as the length passed.
+    let mut n = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    if n as usize >= buf.len() {
+        buf.resize(n as usize, 0);
+        // SAFETY: as above, with the size the first call asked for.
+        n = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    }
+    if n == 0 || n as usize >= buf.len() {
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_wide(
+        &buf[..n as usize],
+    )))
+}
+
 /// A volume path that is a folder rather than a drive root (`C:\\`).
 pub fn mounted_folder(path: &str) -> bool {
     let b = path.as_bytes();
@@ -1347,6 +1421,42 @@ impl BinFilters {
             .filter(|it| !self.size.is_set() || self.size.keeps(size(it)))
             .collect()
     }
+}
+
+/// What `rm` reads from its arguments before the shared parser: the options
+/// with `-m KIND`, `--match KIND` and `-m=KIND` spelled `--match=KIND`, then
+/// the operands after a `--`, which stay as typed (so `-m` after it is a
+/// name), then the error for a `-m` with no value.
+#[cfg(any(windows, test))]
+fn rm_option_args(args: &[String]) -> (Vec<String>, Vec<String>, Option<String>) {
+    let (opts, operands) = match args.iter().position(|a| a == "--") {
+        Some(at) => (&args[..at], args[at + 1..].to_vec()),
+        None => (args, Vec::new()),
+    };
+    let (mut rest, mut error) = (
+        Vec::new(),
+        operands
+            .iter()
+            .any(String::is_empty)
+            .then(|| "'' is not a path".to_string()),
+    );
+    let mut i = 0usize;
+    while i < opts.len() {
+        let arg = &opts[i];
+        match arg.as_str() {
+            "-m" | "--match" => {
+                i += 1;
+                match opts.get(i) {
+                    Some(value) => rest.push(format!("--match={value}")),
+                    None => error = Some(format!("{arg} requires a match kind")),
+                }
+            }
+            a if a.starts_with("-m=") => rest.push(format!("--match={}", &a[3..])),
+            _ => rest.push(arg.clone()),
+        }
+        i += 1;
+    }
+    (rest, operands, error)
 }
 
 /// Parse the filter flags out of `args`, handing every other argument to
@@ -1673,6 +1783,8 @@ pub(crate) fn file_identity(path: &Path) -> Option<(u64, u64)> {
             GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
             FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
         };
+        // The reparse point itself, as symlink_metadata reads a link on Unix:
+        // an operand that is a link must not take the identity of its target.
         let file = std::fs::OpenOptions::new()
             .access_mode(FILE_READ_ATTRIBUTES)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
@@ -1694,6 +1806,29 @@ pub(crate) fn file_identity(path: &Path) -> Option<(u64, u64)> {
     }
 }
 
+/// The warning for a repository with git work that a put moved into the
+/// bin. `restore --batch=last` brings it back only when the last-put record
+/// was written; without it the line says to restore from the bin, so the
+/// work is named either way.
+#[cfg(any(windows, test))]
+pub(crate) fn risky_put_line(
+    prog: &str,
+    path: &Path,
+    work: crate::du_git::RiskyGit,
+    recorded: bool,
+) -> String {
+    let how = if recorded {
+        "`rtrash restore --batch=last` brings it back"
+    } else {
+        "restore it from the Recycle Bin"
+    };
+    format!(
+        "{prog}: warning: '{}' contains a git repository with {} work; {how}",
+        crate::util::err_path(path),
+        work.label()
+    )
+}
+
 /// `RTRASH_TEST_RETARGET=LINK|TARGET` replaces `LINK` with a directory
 /// symlink to `TARGET` after the operand's identity was read. Debug builds
 /// only. The handoff uses the path resolved before this runs.
@@ -1710,13 +1845,13 @@ pub(crate) fn retarget_seam() {
     }
 }
 
-/// True when `path` is not the file `before` named. A missing side is a
-/// change: the handoff must not proceed on a path it can no longer check.
+/// True when `path` is not the file `before` named. A side that cannot be
+/// read, either one, is a change: the handoff must not proceed on a path
+/// whose identity it never had or can no longer check.
 #[cfg(any(windows, test))]
 pub(crate) fn identity_changed(before: Option<(u64, u64)>, path: &Path) -> bool {
     match (before, file_identity(path)) {
         (Some(a), Some(b)) => a != b,
-        (None, None) => true,
         _ => true,
     }
 }
@@ -1780,6 +1915,46 @@ mod os {
             .unwrap_or_else(|| it.original_path())
     }
 
+    type PayloadFiles =
+        std::collections::HashMap<std::ffi::OsString, Option<crate::util::Fingerprint>>;
+
+    /// The file each item's `$R` payload is now, by `$R` path: what a
+    /// match reads, to be held against later.
+    fn payload_files(items: &[TrashItem]) -> PayloadFiles {
+        items
+            .iter()
+            .map(|it| (it.id.clone(), crate::util::fingerprint(Path::new(&it.id))))
+            .collect()
+    }
+
+    /// The items whose `$R` payload is still the file in `seen`, and how
+    /// many were swapped for another (named on stderr). The `$I` record can
+    /// stay as it was while another payload takes the name, so
+    /// [`rechecked`] does not see it.
+    fn payload_unchanged(
+        prog: &str,
+        items: Vec<TrashItem>,
+        seen: &PayloadFiles,
+    ) -> (Vec<TrashItem>, usize) {
+        let mut changed = 0usize;
+        let kept: Vec<TrashItem> = items
+            .into_iter()
+            .filter(|it| {
+                let now = crate::util::fingerprint(Path::new(&it.id));
+                let same = seen.get(&it.id).is_none_or(|was| *was == now);
+                if !same {
+                    eprintln!(
+                        "{prog}: '{}' changed in the Recycle Bin after it was read; left as it is",
+                        crate::util::err_path(&original_of(it))
+                    );
+                    changed += 1;
+                }
+                same
+            })
+            .collect();
+        (kept, changed)
+    }
+
     /// The items of `items` that [`super::recheck_item`] passes just before
     /// rtrash acts on them, and how many changed. A changed item is named
     /// on stderr; one already gone is dropped quietly.
@@ -1813,7 +1988,14 @@ mod os {
         let Some(payload) = std::env::var_os("RTRASH_TEST_RM_RECHECK").map(PathBuf::from) else {
             return;
         };
-        if !items.iter().any(|it| Path::new(&it.id) == payload) {
+        // The seam path may differ in letter case, separators or verbatim
+        // prefix from the listed `$R` name. Compare with path_key semantics.
+        let mounts = volume_mounts();
+        let want = path_key(&payload.to_string_lossy(), &mounts);
+        if !items
+            .iter()
+            .any(|it| path_key(&it.id.to_string_lossy(), &mounts) == want)
+        {
             return;
         }
         let Some(index) = index_file_for(&payload) else {
@@ -2040,6 +2222,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut status = 0;
         let mut failed = 0usize;
         let mut moved: Vec<PathBuf> = Vec::new();
+        let mut found: Vec<(PathBuf, String, PathBuf)> = Vec::new();
         let mut roots: Vec<PathBuf> = Vec::new();
         let mut restore_notes: Vec<(PathBuf, crate::du_git::RiskyGit)> = Vec::new();
         for f in &files {
@@ -2148,6 +2331,14 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 failed += 1;
                 continue;
             }
+            // What the bin held for this path before the move, so the item
+            // it made is told from an older one with the same deletion time.
+            let before: PayloadFiles = super::list_items()
+                .unwrap_or_default()
+                .iter()
+                .filter(|it| super::same_git_risk_path(&original_of(it), &abs))
+                .map(|it| (it.id.clone(), crate::util::fingerprint(Path::new(&it.id))))
+                .collect();
             match crate::allow_roots::trash_delete_as(&abs, allow_permanent) {
                 // Gone for good: no bin to name, nothing to undo.
                 Ok(false) => {
@@ -2176,8 +2367,14 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                         items
                             .into_iter()
                             .filter(|it| super::same_git_risk_path(&original_of(it), &kept))
+                            .filter(|it| {
+                                before.get(&it.id).is_none_or(|was| {
+                                    *was != crate::util::fingerprint(Path::new(&it.id))
+                                })
+                            })
                             .max_by_key(|it| it.time_deleted)
                     });
+                    found.push(trashed_as(&kept, located.as_ref()));
                     let after = located
                         .as_ref()
                         .and_then(|it| crate::du_git::risky_tree(Path::new(&it.id)));
@@ -2208,7 +2405,6 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             }
         }
         if json {
-            let found = locate_trashed(&moved);
             let items: Vec<(&Path, &str, &Path)> = found
                 .iter()
                 .map(|(o, n, d)| (o.as_path(), n.as_str(), d.as_path()))
@@ -2218,24 +2414,20 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         if !moved.is_empty() {
             // The restore hint is true only after last-put.txt is written.
             // `rtrash undo` does not restore the Recycle Bin.
-            match write_last_put(started, &moved) {
-                Ok(()) if !json => {
-                    for (path, work) in &restore_notes {
-                        eprintln!(
-                            "{prog}: warning: '{}' contains a git repository with {} work; \
-                             `rtrash restore --batch=last` brings it back",
-                            crate::util::err_path(path),
-                            work.label()
-                        );
-                    }
-                }
-                Ok(()) => {}
+            let recorded = match write_last_put(started, &moved) {
+                Ok(()) => true,
                 Err(e) => {
                     eprintln!(
                         "{prog}: warning: the last-put record could not be written ({e}); \
                          restore the items from the Recycle Bin. \
                          `rtrash restore --batch=last` cannot see them yet",
                     );
+                    false
+                }
+            };
+            if !json {
+                for (path, work) in &restore_notes {
+                    eprintln!("{}", super::risky_put_line(prog, path, *work, recorded));
                 }
             }
             prune_after_put(prog, &moved, json);
@@ -2329,32 +2521,22 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         }
     }
 
-    /// For each moved path, its name and folder in the Recycle Bin: the
-    /// newest item with that original path. The shell API does not return
-    /// them from the move itself.
-    fn locate_trashed(moved: &[PathBuf]) -> Vec<(PathBuf, String, PathBuf)> {
-        let items = super::list_items().unwrap_or_default();
-        moved
-            .iter()
-            .map(|orig| {
-                let hit = items
-                    .iter()
-                    .filter(|it| super::same_git_risk_path(&original_of(it), orig))
-                    .max_by_key(|it| it.time_deleted);
-                let (name, dir) = match hit {
-                    Some(it) => {
-                        let id = PathBuf::from(&it.id);
-                        let name = id
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| it.name.to_string_lossy().into_owned());
-                        (name, id.parent().map(Path::to_path_buf).unwrap_or_default())
-                    }
-                    None => (String::new(), PathBuf::new()),
-                };
-                (orig.clone(), name, dir)
-            })
-            .collect()
+    /// A moved path with its name and folder in the Recycle Bin, from the
+    /// item the move made. The shell API does not return them from the move
+    /// itself; empty strings when the item was not found.
+    fn trashed_as(orig: &Path, item: Option<&TrashItem>) -> (PathBuf, String, PathBuf) {
+        let (name, dir) = match item {
+            Some(it) => {
+                let id = PathBuf::from(&it.id);
+                let name = id
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| it.name.to_string_lossy().into_owned());
+                (name, id.parent().map(Path::to_path_buf).unwrap_or_default())
+            }
+            None => (String::new(), PathBuf::new()),
+        };
+        (orig.to_path_buf(), name, dir)
     }
 
     /// What Windows `list --sort` orders by, as on FreeDesktop.
@@ -2726,27 +2908,42 @@ on Windows (there is no FreeDesktop layout here).
         let mut max_size: Option<u64> = None;
         let mut policy = crate::budget::Policy::Oldest;
         let mut every = false;
+        let mut paths = Vec::new();
         let mut age = AgeFilter::default();
+        let mut no_more_opts = false;
         let mut i = 0usize;
         while i < args.len() {
-            match age.take(args, &mut i) {
-                // As on Linux, `empty` takes no --newer-than.
-                Some(_) if age.newer_than.is_some() => {
-                    eprintln!("{prog}: unrecognized option '--newer-than'");
-                    return 2;
+            if !no_more_opts {
+                match age.take(args, &mut i) {
+                    // As on Linux, `empty` takes no --newer-than.
+                    Some(_) if age.newer_than.is_some() => {
+                        eprintln!("{prog}: unrecognized option '--newer-than'");
+                        return 2;
+                    }
+                    Some(Ok(())) => {
+                        i += 1;
+                        continue;
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                    None => {}
                 }
-                Some(Ok(())) => {
-                    i += 1;
-                    continue;
-                }
-                Some(Err(e)) => {
-                    eprintln!("{prog}: {e}");
-                    return 2;
-                }
-                None => {}
             }
             let arg = &args[i];
             i += 1;
+            if no_more_opts || !arg.starts_with('-') {
+                if arg.is_empty() {
+                    eprintln!("{prog}: '' is not a path");
+                    return 2;
+                }
+                match crate::filters::parse_age_secs(arg) {
+                    Ok(d) => age.older_than = Some(d),
+                    Err(_) => paths.push(arg.to_string()),
+                }
+                continue;
+            }
             match arg.as_str() {
                 "-n" | "--dry-run" => dry_run = true,
                 "-v" | "--verbose" => verbose = true,
@@ -2795,9 +2992,14 @@ on Windows (there is no FreeDesktop layout here).
                 "--help" => {
                     print!(
                         "\
-Usage: {prog} [OPTION]... [DAYS]
+Usage: {prog} [OPTION]... [DAYS | PATH]...
 Permanently empty the Windows Recycle Bin (system trash).
 With DAYS, only items deleted more than DAYS days ago, as on Linux.
+A PATH removes only the items whose original path is that path,
+exactly. A relative PATH is resolved from the current directory, and
+a trailing slash is ignored. When nothing matches, longer paths that
+start the same way are named and left in place. A number or a
+duration is an age, not a path.
 
   -n, --dry-run  list what would be removed
   -v, --verbose  print each removed original path
@@ -2834,18 +3036,16 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                     return 0;
                 }
                 a if a.starts_with("--trash-dir=") => {}
-                a if !a.starts_with('-') => match crate::filters::parse_age_secs(a) {
-                    Ok(d) => age.older_than = Some(d),
-                    Err(e) => {
-                        eprintln!("{prog}: {e}");
-                        return 2;
-                    }
-                },
+                "--" => no_more_opts = true,
                 a => {
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return 2;
                 }
             }
+        }
+        if !paths.is_empty() && (until.is_some() || max_size.is_some()) {
+            eprintln!("{prog}: a PATH takes no --until-free or --max-size");
+            return 2;
         }
         if let Some((spec, floor)) = until {
             if age.older_than.is_some() || max_size.is_some() {
@@ -2864,7 +3064,17 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         };
         // An empty of everything may take what other sessions or agents
         // put; it goes ahead alone only for the latest put's items.
-        if age.older_than.is_none() && max_size.is_none() && !every && !dry_run {
+        let have: Vec<PathBuf> = all.iter().map(original_of).collect();
+        let wants = crate::orig_path::expand(&paths);
+        let all: Vec<TrashItem> = if paths.is_empty() {
+            all
+        } else {
+            all.into_iter()
+                .filter(|it| crate::orig_path::selects(&wants, &original_of(it)))
+                .collect()
+        };
+        if age.older_than.is_none() && max_size.is_none() && paths.is_empty() && !every && !dry_run
+        {
             let rows: Vec<(PathBuf, i64)> = all
                 .iter()
                 .map(|it| (original_of(it), it.time_deleted))
@@ -2890,6 +3100,16 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let (mut items, rest): (Vec<TrashItem>, Vec<TrashItem>) = all
             .into_iter()
             .partition(|it| age_pass && age.keeps(Some(it.time_deleted)));
+        if !paths.is_empty() {
+            let kept: Vec<PathBuf> = items.iter().map(original_of).collect();
+            crate::orig_path::hint(
+                prog,
+                &paths,
+                &have,
+                &kept,
+                crate::orig_path::window(age.older_than.is_some(), false),
+            );
+        }
         if let Some(max) = max_size {
             let sized: Vec<(i64, u64)> = rest
                 .iter()
@@ -3341,8 +3561,8 @@ Without PATH, print a numbered list and read an index from stdin.
       --regex=RE  match items whose original path matches RE
   -m, --match=KIND  read PATH as a pattern of KIND, as trashy's -m does:
                 glob, regex, substring, exact (the whole original path) or
-                id (the {{id}} from `list --format`, which includes
-                payload name, date and bin root)
+                id (the {{id}} from `list --format`, the trash name,
+                deletion date and trash root)
       --to=DIR  restore into DIR, keeping each item's file name
       --older-than=AGE  only items deleted more than AGE ago; AGE is DAYS
                 or a duration such as 2h, 30m or 1d12h
@@ -3438,11 +3658,12 @@ Without PATH, print a numbered list and read an index from stdin.
                 return 2;
             }
         }
-        let opts = RestoreOpts {
+        let mut opts = RestoreOpts {
             conflict,
             json,
             dry_run,
             to: to.clone(),
+            seen: PayloadFiles::new(),
         };
         let mut items = match super::list_items() {
             Ok(i) => i,
@@ -3459,6 +3680,10 @@ Without PATH, print a numbered list and read an index from stdin.
         // --larger-than and --smaller-than; only the items left get sized.
         if size.is_set() {
             items.retain(|i| size.keeps(item_size(i)));
+        }
+        // The `$R` files as listed: restore moves only these.
+        if !dry_run {
+            opts.seen = payload_files(&items);
         }
         if last_run {
             if target.is_some() {
@@ -3673,6 +3898,7 @@ Without PATH, print a numbered list and read an index from stdin.
         item: TrashItem,
         original: PathBuf,
         date: String,
+        payload: Option<crate::util::Fingerprint>,
     }
 
     #[cfg(feature = "tui")]
@@ -3680,10 +3906,12 @@ Without PATH, print a numbered list and read an index from stdin.
         pub fn new(item: TrashItem) -> Self {
             let original = original_of(&item);
             let date = platform::epoch_to_iso_utc(item.time_deleted);
+            let payload = crate::util::fingerprint(Path::new(&item.id));
             Self {
                 item,
                 original,
                 date,
+                payload,
             }
         }
     }
@@ -3700,6 +3928,14 @@ Without PATH, print a numbered list and read an index from stdin.
             let dest = &self.original;
             // Another item may have taken the payload's name since the scan.
             super::recheck_item(&self.item).map_err(|s| s.reason(&dest.to_string_lossy()))?;
+            let payload = Path::new(&self.item.id);
+            crate::util::replace_payload_seam(payload);
+            if self.payload != crate::util::fingerprint(payload) {
+                return Err(format!(
+                    "'{}' changed in the Recycle Bin after it was read; left as it is",
+                    dest.display()
+                ));
+            }
             if dest.symlink_metadata().is_ok() {
                 if !force {
                     return Err(format!(
@@ -3707,10 +3943,10 @@ Without PATH, print a numbered list and read an index from stdin.
                         dest.display()
                     ));
                 }
-                crate::permanent_guard::remove(dest)
-                    .map_err(|e| format!("cannot replace '{}': {e}", dest.display()))?;
+                restore_overwrite(&self.item, self.payload, dest)?;
+                return Ok((dest.clone(), Vec::new()));
             }
-            super::restore_payload(Path::new(&self.item.id), dest)
+            super::restore_payload(payload, dest)
                 .map(|()| (dest.clone(), Vec::new()))
                 .map_err(|e| format!("restore failed: {e}"))
         }
@@ -3753,6 +3989,8 @@ Without PATH, print a numbered list and read an index from stdin.
         dry_run: bool,
         /// `--to=DIR`, absolute: restore there, keeping each file name.
         to: Option<PathBuf>,
+        /// The `$R` file of each listed item when it was listed.
+        seen: PayloadFiles,
     }
 
     /// The first `STEM.N.EXT` (or `NAME.N`) next to `dest` that is free.
@@ -3770,6 +4008,148 @@ Without PATH, print a numbered list and read an index from stdin.
             })
             .find(|p| crate::util::is_gone(p))
             .unwrap_or_else(|| dest.to_path_buf())
+    }
+
+    fn hidden_restore_name(parent: &Path, name: &std::ffi::OsStr, role: &str) -> PathBuf {
+        let pid = std::process::id();
+        (0u32..)
+            .map(|n| {
+                let suffix = if n == 0 {
+                    String::new()
+                } else {
+                    format!("-{n}")
+                };
+                parent.join(format!(
+                    ".rtrash-{role}-{pid}{suffix}-{}",
+                    name.to_string_lossy()
+                ))
+            })
+            .find(|path| crate::util::is_gone(path))
+            .unwrap_or_else(|| parent.join(format!(".rtrash-{role}-{pid}")))
+    }
+
+    fn put_staged_back(why: String, staged: &Path, payload: &Path) -> String {
+        match super::move_payload(staged, payload) {
+            Ok(()) => format!("{why}; the item stays in the Recycle Bin"),
+            Err(e) => format!(
+                "{why}; the item is now at '{}', since it could not go back to '{}': {e}",
+                staged.display(),
+                payload.display()
+            ),
+        }
+    }
+
+    /// Move the selected payload out of its public `$R` name before replacing
+    /// an existing destination. The old destination is renamed aside until
+    /// the staged payload is in place, so a failed swap can put both back.
+    fn restore_overwrite(
+        it: &TrashItem,
+        expected: Option<crate::util::Fingerprint>,
+        dest: &Path,
+    ) -> Result<(), String> {
+        crate::allow_roots::check(dest).map_err(|e| e.to_string())?;
+        if let Err(e) = crate::permanent_guard::gate() {
+            return Err(format!("cannot replace '{}': {e}", dest.display()));
+        }
+        let payload = Path::new(&it.id);
+        let parent = dest
+            .parent()
+            .ok_or_else(|| format!("'{}' has no parent", dest.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create '{}': {e}", parent.display()))?;
+        let payload_parent = payload
+            .parent()
+            .ok_or_else(|| format!("'{}' has no parent", payload.display()))?;
+        let name = payload.file_name().unwrap_or_default();
+        let bin_stage = hidden_restore_name(payload_parent, name, "bin-stage");
+
+        crate::util::replace_payload_after_overwrite_seam(payload);
+        std::fs::rename(payload, &bin_stage)
+            .map_err(|e| format!("cannot stage '{}': {e}", payload.display()))?;
+        if expected != crate::util::fingerprint(&bin_stage) {
+            return Err(put_staged_back(
+                format!(
+                    "'{}' changed in the Recycle Bin before it could be staged",
+                    payload.display()
+                ),
+                &bin_stage,
+                payload,
+            ));
+        }
+        if let Err(stale) = super::recheck_item_record(it) {
+            return Err(put_staged_back(
+                stale.reason(&original_of(it).to_string_lossy()),
+                &bin_stage,
+                payload,
+            ));
+        }
+
+        let dest_stage = hidden_restore_name(parent, name, "restore-stage");
+        if let Err(e) = super::move_payload(&bin_stage, &dest_stage) {
+            return Err(put_staged_back(
+                format!("cannot move the payload to '{}': {e}", dest_stage.display()),
+                &bin_stage,
+                payload,
+            ));
+        }
+        let staged = crate::util::fingerprint(&dest_stage);
+        if !matches!((expected, staged), (Some(a), Some(b)) if a.matches_move(b)) {
+            return Err(put_staged_back(
+                "the staged payload changed before the destination swap".to_string(),
+                &dest_stage,
+                payload,
+            ));
+        }
+
+        let backup = hidden_restore_name(parent, dest.file_name().unwrap_or_default(), "backup");
+        if let Err(e) = std::fs::rename(dest, &backup) {
+            return Err(put_staged_back(
+                format!("cannot stage existing '{}': {e}", dest.display()),
+                &dest_stage,
+                payload,
+            ));
+        }
+        let block_swap = cfg!(debug_assertions)
+            && std::env::var_os("RTRASH_TEST_BLOCK_RESTORE_SWAP").as_deref()
+                == Some(dest.as_os_str());
+        let swapped = if block_swap {
+            Err(std::io::Error::other("injected destination swap failure"))
+        } else {
+            std::fs::rename(&dest_stage, dest)
+        };
+        if let Err(e) = swapped {
+            let restore_dest = std::fs::rename(&backup, dest);
+            let why = match restore_dest {
+                Ok(()) => format!("cannot place restored file at '{}': {e}", dest.display()),
+                Err(back) => format!(
+                    "cannot place restored file at '{}': {e}; cannot put its old value back: \
+                     {back}",
+                    dest.display()
+                ),
+            };
+            return Err(put_staged_back(why, &dest_stage, payload));
+        }
+        if let Err(e) = crate::win_recycle::remove_forcing(&backup) {
+            let staged_again = std::fs::rename(dest, &dest_stage);
+            let restored_dest = std::fs::rename(&backup, dest);
+            let why = format!(
+                "cannot remove staged old destination '{}': {e}",
+                backup.display()
+            );
+            if staged_again.is_ok() && restored_dest.is_ok() {
+                return Err(put_staged_back(why, &dest_stage, payload));
+            }
+            return Err(format!(
+                "{why}; rollback failed (new destination: {staged_again:?}, old destination: \
+                 {restored_dest:?})"
+            ));
+        }
+        super::remove_index(payload).map_err(|e| {
+            format!(
+                "restored '{}' but cannot remove its record: {e}",
+                dest.display()
+            )
+        })
     }
 
     /// `{restored, failed, skipped}` as the FreeDesktop restore prints it,
@@ -3911,18 +4291,29 @@ Without PATH, print a numbered list and read an index from stdin.
                 failed += 1;
                 continue;
             }
+            // The record can stay as listed while another payload takes the
+            // `$R` name; that one is not what was chosen.
+            crate::util::replace_payload_seam(Path::new(&it.id));
+            let now = crate::util::fingerprint(Path::new(&it.id));
+            if o.seen.get(&it.id).is_some_and(|was| *was != now) {
+                eprintln!(
+                    "{prog}: '{}' changed in the Recycle Bin after it was read; left as it is",
+                    crate::util::err_path(&orig)
+                );
+                failed += 1;
+                continue;
+            }
             if o.conflict == Conflict::Overwrite && dest.symlink_metadata().is_ok() {
-                let gone = crate::permanent_guard::remove(&dest);
-                if let Err(e) = gone {
+                let expected = o.seen.get(&it.id).copied().flatten();
+                if let Err(e) = restore_overwrite(it, expected, &dest) {
                     eprintln!(
-                        "{prog}: cannot replace '{}': {e}",
+                        "{prog}: cannot restore '{}': {e}",
                         crate::util::err_path(&dest)
                     );
                     failed += 1;
                     continue;
                 }
-            }
-            if let Err(e) = super::restore_payload(Path::new(&it.id), &dest) {
+            } else if let Err(e) = super::restore_payload(Path::new(&it.id), &dest) {
                 let why = held_reason(Path::new(&it.id), &e);
                 eprintln!(
                     "{prog}: cannot restore '{}': {why}",
@@ -4236,12 +4627,14 @@ registry), then the total and the free space on each (a warning under
         let mut dry_run = false;
         let mut force = false;
         let mut verbose = false;
-        let mut kind = crate::filters::Match::Glob;
+        let mut kind = crate::filters::Match::Exact;
         let mut bad_match: Option<String> = None;
         let mut json = false;
         let mut patterns: Vec<String> = Vec::new();
         let mut batch: Option<String> = None;
-        let filters = parse_with_filters(prog, args, |arg| {
+        let (rest, operands, short_err) = super::rm_option_args(args);
+        bad_match = bad_match.or(short_err);
+        let filters = parse_with_filters(prog, &rest, |arg| {
             match arg {
                 "-n" | "--dry-run" => dry_run = true,
                 "--regex" => kind = crate::filters::Match::Regex,
@@ -4274,14 +4667,18 @@ registry), then the total and the free space on each (a warning under
                     print!(
                         "\
 Usage: {prog} [OPTION]... PATTERN...
-Permanently delete Recycle Bin items matching PATTERN (glob).
+Permanently delete Recycle Bin items whose original path is PATTERN.
+A bare PATTERN is that path exactly, resolved from the current
+directory, with a trailing slash ignored. It does not remove a longer
+name or a file inside it. When nothing matches, those are named and
+left in place.
 
       --regex   PATTERNs are regular expressions searched in the original
                    path (the same as --match=regex)
-      --match=KIND  how to read PATTERNs (trashy's -m): glob (default),
-                   regex, substring, exact (the whole original path) or id
-                   (the {{id}} from `list --format`, the payload name,
-                   date and bin root)
+      --match=KIND  how to read PATTERNs (trashy's -m): exact (the
+                   default), glob, regex, substring or id (the {{id}}
+                   from `list --format`, the trash name, deletion date
+                   and trash root)
       --older-than=AGE  only match items deleted more than AGE ago: DAYS,
                    or a duration such as 2h, 30m or 1d12h
       --newer-than=AGE  only match items deleted within the last AGE
@@ -4310,6 +4707,10 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                     return Some(0);
                 }
                 a if a.starts_with("--trash-dir=") => {}
+                "" => {
+                    eprintln!("{prog}: '' is not a path");
+                    return Some(2);
+                }
                 a if a.starts_with('-') => {
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return Some(2);
@@ -4322,6 +4723,7 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             Ok(f) => f,
             Err(code) => return code,
         };
+        patterns.extend(operands);
         if let Some(b) = &batch {
             if b != "last" {
                 eprintln!(
@@ -4344,13 +4746,16 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             eprintln!("{prog}: missing PATTERN");
             return 2;
         }
-        let pats = match crate::filters::Patterns::new(patterns, kind) {
+        let mut pats = match crate::filters::Patterns::new(patterns, kind) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("{prog}: {e}");
                 return 2;
             }
         };
+        if kind == crate::filters::Match::Exact {
+            pats.texts = crate::orig_path::expand(&pats.operands);
+        }
         if pats.is_mass() && !force && !scoped {
             eprintln!("{prog}: refusing a pattern that matches everything without --force");
             return 2;
@@ -4370,10 +4775,15 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
         } else {
             items
         };
+        let exact = pats.kind == crate::filters::Match::Exact;
+        let have: Vec<PathBuf> = items.iter().map(original_of).collect();
         let matched: Vec<TrashItem> = items
             .into_iter()
             .filter(|it| {
                 let orig = original_of(it);
+                if exact {
+                    return crate::orig_path::selects(&pats.texts, &orig);
+                }
                 let full = orig.to_string_lossy().into_owned();
                 let base = orig
                     .file_name()
@@ -4390,6 +4800,11 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
             .collect();
         // Size last: only the matches need their `$I` read.
         let matched = filters.apply(matched, |it| it.time_deleted, item_size);
+        if exact {
+            let kept: Vec<PathBuf> = matched.iter().map(original_of).collect();
+            let window = crate::orig_path::window(filters.age.is_set(), filters.size.is_set());
+            crate::orig_path::hint(prog, &pats.operands, &have, &kept, window);
+        }
         if !dry_run {
             // RTRASH_ALLOW_ROOTS: rm deletes only items trashed from there.
             let origins: Vec<PathBuf> = matched.iter().map(original_of).collect();
@@ -4400,6 +4815,10 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
                 return code;
             }
         }
+        // The `$R` files the match saw, taken before the question: a swap
+        // during the prompt or the git scan must not pass for the item that
+        // was listed.
+        let seen = payload_files(&matched);
         // On a terminal, or with -i, rm names the matches and asks once.
         if crate::rm_ask::would_ask(dry_run, json) {
             let named: Vec<(String, u64)> = matched
@@ -4414,7 +4833,9 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
         let (matched, changed) = if dry_run {
             (matched, 0)
         } else {
-            rechecked(prog, matched)
+            let (matched, changed) = rechecked(prog, matched);
+            let (matched, swapped) = payload_unchanged(prog, matched, &seen);
+            (matched, changed.saturating_add(swapped))
         };
         let mut refused = 0u32;
         let matched = if force {
@@ -4446,8 +4867,13 @@ Permanently delete Recycle Bin items matching PATTERN (glob).
         let (matched, final_changed) = if dry_run {
             (matched, 0)
         } else {
+            for it in &matched {
+                crate::util::replace_payload_seam(Path::new(&it.id));
+            }
             rm_recheck_seam(&matched);
-            rechecked(prog, matched)
+            let (matched, changed) = rechecked(prog, matched);
+            let (matched, swapped) = payload_unchanged(prog, matched, &seen);
+            (matched, changed.saturating_add(swapped))
         };
         let changed = changed.saturating_add(final_changed);
         // Taken before the purge: the `$R` payloads are gone after it.
@@ -4865,6 +5291,22 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn rm_options_stop_at_a_double_dash() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (rest, ops, err) = rm_option_args(&v(&["-m", "glob", "-m=id", "-f", "--", "-m", "x"]));
+        assert_eq!(rest, v(&["--match=glob", "--match=id", "-f"]));
+        assert_eq!(ops, v(&["-m", "x"]));
+        assert!(err.is_none());
+        let (rest, ops, err) = rm_option_args(&v(&["a", "-m"]));
+        assert_eq!(rest, v(&["a"]));
+        assert!(ops.is_empty());
+        assert_eq!(err.as_deref(), Some("-m requires a match kind"));
+        let (rest, ops, _) = rm_option_args(&v(&["--", "--match", "kind"]));
+        assert!(rest.is_empty());
+        assert_eq!(ops, v(&["--match", "kind"]));
+    }
+
+    #[test]
     fn identity_changes_when_another_file_is_checked() {
         let dir = std::env::temp_dir().join(format!("rtrash-ident-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -4883,6 +5325,70 @@ mod tests {
         assert!(file_identity(&gone).is_none());
         assert!(identity_changed(None, &gone));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path whose identity was never read cannot be checked, so a path that
+    /// still cannot be read is a change, not a match.
+    #[test]
+    fn a_path_that_cannot_be_read_before_or_after_is_changed() {
+        let dir = std::env::temp_dir().join(format!("rtrash-ident-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let missing = dir.join("missing");
+        assert_eq!(file_identity(&missing), None);
+        assert!(identity_changed(None, &missing));
+        let there = dir.join("there");
+        std::fs::write(&there, b"x").unwrap();
+        assert!(identity_changed(None, &there));
+        let seen = file_identity(&there);
+        std::fs::remove_file(&there).unwrap();
+        assert!(identity_changed(seen, &there));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A link is its own file: it does not take the identity of the folder it
+    /// names. On Windows a junction is the case that needs no privilege.
+    #[test]
+    fn a_link_has_an_identity_of_its_own() {
+        let dir = std::env::temp_dir().join(format!("rtrash-ident-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        let link = dir.join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("target"), &link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(dir.join("target"))
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "{made:?}");
+        }
+        let target = file_identity(&dir.join("target")).unwrap();
+        let of_link = file_identity(&link).unwrap();
+        assert_ne!(of_link, target);
+        assert!(identity_changed(Some(target), &link));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_risky_put_line_names_the_work_with_or_without_the_record() {
+        let work = crate::du_git::RiskyGit::unknown();
+        let on = risky_put_line("rtrash", Path::new("repo"), work, true);
+        assert!(
+            on.contains("contains a git repository with") && on.contains("restore --batch=last"),
+            "{on}"
+        );
+        let off = risky_put_line("rtrash", Path::new("repo"), work, false);
+        assert!(
+            off.contains("contains a git repository with")
+                && off.contains("'repo'")
+                && off.contains("Recycle Bin")
+                && !off.contains("restore --batch=last"),
+            "{off}"
+        );
     }
 
     /// The final component stays the operand. Canonicalizing the whole path

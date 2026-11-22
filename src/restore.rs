@@ -63,7 +63,7 @@ the index prompt. --newest-first and --oldest-first set the order for both.
   -m, --match=KIND  read PATH as a pattern of KIND, as trashy's -m does:
                     glob, regex, substring (text in the original path) or
                     exact (the whole original path) or id (the {id} from
-                    `list --format`, which includes trash root and date)
+                    `list --format`, the trash name, deletion date and trash root)
       --latest    of several matches, restore the most recently trashed
       --all       of several matches, restore every one
   -n, --dry-run   show where each chosen item would go and change nothing;
@@ -1176,6 +1176,12 @@ pub(crate) fn restore_one_to(
     if let Err(e) = fs::create_dir_all(parent) {
         return Err(format!("cannot create '{}': {e}", parent.display()));
     }
+    // Still the file the lock was taken on, now that nothing else is left to
+    // wait for before the move.
+    crate::util::replace_payload_seam(&src);
+    if held.swapped() {
+        return Err(list::Relock::Changed.reason(entry));
+    }
 
     // What leaving the trash takes off a running total that is current.
     let size = crate::trash_total::cached(&entry.dir)
@@ -1324,6 +1330,7 @@ mod tests {
             },
             batch: None,
             recorded: true,
+            payload: None,
         }
     }
 

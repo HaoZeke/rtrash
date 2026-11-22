@@ -13,9 +13,14 @@ use crate::trashdir::{self, TrashDir};
 use crate::util::stdin_is_tty;
 
 const HELP: &str = "\
-Usage: {prog} [OPTION]... [DAYS]
+Usage: {prog} [OPTION]... [DAYS | PATH]...
 Purge trashed items. With DAYS (or an age such as 2h), only items trashed
 more than that long ago.
+A PATH removes only the items whose original path is that path, exactly,
+the way put records it. A relative PATH is resolved from the current
+directory, and a trailing slash is ignored. `empty ~/a` does not remove
+`~/ab` or `~/a/b`. When nothing matches, those longer paths are named
+and left in place. A number or a duration is an age, not a path.
 An item that cannot be removed stays; each one is listed at the end, with
 the reason, and the exit status is 1.
 On a TTY without DAYS, opens the interactive empty browser (multi-select
@@ -82,6 +87,8 @@ struct Opts {
     /// `--all`: an unscoped empty may take items other puts left.
     all: bool,
     all_users: bool,
+    /// Original paths to remove exactly. Empty means the whole trash.
+    paths: Vec<String>,
 }
 
 /// The `.trashinfo` records in `dir` whose payload in `files/` is gone,
@@ -236,6 +243,7 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
 /// cut, no `--trash-dir` pin, no `--all`, and not a dry run.
 fn unscoped(opts: &Opts) -> bool {
     opts.days.is_none()
+        && opts.paths.is_empty()
         && opts.max_size.is_none()
         && opts.trash_dirs.is_empty()
         && !opts.all
@@ -297,9 +305,22 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         interactive: false,
         all_users: false,
         all: false,
+        paths: Vec::new(),
     };
+    let mut no_more_opts = false;
     for arg in args {
-        match arg.as_str() {
+        let text = arg.as_str();
+        if no_more_opts || !text.starts_with('-') {
+            if text.is_empty() {
+                return usage_err(prog, "'' is not a path");
+            }
+            match crate::filters::parse_age_secs(text) {
+                Ok(secs) => opts.days = Some(secs),
+                Err(_) => opts.paths.push(text.to_string()),
+            }
+            continue;
+        }
+        match text {
             "-n" | "--dry-run" => opts.dry_run = true,
             "-v" | "--verbose" => opts.verbose = true,
             "-f" | "--force" => opts.interactive = false,
@@ -367,22 +388,28 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "--older-than" => {
                 return usage_err(prog, "--older-than requires an AGE (use --older-than=AGE)");
             }
-            a if !a.starts_with('-') => match crate::filters::parse_age_secs(a) {
-                Ok(secs) => opts.days = Some(secs),
-                Err(_) => return usage_err(prog, &format!("invalid DAYS argument '{a}'")),
-            },
+            "--" => no_more_opts = true,
             a => return usage_err(prog, &format!("unrecognized option '{a}'")),
         }
     }
 
     if let Some((spec, floor)) = &opts.until_free {
-        if opts.days.is_some() || opts.max_size.is_some() || opts.dangling || opts.all_users {
+        if opts.days.is_some()
+            || opts.max_size.is_some()
+            || opts.dangling
+            || opts.all_users
+            || !opts.paths.is_empty()
+        {
             return usage_err(
                 prog,
-                "--until-free takes no DAYS, --max-size, --dangling or --all-users",
+                "--until-free takes no DAYS, PATH, --max-size, --dangling or --all-users",
             );
         }
         return until_free(prog, spec, *floor, &opts);
+    }
+
+    if !opts.paths.is_empty() && opts.max_size.is_some() {
+        return usage_err(prog, "a PATH takes no --max-size");
     }
 
     // macOS empties the Finder Trash unless a pin or the setting says
@@ -400,7 +427,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 return 2;
             }
         }
-        if opts.interactive && !opts.dry_run {
+        if opts.interactive && !opts.dry_run && opts.paths.is_empty() {
             let (mut bytes, mut n) = (0u64, 0u64);
             for t in crate::finder::trashes() {
                 bytes += crate::fastdelete::disk_usage(&t);
@@ -420,9 +447,11 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 cutoff,
                 max_size: opts.max_size,
                 prune: opts.prune,
+                interactive: opts.interactive,
                 dry_run: opts.dry_run,
                 verbose: opts.verbose,
                 json: opts.json,
+                paths: opts.paths.clone(),
             },
         );
     }
@@ -442,10 +471,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     }
 
     if opts.dangling {
-        if opts.days.is_some() || opts.max_size.is_some() {
-            return usage_err(prog, "--dangling takes no DAYS or --max-size");
+        if opts.days.is_some() || opts.max_size.is_some() || !opts.paths.is_empty() {
+            return usage_err(prog, "--dangling takes no DAYS, PATH or --max-size");
         }
         return empty_dangling(prog, &dirs, &opts);
+    }
+    if !opts.paths.is_empty() {
+        return empty_exact(prog, &dirs, &opts);
     }
 
     // What the run counts is all it may remove: an item put after the
@@ -936,6 +968,172 @@ fn report_late(prog: &str, dir: &TrashDir, late: u64) {
             crate::util::err_path(&dir.root)
         );
     }
+}
+
+/// `empty PATH`: remove only the items whose original path is one of
+/// `opts.paths`, exactly. A near miss is named and left in place.
+fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
+    let mut entries = list::collect(dirs);
+    let orphans = list::orphans(dirs);
+    let mut have: Vec<PathBuf> = entries.iter().map(|e| e.original.clone()).collect();
+    have.extend(orphans.iter().map(|e| e.original.clone()));
+    if opts.days.is_none() {
+        entries.extend(orphans);
+    }
+    let wants = crate::orig_path::expand(&opts.paths);
+    if let Some(secs) = opts.days {
+        let age = crate::filters::AgeFilter {
+            older_than: Some(secs),
+            newer_than: None,
+        };
+        let now = info::now_epoch();
+        entries
+            .retain(|e| age.keeps_at(e.date.as_deref().and_then(info::parse_local_to_epoch), now));
+    }
+    let hits: Vec<&list::Entry> = entries
+        .iter()
+        .filter(|e| crate::orig_path::selects(&wants, &e.original))
+        .collect();
+    let kept: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
+    crate::orig_path::hint(
+        prog,
+        &opts.paths,
+        &have,
+        &kept,
+        crate::orig_path::window(opts.days.is_some(), false),
+    );
+    if opts.interactive && !opts.dry_run {
+        let named: Vec<(String, u64)> = hits
+            .iter()
+            .map(|entry| {
+                let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
+                let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
+                (
+                    crate::util::term_path(&entry.original),
+                    crate::fastdelete::disk_usage(&payload)
+                        .saturating_add(crate::fastdelete::disk_usage(&info_path)),
+                )
+            })
+            .collect();
+        if !crate::rm_ask::confirm(prog, &named) {
+            return 0;
+        }
+    }
+    if !opts.dry_run {
+        let origins: Vec<PathBuf> = hits.iter().map(|e| e.original.clone()).collect();
+        if let Some(code) = crate::allow_roots::refuse_outside(prog, &origins) {
+            return code;
+        }
+        if let Some(code) = crate::permanent_guard::check_count(prog, hits.len() as u64) {
+            return code;
+        }
+        crate::interrupt::stop_then_quit();
+    }
+    let mut removed = 0u64;
+    let mut bytes = 0u64;
+    let mut status = 0i32;
+    for entry in &hits {
+        if crate::interrupt::requested() {
+            status = 130;
+            break;
+        }
+        let payload = crate::util::join_name(&entry.dir.files(), &entry.name);
+        let info_path = crate::util::join_info(&entry.dir.info(), &entry.name);
+        let sz =
+            crate::fastdelete::disk_usage(&payload) + crate::fastdelete::disk_usage(&info_path);
+        if opts.dry_run {
+            bytes = bytes.saturating_add(sz);
+            if opts.verbose && !opts.json {
+                println!(
+                    "would remove {} ({})",
+                    crate::util::term_path(&entry.original),
+                    crate::fastdelete::format_bytes(sz)
+                );
+            }
+            removed += 1;
+            continue;
+        }
+        let held = match entry.relock() {
+            Ok(held) => held,
+            Err(list::Relock::Gone) => continue,
+            Err(why) => {
+                eprintln!("{prog}: {}", crate::util::err_text(&why.reason(entry)));
+                status = 1;
+                continue;
+            }
+        };
+        let (payload, info_path) = (held.payload(), held.record());
+        if let Err(e) = crate::permanent_guard::remove(&payload) {
+            eprintln!(
+                "{prog}: cannot remove '{}': {e}",
+                crate::util::err_path(&payload)
+            );
+            status = 1;
+            continue;
+        }
+        let section = crate::interrupt::critical();
+        let orphan = !info_path.exists();
+        let carry = (!orphan)
+            .then(|| crate::trash_total::cached(&entry.dir))
+            .flatten()
+            .map(|(b, n)| (b.saturating_sub(sz), n.saturating_sub(1)));
+        crate::trash_total::touched(&entry.dir);
+        if !orphan {
+            crate::trash_total::forget(&entry.dir);
+        }
+        let info_gone = fs::remove_file(&info_path);
+        if let (Ok(()), Some((b, n))) = (&info_gone, carry) {
+            crate::trash_total::store(&entry.dir, b, n);
+        }
+        if let Err(e) = info_gone {
+            if e.kind() != io::ErrorKind::NotFound {
+                eprintln!(
+                    "{prog}: cannot remove '{}': {e}",
+                    crate::util::err_path(&info_path)
+                );
+                status = 1;
+                drop(section);
+                continue;
+            }
+        }
+        trashdir::directorysizes_remove(&entry.dir, &entry.name);
+        bytes = bytes.saturating_add(sz);
+        if opts.verbose && !opts.json {
+            println!("removed {}", crate::util::term_path(&entry.original));
+        }
+        removed += 1;
+        drop(section);
+        drop(held);
+        crate::interrupt::test_seam("after-item");
+    }
+    if opts.json {
+        let days = match opts.days {
+            Some(s) if s % 86_400 == 0 => (s / 86_400).to_string(),
+            Some(s) => format!("{}", s as f64 / 86_400.0),
+            None => "null".into(),
+        };
+        let older_secs = opts.days.map_or("null".into(), |s| s.to_string());
+        let tail = format!("\"older_than_secs\":{older_secs},\"max_size\":null");
+        println!(
+            "{{\"dry_run\":{},\"removed\":{},\"bytes\":{},\"days\":{},{tail}}}",
+            if opts.dry_run { "true" } else { "false" },
+            removed,
+            bytes,
+            days,
+        );
+    } else if opts.verbose || opts.dry_run || removed > 0 {
+        let verb = if opts.dry_run {
+            "Would remove"
+        } else {
+            "Removed"
+        };
+        let noun = if removed == 1 { "item" } else { "items" };
+        eprintln!("{verb} {removed} {noun}");
+    }
+    if status == 130 {
+        eprintln!("{prog}: stopped by Ctrl-C: {removed} removed; the rest stay in the trash");
+    }
+    status
 }
 
 /// The original path a `.trashinfo` records, resolved against its trash.

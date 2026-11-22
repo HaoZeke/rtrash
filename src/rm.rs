@@ -7,12 +7,15 @@ use crate::trashdir::{self, TrashDir};
 
 const HELP: &str = "\
 Usage: {prog} [OPTION]... PATTERN...
-Permanently remove trashed items whose original path or basename matches
-a PATTERN (shell-style glob; quote globs from the shell; --match picks
-another kind, as trashy's -m does). Matching entries
-are deleted from the trash (files/ + .trashinfo), not restored. An absolute
-PATTERN also matches with symlinks in its directory part resolved, the way
-put records original paths.
+Permanently remove trashed items whose original path is PATTERN.
+A bare PATTERN is that path exactly: the path put records, resolved
+from the current directory, with a trailing slash ignored. `rm ~/a`
+does not remove `~/ab` or `~/a/b`. When nothing matches, those longer
+paths are named and left in place. --match=glob (a shell glob of the
+original path, its basename or the trash name), --regex and
+--match=substring are the broader matches; --match=exact is the same
+comparison as a bare PATTERN. Matching entries are deleted from the
+trash (files/ + .trashinfo), not restored.
 
 Note: multi-call name `rm` means *put into trash* (safe). This command
 (subcommand `rtrash rm` or multi-call `trash-rm`) permanently deletes
@@ -34,10 +37,11 @@ unknown git work; -n reports the same refusal without deleting anything.
                      (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
       --regex      PATTERNs are regular expressions searched in the
                      original path (the same as --match=regex)
-  -m, --match=KIND  how to read PATTERNs (trashy's -m): glob (default),
-                     regex, substring (text in the original path),
-                     exact (the whole original path) or id (the {id}
-                     from `list --format`, the trash name, date and root)
+  -m, --match=KIND  how to read PATTERNs (trashy's -m): exact (the
+                     default; the whole original path), glob, regex,
+                     substring (text in the original path) or id (the
+                     {id} from `list --format`, the trash name, date
+                     and root)
       --batch=ID   only items from one put run: an ID from `undo --list`,
                      or `last` for the latest; with no PATTERN, all of it
   -n, --dry-run    list matches and reclaimable size; do not delete
@@ -54,10 +58,10 @@ unknown git work; -n reports the same refusal without deleting anything.
       --version    output version information and exit
 
 Examples:
-  {prog} '*.o'
-  {prog} -n '*.o'
-  {prog} foo
-  {prog} /work/old-project
+  {prog} /home/you/old-project
+  {prog} -n foo
+  {prog} --match=glob '*.o'
+  {prog} -n --match=glob '*.o'
   {prog} -i --max-count=1 --match=id ID
   {prog} --regex '/build-[0-9]+/'
   {prog} --batch=last
@@ -77,7 +81,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut dry_run = false;
     let mut home_only = false;
     let mut json = false;
-    let mut kind = crate::filters::Match::Glob;
+    let mut kind = crate::filters::Match::Exact;
     let mut older_than: Option<i64> = None;
     let mut newer_than: Option<i64> = None;
     let mut trash_dirs: Vec<PathBuf> = Vec::new();
@@ -85,20 +89,33 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     let mut batch: Option<String> = None;
     let mut size = list::SizeFilter::default();
 
+    let mut no_more_opts = false;
     let mut i = 0usize;
     while i < args.len() {
-        match size.take(args, &mut i) {
-            Some(Ok(())) => {
-                i += 1;
-                continue;
+        if !no_more_opts {
+            match size.take(args, &mut i) {
+                Some(Ok(())) => {
+                    i += 1;
+                    continue;
+                }
+                Some(Err(e)) => {
+                    eprintln!("{prog}: {e}");
+                    return 2;
+                }
+                None => {}
             }
-            Some(Err(e)) => {
-                eprintln!("{prog}: {e}");
-                return 2;
-            }
-            None => {}
         }
         let arg = &args[i];
+        if no_more_opts {
+            if arg.is_empty() {
+                eprintln!("{prog}: '' is not a path");
+                eprintln!("Try '{prog} --help' for more information.");
+                return 2;
+            }
+            patterns.push(arg.to_string());
+            i += 1;
+            continue;
+        }
         match arg.as_str() {
             "-v" | "--verbose" => verbose = true,
             "-f" | "--force" => {
@@ -198,6 +215,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                     }
                 }
             }
+            "" => {
+                eprintln!("{prog}: '' is not a path");
+                eprintln!("Try '{prog} --help' for more information.");
+                return 2;
+            }
+            "--" => no_more_opts = true,
             a if a.starts_with('-') && a.len() > 1 => {
                 eprintln!("{prog}: unrecognized option '{a}'");
                 eprintln!("Try '{prog} --help' for more information.");
@@ -223,22 +246,25 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         eprintln!("Try '{prog} --help' for more information.");
         return 2;
     }
-    if matches!(
-        kind,
-        crate::filters::Match::Glob | crate::filters::Match::Exact
-    ) {
+    if kind == crate::filters::Match::Glob {
         // put records originals with their parent directory resolved, so
         // a path typed through a symlinked directory matches that way too.
         let resolved: Vec<String> = patterns.iter().filter_map(|p| resolve_pattern(p)).collect();
         patterns.extend(resolved);
     }
-    let pats = match crate::filters::Patterns::new(patterns.clone(), kind) {
+    let mut pats = match crate::filters::Patterns::new(patterns.clone(), kind) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{prog}: {e}");
             return 2;
         }
     };
+    if kind == crate::filters::Match::Exact {
+        // The path put would record, including a relative one and one
+        // typed with a trailing slash. `operands` stays as typed, so a
+        // hint is once per operand rather than once per spelling.
+        pats.texts = crate::orig_path::expand(&pats.operands);
+    }
 
     // Refuse accidental host-wide permanent purge of the whole trash.
     if !force && !scoped && pats.is_mass() {
@@ -278,11 +304,22 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             },
         );
     }
-    let mut entries = list::filter_age_secs(list::collect(&dirs), older_than, newer_than);
+    let collected = list::collect(&dirs);
+    // Originals before the age filter, with their batch id, so a path that
+    // the window leaves out is still visible to the hint.
+    let mut pre: Vec<(PathBuf, Option<String>)> = collected
+        .iter()
+        .map(|e| (e.original.clone(), e.batch.clone()))
+        .collect();
+    let mut entries = list::filter_age_secs(collected, older_than, newer_than);
     // Payloads with no .trashinfo match by their name or their path under
     // files/; having no date, they stay out of an age-filtered rm.
+    let orphans = list::orphans(&dirs);
+    for orphan in &orphans {
+        pre.push((orphan.original.clone(), orphan.batch.clone()));
+    }
     if older_than.is_none() && newer_than.is_none() {
-        entries.extend(list::orphans(&dirs));
+        entries.extend(orphans);
     }
     if let Some(want) = &batch {
         let id = if want == "last" {
@@ -295,11 +332,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             return 1;
         };
         entries.retain(|e| e.batch.as_deref() == Some(id.as_str()));
+        pre.retain(|(_, batch_id)| batch_id.as_deref() == Some(id.as_str()));
         if entries.is_empty() {
             eprintln!("{prog}: no trashed items from put run '{id}'");
             return 1;
         }
     }
+    let have: Vec<PathBuf> = pre.into_iter().map(|(path, _)| path).collect();
     let mut status = 0i32;
     let mut removed = 0u64;
     let mut bytes = 0u64;
@@ -317,7 +356,10 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
     };
 
-    let wanted = |entry: &list::Entry| -> bool {
+    let path_hit = |entry: &list::Entry| -> bool {
+        if kind == crate::filters::Match::Exact {
+            return crate::orig_path::selects(&pats.texts, &entry.original);
+        }
         let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
         let base = entry
             .original
@@ -330,7 +372,20 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             entry.name.as_str(),
             entry.date.as_deref().unwrap_or(""),
             &entry.dir.root,
-        ) && size.keeps(size_of(entry))
+        )
+    };
+    if kind == crate::filters::Match::Exact {
+        let kept: Vec<PathBuf> = entries
+            .iter()
+            .filter(|entry| !size.is_set() || size.keeps(size_of(entry)))
+            .map(|entry| entry.original.clone())
+            .collect();
+        let window =
+            crate::orig_path::window(older_than.is_some() || newer_than.is_some(), size.is_set());
+        crate::orig_path::hint(prog, &pats.operands, &have, &kept, window);
+    }
+    let wanted = |entry: &list::Entry| -> bool {
+        path_hit(entry) && (!size.is_set() || size.keeps(size_of(entry)))
     };
 
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
@@ -369,20 +424,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             not_reached = Some(entries[k..].iter().filter(|e| wanted(e)).count());
             break;
         }
-        let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
-        let base = entry
-            .original
-            .file_name()
-            .map(crate::util::str_from_os_ref)
-            .unwrap_or_default();
-        let hit = pats.selects(
-            path_s.as_ref(),
-            base.as_str(),
-            entry.name.as_str(),
-            entry.date.as_deref().unwrap_or(""),
-            &entry.dir.root,
-        );
-        if !hit {
+        if !path_hit(entry) {
             continue;
         }
         let sz = size_of(entry);
@@ -443,6 +485,17 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 status = 1;
                 continue;
             }
+        }
+        // The scan above can take long. The payload must still be the file
+        // the lock was taken on, or whatever took its name stays.
+        crate::util::replace_payload_seam(&payload);
+        if held.swapped() {
+            eprintln!(
+                "{prog}: {}",
+                crate::util::err_text(&list::Relock::Changed.reason(entry))
+            );
+            status = 1;
+            continue;
         }
         if let Err(e) = crate::permanent_guard::remove(&payload) {
             eprintln!(

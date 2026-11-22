@@ -430,12 +430,13 @@ fn junctions_are_not_followed_or_counted_twice() {
     let t = Tree::new("junctions");
     t.file("d/real/a.bin", 100_000);
     let d = native(&t.root, "d");
-    common::mklink_junction(&native(&d, "again"), &native(&d, "real"));
-    common::mklink_junction(&native(&d, "real/up"), &d);
+    common::mklink_junction(&native(&d, "again"), &native(&d, "real")).expect("mklink /J");
+    common::mklink_junction(&native(&d, "real/up"), &d).expect("mklink /J");
     common::mklink_junction(
         &native(&d, "elsewhere"),
         Path::new(env!("CARGO_MANIFEST_DIR")),
-    );
+    )
+    .expect("mklink /J");
     for one_fs in [false, true] {
         let mut args = vec!["--files", "--all-dirs"];
         if one_fs {

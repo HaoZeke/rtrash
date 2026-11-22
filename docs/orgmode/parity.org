@@ -66,7 +66,7 @@ Linked as =trash-put=, =trash-list=, =trash-empty=, =trash-restore= and
 | =trash-restore PATH=               | same: the item at PATH and items from under it     |
 | =trash-restore --sort date/path/none= | same                                            |
 | =trash-restore --overwrite=        | same                                               |
-| =trash-rm PATTERN=                 | same; no match exits 0                             |
+| =trash-rm PATTERN=                 | =rtrash rm --match=glob PATTERN=; no match exits 0 |
 
 On a terminal, =trash-restore= and =trash-empty= open the rtrash browser;
 =--plain= keeps the numbered prompt.
@@ -94,7 +94,7 @@ In rtrash a flag names the kind:
 | ~trashy restore -m substring P~ | ~rtrash restore -m substring P~       |
 | ~trashy restore -m exact P~     | ~rtrash restore -m exact P~           |
 | ~trashy empty PATTERN~          | ~rtrash rm --regex PATTERN~           |
-| ~trashy empty --match=glob P~   | ~rtrash rm P~ (globs are the default) |
+| ~trashy empty --match=glob P~   | ~rtrash rm --match=glob P~            |
 | ~trashy empty -m substring P~   | ~rtrash rm -m substring P~            |
 | ~trashy empty -m exact P~       | ~rtrash rm -m exact P~                |
 
@@ -102,7 +102,8 @@ A regex for =rm= searches the whole original path, on the FreeDesktop,
 Finder and Windows trashes alike.
 One that matches every path (such as =.*=) needs =--force=, as =*= does.
 =restore -m= and =rm -m= with =substring= or =exact= read the text
-against the original path as trashy does; only the default differs (glob here, regex in trashy).
+against the original path as trashy does. A bare =rtrash rm PATH= uses
+the exact original path; glob and regex matching must be selected explicitly.
 
 * macOS
 

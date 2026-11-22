@@ -764,6 +764,19 @@ fn say_undo(prog: &str, name: &str, work: Option<crate::du_git::RiskyGit>) {
     );
 }
 
+/// The warning for git work that the undo log could not record: the item
+/// is in the Finder Trash, but `rtrash undo` does not know it.
+fn say_unlogged_work(prog: &str, name: &str, work: Option<crate::du_git::RiskyGit>) {
+    let Some(work) = work else {
+        return;
+    };
+    say!(
+        "{prog}: warning: '{name}' contains a git repository with {} work; \
+         restore it from the Finder Trash. `rtrash undo` cannot see it yet",
+        work.label()
+    );
+}
+
 /// WSL put the item in the Windows Recycle Bin. `rtrash undo` reads the
 /// FreeDesktop trash and would not bring this item back.
 fn say_wsl_restore(prog: &str, name: &str, work: Option<crate::du_git::RiskyGit>) {
@@ -810,6 +823,10 @@ fn report_finder_undo(prog: &str, trashed: &[Trashed], logged: std::io::Result<(
                 "{prog}: warning: the Finder undo log could not be written ({e}); \
                  restore the items from the Finder Trash. `rtrash undo` cannot see them yet"
             );
+            for t in trashed {
+                let name = t.original.to_string_lossy();
+                say_unlogged_work(prog, name.as_ref(), t.risky_git);
+            }
         }
     }
 }

@@ -102,7 +102,7 @@ PY
 echo "ok   undo, status and trash-stats (with --total and --history)"
 
 "$rt" put "$i" || fail "put for rm"
-"$rt" rm "undo me.txt" || fail "rm on the Finder Trash"
+"$rt" rm "$i" || fail "rm on the Finder Trash"
 "$rt" list | has -F -- "$i" && fail "rm left the item listed"
 echo "ok   rm"
 
@@ -155,7 +155,8 @@ if [[ -n ${RTRASH_SMOKE_VOLUME:-} ]]; then
   listed "$v" || fail "list does not show the volume item"
   "$rt" restore "$v" || fail "restore on the volume"
   [[ $(cat "$v") == vol ]] || fail "volume restore content"
-  "$rt" put "$v" && "$rt" rm "rtrash smoke.txt" || fail "rm on the volume"
+  "$rt" put "$v" && "$rt" rm "$v" || fail "rm on the volume"
+  "$rt" list | has -F -- "$v" && fail "rm on the volume left the item listed"
   echo "ok   external volume"
 fi
 

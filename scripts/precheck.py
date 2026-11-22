@@ -1089,6 +1089,7 @@ BATCH = "a batch the caller counted up front with permanent_guard::gate_many"
 PERMANENT_ALLOW = {
     ("du_dupes.rs", "clone_file"): (2, OWN + ": the clone target it just created"),
     ("du_dupes.rs", "link_one"): (2, OWN + ": the .rtrash-link temp beside the duplicate"),
+    ("empty.rs", "empty_exact"): (1, RECORD),
     ("empty.rs", "empty_one"): (1, RECORD),
     ("empty.rs", "full_empty_wipe"): (1, BATCH),
     ("empty_tui.rs", "permanently_remove_entries"): (1, RECORD),
@@ -1121,8 +1122,11 @@ PERMANENT_ALLOW = {
                                           "reparse data does not take"),
     ("win_recycle.rs", "purge_oldest_on"): (1, BATCH),
     ("win_recycle.rs", "remove_retry"): (3, PRIMITIVE + " (under remove_forcing)"),
+    ("win_recycle.rs", "restore_overwrite"): (1, "the staged old destination after one "
+                                              "permanent_guard::gate"),
     ("win_recycle.rs", "test_bin_put"): (1, OWN + ": the $I record it just wrote, when the move fails"),
-    ("win_recycle.rs", "restore_payload"): (3, MOVE + "; then the $I record of the restored item"),
+    ("win_recycle.rs", "move_payload"): (2, MOVE),
+    ("win_recycle.rs", "remove_index"): (1, "the record of the restored Recycle Bin item"),
     ("win_recycle.rs", "rm_run"): (1, BATCH),
     ("wsl_bin.rs", "remove_entry"): (1, RECORD),
     ("put.rs", "retarget_seam"): (1, "a debug seam replacing a symlink the test created, "

@@ -1148,9 +1148,12 @@ pub struct EmptyOpts {
     pub cutoff: Option<i64>,
     pub max_size: Option<u64>,
     pub prune: crate::retention::Policy,
+    pub interactive: bool,
     pub dry_run: bool,
     pub verbose: bool,
     pub json: bool,
+    /// Original paths to remove exactly. Empty means every item in scope.
+    pub paths: Vec<String>,
 }
 
 /// The items `empty` removes: those older than the cutoff (all of them
@@ -1301,17 +1304,43 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
         Ok(r) => r,
         Err(c) => return c,
     };
+    let wants = crate::orig_path::expand(&o.paths);
+    let have: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
     let rows: Vec<_> = rows
         .into_iter()
+        .filter(|e| o.paths.is_empty() || crate::orig_path::selects(&wants, &e.shown))
         .map(|e| {
             let b = crate::fastdelete::disk_usage(&e.path());
             (e, b)
         })
         .collect();
+    if !o.paths.is_empty() {
+        let kept: Vec<PathBuf> = rows
+            .iter()
+            .filter(|(e, _)| o.cutoff.is_none_or(|c| e.epoch < c))
+            .map(|(e, _)| e.shown.clone())
+            .collect();
+        crate::orig_path::hint(
+            prog,
+            &o.paths,
+            &have,
+            &kept,
+            crate::orig_path::window(o.cutoff.is_some(), false),
+        );
+    }
     let mut removed = 0u64;
     let mut bytes = 0u64;
     let mut failed = 0u64;
     let picked = empty_pick(rows, o.cutoff, o.max_size, o.prune);
+    if o.interactive && !dry_run && !o.paths.is_empty() {
+        let named: Vec<(String, u64)> = picked
+            .iter()
+            .map(|(e, b)| (crate::util::term_path(&e.shown), *b))
+            .collect();
+        if !crate::rm_ask::confirm(prog, &named) {
+            return 0;
+        }
+    }
     // A cap counts the picks first, so a refused empty deletes nothing.
     if !dry_run {
         if let Some(code) = crate::permanent_guard::check_count(prog, picked.len() as u64) {

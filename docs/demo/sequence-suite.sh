@@ -44,8 +44,8 @@ run 'trash-put keep.txt drop.o'
 run "trash-list $PIN"
 
 banner "selective permanent delete (rtrash rm / trash-rm)"
-run "rtrash rm -n $PIN '*.o'"
-run "rtrash rm -y $PIN '*.o'"
+run "rtrash rm -n --match=glob $PIN '*.o'"
+run "rtrash rm -y --match=glob $PIN '*.o'"
 run "trash-list $PIN"
 
 banner "empty --dry-run then purge leftover"

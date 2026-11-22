@@ -838,6 +838,7 @@ mod tests {
             },
             batch: None,
             recorded: true,
+            payload: None,
         }
     }
 

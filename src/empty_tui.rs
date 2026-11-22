@@ -625,6 +625,7 @@ mod tests {
             dir: dir.clone(),
             batch: None,
             recorded: true,
+            payload: None,
         };
         let r = permanently_remove_entries("rtrash", &[&e], false);
         assert_eq!(r.succeeded, vec![true]);
@@ -650,6 +651,7 @@ mod tests {
             },
             batch: None,
             recorded: true,
+            payload: None,
         };
         let mut app = App::new("rtrash", vec![&e], false);
         app.status = "purge 1 item?".into();

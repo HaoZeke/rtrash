@@ -71,7 +71,7 @@ fn put_list_rm_and_restore_reach_a_file_past_max_path() {
     let shown = ok(&run(&home, &["list"]));
     assert!(shown.lines().any(|l| l.ends_with(&path)), "{shown}");
     assert!(!shown.contains(r"\\?\"), "{shown}");
-    let matched = ok(&run(&home, &["rm", "-n", "leaf-deep.txt"]));
+    let matched = ok(&run(&home, &["rm", "-n", "--match=glob", "leaf-deep.txt"]));
     assert_eq!(matched.trim_end(), path, "{matched}");
     ok(&run(&home, &["restore", &path]));
     assert_eq!(fs::read_to_string(&f).unwrap(), "deep");
@@ -233,7 +233,7 @@ fn a_restore_across_volumes_makes_a_junction_again() {
     let tree = home.join("tree");
     fs::create_dir_all(&tree).unwrap();
     fs::write(tree.join("f.txt"), "f").unwrap();
-    common::mklink_junction(&tree.join("link"), &target);
+    common::mklink_junction(&tree.join("link"), &target).expect("mklink /J");
     ok(&run(&home, &["put", &s(&tree)]));
     fs::create_dir_all(&away).unwrap();
     let to = format!("--to={}", s(&away));
@@ -259,4 +259,246 @@ fn a_restore_across_volumes_makes_a_junction_again() {
     assert_eq!(left, 0);
     let _ = fs::remove_dir_all(&away);
     let _ = fs::remove_dir_all(&home);
+}
+
+fn lines(text: &str) -> usize {
+    text.lines().filter(|l| !l.is_empty()).count()
+}
+
+fn folded(p: &Path) -> String {
+    s(p).replace('/', "\\").to_ascii_lowercase()
+}
+
+/// Exact `rm` matches the original through letter case, `/`, a relative
+/// name, and the short 8.3 form of a parent. The file's own 8.3 name,
+/// read before `put`, matches nothing: that entry is gone, and the `$I`
+/// record keeps the one path put stored.
+#[test]
+fn rm_matches_the_exact_path_across_windows_spellings() {
+    let home = home("spellings");
+    let dir = home.join("LongDirectoryName");
+    fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("ExactFile.TXT");
+    fs::write(&file, "body").unwrap();
+    let long = s(&file);
+    let short_file = rtrash::win_recycle::short_path(&file);
+    let short_dir = rtrash::win_recycle::short_path(&dir);
+    ok(&run(&home, &["put", &long]));
+    assert!(!file.exists(), "put left {long}");
+
+    let case = s(&dir.join("exactfile.txt"));
+    assert_eq!(lines(&ok(&run(&home, &["rm", "-n", &case]))), 1, "{case}");
+    let slashed = long.replace('\\', "/");
+    assert_eq!(
+        lines(&ok(&run(&home, &["rm", "-n", &slashed]))),
+        1,
+        "{slashed}"
+    );
+    let rel = common::rtrash(&home)
+        .args(["rm", "-n", "ExactFile.TXT"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(rel.status.success(), "{}", text(&rel));
+    let rel_out = String::from_utf8_lossy(&rel.stdout);
+    assert_eq!(lines(&rel_out), 1, "{}", text(&rel));
+
+    match &short_dir {
+        Some(short) if folded(short) != folded(&dir) => {
+            let via = s(&short.join("ExactFile.TXT"));
+            assert_eq!(lines(&ok(&run(&home, &["rm", "-n", &via]))), 1, "{via}");
+            let other = dir.join("OtherFile.TXT");
+            fs::write(&other, "other").unwrap();
+            let short_other = s(&short.join("OtherFile.TXT"));
+            ok(&run(&home, &["put", &short_other]));
+            assert_eq!(
+                lines(&ok(&run(&home, &["rm", "-n", &s(&other)]))),
+                1,
+                "{short_other}"
+            );
+            ok(&run(&home, &["rm", &s(&other)]));
+        }
+        _ => common::skip("this volume has no 8.3 name for the directory"),
+    }
+    match short_file {
+        Some(short) if folded(&short) != folded(&file) => {
+            let dry = ok(&run(&home, &["rm", "-n", &s(&short)]));
+            assert_eq!(lines(&dry), 0, "a short final name matched: {dry}");
+        }
+        _ => common::skip("this volume has no 8.3 name for the file"),
+    }
+    let shown = ok(&run(&home, &["list"]));
+    assert!(
+        shown.to_ascii_lowercase().contains("exactfile.txt"),
+        "{shown}"
+    );
+    ok(&run(&home, &["rm", &case]));
+    let shown = ok(&run(&home, &["list"]));
+    assert!(
+        !shown.to_ascii_lowercase().contains("exactfile.txt"),
+        "{shown}"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// A file symlink when the process may make one, otherwise a junction.
+/// `None` when neither can be made; `why` is the junction error.
+fn final_link(home: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let file = home.join("target.txt");
+    fs::write(&file, b"t").unwrap();
+    let link = home.join("link.txt");
+    if std::os::windows::fs::symlink_file(&file, &link).is_ok() {
+        return Ok((link, file));
+    }
+    let _ = fs::remove_file(&link);
+    let dir = home.join("target");
+    fs::create_dir(&dir).unwrap();
+    let junction = home.join("link");
+    match common::mklink_junction(&junction, &dir) {
+        Ok(()) => Ok((junction, dir)),
+        Err(e) => Err(format!("cannot make a final symlink or a junction: {e}")),
+    }
+}
+
+/// An exact operand whose final component is a symlink or a junction
+/// selects that link's own record. Following the final component would
+/// select the target's record instead.
+#[test]
+fn an_exact_final_link_selects_the_link_not_the_target() {
+    let home = home("finallink");
+    let (link, target) = match final_link(&home) {
+        Ok(pair) => pair,
+        Err(why) => {
+            common::skip(&why);
+            let _ = fs::remove_dir_all(&home);
+            return;
+        }
+    };
+    let wants = rtrash::orig_path::forms(&s(&link));
+    assert!(
+        rtrash::orig_path::selects(&wants, &link),
+        "the link's own record: {wants:?}"
+    );
+    assert!(
+        !rtrash::orig_path::selects(&wants, &target),
+        "the target's record was selected: {wants:?}"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// The first drive-letter mount from `volume_mounts`, the table
+/// `path_key` reads. `C:\` stays `C:`.
+fn drive_mount() -> Option<(String, String)> {
+    rtrash::win_recycle::volume_mounts()
+        .into_iter()
+        .find(|(_, mount)| {
+            let m = mount.trim_end_matches(['\\', '/']);
+            let b = m.as_bytes();
+            b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+        })
+}
+
+/// A drive-letter original and the `\\?\Volume{GUID}\` spelling of it
+/// are one path for `norm`, `selects` and `allow_roots::under`.
+#[test]
+fn a_volume_guid_operand_selects_the_drive_letter_original() {
+    let Some((guid, mount)) = drive_mount() else {
+        common::skip("volume_mounts listed no drive-letter mount");
+        return;
+    };
+    let guid = guid.trim_end_matches(['\\', '/']);
+    let mount = mount.trim_end_matches(['\\', '/']);
+    let letter = format!(r"{mount}\rtrash-exact\File.TXT");
+    let volume = format!(r"{guid}\rtrash-exact\File.TXT");
+    let letter_p = Path::new(&letter);
+    let volume_p = Path::new(&volume);
+    assert_eq!(
+        rtrash::orig_path::norm(letter_p),
+        rtrash::orig_path::norm(volume_p),
+        "guid {guid} mount {mount}"
+    );
+    let wants = vec![rtrash::orig_path::norm(volume_p)];
+    assert!(
+        rtrash::orig_path::selects(&wants, letter_p),
+        "{wants:?} {letter}"
+    );
+    let letter_root = PathBuf::from(format!(r"{mount}\"));
+    let volume_root = PathBuf::from(format!(r"{guid}\"));
+    assert!(rtrash::allow_roots::under(letter_p, &letter_root));
+    assert!(rtrash::allow_roots::under(volume_p, &letter_root));
+    assert!(rtrash::allow_roots::under(letter_p, &volume_root));
+    assert!(rtrash::allow_roots::under(volume_p, &volume_root));
+}
+
+/// `--` ends options, but its operands still have to name paths.
+#[test]
+fn rm_refuses_an_empty_operand_after_a_double_dash() {
+    let home = home("rm-dash-blank");
+    let kept = home.join("keep.txt");
+    fs::write(&kept, b"keep").unwrap();
+    ok(&run(&home, &["put", &s(&kept)]));
+    let out = run(&home, &["rm", "--", ""]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(text(&out).contains("'' is not a path"), "{}", text(&out));
+    let listed = ok(&run(&home, &["list"]));
+    assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
+}
+
+/// `rm ""` is not a path, and it removes nothing.
+#[test]
+fn rm_refuses_an_empty_operand() {
+    let home = home("rm-blank");
+    let kept = home.join("keep.txt");
+    fs::write(&kept, b"keep").unwrap();
+    ok(&run(&home, &["put", &s(&kept)]));
+    let out = run(&home, &["rm", ""]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(text(&out).contains("'' is not a path"), "{}", text(&out));
+    let listed = ok(&run(&home, &["list"]));
+    assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
+}
+
+/// `empty ""` is not a path, and it removes nothing.
+#[test]
+fn empty_refuses_an_empty_operand() {
+    let home = home("empty-blank");
+    let kept = home.join("keep.txt");
+    fs::write(&kept, b"keep").unwrap();
+    ok(&run(&home, &["put", &s(&kept)]));
+    let out = run(&home, &["empty", ""]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(text(&out).contains("'' is not a path"), "{}", text(&out));
+    let listed = ok(&run(&home, &["list"]));
+    assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
+}
+
+/// An empty operand after `--` is still not a path.
+#[test]
+fn empty_refuses_an_empty_operand_after_a_double_dash() {
+    let home = home("empty-dash-blank");
+    let kept = home.join("keep.txt");
+    fs::write(&kept, b"keep").unwrap();
+    ok(&run(&home, &["put", &s(&kept)]));
+    let out = run(&home, &["empty", "--", ""]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(text(&out).contains("'' is not a path"), "{}", text(&out));
+    let listed = ok(&run(&home, &["list"]));
+    assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
+}
+
+/// `--` ends empty's options, so `-n` after it is a path and the item stays.
+#[test]
+fn empty_takes_a_double_dash_as_the_end_of_its_options() {
+    let home = home("empty-ddash");
+    let kept = home.join("keep.txt");
+    fs::write(&kept, b"keep").unwrap();
+    ok(&run(&home, &["put", &s(&kept)]));
+    let out = run(&home, &["empty", "--", "-n"]);
+    let shown = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{shown}");
+    assert!(!shown.contains("unrecognized option"), "{shown}");
+    assert!(!shown.contains("would remove"), "{shown}");
+    assert!(!shown.contains("Would remove"), "{shown}");
+    let listed = ok(&run(&home, &["list"]));
+    assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
 }

@@ -538,6 +538,120 @@ fn put_space_hint_keeps_flagged_git_work() {
     }
 }
 
+/// An unpushed repository and a dirty one in one bin: a low-space put names
+/// both, in the plural advice, so neither is dropped when the other is
+/// flagged too.
+#[cfg(debug_assertions)]
+#[test]
+fn put_space_hint_names_every_flagged_repository_in_the_bin() {
+    let git = |repo: &std::path::Path, home: &std::path::Path, args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", home)
+            .env("GIT_AUTHOR_NAME", "Trash Test")
+            .env("GIT_AUTHOR_EMAIL", "trash-test@example.com")
+            .env("GIT_COMMITTER_NAME", "Trash Test")
+            .env("GIT_COMMITTER_EMAIL", "trash-test@example.com")
+            .output()
+    };
+    let base = common::scratch_dir("wingit", "put-git-both");
+    let vol = base.join("vol");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+    for (tag, commit) in [("unpushed", true), ("dirty", false)] {
+        let repo = base.join(tag);
+        std::fs::create_dir(&repo).unwrap();
+        if !git(&repo, &base, &["init", "-q"]).is_ok_and(|o| o.status.success()) {
+            common::skip("git unavailable; skipping");
+            let _ = std::fs::remove_dir_all(&base);
+            return;
+        }
+        std::fs::write(repo.join("f"), b"x").unwrap();
+        if commit {
+            let add = git(&repo, &base, &["add", "f"]).unwrap();
+            let done = git(&repo, &base, &["commit", "-qm", "work"]).unwrap();
+            assert!(add.status.success() && done.status.success());
+        }
+    }
+    let put = |path: &std::path::Path, low: bool| {
+        let mut c = common::rtrash(&base);
+        c.args(["put", path.to_str().unwrap()])
+            .env("RTRASH_TEST_BIN_ROOT", &vol)
+            .env("RTRASH_IN_USE", "ignore");
+        if low {
+            c.env("RTRASH_TEST_FS", format!("100000:{}", vol.display()));
+        }
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{}", common::stderr_text(&out));
+        common::stderr_text(&out)
+    };
+    put(&base.join("unpushed"), false);
+    let err = put(&base.join("dirty"), true);
+    assert!(
+        err.contains("is low (")
+            && err.contains("with dirty work")
+            && err.contains("would lose the work")
+            && err.contains("'")
+            && err.contains("unpushed")
+            && err.contains("dirty")
+            && err.contains("uncommitted work is committed")
+            && !err.contains("rtrash rm"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A put of a plain file on a short volume still names git work that an
+/// earlier put left in that bin, and does not point at removing it.
+#[cfg(debug_assertions)]
+#[test]
+fn a_low_space_put_names_risky_work_already_in_the_bin() {
+    let base = common::scratch_dir("wingit", "put-old-risk");
+    let vol = base.join("vol");
+    let repo = base.join("oldrepo");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+    let git = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &base)
+        .output();
+    if !git.is_ok_and(|o| o.status.success()) {
+        common::skip("git unavailable; skipping");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    std::fs::write(repo.join("f"), b"dirty").unwrap();
+    let put = |path: &std::path::Path, low: bool| {
+        let mut c = common::rtrash(&base);
+        c.args(["put", path.to_str().unwrap()])
+            .env("RTRASH_TEST_BIN_ROOT", &vol)
+            .env("RTRASH_IN_USE", "ignore");
+        if low {
+            c.env("RTRASH_TEST_FS", format!("100000:{}", vol.display()));
+        }
+        let out = c.output().unwrap();
+        assert!(out.status.success(), "{}", common::stderr_text(&out));
+        common::stderr_text(&out)
+    };
+    put(&repo, false);
+    let plain = base.join("plain.txt");
+    std::fs::write(&plain, b"ok").unwrap();
+    let err = put(&plain, true);
+    assert!(
+        err.contains("is low (")
+            && err.contains("would lose the work")
+            && err.contains("oldrepo")
+            && !err.contains("rtrash rm"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Undo is named only after the item is in the bin. A dry run does not
 /// promise it.
 #[cfg(debug_assertions)]
@@ -604,7 +718,7 @@ fn put_does_not_attribute_a_junction_to_the_repository_it_points_at() {
     std::fs::write(repo.join("f"), b"kept").unwrap();
     let link = base.join("shortcut");
     let _ = std::fs::remove_dir_all(&link);
-    common::mklink_junction(&link, &repo);
+    common::mklink_junction(&link, &repo).expect("make a junction to the repository");
     let out = common::rtrash(&base)
         .args(["put", link.to_str().unwrap()])
         .env("RTRASH_TEST_BIN_ROOT", &vol)
@@ -706,6 +820,42 @@ fn put_json_leaves_out_the_repository_note() {
             && json.trim_end().ends_with("\"failed\":0}"),
         "{json}"
     );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A last-put record that cannot be written does not hide the git work: the
+/// put names the repository, and does not say `restore --batch=last` brings it back.
+#[test]
+fn a_failed_last_put_record_still_names_the_git_work() {
+    let base = common::scratch_dir("wingit", "last-put-fail-risk");
+    let repo = base.join("repo");
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir(&repo).unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &base)
+        .output();
+    if !init.is_ok_and(|o| o.status.success()) {
+        common::skip("git unavailable; skipping");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    std::fs::write(repo.join("f"), b"x").unwrap();
+    let lad = common::local_app_data(&base);
+    std::fs::write(&lad, b"not a directory").unwrap();
+    let out = common::rtrash(&base)
+        .args(["put", repo.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("could not be written"), "{err}");
+    assert!(err.contains("contains a git repository with"), "{err}");
+    assert!(err.contains("cannot see them yet"), "{err}");
+    assert!(!err.contains("brings it back"), "{err}");
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -850,7 +1000,8 @@ fn empty_until_free_dry_run_reports_each_short_drive() {
     assert!(stderr.contains("from the Recycle Bin of"), "{stderr}");
     // The dry run left the item; take it out by name.
     let _ = common::rtrash_real(common::Real::RecycleBin)
-        .args(["rm", &name])
+        .arg("rm")
+        .arg(&p)
         .output();
     assert_eq!(
         common::rtrash_real(common::Real::RecycleBin)
@@ -908,7 +1059,8 @@ fn empty_max_size_dry_run_trims_the_recycle_bins() {
         "{json}"
     );
     let _ = common::rtrash_real(common::Real::RecycleBin)
-        .args(["rm", &name])
+        .arg("rm")
+        .arg(&p)
         .output();
     assert_eq!(
         common::rtrash_real(common::Real::RecycleBin)
@@ -941,7 +1093,8 @@ fn put_under_a_roomy_budget_trims_nothing() {
     assert!(out.status.success(), "{err}");
     assert!(!err.contains("to keep them under"), "{err}");
     let _ = common::rtrash_real(common::Real::RecycleBin)
-        .args(["rm", &name])
+        .arg("rm")
+        .arg(&p)
         .output();
 }
 
@@ -967,7 +1120,7 @@ fn rm_json_summarizes_the_recycle_bin_removal() {
         let out = common::rtrash_real(common::Real::RecycleBin)
             .arg("rm")
             .args(args)
-            .arg(&name)
+            .arg(&p)
             .output()
             .unwrap();
         assert!(

@@ -460,13 +460,14 @@ fn volume_trashes_join_list_restore_rm_and_status() {
 
     // Back into the volume trash, then a Finder rm takes it for good.
     fs::rename(&orig, vt.join("v.bin")).unwrap();
-    let o = run(&["rm", "-n", "v.bin"]);
+    let shown = orig.to_str().unwrap();
+    let o = run(&["rm", "-n", shown]);
     assert!(out(&o).contains("v.bin") && vt.join("v.bin").exists());
-    let o = run(&["rm", "v.bin"]);
+    let o = run(&["rm", shown]);
     assert!(o.status.success(), "{}", err(&o));
     assert!(!vt.join("v.bin").exists());
     assert!(vt.join(".DS_Store").exists());
-    let o = run(&["rm", "--older-than=1d", "*", "--force"]);
+    let o = run(&["rm", "--match=glob", "--older-than=1d", "*", "--force"]);
     assert!(o.status.success(), "{}", err(&o));
 }
 
@@ -1181,7 +1182,7 @@ fn finder_matching_ignores_unicode_normalization() {
     // rm takes a composed glob for a decomposed name.
     assert!(b.run(&["put", nfd], "").status.success());
     b.put_back(nfd, &f);
-    let o = b.run(&["rm", "n\u{e9}*"], "");
+    let o = b.run(&["rm", "--match=glob", "n\u{e9}*"], "");
     assert!(o.status.success(), "{}", err(&o));
     assert!(!b.finder().join(nfd).exists());
 
@@ -1367,6 +1368,32 @@ fn verbose_finder_empty_names_the_put_back_place() {
     assert!(!line.contains(".Trash"), "{line}");
 }
 
+#[test]
+fn interactive_finder_empty_of_an_exact_path_honors_the_reply() {
+    let b = Box_::new("emptyiexact");
+    fs::write(b.work().join("chosen.txt"), b"chosen").unwrap();
+    fs::write(b.work().join("kept.txt"), b"kept").unwrap();
+    assert!(b
+        .run(&["put", "chosen.txt", "kept.txt"], "")
+        .status
+        .success());
+
+    let no = b.run(&["empty", "-i", "chosen.txt"], "no\n");
+    assert!(no.status.success(), "{}", err(&no));
+    assert!(
+        err(&no).contains("Permanently remove 1 item"),
+        "{}",
+        err(&no)
+    );
+    assert!(b.finder().join("chosen.txt").exists());
+    assert!(b.finder().join("kept.txt").exists());
+
+    let yes = b.run(&["empty", "-i", "chosen.txt"], "y\n");
+    assert!(yes.status.success(), "{}", err(&yes));
+    assert!(!b.finder().join("chosen.txt").exists());
+    assert!(b.finder().join("kept.txt").exists());
+}
+
 /// Odd but valid file names (APFS takes no invalid UTF-8) through put,
 /// every list form, restore, rm and empty on the Finder Trash. Each
 /// command must finish without a panic; restore brings back the bytes.
@@ -1499,8 +1526,11 @@ fn max_count_refuses_finder_rm_and_empty_past_the_cap() {
     assert!(b.run(&["put", "fc-a", "fc-b", "fc-c"], "").status.success());
     let cap2 = [("RTRASH_MAX_PERMANENT", "2")];
     for (args, envs) in [
-        (&["rm", "--max-count=2", "fc-*"][..], &[][..]),
-        (&["rm", "fc-*"][..], &cap2[..]),
+        (
+            &["rm", "--match=glob", "--max-count=2", "fc-*"][..],
+            &[][..],
+        ),
+        (&["rm", "--match=glob", "fc-*"][..], &cap2[..]),
         (&["empty", "--all"][..], &cap2[..]),
     ] {
         let o = b.run_env(args, envs);
@@ -1558,8 +1588,8 @@ fn allow_roots_keeps_finder_put_restore_and_rm_inside() {
     fs::write(b.finder().join("fa-c"), "fa-c").unwrap();
     let to_out = format!("--to={}", outside.display());
     for (args, item) in [
-        (&["rm", "fa-b"][..], "fa-b"),
-        (&["rm", "fa-c"][..], "fa-c"),
+        (&["rm", "--match=glob", "fa-b"][..], "fa-b"),
+        (&["rm", "--match=glob", "fa-c"][..], "fa-c"),
         (&["restore", &to_out, "fa-a"][..], "fa-a"),
     ] {
         refused(args);
@@ -1616,4 +1646,221 @@ fn finder_rm_keeps_an_item_that_took_the_name_while_it_asked() {
     assert!(!status.success(), "{rest}");
     assert!(rest.contains("changed in the trash"), "{rest}");
     assert_eq!(fs::read(b.finder().join("a.o")).unwrap(), b"second");
+}
+
+/// A repository that takes the name of a listed item while rm asks stays,
+/// whichever of the two checks (the git scan or the identity) meets it first.
+#[test]
+fn finder_rm_keeps_a_repository_that_took_the_name_while_it_asked() {
+    let b = Box_::new("rm-retaken-git");
+    fs::write(b.work().join("rr"), b"plain").unwrap();
+    let o = b.run(&["put", "rr"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let mut cmd = common::rtrash_real(common::Real::Finder);
+    cmd.args(["rm", "-i", "rr"])
+        .current_dir(b.work())
+        .env("HOME", &b.root)
+        .env("XDG_DATA_HOME", b.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", b.root.join(".config"))
+        .env("RTRASH_MACOS_TRASH", "finder")
+        .env("RTRASH_OSASCRIPT", b.root.join("osascript"))
+        .env("XDG_STATE_HOME", b.root.join("state"))
+        .env_remove("RTRASH_MAX_PERMANENT")
+        .env_remove("RTRASH_ALLOW_ROOTS");
+    let mut rm = common::Asking::spawn(&mut cmd);
+    rm.wait_for("(y/N) ");
+    let repo = b.root.join("rr.new");
+    fs::create_dir(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &b.root)
+        .output();
+    if !init.is_ok_and(|o| o.status.success()) {
+        let _ = rm.answer("n\n");
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"work").unwrap();
+    fs::remove_file(b.finder().join("rr")).unwrap();
+    fs::rename(&repo, b.finder().join("rr")).unwrap();
+    let (status, rest) = rm.answer("y\n");
+    assert!(!status.success(), "{rest}");
+    assert_eq!(fs::read(b.finder().join("rr").join("f")).unwrap(), b"work");
+}
+
+/// The Git scan can take long enough for a Finder name to change hands.
+/// A change made at the end of that scan must fail the identity check that
+/// immediately follows it.
+#[test]
+fn finder_rm_rechecks_identity_after_the_git_scan() {
+    let b = Box_::new("rm-recheck-after-git");
+    let repo = b.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &b.root)
+        .output();
+    if !init.is_ok_and(|o| o.status.success()) {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    let put = b.run(&["put", "-r", "repo"], "");
+    assert!(put.status.success(), "{}", err(&put));
+    let payload = b.finder().join("repo");
+    let out = b.run_env(
+        &["rm", "-y", "repo"],
+        &[("RTRASH_TEST_AFTER_PROBE", payload.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", err(&out));
+    assert!(err(&out).contains("changed in the trash"), "{}", err(&out));
+    assert!(payload.join(".rtrash-probe-seam").is_file());
+}
+
+/// Finder rm refuses an item that holds dirty git work, as rm on a
+/// FreeDesktop trash does, in a dry run too; `-f` removes it.
+#[test]
+fn finder_rm_refuses_a_repository_that_holds_risky_work() {
+    let b = Box_::new("rm-git");
+    let repo = b.work().join("fr-repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", &b.root)
+            .output()
+            .unwrap()
+    };
+    if !git(&["init", "-q"]).status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let o = b.run(&["put", "-r", "fr-repo"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let kept = b.finder().join("fr-repo");
+    assert!(kept.join("f").exists());
+    for args in [
+        &["rm", "--match=glob", "fr-repo"][..],
+        &["rm", "-n", "--match=glob", "fr-repo"][..],
+        &["rm", "-y", "--match=glob", "fr-repo"][..],
+    ] {
+        let o = b.run(args, "");
+        assert_eq!(o.status.code(), Some(1), "{args:?}: {}", err(&o));
+        assert!(
+            err(&o).contains("refusing to remove"),
+            "{args:?}: {}",
+            err(&o)
+        );
+        assert!(err(&o).contains("-f"), "{args:?}: {}", err(&o));
+        assert!(kept.join("f").exists(), "{args:?}");
+    }
+    let o = b.run(&["rm", "-f", "--match=glob", "fr-repo"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!kept.exists());
+}
+
+/// The id that list prints for a name Finder stored decomposed is the id
+/// rm's `--match=id` reads: both hash the composed name.
+#[test]
+fn a_finder_id_hashes_the_composed_name() {
+    let b = Box_::new("nfc-id");
+    let nfd = "ne\u{301}e.txt";
+    let f = b.work().join(nfd);
+    fs::write(&f, b"x").unwrap();
+    assert!(b.run(&["put", nfd], "").status.success());
+    b.put_back(nfd, &f);
+    let o = b.run(&["list", "--format={id}\\n"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let id = out(&o).lines().next().unwrap_or_default().to_string();
+    assert!(id.contains('@'), "{}", out(&o));
+    assert!(!id.contains("e%CC%81"), "decomposed bytes in the id: {id}");
+    let o = b.run(&["rm", "--match=id", &id], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!b.finder().join(nfd).exists());
+}
+
+/// A low-space put names git work an earlier put left in the Finder trash,
+/// not only the work of this put, and does not point at removing it.
+#[test]
+fn a_low_space_finder_put_names_risky_work_already_in_the_trash() {
+    let b = Box_::new("low-old-risk");
+    let repo = b.work().join("old-repo");
+    fs::create_dir(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &b.root)
+        .output();
+    if !init.is_ok_and(|o| o.status.success()) {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let o = b.run(&["put", "-r", "old-repo"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let plain = b.work().join("plain.bin");
+    fs::write(&plain, "z".repeat(20_000)).unwrap();
+    let mut c = common::rtrash_real(common::Real::Finder);
+    c.arg("put")
+        .arg(&plain)
+        .current_dir(b.work())
+        .env("HOME", &b.root)
+        .env("XDG_DATA_HOME", b.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", b.root.join(".config"))
+        .env("XDG_STATE_HOME", b.root.join("state"))
+        .env("RTRASH_MACOS_TRASH", "finder")
+        .env("RTRASH_OSASCRIPT", b.root.join("osascript"))
+        .env("RTRASH_TEST_FS", format!("45000:{}", b.root.display()));
+    let o = c.output().unwrap();
+    assert!(o.status.success(), "{}", err(&o));
+    let text = err(&o);
+    assert!(
+        text.contains("is low (")
+            && text.contains("would lose the work")
+            && text.contains("old-repo")
+            && !text.contains("plain.bin")
+            && !text.contains("rtrash rm"),
+        "{text}"
+    );
+}
+
+/// An undo log that cannot be written does not hide git work: the put still
+/// names each repository, and does not promise `undo`.
+#[test]
+fn an_unwritable_undo_log_still_names_the_git_work_it_moved() {
+    let b = Box_::new("log-fail-risk");
+    let repo = b.work().join("old-repo");
+    fs::create_dir(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &b.root)
+        .output();
+    if !init.is_ok_and(|o| o.status.success()) {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let state = b.root.join("state");
+    fs::write(&state, b"not a directory").unwrap();
+    let o = b.run(&["put", "-r", "old-repo"], "");
+    let text = err(&o);
+    assert!(o.status.success(), "{text}");
+    assert!(!repo.exists(), "{text}");
+    assert!(text.contains("could not be written"), "{text}");
+    assert!(
+        text.contains("'")
+            && text.contains("old-repo")
+            && text.contains("contains a git repository"),
+        "{text}"
+    );
+    assert!(!text.contains("`rtrash undo` brings it back"), "{text}");
 }

@@ -266,7 +266,7 @@ Selective permanent delete from the trash (trash-cli `trash-rm`):
 
 ```console
 $ rtrash put a.o b.c
-$ rtrash rm '*.o'          # quote globs; removes a.o from trash only
+$ rtrash rm --match=glob '*.o'   # quote globs; removes a.o from trash only
 $ rtrash list              # b.c still listed
 ```
 
@@ -295,7 +295,7 @@ Names are reserved atomically, so concurrent invocations never clobber each othe
 
 **Script pins:** `--trash-dir=PATH` puts into that FreeDesktop root (creates `files/` and `info/` if needed); `--home-only` always uses the home trash.
 
-**Script output:** `--json` prints one object, `{"trashed": [...], "failed": N}`. Each trashed entry lists `original` (the original path), `name` (the payload name in the trash: under `files/` on FreeDesktop, in the Finder Trash, or `$R...` in the Windows Recycle Bin), and `trash_dir` (the trash root), so a script can hand the names to `rtrash rm` or restore by path later.
+**Script output:** `--json` prints one object, `{"trashed": [...], "failed": N}`. Each trashed entry lists `original` (the original path), `name` (the payload name in the trash: under `files/` on FreeDesktop, in the Finder Trash, or `$R...` in the Windows Recycle Bin), and `trash_dir` (the trash root). Pass the original path to `rtrash rm` or to restore; `rtrash rm` selects the trash name with `--match=glob`.
 
 Putting a **directory** updates that trash dir’s FreeDesktop `directorysizes` cache (`size mtime percent-encoded-name`).
 Sizes count allocated blocks the way `du -B1` does, the directories' own blocks included and each hard-linked file once.
@@ -304,10 +304,11 @@ Put measures the tree in parallel after the move, outside the trash lock.
 When `status` or `empty --dry-run` has to walk a directory with no valid line, it writes the size back and drops lines for directories that left the trash, so the next run reads the cache.
 Putting ordinary files does not add directory lines.
 
-### `rtrash empty [DAYS]` (also `trash-empty`)
+### `rtrash empty [DAYS | PATH]` (also `trash-empty`)
 
 Purges every trash directory visible to the user (home trash plus mounted volumes).
 With `DAYS` (or `--older-than=DAYS`), only items trashed more than `DAYS` days ago go.
+A `PATH` removes only the items whose original path is that path, exactly, the way `put` records it (a relative path is resolved from the current directory, and a trailing slash is ignored). `empty ~/a` does not remove `~/ab` or `~/a/b`; when nothing matches, those longer paths are named and left in place. A number or a duration is an age, not a path.
 Entries are removed in parallel.
 Orphaned `files/` entries (no `.trashinfo`) and entries with broken metadata are purged on a full empty, and the `directorysizes` cache is pruned when present.
 A directory you own but cannot list or change, such as a build tree's `pkg` at mode 0311, gets owner `rwx` back and then goes.
@@ -419,7 +420,7 @@ $ rtrash empty -n && rtrash empty 14                    # free the space
 | `printf '0-2,5\n' \| rtrash restore` | Piped selection without TUI: indices, ranges, commas, or `all` |
 | `rtrash restore --glob='*.rs' --all` | Restore every item whose file name matches; a pattern with a `/` matches the original path |
 | `rtrash restore --regex='/src/.*\.c$' --all` | Restore every item whose original path matches the regular expression |
-| `rtrash restore --match=id ID` | Restore one item by `{id}` from `rtrash list --format='{id} {path}\n'` (id includes name, date and trash root) |
+| `rtrash restore --match=id ID` | Restore one item by `{id}` from `rtrash list --format='{id} {path}\n'` (the id is the trash name, deletion date and trash root) |
 | `rtrash restore --to=DIR …` | Restore into `DIR`, keeping each file name |
 | `rtrash restore --conflict=rename\|skip\|overwrite …` | When the destination exists: restore as `NAME.1.EXT`, leave the item in the trash, or replace it (`-f`); the default refuses |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
@@ -498,9 +499,11 @@ The other `[du]` keys are `count`, `one_file_system`, `threads`, `git`, `exclude
 
 ### `rtrash rm PATTERN...` (also `trash-rm`)
 
-Permanently deletes trash entries whose original path, basename, or trash name matches a shell-style glob `PATTERN` (quote globs from the shell).
+Permanently deletes trash entries whose original path is exactly `PATTERN`: the path `put` records, resolved from the current directory, with a trailing slash ignored. `rm ~/a` does not remove `~/ab` or `~/a/b`. When nothing matches, those longer paths are named and left in place.
+
+On Windows, a short 8.3 name of a parent that is still on disk matches the long name. The file's own short name does not, once the file is in the Recycle Bin: `EXACTF~1.TXT` is not `ExactFile.TXT`. Type the long name, or pass `--match=glob`.
 Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
-An orphan matches by its name in `files/` or its path there.
+`--match=glob` is the shell glob of the original path, its basename or the trash name (quote globs from the shell), which is how an orphan is selected by its name in `files/` or its path there. `--regex` and `--match=substring` compare the whole original path. `--match=exact` is the same comparison as a bare `PATTERN`.
 Does **not** restore.
 On a terminal it names the matches (the first 10, with sizes) and asks once before it deletes, as `rm -I` does and as trash-cli #383 asks of `trash-rm`. Only `y` or `yes` goes on. A script, whose stdin or stderr is not a terminal, is never asked, so pipelines and cron jobs work as before. `-i`/`--interactive` asks even then, with the reply read from stdin. `-y`/`--yes` and `-f`/`--force` never ask, and the last of the three wins. Without `-f`, rm refuses payloads with dirty, unpushed or unknown git work; `-n` reports the same refusal without deleting anything.
 Options: `-v`/`--verbose`, `-n`/`--dry-run`, `-i`/`--interactive`, `-y`/`--yes`, `-f`/`--force` (no question, and mass patterns), `--trash-dir=PATH` (repeatable), `--home-only`, `--older-than=DAYS` / `--newer-than=DAYS`, `--larger-than=SIZE` / `--smaller-than=SIZE`, `--json` (summary + `matches` array).

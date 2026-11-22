@@ -489,6 +489,9 @@ pub struct Patterns {
     pub kind: Match,
     pub texts: Vec<String>,
     pub regex: Vec<regex_lite::Regex>,
+    /// Exact operands as typed, before [`crate::orig_path::forms`] expands
+    /// them into `texts`. Empty for every other kind.
+    pub operands: Vec<String>,
 }
 
 /// The stable id `list` prints as `{id}`: the trash name, deletion date and
@@ -514,7 +517,17 @@ impl Patterns {
         } else {
             Vec::new()
         };
-        Ok(Patterns { kind, texts, regex })
+        let operands = if kind == Match::Exact {
+            texts.clone()
+        } else {
+            Vec::new()
+        };
+        Ok(Patterns {
+            kind,
+            texts,
+            regex,
+            operands,
+        })
     }
 
     /// A pattern that takes everything: `*` and friends, a regex that

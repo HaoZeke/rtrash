@@ -84,7 +84,8 @@ mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 # Finder may keep a name decomposed (NFD) where the user types it
-# composed (NFC); matching compares the NFC forms.
+# composed (NFC). Finder matching compares the NFC forms. FreeDesktop
+# exact paths compare as bytes; orig_path composes only on macOS.
 unicode-normalization = { version = "0.1", default-features = false, features = [
   "std",
 ] }

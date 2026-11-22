@@ -752,7 +752,7 @@ fn messages_scrub_control_characters_on_a_terminal() {
     let cases = [
         format!("put -- {evil}"),
         format!("restore --to={evil}"),
-        "rm --home-only --dry-run evil".to_string(),
+        "rm --home-only --dry-run --match=glob evil".to_string(),
         format!("empty {pin} --plain --dry-run --verbose"),
         format!("du --file={evil}"),
     ];
@@ -847,7 +847,13 @@ fn age_cuts_keep_items_whose_age_is_unknown() {
     }
     let pattern = format!("{}/*", w.display());
     // --home-only keeps rm and empty off the host's volume trashes.
-    let out = sb.run(&["rm", "--home-only", "--older-than=1", &pattern]);
+    let out = sb.run(&[
+        "rm",
+        "--home-only",
+        "--match=glob",
+        "--older-than=1",
+        &pattern,
+    ]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!sb.trash().join("files/old").exists());
     fs::write(sb.trash().join("files/old"), b"x").unwrap();
@@ -998,7 +1004,7 @@ fn rm_patterns_through_a_symlinked_parent_match() {
     let out = run_in(&lwork, &ldata, &["rm", typed.to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let glob = format!("{}/*.o", lwork.display());
-    let out = run_in(&lwork, &ldata, &["rm", "-n", &glob]);
+    let out = run_in(&lwork, &ldata, &["rm", "--match=glob", "-n", &glob]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(stdout_of(&out).lines().count(), 2, "{}", stdout_of(&out));
     let left: Vec<_> = fs::read_dir(sb.trash().join("info"))
@@ -1478,7 +1484,7 @@ fn orphans_show_in_list_and_status_and_go_with_rm() {
 
     // The tree cannot be listed, so the git check calls it unknown and
     // leaves it. -f is the override.
-    let out = sb.run(&["rm", "--home-only", "-f", "linux-6.9"]);
+    let out = sb.run(&["rm", "--home-only", "-f", "--match=glob", "linux-6.9"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb).len(), 1);
     assert!(!orphan.exists());
@@ -1569,7 +1575,7 @@ fn trash_rm_dry_run_keeps_entries_and_reports_reclaim() {
     sb.touch("drop.o");
     sb.touch("keep.c");
     assert!(sb.run(&["put", "drop.o", "keep.c"]).status.success());
-    let out = sb.run(&["rm", "--dry-run", "*.o"]);
+    let out = sb.run(&["rm", "--match=glob", "--dry-run", "*.o"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let err = stderr_of(&out);
     assert!(err.contains("Would permanently remove"), "{err}");
@@ -1743,7 +1749,7 @@ fn trash_rm_refuses_star_without_force() {
     let sb = Sandbox::new("rm-star");
     sb.touch("a.txt");
     sb.run(&["put", "a.txt"]);
-    let out = sb.run(&["rm", "*"]);
+    let out = sb.run(&["rm", "--match=glob", "*"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb), vec!["a.txt"]);
 }
@@ -1788,9 +1794,10 @@ fn trash_rm_match_takes_substring_and_exact() {
         .to_string();
     let out = sb.run(&["rm", "--match=exact", &exact]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    // Exact needs the whole path: a bare name matches nothing.
-    let out = sb.run(&["rm", "--match=exact", "new.txt"]);
+    // A shorter path is not the file. new.txt stays, and is named.
+    let out = sb.run(&["rm", "--match=exact", "new"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("near miss"), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb), ["new.txt"]);
     // A substring every path holds needs --force; a bad kind exits 2.
     let mass = sb.run(&["rm", "-m", "substring", "/"]);
@@ -1827,7 +1834,7 @@ fn rm_exact_path_keeps_a_glob_name_to_one_item() {
         .run(&["put", "--home-only", "*.log", "notes.log"])
         .status
         .success());
-    let dry = sb.run(&["rm", "--home-only", "-n", "*.log"]);
+    let dry = sb.run(&["rm", "--home-only", "-n", "--match=glob", "*.log"]);
     let shown = format!("{}{}", stdout_of(&dry), stderr_of(&dry));
     assert!(
         shown.contains("*.log")
@@ -1886,7 +1893,7 @@ fn rm_exact_path_keeps_a_duplicate_basename() {
         .run(&["put", "--home-only", "a/foo", "b/foo"])
         .status
         .success());
-    let dry = sb.run(&["rm", "--home-only", "-n", "foo"]);
+    let dry = sb.run(&["rm", "--home-only", "-n", "--match=glob", "foo"]);
     assert!(
         stderr_of(&dry).contains("Would permanently remove 2 items"),
         "{}",
@@ -2109,6 +2116,7 @@ fn rm_and_empty_take_ages_in_hours_and_minutes() {
         "-f",
         "--older-than=1h",
         "--newer-than=2h30m",
+        "--match=glob",
         "*",
     ]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -2482,10 +2490,25 @@ fn list_status_and_rm_filter_by_size() {
     let json = stdout_of(&sb.run(&["status", &pin, "--json", "--larger-than=32K"]));
     assert!(json.contains("\"total_items\": 2"), "{json}");
     assert!(json.contains("\"orphans\":1"), "{json}");
-    let dry = sb.run(&["rm", &pin, "-n", "--smaller-than=32K", "--force", "*"]);
+    let dry = sb.run(&[
+        "rm",
+        &pin,
+        "--match=glob",
+        "-n",
+        "--smaller-than=32K",
+        "--force",
+        "*",
+    ]);
     assert_eq!(stdout_of(&dry).lines().count(), 1, "{}", stdout_of(&dry));
     assert!(stdout_of(&dry).trim_end().ends_with("small"));
-    let gone = sb.run(&["rm", &pin, "--larger-than=100K", "--force", "*"]);
+    let gone = sb.run(&[
+        "rm",
+        &pin,
+        "--match=glob",
+        "--larger-than=100K",
+        "--force",
+        "*",
+    ]);
     assert!(gone.status.success(), "{}", stderr_of(&gone));
     assert_eq!(names(&["list", &pin]), ["big", "small"]);
     for bad in [
@@ -3287,7 +3310,7 @@ fn trash_rm_removes_match_keeps_other() {
     assert_eq!(trash_names(&sb).len(), 3);
 
     // --home-only: a bare rm would also delete the host's trashed *.o.
-    let out = sb.run(&["rm", "--home-only", "*.o"]);
+    let out = sb.run(&["rm", "--home-only", "--match=glob", "*.o"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let mut names = trash_names(&sb);
     names.sort();
@@ -3295,6 +3318,310 @@ fn trash_rm_removes_match_keeps_other() {
     assert!(sb.trash().join("info/keep.dat.trashinfo").exists());
     assert!(!sb.trash().join("info/drop.o.trashinfo").exists());
     assert!(!sb.trash().join("files/drop.o").exists());
+}
+
+/// A bare path is the original path put recorded. A sibling and a child
+/// stay, and a second try names them instead of removing them.
+#[test]
+fn rm_matches_the_original_path_exactly() {
+    let sb = Sandbox::new("exact-rm");
+    fs::create_dir(sb.work().join("a")).unwrap();
+    fs::write(sb.work().join("a/b"), b"child").unwrap();
+    assert!(sb.run(&["put", "a/b"]).status.success());
+    fs::remove_dir(sb.work().join("a")).unwrap();
+    fs::write(sb.work().join("a"), b"exact").unwrap();
+    fs::write(sb.work().join("ab"), b"sib").unwrap();
+    assert!(sb.run(&["put", "a", "ab"]).status.success());
+
+    let dry = sb.run(&["rm", "--home-only", "-n", "a/"]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    let shown = stdout_of(&dry);
+    let lines: Vec<_> = shown.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 1, "{}", stdout_of(&dry));
+    assert!(lines[0].ends_with("/a"), "{}", stdout_of(&dry));
+
+    let sub = sb.work().join("elsewhere");
+    fs::create_dir(&sub).unwrap();
+    let from = common::rtrash(&sb.root)
+        .args(["rm", "--home-only", "-n", "../a"])
+        .current_dir(&sub)
+        .output()
+        .unwrap();
+    assert!(from.status.success(), "{}", stderr_of(&from));
+    assert_eq!(
+        stdout_of(&from).lines().filter(|l| !l.is_empty()).count(),
+        1,
+        "{}",
+        stdout_of(&from)
+    );
+
+    let out = sb.run(&["rm", "--home-only", "a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["ab".to_string(), "b".to_string()]);
+
+    let again = sb.run(&["rm", "--home-only", "a"]);
+    assert!(again.status.success(), "{}", stderr_of(&again));
+    let err = stderr_of(&again);
+    assert!(err.contains("no exact match"), "{err}");
+    assert!(err.contains("near miss"), "{err}");
+    assert!(err.contains("/ab"), "{err}");
+    assert!(err.contains("/a/b"), "{err}");
+    assert_eq!(trash_names(&sb).len(), 2);
+}
+
+/// A composed `é` and a decomposed one are two files on a file system that
+/// keeps both. `rm` of the composed spelling removes that item and leaves
+/// the decomposed one.
+#[test]
+fn rm_removes_one_spelling_of_an_accented_name() {
+    let sb = Sandbox::new("exact-nfc");
+    let composed = "item-\u{e9}.txt";
+    let decomposed = "item-e\u{301}.txt";
+    let a = sb.work().join(composed);
+    let b = sb.work().join(decomposed);
+    fs::write(&a, b"composed").unwrap();
+    fs::write(&b, b"decomposed").unwrap();
+    if fs::read(&a).unwrap() == b"decomposed" {
+        common::skip("this file system stores one Unicode spelling");
+        return;
+    }
+    assert!(
+        sb.run(&["put", composed, decomposed]).status.success(),
+        "put failed"
+    );
+    assert_eq!(trash_names(&sb).len(), 2, "put did not keep both spellings");
+    let out = sb.run(&["rm", "--home-only", composed]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let left: Vec<_> = fs::read_dir(sb.trash().join("files"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(left.len(), 1, "{}", stderr_of(&out));
+    assert_eq!(fs::read(&left[0]).unwrap(), b"decomposed");
+}
+
+/// A parent traversal after a link resolves the link before `..`. Its
+/// lexical collapse names the decoy, which must stay in the trash.
+#[cfg(unix)]
+#[test]
+fn rm_resolves_a_link_before_climbing_to_the_original_path() {
+    let sb = Sandbox::new("exact-link-up");
+    fs::create_dir_all(sb.work().join("real/sub")).unwrap();
+    std::os::unix::fs::symlink("real/sub", sb.work().join("link")).unwrap();
+    fs::write(sb.work().join("other.txt"), b"decoy").unwrap();
+    fs::write(sb.work().join("real/other.txt"), b"wanted").unwrap();
+    assert!(sb.run(&["put", "other.txt"]).status.success());
+    assert!(sb.run(&["put", "link/../other.txt"]).status.success());
+
+    let out = sb.run(&["rm", "--home-only", "link/../other.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let left: Vec<_> = fs::read_dir(sb.trash().join("files"))
+        .unwrap()
+        .flatten()
+        .map(|entry| fs::read(entry.path()).unwrap())
+        .collect();
+    assert_eq!(left, vec![b"decoy".to_vec()]);
+}
+
+/// A relative exact path still matches after its first component is gone.
+#[test]
+fn rm_matches_a_relative_path_whose_first_component_is_gone() {
+    let sb = Sandbox::new("exact-gone-first");
+    fs::create_dir(sb.work().join("gone")).unwrap();
+    fs::write(sb.work().join("gone/foo.txt"), b"wanted").unwrap();
+    assert!(sb.run(&["put", "gone/foo.txt"]).status.success());
+    fs::remove_dir(sb.work().join("gone")).unwrap();
+
+    let out = sb.run(&["rm", "--home-only", "gone/foo.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty(), "{}", stderr_of(&out));
+}
+
+/// A relative path with `..` still matches when the component before it
+/// no longer exists.
+#[test]
+fn rm_matches_dotdot_after_a_missing_first_component() {
+    let sb = Sandbox::new("exact-missing-up");
+    fs::create_dir(sb.work().join("a")).unwrap();
+    fs::write(sb.work().join("b.txt"), b"wanted").unwrap();
+    assert!(sb.run(&["put", "a/../b.txt"]).status.success());
+    fs::remove_dir(sb.work().join("a")).unwrap();
+
+    let out = sb.run(&["rm", "--home-only", "a/../b.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty(), "{}", stderr_of(&out));
+}
+
+fn set_deletion_date(sb: &Sandbox, name: &str, date: &str) {
+    let path = sb.trash().join(format!("info/{name}.trashinfo"));
+    let text = fs::read_to_string(&path).unwrap();
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.starts_with("DeletionDate=") {
+            out.push_str("DeletionDate=");
+            out.push_str(date);
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    fs::write(path, out).unwrap();
+}
+
+/// `a` is in the trash and too new for `--older-than`. `ab` is old enough.
+/// The hint names `a` as outside the window and leaves `ab` alone.
+#[test]
+fn rm_names_an_exact_path_outside_the_age_window() {
+    let sb = Sandbox::new("exact-age");
+    fs::write(sb.work().join("a"), b"exact").unwrap();
+    fs::write(sb.work().join("ab"), b"sibling-is-long-enough").unwrap();
+    assert!(sb.run(&["put", "a", "ab"]).status.success());
+    set_deletion_date(&sb, "a", "2099-01-01T00:00:00");
+    set_deletion_date(&sb, "ab", "2000-01-01T00:00:00");
+
+    let dry = sb.run(&["rm", "--home-only", "-n", "--older-than=1d", "a"]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    let err = stderr_of(&dry);
+    assert!(err.contains("outside the age window"), "{err}");
+    assert!(!err.contains("no exact match"), "{err}");
+    assert!(!err.contains("near miss"), "{err}");
+    assert!(!stdout_of(&dry).contains("/ab"), "{}", stdout_of(&dry));
+
+    let out = sb.run(&["rm", "--home-only", "--older-than=1d", "a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["a".to_string(), "ab".to_string()]);
+}
+
+/// `empty PATH` with an age cut names a path that is too new, and the
+/// older sibling stays.
+#[test]
+fn empty_names_an_exact_path_outside_the_age_window() {
+    let sb = Sandbox::new("exact-empty-age");
+    fs::write(sb.work().join("a"), b"exact").unwrap();
+    fs::write(sb.work().join("ab"), b"sibling-is-long-enough").unwrap();
+    assert!(sb.run(&["put", "a", "ab"]).status.success());
+    set_deletion_date(&sb, "a", "2099-01-01T00:00:00");
+    set_deletion_date(&sb, "ab", "2000-01-01T00:00:00");
+
+    let out = sb.run(&["empty", "--home-only", "--plain", "--older-than=1d", "a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(err.contains("outside the age window"), "{err}");
+    assert!(!err.contains("no exact match"), "{err}");
+    assert!(!err.contains("near miss"), "{err}");
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["a".to_string(), "ab".to_string()]);
+}
+
+#[test]
+fn empty_i_of_a_path_asks_before_it_removes() {
+    let sb = Sandbox::new("empty-i-path");
+    fs::write(sb.work().join("chosen.txt"), b"chosen").unwrap();
+    fs::write(sb.work().join("kept.txt"), b"kept").unwrap();
+    assert!(sb.run(&["put", "chosen.txt", "kept.txt"]).status.success());
+
+    let no = sb.run_with_stdin(&["empty", "--home-only", "-i", "chosen.txt"], "no\n");
+    assert!(no.status.success(), "{}", stderr_of(&no));
+    assert!(
+        stderr_of(&no).contains("Permanently remove 1 item"),
+        "{}",
+        stderr_of(&no)
+    );
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["chosen.txt".to_string(), "kept.txt".to_string()]
+    );
+
+    let yes = sb.run_with_stdin(&["empty", "--home-only", "-i", "chosen.txt"], "y\n");
+    assert!(yes.status.success(), "{}", stderr_of(&yes));
+    assert_eq!(trash_names(&sb), vec!["kept.txt".to_string()]);
+}
+
+/// `a` and `ab` are far under `--larger-than=1G`, so the exact path is in
+/// the trash and outside the size window. The hint says so and leaves
+/// both items in place.
+#[test]
+fn rm_names_an_exact_path_outside_the_size_window() {
+    let sb = Sandbox::new("exact-size");
+    fs::write(sb.work().join("a"), b"x").unwrap();
+    fs::write(sb.work().join("ab"), b"yy").unwrap();
+    assert!(sb.run(&["put", "a", "ab"]).status.success());
+
+    let out = sb.run(&["rm", "--home-only", "--larger-than=1G", "a"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(err.contains("outside the size window"), "{err}");
+    assert!(!err.contains("no exact match"), "{err}");
+    assert!(!err.contains("near miss"), "{err}");
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["a".to_string(), "ab".to_string()]);
+}
+
+/// `empty PATH` removes that original path only, and names a near miss.
+#[test]
+fn empty_matches_the_original_path_exactly() {
+    let sb = Sandbox::new("exact-empty");
+    fs::create_dir(sb.work().join("a")).unwrap();
+    fs::write(sb.work().join("a/b"), b"child").unwrap();
+    assert!(sb.run(&["put", "a/b"]).status.success());
+    fs::remove_dir(sb.work().join("a")).unwrap();
+    fs::write(sb.work().join("a"), b"exact").unwrap();
+    fs::write(sb.work().join("ab"), b"sib").unwrap();
+    assert!(sb.run(&["put", "a", "ab"]).status.success());
+
+    let out = sb.run(&["empty", "--home-only", "--plain", "a/"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["ab".to_string(), "b".to_string()]);
+
+    let sub = sb.work().join("elsewhere");
+    fs::create_dir(&sub).unwrap();
+    let from = common::rtrash(&sb.root)
+        .args(["empty", "--home-only", "--plain", "../ab"])
+        .current_dir(&sub)
+        .output()
+        .unwrap();
+    assert!(from.status.success(), "{}", stderr_of(&from));
+    assert_eq!(trash_names(&sb), vec!["b".to_string()]);
+
+    let again = sb.run(&["empty", "--home-only", "--plain", "a"]);
+    assert!(again.status.success(), "{}", stderr_of(&again));
+    let err = stderr_of(&again);
+    assert!(err.contains("no exact match"), "{err}");
+    assert!(err.contains("near miss"), "{err}");
+    assert!(err.contains("/a/b"), "{err}");
+    assert_eq!(trash_names(&sb), vec!["b".to_string()]);
+}
+
+#[test]
+fn interactive_empty_of_an_exact_path_honors_the_reply() {
+    let sb = Sandbox::new("exact-empty-i");
+    fs::write(sb.work().join("chosen"), b"chosen").unwrap();
+    fs::write(sb.work().join("kept"), b"kept").unwrap();
+    assert!(sb.run(&["put", "chosen", "kept"]).status.success());
+
+    let no = sb.run_with_stdin(&["empty", "--home-only", "-i", "chosen"], "n\n");
+    assert!(no.status.success(), "{}", stderr_of(&no));
+    assert!(
+        stderr_of(&no).contains("Permanently remove 1 item"),
+        "{}",
+        stderr_of(&no)
+    );
+    assert_eq!(trash_names(&sb).len(), 2);
+
+    let yes = sb.run_with_stdin(&["empty", "--home-only", "-i", "chosen"], "yes\n");
+    assert!(yes.status.success(), "{}", stderr_of(&yes));
+    assert_eq!(trash_names(&sb), vec!["kept".to_string()]);
 }
 
 #[test]
@@ -3878,7 +4205,7 @@ fn rm_json_and_age_filters() {
     sb.touch("drop.o");
     assert!(sb.run(&["put", "keep.c"]).status.success());
     assert!(sb.run(&["put", "drop.o"]).status.success());
-    let j = sb.run(&["rm", &pin, "--json", "-n", "*.o"]);
+    let j = sb.run(&["rm", &pin, "--match=glob", "--json", "-n", "*.o"]);
     assert!(j.status.success(), "{}", stderr_of(&j));
     let s = stdout_of(&j);
     assert!(
@@ -3889,7 +4216,7 @@ fn rm_json_and_age_filters() {
     assert!(!s.contains("keep.c"), "{s}");
     // dry-run keeps files
     assert!(sb.trash().join("files/drop.o").is_file());
-    let gone = sb.run(&["rm", &pin, "--json", "*.o"]);
+    let gone = sb.run(&["rm", &pin, "--match=glob", "--json", "*.o"]);
     assert!(gone.status.success(), "{}", stderr_of(&gone));
     assert!(!sb.trash().join("files/drop.o").exists());
     assert!(sb.trash().join("files/keep.c").is_file());
@@ -4607,6 +4934,38 @@ fn names_that_are_not_utf8_put_list_rm_restore_and_empty() {
     assert!(all.status.success(), "{}", stderr_of(&all));
     assert_eq!(fs::read_dir(sb.trash().join("files")).unwrap().count(), 0);
     assert_eq!(fs::read_dir(sb.trash().join("info")).unwrap().count(), 0);
+}
+
+/// The parent is a non-UTF-8 symlink. `put` records the target, so `rm` of
+/// the same bytes has to resolve that parent. A `Path` built from the
+/// private-use form looks up a directory that is not there.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_exact_rm_resolves_a_parent_that_is_not_utf8() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let sb = Sandbox::new("nonutf8parent");
+    let real = sb.work().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("f"), "z").unwrap();
+    let link = sb.work().join(OsStr::from_bytes(b"d\xff"));
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let mut path = link.into_os_string();
+    path.push("/f");
+    let put = run_os(&sb, &[OsStr::new("put"), path.as_os_str()]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let rm = run_os(
+        &sb,
+        &[
+            OsStr::new("rm"),
+            OsStr::new("--home-only"),
+            OsStr::new("-n"),
+            path.as_os_str(),
+        ],
+    );
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    let out = stdout_of(&rm);
+    assert_eq!(out.lines().count(), 1, "{out}{}", stderr_of(&rm));
 }
 
 #[cfg(target_os = "linux")]
@@ -6728,11 +7087,14 @@ fn rm_carries_the_total_and_trash_stats_total_reads_it() {
     let total = || stdout_of(&run(&["trash-stats", "--home-only", "--total", "--json"]));
     let a = write_at(&sb.root, "work/a.bin", &"a".repeat(50_000));
     let tree = write_at(&sb.root, "work/tree/x/y.txt", &"y".repeat(9_000));
-    for p in [a, tree.parent().unwrap().parent().unwrap().to_path_buf()] {
+    for p in [
+        a.clone(),
+        tree.parent().unwrap().parent().unwrap().to_path_buf(),
+    ] {
         let out = run(&["put", "-r", p.to_str().unwrap()]);
         assert!(out.status.success(), "{}", stderr_of(&out));
     }
-    let out = run(&["rm", "--home-only", "a.bin"]);
+    let out = run(&["rm", "--home-only", a.to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let carried = total();
     assert!(carried.contains(r#""items":1,"stale":false"#), "{carried}");
@@ -6744,7 +7106,7 @@ fn rm_carries_the_total_and_trash_stats_total_reads_it() {
         "o".repeat(7_000),
     )
     .unwrap();
-    let out = run(&["rm", "--home-only", "orphan.bin"]);
+    let out = run(&["rm", "--home-only", "--match=glob", "orphan.bin"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!sb.root.join("xdg/Trash/files/orphan.bin").exists());
     assert_eq!(total(), carried);
@@ -8313,7 +8675,7 @@ fn history_counts_stay_right_when_every_change_shares_a_clock_tick() {
     let out = run(&["empty", "--home-only", "30"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!info.exists());
-    assert_eq!(last_items(), 1, "empty by age");
+    assert_eq!(last_items(), 1, "aged empty");
     let json = stdout_of(&run(&["trash-stats", "--home-only", "--json"]));
     assert!(json.contains(r#""items":1,"#), "{json}");
     // A full empty that fails partway: the seam keeps e, the rest goes,
@@ -8836,6 +9198,350 @@ fn put_space_hint_keeps_a_repo_when_git_cannot_answer() {
     put_repo("failed", false);
 }
 
+fn configure_test_fsmonitor(repo: &Path, home: &Path) -> PathBuf {
+    let monitor = home.join("malicious-monitor");
+    fs::write(
+        &monitor,
+        "#!/bin/sh\nprintf 'ran\\n' > \"$RTRASH_TEST_MONITOR_MARK\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+    let configured = git_env(&mut Command::new("git"), repo, home)
+        .args(["config", "core.fsmonitor"])
+        .arg(&monitor)
+        .output()
+        .unwrap();
+    assert!(configured.status.success(), "{configured:?}");
+    home.join("monitor-ran")
+}
+
+/// A repository can name a command as its file-system monitor. The Git
+/// probes that inspect work before and after a put must not run it.
+#[test]
+fn put_does_not_run_a_repository_fsmonitor() {
+    let sb = Sandbox::new("put-git-fsmonitor");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    let mark = configure_test_fsmonitor(&repo, &sb.root);
+    fs::write(repo.join("untracked"), b"work").unwrap();
+
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r"])
+        .arg(&repo)
+        .env("RTRASH_TEST_MONITOR_MARK", &mark)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!mark.exists(), "repository core.fsmonitor ran");
+}
+
+/// An rm probe of a repository already in the trash must not run the
+/// repository's file-system monitor.
+#[test]
+fn rm_does_not_run_a_trashed_repository_fsmonitor() {
+    let sb = Sandbox::new("rm-git-fsmonitor");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("untracked"), b"work").unwrap();
+    let original = repo.display().to_string();
+    let put = sb.run(&["put", "--home-only", "-r", &original]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+
+    let payload = sb.trash().join("files/repo");
+    let mark = configure_test_fsmonitor(&payload, &sb.root);
+    let out = common::rtrash(&sb.root)
+        .args(["rm", "--home-only", "--match=exact", &original])
+        .env("RTRASH_TEST_MONITOR_MARK", &mark)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(!mark.exists(), "repository core.fsmonitor ran during rm");
+    assert!(payload.exists());
+}
+
+/// A low-space hint probes repositories already in the trash without
+/// running their configured file-system monitors.
+#[cfg(debug_assertions)]
+#[test]
+fn put_space_hint_does_not_run_a_trashed_repository_fsmonitor() {
+    let sb = Sandbox::new("space-git-fsmonitor");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("untracked"), b"work").unwrap();
+    let put = sb.run(&["put", "--home-only", "-r", repo.to_str().unwrap()]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+
+    let payload = sb.trash().join("files/repo");
+    let mark = configure_test_fsmonitor(&payload, &sb.root);
+    let plain = sb.work().join("plain.bin");
+    fs::write(&plain, vec![b'x'; 90_000]).unwrap();
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only"])
+        .arg(&plain)
+        .env_remove("RTRASH_WARN_SIZE")
+        .env("RTRASH_WARN_SIZE", "1")
+        .env_remove("RTRASH_MAX_SIZE")
+        .env("RTRASH_TEST_FS", format!("100000:{}", sb.root.display()))
+        .env("RTRASH_TEST_MONITOR_MARK", &mark)
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("would lose the work"), "{err}");
+    assert!(
+        !mark.exists(),
+        "repository core.fsmonitor ran during a space hint"
+    );
+}
+
+/// Status can run a repository's named clean or process filter while it
+/// hashes a tracked file. A put's work probe must disable that command too.
+#[test]
+fn put_does_not_run_a_repository_filter_process() {
+    let sb = Sandbox::new("put-git-filter");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        git_env(&mut Command::new("git"), &repo, &sb.root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let init = git(&["init", "-q"]);
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join(".gitattributes"), "tracked filter=hostile\n").unwrap();
+    fs::write(repo.join("tracked"), b"first").unwrap();
+    assert!(git(&["add", ".gitattributes", "tracked"]).status.success());
+    assert!(git(&["commit", "-qm", "base"]).status.success());
+
+    let filter = sb.root.join("malicious-filter");
+    fs::write(
+        &filter,
+        "#!/bin/sh\nprintf 'ran\\n' > \"$RTRASH_TEST_FILTER_MARK\"\nexit 1\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    let configured = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["config", "filter.hostile.process"])
+        .arg(&filter)
+        .output()
+        .unwrap();
+    assert!(configured.status.success(), "{configured:?}");
+    fs::write(repo.join("tracked"), b"other").unwrap();
+
+    let mark = sb.root.join("filter-ran");
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r"])
+        .arg(&repo)
+        .env("RTRASH_TEST_FILTER_MARK", &mark)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!mark.exists(), "repository filter process ran");
+}
+
+/// `git log` honors `log.showSignature`, but a repository cannot make the
+/// probe run its configured signature verifier.
+#[test]
+fn put_does_not_run_a_repository_signature_verifier() {
+    let sb = Sandbox::new("put-git-signature");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        git_env(&mut Command::new("git"), &repo, &sb.root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    if !git(&["init", "-q"]).status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("tracked"), b"work").unwrap();
+    assert!(git(&["add", "tracked"]).status.success());
+    let tree = String::from_utf8_lossy(&git(&["write-tree"]).stdout)
+        .trim()
+        .to_string();
+    let commit = format!(
+        "tree {tree}\n\
+author Trash Test <trash-test@example.com> 1 +0000\n\
+committer Trash Test <trash-test@example.com> 1 +0000\n\
+gpgsig -----BEGIN PGP SIGNATURE-----\n invalid\n -----END PGP SIGNATURE-----\n\n\
+signed\n"
+    );
+    let mut hash = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hash.stdin
+        .take()
+        .unwrap()
+        .write_all(commit.as_bytes())
+        .unwrap();
+    let hash = hash.wait_with_output().unwrap();
+    assert!(hash.status.success(), "{hash:?}");
+    let oid = String::from_utf8_lossy(&hash.stdout).trim().to_string();
+    assert!(git(&["update-ref", "HEAD", &oid]).status.success());
+
+    let verifier = sb.root.join("malicious-verifier");
+    fs::write(
+        &verifier,
+        "#!/bin/sh\nprintf 'ran\\n' > \"$RTRASH_TEST_GPG_MARK\"\nexit 0\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&verifier, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["config", "log.showSignature", "true"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["config", "gpg.program"])
+        .arg(&verifier)
+        .status()
+        .unwrap()
+        .success());
+
+    let mark = sb.root.join("gpg-ran");
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r"])
+        .arg(&repo)
+        .env("RTRASH_TEST_GPG_MARK", &mark)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!mark.exists(), "repository gpg.program ran");
+}
+
+/// Environment-pair overrides keep the whole key when a filter subsection
+/// contains `=`; `-c key=` would split it at the wrong byte.
+#[test]
+fn put_does_not_run_a_filter_whose_subsection_contains_equals() {
+    let sb = Sandbox::new("put-git-filter-equals");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        git_env(&mut Command::new("git"), &repo, &sb.root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    if !git(&["init", "-q"]).status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join(".gitattributes"), "tracked filter=x=y\n").unwrap();
+    fs::write(repo.join("tracked"), b"first").unwrap();
+    assert!(git(&["add", ".gitattributes", "tracked"]).status.success());
+    assert!(git(&["commit", "-qm", "base"]).status.success());
+    let filter = sb.root.join("malicious-equals-filter");
+    fs::write(
+        &filter,
+        "#!/bin/sh\nprintf 'ran\\n' > \"$RTRASH_TEST_FILTER_MARK\"\nexit 1\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["config", "filter.x=y.process"])
+        .arg(&filter)
+        .status()
+        .unwrap()
+        .success());
+    fs::write(repo.join("tracked"), b"other").unwrap();
+
+    let mark = sb.root.join("equals-filter-ran");
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r"])
+        .arg(&repo)
+        .env("RTRASH_TEST_FILTER_MARK", &mark)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!mark.exists(), "repository filter.x=y.process ran");
+}
+
+/// `GIT_CONFIG` cannot hide repository program keys from the config scan
+/// while status still reads and runs them.
+#[test]
+fn put_clears_git_config_before_scanning_repository_programs() {
+    let sb = Sandbox::new("put-git-config-env");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        git_env(&mut Command::new("git"), &repo, &sb.root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    if !git(&["init", "-q"]).status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join(".gitattributes"), "tracked filter=hostile\n").unwrap();
+    fs::write(repo.join("tracked"), b"first").unwrap();
+    assert!(git(&["add", ".gitattributes", "tracked"]).status.success());
+    assert!(git(&["commit", "-qm", "base"]).status.success());
+    let filter = sb.root.join("malicious-hidden-filter");
+    fs::write(
+        &filter,
+        "#!/bin/sh\nprintf 'ran\\n' > \"$RTRASH_TEST_FILTER_MARK\"\nexit 1\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&filter, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["config", "filter.hostile.process"])
+        .arg(&filter)
+        .status()
+        .unwrap()
+        .success());
+    fs::write(repo.join("tracked"), b"other").unwrap();
+
+    let mark = sb.root.join("hidden-filter-ran");
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r"])
+        .arg(&repo)
+        .env("GIT_CONFIG", "/dev/null")
+        .env("RTRASH_TEST_FILTER_MARK", &mark)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!mark.exists(), "GIT_CONFIG hid the repository filter");
+}
+
 /// Undo is named only once the item has moved. A dry run leaves it in place
 /// and does not promise to bring it back.
 #[test]
@@ -9254,6 +9960,213 @@ fn rm_by_id_distinguishes_items_from_different_trash_roots() {
         .map(|r| fs::read_dir(r.join("files")).unwrap().count())
         .sum();
     assert_eq!(left, 1);
+}
+
+/// A record whose payload is gone is not git work at risk: rm takes it
+/// without -f instead of refusing it as unknown.
+#[cfg(unix)]
+#[test]
+fn rm_takes_a_dangling_record_without_refusing_it_as_unknown_git_work() {
+    let sb = Sandbox::new("rm-dangling");
+    let f = sb.work().join("gone.txt");
+    fs::write(&f, b"x").unwrap();
+    let path = f.to_str().unwrap();
+    assert!(sb.run(&["put", "--home-only", path]).status.success());
+    fs::remove_file(sb.trash().join("files/gone.txt")).unwrap();
+    let record = sb.trash().join("info/gone.txt.trashinfo");
+    assert!(record.exists());
+    let dry = sb.run(&["rm", "--home-only", "-n", "--match=exact", path]);
+    assert!(
+        !stderr_of(&dry).contains("refusing to remove"),
+        "{}",
+        stderr_of(&dry)
+    );
+    let rm = sb.run(&["rm", "--home-only", "--match=exact", path]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    assert!(
+        !stderr_of(&rm).contains("refusing to remove"),
+        "{}",
+        stderr_of(&rm)
+    );
+    assert!(!record.exists());
+}
+
+/// A backslash is a file name character on Unix, so rm of `plain\\` removes
+/// that item and leaves `plain`, and the other way round.
+#[cfg(unix)]
+#[test]
+fn rm_exact_keeps_a_name_that_differs_by_a_trailing_backslash() {
+    let sb = Sandbox::new("rm-backslash");
+    let plain = sb.work().join("plain");
+    let slashed = sb.work().join("plain\\");
+    fs::write(&plain, b"plain").unwrap();
+    fs::write(&slashed, b"slashed").unwrap();
+    for f in [&plain, &slashed] {
+        let put = sb.run(&["put", "--home-only", f.to_str().unwrap()]);
+        assert!(put.status.success(), "{}", stderr_of(&put));
+    }
+    let rm = sb.run(&[
+        "rm",
+        "--home-only",
+        "--match=exact",
+        slashed.to_str().unwrap(),
+    ]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    let left = listed_originals(&sb);
+    assert_eq!(left, vec![plain.to_str().unwrap().to_string()], "{left:?}");
+    let rm = sb.run(&[
+        "rm",
+        "--home-only",
+        "--match=exact",
+        plain.to_str().unwrap(),
+    ]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    assert!(listed_originals(&sb).is_empty());
+}
+
+/// `""` is not the working directory. rm and empty refuse it, and a
+/// trashed copy of that directory stays.
+#[test]
+fn an_empty_operand_is_not_the_working_directory() {
+    let sb = Sandbox::new("rm-empty-operand");
+    let dir = sb.work().join("here");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("f"), b"x").unwrap();
+    let put = sb.run(&["put", "--home-only", "-r", dir.to_str().unwrap()]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    fs::create_dir(&dir).unwrap();
+    for mode in [
+        &["rm", "--home-only", "--match=exact", ""][..],
+        &["rm", "--home-only", ""][..],
+        &["rm", "--home-only", "--", ""][..],
+    ] {
+        let rm = common::rtrash(&sb.root)
+            .args(mode)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(rm.status.code(), Some(2), "{}", stderr_of(&rm));
+        assert!(
+            stderr_of(&rm).contains("'' is not a path"),
+            "{}",
+            stderr_of(&rm)
+        );
+        assert_eq!(
+            listed_originals(&sb),
+            vec![dir.to_str().unwrap().to_string()]
+        );
+    }
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    for mode in [
+        vec!["empty", pin.as_str(), ""],
+        vec!["empty", pin.as_str(), "--", ""],
+    ] {
+        let empty = common::rtrash(&sb.root)
+            .args(mode)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(empty.status.code(), Some(2), "{}", stderr_of(&empty));
+        assert!(
+            stderr_of(&empty).contains("'' is not a path"),
+            "{}",
+            stderr_of(&empty)
+        );
+        assert_eq!(
+            listed_originals(&sb),
+            vec![dir.to_str().unwrap().to_string()]
+        );
+    }
+}
+
+/// `--` ends empty's options, so `-n` after it is a path.
+#[test]
+fn empty_takes_a_double_dash_as_the_end_of_its_options() {
+    let sb = Sandbox::new("empty-ddash");
+    sb.touch("a.txt");
+    assert!(sb.run(&["put", "a.txt"]).status.success());
+    let out = sb.empty(&["--", "-n"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(!err.contains("unrecognized option"), "{err}");
+    assert!(!err.contains("Would remove"), "{err}");
+    assert!(!err.contains("Removed"), "{err}");
+    assert_eq!(trash_names(&sb), vec!["a.txt".to_string()]);
+    let path = sb.work().join("a.txt").to_string_lossy().into_owned();
+    let gone = sb.empty(&["--", &path]);
+    assert!(gone.status.success(), "{}", stderr_of(&gone));
+    assert!(trash_names(&sb).is_empty(), "{}", stderr_of(&gone));
+}
+
+/// `link/..` is the directory above the link's target, as put resolves a
+/// parent, not the directory that holds the link. rm of it removes the item
+/// trashed from the physical parent and keeps the one from the lexical one.
+#[cfg(unix)]
+#[test]
+fn rm_resolves_a_trailing_dot_dot_after_a_link_physically() {
+    let sb = Sandbox::new("rm-link-dotdot");
+    let (real, holder) = (sb.work().join("real"), sb.work().join("holder"));
+    for d in [&real, &holder] {
+        fs::create_dir_all(d.join("sub")).unwrap();
+        let put = sb.run(&["put", "--home-only", "-r", d.to_str().unwrap()]);
+        assert!(put.status.success(), "{}", stderr_of(&put));
+    }
+    fs::create_dir_all(real.join("sub")).unwrap();
+    fs::create_dir(&holder).unwrap();
+    std::os::unix::fs::symlink(real.join("sub"), holder.join("link")).unwrap();
+    let typed = format!("{}/link/..", holder.display());
+    let rm = sb.run(&["rm", "--home-only", "--match=exact", &typed]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    let left = listed_originals(&sb);
+    assert_eq!(left, vec![holder.to_str().unwrap().to_string()], "{left:?}");
+}
+
+/// `link/..`, with `link` pointing at `../real`, names the physical parent.
+/// put refuses that `..` operand. rm and empty must leave a decoy that was
+/// put at the lexical parent.
+#[test]
+fn rm_and_empty_leave_a_decoy_at_the_lexical_parent_of_link_dotdot() {
+    let sb = Sandbox::new("link-dotdot");
+    let work = sb.work();
+    fs::create_dir(work.join("real")).unwrap();
+    fs::write(work.join("real/inside"), b"in").unwrap();
+    fs::create_dir(work.join("sub")).unwrap();
+    fs::write(work.join("sub/decoy"), b"decoy").unwrap();
+    let put = sb.run(&["put", "--home-only", "-r", "sub"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    assert!(sb.trash().join("files/sub/decoy").is_file());
+
+    fs::create_dir(work.join("sub")).unwrap();
+    std::os::unix::fs::symlink("../real", work.join("sub/link")).unwrap();
+    let refused = sb.run(&["put", "--home-only", "-r", "sub/link/.."]);
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr_of(&refused));
+    assert!(
+        stderr_of(&refused).contains("'.' or '..'"),
+        "{}",
+        stderr_of(&refused)
+    );
+    assert!(sb.trash().join("files/sub/decoy").is_file());
+
+    let dry = sb.run(&["rm", "--home-only", "-n", "sub/link/.."]);
+    let shown = format!("{}{}", stdout_of(&dry), stderr_of(&dry));
+    assert!(
+        shown.contains("Would permanently remove 0 items"),
+        "{shown}"
+    );
+    let rm = sb.run(&["rm", "--home-only", "-f", "sub/link/.."]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    assert!(
+        sb.trash().join("files/sub/decoy").is_file(),
+        "{}",
+        stderr_of(&rm)
+    );
+    let empty = sb.empty(&["sub/link/.."]);
+    assert!(empty.status.success(), "{}", stderr_of(&empty));
+    assert!(
+        sb.trash().join("files/sub/decoy").is_file(),
+        "{}",
+        stderr_of(&empty)
+    );
 }
 
 /// A symlinked parent that is retargeted after the path was resolved does
@@ -9776,11 +10689,15 @@ fn max_count_refuses_rm_and_empty_past_the_cap() {
     };
     let cap2 = [("RTRASH_MAX_PERMANENT", "2")];
     refused(
-        &["rm", &pin, "--max-count=2", "mc-*"],
+        &["rm", &pin, "--match=glob", "--max-count=2", "mc-*"],
         &[],
         "3 items would be deleted",
     );
-    refused(&["rm", &pin, "mc-*"], &cap2, "more than the cap of 2");
+    refused(
+        &["rm", &pin, "--match=glob", "mc-*"],
+        &cap2,
+        "more than the cap of 2",
+    );
     refused(&["empty", &pin, "--all"], &cap2, "more than the cap of 2");
     refused(
         &["rm", &pin, "mc-a"],
@@ -9789,7 +10706,7 @@ fn max_count_refuses_rm_and_empty_past_the_cap() {
     );
     refused(&["rm", &pin, "--max-count=x", "mc-a"], &[], "--max-count");
     // A dry run only looks, so the cap lets it through.
-    let out = sb.run_env(&["rm", &pin, "-n", "mc-*"], &cap2);
+    let out = sb.run_env(&["rm", &pin, "--match=glob", "-n", "mc-*"], &cap2);
     assert!(out.status.success(), "{}", stderr_of(&out));
     // Within the cap the run goes ahead, and --max-count wins over the variable.
     let one = [("RTRASH_MAX_PERMANENT", "1")];
@@ -9834,7 +10751,7 @@ fn allow_roots_keeps_put_restore_and_rm_inside() {
     for f in ["ar-in/ar-a", "ar-out/ar-d"] {
         assert!(sb.work().join(f).exists(), "{f} moved");
     }
-    refused(&["rm", &pin, "ar-c"], 1);
+    refused(&["rm", &pin, "ar-out/ar-c"], 1);
     refused(&["restore", "--home-only", "--name=ar-c"], 1);
     let empty = ["empty", pin.as_str(), "--all"];
     common::assert_refused_unchanged(&empty, &watch, 2, &[], || sb.run_env(&empty, &scope));
@@ -9857,7 +10774,7 @@ fn allow_roots_keeps_put_restore_and_rm_inside() {
     let out = sb.run_env(&["restore", "--home-only", "--name=ar-a"], &scope);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(inside.join("ar-a").exists());
-    let out = sb.run_env(&["rm", &pin, "ar-b"], &scope);
+    let out = sb.run_env(&["rm", &pin, "ar-in/ar-b"], &scope);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert_eq!(names_in_trash(&sb).len(), after_put.len() - 2);
     // A root that does not exist allows nothing.
@@ -10245,7 +11162,10 @@ fn rm_stops_after_the_entry_in_hand_at_the_first_ctrl_c() {
     }
     let put = sb.run(&["put", "a.txt", "b.txt", "c.txt"]);
     assert!(put.status.success(), "{}", stderr_of(&put));
-    let out = sb.run_env(&["rm", "*.txt"], &[("RTRASH_TEST_SIGINT", "after-item:1")]);
+    let out = sb.run_env(
+        &["rm", "--match=glob", "*.txt"],
+        &[("RTRASH_TEST_SIGINT", "after-item:1")],
+    );
     let said = stderr_of(&out);
     assert_eq!(out.status.code(), Some(130), "{said}");
     assert!(
@@ -10559,6 +11479,68 @@ fn rm_keeps_an_item_that_took_the_name_while_it_asked() {
     assert!(rest.contains("changed in the trash"), "{rest}");
     assert_eq!(fs::read(sb.trash().join("files/a.o")).unwrap(), b"second");
     assert!(sb.trash().join("info/a.o.trashinfo").is_file());
+}
+
+/// The record can stay as list read it while another file takes the
+/// payload's name. rm asks, the payload is swapped, and the answer is yes:
+/// the swapped-in file stays, with its record.
+#[test]
+fn rm_keeps_a_payload_swapped_while_it_asked() {
+    let (sb, pin) = trashed_a_o("rm-payload-swapped");
+    let payload = sb.trash().join("files/a.o");
+    let mut cmd = common::rtrash(&sb.root);
+    cmd.args(["rm", &pin, "-i", "a.o"]).current_dir(sb.work());
+    let mut rm = common::Asking::spawn(&mut cmd);
+    rm.wait_for("(y/N) ");
+    fs::remove_file(&payload).unwrap();
+    fs::write(&payload, b"replacement").unwrap();
+    let (status, rest) = rm.answer("y\n");
+    assert!(!status.success(), "{rest}");
+    assert!(rest.contains("changed in the trash"), "{rest}");
+    assert_eq!(fs::read(&payload).unwrap(), b"replacement");
+    assert!(sb.trash().join("info/a.o.trashinfo").is_file());
+}
+
+/// A payload swapped after rm's last read, with the record unchanged, stays.
+/// The debug-only seam swaps it where the git scan has just ended.
+#[test]
+fn rm_rechecks_the_payload_after_the_scan() {
+    let (sb, pin) = trashed_a_o("rm-payload-after-scan");
+    let payload = sb.trash().join("files/a.o");
+    let out = sb.run_env(
+        &["rm", &pin, "a.o"],
+        &[("RTRASH_TEST_REPLACE_PAYLOAD", payload.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("changed in the trash"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(fs::read(&payload).unwrap(), b"replacement");
+    assert!(sb.trash().join("info/a.o.trashinfo").is_file());
+}
+
+/// restore moves the file list read. A payload swapped in under the same
+/// name, with the record unchanged, is left in the trash and nothing is
+/// restored.
+#[test]
+fn restore_keeps_a_payload_swapped_before_it_moves() {
+    let (sb, pin) = trashed_a_o("restore-payload-swapped");
+    let payload = sb.trash().join("files/a.o");
+    let out = sb.run_env(
+        &["restore", &pin, sb.work().join("a.o").to_str().unwrap()],
+        &[("RTRASH_TEST_REPLACE_PAYLOAD", payload.to_str().unwrap())],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("changed in the trash"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(fs::read(&payload).unwrap(), b"replacement");
+    assert!(sb.trash().join("info/a.o.trashinfo").is_file());
+    assert!(!sb.work().join("a.o").exists());
 }
 
 /// An id match is tied to the record that list read. Rewriting that record

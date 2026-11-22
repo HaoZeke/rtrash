@@ -648,13 +648,20 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         json,
         filter,
     } = opts;
-    let rows = match entries() {
-        Ok(r) => filter.apply(r),
+    let all = match entries() {
+        Ok(r) => r,
         Err(e) => {
             eprintln!("{prog}: cannot read the Finder Trash: {e}");
             return 1;
         }
     };
+    // Shown paths before the age and size filters, so a path the window
+    // leaves out is still visible to the hint.
+    let mut pre: Vec<(PathBuf, PathBuf, String)> = all
+        .iter()
+        .map(|e| (e.trash.clone(), e.shown.clone(), e.name.clone()))
+        .collect();
+    let rows = filter.apply(all);
     // --batch: only the items one put run left (`last`: the latest).
     let rows = match batch {
         None => rows,
@@ -672,11 +679,15 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
                 }
                 return 1;
             };
+            pre.retain(|(trash, _, name)| {
+                items.iter().any(|l| l.trash == *trash && l.name == *name)
+            });
             rows.into_iter()
                 .filter(|e| items.iter().any(|l| l.trash == e.trash && l.name == e.name))
                 .collect()
         }
     };
+    let have: Vec<PathBuf> = pre.into_iter().map(|(_, shown, _)| shown).collect();
     let (mut removed, mut bytes, mut status) = (0u64, 0u64, 0);
     let mut matched: Vec<String> = Vec::new();
     let regex = nfc_regexes(&patterns.regex);
@@ -704,12 +715,18 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
                 let path_s = nfc(&path_s);
                 regex.iter().any(|r| r.is_match(&path_s))
             }
+            crate::filters::Match::Exact => crate::orig_path::selects(&patterns.texts, &e.shown),
             crate::filters::Match::Id => {
                 texts.selects(&nfc(&path_s), &base, &name, &e.date, &e.trash)
             }
             _ => texts.hit(&nfc(&path_s), &base, &name),
         }
     };
+    if patterns.kind == crate::filters::Match::Exact {
+        let kept: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
+        let window = crate::orig_path::window(filter.age.is_set(), filter.size.is_set());
+        crate::orig_path::hint(prog, &patterns.operands, &have, &kept, window);
+    }
     let hits: Vec<&Entry> = rows.iter().filter(|e| hit(e)).collect();
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
     // they came from (an item with no Put Back place counts as outside),
@@ -741,20 +758,12 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
     }
     for e in hits {
         let path_s = e.shown.to_string_lossy();
-        // After the question: the item must still be the one listed. One
-        // already gone needs nothing done; another in its place stays.
-        let path = match e.checked() {
-            Ok(p) => p,
-            Err(_) if dry_run => e.path(),
-            Err(Stale::Gone) => continue,
-            Err(s) => {
-                eprintln!("{prog}: {}", s.reason(&e.name));
-                status = 1;
-                continue;
-            }
-        };
-        if !force && !crate::util::is_gone(&path) {
-            if let Some(work) = crate::du_git::risky_tree(&path) {
+        // The git scan reads the whole tree and can take a while, so it comes
+        // first; the item must still be the one listed after it, and after
+        // the question. One already gone needs nothing done; another in its
+        // place stays.
+        if !force && !crate::util::is_gone(&e.path()) {
+            if let Some(work) = crate::du_git::risky_tree(&e.path()) {
                 eprintln!(
                     "{prog}: refusing to remove '{}': it holds {} git work; \
                      restore it, or pass -f to remove it anyway",
@@ -765,17 +774,14 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
                 continue;
             }
         }
-        let path = if dry_run {
-            path
-        } else {
-            match e.checked() {
-                Ok(p) => p,
-                Err(Stale::Gone) => continue,
-                Err(s) => {
-                    eprintln!("{prog}: {}", s.reason(&e.name));
-                    status = 1;
-                    continue;
-                }
+        let path = match e.checked() {
+            Ok(p) => p,
+            Err(_) if dry_run => e.path(),
+            Err(Stale::Gone) => continue,
+            Err(s) => {
+                eprintln!("{prog}: {}", s.reason(&e.name));
+                status = 1;
+                continue;
             }
         };
         let m = crate::finder_total::measure_item(&path);
