@@ -1692,3 +1692,23 @@ fn finder_rm_refuses_a_repository_that_holds_risky_work() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(!kept.exists());
 }
+
+/// The id that list prints for a name Finder stored decomposed is the id
+/// rm's `--match=id` reads: both hash the composed name.
+#[test]
+fn a_finder_id_hashes_the_composed_name() {
+    let b = Box_::new("nfc-id");
+    let nfd = "ne\u{301}e.txt";
+    let f = b.work().join(nfd);
+    fs::write(&f, b"x").unwrap();
+    assert!(b.run(&["put", nfd], "").status.success());
+    b.put_back(nfd, &f);
+    let o = b.run(&["list", "--format={id}\\n"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let id = out(&o).lines().next().unwrap_or_default().to_string();
+    assert!(id.contains('@'), "{}", out(&o));
+    assert!(!id.contains("e%CC%81"), "decomposed bytes in the id: {id}");
+    let o = b.run(&["rm", "--match=id", &id], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!b.finder().join(nfd).exists());
+}
