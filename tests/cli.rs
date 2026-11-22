@@ -9198,6 +9198,48 @@ fn put_space_hint_keeps_a_repo_when_git_cannot_answer() {
     put_repo("failed", false);
 }
 
+/// A repository can name a command as its file-system monitor. The Git
+/// probes that inspect work before and after a put must not run it.
+#[test]
+fn put_does_not_run_a_repository_fsmonitor() {
+    let sb = Sandbox::new("put-git-fsmonitor");
+    let repo = sb.work().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let init = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["init", "-q"])
+        .output()
+        .unwrap();
+    if !init.status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    let monitor = sb.root.join("malicious-monitor");
+    fs::write(
+        &monitor,
+        "#!/bin/sh\nprintf 'ran\\n' > \"$RTRASH_TEST_MONITOR_MARK\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+    let configured = git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["config", "core.fsmonitor"])
+        .arg(&monitor)
+        .output()
+        .unwrap();
+    assert!(configured.status.success(), "{configured:?}");
+    fs::write(repo.join("untracked"), b"work").unwrap();
+
+    let mark = sb.root.join("monitor-ran");
+    let out = common::rtrash(&sb.root)
+        .args(["put", "--home-only", "-r"])
+        .arg(&repo)
+        .env("RTRASH_TEST_MONITOR_MARK", &mark)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!mark.exists(), "repository core.fsmonitor ran");
+}
+
 /// Undo is named only once the item has moved. A dry run leaves it in place
 /// and does not promise to bring it back.
 #[test]

@@ -291,13 +291,41 @@ fn is_executable(p: &Path) -> bool {
 
 fn git(bin: &Path, repo: &Path) -> Command {
     let mut c = Command::new(bin);
-    c.arg("-C")
+    c.arg("--no-pager")
+        // These read-only commands need repository data, but none may run a
+        // program selected by an untrusted repository configuration.
+        .args(["-c", "core.fsmonitor=false"])
+        .args(["-c", "core.hooksPath="])
+        .args(["-c", "diff.external="])
+        .arg("-C")
         .arg(repo)
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_CONFIG_PARAMETERS")
+        .env_remove("GIT_EXTERNAL_DIFF")
+        .env("GIT_PAGER", "cat")
         // Read-only probes: never take the index lock to refresh stat data.
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    c
+}
+
+/// A Git command that reads every configuration source. This is only for
+/// `git config`, which prints configuration data and does not run programs
+/// named by it.
+fn config_git(bin: &Path, repo: &Path) -> Command {
+    let mut c = Command::new(bin);
+    c.arg("--no-pager")
+        .arg("-C")
+        .arg(repo)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env("GIT_PAGER", "cat")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -312,7 +340,7 @@ fn git(bin: &Path, repo: &Path) -> Command {
 pub fn config_path(repo: &Path, key: &str) -> Option<Option<String>> {
     let bin = find_git()?;
     let ask = |dir: &Path| {
-        let out = git(&bin, dir)
+        let out = config_git(&bin, dir)
             .args(["config", "--path", "--get", key])
             .output()
             .ok()?;
