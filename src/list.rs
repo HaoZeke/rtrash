@@ -1315,6 +1315,27 @@ mod tests {
     use crate::trashdir::TrashDir;
     use std::path::PathBuf;
 
+    /// A payload whose name is not UTF-8 is probed under its real name, so
+    /// it is not reported as unknown git work because a lossy copy of the
+    /// name does not exist.
+    #[cfg(unix)]
+    #[test]
+    fn git_risks_probes_a_non_utf8_name_under_its_real_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = std::env::temp_dir().join(format!("rtrash-gitrisk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let trash = TrashDir {
+            root: root.join("Trash"),
+            topdir: None,
+        };
+        trash.ensure().unwrap();
+        let name = std::ffi::OsStr::from_bytes(b"caf\xe9-dir");
+        fs::create_dir(trash.files().join(name)).unwrap();
+        let risks = git_risks(&trash).unwrap();
+        assert!(risks.is_empty(), "{risks:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     /// A record with no `Path=`, or an empty one, still reaches rm,
     /// restore and the totals through `collect`, but `list` leaves it out
     /// and counts it, as `status --check` flags it.

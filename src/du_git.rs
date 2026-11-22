@@ -202,11 +202,14 @@ fn find_repos(root: &Path) -> RepoScan {
 
 /// Risky git work at or below `path`. A directory that is not fully
 /// scanned is unknown, so it is never described as safe to remove. Not a
-/// directory, or a fully scanned tree with nothing risky, is `None`.
+/// directory, a path that is gone (nothing is left to lose) or a fully
+/// scanned tree with nothing risky is `None`; a path that cannot be
+/// reached is unknown.
 pub fn risky_tree(path: &Path) -> Option<RiskyGit> {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(_) => return Some(RiskyGit::unknown()),
+    let meta = match crate::util::look(path) {
+        crate::util::Look::There(m) => m,
+        crate::util::Look::Gone => return None,
+        crate::util::Look::Unreachable(_) => return Some(RiskyGit::unknown()),
     };
     if !meta.is_dir() || meta.file_type().is_symlink() {
         return None;
@@ -933,6 +936,19 @@ mod tests {
         assert_eq!(stash_from_code(Some(1)), Some(false));
         assert_eq!(stash_from_code(Some(128)), None);
         assert_eq!(stash_from_code(None), None);
+    }
+
+    /// A path that is gone has nothing to lose, so a dangling record is not
+    /// refused as unknown; one that cannot be reached still is unknown.
+    #[test]
+    fn a_gone_path_holds_no_risk() {
+        let root = std::env::temp_dir().join(format!("rtrash-git-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(risky_tree(&root.join("missing")).is_none());
+        std::fs::write(root.join("file"), b"x").unwrap();
+        assert!(risky_tree(&root.join("file/below")).is_none());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// A parent that only contains a repository is risky, and a tree that

@@ -9563,6 +9563,35 @@ fn rm_by_id_distinguishes_items_from_different_trash_roots() {
     assert_eq!(left, 1);
 }
 
+/// A record whose payload is gone is not git work at risk: rm takes it
+/// without -f instead of refusing it as unknown.
+#[cfg(unix)]
+#[test]
+fn rm_takes_a_dangling_record_without_refusing_it_as_unknown_git_work() {
+    let sb = Sandbox::new("rm-dangling");
+    let f = sb.work().join("gone.txt");
+    fs::write(&f, b"x").unwrap();
+    let path = f.to_str().unwrap();
+    assert!(sb.run(&["put", "--home-only", path]).status.success());
+    fs::remove_file(sb.trash().join("files/gone.txt")).unwrap();
+    let record = sb.trash().join("info/gone.txt.trashinfo");
+    assert!(record.exists());
+    let dry = sb.run(&["rm", "--home-only", "-n", "--match=exact", path]);
+    assert!(
+        !stderr_of(&dry).contains("refusing to remove"),
+        "{}",
+        stderr_of(&dry)
+    );
+    let rm = sb.run(&["rm", "--home-only", "--match=exact", path]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    assert!(
+        !stderr_of(&rm).contains("refusing to remove"),
+        "{}",
+        stderr_of(&rm)
+    );
+    assert!(!record.exists());
+}
+
 /// A backslash is a file name character on Unix, so rm of `plain\\` removes
 /// that item and leaves `plain`, and the other way round.
 #[cfg(unix)]
