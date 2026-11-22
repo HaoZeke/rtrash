@@ -6000,6 +6000,7 @@ fn who_counts_only_the_paths_it_could_not_check() {
         err.contains("no holder seen, but 1 path could not be checked in full"),
         "{err}"
     );
+    assert!(!err.contains("run as root"), "{err}");
     let out = sb.run_env(&["who", "b.log"], &env);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stderr_of(&out), "");

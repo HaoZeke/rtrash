@@ -102,7 +102,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     if let Some(gap) = snap.gap_of(unchecked) {
         #[cfg(unix)]
         // SAFETY: geteuid has no preconditions.
-        let hint = if unsafe { libc::geteuid() } == 0 {
+        let hint = if snap.unreadable == 0 || unsafe { libc::geteuid() } == 0 {
             ""
         } else {
             "; run as root to inspect them"
