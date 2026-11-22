@@ -1774,6 +1774,29 @@ pub(crate) fn file_identity(path: &Path) -> Option<(u64, u64)> {
     }
 }
 
+/// The warning for a repository with git work that a put moved into the
+/// bin. `restore --batch=last` brings it back only when the last-put record
+/// was written; without it the line says to restore from the bin, so the
+/// work is named either way.
+#[cfg(any(windows, test))]
+pub(crate) fn risky_put_line(
+    prog: &str,
+    path: &Path,
+    work: crate::du_git::RiskyGit,
+    recorded: bool,
+) -> String {
+    let how = if recorded {
+        "`rtrash restore --batch=last` brings it back"
+    } else {
+        "restore it from the Recycle Bin"
+    };
+    format!(
+        "{prog}: warning: '{}' contains a git repository with {} work; {how}",
+        crate::util::err_path(path),
+        work.label()
+    )
+}
+
 /// `RTRASH_TEST_RETARGET=LINK|TARGET` replaces `LINK` with a directory
 /// symlink to `TARGET` after the operand's identity was read. Debug builds
 /// only. The handoff uses the path resolved before this runs.
@@ -2298,24 +2321,20 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         if !moved.is_empty() {
             // The restore hint is true only after last-put.txt is written.
             // `rtrash undo` does not restore the Recycle Bin.
-            match write_last_put(started, &moved) {
-                Ok(()) if !json => {
-                    for (path, work) in &restore_notes {
-                        eprintln!(
-                            "{prog}: warning: '{}' contains a git repository with {} work; \
-                             `rtrash restore --batch=last` brings it back",
-                            crate::util::err_path(path),
-                            work.label()
-                        );
-                    }
-                }
-                Ok(()) => {}
+            let recorded = match write_last_put(started, &moved) {
+                Ok(()) => true,
                 Err(e) => {
                     eprintln!(
                         "{prog}: warning: the last-put record could not be written ({e}); \
                          restore the items from the Recycle Bin. \
                          `rtrash restore --batch=last` cannot see them yet",
                     );
+                    false
+                }
+            };
+            if !json {
+                for (path, work) in &restore_notes {
+                    eprintln!("{}", super::risky_put_line(prog, path, *work, recorded));
                 }
             }
             prune_after_put(prog, &moved, json);
@@ -5072,6 +5091,24 @@ mod tests {
         assert_ne!(of_link, target);
         assert!(identity_changed(Some(target), &link));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_risky_put_line_names_the_work_with_or_without_the_record() {
+        let work = crate::du_git::RiskyGit::unknown();
+        let on = risky_put_line("rtrash", Path::new("repo"), work, true);
+        assert!(
+            on.contains("contains a git repository with") && on.contains("restore --batch=last"),
+            "{on}"
+        );
+        let off = risky_put_line("rtrash", Path::new("repo"), work, false);
+        assert!(
+            off.contains("contains a git repository with")
+                && off.contains("'repo'")
+                && off.contains("Recycle Bin")
+                && !off.contains("restore --batch=last"),
+            "{off}"
+        );
     }
 
     /// The final component stays the operand. Canonicalizing the whole path

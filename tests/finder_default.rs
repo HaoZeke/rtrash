@@ -1800,3 +1800,37 @@ fn a_low_space_finder_put_names_risky_work_already_in_the_trash() {
         "{text}"
     );
 }
+
+/// An undo log that cannot be written does not hide git work: the put still
+/// names each repository, and does not promise `undo`.
+#[test]
+fn an_unwritable_undo_log_still_names_the_git_work_it_moved() {
+    let b = Box_::new("log-fail-risk");
+    let repo = b.work().join("old-repo");
+    fs::create_dir(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &b.root)
+        .output();
+    if !init.is_ok_and(|o| o.status.success()) {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let state = b.root.join("state");
+    fs::write(&state, b"not a directory").unwrap();
+    let o = b.run(&["put", "-r", "old-repo"], "");
+    let text = err(&o);
+    assert!(o.status.success(), "{text}");
+    assert!(!repo.exists(), "{text}");
+    assert!(text.contains("could not be written"), "{text}");
+    assert!(
+        text.contains("'")
+            && text.contains("old-repo")
+            && text.contains("contains a git repository"),
+        "{text}"
+    );
+    assert!(!text.contains("`rtrash undo` brings it back"), "{text}");
+}

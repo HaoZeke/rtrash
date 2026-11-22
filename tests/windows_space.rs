@@ -758,6 +758,42 @@ fn put_json_leaves_out_the_repository_note() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A last-put record that cannot be written does not hide the git work: the
+/// put names the repository, and does not say `restore --batch=last` brings it back.
+#[test]
+fn a_failed_last_put_record_still_names_the_git_work() {
+    let base = common::scratch_dir("wingit", "last-put-fail-risk");
+    let repo = base.join("repo");
+    let _ = std::fs::remove_dir_all(&repo);
+    std::fs::create_dir(&repo).unwrap();
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &base)
+        .output();
+    if !init.is_ok_and(|o| o.status.success()) {
+        common::skip("git unavailable; skipping");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    std::fs::write(repo.join("f"), b"x").unwrap();
+    let lad = common::local_app_data(&base);
+    std::fs::write(&lad, b"not a directory").unwrap();
+    let out = common::rtrash(&base)
+        .args(["put", repo.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("could not be written"), "{err}");
+    assert!(err.contains("contains a git repository with"), "{err}");
+    assert!(err.contains("cannot see them yet"), "{err}");
+    assert!(!err.contains("brings it back"), "{err}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Putting a plain directory by a differently cased spelling still finds its
 /// `$I` record: no false unknown git-work warning, the low-space rm hint
 /// stays, `put --json` keeps the `$R` payload name, and post-put budget
