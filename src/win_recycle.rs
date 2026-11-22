@@ -1361,7 +1361,7 @@ pub fn long_path(path: &Path) -> Option<PathBuf> {
 /// Recycle Bin item on that volume. Canonicalizing follows a junction, so
 /// a junction to a drive root contributes that root beside the path as typed.
 #[cfg(any(windows, test))]
-fn mass_canonical_key(key: &str) -> bool {
+pub(crate) fn mass_canonical_key(key: &str) -> bool {
     if key.is_empty() {
         return true;
     }

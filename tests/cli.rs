@@ -1770,6 +1770,113 @@ fn trash_rm_refuses_star_without_force() {
     assert_eq!(trash_names(&sb), vec!["a.txt"]);
 }
 
+/// A mass pattern must be refused before it deletes. The pin keeps a
+/// guard that fails from reaching a volume trash outside the sandbox.
+fn mass_pattern_keeps_the_trash(tag: &str, args: &[&str]) {
+    let sb = Sandbox::new(tag);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("keep.txt");
+    let put = sb.run(&["put", &pin, "keep.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let mut cmd = vec!["rm", pin.as_str()];
+    cmd.extend_from_slice(args);
+    let out = sb.run(&cmd);
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+    assert_eq!(trash_names(&sb), vec!["keep.txt".to_string()]);
+}
+
+#[test]
+fn question_star_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-qstar", &["--glob", "?*"]);
+}
+
+#[test]
+fn a_regex_dot_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-dot", &["--regex", "."]);
+}
+
+#[test]
+fn an_empty_prefix_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-empty", &["--prefix", ""]);
+}
+
+#[test]
+fn slash_slash_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-slashslash", &["--prefix", "//"]);
+}
+
+#[test]
+fn slash_dot_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-slashdot", &["--prefix", "/."]);
+}
+
+#[test]
+fn a_prefix_that_climbs_to_the_root_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-dotdot", &["--prefix", "/tmp/.."]);
+}
+
+#[test]
+fn tilde_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-tilde", &["--prefix", "~"]);
+}
+
+#[test]
+fn a_trash_root_alias_is_refused_without_force() {
+    let sb = Sandbox::new("rm-mass-trashroot");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("keep.txt");
+    let put = sb.run(&["put", &pin, "keep.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let alias = format!("{}/.", sb.trash().display());
+    let tilde = "~/xdg/Trash/.".to_string();
+    for pattern in [alias.as_str(), tilde.as_str()] {
+        let out = sb.run(&["rm", &pin, "--prefix", pattern]);
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(2), "{pattern}: {err}");
+        assert!(err.contains("refusing mass pattern"), "{pattern}: {err}");
+        assert_eq!(trash_names(&sb), vec!["keep.txt".to_string()], "{pattern}");
+    }
+}
+
+#[test]
+fn rm_refuses_two_spellings_of_one_original() {
+    let sb = Sandbox::new("rm-match-key");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let real = sb.work().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("a.txt"), b"payload").unwrap();
+    let put = sb.run(&["put", &pin, "real/a.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let info_path = sb.trash().join("info/a.txt.trashinfo");
+    let info = fs::read_to_string(&info_path).unwrap();
+    let recorded = info
+        .lines()
+        .find_map(|l| l.strip_prefix("Path="))
+        .unwrap()
+        .to_string();
+    let link = sb.work().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let via_link = link.join("a.txt");
+    let via_link = via_link.to_str().unwrap();
+    let alt = info.replacen(&format!("Path={recorded}"), &format!("Path={via_link}"), 1);
+    fs::write(sb.trash().join("info/a-link.txt.trashinfo"), alt).unwrap();
+    fs::copy(
+        sb.trash().join("files/a.txt"),
+        sb.trash().join("files/a-link.txt"),
+    )
+    .unwrap();
+    let out = sb.run(&["rm", &pin, via_link]);
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing 2 trash items"), "{err}");
+    assert!(err.contains("--all-matches"), "{err}");
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["a-link.txt".to_string(), "a.txt".to_string()]);
+}
+
 #[test]
 fn trash_rm_regex_matches_the_original_path() {
     let sb = Sandbox::new("rm-regex-paths");

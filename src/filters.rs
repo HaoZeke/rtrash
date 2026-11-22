@@ -544,21 +544,17 @@ impl Patterns {
         })
     }
 
-    /// A pattern that takes everything: `*` and friends, a regex that
-    /// matches the empty string (such as `.*` or `^`), or a substring
-    /// every path contains (empty, or a lone separator).
+    /// A pattern whose effective scope is the whole trash: a glob that
+    /// matches every name or every absolute path, a regex that matches
+    /// the empty string or every probed path, a substring every absolute
+    /// path contains, or a prefix whose match key is empty, a volume
+    /// root, the home directory or a trash root.
     pub fn is_mass(&self) -> bool {
         match self.kind {
-            Match::Glob => {
-                let all = ["*", "*.*", "**", "**/*"];
-                self.texts.iter().any(|p| all.contains(&p.as_str()))
-            }
-            Match::Regex => self.regex.iter().any(|r| r.is_match("")),
-            Match::Substring => self
-                .texts
-                .iter()
-                .any(|p| ["", "/", "\\"].contains(&p.as_str())),
-            Match::Prefix => self.texts.iter().any(|p| prefix_is_mass(p)),
+            Match::Glob => self.texts.iter().any(|p| glob_is_mass(p)),
+            Match::Regex => self.regex.iter().any(regex_is_mass),
+            Match::Substring => self.texts.iter().any(|p| substring_is_mass(p)),
+            Match::Prefix => self.texts.iter().any(|p| prefix_pattern_is_mass(p)),
             Match::Exact | Match::Id => false,
         }
     }
@@ -598,6 +594,67 @@ impl Patterns {
             Match::Id => false,
         }
     }
+}
+
+/// Names and absolute paths a glob has to match before it counts as
+/// taking every item. `*.*` stays mass because its only literal is `.`
+/// and it matches every dotted name.
+fn glob_is_mass(p: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "a", "b", "z", "0", "9", ".", "-", "_", " ", "ab", "a.b", ".a", "a.", "foo", "*", "?",
+    ];
+    const ABSOLUTE: &[&str] = &["/", "/a", "/a/b", "/.a", "/a.b", "//x", "/tmp/x"];
+    if NAMES.iter().all(|n| crate::util::fnmatch(p, n)) {
+        return true;
+    }
+    if ABSOLUTE.iter().all(|n| crate::util::fnmatch(p, n)) {
+        return true;
+    }
+    let only_dot = p.bytes().any(|c| c == b'.')
+        && p.bytes()
+            .all(|c| matches!(c, b'*' | b'?' | b'[' | b']' | b'.'));
+    only_dot
+        && ["a.b", ".a", "a.", "foo.bar", "a.b.c"]
+            .iter()
+            .all(|n| crate::util::fnmatch(p, n))
+}
+
+/// A regex that matches the empty string, or every non-empty probe, so
+/// `.` and `.+` are mass and `foo` is not.
+fn regex_is_mass(r: &regex_lite::Regex) -> bool {
+    const PROBES: &[&str] = &[
+        "a", "/", "/a", "/a/b", r"C:\a", ".", "foo.bar", " ", "*", "0",
+    ];
+    r.is_match("") || PROBES.iter().all(|p| r.is_match(p))
+}
+
+/// A substring every Unix absolute path contains, or every Windows path
+/// contains. `.` is neither.
+fn substring_is_mass(p: &str) -> bool {
+    p.is_empty()
+        || ["/", "/a", "/a/b"].iter().all(|s| s.contains(p))
+        || [r"\", r"\a", r"\a\b"].iter().all(|s| s.contains(p))
+}
+
+/// A prefix whose match key is empty, a volume root, the home directory
+/// or a trash root. The raw drive-root spellings stay mass too.
+fn prefix_pattern_is_mass(p: &str) -> bool {
+    if prefix_is_mass(p) {
+        return true;
+    }
+    let key = crate::rm_match::match_key(std::path::Path::new(p));
+    if key.as_os_str().is_empty() {
+        return true;
+    }
+    let shown = key.to_string_lossy();
+    if prefix_is_mass(&shown) || shown == "/" || shown == "\\" {
+        return true;
+    }
+    #[cfg(windows)]
+    if crate::win_recycle::mass_canonical_key(&crate::win_recycle::path_key(&shown, &[])) {
+        return true;
+    }
+    crate::rm_match::is_scope_root(&key)
 }
 
 /// What an `rm` run did, for `--json`.
@@ -645,6 +702,14 @@ mod pattern_tests {
         let g = Patterns::new(vec!["*.o".into()], Match::Glob).unwrap();
         assert!(g.hit("/x/a.o", "a.o", "a.o"));
         assert!(!g.is_mass());
+        for mass in ["*", "*.*", "**", "**/*"] {
+            assert!(
+                Patterns::new(vec![mass.into()], Match::Glob)
+                    .unwrap()
+                    .is_mass(),
+                "{mass}"
+            );
+        }
     }
 
     #[test]
@@ -707,6 +772,78 @@ mod pattern_tests {
         assert!(Patterns::new(vec![r"\".into()], Match::Prefix)
             .unwrap()
             .is_mass());
+    }
+
+    #[test]
+    fn a_glob_of_question_star_matches_every_name() {
+        assert!(Patterns::new(vec!["?*".into()], Match::Glob)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn a_regex_dot_matches_every_nonempty_path() {
+        assert!(Patterns::new(vec![".".into()], Match::Regex)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn an_empty_prefix_matches_every_path() {
+        assert!(Patterns::new(vec![String::new()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn slash_slash_is_a_root_prefix() {
+        assert!(Patterns::new(vec!["//".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn slash_dot_is_a_root_prefix() {
+        assert!(Patterns::new(vec!["/.".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn a_dot_dot_prefix_that_climbs_to_the_root_is_mass() {
+        assert!(Patterns::new(vec!["/tmp/..".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn tilde_is_the_home_root() {
+        if crate::util::home_dir().is_none() {
+            return;
+        }
+        assert!(Patterns::new(vec!["~".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+        assert!(
+            !Patterns::new(vec!["~/not-a-root-alias".into()], Match::Prefix)
+                .unwrap()
+                .is_mass()
+        );
+    }
+
+    #[test]
+    fn a_trash_root_alias_is_mass() {
+        let Some(home) = crate::util::home_dir() else {
+            return;
+        };
+        let trash = home.join(".local/share/Trash");
+        let alias = format!("{}/.", trash.display());
+        assert!(Patterns::new(vec![alias], Match::Prefix).unwrap().is_mass());
+        assert!(
+            Patterns::new(vec!["~/.local/share/Trash/.".into()], Match::Prefix)
+                .unwrap()
+                .is_mass()
+        );
     }
 
     #[test]
