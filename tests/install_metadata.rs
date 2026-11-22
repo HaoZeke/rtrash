@@ -5,6 +5,9 @@
 //! we only publish *musl* tarballs for x86_64 and aarch64. Metadata must remap
 //! those hosts to the musl assets so bare `cargo binstall rtrash` works.
 
+mod common;
+
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -62,6 +65,55 @@ fn musl_asset(name: &str, version: &str, arch: &str) -> (String, String) {
     let basename = format!("{name}-{version}-{triple}.tar.gz");
     let bin_path = format!("{name}-{version}-{triple}/bin/{name}");
     (basename, bin_path)
+}
+
+fn table<'a>(document: &'a str, heading: &str) -> BTreeMap<&'a str, &'a str> {
+    let mut values = BTreeMap::new();
+    let mut found = false;
+    for line in document.lines().map(str::trim) {
+        if line == heading {
+            found = true;
+            continue;
+        }
+        if found && line.starts_with('[') {
+            break;
+        }
+        if found && !line.is_empty() && !line.starts_with('#') {
+            let (key, value) = line.split_once('=').expect("key = value");
+            values.insert(key.trim(), value.trim().trim_matches('"'));
+        }
+    }
+    assert!(found, "missing TOML table {heading}");
+    values
+}
+
+#[cfg(unix)]
+fn zip_entries(bytes: &[u8]) -> Vec<String> {
+    fn u16_at(bytes: &[u8], at: usize) -> usize {
+        u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap()) as usize
+    }
+    fn u32_at(bytes: &[u8], at: usize) -> usize {
+        u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize
+    }
+
+    let end = bytes
+        .windows(4)
+        .rposition(|window| window == b"PK\x05\x06")
+        .expect("zip end record");
+    let count = u16_at(bytes, end + 10);
+    let mut at = u32_at(bytes, end + 16);
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        assert_eq!(&bytes[at..at + 4], b"PK\x01\x02", "zip central header");
+        let name_len = u16_at(bytes, at + 28);
+        let extra_len = u16_at(bytes, at + 30);
+        let comment_len = u16_at(bytes, at + 32);
+        let name = std::str::from_utf8(&bytes[at + 46..at + 46 + name_len]).unwrap();
+        entries.push(name.to_owned());
+        at += 46 + name_len + extra_len + comment_len;
+    }
+    entries.sort();
+    entries
 }
 
 #[test]
@@ -134,10 +186,6 @@ fn binstall_metadata_matches_package_release_basename() {
         "cargo-dist must target both Linux musl arches"
     );
     assert!(
-        script.contains("x86_64-pc-windows-msvc") && script.contains("rtrash.exe"),
-        "package-release must know the Windows x64 target"
-    );
-    assert!(
         musl_workflow.contains("x86_64-pc-windows-msvc") && musl_workflow.contains("dist/*.zip*"),
         "release workflow must build and upload the Windows x64 zip and checksum"
     );
@@ -163,6 +211,77 @@ fn binstall_metadata_matches_package_release_basename() {
     assert_eq!(
         arm_bin,
         format!("rtrash-{version}-aarch64-unknown-linux-musl/bin/rtrash")
+    );
+}
+
+#[test]
+fn binstall_windows_metadata_describes_the_rooted_zip() {
+    let cargo = read("Cargo.toml");
+    let windows = table(
+        &cargo,
+        "[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]",
+    );
+    assert_eq!(
+        windows["pkg-url"],
+        "{ repo }/releases/download/v{ version }/{ name }-x86_64-pc-windows-msvc.zip"
+    );
+    assert_eq!(windows["pkg-fmt"], "zip");
+    assert_eq!(windows["bin-dir"], "{ bin }{ binary-ext }");
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_package_has_its_files_at_the_zip_root() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let temp = common::scratch_dir("install-metadata", "windows-zip-root");
+    let scripts = temp.join("scripts");
+    let fake_bin = temp.join("fake-bin");
+    let target = temp.join("target/x86_64-pc-windows-msvc/release");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::create_dir_all(&fake_bin).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    fs::copy(
+        root().join("scripts/package-release.sh"),
+        scripts.join("package-release.sh"),
+    )
+    .unwrap();
+    fs::write(temp.join("Cargo.toml"), "[package]\nversion = \"1.2.3\"\n").unwrap();
+    for name in ["CHANGELOG.md", "LICENSE", "README.md"] {
+        fs::write(temp.join(name), name).unwrap();
+    }
+    fs::write(target.join("rtrash.exe"), "fake executable").unwrap();
+
+    for (name, body) in [
+        ("cargo", "#!/bin/sh\nexit 0\n"),
+        (
+            "rustc",
+            "#!/bin/sh\nprintf '%s\\n' x86_64-pc-windows-msvc\n",
+        ),
+    ] {
+        let path = fake_bin.join(name);
+        fs::write(&path, body).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut paths = vec![fake_bin];
+    paths.extend(std::env::split_paths(
+        &std::env::var_os("PATH").expect("PATH"),
+    ));
+    let status = Command::new("bash")
+        .current_dir(&temp)
+        .arg("scripts/package-release.sh")
+        .arg("x86_64-pc-windows-msvc")
+        .env("SKIP_TEST", "1")
+        .env("PATH", std::env::join_paths(paths).unwrap())
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let archive = fs::read(temp.join("dist/rtrash-x86_64-pc-windows-msvc.zip")).unwrap();
+    assert_eq!(
+        zip_entries(&archive),
+        ["CHANGELOG.md", "LICENSE", "README.md", "rtrash.exe"]
     );
 }
 
