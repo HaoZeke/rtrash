@@ -74,6 +74,24 @@ fn who_names_the_process_holding_a_file_open() {
 }
 
 #[test]
+fn who_says_when_a_path_could_not_be_checked_in_full() {
+    let root = sandbox("who-unchecked");
+    let many = root.join("many");
+    fs::create_dir_all(&many).unwrap();
+    for n in 0..4097 {
+        fs::write(many.join(n.to_string()), b"").unwrap();
+    }
+    let out = run(&root, &["who", many.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        text(&out).contains("1 path could not be checked in full"),
+        "{}",
+        text(&out)
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn put_in_use_refuse_keeps_an_open_file() {
     let root = sandbox("put");
     let held = root.join("held.txt");
