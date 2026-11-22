@@ -1647,3 +1647,48 @@ fn finder_rm_keeps_an_item_that_took_the_name_while_it_asked() {
     assert!(rest.contains("changed in the trash"), "{rest}");
     assert_eq!(fs::read(b.finder().join("a.o")).unwrap(), b"second");
 }
+
+/// Finder rm refuses an item that holds dirty git work, as rm on a
+/// FreeDesktop trash does, in a dry run too; `-f` removes it.
+#[test]
+fn finder_rm_refuses_a_repository_that_holds_risky_work() {
+    let b = Box_::new("rm-git");
+    let repo = b.work().join("fr-repo");
+    fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", &b.root)
+            .output()
+            .unwrap()
+    };
+    if !git(&["init", "-q"]).status.success() {
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"x").unwrap();
+    let o = b.run(&["put", "-r", "fr-repo"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let kept = b.finder().join("fr-repo");
+    assert!(kept.join("f").exists());
+    for args in [
+        &["rm", "--match=glob", "fr-repo"][..],
+        &["rm", "-n", "--match=glob", "fr-repo"][..],
+        &["rm", "-y", "--match=glob", "fr-repo"][..],
+    ] {
+        let o = b.run(args, "");
+        assert_eq!(o.status.code(), Some(1), "{args:?}: {}", err(&o));
+        assert!(
+            err(&o).contains("refusing to remove"),
+            "{args:?}: {}",
+            err(&o)
+        );
+        assert!(err(&o).contains("-f"), "{args:?}: {}", err(&o));
+        assert!(kept.join("f").exists(), "{args:?}");
+    }
+    let o = b.run(&["rm", "-f", "--match=glob", "fr-repo"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(!kept.exists());
+}
