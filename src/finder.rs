@@ -1308,13 +1308,13 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
     let have: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
     let rows: Vec<_> = rows
         .into_iter()
-        .filter(|e| wants.is_empty() || crate::orig_path::selects(&wants, &e.shown))
+        .filter(|e| o.paths.is_empty() || crate::orig_path::selects(&wants, &e.shown))
         .map(|e| {
             let b = crate::fastdelete::disk_usage(&e.path());
             (e, b)
         })
         .collect();
-    if !wants.is_empty() {
+    if !o.paths.is_empty() {
         let kept: Vec<PathBuf> = rows
             .iter()
             .filter(|(e, _)| o.cutoff.is_none_or(|c| e.epoch < c))

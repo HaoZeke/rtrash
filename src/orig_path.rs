@@ -21,8 +21,14 @@ use std::path::{Component, Path, PathBuf};
 /// the path made absolute from the current directory, and the same path
 /// with a link in a parent resolved, which is the path `put` writes down.
 /// On Windows, also the short and long names of that parent, and of the
-/// final component when it is still on disk and is not a link.
+/// final component when it is still on disk and is not a link. An empty
+/// `typed` has none.
 pub fn forms(typed: &str) -> Vec<String> {
+    // An empty operand is no path. Made absolute it would be the current
+    // directory, and would select an item that was trashed from there.
+    if typed.is_empty() {
+        return Vec::new();
+    }
     let typed = crate::util::arg_path(typed);
     let climbs = typed
         .components()
@@ -130,6 +136,8 @@ enum Notice {
     Outside,
     /// The path is in neither, and these longer paths start with it.
     Miss(Vec<PathBuf>),
+    /// The operand is empty, so it names no path at all.
+    Empty,
 }
 
 fn notices(operands: &[String], have: &[PathBuf], kept: &[PathBuf]) -> Vec<(String, Notice)> {
@@ -140,6 +148,10 @@ fn notices(operands: &[String], have: &[PathBuf], kept: &[PathBuf]) -> Vec<(Stri
     let mut named = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for (operand, forms) in &groups {
+        if forms.is_empty() {
+            out.push((operand.clone(), Notice::Empty));
+            continue;
+        }
         if forms.iter().any(|form| stay.iter().any(|one| one == form)) {
             continue;
         }
@@ -174,6 +186,7 @@ fn notices(operands: &[String], have: &[PathBuf], kept: &[PathBuf]) -> Vec<(Stri
 pub fn hint(prog: &str, wants: &[String], have: &[PathBuf], kept: &[PathBuf], window: &str) {
     for (want, notice) in notices(wants, have, kept) {
         match notice {
+            Notice::Empty => eprintln!("{prog}: no match for an empty path"),
             Notice::Outside => eprintln!(
                 "{prog}: '{}' is in the trash, outside {window}",
                 crate::util::err_path(&crate::util::arg_path(&want))
@@ -231,6 +244,12 @@ fn absolute(path: &Path) -> PathBuf {
 /// then the final name, which is not followed. A symlink or junction in
 /// that final component stays the link, on every system.
 fn put_form(abs: &Path) -> Option<PathBuf> {
+    // A path that ends in `..` has no final name. Its parent is the
+    // physical one: `link/..` is the directory above what `link` points
+    // at, not the directory that holds `link`.
+    if abs.components().next_back() == Some(Component::ParentDir) {
+        return Some(resolve_parent(abs));
+    }
     let name = abs.file_name()?.to_os_string();
     let parent = abs.parent().filter(|p| !p.as_os_str().is_empty())?;
     Some(resolve_parent(parent).join(name))
@@ -388,6 +407,37 @@ mod tests {
         assert_eq!(norm(Path::new("/home/u/plain\\/")), norm(slashed));
     }
 
+    /// An empty operand names no path: it is not the current directory, so
+    /// an item trashed from there is not selected, and the hint says so.
+    #[test]
+    fn an_empty_operand_has_no_forms_and_selects_nothing() {
+        assert!(forms("").is_empty());
+        assert!(expand(&[String::new()]).is_empty());
+        let cwd = std::env::current_dir().unwrap();
+        let wants = expand(&[String::new()]);
+        assert!(!selects(&wants, &cwd));
+        let notes = notices(&[String::new()], &[cwd.clone()], &[cwd]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(matches!(notes[0].1, Notice::Empty), "{notes:?}");
+    }
+
+    /// `link/..` is the directory above what `link` points at, which is how
+    /// put resolves a parent, not the directory that holds `link`.
+    #[cfg(unix)]
+    #[test]
+    fn a_trailing_dot_dot_after_a_link_is_the_physical_parent() {
+        let dir = scratch("dotdot");
+        std::fs::create_dir_all(dir.join("real/sub")).unwrap();
+        std::fs::create_dir_all(dir.join("p")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real/sub"), dir.join("p/link")).unwrap();
+        let got = forms(&format!("{}/p/link/..", dir.display()));
+        let physical = norm(&std::fs::canonicalize(dir.join("real")).unwrap());
+        let lexical = norm(&dir.join("p"));
+        assert!(got.contains(&physical), "{got:?} {physical}");
+        assert!(!got.contains(&lexical), "{got:?} {lexical}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_near_miss_is_a_longer_path_and_not_the_path_itself() {
         let want = Path::new("/home/u/a");
@@ -422,7 +472,7 @@ mod tests {
         assert_eq!(notes.len(), 1, "{notes:?}");
         match &notes[0].1 {
             Notice::Miss(near) => assert_eq!(near.len(), 2, "{near:?}"),
-            Notice::Outside => panic!("an absent path is a near miss"),
+            Notice::Outside | Notice::Empty => panic!("an absent path is a near miss"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -478,7 +528,7 @@ mod tests {
                     .iter()
                     .any(|n| n.ends_with(&norm(&Path::new("a").join("b")))));
             }
-            Notice::Outside => panic!("a missing path is a near miss"),
+            Notice::Outside | Notice::Empty => panic!("a missing path is a near miss"),
         }
     }
 

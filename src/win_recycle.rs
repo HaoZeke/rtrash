@@ -2921,7 +2921,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         // put; it goes ahead alone only for the latest put's items.
         let have: Vec<PathBuf> = all.iter().map(original_of).collect();
         let wants = crate::orig_path::expand(&paths);
-        let all: Vec<TrashItem> = if wants.is_empty() {
+        let all: Vec<TrashItem> = if paths.is_empty() {
             all
         } else {
             all.into_iter()
@@ -2955,7 +2955,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let (mut items, rest): (Vec<TrashItem>, Vec<TrashItem>) = all
             .into_iter()
             .partition(|it| age_pass && age.keeps(Some(it.time_deleted)));
-        if !wants.is_empty() {
+        if !paths.is_empty() {
             let kept: Vec<PathBuf> = items.iter().map(original_of).collect();
             crate::orig_path::hint(
                 prog,

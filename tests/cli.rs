@@ -9625,6 +9625,62 @@ fn rm_exact_keeps_a_name_that_differs_by_a_trailing_backslash() {
     assert!(listed_originals(&sb).is_empty());
 }
 
+/// An empty operand is no path. It is not the current directory, so rm
+/// of "" keeps an item that was trashed from there and says nothing matched.
+#[cfg(unix)]
+#[test]
+fn rm_of_an_empty_operand_matches_nothing_even_in_the_original_directory() {
+    let sb = Sandbox::new("rm-empty-operand");
+    let dir = sb.work().join("here");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("f"), b"x").unwrap();
+    let put = sb.run(&["put", "--home-only", "-r", dir.to_str().unwrap()]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    fs::create_dir(&dir).unwrap();
+    for mode in [
+        &["rm", "--home-only", "--match=exact", ""][..],
+        &["rm", "--home-only", ""][..],
+    ] {
+        let rm = common::rtrash(&sb.root)
+            .args(mode)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            stderr_of(&rm).contains("no match for an empty path"),
+            "{}",
+            stderr_of(&rm)
+        );
+        assert_eq!(
+            listed_originals(&sb),
+            vec![dir.to_str().unwrap().to_string()]
+        );
+    }
+}
+
+/// `link/..` is the directory above the link's target, as put resolves a
+/// parent, not the directory that holds the link. rm of it removes the item
+/// trashed from the physical parent and keeps the one from the lexical one.
+#[cfg(unix)]
+#[test]
+fn rm_resolves_a_trailing_dot_dot_after_a_link_physically() {
+    let sb = Sandbox::new("rm-link-dotdot");
+    let (real, holder) = (sb.work().join("real"), sb.work().join("holder"));
+    for d in [&real, &holder] {
+        fs::create_dir_all(d.join("sub")).unwrap();
+        let put = sb.run(&["put", "--home-only", "-r", d.to_str().unwrap()]);
+        assert!(put.status.success(), "{}", stderr_of(&put));
+    }
+    fs::create_dir_all(real.join("sub")).unwrap();
+    fs::create_dir(&holder).unwrap();
+    std::os::unix::fs::symlink(real.join("sub"), holder.join("link")).unwrap();
+    let typed = format!("{}/link/..", holder.display());
+    let rm = sb.run(&["rm", "--home-only", "--match=exact", &typed]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    let left = listed_originals(&sb);
+    assert_eq!(left, vec![holder.to_str().unwrap().to_string()], "{left:?}");
+}
+
 /// A symlinked parent that is retargeted after the path was resolved does
 /// not make put move the new target. The item that was checked moves.
 #[cfg(all(unix, debug_assertions))]

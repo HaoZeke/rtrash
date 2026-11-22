@@ -515,7 +515,7 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
         return 2;
     }
     let wants = crate::orig_path::expand(&paths);
-    if !wants.is_empty() {
+    if !paths.is_empty() {
         let have: Vec<std::path::PathBuf> = items.iter().map(|it| it.local.clone()).collect();
         crate::orig_path::hint(
             prog,
@@ -587,8 +587,8 @@ pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
         Err(c) => return c,
     };
     let wants = crate::orig_path::expand(&scope.paths);
-    let chosen = matching(items, scope.age, &wants, now);
-    if !wants.is_empty() {
+    let chosen = matching(items, scope.age, &wants, !scope.paths.is_empty(), now);
+    if !scope.paths.is_empty() {
         let have: Vec<std::path::PathBuf> = items.iter().map(|it| it.local.clone()).collect();
         let kept: Vec<std::path::PathBuf> = chosen.iter().map(|it| it.local.clone()).collect();
         crate::orig_path::hint(
@@ -692,13 +692,14 @@ fn matching<'a>(
     items: &'a [BinEntry],
     age: Option<i64>,
     wants: &[String],
+    paths_given: bool,
     now: i64,
 ) -> Vec<&'a BinEntry> {
     items
         .iter()
         .filter(|it| {
             age.is_none_or(|s| now - it.deleted > s)
-                && (wants.is_empty() || crate::orig_path::selects(wants, &it.local))
+                && (!paths_given || crate::orig_path::selects(wants, &it.local))
         })
         .collect()
 }
@@ -787,7 +788,7 @@ mod tests {
         let young = PathBuf::from(&crate::orig_path::forms("2h")[0]);
         let items = vec![bin(old.clone(), now - 3 * 3600), bin(young, now - 30)];
         let wants = crate::orig_path::expand(&scope.paths);
-        let chosen = matching(&items, scope.age, &wants, now);
+        let chosen = matching(&items, scope.age, &wants, !scope.paths.is_empty(), now);
         assert_eq!(chosen.len(), 1, "{chosen:?}");
         assert_eq!(chosen[0].local, old);
     }
