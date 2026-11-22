@@ -6,6 +6,7 @@
 #   ./scripts/package-release.sh aarch64-unknown-linux-musl
 #   ./scripts/package-release.sh x86_64-apple-darwin
 #   ./scripts/package-release.sh aarch64-apple-darwin
+#   ./scripts/package-release.sh x86_64-pc-windows-msvc   # on a Windows host, from bash
 #   TARGETS="x86_64-unknown-linux-musl aarch64-unknown-linux-musl" ./scripts/package-release.sh --all
 # Env:
 #   OUT_DIR   output directory (default: dist/)
@@ -16,7 +17,11 @@
 #   bin path: {name}-{version}-{target}/bin/{bin}
 #   release:  $repo/releases/download/v{version}/...
 # Tag releases as v$VERSION so cargo-binstall can resolve assets without flags.
-# Supported release targets (CI): x86_64/aarch64 Linux musl and Apple Darwin.
+# Windows is the exception: it ships the asset name cargo-dist plans,
+#   rtrash-x86_64-pc-windows-msvc.zip (+ .sha256), holding one folder of the same
+#   name with rtrash.exe, CHANGELOG.md, LICENSE and README.md.
+# Supported release targets (CI): x86_64/aarch64 Linux musl, Apple Darwin and
+# x86_64 Windows MSVC.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -47,6 +52,54 @@ if [[ "${SKIP_TEST:-0}" != "1" ]]; then
   cargo test
 fi
 
+write_sha256() {
+  local dir="$1" file="$2"
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$dir" && sha256sum "$file" >"${file}.sha256")
+  elif command -v shasum >/dev/null 2>&1; then
+    (cd "$dir" && shasum -a 256 "$file" >"${file}.sha256")
+  else
+    echo "error: neither sha256sum nor shasum is available" >&2
+    return 1
+  fi
+}
+
+# Runs after `cargo build --release --target TARGET` has produced rtrash.exe.
+package_windows() {
+  local TARGET="$1"
+  local NAME="rtrash-${TARGET}"
+  local BIN="$ROOT/target/${TARGET}/release/rtrash.exe"
+  if [[ ! -f "$BIN" ]]; then
+    echo "error: missing binary at ${BIN}" >&2
+    return 1
+  fi
+
+  local STAGE="$OUT_DIR/${NAME}"
+  rm -rf "$STAGE"
+  mkdir -p "$STAGE"
+  cp "$BIN" "$STAGE/rtrash.exe"
+  cp "$ROOT/CHANGELOG.md" "$ROOT/LICENSE" "$ROOT/README.md" "$STAGE/"
+
+  local ZIP="$OUT_DIR/${NAME}.zip"
+  rm -f "$ZIP"
+  if command -v zip >/dev/null 2>&1; then
+    (cd "$OUT_DIR" && zip -qr "${NAME}.zip" "$NAME")
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import shutil, sys; shutil.make_archive(sys.argv[1], "zip", sys.argv[2], sys.argv[3])' \
+      "$OUT_DIR/${NAME}" "$OUT_DIR" "$NAME"
+  elif command -v python >/dev/null 2>&1; then
+    python -c 'import shutil, sys; shutil.make_archive(sys.argv[1], "zip", sys.argv[2], sys.argv[3])' \
+      "$OUT_DIR/${NAME}" "$OUT_DIR" "$NAME"
+  else
+    echo "error: neither zip nor python is available to make ${ZIP}" >&2
+    return 1
+  fi
+  write_sha256 "$OUT_DIR" "${NAME}.zip"
+  echo "OK: $ZIP"
+  echo "OK: ${ZIP}.sha256"
+  ls -la "$ZIP" "${ZIP}.sha256" "$STAGE/rtrash.exe"
+}
+
 package_one() {
   local TARGET="$1"
   local NAME="rtrash-${VERSION}-${TARGET}"
@@ -68,6 +121,11 @@ package_one() {
     export "${cc_var}=musl-gcc"
   fi
   cargo build --release --target "${TARGET}"
+
+  if [[ "${TARGET}" == *-windows-* ]]; then
+    package_windows "$TARGET"
+    return
+  fi
 
   local BIN="$ROOT/target/${TARGET}/release/rtrash"
   if [[ ! -x "$BIN" ]]; then
