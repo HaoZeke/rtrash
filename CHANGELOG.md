@@ -77,6 +77,7 @@ Name fragments `+slug.<type>.md` (no issue) or `<issue>.<type>.md` (links to Git
   In the NOTE column and in `--tree`, a folder du could not read shows `unreadable`, and a folder with an unreadable entry below it shows `incomplete`, since its sizes are low.
 - New `rm --regex`: PATTERNs are regular expressions searched in the original path, as trashy's `--match=regex`, on every trash.
 - New `rm -m`/`--match=KIND` reads PATTERNs as glob, regex, substring or exact, the kinds of trashy's `-m`.
+- A bare `rtrash rm PATTERN` now means the exact original path `put` recorded (resolved from the current directory, with a trailing slash ignored), on Linux, macOS Finder Trash and Windows Recycle Bin. Name-only matching now needs `--match=glob`.
 - New `rtrash du --shared` counts each extent that reflinks, clones or snapshots share once per row and in the totals, on copy-on-write file systems for Linux such as Btrfs, so copies no longer add up to more than they take on disk.
   It maps extents like `--unique`, so the plain listing stays as fast as before.
 - New `rtrash du --unique` adds a UNIQUE column with the bytes of each row that no other file shares, roughly what deleting it would free on copy-on-write file systems such as Btrfs and the Apple File System.
