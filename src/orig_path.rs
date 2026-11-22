@@ -416,7 +416,8 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let wants = expand(&[String::new()]);
         assert!(!selects(&wants, &cwd));
-        let notes = notices(&[String::new()], &[cwd.clone()], &[cwd]);
+        let here = std::slice::from_ref(&cwd);
+        let notes = notices(&[String::new()], here, here);
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(matches!(notes[0].1, Notice::Empty), "{notes:?}");
     }

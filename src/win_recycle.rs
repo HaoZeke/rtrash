@@ -1397,6 +1397,36 @@ impl BinFilters {
     }
 }
 
+/// What `rm` reads from its arguments before the shared parser: the options
+/// with `-m KIND`, `--match KIND` and `-m=KIND` spelled `--match=KIND`, then
+/// the operands after a `--`, which stay as typed (so `-m` after it is a
+/// name), then the error for a `-m` with no value.
+#[cfg(any(windows, test))]
+fn rm_option_args(args: &[String]) -> (Vec<String>, Vec<String>, Option<String>) {
+    let (opts, operands) = match args.iter().position(|a| a == "--") {
+        Some(at) => (&args[..at], args[at + 1..].to_vec()),
+        None => (args, Vec::new()),
+    };
+    let (mut rest, mut error) = (Vec::new(), None);
+    let mut i = 0usize;
+    while i < opts.len() {
+        let arg = &opts[i];
+        match arg.as_str() {
+            "-m" | "--match" => {
+                i += 1;
+                match opts.get(i) {
+                    Some(value) => rest.push(format!("--match={value}")),
+                    None => error = Some(format!("{arg} requires a match kind")),
+                }
+            }
+            a if a.starts_with("-m=") => rest.push(format!("--match={}", &a[3..])),
+            _ => rest.push(arg.clone()),
+        }
+        i += 1;
+    }
+    (rest, operands, error)
+}
+
 /// Parse the filter flags out of `args`, handing every other argument to
 /// `other`, which returns an exit status to stop with. A bad filter
 /// value prints its message and stops with 2.
@@ -4316,7 +4346,9 @@ registry), then the total and the free space on each (a warning under
         let mut json = false;
         let mut patterns: Vec<String> = Vec::new();
         let mut batch: Option<String> = None;
-        let filters = parse_with_filters(prog, args, |arg| {
+        let (rest, operands, short_err) = super::rm_option_args(args);
+        bad_match = bad_match.or(short_err);
+        let filters = parse_with_filters(prog, &rest, |arg| {
             match arg {
                 "-n" | "--dry-run" => dry_run = true,
                 "--regex" => kind = crate::filters::Match::Regex,
@@ -4401,6 +4433,7 @@ left in place.
             Ok(f) => f,
             Err(code) => return code,
         };
+        patterns.extend(operands);
         if let Some(b) = &batch {
             if b != "last" {
                 eprintln!(
@@ -4955,6 +4988,22 @@ pub fn purge_oldest_on(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn rm_options_stop_at_a_double_dash() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let (rest, ops, err) = rm_option_args(&v(&["-m", "glob", "-m=id", "-f", "--", "-m", "x"]));
+        assert_eq!(rest, v(&["--match=glob", "--match=id", "-f"]));
+        assert_eq!(ops, v(&["-m", "x"]));
+        assert!(err.is_none());
+        let (rest, ops, err) = rm_option_args(&v(&["a", "-m"]));
+        assert_eq!(rest, v(&["a"]));
+        assert!(ops.is_empty());
+        assert_eq!(err.as_deref(), Some("-m requires a match kind"));
+        let (rest, ops, _) = rm_option_args(&v(&["--", "--match", "kind"]));
+        assert!(rest.is_empty());
+        assert_eq!(ops, v(&["--match", "kind"]));
+    }
 
     #[test]
     fn identity_changes_when_another_file_is_checked() {
