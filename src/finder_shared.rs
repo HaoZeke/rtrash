@@ -758,20 +758,12 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
     }
     for e in hits {
         let path_s = e.shown.to_string_lossy();
-        // After the question: the item must still be the one listed. One
-        // already gone needs nothing done; another in its place stays.
-        let path = match e.checked() {
-            Ok(p) => p,
-            Err(_) if dry_run => e.path(),
-            Err(Stale::Gone) => continue,
-            Err(s) => {
-                eprintln!("{prog}: {}", s.reason(&e.name));
-                status = 1;
-                continue;
-            }
-        };
-        if !force && !crate::util::is_gone(&path) {
-            if let Some(work) = crate::du_git::risky_tree(&path) {
+        // The git scan reads the whole tree and can take a while, so it comes
+        // first; the item must still be the one listed after it, and after
+        // the question. One already gone needs nothing done; another in its
+        // place stays.
+        if !force && !crate::util::is_gone(&e.path()) {
+            if let Some(work) = crate::du_git::risky_tree(&e.path()) {
                 eprintln!(
                     "{prog}: refusing to remove '{}': it holds {} git work; \
                      restore it, or pass -f to remove it anyway",
@@ -782,17 +774,14 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
                 continue;
             }
         }
-        let path = if dry_run {
-            path
-        } else {
-            match e.checked() {
-                Ok(p) => p,
-                Err(Stale::Gone) => continue,
-                Err(s) => {
-                    eprintln!("{prog}: {}", s.reason(&e.name));
-                    status = 1;
-                    continue;
-                }
+        let path = match e.checked() {
+            Ok(p) => p,
+            Err(_) if dry_run => e.path(),
+            Err(Stale::Gone) => continue,
+            Err(s) => {
+                eprintln!("{prog}: {}", s.reason(&e.name));
+                status = 1;
+                continue;
             }
         };
         let m = crate::finder_total::measure_item(&path);

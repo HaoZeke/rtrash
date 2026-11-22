@@ -1648,6 +1648,48 @@ fn finder_rm_keeps_an_item_that_took_the_name_while_it_asked() {
     assert_eq!(fs::read(b.finder().join("a.o")).unwrap(), b"second");
 }
 
+/// A repository that takes the name of a listed item while rm asks stays,
+/// whichever of the two checks (the git scan or the identity) meets it first.
+#[test]
+fn finder_rm_keeps_a_repository_that_took_the_name_while_it_asked() {
+    let b = Box_::new("rm-retaken-git");
+    fs::write(b.work().join("rr"), b"plain").unwrap();
+    let o = b.run(&["put", "rr"], "");
+    assert!(o.status.success(), "{}", err(&o));
+    let mut cmd = common::rtrash_real(common::Real::Finder);
+    cmd.args(["rm", "-i", "rr"])
+        .current_dir(b.work())
+        .env("HOME", &b.root)
+        .env("XDG_DATA_HOME", b.root.join("xdg"))
+        .env("XDG_CONFIG_HOME", b.root.join(".config"))
+        .env("RTRASH_MACOS_TRASH", "finder")
+        .env("RTRASH_OSASCRIPT", b.root.join("osascript"))
+        .env("XDG_STATE_HOME", b.root.join("state"))
+        .env_remove("RTRASH_MAX_PERMANENT")
+        .env_remove("RTRASH_ALLOW_ROOTS");
+    let mut rm = common::Asking::spawn(&mut cmd);
+    rm.wait_for("(y/N) ");
+    let repo = b.root.join("rr.new");
+    fs::create_dir(&repo).unwrap();
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &b.root)
+        .output();
+    if !init.is_ok_and(|o| o.status.success()) {
+        let _ = rm.answer("n\n");
+        common::skip("git unavailable; skipping");
+        return;
+    }
+    fs::write(repo.join("f"), b"work").unwrap();
+    fs::remove_file(b.finder().join("rr")).unwrap();
+    fs::rename(&repo, b.finder().join("rr")).unwrap();
+    let (status, rest) = rm.answer("y\n");
+    assert!(!status.success(), "{rest}");
+    assert_eq!(fs::read(b.finder().join("rr").join("f")).unwrap(), b"work");
+}
+
 /// Finder rm refuses an item that holds dirty git work, as rm on a
 /// FreeDesktop trash does, in a dry run too; `-f` removes it.
 #[test]
