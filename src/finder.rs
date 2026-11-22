@@ -675,7 +675,14 @@ pub fn default_list(
         });
     let mut rows: Vec<_> = rows
         .into_iter()
-        .filter(|e| keep(&e.shown, &e.name, &e.date, &e.trash))
+        .filter(|e| {
+            keep(
+                &e.shown,
+                &crate::finder_shared::nfc(&e.name),
+                &e.date,
+                &e.trash,
+            )
+        })
         .map(|e| {
             let size = with_size.then(|| crate::fastdelete::disk_usage(&e.path()));
             (e, size)

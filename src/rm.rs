@@ -389,20 +389,20 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         if !size.keeps(sz) {
             continue;
         }
-        let payload_scanned = crate::util::join_name(&entry.dir.files(), &entry.name);
-        if !force && !crate::util::is_gone(&payload_scanned) {
-            if let Some(work) = crate::du_git::risky_tree(&payload_scanned) {
-                eprintln!(
-                    "{prog}: refusing to remove '{}': it holds {} git work; \
-                     restore it, or pass -f to remove it anyway",
-                    crate::util::err_path(&entry.original),
-                    work.label()
-                );
-                status = 1;
-                continue;
-            }
-        }
         if dry_run {
+            let payload_scanned = crate::util::join_name(&entry.dir.files(), &entry.name);
+            if !force && !crate::util::is_gone(&payload_scanned) {
+                if let Some(work) = crate::du_git::risky_tree(&payload_scanned) {
+                    eprintln!(
+                        "{prog}: refusing to remove '{}': it holds {} git work; \
+                         restore it, or pass -f to remove it anyway",
+                        crate::util::err_path(&entry.original),
+                        work.label()
+                    );
+                    status = 1;
+                    continue;
+                }
+            }
             bytes = bytes.saturating_add(sz);
             if !json {
                 if verbose {

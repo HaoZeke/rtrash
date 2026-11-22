@@ -656,7 +656,6 @@ fn warn_low_space(prog: &str, trashed: &[Trashed], finder_backend: bool) {
     let mut roots: Vec<PathBuf> = trashed.iter().map(|t| t.trash_dir.clone()).collect();
     roots.sort();
     roots.dedup();
-    let finder_roots = finder_backend.then(crate::finder::trashes);
     for root in roots {
         let Ok(space) = crate::space::query(&root) else {
             continue;
@@ -665,10 +664,7 @@ fn warn_low_space(prog: &str, trashed: &[Trashed], finder_backend: bool) {
         if lows.is_empty() {
             continue;
         }
-        let is_finder = finder_roots
-            .as_ref()
-            .is_some_and(|v| v.iter().any(|t| crate::finder_shared::same_path(t, &root)));
-        let owned = risks_for(&root, trashed, is_finder);
+        let owned = risks_for(&root, trashed, finder_backend);
         let pairs: Vec<(&Path, crate::du_git::RiskyGit)> =
             owned.iter().map(|(p, w)| (p.as_path(), *w)).collect();
         let what = format!("trash '{}'", crate::util::err_path(&root));

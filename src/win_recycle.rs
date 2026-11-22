@@ -885,6 +885,24 @@ pub fn test_bin_dir() -> Option<PathBuf> {
     std::env::var_os("RTRASH_TEST_BIN_DIR").map(PathBuf::from)
 }
 
+#[cfg(windows)]
+fn on_disk_entry(abs: &Path) -> PathBuf {
+    let (Some(parent), Some(name)) = (abs.parent(), abs.file_name()) else {
+        return abs.to_path_buf();
+    };
+    let want = name.to_string_lossy().to_lowercase();
+    let Ok(rd) = std::fs::read_dir(parent) else {
+        return abs.to_path_buf();
+    };
+    for entry in rd.flatten() {
+        let found = entry.file_name();
+        if found.to_string_lossy().to_lowercase() == want {
+            return parent.join(found);
+        }
+    }
+    abs.to_path_buf()
+}
+
 /// The put of [`test_bin_dir`]: `p` moves into `dir` as `$R<ID><ext>`,
 /// beside a version-2 `$I<ID><ext>` record of its path, size and time,
 /// the layout of a real bin, so list, restore and du read it back.
@@ -892,8 +910,10 @@ pub fn test_bin_dir() -> Option<PathBuf> {
 pub fn test_bin_put(dir: &Path, p: &Path) -> io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
-    // The plain form, as the shell records it, even for a `\\?\` operand.
-    let original = crate::util::plain_path(&std::path::absolute(p)?);
+    // The plain form with on-disk name casing, as the shell records it,
+    // even for a `\\?\` operand or a differently cased path.
+    let abs = crate::util::plain_path(&std::path::absolute(p)?);
+    let original = on_disk_entry(&abs);
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -2135,7 +2155,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     let located = super::list_items().ok().and_then(|items| {
                         items
                             .into_iter()
-                            .filter(|it| original_of(it) == kept)
+                            .filter(|it| super::same_git_risk_path(&original_of(it), &kept))
                             .max_by_key(|it| it.time_deleted)
                     });
                     let after = located
@@ -2299,7 +2319,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             .map(|orig| {
                 let hit = items
                     .iter()
-                    .filter(|it| original_of(it) == *orig)
+                    .filter(|it| super::same_git_risk_path(&original_of(it), orig))
                     .max_by_key(|it| it.time_deleted);
                 let (name, dir) = match hit {
                     Some(it) => {
@@ -3007,17 +3027,24 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let Ok(all) = super::list_items() else {
             return;
         };
+        let mounts = super::volume_mounts();
+        let norm = |p: &Path| {
+            let resolved =
+                crate::allow_roots::resolve(p).unwrap_or_else(|| crate::util::plain_path(p));
+            key_of(&resolved, &mounts)
+        };
         let rows: Vec<(PathBuf, i64, u64)> = all
             .iter()
             .map(|it| {
                 (
-                    original_of(it),
+                    norm(&original_of(it)),
                     it.time_deleted,
                     recycled_size(Path::new(&it.id)),
                 )
             })
             .collect();
-        let picked = crate::budget::trim_after_put(&rows, moved, max, policy);
+        let kept: Vec<PathBuf> = moved.iter().map(|p| norm(p)).collect();
+        let picked = crate::budget::trim_after_put(&rows, &kept, max, policy);
         if picked.is_empty() {
             return;
         }
@@ -4925,6 +4952,22 @@ mod tests {
         let hint = crate::space::warning_hint(&pairs);
         assert!(hint.contains("uncommitted work is committed"), "{hint}");
         assert!(hint.contains("commits are pushed"), "{hint}");
+    }
+
+    #[test]
+    fn same_git_risk_path_ignores_case_slashes_and_verbatim_prefix() {
+        assert!(same_git_risk_path(
+            Path::new(r"C:\Temp\PlainDir"),
+            Path::new(r"C:\Temp\plaindir"),
+        ));
+        assert!(same_git_risk_path(
+            Path::new(r"\\?\C:\Temp\PlainDir"),
+            Path::new("c:/temp/plaindir/"),
+        ));
+        assert!(!same_git_risk_path(
+            Path::new(r"C:\Temp\PlainDir"),
+            Path::new(r"C:\Temp\OtherDir"),
+        ));
     }
 
     #[test]

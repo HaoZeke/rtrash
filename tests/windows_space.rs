@@ -709,6 +709,82 @@ fn put_json_leaves_out_the_repository_note() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Putting a plain directory by a differently cased spelling still finds its
+/// `$I` record: no false unknown git-work warning, the low-space rm hint
+/// stays, `put --json` keeps the `$R` payload name, and post-put budget
+/// trimming keeps the just-trashed item.
+#[cfg(debug_assertions)]
+#[test]
+fn put_plain_dir_with_mismatched_case_keeps_rm_hint_and_json_name() {
+    let base = common::scratch_dir("wingit", "put-case");
+    let vol = base.join("vol");
+    std::fs::create_dir_all(&vol).unwrap();
+    std::fs::write(vol.join("ballast.bin"), vec![7u8; 95_000]).unwrap();
+
+    let real = base.join("PlainDir");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::write(real.join("note.txt"), vec![b'x'; 20_000]).unwrap();
+    let typed = base.join("plaindir");
+    let out = common::rtrash(&base)
+        .args(["put", typed.to_str().unwrap()])
+        .env("RTRASH_TEST_BIN_ROOT", &vol)
+        .env("RTRASH_IN_USE", "ignore")
+        .env("RTRASH_TEST_FS", format!("100000:{}", vol.display()))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(!real.exists(), "plain dir should be trashed");
+    assert!(!err.contains("contains a git repository"), "{err}");
+    assert!(!err.contains("would lose the work"), "{err}");
+    assert!(
+        err.contains("is low (") && err.contains("rtrash rm -i --max-count=1 --match=id ID"),
+        "{err}"
+    );
+
+    let real_json = base.join("PlainJsonDir");
+    std::fs::create_dir(&real_json).unwrap();
+    std::fs::write(real_json.join("note.txt"), b"ok").unwrap();
+    let typed_json = base.join("plainjsondir");
+    let out = common::rtrash(&base)
+        .args(["put", "--json", typed_json.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let json = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{err}");
+    assert!(
+        json.contains("\"trashed\":[")
+            && json.contains("\"name\":\"$R")
+            && json.trim_end().ends_with("\"failed\":0}"),
+        "{json}"
+    );
+
+    let real_budget = base.join("PlainBudgetDir");
+    std::fs::create_dir(&real_budget).unwrap();
+    std::fs::write(real_budget.join("note.txt"), vec![b'x'; 20_000]).unwrap();
+    let typed_budget = base.join("plainbudgetdir");
+    let out = common::rtrash(&base)
+        .args(["put", typed_budget.to_str().unwrap()])
+        .env("RTRASH_IN_USE", "ignore")
+        .env("RTRASH_MAX_SIZE", "1")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    let listed = common::rtrash(&base).args(["list"]).output().unwrap();
+    let list_out = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(list_out.contains("PlainBudgetDir"), "{list_out}");
+    assert!(!list_out.contains("PlainDir"), "{list_out}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// The command the Windows warning names restores the repository.
 #[test]
 fn restore_batch_last_brings_back_the_repository_the_warning_names() {

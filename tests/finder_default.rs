@@ -237,8 +237,21 @@ fn finder_list_applies_each_sort_before_last() {
     assert!(b.run(&["put", "a/z-small.txt"], "").status.success());
     common::next_trash_second();
     assert!(b.run(&["put", "z/a-large.txt"], "").status.success());
-    b.put_back("z-small.txt", &small);
-    b.put_back("a-large.txt", &large);
+    let recs: Vec<Record> = [("z-small.txt", &small), ("a-large.txt", &large)]
+        .iter()
+        .map(|(n, p)| Record {
+            name: (*n).into(),
+            code: *b"ptbL",
+            value: Value::Ustr(format!(
+                "{}/",
+                p.parent()
+                    .unwrap()
+                    .to_string_lossy()
+                    .trim_start_matches('/')
+            )),
+        })
+        .collect();
+    fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
 
     let names = |args: &[&str]| {
         let o = b.run(args, "");
