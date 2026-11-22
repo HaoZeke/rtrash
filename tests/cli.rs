@@ -9563,6 +9563,39 @@ fn rm_by_id_distinguishes_items_from_different_trash_roots() {
     assert_eq!(left, 1);
 }
 
+/// A backslash is a file name character on Unix, so rm of `plain\\` removes
+/// that item and leaves `plain`, and the other way round.
+#[cfg(unix)]
+#[test]
+fn rm_exact_keeps_a_name_that_differs_by_a_trailing_backslash() {
+    let sb = Sandbox::new("rm-backslash");
+    let plain = sb.work().join("plain");
+    let slashed = sb.work().join("plain\\");
+    fs::write(&plain, b"plain").unwrap();
+    fs::write(&slashed, b"slashed").unwrap();
+    for f in [&plain, &slashed] {
+        let put = sb.run(&["put", "--home-only", f.to_str().unwrap()]);
+        assert!(put.status.success(), "{}", stderr_of(&put));
+    }
+    let rm = sb.run(&[
+        "rm",
+        "--home-only",
+        "--match=exact",
+        slashed.to_str().unwrap(),
+    ]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    let left = listed_originals(&sb);
+    assert_eq!(left, vec![plain.to_str().unwrap().to_string()], "{left:?}");
+    let rm = sb.run(&[
+        "rm",
+        "--home-only",
+        "--match=exact",
+        plain.to_str().unwrap(),
+    ]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    assert!(listed_originals(&sb).is_empty());
+}
+
 /// A symlinked parent that is retargeted after the path was resolved does
 /// not make put move the new target. The item that was checked moves.
 #[cfg(all(unix, debug_assertions))]

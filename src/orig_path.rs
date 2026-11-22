@@ -326,13 +326,27 @@ fn compose(text: &str) -> String {
     }
 }
 
+/// A trailing separator is not part of the path. A backslash is one only on
+/// Windows; on Unix it is a valid file name character, so `a\` and `a` are
+/// two files.
 fn trim_sep(text: &str) -> String {
-    if text == "/" || text == "\\" || is_drive_root(text) {
-        return text.to_string();
+    #[cfg(windows)]
+    {
+        if text == "/" || text == "\\" || is_drive_root(text) {
+            return text.to_string();
+        }
+        text.trim_end_matches(['/', '\\']).to_string()
     }
-    text.trim_end_matches(['/', '\\']).to_string()
+    #[cfg(not(windows))]
+    {
+        if text == "/" {
+            return text.to_string();
+        }
+        text.trim_end_matches('/').to_string()
+    }
 }
 
+#[cfg(windows)]
 fn is_drive_root(text: &str) -> bool {
     let bytes = text.as_bytes();
     bytes.len() == 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/')
@@ -356,6 +370,22 @@ mod tests {
         let bare = forms(&format!("{}/real", dir.display()));
         assert_eq!(with, bare, "{with:?} {bare:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// On Unix a backslash is a file name character: `plain\\` is not
+    /// `plain`. Only a slash ends a path there.
+    #[cfg(unix)]
+    #[test]
+    fn a_trailing_backslash_is_part_of_a_unix_name() {
+        let plain = Path::new("/home/u/plain");
+        let slashed = Path::new("/home/u/plain\\");
+        assert_ne!(norm(plain), norm(slashed));
+        assert!(norm(slashed).ends_with("plain\\"));
+        assert!(!selects(&[norm(plain)], slashed));
+        assert!(!selects(&[norm(slashed)], plain));
+        assert!(selects(&[norm(slashed)], slashed));
+        assert_eq!(norm(Path::new("/home/u/plain/")), norm(plain));
+        assert_eq!(norm(Path::new("/home/u/plain\\/")), norm(slashed));
     }
 
     #[test]
