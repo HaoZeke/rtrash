@@ -9703,6 +9703,25 @@ fn an_empty_operand_is_not_the_working_directory() {
     );
 }
 
+/// `--` ends empty's options, so `-n` after it is a path.
+#[test]
+fn empty_takes_a_double_dash_as_the_end_of_its_options() {
+    let sb = Sandbox::new("empty-ddash");
+    sb.touch("a.txt");
+    assert!(sb.run(&["put", "a.txt"]).status.success());
+    let out = sb.empty(&["--", "-n"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(!err.contains("unrecognized option"), "{err}");
+    assert!(!err.contains("Would remove"), "{err}");
+    assert!(!err.contains("Removed"), "{err}");
+    assert_eq!(trash_names(&sb), vec!["a.txt".to_string()]);
+    let path = sb.work().join("a.txt").to_string_lossy().into_owned();
+    let gone = sb.empty(&["--", &path]);
+    assert!(gone.status.success(), "{}", stderr_of(&gone));
+    assert!(trash_names(&sb).is_empty(), "{}", stderr_of(&gone));
+}
+
 /// `link/..` is the directory above the link's target, as put resolves a
 /// parent, not the directory that holds the link. rm of it removes the item
 /// trashed from the physical parent and keeps the one from the lexical one.

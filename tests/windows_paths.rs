@@ -457,3 +457,20 @@ fn empty_refuses_an_empty_operand() {
     let listed = ok(&run(&home, &["list"]));
     assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
 }
+
+/// `--` ends empty's options, so `-n` after it is a path and the item stays.
+#[test]
+fn empty_takes_a_double_dash_as_the_end_of_its_options() {
+    let home = home("empty-ddash");
+    let kept = home.join("keep.txt");
+    fs::write(&kept, b"keep").unwrap();
+    ok(&run(&home, &["put", &s(&kept)]));
+    let out = run(&home, &["empty", "--", "-n"]);
+    let shown = text(&out);
+    assert_eq!(out.status.code(), Some(0), "{shown}");
+    assert!(!shown.contains("unrecognized option"), "{shown}");
+    assert!(!shown.contains("would remove"), "{shown}");
+    assert!(!shown.contains("Would remove"), "{shown}");
+    let listed = ok(&run(&home, &["list"]));
+    assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
+}

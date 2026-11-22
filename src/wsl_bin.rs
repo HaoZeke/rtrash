@@ -642,8 +642,20 @@ fn parse_empty_args(prog: &str, args: &[String]) -> Result<EmptyArgs, i32> {
     let mut all = false;
     let mut age = None;
     let mut paths = Vec::new();
+    let mut no_more_opts = false;
     for a in args {
         let a = a.as_str();
+        if no_more_opts || !a.starts_with('-') {
+            if a.is_empty() {
+                eprintln!("{prog}: '' is not a path");
+                return Err(2);
+            }
+            match crate::filters::parse_age_secs(a) {
+                Ok(_) => set_age(prog, a, &mut age)?,
+                Err(_) => paths.push(a.to_string()),
+            }
+            continue;
+        }
         if let Some(v) = a.strip_prefix("--older-than=") {
             set_age(prog, v, &mut age)?;
             continue;
@@ -651,14 +663,7 @@ fn parse_empty_args(prog: &str, args: &[String]) -> Result<EmptyArgs, i32> {
         match a {
             "-n" | "--dry-run" => dry = true,
             "--all" => all = true,
-            "" => {
-                eprintln!("{prog}: '' is not a path");
-                return Err(2);
-            }
-            _ if !a.starts_with('-') => match crate::filters::parse_age_secs(a) {
-                Ok(_) => set_age(prog, a, &mut age)?,
-                Err(_) => paths.push(a.to_string()),
-            },
+            "--" => no_more_opts = true,
             _ => {
                 eprintln!("{prog}: empty: unknown argument '{a}'");
                 return Err(2);
@@ -812,5 +817,12 @@ mod tests {
             parse_empty_args("rtrash", &[String::new()]),
             Err(2)
         ));
+    }
+
+    #[test]
+    fn wsl_empty_takes_a_double_dash_as_the_end_of_its_options() {
+        let ended = parse_empty_args("rtrash", &["--".into(), "-n".into()]).unwrap();
+        assert!(!ended.dry);
+        assert_eq!(ended.paths, vec!["-n".to_string()]);
     }
 }

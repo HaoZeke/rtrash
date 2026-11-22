@@ -307,8 +307,20 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         all: false,
         paths: Vec::new(),
     };
+    let mut no_more_opts = false;
     for arg in args {
-        match arg.as_str() {
+        let text = arg.as_str();
+        if no_more_opts || !text.starts_with('-') {
+            if text.is_empty() {
+                return usage_err(prog, "'' is not a path");
+            }
+            match crate::filters::parse_age_secs(text) {
+                Ok(secs) => opts.days = Some(secs),
+                Err(_) => opts.paths.push(text.to_string()),
+            }
+            continue;
+        }
+        match text {
             "-n" | "--dry-run" => opts.dry_run = true,
             "-v" | "--verbose" => opts.verbose = true,
             "-f" | "--force" => opts.interactive = false,
@@ -376,11 +388,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "--older-than" => {
                 return usage_err(prog, "--older-than requires an AGE (use --older-than=AGE)");
             }
-            "" => return usage_err(prog, "'' is not a path"),
-            a if !a.starts_with('-') => match crate::filters::parse_age_secs(a) {
-                Ok(secs) => opts.days = Some(secs),
-                Err(_) => opts.paths.push(a.to_string()),
-            },
+            "--" => no_more_opts = true,
             a => return usage_err(prog, &format!("unrecognized option '{a}'")),
         }
     }

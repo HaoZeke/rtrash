@@ -2871,26 +2871,40 @@ on Windows (there is no FreeDesktop layout here).
         let mut every = false;
         let mut paths = Vec::new();
         let mut age = AgeFilter::default();
+        let mut no_more_opts = false;
         let mut i = 0usize;
         while i < args.len() {
-            match age.take(args, &mut i) {
-                // As on Linux, `empty` takes no --newer-than.
-                Some(_) if age.newer_than.is_some() => {
-                    eprintln!("{prog}: unrecognized option '--newer-than'");
-                    return 2;
+            if !no_more_opts {
+                match age.take(args, &mut i) {
+                    // As on Linux, `empty` takes no --newer-than.
+                    Some(_) if age.newer_than.is_some() => {
+                        eprintln!("{prog}: unrecognized option '--newer-than'");
+                        return 2;
+                    }
+                    Some(Ok(())) => {
+                        i += 1;
+                        continue;
+                    }
+                    Some(Err(e)) => {
+                        eprintln!("{prog}: {e}");
+                        return 2;
+                    }
+                    None => {}
                 }
-                Some(Ok(())) => {
-                    i += 1;
-                    continue;
-                }
-                Some(Err(e)) => {
-                    eprintln!("{prog}: {e}");
-                    return 2;
-                }
-                None => {}
             }
             let arg = &args[i];
             i += 1;
+            if no_more_opts || !arg.starts_with('-') {
+                if arg.is_empty() {
+                    eprintln!("{prog}: '' is not a path");
+                    return 2;
+                }
+                match crate::filters::parse_age_secs(arg) {
+                    Ok(d) => age.older_than = Some(d),
+                    Err(_) => paths.push(arg.to_string()),
+                }
+                continue;
+            }
             match arg.as_str() {
                 "-n" | "--dry-run" => dry_run = true,
                 "-v" | "--verbose" => verbose = true,
@@ -2983,14 +2997,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                     return 0;
                 }
                 a if a.starts_with("--trash-dir=") => {}
-                "" => {
-                    eprintln!("{prog}: '' is not a path");
-                    return 2;
-                }
-                a if !a.starts_with('-') => match crate::filters::parse_age_secs(a) {
-                    Ok(d) => age.older_than = Some(d),
-                    Err(_) => paths.push(a.to_string()),
-                },
+                "--" => no_more_opts = true,
                 a => {
                     eprintln!("{prog}: unrecognized option '{a}'");
                     return 2;
