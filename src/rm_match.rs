@@ -251,6 +251,9 @@ fn coverage_roots(entries: &[PathBuf]) -> Vec<String> {
         let xdg = PathBuf::from(xdg);
         if xdg.is_absolute() {
             push(cover_key(&xdg));
+            if let Ok(real) = std::fs::canonicalize(&xdg) {
+                push(cover_key(&crate::util::plain_path(&real)));
+            }
         }
     }
     if !cfg!(windows) {

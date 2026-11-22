@@ -2031,6 +2031,41 @@ fn a_prefix_of_the_resolved_home_does_not_wipe_it() {
     assert_eq!(left.len(), 3, "{left:?} {err}");
 }
 
+#[test]
+fn a_pattern_of_the_resolved_xdg_data_home_does_not_wipe_it() {
+    let sb = Sandbox::new("rm-pattern-real-xdg");
+    let real = sb.root.join("real_xdg");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(real.join("a.txt"), b"a").unwrap();
+    fs::write(real.join("b.txt"), b"b").unwrap();
+    let link = sb.root.join("link_xdg");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    sb.touch("other.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let put = sb.run(&[
+        "put",
+        &pin,
+        real.join("a.txt").to_str().unwrap(),
+        real.join("b.txt").to_str().unwrap(),
+        sb.work().join("other.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let real = fs::canonicalize(&real).unwrap();
+    let pattern = format!("^{}/[^#]+$", regex_escape(real.to_str().unwrap()));
+    let out = common::rtrash(&sb.root)
+        .env("XDG_DATA_HOME", &link)
+        .args(["rm", &pin, "--regex", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(left.len(), 3, "{left:?} {err}");
+}
+
 fn write_keep(sb: &Sandbox, line: &str) {
     let dir = sb.root.join(".config/rtrash");
     fs::create_dir_all(&dir).unwrap();
