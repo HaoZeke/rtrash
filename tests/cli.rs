@@ -290,9 +290,8 @@ fn info_files_that_name_no_payload_are_never_items() {
     assert!(!listed.contains("evil"), "{listed}");
     for n in 1..=3 {
         let evil = format!("evil{n}");
-        // No match is clear and successful, as trash-rm is.
         let out = sb.run(&["rm", "--home-only", &evil]);
-        assert!(out.status.success(), "{}", stderr_of(&out));
+        assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
         assert!(!stdout_of(&out).contains("removed"), "{}", stdout_of(&out));
         assert!(!sb.run(&["restore", "--home-only", &evil]).status.success());
         assert!(sb.trash().join("files/keep").exists(), "{evil}");
@@ -3552,7 +3551,7 @@ fn trash_rm_match_takes_substring_and_exact() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     // A shorter path is not the file. new.txt stays, and is named.
     let out = sb.run(&["rm", "--match=exact", "new"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     assert!(stderr_of(&out).contains("near miss"), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb), ["new.txt"]);
     // A substring every path holds needs --force; a bad kind exits 2.
@@ -5048,7 +5047,7 @@ fn trash_cli_command_lines_work_under_the_trash_names() {
     assert!(trash_names(&sb).is_empty());
 
     let out = run_as("trash-rm", &["--trash-dir", &t, "nothing"], "");
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
 }
 
 #[test]
@@ -5182,8 +5181,19 @@ fn rm_matches_the_original_path_exactly() {
     names.sort();
     assert_eq!(names, vec!["ab".to_string(), "b".to_string()]);
 
+    let dry_again = sb.run(&["rm", "--home-only", "-n", "a"]);
+    assert_eq!(
+        dry_again.status.code(),
+        Some(1),
+        "{}",
+        stderr_of(&dry_again)
+    );
+    let dry_err = stderr_of(&dry_again);
+    assert!(dry_err.contains("no exact match"), "{dry_err}");
+    assert!(dry_err.contains("near miss"), "{dry_err}");
+
     let again = sb.run(&["rm", "--home-only", "a"]);
-    assert!(again.status.success(), "{}", stderr_of(&again));
+    assert_eq!(again.status.code(), Some(1), "{}", stderr_of(&again));
     let err = stderr_of(&again);
     assert!(err.contains("no exact match"), "{err}");
     assert!(err.contains("near miss"), "{err}");
@@ -5222,6 +5232,21 @@ fn rm_removes_one_spelling_of_an_accented_name() {
         .collect();
     assert_eq!(left.len(), 1, "{}", stderr_of(&out));
     assert_eq!(fs::read(&left[0]).unwrap(), b"decomposed");
+}
+
+#[test]
+fn glob_matches_an_nfc_pattern_to_an_nfd_path() {
+    let sb = Sandbox::new("glob-nfc");
+    let composed = "item-\u{e9}.txt";
+    let decomposed = "item-e\u{301}.txt";
+    fs::write(sb.work().join(decomposed), b"wanted").unwrap();
+    fs::write(sb.work().join("other.txt"), b"other").unwrap();
+    assert!(sb.run(&["put", decomposed, "other.txt"]).status.success());
+
+    let out = sb.run(&["rm", "--home-only", "--glob", composed]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.trash().join("files").join(decomposed).exists());
+    assert!(sb.trash().join("files/other.txt").exists());
 }
 
 /// A parent traversal after a link resolves the link before `..`. Its
@@ -5304,7 +5329,7 @@ fn rm_names_an_exact_path_outside_the_age_window() {
     set_deletion_date(&sb, "ab", "2000-01-01T00:00:00");
 
     let dry = sb.run(&["rm", "--home-only", "-n", "--older-than=1d", "a"]);
-    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    assert_eq!(dry.status.code(), Some(1), "{}", stderr_of(&dry));
     let err = stderr_of(&dry);
     assert!(err.contains("outside the age window"), "{err}");
     assert!(!err.contains("no exact match"), "{err}");
@@ -5312,7 +5337,7 @@ fn rm_names_an_exact_path_outside_the_age_window() {
     assert!(!stdout_of(&dry).contains("/ab"), "{}", stdout_of(&dry));
 
     let out = sb.run(&["rm", "--home-only", "--older-than=1d", "a"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     let mut names = trash_names(&sb);
     names.sort();
     assert_eq!(names, vec!["a".to_string(), "ab".to_string()]);
@@ -5377,7 +5402,7 @@ fn rm_names_an_exact_path_outside_the_size_window() {
     assert!(sb.run(&["put", "a", "ab"]).status.success());
 
     let out = sb.run(&["rm", "--home-only", "--larger-than=1G", "a"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     let err = stderr_of(&out);
     assert!(err.contains("outside the size window"), "{err}");
     assert!(!err.contains("no exact match"), "{err}");
@@ -5452,7 +5477,7 @@ fn trash_rm_defaults_to_the_exact_original_path() {
     sb.touch("notebook");
     assert!(sb.run(&["put", "note", "notebook"]).status.success());
     let out = sb.run(&["rm", "--home-only", "not"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb).len(), 2);
     let out = sb.run(&["rm", "--home-only", "note"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -12118,13 +12143,10 @@ fn rm_and_empty_leave_a_decoy_at_the_lexical_parent_of_link_dotdot() {
     assert!(sb.trash().join("files/sub/decoy").is_file());
 
     let dry = sb.run(&["rm", "--home-only", "-n", "sub/link/.."]);
-    let shown = format!("{}{}", stdout_of(&dry), stderr_of(&dry));
-    assert!(
-        shown.contains("Would permanently remove 0 items"),
-        "{shown}"
-    );
+    assert_eq!(dry.status.code(), Some(1), "{}", stderr_of(&dry));
+    assert!(stderr_of(&dry).contains("no exact match"));
     let rm = sb.run(&["rm", "--home-only", "-f", "sub/link/.."]);
-    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    assert_eq!(rm.status.code(), Some(1), "{}", stderr_of(&rm));
     assert!(
         sb.trash().join("files/sub/decoy").is_file(),
         "{}",

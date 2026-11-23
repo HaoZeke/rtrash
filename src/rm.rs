@@ -399,6 +399,14 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
         }
     };
+    let glob_pats = crate::filters::Patterns {
+        texts: pats
+            .texts
+            .iter()
+            .map(|text| crate::util::nfc(text))
+            .collect(),
+        ..pats.clone()
+    };
 
     let matched = |entry: &list::Entry| -> bool {
         let path_s = crate::util::str_from_os_ref(entry.original.as_os_str());
@@ -409,6 +417,14 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             .unwrap_or_default();
         let pattern_hit = if kind == crate::filters::Match::Exact {
             crate::orig_path::selects(&pats.texts, &entry.original)
+        } else if kind == crate::filters::Match::Glob {
+            glob_pats.selects(
+                &crate::util::nfc(&path_s),
+                &crate::util::nfc(&base),
+                &crate::util::nfc(&entry.name),
+                entry.date.as_deref().unwrap_or(""),
+                &entry.dir.root,
+            )
         } else {
             pats.selects(
                 path_s.as_ref(),
@@ -446,8 +462,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
     {
         return 2;
     }
-    let exact_no_hits = hits.is_empty() && kind == crate::filters::Match::Exact && ids.is_empty();
-    if hits.is_empty() && (!exact_no_hits || json) {
+    if hits.is_empty() {
         return crate::rm_match::no_matches(prog);
     }
     // After the match: a selection that holds every entry, or every entry
@@ -469,7 +484,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         .into_iter()
         .filter(|e| !keep.protects(&e.original))
         .collect();
-    if selected.is_empty() && !exact_no_hits {
+    if selected.is_empty() {
         return 0;
     }
     let deletable = |entry: &list::Entry| {

@@ -5018,6 +5018,14 @@ left in place.
         if kind == crate::filters::Match::Exact {
             pats.texts = crate::orig_path::expand(&pats.operands);
         }
+        let glob_pats = crate::filters::Patterns {
+            texts: pats
+                .texts
+                .iter()
+                .map(|text| crate::util::nfc(text))
+                .collect(),
+            ..pats.clone()
+        };
         if pats.is_mass() && !force && !scoped {
             if pats.unknown_scope_needs_force() {
                 crate::rm_match::refuse_unknown_scope(prog);
@@ -5141,6 +5149,14 @@ left in place.
                         let root = bin_root_of(Path::new(&it.id)).unwrap_or_default();
                         pats.selects(&full, &base, &id, &date, &root)
                     }
+                    crate::filters::Match::Glob => {
+                        let full = crate::util::nfc(&orig.to_string_lossy());
+                        let base = orig
+                            .file_name()
+                            .map(|f| crate::util::nfc(&f.to_string_lossy()))
+                            .unwrap_or_default();
+                        glob_pats.hit(&full, &base, &base)
+                    }
                     _ => {
                         let full = orig.to_string_lossy().into_owned();
                         let base = orig
@@ -5182,8 +5198,7 @@ left in place.
         {
             return 2;
         }
-        let exact_no_hits = matched.is_empty() && exact && ids.is_empty();
-        if matched.is_empty() && (!exact_no_hits || json) {
+        if matched.is_empty() {
             return crate::rm_match::no_matches(prog);
         }
         if !force && !scoped {
@@ -5219,7 +5234,7 @@ left in place.
                 }
             })
             .collect();
-        if matched.is_empty() && !exact_no_hits {
+        if matched.is_empty() {
             return 0;
         }
         if !dry_run {

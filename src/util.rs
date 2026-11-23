@@ -67,6 +67,12 @@ pub fn str_from_os_ref(s: &std::ffi::OsStr) -> String {
     }
 }
 
+/// `s` in Unicode NFC, so equivalent composed and decomposed paths match.
+pub fn nfc(s: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    s.nfc().collect()
+}
+
 #[cfg(unix)]
 fn os_bytes(s: &std::ffi::OsStr) -> std::borrow::Cow<'_, [u8]> {
     use std::os::unix::ffi::OsStrExt;

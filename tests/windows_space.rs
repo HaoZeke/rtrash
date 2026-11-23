@@ -1285,17 +1285,30 @@ fn rm_json_summarizes_the_recycle_bin_removal() {
     let done = rm(&["--json"]);
     assert!(done.contains("\"dry_run\": false"), "{done}");
     assert!(done.contains("\"removed\": 1"), "{done}");
-    let again = common::rtrash_real(common::Real::RecycleBin)
-        .args(["rm", "--json"])
-        .arg(&p)
-        .output()
-        .unwrap();
-    assert_eq!(again.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&again.stderr).contains("no trash items match"),
-        "{}",
-        String::from_utf8_lossy(&again.stderr)
-    );
+    for args in [&[][..], &["-n"][..], &["--json"][..]] {
+        let again = common::rtrash_real(common::Real::RecycleBin)
+            .arg("rm")
+            .args(args)
+            .arg(&p)
+            .output()
+            .unwrap();
+        assert_eq!(
+            again.status.code(),
+            Some(1),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&again.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&again.stderr).contains("no exact match"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&again.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&again.stderr).contains("no trash items match"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&again.stderr)
+        );
+    }
 }
 
 /// `reap --permanent` on Windows deletes through permanent_guard::remove,

@@ -1255,13 +1255,25 @@ fn finder_rm_exact_with_no_match_exits_one() {
     let b = Box_::new("rm-exact-no-match");
     fs::write(b.work().join("kept.txt"), b"x").unwrap();
     assert!(b.run(&["put", "kept.txt"], "").status.success());
-    let missing = b.work().join("missing.txt");
-    let out = b.run(
-        &["rm", "--json", "--match=exact", missing.to_str().unwrap()],
-        "",
-    );
-    assert_eq!(out.status.code(), Some(1), "{}", err(&out));
-    assert!(err(&out).contains("no trash items match"), "{}", err(&out));
+    let missing = b.work().join("kept");
+    for args in [
+        vec!["rm", "--match=exact", missing.to_str().unwrap()],
+        vec!["rm", "-n", "--match=exact", missing.to_str().unwrap()],
+        vec!["rm", "--json", "--match=exact", missing.to_str().unwrap()],
+    ] {
+        let out = b.run(&args, "");
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", err(&out));
+        assert!(
+            err(&out).contains("no exact match"),
+            "{args:?}: {}",
+            err(&out)
+        );
+        assert!(
+            err(&out).contains("no trash items match"),
+            "{args:?}: {}",
+            err(&out)
+        );
+    }
     assert!(b.finder().join("kept.txt").exists());
 }
 

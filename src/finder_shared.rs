@@ -108,8 +108,7 @@ pub fn entries() -> std::io::Result<Vec<Entry>> {
 /// `s` in Unicode NFC, the form a user types and the FreeDesktop trash
 /// keeps; Finder may hand back a name decomposed (NFD).
 pub fn nfc(s: &str) -> String {
-    use unicode_normalization::UnicodeNormalization;
-    s.nfc().collect()
+    crate::util::nfc(s)
 }
 
 /// The `rm --regex` expressions in NFC, as restore compiles its own, so a
@@ -718,7 +717,7 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         let name = nfc(&e.name);
         let pattern_hit = match patterns.kind {
             crate::filters::Match::Exact => crate::orig_path::selects(&patterns.texts, &e.shown),
-            crate::filters::Match::Glob => texts.glob_hit(&path_s, &base, &name),
+            crate::filters::Match::Glob => texts.glob_hit(&nfc(&path_s), &nfc(&base), &name),
             crate::filters::Match::Regex => {
                 let path_s = nfc(&path_s);
                 regex.iter().any(|r| r.is_match(&path_s))
@@ -750,9 +749,7 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
     {
         return 2;
     }
-    let exact_no_hits =
-        hits.is_empty() && patterns.kind == crate::filters::Match::Exact && ids.is_empty();
-    if hits.is_empty() && (!exact_no_hits || json) {
+    if hits.is_empty() {
         return crate::rm_match::no_matches(prog);
     }
     if refuse_covered {
@@ -779,7 +776,7 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         .into_iter()
         .filter(|e| !keep.protects(&e.shown))
         .collect();
-    if hits.is_empty() && !exact_no_hits {
+    if hits.is_empty() {
         return 0;
     }
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
