@@ -621,32 +621,99 @@ impl Patterns {
 }
 
 fn glob_hits_path(pattern: &str, full: &str) -> bool {
-    #[cfg(not(windows))]
-    if !pattern.contains(['/', '\\']) {
-        let path = std::path::Path::new(full);
-        if let Some((anchor, relative)) = scope_relative(path) {
-            let inherited = anchor.to_string_lossy();
-            if crate::util::fnmatch(pattern, &inherited) {
-                return crate::util::fnmatch(pattern, &relative.to_string_lossy());
-            }
+    let full_hit = crate::util::fnmatch(pattern, full);
+    if !full_hit || pattern.contains(['/', '\\']) {
+        return full_hit;
+    }
+    if let Some((inherited, relative)) = scope_relative(full) {
+        if crate::util::fnmatch(pattern, &inherited) {
+            return crate::util::fnmatch(pattern, &relative);
         }
     }
-    crate::util::fnmatch(pattern, full)
+    full_hit
 }
 
-#[cfg(not(windows))]
-fn scope_relative(path: &std::path::Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+fn scope_relative(full: &str) -> Option<(String, String)> {
     let roots = crate::rm_match::known_scope_roots()?;
-    let first = roots.first()?;
-    let anchor = first.ancestors().find(|ancestor| {
-        !ancestor.as_os_str().is_empty()
-            && path.starts_with(ancestor)
-            && roots.iter().all(|root| root.starts_with(ancestor))
-    })?;
-    Some((
-        anchor.to_path_buf(),
-        path.strip_prefix(anchor).ok()?.to_path_buf(),
-    ))
+    #[cfg(windows)]
+    {
+        let shown = crate::util::plain_path(std::path::Path::new(full))
+            .to_string_lossy()
+            .into_owned();
+        let key = crate::win_recycle::path_key(full, &[]);
+        let roots: Vec<String> = roots
+            .iter()
+            .map(|root| crate::win_recycle::path_key(&root.to_string_lossy(), &[]))
+            .collect();
+        scope_relative_parts(&shown, &key, &roots, b'\\')
+    }
+    #[cfg(not(windows))]
+    {
+        let roots: Vec<String> = roots
+            .iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect();
+        scope_relative_parts(full, full, &roots, b'/')
+    }
+}
+
+fn scope_relative_parts(
+    shown: &str,
+    key: &str,
+    roots: &[String],
+    separator: u8,
+) -> Option<(String, String)> {
+    let key_parts: Vec<&str> = key
+        .split(char::from(separator))
+        .filter(|part| !part.is_empty())
+        .collect();
+    let root_parts: Vec<Vec<&str>> = roots
+        .iter()
+        .map(|root| {
+            root.split(char::from(separator))
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+        .collect();
+    let common = (0..key_parts.len())
+        .take_while(|&n| {
+            root_parts
+                .iter()
+                .all(|root| root.get(n) == Some(&key_parts[n]))
+        })
+        .count();
+    if common == 0 {
+        return None;
+    }
+    let spans = component_spans(shown, separator);
+    if spans.len() < common {
+        return None;
+    }
+    let inherited = shown[..spans[common - 1].1].to_string();
+    let relative = spans
+        .get(common)
+        .map_or("", |span| &shown[span.0..])
+        .to_string();
+    Some((inherited, relative))
+}
+
+fn component_spans(path: &str, separator: u8) -> Vec<(usize, usize)> {
+    let bytes = path.as_bytes();
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        while at < bytes.len() && bytes[at] == separator {
+            at += 1;
+        }
+        let start = at;
+        while at < bytes.len() && bytes[at] != separator {
+            at += 1;
+        }
+        if start < at {
+            spans.push((start, at));
+        }
+    }
+    spans
 }
 
 /// Names a glob has to match before it counts as taking every item, and
@@ -1173,5 +1240,39 @@ mod pattern_tests {
         let regex = Patterns::new(vec![r"^E:\\.*".into()], Match::Regex).unwrap();
         assert!(!regex.is_mass());
         assert!(super::selection_covers_scope(&regex, &on_e, &drives));
+    }
+
+    #[test]
+    fn inherited_windows_scope_paths_ignore_case_and_prefix_spelling() {
+        let roots = [
+            crate::win_recycle::path_key(r"C:\Users\FolderO\hm", &[]),
+            crate::win_recycle::path_key(r"c:/users/foldero/xdg", &[]),
+        ];
+        let key = crate::win_recycle::path_key(r"\\?\c:\USERS\FolderO\work\foo.txt", &[]);
+        let got =
+            super::scope_relative_parts(r"C:\USERS\FolderO\work\foo.txt", &key, &roots, b'\\');
+        assert_eq!(
+            got,
+            Some((r"C:\USERS\FolderO".to_string(), r"work\foo.txt".to_string()))
+        );
+
+        let roots = [
+            crate::win_recycle::path_key(r"\\server\share\FolderO\hm", &[]),
+            crate::win_recycle::path_key(r"\\?\UNC\SERVER\SHARE\foldero\xdg", &[]),
+        ];
+        let key = crate::win_recycle::path_key(r"\\?\UNC\Server\Share\FolderO\work\foo.txt", &[]);
+        let got = super::scope_relative_parts(
+            r"\\Server\Share\FolderO\work\foo.txt",
+            &key,
+            &roots,
+            b'\\',
+        );
+        assert_eq!(
+            got,
+            Some((
+                r"\\Server\Share\FolderO".to_string(),
+                r"work\foo.txt".to_string()
+            ))
+        );
     }
 }

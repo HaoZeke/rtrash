@@ -594,7 +594,9 @@ fn a_prefix_of_a_junction_to_a_drive_root_is_refused() {
         return;
     }
     let root = format!(r"{}:\", char::from(bytes[0].to_ascii_uppercase()));
-    let file = home.join("keep.txt");
+    let narrow_dir = home.join("project");
+    fs::create_dir(&narrow_dir).unwrap();
+    let file = narrow_dir.join("keep.txt");
     fs::write(&file, "k").unwrap();
     ok(&run(&home, &["put", &s(&file)]));
     common::mklink_junction(&link, Path::new(&root)).unwrap();
@@ -626,8 +628,42 @@ fn a_prefix_of_a_junction_to_a_drive_root_is_refused() {
     let listed = ok(&run(&home, &["rm", "-n", "-f", "--prefix", &junction]));
     assert!(listed.lines().any(|l| l.ends_with("keep.txt")), "{listed}");
     assert_eq!(payloads(), 1, "the dry run purged the bin");
-    let narrow = ok(&run(&home, &["rm", "-n", "--prefix", &text_home]));
+    let narrow = ok(&run(&home, &["rm", "-n", "--prefix", &s(&narrow_dir)]));
     assert!(narrow.lines().any(|l| l.ends_with("keep.txt")), "{narrow}");
+}
+
+#[test]
+fn a_home_prefix_is_mass_and_a_child_prefix_is_narrow() {
+    let home = home("scope-prefix");
+    let project = home.join("project");
+    fs::create_dir(&project).unwrap();
+    let file = project.join("keep.txt");
+    fs::write(&file, "k").unwrap();
+    ok(&run(&home, &["put", &s(&file)]));
+
+    let refused = run(&home, &["rm", "-n", "--prefix", &s(&home)]);
+    let err = text(&refused);
+    assert_eq!(refused.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+
+    let narrow = ok(&run(&home, &["rm", "-n", "--prefix", &s(&project)]));
+    assert!(narrow.lines().any(|l| l.ends_with("keep.txt")), "{narrow}");
+}
+
+#[test]
+fn a_home_name_does_not_widen_a_basename_glob() {
+    let home = home("foldero-glob");
+    for name in ["keep.txt", "spared.txt"] {
+        fs::write(home.join(name), "x").unwrap();
+        ok(&run(&home, &["put", name]));
+    }
+    let out = run(&home, &["rm", "-n", "--glob", "*o*"]);
+    let shown = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{shown}");
+    assert!(!shown.contains("refusing mass pattern"), "{shown}");
+    let listed = ok(&run(&home, &["list"]));
+    assert!(listed.contains("keep.txt"), "{listed}");
+    assert!(listed.contains("spared.txt"), "{listed}");
 }
 
 /// `--prefix` of a junction keeps the junction's own name. Items whose

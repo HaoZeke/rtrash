@@ -2093,6 +2093,37 @@ fn a_symlinked_temp_parent_does_not_widen_a_basename_glob() {
 }
 
 #[test]
+fn stripping_an_inherited_scope_prefix_never_adds_a_glob_match() {
+    let sb = Sandbox::new("rm-glob-scope-relative");
+    fs::create_dir_all(sb.root.join("home")).unwrap();
+    let width = sb.root.to_str().unwrap().len();
+    assert!(width > 2);
+    let nested = sb.root.join("a").join("b".repeat(width - 2));
+    fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    fs::write(&nested, b"x").unwrap();
+    fs::write(sb.root.join("spare-long-name.txt"), b"x").unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let put = sb.run(&[
+        "put",
+        &pin,
+        nested.to_str().unwrap(),
+        sb.root.join("spare-long-name.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+
+    let pattern = "?".repeat(width);
+    let out = common::rtrash(&sb.root)
+        .env("HOME", sb.root.join("home"))
+        .env("USERPROFILE", sb.root.join("home"))
+        .args(["rm", &pin, "--glob", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb).len(), 2);
+}
+
+#[test]
 fn a_regex_directory_is_refused_when_home_is_unset() {
     let sb = Sandbox::new("rm-regex-nohome");
     let pin = format!("--trash-dir={}", sb.trash().display());
