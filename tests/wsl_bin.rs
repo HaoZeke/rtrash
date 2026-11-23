@@ -16,11 +16,25 @@ const SID: &str = "S-1-5-21-1-2-3-1001";
 struct Fake {
     top: PathBuf,
     root: PathBuf,
+    cleanup: PathBuf,
 }
 
 impl Fake {
     fn new(tag: &str) -> Self {
         let top = common::scratch_dir("wslbin", tag);
+        Self::at(top.clone(), top)
+    }
+
+    fn behind_link(tag: &str) -> Self {
+        let cleanup = common::scratch_dir("wslbin", tag);
+        let real = cleanup.join("real");
+        let link = cleanup.join("linked");
+        fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        Self::at(link.join("top"), cleanup)
+    }
+
+    fn at(top: PathBuf, cleanup: PathBuf) -> Self {
         let root = top.join("drives");
         fs::create_dir_all(root.join("c").join("$Recycle.Bin").join(SID)).unwrap();
         fs::write(top.join("osrelease"), "5.15.0-microsoft-standard-WSL2\n").unwrap();
@@ -29,7 +43,7 @@ impl Fake {
             format!("[automount]\nroot = {}/\n", root.display()),
         )
         .unwrap();
-        Fake { top, root }
+        Fake { top, root, cleanup }
     }
 
     fn bin(&self) -> PathBuf {
@@ -104,7 +118,7 @@ impl Fake {
 
 impl Drop for Fake {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.top);
+        let _ = fs::remove_dir_all(&self.cleanup);
     }
 }
 
@@ -421,6 +435,26 @@ fn wsl_rm_keeps_an_exact_protected_path() {
 #[test]
 fn wsl_empty_keeps_an_exact_protected_path() {
     let (f, kept) = exact_kept("empty-exact-keep");
+    assert_kept(&f, &kept, "empty");
+}
+
+#[test]
+fn wsl_exact_keep_matches_paths_below_a_linked_temp_directory() {
+    let f = Fake::behind_link("linked-exact-keep");
+    let kept = f.root.join("c/Users/me/kept.txt");
+    fs::create_dir_all(f.top.join(".config/rtrash")).unwrap();
+    fs::write(
+        f.top.join(".config/rtrash/keep"),
+        format!("{}\n", kept.display()),
+    )
+    .unwrap();
+    f.recycle(
+        "AB12CD.txt",
+        r"C:\Users\me\kept.txt",
+        b"kept",
+        1_700_000_000,
+    );
+    assert_kept(&f, &kept, "rm");
     assert_kept(&f, &kept, "empty");
 }
 

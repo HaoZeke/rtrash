@@ -1041,6 +1041,12 @@ fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
         &matched,
         crate::orig_path::window(opts.days.is_some(), false),
     );
+    if hits.is_empty() {
+        if opts.json {
+            print_exact_json(opts, 0, 0);
+        }
+        return crate::rm_match::no_matches(prog);
+    }
     if crate::rm_match::refuse_ambiguous(prog, hits.iter().map(|e| e.original.as_path()), false) {
         return 2;
     }
@@ -1164,20 +1170,7 @@ fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
         crate::interrupt::test_seam("after-item");
     }
     if opts.json {
-        let days = match opts.days {
-            Some(s) if s % 86_400 == 0 => (s / 86_400).to_string(),
-            Some(s) => format!("{}", s as f64 / 86_400.0),
-            None => "null".into(),
-        };
-        let older_secs = opts.days.map_or("null".into(), |s| s.to_string());
-        let tail = format!("\"older_than_secs\":{older_secs},\"max_size\":null");
-        println!(
-            "{{\"dry_run\":{},\"removed\":{},\"bytes\":{},\"days\":{},{tail}}}",
-            if opts.dry_run { "true" } else { "false" },
-            removed,
-            bytes,
-            days,
-        );
+        print_exact_json(opts, removed, bytes);
     } else if opts.verbose || opts.dry_run || removed > 0 {
         let verb = if opts.dry_run {
             "Would remove"
@@ -1191,6 +1184,20 @@ fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
         eprintln!("{prog}: stopped by Ctrl-C: {removed} removed; the rest stay in the trash");
     }
     status
+}
+
+fn print_exact_json(opts: &Opts, removed: u64, bytes: u64) {
+    let days = match opts.days {
+        Some(s) if s % 86_400 == 0 => (s / 86_400).to_string(),
+        Some(s) => format!("{}", s as f64 / 86_400.0),
+        None => "null".into(),
+    };
+    let older_secs = opts.days.map_or("null".into(), |s| s.to_string());
+    let tail = format!("\"older_than_secs\":{older_secs},\"max_size\":null");
+    println!(
+        "{{\"dry_run\":{},\"removed\":{removed},\"bytes\":{bytes},\"days\":{days},{tail}}}",
+        if opts.dry_run { "true" } else { "false" },
+    );
 }
 
 /// The original path a `.trashinfo` records, resolved against its trash.

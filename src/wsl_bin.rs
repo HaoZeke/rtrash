@@ -144,7 +144,7 @@ use rm --match=id ID to select one.
       --all              empty: every item, without asking
   -n, --dry-run          rm, empty: print what would go, delete nothing
   -m, --match=KIND       list, rm: read MATCH as glob, regex, substring,
-                         exact or id
+                         prefix, exact or id
   -f, --force            restore over an existing file; rm permits guarded
                          broad patterns and removes risky git work
   -h, --help             show this help

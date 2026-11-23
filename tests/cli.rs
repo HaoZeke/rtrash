@@ -2051,6 +2051,32 @@ fn a_basename_glob_uses_full_paths_only_with_known_scope_roots() {
 }
 
 #[test]
+fn disjoint_scope_roots_do_not_make_an_inherited_component_a_glob_match() {
+    let sb = Sandbox::new("rm-disjoint-person-roots");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("chosen.txt");
+    sb.touch("outside.dat");
+    assert!(sb
+        .run(&["put", &pin, "chosen.txt", "outside.dat"])
+        .status
+        .success());
+    let home = sb.root.join("home");
+    let xdg = Path::new("/rtrash-disjoint-xdg");
+    fs::create_dir_all(&home).unwrap();
+    let out = common::rtrash(&sb.root)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_DATA_HOME", xdg)
+        .args(["rm", &pin, "--older-than=0", "--glob", "*person*"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("no trash items match"));
+    assert_eq!(trash_names(&sb).len(), 2);
+}
+
+#[test]
 fn a_symlinked_temp_parent_does_not_widen_a_basename_glob() {
     let top = common::scratch_dir("test", "rm-glob-symlinked-temp");
     let real_tmp = top.join("folder-o");
@@ -3090,6 +3116,13 @@ fn a_keep_line_through_a_symlinked_parent_protects_the_recorded_path() {
     assert!(out.status.success(), "{err}");
     assert!(err.contains("listed in the keep file"), "{err}");
     assert_eq!(trash_names(&sb).len(), 1, "{err}");
+    let json = sb.run(&["rm", &pin, "--json", &recorded]);
+    assert!(json.status.success(), "{}", stderr_of(&json));
+    let body = stdout_of(&json);
+    let value: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("{e}: {body}"));
+    assert_eq!(value["removed"], 0, "{body}");
+    assert_eq!(value["matches"], serde_json::json!([]), "{body}");
 }
 
 #[test]
@@ -5355,9 +5388,10 @@ fn empty_names_an_exact_path_outside_the_age_window() {
     set_deletion_date(&sb, "ab", "2000-01-01T00:00:00");
 
     let out = sb.run(&["empty", "--home-only", "--plain", "--older-than=1d", "a"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     let err = stderr_of(&out);
     assert!(err.contains("outside the age window"), "{err}");
+    assert!(err.contains("no trash items match"), "{err}");
     assert!(!err.contains("no exact match"), "{err}");
     assert!(!err.contains("near miss"), "{err}");
     let mut names = trash_names(&sb);
@@ -5441,11 +5475,24 @@ fn empty_matches_the_original_path_exactly() {
     assert_eq!(trash_names(&sb), vec!["b".to_string()]);
 
     let again = sb.run(&["empty", "--home-only", "--plain", "a"]);
-    assert!(again.status.success(), "{}", stderr_of(&again));
+    assert_eq!(again.status.code(), Some(1), "{}", stderr_of(&again));
     let err = stderr_of(&again);
     assert!(err.contains("no exact match"), "{err}");
     assert!(err.contains("near miss"), "{err}");
     assert!(err.contains("/a/b"), "{err}");
+    assert!(err.contains("no trash items match"), "{err}");
+    let dry = sb.run(&["empty", "--home-only", "--plain", "-n", "a"]);
+    assert_eq!(dry.status.code(), Some(1), "{}", stderr_of(&dry));
+    assert!(stderr_of(&dry).contains("near miss"));
+    assert!(stderr_of(&dry).contains("no trash items match"));
+    let json = sb.run(&["empty", "--home-only", "--plain", "-n", "--json", "a"]);
+    assert_eq!(json.status.code(), Some(1), "{}", stderr_of(&json));
+    let body = stdout_of(&json);
+    let value: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("{e}: {body}"));
+    assert_eq!(value["removed"], 0, "{body}");
+    assert!(stderr_of(&json).contains("near miss"));
+    assert!(stderr_of(&json).contains("no trash items match"));
     assert_eq!(trash_names(&sb), vec!["b".to_string()]);
 }
 
@@ -6185,6 +6232,14 @@ fn empty_json_dry_run_with_age_is_one_document() {
     assert_eq!(json["removed"], 1, "{text}");
     assert_eq!(json["older_than_secs"], 0, "{text}");
     assert!(sb.trash().join("files/old.txt").is_file());
+    let capped = sb.run(&["empty", &pin, "--max-size=0", "-n", "--json", "-v"]);
+    assert!(capped.status.success(), "{}", stderr_of(&capped));
+    let text = stdout_of(&capped);
+    let json: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+    assert_eq!(json["dry_run"], true, "{text}");
+    assert_eq!(json["removed"], 1, "{text}");
+    assert_eq!(json["max_size"], 0, "{text}");
 }
 
 #[test]
@@ -12081,9 +12136,10 @@ fn empty_takes_a_double_dash_as_the_end_of_its_options() {
     sb.touch("a.txt");
     assert!(sb.run(&["put", "a.txt"]).status.success());
     let out = sb.empty(&["--", "-n"]);
-    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     let err = stderr_of(&out);
     assert!(!err.contains("unrecognized option"), "{err}");
+    assert!(err.contains("no trash items match"), "{err}");
     assert!(!err.contains("Would remove"), "{err}");
     assert!(!err.contains("Removed"), "{err}");
     assert_eq!(trash_names(&sb), vec!["a.txt".to_string()]);
@@ -12153,7 +12209,8 @@ fn rm_and_empty_leave_a_decoy_at_the_lexical_parent_of_link_dotdot() {
         stderr_of(&rm)
     );
     let empty = sb.empty(&["sub/link/.."]);
-    assert!(empty.status.success(), "{}", stderr_of(&empty));
+    assert_eq!(empty.status.code(), Some(1), "{}", stderr_of(&empty));
+    assert!(stderr_of(&empty).contains("no trash items match"));
     assert!(
         sb.trash().join("files/sub/decoy").is_file(),
         "{}",

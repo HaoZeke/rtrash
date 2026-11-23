@@ -485,6 +485,14 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         .filter(|e| !keep.protects(&e.original))
         .collect();
     if selected.is_empty() {
+        if json {
+            let sum = crate::filters::RmSummary {
+                dry_run,
+                removed: 0,
+                bytes: 0,
+            };
+            print!("{}", sum.json(&[]));
+        }
         return 0;
     }
     let deletable = |entry: &list::Entry| {

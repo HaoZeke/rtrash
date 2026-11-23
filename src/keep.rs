@@ -42,7 +42,11 @@ impl Keep {
 
     /// Whether `path` is one of the configured paths or below one.
     pub fn protects(&self, path: &Path) -> bool {
-        !path.as_os_str().is_empty() && self.paths.iter().any(|keep| keep_covers(keep, path))
+        if path.as_os_str().is_empty() {
+            return false;
+        }
+        let resolved = normalize_keep(path).unwrap_or_else(|_| path.to_path_buf());
+        self.paths.iter().any(|keep| keep_covers(keep, &resolved))
     }
 
     pub fn is_empty(&self) -> bool {

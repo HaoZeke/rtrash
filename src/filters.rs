@@ -625,7 +625,15 @@ fn glob_hits_path(pattern: &str, full: &str) -> bool {
     if !full_hit || pattern.contains(['/', '\\']) {
         return full_hit;
     }
-    if let Some((inherited, relative)) = scope_relative(full) {
+    suppress_inherited_glob_hit(pattern, full_hit, scope_relative(full))
+}
+
+fn suppress_inherited_glob_hit(
+    pattern: &str,
+    full_hit: bool,
+    scope: Option<(String, String)>,
+) -> bool {
+    if let Some((inherited, relative)) = scope {
         if crate::util::fnmatch(pattern, &inherited) {
             return crate::util::fnmatch(pattern, &relative);
         }
@@ -683,7 +691,11 @@ fn scope_relative_parts(
         })
         .count();
     if common == 0 {
-        return None;
+        // No part of this path is safely distinguishable from the
+        // inherited spellings of every known scope. Treat the whole path
+        // as inherited so a separator-free glob cannot gain a match from
+        // one root's parent while an age filter hides the other roots.
+        return Some((shown.to_string(), String::new()));
     }
     let spans = component_spans(shown, separator);
     if spans.len() < common {
@@ -1285,5 +1297,14 @@ mod pattern_tests {
                 r"work\foo.txt".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn disjoint_scope_roots_treat_the_whole_path_as_inherited() {
+        let roots = ["/home/person".to_string(), "/media/data".to_string()];
+        let full = "/home/person/work/foo.txt";
+        let got = super::scope_relative_parts(full, full, &roots, b'/');
+        assert_eq!(got, Some((full.to_string(), String::new())));
+        assert!(!super::suppress_inherited_glob_hit("*person*", true, got));
     }
 }
