@@ -1203,6 +1203,21 @@ fn finder_matching_ignores_unicode_normalization() {
 }
 
 #[test]
+fn finder_rm_exact_with_no_match_exits_one() {
+    let b = Box_::new("rm-exact-no-match");
+    fs::write(b.work().join("kept.txt"), b"x").unwrap();
+    assert!(b.run(&["put", "kept.txt"], "").status.success());
+    let missing = b.work().join("missing.txt");
+    let out = b.run(
+        &["rm", "--json", "--match=exact", missing.to_str().unwrap()],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", err(&out));
+    assert!(err(&out).contains("no trash items match"), "{}", err(&out));
+    assert!(b.finder().join("kept.txt").exists());
+}
+
+#[test]
 fn list_and_restore_use_the_put_log_before_finder_writes_ds_store() {
     let b = Box_::new("nods");
     let f = b.work().join("a b %\u{e9}.txt");

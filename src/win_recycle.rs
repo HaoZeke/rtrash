@@ -5183,7 +5183,7 @@ left in place.
             return 2;
         }
         let exact_no_hits = matched.is_empty() && exact && ids.is_empty();
-        if matched.is_empty() && !exact_no_hits {
+        if matched.is_empty() && (!exact_no_hits || json) {
             return crate::rm_match::no_matches(prog);
         }
         if !force && !scoped {

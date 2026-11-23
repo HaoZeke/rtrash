@@ -752,7 +752,7 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
     }
     let exact_no_hits =
         hits.is_empty() && patterns.kind == crate::filters::Match::Exact && ids.is_empty();
-    if hits.is_empty() && !exact_no_hits {
+    if hits.is_empty() && (!exact_no_hits || json) {
         return crate::rm_match::no_matches(prog);
     }
     if refuse_covered {

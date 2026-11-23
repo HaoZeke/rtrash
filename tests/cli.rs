@@ -3701,6 +3701,28 @@ fn rm_exact_path_keeps_a_duplicate_basename() {
     assert!(left[0].ends_with("/b/foo"), "{left:?}");
 }
 
+#[test]
+fn rm_exact_with_no_match_exits_one() {
+    let sb = Sandbox::new("rm-exact-no-match");
+    sb.touch("kept.txt");
+    assert!(sb.run(&["put", "--home-only", "kept.txt"]).status.success());
+    let missing = sb.work().join("missing.txt");
+    let out = sb.run(&[
+        "rm",
+        "--home-only",
+        "--json",
+        "--match=exact",
+        missing.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("no trash items match"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(trash_names(&sb), vec!["kept.txt".to_string()]);
+}
+
 /// Two copies of one original path: an exact match refuses both until
 /// `--all-matches`, and `--max-count=1` then deletes neither.
 #[test]
