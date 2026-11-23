@@ -10203,7 +10203,8 @@ fn a_retargeted_parent_does_not_change_what_put_moves() {
     assert!(saw, "the trash holds the item that was checked");
 }
 
-/// A WSL put into the Windows Recycle Bin does not promise `rtrash undo`.
+/// A WSL put into the Windows Recycle Bin probes the moved payload and does
+/// not promise `rtrash undo`.
 #[cfg(unix)]
 #[test]
 fn a_wsl_put_of_a_risky_repo_names_wsl_restore() {
@@ -10219,7 +10220,8 @@ fn a_wsl_put_of_a_risky_repo_names_wsl_restore() {
     write_exe("wslpath", "#!/bin/sh\nprintf '%s\\n' \"$2\"\n");
     write_exe(
         "powershell.exe",
-        "#!/bin/sh\nrm -rf -- \"$RTRASH_WSL_TARGET\"\n",
+        "#!/bin/sh\nprintf x > \"$RTRASH_WSL_TARGET/.rtrash-probe-seam\"\n\
+         mv -- \"$RTRASH_WSL_TARGET\" \"$RTRASH_TEST_WSL_PAYLOAD\"\n",
     );
     let repo = sb.root.join("mnt").join("c").join("repo");
     fs::create_dir_all(&repo).unwrap();
@@ -10232,6 +10234,30 @@ fn a_wsl_put_of_a_risky_repo_names_wsl_restore() {
         return;
     }
     fs::write(repo.join("f"), b"x").unwrap();
+    assert!(git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["add", "f"])
+        .status()
+        .unwrap()
+        .success());
+    assert!(git_env(&mut Command::new("git"), &repo, &sb.root)
+        .args(["commit", "-qm", "work"])
+        .status()
+        .unwrap()
+        .success());
+    let sid = "S-1-5-21-test";
+    let recycle = sb.root.join("mnt/c/$Recycle.Bin").join(sid);
+    fs::create_dir_all(&recycle).unwrap();
+    let payload = recycle.join("$RPOST");
+    let index = recycle.join("$IPOST");
+    fs::write(
+        index,
+        rtrash::win_recycle::encode_recycle_i_v2(
+            Path::new(r"C:\repo"),
+            0,
+            rtrash::win_recycle::FILETIME_UNIX_EPOCH,
+        ),
+    )
+    .unwrap();
     let conf = sb.root.join("wsl.conf");
     fs::write(
         &conf,
@@ -10247,14 +10273,18 @@ fn a_wsl_put_of_a_risky_repo_names_wsl_restore() {
         .env("RTRASH_WSL_RECYCLE", "1")
         .env("RTRASH_WSL_OSRELEASE", &rel)
         .env("RTRASH_WSL_CONF", &conf)
+        .env("RTRASH_WSL_SID", sid)
+        .env("RTRASH_TEST_WSL_PAYLOAD", &payload)
         .output()
         .unwrap();
     let err = stderr_of(&out);
     assert!(out.status.success(), "{err}");
-    assert!(!repo.join("f").exists(), "{err}");
+    assert!(!repo.exists(), "{err}");
+    assert!(payload.join(".rtrash-probe-seam").is_file(), "{err}");
     assert!(
         err.contains("rtrash wsl restore")
             && err.contains("Explorer")
+            && err.contains("dirty and unpushed work")
             && !err.contains("`rtrash undo` brings it back")
             && !err.contains("rtrash rm"),
         "{err}"
