@@ -754,17 +754,25 @@ fn probes_under(root: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether `selected` is every recorded original in `all`, or every
-/// original under a real scope root. An exact
-/// path or an id is never this: naming the only item, or each item, is
-/// deliberate. The probe check ([`Patterns::is_mass`]) stays the early
-/// error; this one looks at the entries that are actually in the trash.
+/// Whether a broad `selected` pattern takes every recorded original in
+/// `all`, or every original under a real scope root. Exact paths, ids,
+/// prefixes and literal globs name their selection deliberately. The probe
+/// check ([`Patterns::is_mass`]) remains the early error for a prefix that
+/// is itself a scope or volume root; this check handles result sets of
+/// wildcard globs, regexes and substrings.
 pub fn selection_covers_scope(
     pats: &Patterns,
     selected: &[std::path::PathBuf],
     all: &[std::path::PathBuf],
 ) -> bool {
-    if pats.kind == Match::Exact || pats.kind == Match::Id || selected.is_empty() {
+    let broad = match pats.kind {
+        Match::Glob => pats.texts.iter().any(|text| text.contains(['*', '?', '['])),
+        Match::Regex | Match::Substring => true,
+        // A prefix names a path literally. `Patterns::is_mass` already
+        // refuses it when that path is a scope or volume root.
+        Match::Prefix | Match::Exact | Match::Id => false,
+    };
+    if !broad || selected.is_empty() {
         return false;
     }
     crate::rm_match::selection_wipes(selected, all)
@@ -1099,6 +1107,8 @@ mod pattern_tests {
         let star = Patterns::new(vec!["*".into()], Match::Glob).unwrap();
         let files = vec![std::path::PathBuf::from("/tmp/proj/a.txt")];
         assert!(super::selection_covers_scope(&star, &files, &files));
+        let literal = Patterns::new(vec!["a.txt".into()], Match::Glob).unwrap();
+        assert!(!super::selection_covers_scope(&literal, &files, &files));
         let exact = Patterns::new(vec!["/tmp/proj/a.txt".into()], Match::Exact).unwrap();
         assert!(!super::selection_covers_scope(&exact, &files, &files));
         let by_id =
@@ -1116,6 +1126,7 @@ mod pattern_tests {
         let prefix = Patterns::new(vec!["/tmp/proj".into()], Match::Prefix).unwrap();
         assert!(!prefix.is_mass());
         assert!(!super::selection_covers_scope(&prefix, &two, &with_other));
+        assert!(!super::selection_covers_scope(&prefix, &two, &two));
         let drives = vec![
             std::path::PathBuf::from(r"E:\a.txt"),
             std::path::PathBuf::from(r"E:\b.txt"),

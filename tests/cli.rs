@@ -3582,7 +3582,7 @@ fn rm_exact_path_keeps_a_glob_name_to_one_item() {
 }
 
 /// Two trashed files with the same basename: a glob of that name matches
-/// both, which is the whole trash and waits for `--force`, and the listed
+/// both deliberately even when that is the whole trash, and the listed
 /// original path of one removes only that one.
 #[test]
 fn rm_exact_path_keeps_a_duplicate_basename() {
@@ -3596,9 +3596,9 @@ fn rm_exact_path_keeps_a_duplicate_basename() {
         .status
         .success());
     let dry = sb.run(&["rm", "--home-only", "-n", "--glob", "foo"]);
-    assert_eq!(dry.status.code(), Some(2), "{}", stderr_of(&dry));
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
     assert!(
-        stderr_of(&dry).contains("refusing mass pattern"),
+        stderr_of(&dry).contains("Would permanently remove 2 items"),
         "{}",
         stderr_of(&dry)
     );

@@ -53,7 +53,7 @@ unknown git work; -n reports the same refusal without deleting anything.
   -i, --interactive  ask even when stdin is not a terminal (the reply is
                      read from stdin; no reply removes nothing)
   -y, --yes        do not ask
-  -f, --force      do not ask, and allow patterns that cover every name
+  -f, --force      do not ask, and allow broad patterns that cover every name
                      below a matched directory or take every entry in a
                      known scope, including its last entry (e.g. '*')
                    When the scope is unknown, regex and substring matching

@@ -4942,9 +4942,9 @@ left in place.
   -i, --interactive  ask even when stdin is not a terminal (rm asks on
                    a terminal by default, naming the matches)
   -y, --yes      do not ask
-  -f, --force    do not ask, and allow patterns that cover every name below
-                  a matched directory or take every entry in a known scope,
-                  including its last entry;
+  -f, --force    do not ask, and allow broad patterns that cover every name
+                  below a matched directory or take every entry in a known
+                  scope, including its last entry;
                   When the scope is unknown, regex and substring matching and
                   globs containing a path separator require --force; use an
                   exact path, --id, or a basename glob instead.
