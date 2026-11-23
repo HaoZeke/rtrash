@@ -1203,6 +1203,48 @@ fn finder_matching_ignores_unicode_normalization() {
 }
 
 #[test]
+fn finder_mass_guard_groups_symlinked_scope_spellings() {
+    let b = Box_::new("mass-scope-alias");
+    let alias = b.root.with_file_name(format!(
+        "{}-alias",
+        b.root.file_name().unwrap().to_string_lossy()
+    ));
+    std::os::unix::fs::symlink(&b.root, &alias).unwrap();
+    fs::create_dir(b.finder()).unwrap();
+    let nfd = "ne\u{301}e.txt";
+    for name in [nfd, "other.dat"] {
+        fs::write(b.finder().join(name), b"x").unwrap();
+    }
+    let record = |name: &str, folder: &Path| Record {
+        name: name.into(),
+        code: *b"ptbL",
+        value: Value::Ustr(format!(
+            "{}/",
+            folder.to_string_lossy().trim_start_matches('/')
+        )),
+    };
+    fs::write(
+        b.finder().join(".DS_Store"),
+        ds_store::write(&[
+            record(nfd, &alias.join("work")),
+            record("other.dat", &b.work()),
+        ]),
+    )
+    .unwrap();
+
+    let alias_text = alias.to_string_lossy().into_owned();
+    let alias_xdg = alias.join("xdg").to_string_lossy().into_owned();
+    let out = b.run_env(
+        &["rm", "--match=glob", "n\u{e9}*"],
+        &[("HOME", &alias_text), ("XDG_DATA_HOME", &alias_xdg)],
+    );
+    fs::remove_file(&alias).unwrap();
+    assert!(out.status.success(), "{}", err(&out));
+    assert!(!b.finder().join(nfd).exists());
+    assert!(b.finder().join("other.dat").exists());
+}
+
+#[test]
 fn finder_rm_exact_with_no_match_exits_one() {
     let b = Box_::new("rm-exact-no-match");
     fs::write(b.work().join("kept.txt"), b"x").unwrap();

@@ -194,8 +194,11 @@ pub fn selection_wipes(selected: &[PathBuf], all: &[PathBuf]) -> bool {
     if every.iter().all(|k| sel.contains(k)) {
         return true;
     }
-    for root in coverage_roots(all) {
-        let under: Vec<&String> = every.iter().filter(|k| key_under(k, &root)).collect();
+    for roots in coverage_root_groups(all) {
+        let under: Vec<&String> = every
+            .iter()
+            .filter(|key| roots.iter().any(|root| key_under(key, root)))
+            .collect();
         if !under.is_empty() && under.iter().all(|k| sel.contains(k)) {
             return true;
         }
@@ -239,37 +242,51 @@ fn key_under(path: &str, root: &str) -> bool {
     !root.is_empty() && path.starts_with(root) && path[root.len()..].starts_with('/')
 }
 
-fn coverage_roots(entries: &[PathBuf]) -> Vec<String> {
-    let mut roots = Vec::new();
-    let mut push = |key: String| {
-        if !key.is_empty() && !roots.contains(&key) {
-            roots.push(key);
+fn coverage_root_groups(entries: &[PathBuf]) -> Vec<Vec<String>> {
+    let mut groups = Vec::new();
+    // A symlink or macOS firmlink can give one scope several spellings.
+    // Coverage is over their union, not each spelling in isolation.
+    let mut push = |roots: Vec<String>| {
+        let roots: Vec<String> =
+            roots
+                .into_iter()
+                .filter(|key| !key.is_empty())
+                .fold(Vec::new(), |mut out, key| {
+                    if !out.contains(&key) {
+                        out.push(key);
+                    }
+                    out
+                });
+        if !roots.is_empty() && !groups.contains(&roots) {
+            groups.push(roots);
         }
     };
     if let Some(home) = crate::util::home_dir() {
-        push(cover_key(&home));
+        let mut roots = vec![cover_key(&home)];
         if let Ok(real) = std::fs::canonicalize(&home) {
-            push(cover_key(&crate::util::plain_path(&real)));
+            roots.push(cover_key(&crate::util::plain_path(&real)));
         }
+        push(roots);
     }
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
         let xdg = PathBuf::from(xdg);
         if xdg.is_absolute() {
-            push(cover_key(&xdg));
+            let mut roots = vec![cover_key(&xdg)];
             if let Ok(real) = std::fs::canonicalize(&xdg) {
-                push(cover_key(&crate::util::plain_path(&real)));
+                roots.push(cover_key(&crate::util::plain_path(&real)));
             }
+            push(roots);
         }
     }
     if !cfg!(windows) {
-        push("/".to_string());
+        push(vec!["/".to_string()]);
     }
     for entry in entries {
         if let Some(vol) = volume_root_of(entry) {
-            push(vol);
+            push(vec![vol]);
         }
     }
-    roots
+    groups
 }
 
 fn volume_root_of(path: &Path) -> Option<String> {
