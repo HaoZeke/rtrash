@@ -6126,29 +6126,40 @@ fn empty_json_and_older_than_flag() {
     let pin = format!("--trash-dir={}", sb.trash().display());
     sb.touch("e.txt");
     assert!(sb.run(&["put", "e.txt"]).status.success());
-    let dry = sb.run(&["empty", &pin, "--dry-run", "--json"]);
+    let dry = sb.run(&["empty", &pin, "--dry-run", "--json", "-v"]);
     assert!(dry.status.success(), "{}", stderr_of(&dry));
     let s = stdout_of(&dry);
-    assert!(
-        s.contains("\"dry_run\":true") || s.contains("\"dry_run\": true"),
-        "{s}"
-    );
-    assert!(
-        s.contains("\"removed\":1") || s.contains("\"removed\": 1"),
-        "{s}"
-    );
-    assert!(s.contains("\"bytes\":"), "{s}");
+    let json: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|e| panic!("{e}: {s}"));
+    assert_eq!(json["dry_run"], true, "{s}");
+    assert_eq!(json["removed"], 1, "{s}");
+    assert!(json["bytes"].is_u64(), "{s}");
     // Still present after dry-run.
     assert!(sb.trash().join("files/e.txt").is_file());
-    let real = sb.run(&["empty", &pin, "--json", "--older-than=0"]);
+    let real = sb.run(&["empty", &pin, "--json", "--older-than=0", "-v"]);
     assert!(real.status.success(), "{}", stderr_of(&real));
     let r = stdout_of(&real);
-    assert!(
-        r.contains("\"dry_run\":false") || r.contains("\"dry_run\": false"),
-        "{r}"
-    );
-    assert!(r.contains("\"days\":0") || r.contains("\"days\": 0"), "{r}");
+    let json: serde_json::Value = serde_json::from_str(&r).unwrap_or_else(|e| panic!("{e}: {r}"));
+    assert_eq!(json["dry_run"], false, "{r}");
+    assert_eq!(json["removed"], 1, "{r}");
+    assert_eq!(json["days"], 0, "{r}");
     assert!(!sb.trash().join("files/e.txt").exists());
+}
+
+#[test]
+fn empty_json_dry_run_with_age_is_one_document() {
+    let sb = Sandbox::new("empty-json-age");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("old.txt");
+    assert!(sb.run(&["put", "old.txt"]).status.success());
+    let aged = sb.run(&["empty", &pin, "--older-than=0", "-n", "--json", "-v"]);
+    assert!(aged.status.success(), "{}", stderr_of(&aged));
+    let text = stdout_of(&aged);
+    let json: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+    assert_eq!(json["dry_run"], true, "{text}");
+    assert_eq!(json["removed"], 1, "{text}");
+    assert_eq!(json["older_than_secs"], 0, "{text}");
+    assert!(sb.trash().join("files/old.txt").is_file());
 }
 
 #[test]
@@ -6549,13 +6560,13 @@ fn empty_max_size_removes_oldest_or_largest_until_it_fits() {
     trash_aged(&sb, "mid", 40_000, 10);
     trash_aged(&sb, "new", 40_000, 1);
     // Three items of about 44 KiB each (blocks plus the .trashinfo).
-    let dry = sb.empty(&["--max-size=100K", "-n", "--json"]);
+    let dry = sb.empty(&["--max-size=100K", "-n", "--json", "-v"]);
     assert!(dry.status.success(), "{}", stderr_of(&dry));
     let s = stdout_of(&dry);
-    assert!(
-        s.contains("\"removed\":1") && s.contains("\"max_size\":102400"),
-        "{s}"
-    );
+    let json: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|e| panic!("{e}: {s}"));
+    assert_eq!(json["dry_run"], true, "{s}");
+    assert_eq!(json["removed"], 1, "{s}");
+    assert_eq!(json["max_size"], 102_400, "{s}");
     assert_eq!(names_in_trash(&sb).len(), 3, "dry run removes nothing");
 
     let out = sb.empty(&["--max-size=100K"]);

@@ -2287,7 +2287,15 @@ pub(crate) fn free_until(
         if need == (0, 0) {
             continue;
         }
-        let left = purge_oldest(prog, dev, Some(root), need, floor, dry_run, verbose);
+        let left = purge_oldest(
+            prog,
+            dev,
+            Some(root),
+            need,
+            floor,
+            dry_run,
+            verbose && !json,
+        );
         if left != (0, 0) {
             still += 1;
             eprintln!(

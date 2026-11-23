@@ -618,7 +618,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 max,
                 policy: opts.prune,
                 dry_run: opts.dry_run,
-                verbose: opts.verbose || opts.dry_run,
+                verbose: !opts.json && (opts.verbose || opts.dry_run),
                 protect_batch: None,
                 gone_before: cutoff,
                 free_inodes: 0,
@@ -923,7 +923,7 @@ fn empty_one(
                             .unwrap_or(0)
                 };
                 bytes.fetch_add(sz, Ordering::Relaxed);
-                if opts.verbose || opts.dry_run {
+                if !opts.json && (opts.verbose || opts.dry_run) {
                     println!(
                         "would remove {} ({})",
                         crate::util::term_path(&display),
@@ -967,7 +967,7 @@ fn empty_one(
                         drop(section);
                         crate::interrupt::test_seam("after-item");
                     }
-                    if opts.verbose {
+                    if opts.verbose && !opts.json {
                         println!("removed {}", crate::util::term_path(display));
                     }
                     removed.fetch_add(1, Ordering::Relaxed);
@@ -1235,11 +1235,13 @@ fn full_empty_dry_run(
             let sz = sizes.payload_bytes(&crate::util::str_from_os_ref(&entry.file_name()));
             total = total.saturating_add(sz);
             n_files += 1;
-            println!(
-                "would remove {} ({})",
-                crate::util::term_path(&shown),
-                crate::fastdelete::format_bytes(sz)
-            );
+            if !opts.json {
+                println!(
+                    "would remove {} ({})",
+                    crate::util::term_path(&shown),
+                    crate::fastdelete::format_bytes(sz)
+                );
+            }
         }
     }
     if let Ok(entries) = fs::read_dir(&info_dir) {
@@ -1303,7 +1305,7 @@ fn full_empty_wipe(
 
     // Verbose still lists intended removals before delete (stable UX),
     // by original path where a record names one.
-    if opts.verbose {
+    if opts.verbose && !opts.json {
         if let Ok(entries) = fs::read_dir(&files_dir) {
             for entry in entries
                 .flatten()
