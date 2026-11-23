@@ -461,8 +461,11 @@ mod tests {
 
     #[test]
     fn an_unknown_home_treats_every_prefix_as_a_scope_root() {
-        assert!(super::scope_listed(std::path::Path::new("/tmp/proj"), None));
-        let home = std::path::PathBuf::from("/home/u");
+        assert!(super::scope_listed(
+            &std::env::temp_dir().join("rtrash-unknown-scope"),
+            None
+        ));
+        let home = std::env::temp_dir().join("rtrash-scope-home");
         let roots = super::scope_roots_from(Some(&home), None).unwrap();
         assert!(super::scope_listed(&super::match_key(&home), Some(&roots)));
         assert!(!super::scope_listed(
@@ -502,11 +505,11 @@ mod tests {
 
     #[test]
     fn an_xdg_data_home_is_a_scope_root_without_home() {
-        let xdg = std::path::Path::new("/var/lib/xdg");
-        let roots = super::scope_roots_from(None, Some(xdg)).expect("xdg is a root");
-        assert!(super::scope_listed(&super::match_key(xdg), Some(&roots)));
+        let xdg = std::env::temp_dir().join("rtrash-scope-xdg");
+        let roots = super::scope_roots_from(None, Some(&xdg)).expect("xdg is a root");
+        assert!(super::scope_listed(&super::match_key(&xdg), Some(&roots)));
         assert!(!super::scope_listed(
-            &super::match_key(std::path::Path::new("/tmp/proj")),
+            &super::match_key(&std::env::temp_dir().join("rtrash-other")),
             Some(&roots)
         ));
         assert!(super::scope_roots_from(None, None).is_none());

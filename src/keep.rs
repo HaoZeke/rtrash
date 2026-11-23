@@ -228,21 +228,24 @@ mod tests {
 
     #[test]
     fn a_relative_keep_line_is_read_from_the_working_directory() {
-        let cwd = Path::new("/work");
-        let got = parse_keep_line("secret.txt", None, Some(cwd)).unwrap();
-        assert_eq!(got, Path::new("/work/secret.txt"));
-        let nested = parse_keep_line("dir/secret", None, Some(cwd)).unwrap();
-        assert_eq!(nested, Path::new("/work/dir/secret"));
-        let parent = parse_keep_line("../secret", None, Some(Path::new("/work/proj"))).unwrap();
-        assert_eq!(parent, Path::new("/work/secret"));
+        let real = crate::util::plain_path(
+            &std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
+        );
+        let cwd = real.join("keep-relative-fixture");
+        let got = parse_keep_line("secret.txt", None, Some(&cwd)).unwrap();
+        assert_eq!(got, cwd.join("secret.txt"));
+        let nested = parse_keep_line("dir/secret", None, Some(&cwd)).unwrap();
+        assert_eq!(nested, cwd.join("dir/secret"));
+        let parent = parse_keep_line("../secret", None, Some(&cwd.join("proj"))).unwrap();
+        assert_eq!(parent, cwd.join("secret"));
         let err = parse_keep_line("secret.txt", None, None).unwrap_err();
         assert!(err.to_string().contains("relative"), "{err}");
-        let err = parse_keep_line("~", None, Some(cwd)).unwrap_err();
+        let err = parse_keep_line("~", None, Some(&cwd)).unwrap_err();
         assert!(err.to_string().contains("HOME"), "{err}");
-        let home = Path::new("/home/u");
+        let home = real.join("keep-home-fixture");
         assert_eq!(
-            parse_keep_line("~/secret", Some(home), None).unwrap(),
-            Path::new("/home/u/secret")
+            parse_keep_line("~/secret", Some(&home), None).unwrap(),
+            home.join("secret")
         );
     }
 

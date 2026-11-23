@@ -1062,9 +1062,31 @@ mod pattern_tests {
                 "{mass}"
             );
         }
-        for narrow in ["*.o", "/tmp/*", r"C:\Users\*", "foo"] {
+        if let Some(root) =
+            crate::rm_match::known_scope_roots().and_then(|roots| roots.into_iter().next())
+        {
+            let root = root.to_string_lossy();
+            let sep = if root.contains('\\') { '\\' } else { '/' };
+            let mass = format!("{}{sep}*", root.trim_end_matches(['/', '\\']));
             assert!(
-                !Patterns::new(vec![narrow.into()], Match::Glob)
+                Patterns::new(vec![mass.clone()], Match::Glob)
+                    .unwrap()
+                    .is_mass(),
+                "{mass}"
+            );
+        }
+        let platform_narrow = std::env::temp_dir()
+            .join("rtrash-narrow")
+            .join("*")
+            .to_string_lossy()
+            .into_owned();
+        for narrow in ["*.o", "/tmp/*", "foo"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(std::iter::once(platform_narrow))
+        {
+            assert!(
+                !Patterns::new(vec![narrow.clone()], Match::Glob)
                     .unwrap()
                     .is_mass(),
                 "{narrow}"
