@@ -2052,6 +2052,47 @@ fn a_basename_glob_uses_full_paths_only_with_known_scope_roots() {
 }
 
 #[test]
+fn a_symlinked_temp_parent_does_not_widen_a_basename_glob() {
+    let top = common::scratch_dir("test", "rm-glob-symlinked-temp");
+    let real_tmp = top.join("folder-o");
+    fs::create_dir(&real_tmp).unwrap();
+    let linked_tmp = top.join("linked-tmp");
+    std::os::unix::fs::symlink(&real_tmp, &linked_tmp).unwrap();
+    let spelled_root = linked_tmp.join("sandbox");
+    fs::create_dir_all(spelled_root.join("work")).unwrap();
+    let sb = Sandbox {
+        root: fs::canonicalize(&spelled_root).unwrap(),
+    };
+    fs::create_dir_all(sb.root.join("home")).unwrap();
+    fs::write(sb.work().join("foo.txt"), b"x").unwrap();
+    fs::write(sb.root.join("spared.txt"), b"x").unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let put = common::rtrash(&sb.root)
+        .env("TMPDIR", &linked_tmp)
+        .args([
+            "put",
+            &pin,
+            sb.work().join("foo.txt").to_str().unwrap(),
+            sb.root.join("spared.txt").to_str().unwrap(),
+        ])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(put.status.success(), "{}", stderr_of(&put));
+
+    let out = common::rtrash(&sb.root)
+        .env("HOME", sb.root.join("home"))
+        .env("USERPROFILE", sb.root.join("home"))
+        .env("TMPDIR", &linked_tmp)
+        .args(["rm", &pin, "--glob", "*o*"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), vec!["spared.txt".to_string()]);
+}
+
+#[test]
 fn a_regex_directory_is_refused_when_home_is_unset() {
     let sb = Sandbox::new("rm-regex-nohome");
     let pin = format!("--trash-dir={}", sb.trash().display());

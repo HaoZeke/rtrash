@@ -508,7 +508,13 @@ Permanently deletes trash entries whose original path is exactly `PATTERN`: the 
 
 On Windows, a short 8.3 name of a parent that is still on disk matches the long name. The file's own short name does not, once the file is in the Recycle Bin: `EXACTF~1.TXT` is not `ExactFile.TXT`. Type the long name, or pass `--match=glob`.
 Matching `files/` payloads and `.trashinfo` files are removed; non-matches stay.
-`--match=glob` is the shell glob of the original path, its basename or the trash name (quote globs from the shell), which is how an orphan is selected by its name in `files/` or its path there. `--regex` and `--match=substring` compare the whole original path, and `--prefix` selects a path and paths below it. `--match=exact` is the same comparison as a bare `PATTERN`.
+`--match=glob` is the shell glob of the original path, its basename or the trash
+name (quote globs from the shell), which is how an orphan is selected by its name
+in `files/` or its path there. A glob without a path separator ignores a path
+prefix inherited from all known scope roots, so the spelling of a home or
+temporary parent cannot widen it. `--regex` and `--match=substring` compare the
+whole original path, and `--prefix` selects a path and paths below it.
+`--match=exact` is the same comparison as a bare `PATTERN`.
 If more than one trash item has the same original path, rm refuses; select one with `--id=NAME` or explicitly allow all with `--all-matches`.
 Does **not** restore.
 On a terminal it names the matches (the first 10, with sizes) and asks once before it deletes, as `rm -I` does and as trash-cli #383 asks of `trash-rm`. Only `y` or `yes` goes on. A script, whose stdin or stderr is not a terminal, is never asked, so pipelines and cron jobs work as before. `-i`/`--interactive` asks even then, with the reply read from stdin. `-y`/`--yes` and `-f`/`--force` never ask, and the last of the three wins. Without `-f`, rm refuses payloads with dirty, unpushed or unknown git work; `-n` reports the same refusal without deleting anything.

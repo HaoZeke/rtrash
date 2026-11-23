@@ -612,12 +612,41 @@ impl Patterns {
             if !crate::rm_match::scope_roots_are_known() && !p.contains(['/', '\\']) {
                 crate::util::fnmatch(p, base) || crate::util::fnmatch(p, name)
             } else {
-                crate::util::fnmatch(p, full)
+                glob_hits_path(p, full)
                     || crate::util::fnmatch(p, base)
                     || crate::util::fnmatch(p, name)
             }
         })
     }
+}
+
+fn glob_hits_path(pattern: &str, full: &str) -> bool {
+    #[cfg(not(windows))]
+    if !pattern.contains(['/', '\\']) {
+        let path = std::path::Path::new(full);
+        if let Some((anchor, relative)) = scope_relative(path) {
+            let inherited = anchor.to_string_lossy();
+            if crate::util::fnmatch(pattern, &inherited) {
+                return crate::util::fnmatch(pattern, &relative.to_string_lossy());
+            }
+        }
+    }
+    crate::util::fnmatch(pattern, full)
+}
+
+#[cfg(not(windows))]
+fn scope_relative(path: &std::path::Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let roots = crate::rm_match::known_scope_roots()?;
+    let first = roots.first()?;
+    let anchor = first.ancestors().find(|ancestor| {
+        !ancestor.as_os_str().is_empty()
+            && path.starts_with(ancestor)
+            && roots.iter().all(|root| root.starts_with(ancestor))
+    })?;
+    Some((
+        anchor.to_path_buf(),
+        path.strip_prefix(anchor).ok()?.to_path_buf(),
+    ))
 }
 
 /// Names a glob has to match before it counts as taking every item, and

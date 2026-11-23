@@ -4469,6 +4469,8 @@ from the shell), which is how an orphan with no
 is selected by its name in
 .B files/
 or its path there.
+A glob without a path separator ignores a path prefix inherited from all known
+scope roots, so the spelling of a home or temporary parent cannot widen it.
 An absolute glob also matches with symlinks resolved in its directory
 part (up to the first glob), the form
 .B put
