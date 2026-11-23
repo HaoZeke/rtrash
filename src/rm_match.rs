@@ -189,16 +189,13 @@ pub fn selection_wipes(selected: &[PathBuf], all: &[PathBuf]) -> bool {
     if selected.is_empty() || all.is_empty() {
         return false;
     }
-    let sel: Vec<String> = selected.iter().map(|p| cover_key(p)).collect();
-    let every: Vec<String> = all.iter().map(|p| cover_key(p)).collect();
+    let sel: Vec<String> = selected.iter().map(|p| entry_cover_key(p)).collect();
+    let every: Vec<String> = all.iter().map(|p| entry_cover_key(p)).collect();
     if every.iter().all(|k| sel.contains(k)) {
         return true;
     }
-    for roots in coverage_root_groups(all) {
-        let under: Vec<&String> = every
-            .iter()
-            .filter(|key| roots.iter().any(|root| key_under(key, root)))
-            .collect();
+    for root in coverage_roots(all) {
+        let under: Vec<&String> = every.iter().filter(|key| key_under(key, &root)).collect();
         if !under.is_empty() && under.iter().all(|k| sel.contains(k)) {
             return true;
         }
@@ -206,7 +203,7 @@ pub fn selection_wipes(selected: &[PathBuf], all: &[PathBuf]) -> bool {
     false
 }
 
-fn cover_key(path: &Path) -> String {
+fn plain_cover_key(path: &Path) -> String {
     let s = path.to_string_lossy();
     if cfg!(windows) || windows_shaped(&s) {
         return crate::win_recycle::path_key(&s, &[]);
@@ -215,6 +212,37 @@ fn cover_key(path: &Path) -> String {
         return s.into();
     }
     s.trim_end_matches('/').to_string()
+}
+
+/// The canonical place of a recorded original. Its final name stays as
+/// recorded, while the deepest existing part of its parent is resolved.
+fn entry_cover_key(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if !cfg!(windows) && windows_shaped(&s) {
+        return plain_cover_key(path);
+    }
+    crate::allow_roots::resolve(path)
+        .as_deref()
+        .map(plain_cover_key)
+        .unwrap_or_else(|| plain_cover_key(path))
+}
+
+/// One canonical key for a scope root, including a root whose final
+/// components do not exist yet.
+fn root_cover_key(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if !cfg!(windows) && windows_shaped(&s) {
+        return plain_cover_key(path);
+    }
+    let resolved = path
+        .ancestors()
+        .find_map(|ancestor| {
+            let real = std::fs::canonicalize(ancestor).ok()?;
+            let tail = path.strip_prefix(ancestor).ok()?;
+            Some(crate::util::plain_path(&real).join(tail))
+        })
+        .unwrap_or_else(|| path.to_path_buf());
+    plain_cover_key(&resolved)
 }
 
 fn windows_shaped(s: &str) -> bool {
@@ -242,51 +270,34 @@ fn key_under(path: &str, root: &str) -> bool {
     !root.is_empty() && path.starts_with(root) && path[root.len()..].starts_with('/')
 }
 
-fn coverage_root_groups(entries: &[PathBuf]) -> Vec<Vec<String>> {
-    let mut groups = Vec::new();
-    // A symlink or macOS firmlink can give one scope several spellings.
-    // Coverage is over their union, not each spelling in isolation.
-    let mut push = |roots: Vec<String>| {
-        let roots: Vec<String> =
-            roots
-                .into_iter()
-                .filter(|key| !key.is_empty())
-                .fold(Vec::new(), |mut out, key| {
-                    if !out.contains(&key) {
-                        out.push(key);
-                    }
-                    out
-                });
-        if !roots.is_empty() && !groups.contains(&roots) {
-            groups.push(roots);
+fn coverage_roots(entries: &[PathBuf]) -> Vec<String> {
+    let mut roots = Vec::new();
+    let mut push = |key: String| {
+        if !key.is_empty() && !roots.contains(&key) {
+            roots.push(key);
         }
     };
     if let Some(home) = crate::util::home_dir() {
-        let mut roots = vec![cover_key(&home)];
-        if let Ok(real) = std::fs::canonicalize(&home) {
-            roots.push(cover_key(&crate::util::plain_path(&real)));
-        }
-        push(roots);
+        push(root_cover_key(&home));
     }
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
         let xdg = PathBuf::from(xdg);
         if xdg.is_absolute() {
-            let mut roots = vec![cover_key(&xdg)];
-            if let Ok(real) = std::fs::canonicalize(&xdg) {
-                roots.push(cover_key(&crate::util::plain_path(&real)));
-            }
-            push(roots);
+            push(root_cover_key(&xdg));
         }
     }
     if !cfg!(windows) {
-        push(vec!["/".to_string()]);
+        push("/".to_string());
     }
     for entry in entries {
         if let Some(vol) = volume_root_of(entry) {
-            push(vec![vol]);
+            push(vol);
+        }
+        if let Some(vol) = drive_or_unc_root(&entry_cover_key(entry)) {
+            push(vol);
         }
     }
-    groups
+    roots
 }
 
 fn volume_root_of(path: &Path) -> Option<String> {

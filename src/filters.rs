@@ -1146,9 +1146,18 @@ mod pattern_tests {
                 "{mass}"
             );
         }
-        for narrow in ["foo", "^/tmp", "a", r"^/home/u/proj"] {
+        let scoped_child = crate::rm_match::known_scope_roots()
+            .and_then(|roots| roots.into_iter().next())
+            .unwrap_or_else(std::env::temp_dir)
+            .join("rtrash-narrow");
+        let scoped_child = format!("^{}", regex_lite::escape(&scoped_child.to_string_lossy()));
+        for narrow in ["foo", "a", r"^/home/u/proj"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(std::iter::once(scoped_child))
+        {
             assert!(
-                !Patterns::new(vec![narrow.into()], Match::Regex)
+                !Patterns::new(vec![narrow.clone()], Match::Regex)
                     .unwrap()
                     .is_mass(),
                 "{narrow}"
@@ -1179,12 +1188,14 @@ mod pattern_tests {
                 "{mass}"
             );
         }
-        let platform_narrow = std::env::temp_dir()
+        let platform_narrow = crate::rm_match::known_scope_roots()
+            .and_then(|roots| roots.into_iter().next())
+            .unwrap_or_else(std::env::temp_dir)
             .join("rtrash-narrow")
             .join("*")
             .to_string_lossy()
             .into_owned();
-        for narrow in ["*.o", "/tmp/*", "foo"]
+        for narrow in ["*.o", "foo"]
             .into_iter()
             .map(str::to_owned)
             .chain(std::iter::once(platform_narrow))

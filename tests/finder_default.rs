@@ -1205,11 +1205,16 @@ fn finder_matching_ignores_unicode_normalization() {
 #[test]
 fn finder_mass_guard_groups_symlinked_scope_spellings() {
     let b = Box_::new("mass-scope-alias");
-    let alias = b.root.with_file_name(format!(
-        "{}-alias",
-        b.root.file_name().unwrap().to_string_lossy()
-    ));
-    std::os::unix::fs::symlink(&b.root, &alias).unwrap();
+    let root_name = b.root.file_name().unwrap();
+    let front = b
+        .root
+        .with_file_name(format!("{}-front", root_name.to_string_lossy()));
+    std::os::unix::fs::symlink(b.root.parent().unwrap(), &front).unwrap();
+    let through_front = front.join(root_name);
+    let alias = b
+        .root
+        .with_file_name(format!("{}-alias", root_name.to_string_lossy()));
+    std::os::unix::fs::symlink(&through_front, &alias).unwrap();
     fs::create_dir(b.finder()).unwrap();
     let nfd = "ne\u{301}e.txt";
     for name in [nfd, "other.dat"] {
@@ -1227,7 +1232,7 @@ fn finder_mass_guard_groups_symlinked_scope_spellings() {
         b.finder().join(".DS_Store"),
         ds_store::write(&[
             record(nfd, &alias.join("work")),
-            record("other.dat", &b.work()),
+            record("other.dat", &through_front.join("work")),
         ]),
     )
     .unwrap();
@@ -1239,6 +1244,7 @@ fn finder_mass_guard_groups_symlinked_scope_spellings() {
         &[("HOME", &alias_text), ("XDG_DATA_HOME", &alias_xdg)],
     );
     fs::remove_file(&alias).unwrap();
+    fs::remove_file(&front).unwrap();
     assert!(out.status.success(), "{}", err(&out));
     assert!(!b.finder().join(nfd).exists());
     assert!(b.finder().join("other.dat").exists());
