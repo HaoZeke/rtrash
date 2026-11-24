@@ -1265,7 +1265,7 @@ pub fn purge_oldest(
     dev: u64,
     need: (u64, u64),
     dry_run: bool,
-    show_items: bool,
+    human: crate::util::HumanOutput,
 ) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     let Ok(rows) = read_all(prog) else {
@@ -1305,9 +1305,7 @@ pub fn purge_oldest(
         let b = crate::fastdelete::disk_usage(&path);
         let inodes = 1 + crate::trash_stats::count_inodes(&path);
         if dry_run {
-            if show_items {
-                println!("would remove {}", crate::util::term_path(&e.shown));
-            }
+            human.line(&format!("would remove {}", e.shown.display()));
         } else {
             if let Err(err) = crate::permanent_guard::remove(&path) {
                 crate::finder_total::uncarried(&e.trash);
@@ -1445,9 +1443,8 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
         };
         bytes += b;
         if dry_run {
-            if !json {
-                println!("would remove {}", crate::util::term_path(&e.shown));
-            }
+            crate::util::HumanOutput::new(json, !json || verbose)
+                .line(&format!("would remove {}", e.shown.display()));
             removed += 1;
             continue;
         }
@@ -1456,10 +1453,9 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
             Ok(()) => {
                 crate::finder_total::carry(&e.trash, (b, inodes), false);
                 removed += 1;
-                if verbose && !json {
-                    // The Put Back place, else the path in the trash.
-                    println!("removed {}", crate::util::term_path(&e.shown));
-                }
+                // The Put Back place, else the path in the trash.
+                crate::util::HumanOutput::new(json, verbose)
+                    .line(&format!("removed {}", e.shown.display()));
             }
             Err(err) => {
                 // Part of the item may be gone, so measure afterwards.

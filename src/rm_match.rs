@@ -408,6 +408,22 @@ pub fn no_matches(prog: &str) -> i32 {
     1
 }
 
+/// Report an empty `rm` selection in the command's normal output mode.
+///
+/// Every backend uses this after matching, so JSON misses have the same
+/// summary and human misses keep stdout empty.
+pub fn rm_no_matches(prog: &str, json: bool, dry_run: bool) -> i32 {
+    if json {
+        let sum = crate::filters::RmSummary {
+            dry_run,
+            removed: 0,
+            bytes: 0,
+        };
+        print!("{}", sum.json(&[]));
+    }
+    no_matches(prog)
+}
+
 /// Apply rm's pattern safeguards before scanning (`selected` and `census`
 /// empty) or after matching. Every backend calls this same decision.
 pub fn refuse_pattern_selection(

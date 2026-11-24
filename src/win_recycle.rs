@@ -2433,7 +2433,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 } else {
                     "would trash"
                 };
-                println!("{verb} '{}'", crate::util::term_path(&abs));
+                crate::util::HumanOutput::new(json, !json || verbose)
+                    .line(&format!("{verb} '{}'", abs.display()));
                 continue;
             }
             let root = test_bin_root().or_else(|| bin_root_of(&abs));
@@ -2476,12 +2477,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     failed += 1;
                 }
                 Ok(true) => {
-                    if verbose && !json {
-                        println!(
-                            "{}",
-                            removed_line(&crate::util::term_path(f), bin.as_deref())
-                        );
-                    }
+                    crate::util::HumanOutput::new(json, verbose)
+                        .line(&removed_line(&f.display().to_string(), bin.as_deref()));
                     // The same path the shell was given, which is what the
                     // bin records and what the warning names.
                     let kept = abs.clone();
@@ -3353,12 +3350,13 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             );
         };
         if dry_run {
+            for it in &items {
+                crate::util::HumanOutput::new(json, !json || verbose)
+                    .line(&format!("would remove {}", original_of(it).display()));
+            }
             if json {
                 summary(&items);
                 return i32::from(items.is_empty());
-            }
-            for it in &items {
-                println!("would remove {}", crate::util::term_path(&original_of(it)));
             }
             println!("{} item(s)", items.len());
             if items.is_empty() {
@@ -3370,10 +3368,9 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         if let Some(code) = crate::permanent_guard::check_count(prog, items.len() as u64) {
             return code;
         }
-        if verbose && !json {
-            for it in &items {
-                println!("removed {}", crate::util::term_path(&original_of(it)));
-            }
+        for it in &items {
+            crate::util::HumanOutput::new(json, verbose)
+                .line(&format!("removed {}", original_of(it).display()));
         }
         // Sizes come from the records, so read them before the purge.
         if json {
@@ -3546,7 +3543,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         at: &Path,
         need: (u64, u64),
         dry_run: bool,
-        show_items: bool,
+        human: crate::util::HumanOutput,
     ) -> (u64, u64, u64) {
         let mut items: Vec<TrashItem> = match super::list_items() {
             Ok(all) => {
@@ -3593,10 +3590,11 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             .fold((0u64, 0u64), |(b, f), &i| (b + sized[i].1, f + sized[i].2));
         let chosen: Vec<TrashItem> = picked.iter().map(|&i| items[i].clone()).collect();
         for it in &chosen {
-            if dry_run && show_items {
-                println!("would remove {}", crate::util::term_path(&original_of(it)));
-            } else if show_items {
-                println!("removed {}", crate::util::term_path(&original_of(it)));
+            let original = original_of(it);
+            if dry_run {
+                human.line(&format!("would remove {}", original.display()));
+            } else {
+                human.line(&format!("removed {}", original.display()));
             }
         }
         let n = chosen.len() as u64;
@@ -5215,7 +5213,7 @@ left in place.
             return 2;
         }
         if matched.is_empty() {
-            return crate::rm_match::no_matches(prog);
+            return crate::rm_match::rm_no_matches(prog, json, dry_run);
         }
         if !force && !scoped {
             let originals: Vec<PathBuf> = matched.iter().map(original_of).collect();
@@ -5345,10 +5343,9 @@ left in place.
             };
             (sum, names)
         });
-        if !json && (dry_run || verbose) {
-            for it in &matched {
-                println!("{}", crate::util::term_path(&original_of(it)));
-            }
+        for it in &matched {
+            crate::util::HumanOutput::new(json, verbose || (!json && dry_run))
+                .line(&original_of(it).display().to_string());
         }
         let code = if dry_run {
             if !json {
@@ -5744,9 +5741,9 @@ pub fn purge_oldest_on(
     at: &Path,
     need: (u64, u64),
     dry_run: bool,
-    verbose: bool,
+    human: crate::util::HumanOutput,
 ) -> (u64, u64, u64) {
-    os::purge_oldest_on(prog, at, need, dry_run, verbose)
+    os::purge_oldest_on(prog, at, need, dry_run, human)
 }
 
 #[cfg(test)]

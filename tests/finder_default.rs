@@ -418,6 +418,35 @@ fn undo_status_and_trash_stats_cover_the_finder_trash() {
 }
 
 #[test]
+fn finder_undo_json_dry_run_keeps_stdout_to_one_document() {
+    let b = Box_::new("undo-json-dry");
+    let original = b.work().join("gone.txt");
+    fs::write(&original, b"gone").unwrap();
+    assert!(b.run(&["put", "gone.txt"], "").status.success());
+
+    let human = b.run(&["undo", "-n"], "");
+    assert!(human.status.success(), "{}", err(&human));
+    assert!(
+        out(&human).contains("would restore") && out(&human).contains("gone.txt"),
+        "{}",
+        out(&human)
+    );
+    assert!(b.finder().join("gone.txt").exists());
+
+    let json = b.run(&["undo", "-n", "--json"], "");
+    assert!(json.status.success(), "{}", err(&json));
+    let value: serde_json::Value =
+        serde_json::from_slice(&json.stdout).unwrap_or_else(|e| panic!("{e}: {}", out(&json)));
+    assert_eq!(value["restored"].as_array().map(Vec::len), Some(1));
+    assert!(
+        err(&json).contains("would restore") && err(&json).contains("gone.txt"),
+        "{}",
+        err(&json)
+    );
+    assert!(b.finder().join("gone.txt").exists());
+}
+
+#[test]
 fn volume_trashes_join_list_restore_rm_and_status() {
     use std::os::unix::fs::MetadataExt;
     let b = Box_::new("vol");
@@ -1036,11 +1065,19 @@ fn empty_until_free_takes_finder_items() {
         "{}",
         out(&human)
     );
-    let dry = run(&["empty", "--home-only", "-n", "--json", &want], &fs_spec);
+    let dry = run(
+        &["empty", "--home-only", "-n", "-v", "--json", &want],
+        &fs_spec,
+    );
     assert_eq!(dry.status.code(), Some(1), "{}", err(&dry));
     serde_json::from_slice::<serde_json::Value>(&dry.stdout)
         .unwrap_or_else(|e| panic!("{e}: {}", out(&dry)));
     assert!(!out(&dry).contains("would remove"), "{}", out(&dry));
+    assert!(
+        err(&dry).contains("would remove") && err(&dry).contains("gone.txt"),
+        "{}",
+        err(&dry)
+    );
     assert!(b.finder().join("gone.txt").exists());
 }
 

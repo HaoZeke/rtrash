@@ -480,7 +480,8 @@ pub fn undo(
             (_, c) => (l.original.clone(), c == Conflict::Overwrite),
         };
         if dry_run {
-            println!("would restore '{}'", crate::util::term_path(&dest));
+            crate::util::HumanOutput::new(json, true)
+                .line(&format!("would restore '{}'", dest.display()));
             restored.push(dest);
             continue;
         }
@@ -750,15 +751,7 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         return 2;
     }
     if hits.is_empty() {
-        if json {
-            let sum = crate::filters::RmSummary {
-                dry_run,
-                removed: 0,
-                bytes: 0,
-            };
-            print!("{}", sum.json(&[]));
-        }
-        return crate::rm_match::no_matches(prog);
+        return crate::rm_match::rm_no_matches(prog, json, dry_run);
     }
     if refuse_covered {
         let originals: Vec<PathBuf> = hits.iter().map(|e| e.shown.clone()).collect();
@@ -854,9 +847,8 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         let m = crate::finder_total::measure_item(&path);
         let sz = m.0;
         if dry_run {
-            if !json {
-                println!("{}", crate::util::term_path(&e.shown));
-            }
+            crate::util::HumanOutput::new(json, !json || verbose)
+                .line(&e.shown.display().to_string());
         } else if let Err(err) = crate::permanent_guard::remove(&path) {
             crate::finder_total::uncarried(&e.trash);
             eprintln!(
@@ -867,9 +859,8 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
             continue;
         } else {
             crate::finder_total::carry(&e.trash, m, false);
-            if verbose && !json {
-                println!("removed '{}'", crate::util::term_path(&e.shown));
-            }
+            crate::util::HumanOutput::new(json, verbose)
+                .line(&format!("removed '{}'", e.shown.display()));
         }
         removed += 1;
         bytes = bytes.saturating_add(sz);

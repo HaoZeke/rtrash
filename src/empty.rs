@@ -197,18 +197,16 @@ fn empty_dangling(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
                 continue;
             }
             if opts.dry_run {
-                if !opts.json {
-                    println!("would remove {}", crate::util::term_path(&path));
-                }
+                crate::util::HumanOutput::new(opts.json, !opts.json || opts.verbose)
+                    .line(&format!("would remove {}", path.display()));
                 removed += 1;
                 continue;
             }
             let sz = fs::symlink_metadata(&path).map_or(0, |m| crate::du_fs::disk_bytes(&path, &m));
             match crate::permanent_guard::remove_record(&path) {
                 Ok(()) => {
-                    if opts.verbose && !opts.json {
-                        println!("removed {}", crate::util::term_path(&path));
-                    }
+                    crate::util::HumanOutput::new(opts.json, opts.verbose)
+                        .line(&format!("removed {}", path.display()));
                     crate::trash_total::forget(dir);
                     crate::trash_total::touched(dir);
                     if let Some((b, n)) = total {
@@ -570,7 +568,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                     max,
                     policy: opts.prune,
                     dry_run: true,
-                    verbose: false,
+                    human: crate::util::HumanOutput::default(),
                     protect_batch: None,
                     gone_before: cutoff,
                     free_inodes: 0,
@@ -618,7 +616,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 max,
                 policy: opts.prune,
                 dry_run: opts.dry_run,
-                verbose: !opts.json && (opts.verbose || opts.dry_run),
+                human: crate::util::HumanOutput::new(opts.json, opts.verbose || opts.dry_run),
                 protect_batch: None,
                 gone_before: cutoff,
                 free_inodes: 0,
@@ -923,13 +921,13 @@ fn empty_one(
                             .unwrap_or(0)
                 };
                 bytes.fetch_add(sz, Ordering::Relaxed);
-                if !opts.json && (opts.verbose || opts.dry_run) {
-                    println!(
+                crate::util::HumanOutput::new(opts.json, opts.verbose || opts.dry_run).line(
+                    &format!(
                         "would remove {} ({})",
-                        crate::util::term_path(&display),
+                        display.display(),
                         crate::fastdelete::format_bytes(sz)
-                    );
-                }
+                    ),
+                );
                 removed.fetch_add(1, Ordering::Relaxed);
                 return;
             }
@@ -967,9 +965,8 @@ fn empty_one(
                         drop(section);
                         crate::interrupt::test_seam("after-item");
                     }
-                    if opts.verbose && !opts.json {
-                        println!("removed {}", crate::util::term_path(display));
-                    }
+                    crate::util::HumanOutput::new(opts.json, opts.verbose)
+                        .line(&format!("removed {}", display.display()));
                     removed.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => fail(failures, errors, display.clone(), &e),
@@ -1106,13 +1103,11 @@ fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
             crate::fastdelete::disk_usage(&payload) + crate::fastdelete::disk_usage(&info_path);
         if opts.dry_run {
             bytes = bytes.saturating_add(sz);
-            if opts.verbose && !opts.json {
-                println!(
-                    "would remove {} ({})",
-                    crate::util::term_path(&entry.original),
-                    crate::fastdelete::format_bytes(sz)
-                );
-            }
+            crate::util::HumanOutput::new(opts.json, opts.verbose).line(&format!(
+                "would remove {} ({})",
+                entry.original.display(),
+                crate::fastdelete::format_bytes(sz)
+            ));
             removed += 1;
             continue;
         }
@@ -1161,9 +1156,8 @@ fn empty_exact(prog: &str, dirs: &[TrashDir], opts: &Opts) -> i32 {
         }
         trashdir::directorysizes_remove(&entry.dir, &entry.name);
         bytes = bytes.saturating_add(sz);
-        if opts.verbose && !opts.json {
-            println!("removed {}", crate::util::term_path(&entry.original));
-        }
+        crate::util::HumanOutput::new(opts.json, opts.verbose)
+            .line(&format!("removed {}", entry.original.display()));
         removed += 1;
         drop(section);
         drop(held);
@@ -1242,13 +1236,11 @@ fn full_empty_dry_run(
             let sz = sizes.payload_bytes(&crate::util::str_from_os_ref(&entry.file_name()));
             total = total.saturating_add(sz);
             n_files += 1;
-            if !opts.json {
-                println!(
-                    "would remove {} ({})",
-                    crate::util::term_path(&shown),
-                    crate::fastdelete::format_bytes(sz)
-                );
-            }
+            crate::util::HumanOutput::new(opts.json, !opts.json || opts.verbose).line(&format!(
+                "would remove {} ({})",
+                shown.display(),
+                crate::fastdelete::format_bytes(sz)
+            ));
         }
     }
     if let Ok(entries) = fs::read_dir(&info_dir) {
@@ -1312,7 +1304,7 @@ fn full_empty_wipe(
 
     // Verbose still lists intended removals before delete (stable UX),
     // by original path where a record names one.
-    if opts.verbose && !opts.json {
+    if opts.verbose {
         if let Ok(entries) = fs::read_dir(&files_dir) {
             for entry in entries
                 .flatten()
@@ -1321,7 +1313,8 @@ fn full_empty_wipe(
                 let mut info = entry.file_name();
                 info.push(".trashinfo");
                 let shown = original_of(dir, &info_dir.join(info)).unwrap_or_else(|| entry.path());
-                println!("removed {}", crate::util::term_path(&shown));
+                crate::util::HumanOutput::new(opts.json, true)
+                    .line(&format!("removed {}", shown.display()));
             }
         }
     }
