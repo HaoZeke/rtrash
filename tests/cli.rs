@@ -8432,19 +8432,29 @@ fn put_warns_about_an_open_file_and_refuses_it_on_request() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(stderr_of(&out).contains("warning: 'held.log' is in use by pid"));
     assert!(!held.exists());
-    sb.touch("idle.log");
     // Without root some processes cannot be inspected, and refuse then
-    // leaves even a file nobody holds, unless every process was seen.
-    let who = stdout_of(&sb.run(&["who", "--json", "idle.log"]));
-    let seen_all = who.contains("\"unreadable\":0}");
-    let out = sb.run(&["put", &pin, "--in-use=refuse", "idle.log"]);
-    if seen_all {
-        assert!(out.status.success(), "{}", stderr_of(&out));
-        assert!(stderr_of(&out).is_empty());
-    } else {
-        assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
-        assert!(stderr_of(&out).contains("could not be inspected"));
+    // leaves even a file nobody holds, unless every process was seen. Two
+    // scans of /proc can differ: a process of another test that is in the
+    // middle of an exec reads as denied for a moment. So `who` and the put
+    // are tried again until they agree, and fail only if they never do.
+    let mut last = String::new();
+    for _ in 0..20 {
+        sb.touch("idle.log");
+        let who = stdout_of(&sb.run(&["who", "--json", "idle.log"]));
+        let seen_all = who.contains("\"unreadable\":0}");
+        let out = sb.run(&["put", &pin, "--in-use=refuse", "idle.log"]);
+        let said = stderr_of(&out);
+        let agreed = if seen_all {
+            out.status.success() && said.is_empty()
+        } else {
+            out.status.code() == Some(1) && said.contains("could not be inspected")
+        };
+        if agreed {
+            return;
+        }
+        last = format!("who: {who}\nexit: {:?}\nstderr: {said}", out.status.code());
     }
+    panic!("who and put never agreed in 20 tries; the last was\n{last}");
 }
 
 /// A stand-in `/proc` for the debug seam `RTRASH_TEST_PROC`: each of
