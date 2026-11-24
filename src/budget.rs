@@ -204,6 +204,7 @@ pub enum PathMatch {
     Name(String),
     /// `restore --match=substring`: text anywhere in the original path.
     Substring(String),
+    Prefix(String),
     /// `restore --match=exact`: the whole original path.
     Exact(String),
     /// `restore --match=id`: the `{id}` from `list --format`.
@@ -217,6 +218,7 @@ impl PathMatch {
         Ok(match kind {
             Match::Glob => PathMatch::Glob(pat.to_string()),
             Match::Substring => PathMatch::Substring(pat.to_string()),
+            Match::Prefix => PathMatch::Prefix(pat.to_string()),
             Match::Exact => PathMatch::Exact(pat.to_string()),
             Match::Id => PathMatch::Id(pat.to_string()),
             Match::Regex => match regex_lite::Regex::new(pat) {
@@ -256,6 +258,7 @@ impl PathMatch {
             PathMatch::Regex(re) => re.is_match(&full),
             PathMatch::Name(n) => base == *n,
             PathMatch::Substring(s) => full.contains(s.as_str()),
+            PathMatch::Prefix(s) => original.starts_with(Path::new(s)),
             PathMatch::Exact(s) => full == *s,
             // The id needs the trash name and the date; [`keeps_record`].
             PathMatch::Id(_) => false,

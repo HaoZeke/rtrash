@@ -468,7 +468,7 @@ fn volume_trashes_join_list_restore_rm_and_status() {
     assert!(!vt.join("v.bin").exists());
     assert!(vt.join(".DS_Store").exists());
     let o = run(&["rm", "--match=glob", "--older-than=1d", "*", "--force"]);
-    assert!(o.status.success(), "{}", err(&o));
+    assert_eq!(o.status.code(), Some(1), "{}", err(&o));
 }
 
 #[test]
@@ -1179,7 +1179,12 @@ fn finder_matching_ignores_unicode_normalization() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(f.exists());
 
-    // rm takes a composed glob for a decomposed name.
+    // rm takes a composed glob for a decomposed name. A second file keeps
+    // the glob from being every entry in the trash.
+    let other = b.work().join("other.dat");
+    fs::write(&other, b"o").unwrap();
+    assert!(b.run(&["put", "other.dat"], "").status.success());
+    b.put_back("other.dat", &other);
     assert!(b.run(&["put", nfd], "").status.success());
     b.put_back(nfd, &f);
     let o = b.run(&["rm", "--match=glob", "n\u{e9}*"], "");
@@ -1195,6 +1200,81 @@ fn finder_matching_ignores_unicode_normalization() {
     let o = b.run(&["rm", "--regex", "/ne\u{301}e\\.txt$"], "");
     assert!(o.status.success(), "{}", err(&o));
     assert!(!b.finder().join(nfd).exists());
+}
+
+#[test]
+fn finder_mass_guard_groups_symlinked_scope_spellings() {
+    let b = Box_::new("mass-scope-alias");
+    let root_name = b.root.file_name().unwrap();
+    let front = b
+        .root
+        .with_file_name(format!("{}-front", root_name.to_string_lossy()));
+    std::os::unix::fs::symlink(b.root.parent().unwrap(), &front).unwrap();
+    let through_front = front.join(root_name);
+    let alias = b
+        .root
+        .with_file_name(format!("{}-alias", root_name.to_string_lossy()));
+    std::os::unix::fs::symlink(&through_front, &alias).unwrap();
+    fs::create_dir(b.finder()).unwrap();
+    let nfd = "ne\u{301}e.txt";
+    for name in [nfd, "other.dat"] {
+        fs::write(b.finder().join(name), b"x").unwrap();
+    }
+    let record = |name: &str, folder: &Path| Record {
+        name: name.into(),
+        code: *b"ptbL",
+        value: Value::Ustr(format!(
+            "{}/",
+            folder.to_string_lossy().trim_start_matches('/')
+        )),
+    };
+    fs::write(
+        b.finder().join(".DS_Store"),
+        ds_store::write(&[
+            record(nfd, &alias.join("work")),
+            record("other.dat", &through_front.join("work")),
+        ]),
+    )
+    .unwrap();
+
+    let alias_text = alias.to_string_lossy().into_owned();
+    let alias_xdg = alias.join("xdg").to_string_lossy().into_owned();
+    let out = b.run_env(
+        &["rm", "--match=glob", "n\u{e9}*"],
+        &[("HOME", &alias_text), ("XDG_DATA_HOME", &alias_xdg)],
+    );
+    fs::remove_file(&alias).unwrap();
+    fs::remove_file(&front).unwrap();
+    assert!(out.status.success(), "{}", err(&out));
+    assert!(!b.finder().join(nfd).exists());
+    assert!(b.finder().join("other.dat").exists());
+}
+
+#[test]
+fn finder_rm_exact_with_no_match_exits_one() {
+    let b = Box_::new("rm-exact-no-match");
+    fs::write(b.work().join("kept.txt"), b"x").unwrap();
+    assert!(b.run(&["put", "kept.txt"], "").status.success());
+    let missing = b.work().join("kept");
+    for args in [
+        vec!["rm", "--match=exact", missing.to_str().unwrap()],
+        vec!["rm", "-n", "--match=exact", missing.to_str().unwrap()],
+        vec!["rm", "--json", "--match=exact", missing.to_str().unwrap()],
+    ] {
+        let out = b.run(&args, "");
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", err(&out));
+        assert!(
+            err(&out).contains("no exact match"),
+            "{args:?}: {}",
+            err(&out)
+        );
+        assert!(
+            err(&out).contains("no trash items match"),
+            "{args:?}: {}",
+            err(&out)
+        );
+    }
+    assert!(b.finder().join("kept.txt").exists());
 }
 
 #[test]
@@ -1394,6 +1474,77 @@ fn interactive_finder_empty_of_an_exact_path_honors_the_reply() {
     assert!(b.finder().join("kept.txt").exists());
 }
 
+#[test]
+fn finder_empty_exact_keeps_a_protected_path() {
+    let b = Box_::new("emptyexactkeep");
+    fs::create_dir_all(b.root.join(".config/rtrash")).unwrap();
+    let kept = b.work().join("kept.txt");
+    fs::write(
+        b.root.join(".config/rtrash/keep"),
+        format!("{}\n", kept.display()),
+    )
+    .unwrap();
+    fs::write(&kept, b"kept").unwrap();
+    fs::write(b.work().join("other.txt"), b"other").unwrap();
+    assert!(b
+        .run(&["put", "kept.txt", "other.txt"], "")
+        .status
+        .success());
+
+    let o = b.run(&["empty", "-f", kept.to_str().unwrap()], "");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(err(&o).contains("listed in the keep file"), "{}", err(&o));
+    assert!(b.finder().join("kept.txt").exists());
+    assert!(b.finder().join("other.txt").exists());
+}
+
+#[test]
+fn finder_empty_exact_refuses_duplicate_originals_until_an_id_selects_one() {
+    let b = Box_::new("emptyexactambiguous");
+    fs::create_dir_all(b.finder()).unwrap();
+    for name in ["same one", "same two"] {
+        fs::write(b.finder().join(name), name).unwrap();
+    }
+    let folder = format!("{}/", b.work().to_string_lossy().trim_start_matches('/'));
+    let records: Vec<Record> = ["same one", "same two"]
+        .into_iter()
+        .flat_map(|name| {
+            [
+                Record {
+                    name: name.into(),
+                    code: *b"ptbL",
+                    value: Value::Ustr(folder.clone()),
+                },
+                Record {
+                    name: name.into(),
+                    code: *b"ptbN",
+                    value: Value::Ustr("same.txt".into()),
+                },
+            ]
+        })
+        .collect();
+    fs::write(b.finder().join(".DS_Store"), ds_store::write(&records)).unwrap();
+    let original = b.work().join("same.txt");
+
+    let refused = b.run(&["empty", "-f", original.to_str().unwrap()], "");
+    assert_eq!(refused.status.code(), Some(2), "{}", err(&refused));
+    assert!(
+        err(&refused).contains("refusing 2 trash items with original path"),
+        "{}",
+        err(&refused)
+    );
+    assert!(b.finder().join("same one").exists());
+    assert!(b.finder().join("same two").exists());
+
+    let removed = b.run(
+        &["rm", "--id=same one", original.to_str().unwrap(), "--yes"],
+        "",
+    );
+    assert!(removed.status.success(), "{}", err(&removed));
+    assert!(!b.finder().join("same one").exists());
+    assert!(b.finder().join("same two").exists());
+}
+
 /// Odd but valid file names (APFS takes no invalid UTF-8) through put,
 /// every list form, restore, rm and empty on the Finder Trash. Each
 /// command must finish without a panic; restore brings back the bytes.
@@ -1457,7 +1608,7 @@ fn odd_names_survive_the_finder_trash() {
             &format!("{args:?} after a payload vanished"),
         );
     }
-    let o = b.run(&["rm", "*"], "");
+    let o = b.run(&["rm", "--glob", "*"], "");
     ok(&o, "rm");
     let o = b.run(&["empty", "--all", "-v"], "");
     ok(&o, "empty");
@@ -1523,19 +1674,32 @@ fn max_count_refuses_finder_rm_and_empty_past_the_cap() {
     for n in names {
         fs::write(b.work().join(n), n).unwrap();
     }
-    assert!(b.run(&["put", "fc-a", "fc-b", "fc-c"], "").status.success());
+    fs::write(b.work().join("other.dat"), b"o").unwrap();
+    assert!(b
+        .run(&["put", "fc-a", "fc-b", "fc-c", "other.dat"], "")
+        .status
+        .success());
     let cap2 = [("RTRASH_MAX_PERMANENT", "2")];
-    for (args, envs) in [
+    for (args, envs, says) in [
         (
-            &["rm", "--match=glob", "--max-count=2", "fc-*"][..],
+            &["rm", "--max-count=2", "--glob", "fc-*"][..],
             &[][..],
+            "3 items would be deleted",
         ),
-        (&["rm", "--match=glob", "fc-*"][..], &cap2[..]),
-        (&["empty", "--all"][..], &cap2[..]),
+        (
+            &["rm", "--glob", "fc-*"][..],
+            &cap2[..],
+            "3 items would be deleted",
+        ),
+        (
+            &["empty", "--all"][..],
+            &cap2[..],
+            "4 items would be deleted",
+        ),
     ] {
         let o = b.run_env(args, envs);
         assert_eq!(o.status.code(), Some(2), "{args:?}: {}", err(&o));
-        assert!(err(&o).contains("3 items would be deleted"), "{}", err(&o));
+        assert!(err(&o).contains(says), "{}", err(&o));
         assert!(
             names.iter().all(|n| b.finder().join(n).exists()),
             "{args:?}"
@@ -1544,7 +1708,8 @@ fn max_count_refuses_finder_rm_and_empty_past_the_cap() {
     let o = b.run_env(&["rm", "--max-count=1", "fc-a"], &cap2);
     assert!(o.status.success(), "{}", err(&o));
     assert!(!b.finder().join("fc-a").exists());
-    let o = b.run_env(&["empty", "--all"], &cap2);
+    let cap3 = [("RTRASH_MAX_PERMANENT", "3")];
+    let o = b.run_env(&["empty", "--all"], &cap3);
     assert!(o.status.success(), "{}", err(&o));
     assert!(!b.finder().join("fc-b").exists() && !b.finder().join("fc-c").exists());
 }
@@ -1741,7 +1906,8 @@ fn finder_rm_refuses_a_repository_that_holds_risky_work() {
         return;
     }
     fs::write(repo.join("f"), b"x").unwrap();
-    let o = b.run(&["put", "-r", "fr-repo"], "");
+    fs::write(b.work().join("spared.txt"), b"spared").unwrap();
+    let o = b.run(&["put", "-r", "fr-repo", "spared.txt"], "");
     assert!(o.status.success(), "{}", err(&o));
     let kept = b.finder().join("fr-repo");
     assert!(kept.join("f").exists());

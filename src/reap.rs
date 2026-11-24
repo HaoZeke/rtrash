@@ -641,6 +641,13 @@ fn walk(entry: &Path, top: &fs::Metadata, dev: u64, ctx: &Ctx, g: &Group) -> Wal
                     return w;
                 }
             };
+            if ctx.keep.protects(&p) {
+                w.keep = Some(format!(
+                    "holds '{}', listed in the keep file",
+                    crate::util::err_path(&p)
+                ));
+                return w;
+            }
             if plat::dev(&m) != dev {
                 w.keep = Some(format!("holds the mount point '{}'", p.display()));
                 return w;
@@ -702,6 +709,7 @@ struct Outcome {
     skip: Option<String>,
     /// Bytes only this entry uses (`--shared`).
     unique: Option<u64>,
+    identity: (u64, u64, u64, u64),
 }
 
 /// The entries of one profile, or of the plain directories (`tmp`).
@@ -731,6 +739,7 @@ struct Ctx {
     excl: Vec<String>,
     runtime: Option<PathBuf>,
     home: Option<PathBuf>,
+    keep: crate::keep::Keep,
 }
 
 fn judge(path: &Path, parent_dev: u64, gi: usize, g: &Group, ctx: &Ctx) -> Option<Outcome> {
@@ -754,12 +763,15 @@ fn judge(path: &Path, parent_dev: u64, gi: usize, g: &Group, ctx: &Ctx) -> Optio
         dev: parent_dev,
         skip: None,
         unique: None,
+        identity: plat::identity(path, &m),
     };
     let name = path
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_default();
-    o.skip = if path.parent().is_none() || ctx.home.as_ref().is_some_and(|h| h.starts_with(path)) {
+    o.skip = if ctx.keep.protects(path) {
+        Some("listed in the keep file".to_string())
+    } else if path.parent().is_none() || ctx.home.as_ref().is_some_and(|h| h.starts_with(path)) {
         Some("holds your home directory".to_string())
     } else if name.starts_with(".Trash") {
         Some("a trash directory".to_string())
@@ -866,6 +878,9 @@ mod plat {
     }
     pub fn uid(m: &fs::Metadata) -> u32 {
         m.uid()
+    }
+    pub fn identity(_p: &Path, m: &fs::Metadata) -> (u64, u64, u64, u64) {
+        (m.dev(), m.ino(), m.ctime() as u64, m.ctime_nsec() as u64)
     }
     /// The bytes on disk of `p`, as du counts them.
     pub fn bytes(p: &Path, m: &fs::Metadata) -> u64 {
@@ -988,6 +1003,14 @@ mod plat {
     }
     pub fn uid(_m: &fs::Metadata) -> u32 {
         0
+    }
+    pub fn identity(_p: &Path, m: &fs::Metadata) -> (u64, u64, u64, u64) {
+        (
+            m.file_size(),
+            m.last_write_time(),
+            m.creation_time(),
+            u64::from(m.file_attributes()),
+        )
     }
     /// The bytes on disk of `p`, as du counts them: a compressed, Compact,
     /// sparse or online-only file counts what it takes, not its length.
@@ -1502,6 +1525,13 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         return usage_err(prog, "--purge-trash goes with --when-below");
     }
     let now = crate::util::now_epoch();
+    let keep = match crate::keep::Keep::load() {
+        Ok(keep) => keep,
+        Err(e) => {
+            eprintln!("{prog}: cannot read keep file: {e}; refusing reap");
+            return 1;
+        }
+    };
     let mut status = 0;
     let mut groups: Vec<Group> = Vec::new();
 
@@ -1799,6 +1829,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         excl: tmpfiles_exclusions(),
         runtime: std::env::var_os("XDG_RUNTIME_DIR").and_then(|d| fs::canonicalize(d).ok()),
         home: crate::util::home_dir().and_then(|h| fs::canonicalize(h).ok()),
+        keep,
     };
 
     // A profile with a tool on PATH hands its cleanup to it under --tool.
@@ -1891,6 +1922,21 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
         }
         if !dry_run {
+            if groups[o.group].action == Action::Permanent
+                && fs::symlink_metadata(&o.path)
+                    .map(|m| plat::identity(&o.path, &m))
+                    .ok()
+                    != Some(o.identity)
+            {
+                eprintln!(
+                    "{prog}: '{}' changed after it was selected; left as it is",
+                    crate::util::err_path(&o.path)
+                );
+                o.skip = Some("changed after it was selected".into());
+                failed += 1;
+                status = 1;
+                continue;
+            }
             let done = if groups[o.group].action == Action::Permanent {
                 plat::remove(&o.path).map_err(|e| {
                     eprintln!(
@@ -2020,9 +2066,9 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             crate::util::format_bytes(o.bytes)
         );
     }
-    if verbose {
-        for o in &outcomes {
-            if let Some(why) = &o.skip {
+    for o in &outcomes {
+        if let Some(why) = &o.skip {
+            if verbose || why == "listed in the keep file" {
                 println!(
                     "kept '{}': {}",
                     crate::util::term_path(&o.path),
@@ -2241,7 +2287,15 @@ pub(crate) fn free_until(
         if need == (0, 0) {
             continue;
         }
-        let left = purge_oldest(prog, dev, Some(root), need, floor, dry_run, verbose);
+        let left = purge_oldest(
+            prog,
+            dev,
+            Some(root),
+            need,
+            floor,
+            dry_run,
+            verbose && !json,
+        );
         if left != (0, 0) {
             still += 1;
             eprintln!(

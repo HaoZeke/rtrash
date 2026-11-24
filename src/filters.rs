@@ -450,8 +450,7 @@ mod tests {
     }
 }
 
-/// How `rm` reads its PATTERNs: trashy's `--match` kinds. Globs are the
-/// default here (trashy's default is regex).
+/// How `rm` reads its PATTERNs: trashy's `--match` kinds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Match {
     /// Shell glob on the original path, its basename or the trash name.
@@ -461,6 +460,8 @@ pub enum Match {
     Regex,
     /// Text found anywhere in the original path.
     Substring,
+    /// The original path, or a path below it.
+    Prefix,
     /// The whole original path, character for character.
     Exact,
     /// One trash item: [`item_id`] of its name and deletion date.
@@ -473,13 +474,26 @@ impl Match {
             "glob" => Ok(Match::Glob),
             "regex" => Ok(Match::Regex),
             "substring" => Ok(Match::Substring),
+            "prefix" => Ok(Match::Prefix),
             "exact" => Ok(Match::Exact),
             "id" => Ok(Match::Id),
             _ => Err(format!(
-                "invalid --match '{s}' (use glob, regex, substring, exact or id)"
+                "invalid --match '{s}' (use exact, glob, regex, substring, prefix or id)"
             )),
         }
     }
+}
+
+/// A prefix that names a whole volume: `/`, `\`, or a drive root in any
+/// of the spellings Windows accepts (`C:\`, `C:/`, `C:`, `\\?\C:\`).
+fn prefix_is_mass(p: &str) -> bool {
+    if p == "/" || p == "\\" {
+        return true;
+    }
+    let bare = p.strip_prefix(r"\\?\").unwrap_or(p);
+    let s = bare.replace('/', "\\");
+    let b = s.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2..].iter().all(|c| *c == b'\\')
 }
 
 /// The PATTERN operands of `rm`, read as `kind` says. `texts` keeps them
@@ -530,21 +544,34 @@ impl Patterns {
         })
     }
 
-    /// A pattern that takes everything: `*` and friends, a regex that
-    /// matches the empty string (such as `.*` or `^`), or a substring
-    /// every path contains (empty, or a lone separator).
+    /// A pattern whose effective scope is the whole trash, or every entry
+    /// under one scope root: a glob or regex that matches every probed
+    /// path in such a set, a substring every absolute path contains, or a
+    /// prefix whose match key is empty, a volume root, the home directory
+    /// or a trash root. The decision is what the pattern matches, not a
+    /// list of spellings.
     pub fn is_mass(&self) -> bool {
+        if self.unknown_scope_needs_force() {
+            return true;
+        }
         match self.kind {
-            Match::Glob => {
-                let all = ["*", "*.*", "**", "**/*"];
-                self.texts.iter().any(|p| all.contains(&p.as_str()))
-            }
-            Match::Regex => self.regex.iter().any(|r| r.is_match("")),
-            Match::Substring => self
-                .texts
-                .iter()
-                .any(|p| ["", "/", "\\"].contains(&p.as_str())),
+            Match::Glob => self.texts.iter().any(|p| glob_is_mass(p)),
+            Match::Regex => self.regex.iter().any(regex_is_mass),
+            Match::Substring => self.texts.iter().any(|p| substring_is_mass(p)),
+            Match::Prefix => self.texts.iter().any(|p| prefix_pattern_is_mass(p)),
             Match::Exact | Match::Id => false,
+        }
+    }
+
+    /// Whether broad matching is unavailable because no scope root is known.
+    pub fn unknown_scope_needs_force(&self) -> bool {
+        if crate::rm_match::known_scope_roots().is_some() {
+            return false;
+        }
+        match self.kind {
+            Match::Regex | Match::Substring => true,
+            Match::Glob => self.texts.iter().any(|text| text.contains(['/', '\\'])),
+            Match::Prefix | Match::Exact | Match::Id => false,
         }
     }
 
@@ -567,18 +594,326 @@ impl Patterns {
 
     pub fn hit(&self, full: &str, base: &str, name: &str) -> bool {
         match self.kind {
-            Match::Glob => self.texts.iter().any(|p| {
-                crate::util::fnmatch(p, full)
-                    || crate::util::fnmatch(p, base)
-                    || crate::util::fnmatch(p, name)
-            }),
+            Match::Glob => self.glob_hit(full, base, name),
             Match::Regex => self.regex.iter().any(|r| r.is_match(full)),
             Match::Substring => self.texts.iter().any(|p| full.contains(p.as_str())),
+            Match::Prefix => self
+                .texts
+                .iter()
+                .any(|p| std::path::Path::new(full).starts_with(std::path::Path::new(p))),
             Match::Exact => self.texts.iter().any(|p| p == full),
             // The date is not here; [`selects`] matches an id.
             Match::Id => false,
         }
     }
+
+    pub(crate) fn glob_hit(&self, full: &str, base: &str, name: &str) -> bool {
+        self.texts.iter().any(|p| {
+            if !crate::rm_match::scope_roots_are_known() && !p.contains(['/', '\\']) {
+                crate::util::fnmatch(p, base) || crate::util::fnmatch(p, name)
+            } else {
+                glob_hits_path(p, full)
+                    || crate::util::fnmatch(p, base)
+                    || crate::util::fnmatch(p, name)
+            }
+        })
+    }
+}
+
+fn glob_hits_path(pattern: &str, full: &str) -> bool {
+    let full_hit = crate::util::fnmatch(pattern, full);
+    if !full_hit || pattern.contains(['/', '\\']) {
+        return full_hit;
+    }
+    suppress_inherited_glob_hit(pattern, full_hit, scope_relative(full))
+}
+
+fn suppress_inherited_glob_hit(
+    pattern: &str,
+    full_hit: bool,
+    scope: Option<(String, String)>,
+) -> bool {
+    if let Some((inherited, relative)) = scope {
+        if crate::util::fnmatch(pattern, &inherited) {
+            return crate::util::fnmatch(pattern, &relative);
+        }
+    }
+    full_hit
+}
+
+fn scope_relative(full: &str) -> Option<(String, String)> {
+    let roots = crate::rm_match::known_scope_roots()?;
+    #[cfg(windows)]
+    {
+        let shown = crate::util::plain_path(std::path::Path::new(full))
+            .to_string_lossy()
+            .into_owned();
+        let key = crate::win_recycle::path_key(full, &[]);
+        let roots: Vec<String> = roots
+            .iter()
+            .map(|root| crate::win_recycle::path_key(&root.to_string_lossy(), &[]))
+            .collect();
+        scope_relative_parts(&shown, &key, &roots, b'\\')
+    }
+    #[cfg(not(windows))]
+    {
+        let roots: Vec<String> = roots
+            .iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect();
+        scope_relative_parts(full, full, &roots, b'/')
+    }
+}
+
+fn scope_relative_parts(
+    shown: &str,
+    key: &str,
+    roots: &[String],
+    separator: u8,
+) -> Option<(String, String)> {
+    let key_parts: Vec<&str> = key
+        .split(char::from(separator))
+        .filter(|part| !part.is_empty())
+        .collect();
+    let root_parts: Vec<Vec<&str>> = roots
+        .iter()
+        .map(|root| {
+            root.split(char::from(separator))
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+        .collect();
+    let common = (0..key_parts.len())
+        .take_while(|&n| {
+            root_parts
+                .iter()
+                .all(|root| root.get(n) == Some(&key_parts[n]))
+        })
+        .count();
+    if common == 0 {
+        // No part of this path is safely distinguishable from the
+        // inherited spellings of every known scope. Treat the whole path
+        // as inherited so a separator-free glob cannot gain a match from
+        // one root's parent while an age filter hides the other roots.
+        return Some((shown.to_string(), String::new()));
+    }
+    let spans = component_spans(shown, separator);
+    if spans.len() < common {
+        return None;
+    }
+    let inherited = shown[..spans[common - 1].1].to_string();
+    let relative = spans
+        .get(common)
+        .map_or("", |span| &shown[span.0..])
+        .to_string();
+    Some((inherited, relative))
+}
+
+fn component_spans(path: &str, separator: u8) -> Vec<(usize, usize)> {
+    let bytes = path.as_bytes();
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        while at < bytes.len() && bytes[at] == separator {
+            at += 1;
+        }
+        let start = at;
+        while at < bytes.len() && bytes[at] != separator {
+            at += 1;
+        }
+        if start < at {
+            spans.push((start, at));
+        }
+    }
+    spans
+}
+
+/// Names a glob has to match before it counts as taking every item, and
+/// absolute paths a glob or regex has to match before it counts as taking
+/// every entry, or every entry on one volume or under one scope root.
+/// `*.*` stays mass because its only literal is `.` and it matches every
+/// dotted name. The absolute probes leave out a bare `/` and a one-letter
+/// name, so a pattern that matches every real path (`/?*`, `/`, `..`) is
+/// mass and one that matches a single letter is not.
+fn glob_is_mass(p: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "a", "b", "z", "0", "9", ".", "-", "_", " ", "ab", "a.b", ".a", "a.", "foo", "*", "?",
+    ];
+    if NAMES.iter().all(|n| crate::util::fnmatch(p, n)) {
+        return true;
+    }
+    if covers_absolute(|full| crate::util::fnmatch(p, full)) || glob_covers_any_scope(p) {
+        return true;
+    }
+    let only_dot = p.bytes().any(|c| c == b'.')
+        && p.bytes()
+            .all(|c| matches!(c, b'*' | b'?' | b'[' | b']' | b'.'));
+    only_dot
+        && ["a.b", ".a", "a.", "foo.bar", "a.b.c"]
+            .iter()
+            .all(|n| crate::util::fnmatch(p, n))
+}
+
+/// A regex that matches the empty string, or every path in one probe set,
+/// so `.`, `/`, `..` and `.{2}` are mass and `foo` is not.
+fn regex_is_mass(r: &regex_lite::Regex) -> bool {
+    r.is_match("") || covers_absolute(|full| r.is_match(full)) || regex_covers_any_scope(r)
+}
+
+fn every(probes: &[&str], hit: &mut impl FnMut(&str) -> bool) -> bool {
+    probes.iter().all(|p| hit(p))
+}
+
+/// True when `hit` accepts every Unix absolute probe, every drive-letter
+/// probe, or every probe on one drive.
+fn covers_absolute(mut hit: impl FnMut(&str) -> bool) -> bool {
+    const UNIX: &[&str] = &[
+        "/a",
+        "/b/c",
+        "/tmp/x",
+        "/var/y",
+        "/.a",
+        "/home/u/a",
+        "/x.y",
+        "//x",
+    ];
+    const WIN_ANY: &[&str] = &[r"C:\a", r"D:\x", r"E:\z.y", r"C:\b\c"];
+    const WIN_C: &[&str] = &[r"C:\a", r"C:\b\c", r"C:\Users\q", r"C:\z.y"];
+    const WIN_D: &[&str] = &[r"D:\a", r"D:\b\c", r"D:\q"];
+    every(UNIX, &mut hit)
+        || every(WIN_ANY, &mut hit)
+        || every(WIN_C, &mut hit)
+        || every(WIN_D, &mut hit)
+}
+
+/// A glob that matches every entry under a known scope root and names that
+/// directory literally. `*e*` is not this: it has no directory, and the
+/// home spelling is what made every probe match.
+fn glob_covers_any_scope(pat: &str) -> bool {
+    let Some(roots) = crate::rm_match::known_scope_roots() else {
+        return false;
+    };
+    roots
+        .iter()
+        .any(|root| glob_covers_root(pat, &root.to_string_lossy()))
+}
+
+fn glob_covers_root(pat: &str, root: &str) -> bool {
+    let probes = probes_under(root);
+    if !probes.iter().all(|p| crate::util::fnmatch(pat, p)) {
+        return false;
+    }
+    let literal: String = pat
+        .chars()
+        .take_while(|c| !matches!(c, '*' | '?' | '['))
+        .collect();
+    let literal = literal.trim_end_matches(['/', '\\']);
+    if literal.is_empty() {
+        return false;
+    }
+    let root = root.trim_end_matches(['/', '\\']);
+    root.starts_with(literal) || literal.starts_with(root)
+}
+
+/// A regex whose match on every probe under a scope root starts at the
+/// first character and ends at the same place. That is a prefix of the
+/// scope (`^/home/u`), not a letter that happens to sit in the root.
+fn regex_covers_any_scope(r: &regex_lite::Regex) -> bool {
+    let Some(roots) = crate::rm_match::known_scope_roots() else {
+        return false;
+    };
+    roots
+        .iter()
+        .any(|root| regex_covers_root(r, &root.to_string_lossy()))
+}
+
+fn regex_covers_root(r: &regex_lite::Regex, root: &str) -> bool {
+    let probes = probes_under(root);
+    let mut end_at: Option<usize> = None;
+    for probe in &probes {
+        let Some(found) = r.find(probe) else {
+            return false;
+        };
+        if found.start() != 0 {
+            return false;
+        }
+        match end_at {
+            None => end_at = Some(found.end()),
+            Some(end) if end == found.end() => {}
+            Some(_) => return false,
+        }
+    }
+    end_at.is_some()
+}
+
+fn probes_under(root: &str) -> Vec<String> {
+    let root = root.trim_end_matches(['/', '\\']);
+    let sep = if root.contains('\\') { '\\' } else { '/' };
+    ["a", "b/c", "z.y", ".q"]
+        .into_iter()
+        .map(|tail| {
+            let tail = if sep == '\\' {
+                tail.replace('/', "\\")
+            } else {
+                tail.to_string()
+            };
+            format!("{root}{sep}{tail}")
+        })
+        .collect()
+}
+
+/// Whether a broad `selected` pattern takes every recorded original in
+/// `all`, or every original under a real scope root. Exact paths, ids,
+/// prefixes and literal globs name their selection deliberately. The probe
+/// check ([`Patterns::is_mass`]) remains the early error for a prefix that
+/// is itself a scope or volume root; this check handles result sets of
+/// wildcard globs, regexes and substrings.
+pub fn selection_covers_scope(
+    pats: &Patterns,
+    selected: &[std::path::PathBuf],
+    all: &[std::path::PathBuf],
+) -> bool {
+    let broad = match pats.kind {
+        Match::Glob => pats.texts.iter().any(|text| text.contains(['*', '?', '['])),
+        Match::Regex | Match::Substring => true,
+        // A prefix names a path literally. `Patterns::is_mass` already
+        // refuses it when that path is a scope or volume root.
+        Match::Prefix | Match::Exact | Match::Id => false,
+    };
+    if !broad || selected.is_empty() {
+        return false;
+    }
+    crate::rm_match::selection_wipes(selected, all)
+}
+
+/// A substring every Unix absolute path contains, or every Windows path
+/// contains. When no scope root is known, every substring needs `--force`
+/// before this content check matters.
+fn substring_is_mass(p: &str) -> bool {
+    p.is_empty()
+        || ["/", "/a", "/a/b"].iter().all(|s| s.contains(p))
+        || [r"\", r"\a", r"\a\b"].iter().all(|s| s.contains(p))
+}
+
+/// A prefix whose match key is empty, a volume root, the home directory
+/// or a trash root. The raw drive-root spellings stay mass too.
+fn prefix_pattern_is_mass(p: &str) -> bool {
+    if prefix_is_mass(p) {
+        return true;
+    }
+    let key = crate::rm_match::match_key(std::path::Path::new(p));
+    if key.as_os_str().is_empty() {
+        return true;
+    }
+    let shown = key.to_string_lossy();
+    if prefix_is_mass(&shown) || shown == "/" || shown == "\\" {
+        return true;
+    }
+    #[cfg(windows)]
+    if crate::win_recycle::mass_canonical_key(&crate::win_recycle::path_key(&shown, &[])) {
+        return true;
+    }
+    crate::rm_match::is_scope_root(&key)
 }
 
 /// What an `rm` run did, for `--json`.
@@ -622,10 +957,21 @@ mod pattern_tests {
         assert!(Patterns::new(vec![".*".into()], Match::Regex)
             .unwrap()
             .is_mass());
+        assert!(!Patterns::new(vec![r"\.o$".into()], Match::Regex)
+            .unwrap()
+            .is_mass());
         assert!(Patterns::new(vec!["(".into()], Match::Regex).is_err());
         let g = Patterns::new(vec!["*.o".into()], Match::Glob).unwrap();
         assert!(g.hit("/x/a.o", "a.o", "a.o"));
         assert!(!g.is_mass());
+        for mass in ["*", "*.*", "**", "**/*"] {
+            assert!(
+                Patterns::new(vec![mass.into()], Match::Glob)
+                    .unwrap()
+                    .is_mass(),
+                "{mass}"
+            );
+        }
     }
 
     #[test]
@@ -633,6 +979,14 @@ mod pattern_tests {
         let sub = Patterns::new(vec!["old-pro".into()], Match::Substring).unwrap();
         assert!(sub.hit("/home/u/old-project/a", "a", "a"));
         assert!(!sub.hit("/home/u/new/a", "a", "a"));
+        for narrow in ["notes", "b.log"] {
+            assert!(
+                !Patterns::new(vec![narrow.into()], Match::Substring)
+                    .unwrap()
+                    .is_mass(),
+                "{narrow}"
+            );
+        }
         assert!(Patterns::new(vec!["/".into()], Match::Substring)
             .unwrap()
             .is_mass());
@@ -660,6 +1014,106 @@ mod pattern_tests {
         let gstar = Patterns::new(vec!["*.log".into()], Match::Glob).unwrap();
         assert!(gstar.hit("/w/*.log", "*.log", "*.log"));
         assert!(gstar.hit("/w/notes.log", "notes.log", "notes.log"));
+    }
+
+    #[test]
+    fn drive_root_prefixes_are_mass() {
+        for p in [
+            r"C:\", "C:/", "c:\\", "D:", r"\\?\C:\", r"\\?\C:/", r"\\?\d:",
+        ] {
+            assert!(
+                Patterns::new(vec![p.into()], Match::Prefix)
+                    .unwrap()
+                    .is_mass(),
+                "{p}"
+            );
+        }
+        assert!(!Patterns::new(vec![r"C:\Users".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+        assert!(
+            !Patterns::new(vec![r"C:\safe-junction".into()], Match::Prefix)
+                .unwrap()
+                .is_mass()
+        );
+        assert!(Patterns::new(vec!["/".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+        assert!(Patterns::new(vec![r"\".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn a_glob_of_question_star_matches_every_name() {
+        assert!(Patterns::new(vec!["?*".into()], Match::Glob)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn a_regex_dot_matches_every_nonempty_path() {
+        assert!(Patterns::new(vec![".".into()], Match::Regex)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn an_empty_prefix_matches_every_path() {
+        assert!(Patterns::new(vec![String::new()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn slash_slash_is_a_root_prefix() {
+        assert!(Patterns::new(vec!["//".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn slash_dot_is_a_root_prefix() {
+        assert!(Patterns::new(vec!["/.".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn a_dot_dot_prefix_that_climbs_to_the_root_is_mass() {
+        assert!(Patterns::new(vec!["/tmp/..".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+    }
+
+    #[test]
+    fn tilde_is_the_home_root() {
+        if crate::util::home_dir().is_none() {
+            return;
+        }
+        assert!(Patterns::new(vec!["~".into()], Match::Prefix)
+            .unwrap()
+            .is_mass());
+        assert!(
+            !Patterns::new(vec!["~/not-a-root-alias".into()], Match::Prefix)
+                .unwrap()
+                .is_mass()
+        );
+    }
+
+    #[test]
+    fn a_trash_root_alias_is_mass() {
+        let Some(home) = crate::util::home_dir() else {
+            return;
+        };
+        let trash = home.join(".local/share/Trash");
+        let alias = format!("{}/.", trash.display());
+        assert!(Patterns::new(vec![alias], Match::Prefix).unwrap().is_mass());
+        assert!(
+            Patterns::new(vec!["~/.local/share/Trash/.".into()], Match::Prefix)
+                .unwrap()
+                .is_mass()
+        );
     }
 
     #[test]
@@ -692,5 +1146,165 @@ mod pattern_tests {
         );
         let b = super::item_id(name, date, std::path::Path::new("/mnt/disk/.Trash-1000"));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_regex_that_matches_every_path_is_mass() {
+        for mass in ["/", "^/", "..", ".{2}", r"\\"] {
+            assert!(
+                Patterns::new(vec![mass.into()], Match::Regex)
+                    .unwrap()
+                    .is_mass(),
+                "{mass}"
+            );
+        }
+        let scoped_child = crate::rm_match::known_scope_roots()
+            .and_then(|roots| roots.into_iter().next())
+            .unwrap_or_else(std::env::temp_dir)
+            .join("rtrash-narrow");
+        let scoped_child = format!("^{}", regex_lite::escape(&scoped_child.to_string_lossy()));
+        for narrow in ["foo", "a", r"^/home/u/proj"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(std::iter::once(scoped_child))
+        {
+            assert!(
+                !Patterns::new(vec![narrow.clone()], Match::Regex)
+                    .unwrap()
+                    .is_mass(),
+                "{narrow}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_glob_that_matches_every_path_is_mass() {
+        for mass in ["/?*", "/*?", "**/?*", "*/?*", "?:\\*"] {
+            assert!(
+                Patterns::new(vec![mass.into()], Match::Glob)
+                    .unwrap()
+                    .is_mass(),
+                "{mass}"
+            );
+        }
+        if let Some(root) =
+            crate::rm_match::known_scope_roots().and_then(|roots| roots.into_iter().next())
+        {
+            let root = root.to_string_lossy();
+            let sep = if root.contains('\\') { '\\' } else { '/' };
+            let mass = format!("{}{sep}*", root.trim_end_matches(['/', '\\']));
+            assert!(
+                Patterns::new(vec![mass.clone()], Match::Glob)
+                    .unwrap()
+                    .is_mass(),
+                "{mass}"
+            );
+        }
+        let platform_narrow = crate::rm_match::known_scope_roots()
+            .and_then(|roots| roots.into_iter().next())
+            .unwrap_or_else(std::env::temp_dir)
+            .join("rtrash-narrow")
+            .join("*")
+            .to_string_lossy()
+            .into_owned();
+        for narrow in ["*.o", "foo"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(std::iter::once(platform_narrow))
+        {
+            assert!(
+                !Patterns::new(vec![narrow.clone()], Match::Glob)
+                    .unwrap()
+                    .is_mass(),
+                "{narrow}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_selection_of_every_entry_under_a_scope_is_mass() {
+        let star = Patterns::new(vec!["*".into()], Match::Glob).unwrap();
+        let files = vec![std::path::PathBuf::from("/tmp/proj/a.txt")];
+        assert!(super::selection_covers_scope(&star, &files, &files));
+        let literal = Patterns::new(vec!["a.txt".into()], Match::Glob).unwrap();
+        assert!(!super::selection_covers_scope(&literal, &files, &files));
+        let exact = Patterns::new(vec!["/tmp/proj/a.txt".into()], Match::Exact).unwrap();
+        assert!(!super::selection_covers_scope(&exact, &files, &files));
+        let by_id =
+            Patterns::new(vec!["a.txt@2020-01-01T00:00:00@/tmp".into()], Match::Id).unwrap();
+        assert!(!super::selection_covers_scope(&by_id, &files, &files));
+        let objects = Patterns::new(vec!["*.o".into()], Match::Glob).unwrap();
+        let two = vec![
+            std::path::PathBuf::from("/tmp/proj/a.o"),
+            std::path::PathBuf::from("/tmp/proj/b.o"),
+        ];
+        let mut with_other = two.clone();
+        with_other.push(std::path::PathBuf::from("/tmp/proj/c.c"));
+        assert!(!super::selection_covers_scope(&objects, &two, &with_other));
+        assert!(super::selection_covers_scope(&objects, &two, &two));
+        let prefix = Patterns::new(vec!["/tmp/proj".into()], Match::Prefix).unwrap();
+        assert!(!prefix.is_mass());
+        assert!(!super::selection_covers_scope(&prefix, &two, &with_other));
+        assert!(!super::selection_covers_scope(&prefix, &two, &two));
+        let drives = vec![
+            std::path::PathBuf::from(r"E:\a.txt"),
+            std::path::PathBuf::from(r"E:\b.txt"),
+            std::path::PathBuf::from(r"C:\c.txt"),
+        ];
+        let on_e = vec![
+            std::path::PathBuf::from(r"E:\a.txt"),
+            std::path::PathBuf::from(r"E:\b.txt"),
+        ];
+        let glob = Patterns::new(vec![r"E:\*".into()], Match::Glob).unwrap();
+        assert!(!glob.is_mass());
+        assert!(super::selection_covers_scope(&glob, &on_e, &drives));
+        let one = vec![std::path::PathBuf::from(r"E:\a.txt")];
+        assert!(!super::selection_covers_scope(&glob, &one, &drives));
+        let regex = Patterns::new(vec![r"^E:\\.*".into()], Match::Regex).unwrap();
+        assert!(!regex.is_mass());
+        assert!(super::selection_covers_scope(&regex, &on_e, &drives));
+    }
+
+    #[test]
+    fn inherited_windows_scope_paths_ignore_case_and_prefix_spelling() {
+        let roots = [
+            crate::win_recycle::path_key(r"C:\Users\FolderO\hm", &[]),
+            crate::win_recycle::path_key(r"c:/users/foldero/xdg", &[]),
+        ];
+        let key = crate::win_recycle::path_key(r"\\?\c:\USERS\FolderO\work\foo.txt", &[]);
+        let got =
+            super::scope_relative_parts(r"C:\USERS\FolderO\work\foo.txt", &key, &roots, b'\\');
+        assert_eq!(
+            got,
+            Some((r"C:\USERS\FolderO".to_string(), r"work\foo.txt".to_string()))
+        );
+
+        let roots = [
+            crate::win_recycle::path_key(r"\\server\share\FolderO\hm", &[]),
+            crate::win_recycle::path_key(r"\\?\UNC\SERVER\SHARE\foldero\xdg", &[]),
+        ];
+        let key = crate::win_recycle::path_key(r"\\?\UNC\Server\Share\FolderO\work\foo.txt", &[]);
+        let got = super::scope_relative_parts(
+            r"\\Server\Share\FolderO\work\foo.txt",
+            &key,
+            &roots,
+            b'\\',
+        );
+        assert_eq!(
+            got,
+            Some((
+                r"\\Server\Share\FolderO".to_string(),
+                r"work\foo.txt".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn disjoint_scope_roots_treat_the_whole_path_as_inherited() {
+        let roots = ["/home/person".to_string(), "/media/data".to_string()];
+        let full = "/home/person/work/foo.txt";
+        let got = super::scope_relative_parts(full, full, &roots, b'/');
+        assert_eq!(got, Some((full.to_string(), String::new())));
+        assert!(!super::suppress_inherited_glob_hit("*person*", true, got));
     }
 }

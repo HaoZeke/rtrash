@@ -108,8 +108,7 @@ pub fn entries() -> std::io::Result<Vec<Entry>> {
 /// `s` in Unicode NFC, the form a user types and the FreeDesktop trash
 /// keeps; Finder may hand back a name decomposed (NFD).
 pub fn nfc(s: &str) -> String {
-    use unicode_normalization::UnicodeNormalization;
-    s.nfc().collect()
+    crate::util::nfc(s)
 }
 
 /// The `rm --regex` expressions in NFC, as restore compiles its own, so a
@@ -628,25 +627,36 @@ pub fn stats(top: usize) -> Vec<crate::trash_stats::Stats> {
         .collect()
 }
 
+/// `rm` on the Finder trashes: permanently remove the items whose Put Back
+/// place, its file name or the name in the trash matches a pattern.
 pub struct RmOpts<'a> {
+    pub ids: &'a [String],
+    pub all_matches: bool,
+    pub keep: &'a crate::keep::Keep,
     pub batch: Option<&'a str>,
     pub dry_run: bool,
     pub force: bool,
     pub verbose: bool,
     pub json: bool,
     pub filter: Filter,
+    /// Refuse when the selection covers every listed entry under a scope.
+    pub refuse_covered: bool,
 }
 
 /// `rm` on the Finder trashes: permanently remove the items whose Put Back
 /// place, its file name or the name in the trash matches a pattern.
 pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> i32 {
     let RmOpts {
+        ids,
+        all_matches,
+        keep,
         batch,
         dry_run,
         force,
         verbose,
         json,
         filter,
+        refuse_covered,
     } = opts;
     let all = match entries() {
         Ok(r) => r,
@@ -655,6 +665,7 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
             return 1;
         }
     };
+    let census: Vec<PathBuf> = all.iter().map(|e| e.shown.clone()).collect();
     // Shown paths before the age and size filters, so a path the window
     // leaves out is still visible to the hint.
     let mut pre: Vec<(PathBuf, PathBuf, String)> = all
@@ -704,23 +715,23 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
             .map(|b| b.to_string_lossy().into_owned())
             .unwrap_or_default();
         let name = nfc(&e.name);
-        match patterns.kind {
-            crate::filters::Match::Glob => patterns.texts.iter().any(|p| {
-                let p = nfc(p);
-                crate::util::fnmatch(&p, &path_s)
-                    || crate::util::fnmatch(&p, &base)
-                    || crate::util::fnmatch(&p, &name)
-            }),
+        let pattern_hit = match patterns.kind {
+            crate::filters::Match::Exact => crate::orig_path::selects(&patterns.texts, &e.shown),
+            crate::filters::Match::Glob => texts.glob_hit(&nfc(&path_s), &nfc(&base), &name),
             crate::filters::Match::Regex => {
                 let path_s = nfc(&path_s);
                 regex.iter().any(|r| r.is_match(&path_s))
             }
-            crate::filters::Match::Exact => crate::orig_path::selects(&patterns.texts, &e.shown),
             crate::filters::Match::Id => {
                 texts.selects(&nfc(&path_s), &base, &name, &e.date, &e.trash)
             }
             _ => texts.hit(&nfc(&path_s), &base, &name),
-        }
+        };
+        crate::rm_match::chosen(
+            pattern_hit,
+            crate::rm_match::id_hit(ids, &e.name),
+            !ids.is_empty(),
+        )
     };
     if patterns.kind == crate::filters::Match::Exact {
         let kept: Vec<PathBuf> = rows.iter().map(|e| e.shown.clone()).collect();
@@ -728,6 +739,46 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         crate::orig_path::hint(prog, &patterns.operands, &have, &kept, window);
     }
     let hits: Vec<&Entry> = rows.iter().filter(|e| hit(e)).collect();
+    if patterns.kind == crate::filters::Match::Exact
+        && ids.is_empty()
+        && crate::rm_match::refuse_ambiguous(
+            prog,
+            hits.iter().map(|e| e.shown.as_path()),
+            all_matches,
+        )
+    {
+        return 2;
+    }
+    if hits.is_empty() {
+        return crate::rm_match::no_matches(prog);
+    }
+    if refuse_covered {
+        let originals: Vec<PathBuf> = hits.iter().map(|e| e.shown.clone()).collect();
+        if crate::rm_match::refuse_pattern_selection(
+            prog,
+            patterns,
+            &patterns.texts,
+            false,
+            false,
+            &originals,
+            &census,
+        ) {
+            return 2;
+        }
+    }
+    for e in hits.iter().filter(|e| keep.protects(&e.shown)) {
+        eprintln!(
+            "{prog}: kept '{}' (listed in the keep file)",
+            crate::util::err_path(&e.shown)
+        );
+    }
+    let hits: Vec<&Entry> = hits
+        .into_iter()
+        .filter(|e| !keep.protects(&e.shown))
+        .collect();
+    if hits.is_empty() {
+        return 0;
+    }
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where
     // they came from (an item with no Put Back place counts as outside),
     // so a refused rm deletes nothing.
@@ -815,7 +866,8 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
             .map(|p| format!("\"{}\"", crate::util::json_escape(p)))
             .collect();
         println!(
-            "{{\"dry_run\":{dry_run},\"removed\":{removed},\"bytes\":{bytes},\"matches\":[{}]}}",
+            "{{\"dry_run\":{},\"removed\":{removed},\"bytes\":{bytes},\"matches\":[{}]}}",
+            dry_run,
             m.join(",")
         );
     } else if dry_run {

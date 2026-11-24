@@ -204,7 +204,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l regex 
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -l name -x -a '(__rtrash_wsl_items | string replace -r ".*/" "")' -d 'items with exactly this file name'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s m -l match -x -a 'glob regex substring exact id' -d 'read MATCH as this kind'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s n -l dry-run -d 'rm: print what would go'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s f -l force -d 'restore: overwrite; rm: remove risky git work'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q wsl' -s f -l force -d 'restore: overwrite; rm: permit broad patterns and remove risky git work'
 
 # finder
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q finder' -f -a 'put list restore'
@@ -270,12 +270,17 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l larger-
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l smaller-than -d 'only match items under SIZE on disk' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l batch -d 'only items from one put run (an ID or last)' -r
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l max-count -d 'refuse when more than N items would go' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l glob -d 'PATHs are shell-style globs'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l prefix -d 'PATHs match themselves and paths below them'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l substring -d 'PATHs are searched in the original path'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l regex -d 'PATTERNs are regular expressions on the original path'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s m -l match -d 'how to read PATTERNs' -xa 'glob regex substring exact id'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s m -l match -d 'how to read PATTERNs' -xa 'exact glob regex substring prefix id'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l id -d 'select one trash item by name' -r
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l all-matches -d 'allow duplicate original paths'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s n -l dry-run -d 'list matches and reclaimable size; do not delete'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s i -l interactive -d 'ask before deleting, even off a terminal'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s y -l yes -d 'do not ask before deleting'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s f -l force -d 'do not ask, and allow mass patterns that match everything'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s f -l force -d 'permit broad patterns and remove risky git work'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -s v -l verbose -d 'print each permanently removed original path'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q rm' -l json -d 'JSON summary with matches'
 
@@ -403,8 +408,13 @@ complete -c trash-rm -l larger-than -r
 complete -c trash-rm -l smaller-than -r
 complete -c trash-rm -l batch -r
 complete -c trash-rm -l max-count -r
+complete -c trash-rm -l glob
+complete -c trash-rm -l prefix
+complete -c trash-rm -l substring
 complete -c trash-rm -l regex
-complete -c trash-rm -s m -l match -xa 'glob regex substring exact id'
+complete -c trash-rm -s m -l match -xa 'exact glob regex substring prefix id'
+complete -c trash-rm -l id -r
+complete -c trash-rm -l all-matches
 complete -c trash-rm -l json
 complete -c trash-rm -s n -l dry-run
 complete -c trash-rm -s i -l interactive

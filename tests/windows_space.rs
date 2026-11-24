@@ -1131,7 +1131,7 @@ fn empty_until_free_dry_run_reports_each_short_drive() {
         "{stdout}"
     );
     assert!(stderr.contains("from the Recycle Bin of"), "{stderr}");
-    // The dry run left the item; take it out by name.
+    // The dry run left the item; take it out by exact original path.
     let _ = common::rtrash_real(common::Real::RecycleBin)
         .arg("rm")
         .arg(&p)
@@ -1182,8 +1182,23 @@ fn empty_max_size_dry_run_trims_the_recycle_bins() {
         );
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
-    let roomy = dry(&["--max-size=999999G"]);
-    assert!(roomy.contains("0 item(s)"), "{roomy}");
+    let roomy = common::rtrash_real(common::Real::RecycleBin)
+        .args(["empty", "--max-size=999999G", "-n"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        roomy.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&roomy.stderr)
+    );
+    let roomy_out = String::from_utf8_lossy(&roomy.stdout);
+    assert!(roomy_out.contains("0 item(s)"), "{roomy_out}");
+    assert!(
+        String::from_utf8_lossy(&roomy.stderr).contains("nothing would be permanently removed"),
+        "{}",
+        String::from_utf8_lossy(&roomy.stderr)
+    );
     let tight = dry(&["--max-size=0", "--prune=largest"]);
     assert!(tight.contains(&name), "{tight}");
     let json = dry(&["--max-size=0", "--json"]);
@@ -1270,8 +1285,30 @@ fn rm_json_summarizes_the_recycle_bin_removal() {
     let done = rm(&["--json"]);
     assert!(done.contains("\"dry_run\": false"), "{done}");
     assert!(done.contains("\"removed\": 1"), "{done}");
-    let again = rm(&["--json"]);
-    assert!(again.contains("\"removed\": 0"), "{again}");
+    for args in [&[][..], &["-n"][..], &["--json"][..]] {
+        let again = common::rtrash_real(common::Real::RecycleBin)
+            .arg("rm")
+            .args(args)
+            .arg(&p)
+            .output()
+            .unwrap();
+        assert_eq!(
+            again.status.code(),
+            Some(1),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&again.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&again.stderr).contains("no exact match"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&again.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&again.stderr).contains("no trash items match"),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&again.stderr)
+        );
+    }
 }
 
 /// `reap --permanent` on Windows deletes through permanent_guard::remove,

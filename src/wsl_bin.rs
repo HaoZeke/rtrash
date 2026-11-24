@@ -125,10 +125,12 @@ under the automount root, restore the newest item from each PATH, or
 delete items for good (rm by match, empty by age, path or all of them; a
 whole empty asks first, or needs --all). A bare PATH is that original path
 exactly, resolved from the current directory; a longer path is named and
-left in place. MATCH is read as glob, regex, name, substring, exact or id
+left in place. MATCH is read as glob, regex, name, substring, prefix, exact or id
 (with --match=KIND), and is tested against the original path as WSL sees
 it. empty takes an age (`7`, `2h`, `30m`, the same forms as --older-than),
-a PATH, or all of them.
+a PATH, or all of them. rm and empty leave paths listed in the keep file
+alone. When two items have the same original path, an exact match refuses;
+use rm --match=id ID to select one.
       --json             list: a JSON array of {original, path, deleted,
                          date, size, id}
       --format=TEMPLATE  list: each item through TEMPLATE, as list --format
@@ -142,9 +144,9 @@ a PATH, or all of them.
       --all              empty: every item, without asking
   -n, --dry-run          rm, empty: print what would go, delete nothing
   -m, --match=KIND       list, rm: read MATCH as glob, regex, substring,
-                         exact or id
-  -f, --force            restore over an existing file; rm removes entries
-                         even when they hold risky git work
+                         prefix, exact or id
+  -f, --force            restore over an existing file; rm permits guarded
+                         broad patterns and removes risky git work
   -h, --help             show this help
 ";
 
@@ -433,6 +435,110 @@ pub fn format_row(parts: &[crate::listfmt::FmtPart], it: &BinEntry) -> Vec<u8> {
     crate::listfmt::render_format(parts, &row)
 }
 
+/// An rm matcher as the shared matcher and guard pipeline reads it. `--name`
+/// is a literal basename; a harmless prefix pattern gives its selected rows
+/// the same post-match scope check without interpreting glob characters.
+fn shared_patterns(
+    matcher: &crate::budget::PathMatch,
+) -> Result<(crate::filters::Patterns, Vec<String>), String> {
+    use crate::budget::PathMatch;
+    use crate::filters::{Match, Patterns};
+    let (kind, text) = match matcher {
+        PathMatch::Glob(text) => (Match::Glob, text.clone()),
+        PathMatch::Regex(regex) => (Match::Regex, regex.as_str().to_string()),
+        PathMatch::Substring(text) => (Match::Substring, text.clone()),
+        PathMatch::Prefix(text) => (Match::Prefix, text.clone()),
+        PathMatch::Exact(text) => (Match::Exact, text.clone()),
+        PathMatch::Id(text) => (Match::Id, text.clone()),
+        PathMatch::Name(text) => {
+            let guard = Patterns::new(vec!["wsl-name-guard".into()], Match::Prefix)?;
+            return Ok((guard, vec![text.clone()]));
+        }
+    };
+    let shown = vec![text.clone()];
+    let mut patterns = Patterns::new(vec![text], kind)?;
+    if kind == Match::Exact {
+        patterns.texts = crate::orig_path::expand(&patterns.operands);
+    }
+    Ok((patterns, shown))
+}
+
+fn selected_by<'a>(
+    items: &'a [BinEntry],
+    patterns: &crate::filters::Patterns,
+    literal_name: Option<&str>,
+) -> Vec<&'a BinEntry> {
+    items
+        .iter()
+        .filter(|it| {
+            let name = it
+                .payload
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if literal_name.is_some_and(|want| {
+                it.local.file_name().is_some_and(|base| base == want) || name == want
+            }) {
+                return true;
+            }
+            let full = it.local.to_string_lossy();
+            let base = it
+                .local
+                .file_name()
+                .map(|base| base.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let date = crate::platform::epoch_to_iso_utc(it.deleted);
+            patterns.selects(
+                &full,
+                &base,
+                &name,
+                &date,
+                it.payload.parent().unwrap_or(&it.payload),
+            )
+        })
+        .collect()
+}
+
+fn selection_refused(
+    prog: &str,
+    patterns: &crate::filters::Patterns,
+    shown: &[String],
+    hits: &[&BinEntry],
+    census: &[PathBuf],
+    force: bool,
+) -> bool {
+    if patterns.kind == crate::filters::Match::Exact
+        && crate::rm_match::refuse_ambiguous(prog, hits.iter().map(|it| it.local.as_path()), false)
+    {
+        return true;
+    }
+    let selected: Vec<PathBuf> = hits.iter().map(|it| it.local.clone()).collect();
+    crate::rm_match::refuse_pattern_selection(
+        prog, patterns, shown, force, false, &selected, census,
+    )
+}
+
+/// Remove keep-file matches from a permanent-delete selection.
+fn without_kept<'a>(prog: &str, selected: Vec<&'a BinEntry>) -> Result<Vec<&'a BinEntry>, i32> {
+    let keep = match crate::keep::Keep::load() {
+        Ok(keep) => keep,
+        Err(e) => {
+            eprintln!("{prog}: cannot read keep file: {e}; refusing permanent deletion");
+            return Err(1);
+        }
+    };
+    for it in selected.iter().filter(|it| keep.protects(&it.local)) {
+        eprintln!(
+            "{prog}: kept '{}' (listed in the keep file)",
+            crate::util::err_path(&it.local)
+        );
+    }
+    Ok(selected
+        .into_iter()
+        .filter(|it| !keep.protects(&it.local))
+        .collect())
+}
+
 /// The `wsl list --json` array: original Windows path, path under the
 /// automount root, deletion time (epoch and ISO date) and size.
 pub fn list_json(items: &[&BinEntry]) -> String {
@@ -527,7 +633,9 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
         eprintln!("{prog}: rm needs --glob, --regex, --name or a PATH");
         return 2;
     }
-    let wants = crate::orig_path::expand(&paths);
+    let mut exact = crate::filters::Patterns::new(paths.clone(), crate::filters::Match::Exact)
+        .expect("exact paths are valid patterns");
+    exact.texts = crate::orig_path::expand(&exact.operands);
     if !paths.is_empty() {
         let have: Vec<std::path::PathBuf> = items.iter().map(|it| it.local.clone()).collect();
         crate::orig_path::hint(
@@ -538,15 +646,51 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
             crate::orig_path::window(false, false),
         );
     }
-    let chosen: Vec<&BinEntry> = items
-        .iter()
-        .filter(|it| {
-            matcher.as_ref().is_some_and(|m| bin_keeps(m, it))
-                || crate::orig_path::selects(&wants, &it.local)
+    let exact_hits = selected_by(items, &exact, None);
+    let parsed = match matcher.as_ref().map(shared_patterns).transpose() {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("{prog}: rm: {e}");
+            return 2;
+        }
+    };
+    if let Some((patterns, shown)) = &parsed {
+        if selection_refused(prog, patterns, shown, &[], &[], force) {
+            return 2;
+        }
+    }
+    let matcher_hits = parsed
+        .as_ref()
+        .map(|(patterns, shown)| {
+            let literal = matches!(matcher, Some(crate::budget::PathMatch::Name(_)))
+                .then(|| shown[0].as_str());
+            selected_by(items, patterns, literal)
         })
-        .collect();
+        .unwrap_or_default();
+    let mut chosen = exact_hits.clone();
+    for hit in &matcher_hits {
+        if !chosen.iter().any(|entry| std::ptr::eq(*entry, *hit)) {
+            chosen.push(hit);
+        }
+    }
     if chosen.is_empty() {
         eprintln!("{prog}: no Recycle Bin items match");
+        return 0;
+    }
+    let census: Vec<PathBuf> = items.iter().map(|it| it.local.clone()).collect();
+    if !paths.is_empty() && selection_refused(prog, &exact, &paths, &exact_hits, &census, force) {
+        return 2;
+    }
+    if let Some((patterns, shown)) = &parsed {
+        if selection_refused(prog, patterns, shown, &chosen, &census, force) {
+            return 2;
+        }
+    }
+    let chosen = match without_kept(prog, chosen) {
+        Ok(chosen) => chosen,
+        Err(code) => return code,
+    };
+    if chosen.is_empty() {
         return 0;
     }
     let mut status = 0;
@@ -601,6 +745,11 @@ pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
     };
     let wants = crate::orig_path::expand(&scope.paths);
     let chosen = matching(items, scope.age, &wants, !scope.paths.is_empty(), now);
+    let census: Vec<PathBuf> = items.iter().map(|it| it.local.clone()).collect();
+    let mut exact =
+        crate::filters::Patterns::new(scope.paths.clone(), crate::filters::Match::Exact)
+            .expect("exact paths are valid patterns");
+    exact.texts = wants;
     if !scope.paths.is_empty() {
         let have: Vec<std::path::PathBuf> = items.iter().map(|it| it.local.clone()).collect();
         let kept: Vec<std::path::PathBuf> = chosen.iter().map(|it| it.local.clone()).collect();
@@ -612,6 +761,15 @@ pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
             crate::orig_path::window(scope.age.is_some(), false),
         );
     }
+    if !scope.paths.is_empty()
+        && selection_refused(prog, &exact, &scope.paths, &chosen, &census, false)
+    {
+        return 2;
+    }
+    let chosen = match without_kept(prog, chosen) {
+        Ok(chosen) => chosen,
+        Err(code) => return code,
+    };
     if chosen.is_empty() {
         return 0;
     }

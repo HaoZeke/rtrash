@@ -26,6 +26,8 @@ pub struct Candidate {
     pub inodes: u64,
     /// Never removed (items of the put run that triggered the prune).
     pub protected: bool,
+    /// Payload identity at selection time, checked again before removal.
+    identity: Option<trashdir::PayloadId>,
 }
 
 /// Indices of `items` to remove, in removal order, so the rest totals at
@@ -99,6 +101,14 @@ pub struct Prune<'a> {
 /// Bring the trash roots in `dirs`, taken together, under `p.max` bytes.
 pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
     let mut out = Outcome::default();
+    let keep = match crate::keep::Keep::load() {
+        Ok(keep) => keep,
+        Err(e) => {
+            eprintln!("{prog}: cannot read keep file: {e}; refusing retention deletion");
+            out.errors = 1;
+            return out;
+        }
+    };
     // Lock every root, in path order so two prunes cannot deadlock.
     let mut order: Vec<usize> = (0..dirs.len()).collect();
     order.sort_by(|&a, &b| dirs[a].root.cmp(&dirs[b].root));
@@ -130,21 +140,33 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
             .filter(|e| !p.gone_before.is_some_and(|cut| e.epoch <= cut))
             .collect();
         // Sizing stats every payload; spread it over the rayon pool.
-        items.par_extend(entries.into_par_iter().map(|e| Candidate {
-            root: ri,
-            bytes: sizes.entry_bytes(&e.name),
-            epoch: e.epoch,
-            inodes: if p.free_inodes > 0 {
-                1 + tree_inodes(&crate::util::join_name(&dir.files(), &e.name))
-            } else {
-                0
-            },
-            protected: (p.protect_batch.is_some() && e.batch.as_deref() == p.protect_batch)
-                || p.only.is_some_and(|seen| {
-                    let name = crate::util::os_from_str(&e.name);
-                    !seen.get(ri).is_some_and(|s| s.saw_item(&name))
-                }),
-            name: e.name,
+        items.par_extend(entries.into_par_iter().map(|e| {
+            let payload = crate::util::join_name(&dir.files(), &e.name);
+            let kept = keep.protects(&e.original);
+            if kept && (p.max != u64::MAX || p.free_inodes > 0) {
+                eprintln!(
+                    "{prog}: kept '{}' (listed in the keep file)",
+                    crate::util::err_path(&e.original)
+                );
+            }
+            Candidate {
+                root: ri,
+                bytes: sizes.entry_bytes(&e.name),
+                epoch: e.epoch,
+                inodes: if p.free_inodes > 0 {
+                    1 + tree_inodes(&payload)
+                } else {
+                    0
+                },
+                protected: kept
+                    || (p.protect_batch.is_some() && e.batch.as_deref() == p.protect_batch)
+                    || p.only.is_some_and(|seen| {
+                        let name = crate::util::os_from_str(&e.name);
+                        !seen.get(ri).is_some_and(|s| s.saw_item(&name))
+                    }),
+                identity: trashdir::payload_id(&payload),
+                name: e.name,
+            }
         }));
         sizes.write_back_locked();
     }
@@ -173,7 +195,7 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
                 );
             }
         } else {
-            if let Err(e) = remove_entry(dir, &c.name) {
+            if let Err(e) = remove_entry(dir, &c.name, c.identity) {
                 eprintln!(
                     "{prog}: cannot remove '{}': {e}",
                     crate::util::err_path(&shown)
@@ -237,8 +259,18 @@ fn tree_inodes(path: &std::path::Path) -> u64 {
     n
 }
 
-fn remove_entry(dir: &TrashDir, name: &str) -> io::Result<()> {
-    crate::permanent_guard::remove(&crate::util::join_name(&dir.files(), name))?;
+fn remove_entry(
+    dir: &TrashDir,
+    name: &str,
+    identity: Option<trashdir::PayloadId>,
+) -> io::Result<()> {
+    let payload = crate::util::join_name(&dir.files(), name);
+    if trashdir::payload_id(&payload) != identity {
+        return Err(io::Error::other(
+            "item changed after it was selected; left as it is",
+        ));
+    }
+    crate::permanent_guard::remove(&payload)?;
     // The payload is gone: its record goes too before a Ctrl-C acts.
     let _section = crate::interrupt::critical();
     match fs::remove_file(crate::util::join_info(&dir.info(), name)) {
@@ -259,6 +291,7 @@ mod tests {
             epoch,
             inodes: 0,
             protected: false,
+            identity: None,
         }
     }
 

@@ -45,7 +45,7 @@ pub fn roots() -> Option<Vec<PathBuf>> {
 /// resolved. None when a part that does not exist yet is `..`, or when
 /// nothing of the path resolves.
 pub fn resolve(p: &Path) -> Option<PathBuf> {
-    let abs = std::path::absolute(p).ok()?;
+    let abs = crate::util::absolute_keep_tail(p);
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     let mut base = abs.as_path();
     // The entry itself stays as named: a link names its own place.

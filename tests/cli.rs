@@ -290,8 +290,8 @@ fn info_files_that_name_no_payload_are_never_items() {
     assert!(!listed.contains("evil"), "{listed}");
     for n in 1..=3 {
         let evil = format!("evil{n}");
-        // No match: rm, like trash-rm, still exits 0.
         let out = sb.run(&["rm", "--home-only", &evil]);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
         assert!(!stdout_of(&out).contains("removed"), "{}", stdout_of(&out));
         assert!(!sb.run(&["restore", "--home-only", &evil]).status.success());
         assert!(sb.trash().join("files/keep").exists(), "{evil}");
@@ -752,7 +752,7 @@ fn messages_scrub_control_characters_on_a_terminal() {
     let cases = [
         format!("put -- {evil}"),
         format!("restore --to={evil}"),
-        "rm --home-only --dry-run --match=glob evil".to_string(),
+        "rm --home-only --dry-run --force --match=glob evil".to_string(),
         format!("empty {pin} --plain --dry-run --verbose"),
         format!("du --file={evil}"),
     ];
@@ -994,10 +994,10 @@ fn rm_patterns_through_a_symlinked_parent_match() {
     std::os::unix::fs::symlink(&sb.root, &link).unwrap();
     let lwork = link.join("work");
     let ldata = link.join("xdg");
-    for f in ["a.txt", "b.o", "c.o"] {
+    for f in ["a.txt", "b.o", "c.o", "d.c"] {
         fs::write(lwork.join(f), b"x").unwrap();
     }
-    let out = run_in(&lwork, &ldata, &["put", "a.txt", "b.o", "c.o"]);
+    let out = run_in(&lwork, &ldata, &["put", "a.txt", "b.o", "c.o", "d.c"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
 
     let typed = lwork.join("a.txt");
@@ -1012,7 +1012,7 @@ fn rm_patterns_through_a_symlinked_parent_match() {
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     assert!(!left.iter().any(|n| n.starts_with("a.txt")), "{left:?}");
-    assert_eq!(left.len(), 2, "{left:?}");
+    assert_eq!(left.len(), 3, "{left:?}");
     let _ = fs::remove_file(&link);
 }
 
@@ -1542,6 +1542,21 @@ fn empty_dry_run_removes_nothing() {
 }
 
 #[test]
+fn empty_dry_run_is_nonzero_when_nothing_matches() {
+    let sb = Sandbox::new("empty-dry-none");
+    fs::create_dir_all(sb.trash().join("files")).unwrap();
+    fs::create_dir_all(sb.trash().join("info")).unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = sb.run(&["empty", &pin, "--plain", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr_of(&out).contains("nothing would be permanently removed"),
+        "{}",
+        stderr_of(&out)
+    );
+}
+
+#[test]
 fn directorysizes_atomic_rewrite_survives_put() {
     let sb = Sandbox::new("dirsizes-atomic");
     fs::create_dir(sb.work().join("d")).unwrap();
@@ -1754,6 +1769,1779 @@ fn trash_rm_refuses_star_without_force() {
     assert_eq!(trash_names(&sb), vec!["a.txt"]);
 }
 
+/// A mass pattern must be refused before it deletes. The pin keeps a
+/// guard that fails from reaching a volume trash outside the sandbox.
+fn mass_pattern_keeps_the_trash(tag: &str, args: &[&str]) {
+    let sb = Sandbox::new(tag);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("keep.txt");
+    let put = sb.run(&["put", &pin, "keep.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let mut cmd = vec!["rm", pin.as_str()];
+    cmd.extend_from_slice(args);
+    let out = sb.run(&cmd);
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+    assert_eq!(trash_names(&sb), vec!["keep.txt".to_string()]);
+}
+
+#[test]
+fn question_star_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-qstar", &["--glob", "?*"]);
+}
+
+#[test]
+fn a_regex_dot_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-dot", &["--regex", "."]);
+}
+
+#[test]
+fn an_empty_prefix_is_refused_without_force() {
+    let sb = Sandbox::new("rm-mass-empty");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("keep.txt");
+    assert!(sb.run(&["put", &pin, "keep.txt"]).status.success());
+    let out = sb.run(&["rm", &pin, "--prefix", ""]);
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("'' is not a path"), "{err}");
+    assert_eq!(trash_names(&sb), vec!["keep.txt".to_string()]);
+}
+
+#[test]
+fn slash_slash_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-slashslash", &["--prefix", "//"]);
+}
+
+#[test]
+fn slash_dot_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-slashdot", &["--prefix", "/."]);
+}
+
+#[test]
+fn a_prefix_that_climbs_to_the_root_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-dotdot", &["--prefix", "/tmp/.."]);
+}
+
+#[test]
+fn tilde_is_refused_without_force() {
+    mass_pattern_keeps_the_trash("rm-mass-tilde", &["--prefix", "~"]);
+}
+
+#[test]
+fn a_trash_root_alias_is_refused_without_force() {
+    let sb = Sandbox::new("rm-mass-trashroot");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("keep.txt");
+    let put = sb.run(&["put", &pin, "keep.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let alias = format!("{}/.", sb.trash().display());
+    let tilde = "~/xdg/Trash/.".to_string();
+    for pattern in [alias.as_str(), tilde.as_str()] {
+        let out = sb.run(&["rm", &pin, "--prefix", pattern]);
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(2), "{pattern}: {err}");
+        assert!(err.contains("refusing mass pattern"), "{pattern}: {err}");
+        assert_eq!(trash_names(&sb), vec!["keep.txt".to_string()], "{pattern}");
+    }
+}
+
+#[test]
+fn a_regex_that_matches_every_path_is_refused_without_force() {
+    for (tag, pattern) in [
+        ("rm-mass-re-slash", "/"),
+        ("rm-mass-re-caret", "^/"),
+        ("rm-mass-re-dotdot", ".."),
+        ("rm-mass-re-count", ".{2}"),
+        ("rm-mass-re-bs", r"\\"),
+    ] {
+        mass_pattern_keeps_the_trash(tag, &["--regex", pattern]);
+    }
+}
+
+#[test]
+fn a_glob_that_matches_every_path_is_refused_without_force() {
+    for (tag, pattern) in [
+        ("rm-mass-glob-q", "/?*"),
+        ("rm-mass-glob-sq", "/*?"),
+        ("rm-mass-glob-dq", "**/?*"),
+        ("rm-mass-glob-starq", "*/?*"),
+        ("rm-mass-glob-drive", "?:\\*"),
+    ] {
+        mass_pattern_keeps_the_trash(tag, &["--glob", pattern]);
+    }
+}
+
+#[test]
+fn a_narrow_prefix_still_removes_only_what_it_names() {
+    let sb = Sandbox::new("rm-narrow-prefix");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    fs::create_dir_all(sb.work().join("proj")).unwrap();
+    fs::write(sb.work().join("proj/a.txt"), b"a").unwrap();
+    sb.touch("other.txt");
+    assert!(sb
+        .run(&["put", &pin, "proj/a.txt", "other.txt"])
+        .status
+        .success());
+    let proj = sb.work().join("proj");
+    let out = sb.run(&["rm", &pin, "--prefix", proj.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(left, vec!["other.txt".to_string()]);
+}
+
+#[test]
+fn a_prefix_is_refused_when_home_is_unset() {
+    let sb = Sandbox::new("rm-mass-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("keep.txt");
+    let put = sb.run(&["put", &pin, "keep.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--prefix", "/tmp/not-a-root"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+    assert_eq!(trash_names(&sb), vec!["keep.txt".to_string()]);
+}
+
+#[test]
+fn a_glob_is_refused_when_home_is_unset() {
+    let sb = Sandbox::new("rm-glob-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("inside.txt");
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        sb.work().join("inside.txt").to_str().unwrap(),
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let pattern = format!("{}/*", sb.work().display());
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--glob", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("When the scope is unknown"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec!["inside.txt".to_string(), "outside.txt".to_string()]
+    );
+}
+
+#[test]
+fn a_basename_glob_stays_narrow_when_home_is_unset() {
+    let sb = Sandbox::new("rm-basename-glob-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    for name in ["keep.txt", "other.txt"] {
+        sb.touch(name);
+    }
+    let put = sb.run(&["put", &pin, "keep.txt", "other.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--glob", "keep*"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), vec!["other.txt".to_string()]);
+}
+
+#[test]
+fn a_cache_prefix_glob_stays_narrow_when_home_is_unset() {
+    let sb = Sandbox::new("rm-cache-glob-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    for name in ["cache1.dat", "other.txt"] {
+        sb.touch(name);
+    }
+    let put = sb.run(&["put", &pin, "cache1.dat", "other.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--glob", "cache*"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), vec!["other.txt".to_string()]);
+}
+
+#[test]
+fn a_basename_glob_uses_full_paths_only_with_known_scope_roots() {
+    for roots_known in [true, false] {
+        let tag = if roots_known {
+            "rm-basename-glob-known-roots"
+        } else {
+            "rm-basename-glob-unknown-roots"
+        };
+        let sb = Sandbox::new(tag);
+        let pin = format!("--trash-dir={}", sb.trash().display());
+        let work = sb.work().join("work");
+        let other = sb.work().join("other");
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        for path in [
+            work.join("a.txt"),
+            work.join("b.txt"),
+            other.join("work.txt"),
+            sb.root.join("outside.txt"),
+        ] {
+            fs::write(path, b"x").unwrap();
+        }
+        let put = sb.run(&[
+            "put",
+            &pin,
+            work.join("a.txt").to_str().unwrap(),
+            work.join("b.txt").to_str().unwrap(),
+            other.join("work.txt").to_str().unwrap(),
+            sb.root.join("outside.txt").to_str().unwrap(),
+        ]);
+        assert!(put.status.success(), "{tag}: {}", stderr_of(&put));
+        let mut cmd = common::rtrash(&sb.root);
+        if roots_known {
+            let home = sb.root.join("hm");
+            fs::create_dir_all(&home).unwrap();
+            cmd.env("HOME", &home).env("USERPROFILE", &home);
+        } else {
+            cmd.env_remove("HOME")
+                .env_remove("USERPROFILE")
+                .env_remove("XDG_DATA_HOME");
+        }
+        let out = cmd
+            .args(["rm", &pin, "--glob", "*work*"])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{tag}: {}", stderr_of(&out));
+        let mut left = trash_names(&sb);
+        left.sort();
+        let expected = if roots_known {
+            vec!["outside.txt".to_string()]
+        } else {
+            vec![
+                "a.txt".to_string(),
+                "b.txt".to_string(),
+                "outside.txt".to_string(),
+            ]
+        };
+        assert_eq!(left, expected, "{tag}");
+    }
+}
+
+#[test]
+fn disjoint_scope_roots_do_not_make_an_inherited_component_a_glob_match() {
+    let sb = Sandbox::new("rm-disjoint-person-roots");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("chosen.txt");
+    sb.touch("outside.dat");
+    assert!(sb
+        .run(&["put", &pin, "chosen.txt", "outside.dat"])
+        .status
+        .success());
+    let home = sb.root.join("home");
+    let xdg = Path::new("/rtrash-disjoint-xdg");
+    fs::create_dir_all(&home).unwrap();
+    let out = common::rtrash(&sb.root)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("XDG_DATA_HOME", xdg)
+        .args(["rm", &pin, "--older-than=0", "--glob", "*person*"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("no trash items match"));
+    assert_eq!(trash_names(&sb).len(), 2);
+}
+
+#[test]
+fn a_symlinked_temp_parent_does_not_widen_a_basename_glob() {
+    let top = common::scratch_dir("test", "rm-glob-symlinked-temp");
+    let real_tmp = top.join("folder-o");
+    fs::create_dir(&real_tmp).unwrap();
+    let linked_tmp = top.join("linked-tmp");
+    std::os::unix::fs::symlink(&real_tmp, &linked_tmp).unwrap();
+    let spelled_root = linked_tmp.join("sandbox");
+    fs::create_dir_all(spelled_root.join("work")).unwrap();
+    let sb = Sandbox {
+        root: fs::canonicalize(&spelled_root).unwrap(),
+    };
+    fs::create_dir_all(sb.root.join("home")).unwrap();
+    fs::write(sb.work().join("foo.txt"), b"x").unwrap();
+    fs::write(sb.root.join("spared.txt"), b"x").unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let put = common::rtrash(&sb.root)
+        .env("TMPDIR", &linked_tmp)
+        .args([
+            "put",
+            &pin,
+            sb.work().join("foo.txt").to_str().unwrap(),
+            sb.root.join("spared.txt").to_str().unwrap(),
+        ])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(put.status.success(), "{}", stderr_of(&put));
+
+    let out = common::rtrash(&sb.root)
+        .env("HOME", sb.root.join("home"))
+        .env("USERPROFILE", sb.root.join("home"))
+        .env("TMPDIR", &linked_tmp)
+        .args(["rm", &pin, "--glob", "*o*"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), vec!["spared.txt".to_string()]);
+}
+
+#[test]
+fn stripping_an_inherited_scope_prefix_never_adds_a_glob_match() {
+    let sb = Sandbox::new("rm-glob-scope-relative");
+    fs::create_dir_all(sb.root.join("home")).unwrap();
+    let width = sb.root.to_str().unwrap().len();
+    assert!(width > 2);
+    let nested = sb.root.join("a").join("b".repeat(width - 2));
+    fs::create_dir_all(nested.parent().unwrap()).unwrap();
+    fs::write(&nested, b"x").unwrap();
+    fs::write(sb.root.join("spare-long-name.txt"), b"x").unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let put = sb.run(&[
+        "put",
+        &pin,
+        nested.to_str().unwrap(),
+        sb.root.join("spare-long-name.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+
+    let pattern = "?".repeat(width);
+    let out = common::rtrash(&sb.root)
+        .env("HOME", sb.root.join("home"))
+        .env("USERPROFILE", sb.root.join("home"))
+        .args(["rm", &pin, "--glob", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb).len(), 2);
+}
+
+#[test]
+fn a_regex_directory_is_refused_when_home_is_unset() {
+    let sb = Sandbox::new("rm-regex-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    for name in ["inside.txt", "second.txt"] {
+        sb.touch(name);
+    }
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        sb.work().join("inside.txt").to_str().unwrap(),
+        sb.work().join("second.txt").to_str().unwrap(),
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let pattern = format!("^{}/.*", regex_escape(sb.work().to_str().unwrap()));
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--regex", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("When the scope is unknown"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec![
+            "inside.txt".to_string(),
+            "outside.txt".to_string(),
+            "second.txt".to_string()
+        ]
+    );
+}
+
+fn refuse_unknown_regex_scope(tag: &str, dir_name: &str, mode: &str) {
+    let sb = Sandbox::new(tag);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let dir = sb.work().join(dir_name);
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["a.txt", "b.txt"] {
+        fs::write(dir.join(name), name).unwrap();
+    }
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        dir.join("a.txt").to_str().unwrap(),
+        dir.join("b.txt").to_str().unwrap(),
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{tag}: {}", stderr_of(&put));
+    let pattern = match mode {
+        "raw" => format!("^{}/.*", dir.display()),
+        "escaped" => format!("^{}/.*", regex_escape(dir.to_str().unwrap())),
+        "parent-wildcard" => format!("^.*/{dir_name}/.*"),
+        _ => unreachable!("{mode}"),
+    };
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--regex", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{tag} {pattern}: {err}");
+    assert!(err.contains("When the scope is unknown"), "{tag}: {err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec![
+            "a.txt".to_string(),
+            "b.txt".to_string(),
+            "outside.txt".to_string()
+        ],
+        "{tag}: {err}"
+    );
+}
+
+#[test]
+fn a_regex_directory_with_a_dot_is_refused_without_scope_roots() {
+    refuse_unknown_regex_scope("rm-regex-dot-dir", "work.with.dot", "raw");
+}
+
+#[test]
+fn an_escaped_regex_directory_with_a_dot_is_refused_without_scope_roots() {
+    refuse_unknown_regex_scope("rm-regex-escaped-dot", "work.with.dot", "escaped");
+}
+
+#[test]
+fn a_regex_hidden_directory_is_refused_without_scope_roots() {
+    refuse_unknown_regex_scope("rm-regex-hidden", ".config", "raw");
+}
+
+#[test]
+fn an_escaped_regex_hidden_directory_is_refused_without_scope_roots() {
+    refuse_unknown_regex_scope("rm-regex-escaped-hidden", ".config", "escaped");
+}
+
+#[test]
+fn a_regex_directory_below_a_wildcard_parent_is_refused_without_scope_roots() {
+    refuse_unknown_regex_scope("rm-regex-wild-parent", "work", "parent-wildcard");
+}
+
+#[test]
+fn every_regex_needs_force_without_scope_roots() {
+    let sb = Sandbox::new("rm-regex-narrow-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    for name in ["a.o", "foo", "b.c", "keep.txt"] {
+        sb.touch(name);
+    }
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        "a.o",
+        "foo",
+        "b.c",
+        "keep.txt",
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let run = |pattern: &str| {
+        common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .args(["rm", &pin, "--regex", pattern])
+            .current_dir(sb.work())
+            .output()
+            .unwrap()
+    };
+    for pattern in [
+        r"\.o$".to_string(),
+        "o".to_string(),
+        "foo".to_string(),
+        format!(r"^{}/.*\.c$", regex_escape(sb.work().to_str().unwrap())),
+    ] {
+        let out = run(&pattern);
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(2), "{pattern}: {err}");
+        assert!(
+            err.contains("When the scope is unknown"),
+            "{pattern}: {err}"
+        );
+    }
+    assert_eq!(trash_names(&sb).len(), 5);
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--force", "--regex", r"\.o$"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec![
+            "b.c".to_string(),
+            "foo".to_string(),
+            "keep.txt".to_string(),
+            "outside.txt".to_string()
+        ]
+    );
+}
+
+fn remove_only_objects_without_scope_roots(tag: &str, flag: &str, pattern: &str, nested: bool) {
+    let sb = Sandbox::new(tag);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let (a, b) = if nested {
+        let a = sb.work().join("group/proj1/a.o");
+        let b = sb.work().join("group/proj2/b.o");
+        fs::create_dir_all(a.parent().unwrap()).unwrap();
+        fs::create_dir_all(b.parent().unwrap()).unwrap();
+        (a, b)
+    } else {
+        (sb.work().join("a.o"), sb.work().join("b.o"))
+    };
+    fs::write(&a, b"a").unwrap();
+    fs::write(&b, b"b").unwrap();
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{tag}: {}", stderr_of(&put));
+    let mut cmd = common::rtrash(&sb.root);
+    cmd.env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin]);
+    if flag == "--regex" {
+        cmd.arg("--force");
+    }
+    let out = cmd
+        .args([flag, pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{tag}: {}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), vec!["outside.txt".to_string()]);
+}
+
+#[test]
+fn a_basename_glob_can_remove_the_only_objects_below_a_directory() {
+    remove_only_objects_without_scope_roots("rm-objects-glob", "--glob", "*.o", false);
+}
+
+#[test]
+fn a_forced_basename_regex_can_remove_the_only_objects_below_a_directory() {
+    remove_only_objects_without_scope_roots("rm-objects-regex", "--regex", r"\.o$", false);
+}
+
+#[test]
+fn a_basename_glob_can_remove_objects_from_separate_subdirectories() {
+    remove_only_objects_without_scope_roots("rm-nested-objects-glob", "--glob", "*.o", true);
+}
+
+#[test]
+fn a_forced_basename_regex_can_remove_objects_from_separate_subdirectories() {
+    remove_only_objects_without_scope_roots("rm-nested-objects-regex", "--regex", r"\.o$", true);
+}
+
+#[test]
+fn an_unanchored_basename_regex_needs_force_without_scope_roots() {
+    let sb = Sandbox::new("rm-unanchored-basename");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let dir = sb.work().join("work");
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["foo.txt", "keep.txt"] {
+        fs::write(dir.join(name), name).unwrap();
+    }
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        dir.join("foo.txt").to_str().unwrap(),
+        dir.join("keep.txt").to_str().unwrap(),
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--regex", "foo"])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("When the scope is unknown"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec![
+            "foo.txt".to_string(),
+            "keep.txt".to_string(),
+            "outside.txt".to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_directory_regex_refuses_its_only_entry_without_scope_roots() {
+    let sb = Sandbox::new("rm-regex-one-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let dir = sb.work().join("work");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("only.txt"), b"only").unwrap();
+    fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+    let put = sb.run(&[
+        "put",
+        &pin,
+        dir.join("only.txt").to_str().unwrap(),
+        sb.root.join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let pattern = format!("^{}/.*", regex_escape(dir.to_str().unwrap()));
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--regex", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("When the scope is unknown"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec!["only.txt".to_string(), "outside.txt".to_string()]
+    );
+}
+
+#[test]
+fn directory_glob_regex_and_substring_share_the_same_refusal() {
+    for (tag, flag) in [
+        ("rm-dir-kind-glob", "--glob"),
+        ("rm-dir-kind-regex", "--regex"),
+        ("rm-dir-kind-substring", "--substring"),
+    ] {
+        let sb = Sandbox::new(tag);
+        let pin = format!("--trash-dir={}", sb.trash().display());
+        let dir = sb.work().join("named");
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt"] {
+            fs::write(dir.join(name), name).unwrap();
+        }
+        fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+        let put = sb.run(&[
+            "put",
+            &pin,
+            dir.join("a.txt").to_str().unwrap(),
+            dir.join("b.txt").to_str().unwrap(),
+            sb.root.join("outside.txt").to_str().unwrap(),
+        ]);
+        assert!(put.status.success(), "{tag}: {}", stderr_of(&put));
+        let pattern = match flag {
+            "--glob" => format!("{}/*", dir.display()),
+            "--regex" => format!("^{}/.*", regex_escape(dir.to_str().unwrap())),
+            "--substring" => format!("{}/", dir.display()),
+            _ => unreachable!("{flag}"),
+        };
+        let out = common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .args(["rm", &pin, flag, &pattern])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(2), "{tag} {pattern}: {err}");
+        assert!(err.contains("When the scope is unknown"), "{tag}: {err}");
+        assert_eq!(trash_names(&sb).len(), 3, "{tag}: {err}");
+    }
+}
+
+#[test]
+fn directory_pattern_spellings_share_the_same_refusal() {
+    let mut failures = Vec::new();
+    for (n, mode) in [
+        "unanchored-path",
+        "wild-parent",
+        "wrapped-anchor",
+        "alternative-anchor",
+        "inline-flags",
+        "probe-bypass",
+        "glob-no-separator",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let tag = format!("rm-dir-spelling-{n}");
+        let sb = Sandbox::new(&tag);
+        let pin = format!("--trash-dir={}", sb.trash().display());
+        let dir = sb.work().join("work");
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["a.txt", "b.txt"] {
+            fs::write(dir.join(name), name).unwrap();
+        }
+        fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+        let put = sb.run(&[
+            "put",
+            &pin,
+            dir.join("a.txt").to_str().unwrap(),
+            dir.join("b.txt").to_str().unwrap(),
+            sb.root.join("outside.txt").to_str().unwrap(),
+        ]);
+        assert!(put.status.success(), "{mode}: {}", stderr_of(&put));
+        let escaped = regex_escape(dir.to_str().unwrap());
+        let (flag, pattern) = match mode {
+            "unanchored-path" => ("--regex", format!("{}/.*", dir.display())),
+            "wild-parent" => ("--regex", r".*/work/.*".to_string()),
+            "wrapped-anchor" => ("--regex", format!("(?:^{escaped}/.*)")),
+            "alternative-anchor" => ("--regex", format!("QQ|^{escaped}/.*")),
+            "inline-flags" => ("--regex", format!("(?i)^{escaped}/.*")),
+            "probe-bypass" => ("--regex", format!("^{escaped}/.*(?:o|[^/.]\\.)")),
+            "glob-no-separator" => ("--glob", "*work*".to_string()),
+            _ => unreachable!("{mode}"),
+        };
+        let out = common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .args(["rm", &pin, flag, &pattern])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        let mut left = trash_names(&sb);
+        left.sort();
+        let expected_status = if flag == "--glob" { Some(1) } else { Some(2) };
+        if out.status.code() != expected_status
+            || left
+                != vec![
+                    "a.txt".to_string(),
+                    "b.txt".to_string(),
+                    "outside.txt".to_string(),
+                ]
+        {
+            failures.push(format!(
+                "{mode} {pattern}: status {:?}, left {left:?}, stderr {}",
+                out.status.code(),
+                stderr_of(&out)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn matching_modes_follow_the_same_rule_with_known_and_unknown_roots() {
+    let cases = [
+        ("keep-glob", "--glob"),
+        ("cache-glob", "--glob"),
+        ("object-glob", "--glob"),
+        ("contains-o-glob", "--glob"),
+        ("narrow-glob", "--glob"),
+        ("ancestor-glob", "--glob"),
+        ("path-glob", "--glob"),
+        ("one-path-glob", "--glob"),
+        ("anchored-regex", "--regex"),
+        ("escaped-regex", "--regex"),
+        ("hidden-regex", "--regex"),
+        ("wild-parent-regex", "--regex"),
+        ("unanchored-regex", "--regex"),
+        ("wrapped-regex", "--regex"),
+        ("alternative-regex", "--regex"),
+        ("flags-regex", "--regex"),
+        ("probe-bypass-regex", "--regex"),
+        ("narrow-regex", "--regex"),
+        ("object-regex", "--regex"),
+        ("letter-regex", "--regex"),
+        ("one-path-regex", "--regex"),
+        ("directory-substring", "--substring"),
+        ("path-substring", "--substring"),
+    ];
+    for roots_known in [false, true] {
+        for (n, (mode, flag)) in cases.into_iter().enumerate() {
+            let tag = format!("rmtbl{}-{n}", usize::from(roots_known));
+            let sb = Sandbox::new(&tag);
+            let pin = format!("--trash-dir={}", sb.trash().display());
+            let dir = sb.work().join("wrk");
+            let hidden = sb.work().join(".config");
+            let one = sb.work().join("one");
+            for path in [&dir, &hidden, &one] {
+                fs::create_dir_all(path).unwrap();
+            }
+            fs::create_dir_all(dir.join("nest")).unwrap();
+            let files = [
+                dir.join("foo"),
+                dir.join("notes.txt"),
+                dir.join("nest/a.o"),
+                dir.join("b.c"),
+                dir.join("alpha.txt"),
+                dir.join("cache.bin"),
+                dir.join("keep.txt"),
+                hidden.join("hidden.txt"),
+                one.join("only.txt"),
+                sb.root.join("spared.txt"),
+            ];
+            for path in &files {
+                fs::write(path, b"x").unwrap();
+            }
+            let mut put_args = vec!["put".to_string(), pin.clone()];
+            put_args.extend(files.iter().map(|path| path.to_string_lossy().into_owned()));
+            let put_refs: Vec<&str> = put_args.iter().map(String::as_str).collect();
+            let put = sb.run(&put_refs);
+            assert!(put.status.success(), "{mode}: {}", stderr_of(&put));
+
+            let dir_text = dir.to_string_lossy();
+            let dir_regex = regex_escape(&dir_text);
+            let hidden_regex = regex_escape(hidden.to_str().unwrap());
+            let one_regex = regex_escape(one.to_str().unwrap());
+            let pattern = match mode {
+                "keep-glob" => "keep*".to_string(),
+                "cache-glob" => "cache*".to_string(),
+                "object-glob" => "*.o".to_string(),
+                "contains-o-glob" => "*o*".to_string(),
+                "narrow-glob" => "a*".to_string(),
+                "ancestor-glob" => "*wrk*".to_string(),
+                "path-glob" => format!("{dir_text}/*"),
+                "one-path-glob" => format!("{}/*", one.display()),
+                "anchored-regex" => format!("^{dir_text}/.*"),
+                "escaped-regex" => format!("^{dir_regex}/.*"),
+                "hidden-regex" => format!("^{hidden_regex}/.*"),
+                "wild-parent-regex" => r"^.*/wrk/.*".to_string(),
+                "unanchored-regex" => format!("{dir_text}/.*"),
+                "wrapped-regex" => format!("(?:^{dir_regex}/.*)"),
+                "alternative-regex" => format!("QQ|^{dir_regex}/.*"),
+                "flags-regex" => format!("(?i)^{dir_regex}/.*"),
+                "probe-bypass-regex" => {
+                    format!("^{dir_regex}/.*(?:o|[^/.]\\.)")
+                }
+                "narrow-regex" => format!("^{dir_regex}/f"),
+                "object-regex" => r"\.o$".to_string(),
+                "letter-regex" => "o".to_string(),
+                "one-path-regex" => format!("^{one_regex}/.*"),
+                "directory-substring" => format!("{dir_text}/"),
+                "path-substring" => dir.join("notes.txt").to_string_lossy().into_owned(),
+                _ => unreachable!("{mode}"),
+            };
+            let mut cmd = common::rtrash(&sb.root);
+            if roots_known {
+                let home = sb.root.join("home");
+                fs::create_dir_all(&home).unwrap();
+                cmd.env("HOME", &home).env("USERPROFILE", &home);
+            } else {
+                cmd.env_remove("HOME")
+                    .env_remove("USERPROFILE")
+                    .env_remove("XDG_DATA_HOME");
+            }
+            let out = cmd
+                .args(["rm", &pin, flag, &pattern])
+                .current_dir(sb.work())
+                .output()
+                .unwrap();
+            let basename_glob = flag == "--glob" && !pattern.contains(['/', '\\']);
+            if !roots_known && !basename_glob {
+                let err = stderr_of(&out);
+                assert_eq!(out.status.code(), Some(2), "{mode}: {err}");
+                assert!(err.contains("When the scope is unknown"), "{mode}: {err}");
+                assert_eq!(trash_names(&sb).len(), files.len(), "{mode}: {err}");
+            } else if roots_known && mode == "letter-regex" && out.status.code() == Some(2) {
+                let err = stderr_of(&out);
+                assert!(err.contains("refusing mass pattern"), "{mode}: {err}");
+                assert_eq!(trash_names(&sb).len(), files.len(), "{mode}: {err}");
+            } else {
+                assert_ne!(
+                    out.status.code(),
+                    Some(2),
+                    "{mode} ({pattern}): {}",
+                    stderr_of(&out)
+                );
+                assert!(
+                    trash_names(&sb).contains(&"spared.txt".to_string()),
+                    "{mode}: {}",
+                    stderr_of(&out)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn unknown_scope_narrow_patterns_are_deterministic() {
+    for n in 0..50 {
+        let sb = Sandbox::new(&format!("rmdet-{n}"));
+        let pin = format!("--trash-dir={}", sb.trash().display());
+        let dir = sb.work().join("wrk");
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["foo", "a.txt"] {
+            fs::write(dir.join(name), name).unwrap();
+        }
+        fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+        let put = sb.run(&[
+            "put",
+            &pin,
+            dir.join("foo").to_str().unwrap(),
+            dir.join("a.txt").to_str().unwrap(),
+            sb.root.join("outside.txt").to_str().unwrap(),
+        ]);
+        assert!(put.status.success(), "{n}: {}", stderr_of(&put));
+        let pattern = format!("^{}/f", regex_escape(dir.to_str().unwrap()));
+        let regex = common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .args(["rm", &pin, "--regex", &pattern])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        assert_eq!(regex.status.code(), Some(2), "{n}: {}", stderr_of(&regex));
+        let glob = common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .args(["rm", &pin, "--glob", "a*"])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        assert!(glob.status.success(), "{n}: {}", stderr_of(&glob));
+        let mut left = trash_names(&sb);
+        left.sort();
+        assert_eq!(
+            left,
+            vec!["foo".to_string(), "outside.txt".to_string()],
+            "{n}"
+        );
+    }
+}
+
+#[test]
+fn path_globs_and_substrings_need_force_without_scope_roots() {
+    for (n, mode) in ["glob", "substring"].into_iter().enumerate() {
+        let tag = format!("rm-narrow-path-{n}");
+        let sb = Sandbox::new(&tag);
+        let pin = format!("--trash-dir={}", sb.trash().display());
+        let dir = sb.work().join("work");
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["a.c", "b.c", "notes.txt"] {
+            fs::write(dir.join(name), name).unwrap();
+        }
+        fs::write(sb.root.join("outside.txt"), b"outside").unwrap();
+        let put = sb.run(&[
+            "put",
+            &pin,
+            dir.join("a.c").to_str().unwrap(),
+            dir.join("b.c").to_str().unwrap(),
+            dir.join("notes.txt").to_str().unwrap(),
+            sb.root.join("outside.txt").to_str().unwrap(),
+        ]);
+        assert!(put.status.success(), "{mode}: {}", stderr_of(&put));
+        let (flag, pattern) = match mode {
+            "glob" => ("--glob", format!("{}/*.c", dir.display())),
+            "substring" => (
+                "--substring",
+                dir.join("a.c").to_string_lossy().into_owned(),
+            ),
+            _ => unreachable!("{mode}"),
+        };
+        let out = common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .env_remove("XDG_DATA_HOME")
+            .args(["rm", &pin, flag, &pattern])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(2), "{mode}: {err}");
+        assert!(err.contains("When the scope is unknown"), "{mode}: {err}");
+        let mut left = trash_names(&sb);
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "a.c".to_string(),
+                "b.c".to_string(),
+                "notes.txt".to_string(),
+                "outside.txt".to_string()
+            ],
+            "{mode}"
+        );
+    }
+}
+
+#[test]
+fn a_substring_directory_is_refused_when_home_is_unset() {
+    let sb = Sandbox::new("rm-substring-nohome");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let dir = sb.work().join("user");
+    fs::create_dir_all(&dir).unwrap();
+    for name in ["b.log", "z.txt"] {
+        fs::write(dir.join(name), name).unwrap();
+    }
+    sb.touch("outside.txt");
+    let put = sb.run(&[
+        "put",
+        &pin,
+        dir.join("b.log").to_str().unwrap(),
+        dir.join("z.txt").to_str().unwrap(),
+        sb.work().join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let pattern = format!("{}/", dir.display());
+    let out = common::rtrash(&sb.root)
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .env_remove("XDG_DATA_HOME")
+        .args(["rm", &pin, "--substring", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("When the scope is unknown"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec![
+            "b.log".to_string(),
+            "outside.txt".to_string(),
+            "z.txt".to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_substring_directory_stays_narrow_when_scope_roots_are_known() {
+    let sb = Sandbox::new("rm-substring-known-home");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let home = sb.work().join("home");
+    let other = sb.work().join("other");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&other).unwrap();
+    fs::write(home.join("mine.txt"), b"mine").unwrap();
+    for name in ["a.txt", "b.txt"] {
+        fs::write(other.join(name), name).unwrap();
+    }
+    sb.touch("outside.txt");
+    let put = sb.run(&[
+        "put",
+        &pin,
+        home.join("mine.txt").to_str().unwrap(),
+        other.join("a.txt").to_str().unwrap(),
+        other.join("b.txt").to_str().unwrap(),
+        sb.work().join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let pattern = format!("{}/", other.display());
+    let out = common::rtrash(&sb.root)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .args(["rm", &pin, "--substring", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec!["mine.txt".to_string(), "outside.txt".to_string()]
+    );
+}
+
+fn regex_escape(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if "\\.+*?()[]{}^$|".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn home_scope_pattern(home: &str, mode: &str) -> (&'static str, String) {
+    let bare = home.trim_start_matches('/');
+    let esc = regex_escape(home);
+    match mode {
+        "dotstar" => ("--regex", format!("^{esc}/.*")),
+        "plus" => ("--regex", format!("^{esc}/.+")),
+        "any" => ("--regex", format!("{esc}/.*")),
+        "class" => ("--regex", format!("^{esc}/[^#]+$")),
+        "gstar" => ("--glob", format!("*{home}/*")),
+        "gquest" => ("--glob", format!("?{bare}/*")),
+        "gclass" => ("--glob", format!("[/]{bare}/*")),
+        _ => unreachable!("{mode}"),
+    }
+}
+
+/// Two files under `HOME` and one outside it. A pattern of the home that
+/// the probe list misses must still leave every file.
+fn refuse_home_scope(tag: &str, mode: &str) {
+    let sb = Sandbox::new(tag);
+    let user = sb.work().join("user");
+    fs::create_dir_all(&user).unwrap();
+    fs::write(user.join("a.txt"), b"a").unwrap();
+    fs::write(user.join("b.txt"), b"b").unwrap();
+    sb.touch("other.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let put = sb.run(&["put", &pin, "user/a.txt", "user/b.txt", "other.txt"]);
+    assert!(put.status.success(), "{tag}: {}", stderr_of(&put));
+    let home = fs::canonicalize(&user).unwrap();
+    let home = home.to_str().unwrap();
+    let (flag, pattern) = home_scope_pattern(home, mode);
+    let out = common::rtrash(&sb.root)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .args(["rm", pin.as_str(), flag, pattern.as_str()])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{tag} {pattern}: {err}");
+    assert!(err.contains("refusing mass pattern"), "{tag}: {err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(left.len(), 3, "{tag} removed some: {left:?} {err}");
+}
+
+#[test]
+fn a_home_regex_the_probes_miss_does_not_wipe_home() {
+    for (tag, mode) in [
+        ("rm-re-home-star", "dotstar"),
+        ("rm-re-home-plus", "plus"),
+        ("rm-re-home-any", "any"),
+        ("rm-re-home-class", "class"),
+    ] {
+        refuse_home_scope(tag, mode);
+    }
+}
+
+#[test]
+fn a_home_glob_with_no_literal_does_not_wipe_home() {
+    for (tag, mode) in [
+        ("rm-glob-home-star", "gstar"),
+        ("rm-glob-home-quest", "gquest"),
+        ("rm-glob-home-class", "gclass"),
+    ] {
+        refuse_home_scope(tag, mode);
+    }
+}
+
+#[test]
+fn a_broad_pattern_cannot_empty_a_scope_one_item_at_a_time() {
+    let sb = Sandbox::new("rm-last-scope-item");
+    let home = sb.work().join("user");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(home.join("a.log"), b"a").unwrap();
+    fs::write(home.join("b.log"), b"b").unwrap();
+    fs::write(sb.work().join("outside.txt"), b"outside").unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let put = sb.run(&[
+        "put",
+        &pin,
+        home.join("a.log").to_str().unwrap(),
+        home.join("b.log").to_str().unwrap(),
+        sb.work().join("outside.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let run = |pattern: String| {
+        common::rtrash(&sb.root)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .args(["rm", &pin, "--glob", &pattern])
+            .current_dir(sb.work())
+            .output()
+            .unwrap()
+    };
+    let first = run(format!("{}/a.*", home.display()));
+    assert!(first.status.success(), "{}", stderr_of(&first));
+    let last = run(format!("{}/b.*", home.display()));
+    let err = stderr_of(&last);
+    assert_eq!(last.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(left, vec!["b.log".to_string(), "outside.txt".to_string()]);
+}
+
+#[test]
+fn a_prefix_of_the_resolved_home_does_not_wipe_it() {
+    let sb = Sandbox::new("rm-prefix-real-home");
+    let real = sb.root.join("real_home");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(real.join("a.txt"), b"a").unwrap();
+    fs::write(real.join("b.txt"), b"b").unwrap();
+    let link = sb.root.join("link_home");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    sb.touch("other.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let a = real.join("a.txt");
+    let b = real.join("b.txt");
+    let other = sb.work().join("other.txt");
+    let put = sb.run(&[
+        "put",
+        &pin,
+        a.to_str().unwrap(),
+        b.to_str().unwrap(),
+        other.to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let real = fs::canonicalize(&real).unwrap();
+    let out = common::rtrash(&sb.root)
+        .env("HOME", &link)
+        .env("USERPROFILE", &link)
+        .args(["rm", &pin, "--prefix", real.to_str().unwrap()])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(left.len(), 3, "{left:?} {err}");
+}
+
+#[test]
+fn a_pattern_of_the_resolved_xdg_data_home_does_not_wipe_it() {
+    let sb = Sandbox::new("rm-pattern-real-xdg");
+    let real = sb.root.join("real_xdg");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(real.join("a.txt"), b"a").unwrap();
+    fs::write(real.join("b.txt"), b"b").unwrap();
+    let link = sb.root.join("link_xdg");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    sb.touch("other.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let put = sb.run(&[
+        "put",
+        &pin,
+        real.join("a.txt").to_str().unwrap(),
+        real.join("b.txt").to_str().unwrap(),
+        sb.work().join("other.txt").to_str().unwrap(),
+    ]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let real = fs::canonicalize(&real).unwrap();
+    let pattern = format!("^{}/[^#]+$", regex_escape(real.to_str().unwrap()));
+    let out = common::rtrash(&sb.root)
+        .env("XDG_DATA_HOME", &link)
+        .args(["rm", &pin, "--regex", &pattern])
+        .current_dir(sb.work())
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(left.len(), 3, "{left:?} {err}");
+}
+
+fn write_keep(sb: &Sandbox, line: &str) {
+    let dir = sb.root.join(".config/rtrash");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("keep"), format!("{line}\n")).unwrap();
+}
+
+fn recorded_path(sb: &Sandbox, name: &str) -> String {
+    let info = fs::read_to_string(sb.trash().join(format!("info/{name}.trashinfo"))).unwrap();
+    info.lines()
+        .find_map(|l| l.strip_prefix("Path="))
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn a_keep_line_through_a_symlinked_parent_protects_the_recorded_path() {
+    let sb = Sandbox::new("keep-link-parent");
+    let real = sb.work().join("real");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(real.join("secret"), b"s").unwrap();
+    let link = sb.work().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    write_keep(&sb, link.join("secret").to_str().unwrap());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let put = sb.run(&["put", &pin, real.join("secret").to_str().unwrap()]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let recorded = recorded_path(&sb, "secret");
+    let out = sb.run(&["rm", &pin, &recorded]);
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("listed in the keep file"), "{err}");
+    assert_eq!(trash_names(&sb).len(), 1, "{err}");
+    let json = sb.run(&["rm", &pin, "--json", &recorded]);
+    assert!(json.status.success(), "{}", stderr_of(&json));
+    let body = stdout_of(&json);
+    let value: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("{e}: {body}"));
+    assert_eq!(value["removed"], 0, "{body}");
+    assert_eq!(value["matches"], serde_json::json!([]), "{body}");
+}
+
+#[test]
+fn a_keep_line_that_is_a_symlinked_directory_protects_the_recorded_path() {
+    let sb = Sandbox::new("keep-link-dir");
+    let real = sb.work().join("real_dir");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(real.join("inside"), b"s").unwrap();
+    let link = sb.work().join("link_dir");
+    std::os::unix::fs::symlink(fs::canonicalize(&real).unwrap(), &link).unwrap();
+    write_keep(&sb, link.to_str().unwrap());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let put = sb.run(&["put", &pin, "-r", real.to_str().unwrap()]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let recorded = recorded_path(&sb, "real_dir");
+    let out = sb.run(&["rm", &pin, &recorded]);
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("listed in the keep file"), "{err}");
+    assert!(trash_names(&sb).iter().any(|n| n == "real_dir"), "{err}");
+}
+
+#[test]
+fn a_keep_line_with_dotdot_across_a_symlink_protects_the_recorded_path() {
+    let sb = Sandbox::new("keep-dotdot-link");
+    let real = sb.work().join("real");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(sb.work().join("secret"), b"s").unwrap();
+    let hole = sb.work().join("hole");
+    fs::create_dir_all(&hole).unwrap();
+    let link = hole.join("link");
+    std::os::unix::fs::symlink(fs::canonicalize(&real).unwrap(), &link).unwrap();
+    write_keep(&sb, link.join("..").join("secret").to_str().unwrap());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let put = sb.run(&["put", &pin, "secret"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let recorded = recorded_path(&sb, "secret");
+    let out = sb.run(&["rm", &pin, &recorded]);
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("listed in the keep file"), "{err}");
+    assert_eq!(trash_names(&sb).len(), 1, "{err}");
+}
+
+#[test]
+fn a_keep_line_of_the_root_is_an_error_not_a_silent_no_op() {
+    let sb = Sandbox::new("keep-root");
+    write_keep(&sb, "/");
+    sb.touch("only.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    assert!(sb.run(&["put", &pin, "only.txt"]).status.success());
+    let recorded = recorded_path(&sb, "only.txt");
+    let out = sb.run(&["rm", &pin, &recorded]);
+    let err = stderr_of(&out);
+    assert_ne!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("whole volume"), "{err}");
+    assert_eq!(trash_names(&sb), vec!["only.txt".to_string()]);
+}
+
+#[test]
+fn a_keep_line_of_dot_from_the_root_is_an_error() {
+    let sb = Sandbox::new("keep-dot-root");
+    write_keep(&sb, ".");
+    sb.touch("only.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    assert!(sb.run(&["put", &pin, "only.txt"]).status.success());
+    let recorded = recorded_path(&sb, "only.txt");
+    let out = common::rtrash(&sb.root)
+        .args(["rm", pin.as_str(), recorded.as_str()])
+        .current_dir("/")
+        .output()
+        .unwrap();
+    let err = stderr_of(&out);
+    assert_ne!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("whole volume"), "{err}");
+    assert_eq!(trash_names(&sb), vec!["only.txt".to_string()]);
+}
+
+#[test]
+fn a_narrow_prefix_and_glob_agree_when_only_xdg_is_set() {
+    for (tag, glob) in [("rm-xdg-prefix", false), ("rm-xdg-glob", true)] {
+        let sb = Sandbox::new(tag);
+        fs::create_dir_all(sb.work().join("proj")).unwrap();
+        fs::write(sb.work().join("proj/a.txt"), b"a").unwrap();
+        sb.touch("other.txt");
+        let pin = format!("--trash-dir={}", sb.trash().display());
+        let put = sb.run(&["put", &pin, "proj/a.txt", "other.txt"]);
+        assert!(put.status.success(), "{tag}: {}", stderr_of(&put));
+        let proj = fs::canonicalize(sb.work().join("proj")).unwrap();
+        let pattern = if glob {
+            format!("{}/*", proj.display())
+        } else {
+            proj.display().to_string()
+        };
+        let flag = if glob { "--glob" } else { "--prefix" };
+        let out = common::rtrash(&sb.root)
+            .env_remove("HOME")
+            .env_remove("USERPROFILE")
+            .args(["rm", pin.as_str(), flag, pattern.as_str()])
+            .current_dir(sb.work())
+            .output()
+            .unwrap();
+        let err = stderr_of(&out);
+        assert!(out.status.success(), "{tag}: {err}");
+        let mut left = trash_names(&sb);
+        left.sort();
+        assert_eq!(left, vec!["other.txt".to_string()], "{tag}: {left:?} {err}");
+    }
+}
+
+fn plant_volumes(sb: &Sandbox) {
+    let files = sb.trash().join("files");
+    let info = sb.trash().join("info");
+    fs::create_dir_all(&files).unwrap();
+    fs::create_dir_all(&info).unwrap();
+    for (name, path) in [
+        ("e-one", r"E:\one.txt"),
+        ("e-two", r"E:\two.txt"),
+        ("c-other", r"C:\other.txt"),
+    ] {
+        fs::write(files.join(name), b"x").unwrap();
+        fs::write(
+            info.join(format!("{name}.trashinfo")),
+            format!("[Trash Info]\nPath={path}\nDeletionDate=2026-01-02T03:04:05\n"),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn a_pattern_of_one_drive_does_not_wipe_it_when_another_drive_has_an_entry() {
+    for (tag, flag, pattern) in [
+        ("rm-drive-e-glob", "--glob", r"E:\*"),
+        ("rm-drive-e-regex", "--regex", r"^E:\\.*"),
+    ] {
+        let sb = Sandbox::new(tag);
+        plant_volumes(&sb);
+        let pin = format!("--trash-dir={}", sb.trash().display());
+        let out = sb.run(&["rm", &pin, flag, pattern]);
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(2), "{tag}: {err}");
+        assert!(err.contains("refusing mass pattern"), "{tag}: {err}");
+        let mut left = trash_names(&sb);
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "c-other".to_string(),
+                "e-one".to_string(),
+                "e-two".to_string()
+            ],
+            "{tag}: {left:?} {err}"
+        );
+    }
+}
+
+#[test]
+fn one_drive_file_is_removed_when_another_on_that_drive_stays() {
+    let sb = Sandbox::new("rm-drive-e-one");
+    plant_volumes(&sb);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = sb.run(&["rm", &pin, "--glob", r"E:\one.txt"]);
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(
+        left,
+        vec!["c-other".to_string(), "e-two".to_string()],
+        "{left:?} {err}"
+    );
+}
+
+#[test]
+fn the_exact_path_of_the_only_item_is_removed() {
+    let sb = Sandbox::new("rm-exact-only");
+    sb.touch("only.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    assert!(sb.run(&["put", &pin, "only.txt"]).status.success());
+    let recorded = recorded_path(&sb, "only.txt");
+    let out = sb.run(&["rm", &pin, &recorded]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(trash_names(&sb).is_empty());
+}
+
+#[test]
+fn every_item_but_one_is_still_removed() {
+    let sb = Sandbox::new("rm-all-but-one");
+    sb.touch("a.txt");
+    sb.touch("b.txt");
+    sb.touch("keep.dat");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    assert!(sb
+        .run(&["put", &pin, "a.txt", "b.txt", "keep.dat"])
+        .status
+        .success());
+    let out = sb.run(&["rm", &pin, "--glob", "*.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), vec!["keep.dat".to_string()]);
+}
+
+#[test]
+fn an_id_selects_only_that_entry() {
+    let sb = Sandbox::new("rm-id-one");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("same.txt");
+    assert!(sb.run(&["put", &pin, "same.txt"]).status.success());
+    sb.touch("same.txt");
+    assert!(sb.run(&["put", &pin, "same.txt"]).status.success());
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names.len(), 2, "{names:?}");
+    let id = format!("--id={}", names[0]);
+    let path = sb.work().join("same.txt");
+    let out = sb.run(&["rm", &pin, &id, path.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(left, vec![names[1].clone()]);
+}
+
+#[test]
+fn batch_last_with_an_id_removes_only_that_item() {
+    let sb = Sandbox::new("rm-batch-id");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("a.txt");
+    sb.touch("b.txt");
+    assert!(sb.run(&["put", &pin, "a.txt", "b.txt"]).status.success());
+    let out = sb.run(&["rm", &pin, "--batch=last", "--id=a.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb), vec!["b.txt".to_string()]);
+    let rest = sb.run(&["rm", &pin, "--batch=last"]);
+    assert!(rest.status.success(), "{}", stderr_of(&rest));
+    assert!(trash_names(&sb).is_empty());
+}
+
+#[test]
+fn keep_is_counted_before_the_cap() {
+    let sb = Sandbox::new("rm-keep-cap");
+    fs::create_dir_all(sb.root.join(".config/rtrash")).unwrap();
+    let kept = sb.work().join("kept.txt");
+    fs::write(&kept, b"k").unwrap();
+    fs::write(sb.work().join("drop.txt"), b"d").unwrap();
+    fs::write(sb.work().join("plain.dat"), b"p").unwrap();
+    fs::write(
+        sb.root.join(".config/rtrash/keep"),
+        format!("{}\n", kept.display()),
+    )
+    .unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    assert!(sb
+        .run(&["put", &pin, "kept.txt", "drop.txt", "plain.dat"])
+        .status
+        .success());
+    let out = sb.run(&["rm", &pin, "--max-count=1", "--glob", "*.txt"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(stderr_of(&out).contains("listed in the keep file"));
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(left, vec!["kept.txt".to_string(), "plain.dat".to_string()]);
+}
+
+#[test]
+fn keep_is_left_out_of_the_question() {
+    let sb = Sandbox::new("rm-keep-ask");
+    fs::create_dir_all(sb.root.join(".config/rtrash")).unwrap();
+    let kept = sb.work().join("kept.txt");
+    fs::write(&kept, b"k").unwrap();
+    fs::write(sb.work().join("drop.txt"), b"d").unwrap();
+    fs::write(sb.work().join("plain.dat"), b"p").unwrap();
+    fs::write(
+        sb.root.join(".config/rtrash/keep"),
+        format!("{}\n", kept.display()),
+    )
+    .unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    assert!(sb
+        .run(&["put", &pin, "kept.txt", "drop.txt", "plain.dat"])
+        .status
+        .success());
+    let out = sb.run_with_stdin(&["rm", &pin, "-i", "--glob", "*.txt"], "y\n");
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("Permanently remove 1 item"), "{err}");
+    assert!(err.contains("listed in the keep file"), "{err}");
+    let mut left = trash_names(&sb);
+    left.sort();
+    assert_eq!(left, vec!["kept.txt".to_string(), "plain.dat".to_string()]);
+}
+
+#[test]
+fn a_kept_file_keeps_the_directory_that_holds_it() {
+    let sb = Sandbox::new("keep-inside");
+    fs::create_dir_all(sb.root.join(".config/rtrash")).unwrap();
+    let dir = sb.work().join("dir");
+    fs::create_dir_all(&dir).unwrap();
+    let secret = dir.join("secret");
+    fs::write(&secret, b"s").unwrap();
+    fs::write(dir.join("other"), b"o").unwrap();
+    fs::write(
+        sb.root.join(".config/rtrash/keep"),
+        format!("{}\n", secret.display()),
+    )
+    .unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    assert!(sb.run(&["put", &pin, "-r", "dir"]).status.success());
+    let out = sb.run(&["rm", &pin, dir.to_str().unwrap()]);
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("listed in the keep file"), "{err}");
+    assert!(
+        trash_names(&sb).iter().any(|n| n == "dir"),
+        "{:?}",
+        trash_names(&sb)
+    );
+    let empty = sb.run(&["empty", &pin, "--max-size=0"]);
+    assert!(empty.status.success(), "{}", stderr_of(&empty));
+    assert!(
+        trash_names(&sb).iter().any(|n| n == "dir"),
+        "empty: {:?}",
+        trash_names(&sb)
+    );
+}
+
+#[test]
+fn a_relative_keep_path_protects_the_file_in_the_working_directory() {
+    let sb = Sandbox::new("keep-relative");
+    fs::create_dir_all(sb.root.join(".config/rtrash")).unwrap();
+    fs::write(sb.root.join(".config/rtrash/keep"), "secret.txt\n").unwrap();
+    sb.touch("secret.txt");
+    sb.touch("other.txt");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    assert!(sb
+        .run(&["put", &pin, "secret.txt", "other.txt"])
+        .status
+        .success());
+    let secret = sb.work().join("secret.txt");
+    let out = sb.run(&["rm", &pin, secret.to_str().unwrap()]);
+    let err = stderr_of(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("listed in the keep file"), "{err}");
+    assert!(trash_names(&sb).iter().any(|n| n == "secret.txt"));
+    let other = sb.work().join("other.txt");
+    let gone = sb.run(&["rm", &pin, other.to_str().unwrap()]);
+    assert!(gone.status.success(), "{}", stderr_of(&gone));
+    assert!(!trash_names(&sb).iter().any(|n| n == "other.txt"));
+    assert!(trash_names(&sb).iter().any(|n| n == "secret.txt"));
+}
+
+#[test]
+fn reap_keeps_a_directory_that_holds_a_kept_file() {
+    let sb = Sandbox::new("keep-reap-inside");
+    fs::create_dir_all(sb.root.join(".config/rtrash")).unwrap();
+    let scratch = sb.work().join("scratch");
+    let cache = scratch.join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    let secret = cache.join("secret");
+    fs::write(&secret, b"s").unwrap();
+    fs::write(cache.join("old"), b"o").unwrap();
+    age_tree(&cache);
+    fs::write(
+        sb.root.join(".config/rtrash/keep"),
+        format!("{}\n", secret.display()),
+    )
+    .unwrap();
+    let out = sb.run(&[
+        "reap",
+        "--permanent",
+        "--older-than=1h",
+        "--age-by=m",
+        scratch.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}{}",
+        stderr_of(&out),
+        stdout_of(&out)
+    );
+    assert!(secret.exists(), "{}{}", stderr_of(&out), stdout_of(&out));
+    assert!(cache.exists(), "{}{}", stderr_of(&out), stdout_of(&out));
+}
+
+#[test]
+fn rm_refuses_two_spellings_of_one_original() {
+    let sb = Sandbox::new("rm-match-key");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let real = sb.work().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("a.txt"), b"payload").unwrap();
+    let put = sb.run(&["put", &pin, "real/a.txt"]);
+    assert!(put.status.success(), "{}", stderr_of(&put));
+    let info_path = sb.trash().join("info/a.txt.trashinfo");
+    let info = fs::read_to_string(&info_path).unwrap();
+    let recorded = info
+        .lines()
+        .find_map(|l| l.strip_prefix("Path="))
+        .unwrap()
+        .to_string();
+    let link = sb.work().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let via_link = link.join("a.txt");
+    let via_link = via_link.to_str().unwrap();
+    let alt = info.replacen(&format!("Path={recorded}"), &format!("Path={via_link}"), 1);
+    fs::write(sb.trash().join("info/a-link.txt.trashinfo"), alt).unwrap();
+    fs::copy(
+        sb.trash().join("files/a.txt"),
+        sb.trash().join("files/a-link.txt"),
+    )
+    .unwrap();
+    let out = sb.run(&["rm", &pin, via_link]);
+    let err = stderr_of(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing 2 trash items"), "{err}");
+    assert!(err.contains("--all-matches"), "{err}");
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["a-link.txt".to_string(), "a.txt".to_string()]);
+}
+
 #[test]
 fn trash_rm_regex_matches_the_original_path() {
     let sb = Sandbox::new("rm-regex-paths");
@@ -1783,7 +3571,7 @@ fn trash_rm_match_takes_substring_and_exact() {
         sb.touch(f);
         assert!(sb.run(&["put", f]).status.success());
     }
-    let out = sb.run(&["rm", "-m", "substring", "/old-a"]);
+    let out = sb.run(&["rm", "-m", "substring", "old-a"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     // The original path exactly as put recorded it.
     let info = fs::read_to_string(sb.trash().join("info/old-b.txt.trashinfo")).unwrap();
@@ -1796,7 +3584,7 @@ fn trash_rm_match_takes_substring_and_exact() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     // A shorter path is not the file. new.txt stays, and is named.
     let out = sb.run(&["rm", "--match=exact", "new"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     assert!(stderr_of(&out).contains("near miss"), "{}", stderr_of(&out));
     assert_eq!(trash_names(&sb), ["new.txt"]);
     // A substring every path holds needs --force; a bad kind exits 2.
@@ -1823,8 +3611,9 @@ fn listed_originals(sb: &Sandbox) -> Vec<String> {
     out
 }
 
-/// A name that is itself a glob matches only that listed path. `rm *.log`
-/// also takes every other `.log`, including by basename.
+/// A name that is itself a glob matches only that listed path. The exact
+/// default takes the file named `*.log` and leaves `notes.log`. A glob of
+/// every item in the trash is a mass delete and waits for `--force`.
 #[test]
 fn rm_exact_path_keeps_a_glob_name_to_one_item() {
     let sb = Sandbox::new("rm-exact-glob");
@@ -1834,13 +3623,29 @@ fn rm_exact_path_keeps_a_glob_name_to_one_item() {
         .run(&["put", "--home-only", "*.log", "notes.log"])
         .status
         .success());
-    let dry = sb.run(&["rm", "--home-only", "-n", "--match=glob", "*.log"]);
+    let dry = sb.run(&["rm", "--home-only", "-n", "*.log"]);
     let shown = format!("{}{}", stdout_of(&dry), stderr_of(&dry));
     assert!(
         shown.contains("*.log")
-            && shown.contains("notes.log")
-            && shown.contains("Would permanently remove 2 items"),
+            && !shown.contains("notes.log")
+            && shown.contains("Would permanently remove 1 item"),
         "{shown}"
+    );
+    let globbed = sb.run(&["rm", "--home-only", "-n", "--glob", "*.log"]);
+    assert_eq!(globbed.status.code(), Some(2), "{}", stderr_of(&globbed));
+    assert!(
+        stderr_of(&globbed).contains("refusing mass pattern"),
+        "{}",
+        stderr_of(&globbed)
+    );
+    assert_eq!(listed_originals(&sb).len(), 2);
+    let forced = sb.run(&["rm", "--home-only", "-n", "--force", "--glob", "*.log"]);
+    let both = format!("{}{}", stdout_of(&forced), stderr_of(&forced));
+    assert!(
+        both.contains("*.log")
+            && both.contains("notes.log")
+            && both.contains("Would permanently remove 2 items"),
+        "{both}"
     );
     let star = listed_originals(&sb)
         .into_iter()
@@ -1880,8 +3685,9 @@ fn rm_exact_path_keeps_a_glob_name_to_one_item() {
     assert!(left.iter().any(|p| p.ends_with("/notes.log")), "{left:?}");
 }
 
-/// Two trashed files with the same basename: a bare name removes both,
-/// and the listed original path of one removes only that one.
+/// Two trashed files with the same basename: a glob of that name matches
+/// both deliberately even when that is the whole trash, and the listed
+/// original path of one removes only that one.
 #[test]
 fn rm_exact_path_keeps_a_duplicate_basename() {
     let sb = Sandbox::new("rm-exact-dup");
@@ -1893,11 +3699,18 @@ fn rm_exact_path_keeps_a_duplicate_basename() {
         .run(&["put", "--home-only", "a/foo", "b/foo"])
         .status
         .success());
-    let dry = sb.run(&["rm", "--home-only", "-n", "--match=glob", "foo"]);
+    let dry = sb.run(&["rm", "--home-only", "-n", "--glob", "foo"]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
     assert!(
         stderr_of(&dry).contains("Would permanently remove 2 items"),
         "{}",
         stderr_of(&dry)
+    );
+    let forced = sb.run(&["rm", "--home-only", "-n", "--force", "--glob", "foo"]);
+    assert!(
+        stderr_of(&forced).contains("Would permanently remove 2 items"),
+        "{}",
+        stderr_of(&forced)
     );
     let wanted = listed_originals(&sb)
         .into_iter()
@@ -1920,7 +3733,30 @@ fn rm_exact_path_keeps_a_duplicate_basename() {
     assert!(left[0].ends_with("/b/foo"), "{left:?}");
 }
 
-/// Two copies of one original path: `--max-count=1` deletes neither.
+#[test]
+fn rm_exact_with_no_match_exits_one() {
+    let sb = Sandbox::new("rm-exact-no-match");
+    sb.touch("kept.txt");
+    assert!(sb.run(&["put", "--home-only", "kept.txt"]).status.success());
+    let missing = sb.work().join("missing.txt");
+    let out = sb.run(&[
+        "rm",
+        "--home-only",
+        "--json",
+        "--match=exact",
+        missing.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("no trash items match"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(trash_names(&sb), vec!["kept.txt".to_string()]);
+}
+
+/// Two copies of one original path: an exact match refuses both until
+/// `--all-matches`, and `--max-count=1` then deletes neither.
 #[test]
 fn rm_exact_path_stops_at_one_copy_of_a_path() {
     let sb = Sandbox::new("rm-exact-cap");
@@ -1932,10 +3768,25 @@ fn rm_exact_path_stops_at_one_copy_of_a_path() {
     assert_eq!(paths.len(), 2, "{paths:?}");
     assert!(paths.iter().all(|p| p.ends_with("/same.txt")), "{paths:?}");
     let dry = sb.run(&["rm", "--home-only", "-n", "--match=exact", &paths[0]]);
+    assert_eq!(dry.status.code(), Some(2), "{}", stderr_of(&dry));
     assert!(
-        stderr_of(&dry).contains("Would permanently remove 2 items"),
+        stderr_of(&dry).contains("select one with --id=NAME, or pass --all-matches"),
         "{}",
         stderr_of(&dry)
+    );
+    assert_eq!(listed_originals(&sb).len(), 2);
+    let all = sb.run(&[
+        "rm",
+        "--home-only",
+        "-n",
+        "--all-matches",
+        "--match=exact",
+        &paths[0],
+    ]);
+    assert!(
+        stderr_of(&all).contains("Would permanently remove 2 items"),
+        "{}",
+        stderr_of(&all)
     );
     let out = sb.run_with_stdin(
         &[
@@ -1943,6 +3794,7 @@ fn rm_exact_path_stops_at_one_copy_of_a_path() {
             "--home-only",
             "-i",
             "--max-count=1",
+            "--all-matches",
             "--match=exact",
             &paths[0],
         ],
@@ -2129,7 +3981,7 @@ fn rm_and_empty_take_ages_in_hours_and_minutes() {
     assert!(sb.trash().join("files/fresh.txt").exists());
     for bad in ["--older-than=2x", "--older-than=1.5h"] {
         assert_eq!(
-            sb.run(&["rm", &pin, bad, "*"]).status.code(),
+            sb.run(&["rm", &pin, bad, "--glob", "*"]).status.code(),
             Some(2),
             "{bad}"
         );
@@ -2666,7 +4518,8 @@ fn multicall_names_dispatch() {
     assert_eq!(trash_names(&sb), vec!["via-trash.txt"]);
 
     // trash-rm permanently deletes matching trash entries (not restore).
-    let out = run_as("trash-rm", &["via-trash.txt"]);
+    let original = sb.work().join("via-trash.txt");
+    let out = run_as("trash-rm", &[original.to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(trash_names(&sb).is_empty());
 }
@@ -3227,7 +5080,7 @@ fn trash_cli_command_lines_work_under_the_trash_names() {
     assert!(trash_names(&sb).is_empty());
 
     let out = run_as("trash-rm", &["--trash-dir", &t, "nothing"], "");
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
 }
 
 #[test]
@@ -3361,8 +5214,19 @@ fn rm_matches_the_original_path_exactly() {
     names.sort();
     assert_eq!(names, vec!["ab".to_string(), "b".to_string()]);
 
+    let dry_again = sb.run(&["rm", "--home-only", "-n", "a"]);
+    assert_eq!(
+        dry_again.status.code(),
+        Some(1),
+        "{}",
+        stderr_of(&dry_again)
+    );
+    let dry_err = stderr_of(&dry_again);
+    assert!(dry_err.contains("no exact match"), "{dry_err}");
+    assert!(dry_err.contains("near miss"), "{dry_err}");
+
     let again = sb.run(&["rm", "--home-only", "a"]);
-    assert!(again.status.success(), "{}", stderr_of(&again));
+    assert_eq!(again.status.code(), Some(1), "{}", stderr_of(&again));
     let err = stderr_of(&again);
     assert!(err.contains("no exact match"), "{err}");
     assert!(err.contains("near miss"), "{err}");
@@ -3401,6 +5265,21 @@ fn rm_removes_one_spelling_of_an_accented_name() {
         .collect();
     assert_eq!(left.len(), 1, "{}", stderr_of(&out));
     assert_eq!(fs::read(&left[0]).unwrap(), b"decomposed");
+}
+
+#[test]
+fn glob_matches_an_nfc_pattern_to_an_nfd_path() {
+    let sb = Sandbox::new("glob-nfc");
+    let composed = "item-\u{e9}.txt";
+    let decomposed = "item-e\u{301}.txt";
+    fs::write(sb.work().join(decomposed), b"wanted").unwrap();
+    fs::write(sb.work().join("other.txt"), b"other").unwrap();
+    assert!(sb.run(&["put", decomposed, "other.txt"]).status.success());
+
+    let out = sb.run(&["rm", "--home-only", "--glob", composed]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!sb.trash().join("files").join(decomposed).exists());
+    assert!(sb.trash().join("files/other.txt").exists());
 }
 
 /// A parent traversal after a link resolves the link before `..`. Its
@@ -3483,7 +5362,7 @@ fn rm_names_an_exact_path_outside_the_age_window() {
     set_deletion_date(&sb, "ab", "2000-01-01T00:00:00");
 
     let dry = sb.run(&["rm", "--home-only", "-n", "--older-than=1d", "a"]);
-    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    assert_eq!(dry.status.code(), Some(1), "{}", stderr_of(&dry));
     let err = stderr_of(&dry);
     assert!(err.contains("outside the age window"), "{err}");
     assert!(!err.contains("no exact match"), "{err}");
@@ -3491,7 +5370,7 @@ fn rm_names_an_exact_path_outside_the_age_window() {
     assert!(!stdout_of(&dry).contains("/ab"), "{}", stdout_of(&dry));
 
     let out = sb.run(&["rm", "--home-only", "--older-than=1d", "a"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     let mut names = trash_names(&sb);
     names.sort();
     assert_eq!(names, vec!["a".to_string(), "ab".to_string()]);
@@ -3509,9 +5388,10 @@ fn empty_names_an_exact_path_outside_the_age_window() {
     set_deletion_date(&sb, "ab", "2000-01-01T00:00:00");
 
     let out = sb.run(&["empty", "--home-only", "--plain", "--older-than=1d", "a"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     let err = stderr_of(&out);
     assert!(err.contains("outside the age window"), "{err}");
+    assert!(err.contains("no trash items match"), "{err}");
     assert!(!err.contains("no exact match"), "{err}");
     assert!(!err.contains("near miss"), "{err}");
     let mut names = trash_names(&sb);
@@ -3556,7 +5436,7 @@ fn rm_names_an_exact_path_outside_the_size_window() {
     assert!(sb.run(&["put", "a", "ab"]).status.success());
 
     let out = sb.run(&["rm", "--home-only", "--larger-than=1G", "a"]);
-    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     let err = stderr_of(&out);
     assert!(err.contains("outside the size window"), "{err}");
     assert!(!err.contains("no exact match"), "{err}");
@@ -3595,11 +5475,24 @@ fn empty_matches_the_original_path_exactly() {
     assert_eq!(trash_names(&sb), vec!["b".to_string()]);
 
     let again = sb.run(&["empty", "--home-only", "--plain", "a"]);
-    assert!(again.status.success(), "{}", stderr_of(&again));
+    assert_eq!(again.status.code(), Some(1), "{}", stderr_of(&again));
     let err = stderr_of(&again);
     assert!(err.contains("no exact match"), "{err}");
     assert!(err.contains("near miss"), "{err}");
     assert!(err.contains("/a/b"), "{err}");
+    assert!(err.contains("no trash items match"), "{err}");
+    let dry = sb.run(&["empty", "--home-only", "--plain", "-n", "a"]);
+    assert_eq!(dry.status.code(), Some(1), "{}", stderr_of(&dry));
+    assert!(stderr_of(&dry).contains("near miss"));
+    assert!(stderr_of(&dry).contains("no trash items match"));
+    let json = sb.run(&["empty", "--home-only", "--plain", "-n", "--json", "a"]);
+    assert_eq!(json.status.code(), Some(1), "{}", stderr_of(&json));
+    let body = stdout_of(&json);
+    let value: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("{e}: {body}"));
+    assert_eq!(value["removed"], 0, "{body}");
+    assert!(stderr_of(&json).contains("near miss"));
+    assert!(stderr_of(&json).contains("no trash items match"));
     assert_eq!(trash_names(&sb), vec!["b".to_string()]);
 }
 
@@ -3625,16 +5518,149 @@ fn interactive_empty_of_an_exact_path_honors_the_reply() {
 }
 
 #[test]
-fn trash_rm_literal_basename() {
+fn trash_rm_defaults_to_the_exact_original_path() {
     let sb = Sandbox::new("trash-rm-literal");
-    sb.touch("foo");
-    sb.touch("foobar");
-    assert!(sb.run(&["put", "foo", "foobar"]).status.success());
-    let out = sb.run(&["rm", "--home-only", "foo"]);
+    sb.touch("note");
+    sb.touch("notebook");
+    assert!(sb.run(&["put", "note", "notebook"]).status.success());
+    let out = sb.run(&["rm", "--home-only", "not"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert_eq!(trash_names(&sb).len(), 2);
+    let out = sb.run(&["rm", "--home-only", "note"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     let mut names = trash_names(&sb);
     names.sort();
-    assert_eq!(names, vec!["foobar"]);
+    assert_eq!(names, vec!["notebook"]);
+}
+
+#[test]
+fn trash_rm_refuses_duplicate_originals_without_all_matches() {
+    let sb = Sandbox::new("rm-ambiguous");
+    sb.touch("same.txt");
+    assert!(sb.run(&["put", "same.txt"]).status.success());
+    sb.touch("same.txt");
+    assert!(sb.run(&["put", "same.txt"]).status.success());
+    let original = sb.work().join("same.txt");
+    let path = original.to_str().unwrap();
+    let refused = sb.run(&["rm", path]);
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr_of(&refused));
+    assert_eq!(trash_names(&sb).len(), 2);
+    let removed = sb.run(&["rm", "--all-matches", path]);
+    assert!(removed.status.success(), "{}", stderr_of(&removed));
+    assert!(trash_names(&sb).is_empty());
+}
+
+#[test]
+fn empty_exact_refuses_duplicate_originals_until_an_id_selects_one() {
+    let sb = Sandbox::new("empty-exact-ambiguous");
+    sb.touch("same.txt");
+    assert!(sb.run(&["put", "same.txt"]).status.success());
+    sb.touch("same.txt");
+    assert!(sb.run(&["put", "same.txt"]).status.success());
+    let original = sb.work().join("same.txt");
+    let path = original.to_str().unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+
+    let refused = sb.run(&["empty", "-f", &pin, path]);
+    assert_eq!(refused.status.code(), Some(2), "{}", stderr_of(&refused));
+    assert!(
+        stderr_of(&refused).contains("refusing 2 trash items with original path"),
+        "{}",
+        stderr_of(&refused)
+    );
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names.len(), 2, "{names:?}");
+
+    let id = format!("--id={}", names[0]);
+    let removed = sb.run(&["rm", &pin, &id, path]);
+    assert!(removed.status.success(), "{}", stderr_of(&removed));
+    assert_eq!(trash_names(&sb).len(), 1);
+}
+
+#[test]
+fn keep_file_protects_an_exact_empty_path() {
+    let sb = Sandbox::new("empty-exact-keep");
+    fs::create_dir_all(sb.root.join(".config/rtrash")).unwrap();
+    let kept = sb.work().join("kept.txt");
+    let other = sb.work().join("other.txt");
+    fs::write(
+        sb.root.join(".config/rtrash/keep"),
+        format!("{}\n", kept.display()),
+    )
+    .unwrap();
+    fs::write(&kept, b"kept").unwrap();
+    fs::write(&other, b"other").unwrap();
+    assert!(sb.run(&["put", "kept.txt", "other.txt"]).status.success());
+    let pin = format!("--trash-dir={}", sb.trash().display());
+
+    let out = sb.run(&["empty", "-f", &pin, kept.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(
+        stderr_of(&out).contains("listed in the keep file"),
+        "{}",
+        stderr_of(&out)
+    );
+    let mut names = trash_names(&sb);
+    names.sort();
+    assert_eq!(names, vec!["kept.txt", "other.txt"]);
+}
+
+#[test]
+fn keep_file_protects_rm_empty_and_retention() {
+    let sb = Sandbox::new("keep-permanent");
+    fs::create_dir_all(sb.root.join(".config/rtrash")).unwrap();
+    let kept = sb.work().join("kept");
+    fs::write(
+        sb.root.join(".config/rtrash/keep"),
+        format!("# permanent deletion exclusions\n{}\n", kept.display()),
+    )
+    .unwrap();
+    for name in ["kept/a", "drop"] {
+        let path = sb.work().join(name);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, b"x").unwrap();
+    }
+    assert!(sb.run(&["put", "-r", "kept", "drop"]).status.success());
+    let rm = sb.run(&["rm", kept.to_str().unwrap()]);
+    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    assert!(stderr_of(&rm).contains("listed in the keep file"));
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let dry = sb.run(&["empty", &pin, "--plain", "--dry-run"]);
+    assert!(dry.status.success(), "{}", stderr_of(&dry));
+    assert!(stdout_of(&dry).contains("drop"), "{}", stdout_of(&dry));
+    assert!(!stdout_of(&dry).contains("kept/a"), "{}", stdout_of(&dry));
+    let empty = sb.run(&["empty", &pin, "--plain", "--max-size=0"]);
+    assert!(empty.status.success(), "{}", stderr_of(&empty));
+    assert_eq!(trash_names(&sb), vec!["kept"]);
+}
+
+#[test]
+fn keep_file_protects_permanent_reap() {
+    let sb = Sandbox::new("keep-reap");
+    fs::create_dir_all(sb.root.join(".config/rtrash")).unwrap();
+    let scratch = sb.work().join("scratch");
+    let kept = scratch.join("kept");
+    fs::create_dir_all(&scratch).unwrap();
+    fs::write(&kept, b"x").unwrap();
+    age_tree(&kept);
+    fs::write(
+        sb.root.join(".config/rtrash/keep"),
+        format!("{}\n", kept.display()),
+    )
+    .unwrap();
+    let out = sb.run(&[
+        "reap",
+        "--permanent",
+        "--older-than=1h",
+        "--age-by=m",
+        scratch.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(kept.exists());
+    assert!(stdout_of(&out).contains("listed in the keep file"));
 }
 
 #[test]
@@ -4172,29 +6198,48 @@ fn empty_json_and_older_than_flag() {
     let pin = format!("--trash-dir={}", sb.trash().display());
     sb.touch("e.txt");
     assert!(sb.run(&["put", "e.txt"]).status.success());
-    let dry = sb.run(&["empty", &pin, "--dry-run", "--json"]);
+    let dry = sb.run(&["empty", &pin, "--dry-run", "--json", "-v"]);
     assert!(dry.status.success(), "{}", stderr_of(&dry));
     let s = stdout_of(&dry);
-    assert!(
-        s.contains("\"dry_run\":true") || s.contains("\"dry_run\": true"),
-        "{s}"
-    );
-    assert!(
-        s.contains("\"removed\":1") || s.contains("\"removed\": 1"),
-        "{s}"
-    );
-    assert!(s.contains("\"bytes\":"), "{s}");
+    let json: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|e| panic!("{e}: {s}"));
+    assert_eq!(json["dry_run"], true, "{s}");
+    assert_eq!(json["removed"], 1, "{s}");
+    assert!(json["bytes"].is_u64(), "{s}");
     // Still present after dry-run.
     assert!(sb.trash().join("files/e.txt").is_file());
-    let real = sb.run(&["empty", &pin, "--json", "--older-than=0"]);
+    let real = sb.run(&["empty", &pin, "--json", "--older-than=0", "-v"]);
     assert!(real.status.success(), "{}", stderr_of(&real));
     let r = stdout_of(&real);
-    assert!(
-        r.contains("\"dry_run\":false") || r.contains("\"dry_run\": false"),
-        "{r}"
-    );
-    assert!(r.contains("\"days\":0") || r.contains("\"days\": 0"), "{r}");
+    let json: serde_json::Value = serde_json::from_str(&r).unwrap_or_else(|e| panic!("{e}: {r}"));
+    assert_eq!(json["dry_run"], false, "{r}");
+    assert_eq!(json["removed"], 1, "{r}");
+    assert_eq!(json["days"], 0, "{r}");
     assert!(!sb.trash().join("files/e.txt").exists());
+}
+
+#[test]
+fn empty_json_dry_run_with_age_is_one_document() {
+    let sb = Sandbox::new("empty-json-age");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    sb.touch("old.txt");
+    assert!(sb.run(&["put", "old.txt"]).status.success());
+    let aged = sb.run(&["empty", &pin, "--older-than=0", "-n", "--json", "-v"]);
+    assert!(aged.status.success(), "{}", stderr_of(&aged));
+    let text = stdout_of(&aged);
+    let json: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+    assert_eq!(json["dry_run"], true, "{text}");
+    assert_eq!(json["removed"], 1, "{text}");
+    assert_eq!(json["older_than_secs"], 0, "{text}");
+    assert!(sb.trash().join("files/old.txt").is_file());
+    let capped = sb.run(&["empty", &pin, "--max-size=0", "-n", "--json", "-v"]);
+    assert!(capped.status.success(), "{}", stderr_of(&capped));
+    let text = stdout_of(&capped);
+    let json: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}"));
+    assert_eq!(json["dry_run"], true, "{text}");
+    assert_eq!(json["removed"], 1, "{text}");
+    assert_eq!(json["max_size"], 0, "{text}");
 }
 
 #[test]
@@ -4595,13 +6640,13 @@ fn empty_max_size_removes_oldest_or_largest_until_it_fits() {
     trash_aged(&sb, "mid", 40_000, 10);
     trash_aged(&sb, "new", 40_000, 1);
     // Three items of about 44 KiB each (blocks plus the .trashinfo).
-    let dry = sb.empty(&["--max-size=100K", "-n", "--json"]);
+    let dry = sb.empty(&["--max-size=100K", "-n", "--json", "-v"]);
     assert!(dry.status.success(), "{}", stderr_of(&dry));
     let s = stdout_of(&dry);
-    assert!(
-        s.contains("\"removed\":1") && s.contains("\"max_size\":102400"),
-        "{s}"
-    );
+    let json: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|e| panic!("{e}: {s}"));
+    assert_eq!(json["dry_run"], true, "{s}");
+    assert_eq!(json["removed"], 1, "{s}");
+    assert_eq!(json["max_size"], 102_400, "{s}");
     assert_eq!(names_in_trash(&sb).len(), 3, "dry run removes nothing");
 
     let out = sb.empty(&["--max-size=100K"]);
@@ -7106,7 +9151,7 @@ fn rm_carries_the_total_and_trash_stats_total_reads_it() {
         "o".repeat(7_000),
     )
     .unwrap();
-    let out = run(&["rm", "--home-only", "--match=glob", "orphan.bin"]);
+    let out = run(&["rm", "--home-only", "--force", "--match=glob", "orphan.bin"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!sb.root.join("xdg/Trash/files/orphan.bin").exists());
     assert_eq!(total(), carried);
@@ -9916,7 +11961,12 @@ fn rm_by_id_leaves_a_later_item_at_the_same_path() {
         .status
         .success());
     let rm = sb.run(&["rm", "--home-only", "--match=id", &id]);
-    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    assert_eq!(rm.status.code(), Some(1), "{}", stderr_of(&rm));
+    assert!(
+        stderr_of(&rm).contains("no trash items match"),
+        "{}",
+        stderr_of(&rm)
+    );
     assert!(stdout_of(&rm).is_empty(), "{}", stdout_of(&rm));
     let files = sb.trash().join("files");
     let mut bodies = Vec::new();
@@ -10086,9 +12136,10 @@ fn empty_takes_a_double_dash_as_the_end_of_its_options() {
     sb.touch("a.txt");
     assert!(sb.run(&["put", "a.txt"]).status.success());
     let out = sb.empty(&["--", "-n"]);
-    assert_eq!(out.status.code(), Some(0), "{}", stderr_of(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
     let err = stderr_of(&out);
     assert!(!err.contains("unrecognized option"), "{err}");
+    assert!(err.contains("no trash items match"), "{err}");
     assert!(!err.contains("Would remove"), "{err}");
     assert!(!err.contains("Removed"), "{err}");
     assert_eq!(trash_names(&sb), vec!["a.txt".to_string()]);
@@ -10148,20 +12199,18 @@ fn rm_and_empty_leave_a_decoy_at_the_lexical_parent_of_link_dotdot() {
     assert!(sb.trash().join("files/sub/decoy").is_file());
 
     let dry = sb.run(&["rm", "--home-only", "-n", "sub/link/.."]);
-    let shown = format!("{}{}", stdout_of(&dry), stderr_of(&dry));
-    assert!(
-        shown.contains("Would permanently remove 0 items"),
-        "{shown}"
-    );
+    assert_eq!(dry.status.code(), Some(1), "{}", stderr_of(&dry));
+    assert!(stderr_of(&dry).contains("no exact match"));
     let rm = sb.run(&["rm", "--home-only", "-f", "sub/link/.."]);
-    assert!(rm.status.success(), "{}", stderr_of(&rm));
+    assert_eq!(rm.status.code(), Some(1), "{}", stderr_of(&rm));
     assert!(
         sb.trash().join("files/sub/decoy").is_file(),
         "{}",
         stderr_of(&rm)
     );
     let empty = sb.empty(&["sub/link/.."]);
-    assert!(empty.status.success(), "{}", stderr_of(&empty));
+    assert_eq!(empty.status.code(), Some(1), "{}", stderr_of(&empty));
+    assert!(stderr_of(&empty).contains("no trash items match"));
     assert!(
         sb.trash().join("files/sub/decoy").is_file(),
         "{}",
@@ -10581,7 +12630,7 @@ fn no_permanent_guard_refuses_rm_and_empty_but_not_dry_runs() {
     };
     for args in [
         &["rm", &pin, "keep.txt"][..],
-        &["rm", &pin, "-f", "*"],
+        &["rm", &pin, "-f", "--glob", "*"],
         &["empty", &pin, "--all"],
     ] {
         let out = guarded(args);
@@ -10702,11 +12751,11 @@ fn no_permanent_guard_refuses_reap_permanent_and_purge_trash() {
 fn max_count_refuses_rm_and_empty_past_the_cap() {
     let sb = Sandbox::new("maxcount");
     let pin = format!("--trash-dir={}", sb.trash().display());
-    for n in ["mc-a", "mc-b", "mc-c"] {
+    for n in ["mc-a", "mc-b", "mc-c", "other.dat"] {
         sb.touch(n);
         assert!(sb.run(&["put", n]).status.success());
     }
-    let all = ["mc-a", "mc-b", "mc-c"];
+    let all = ["mc-a", "mc-b", "mc-c", "other.dat"];
     let refused = |args: &[&str], envs: &[(&str, &str)], says: &str| {
         let out = sb.run_env(args, envs);
         assert_eq!(out.status.code(), Some(2), "{args:?} {envs:?}");
@@ -10742,8 +12791,8 @@ fn max_count_refuses_rm_and_empty_past_the_cap() {
     let one = [("RTRASH_MAX_PERMANENT", "1")];
     let out = sb.run_env(&["rm", &pin, "mc-a"], &one);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert_eq!(names_in_trash(&sb), ["mc-b", "mc-c"]);
-    let out = sb.run_env(&["empty", &pin, "--all", "--max-count=2"], &one);
+    assert_eq!(names_in_trash(&sb), ["mc-b", "mc-c", "other.dat"]);
+    let out = sb.run_env(&["empty", &pin, "--all", "--max-count=3"], &one);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(names_in_trash(&sb).is_empty());
 }
@@ -11187,10 +13236,10 @@ fn restore_stops_after_the_entry_in_hand_at_the_first_ctrl_c() {
 #[test]
 fn rm_stops_after_the_entry_in_hand_at_the_first_ctrl_c() {
     let sb = Sandbox::new("rm-ctrl-c");
-    for n in ["a.txt", "b.txt", "c.txt"] {
+    for n in ["a.txt", "b.txt", "c.txt", "notes.dat"] {
         fs::write(sb.work().join(n), n).unwrap();
     }
-    let put = sb.run(&["put", "a.txt", "b.txt", "c.txt"]);
+    let put = sb.run(&["put", "a.txt", "b.txt", "c.txt", "notes.dat"]);
     assert!(put.status.success(), "{}", stderr_of(&put));
     let out = sb.run_env(
         &["rm", "--match=glob", "*.txt"],
@@ -11203,7 +13252,7 @@ fn rm_stops_after_the_entry_in_hand_at_the_first_ctrl_c() {
         "{said}"
     );
     let left = names_in(&sb.trash().join("files"));
-    assert_eq!(left.len(), 2, "{left:?}");
+    assert_eq!(left.len(), 3, "{left:?}");
     let records: Vec<String> = left.iter().map(|n| format!("{n}.trashinfo")).collect();
     assert_eq!(names_in(&sb.trash().join("info")), records);
 }

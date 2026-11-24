@@ -127,7 +127,9 @@ pub fn forget(dir: &TrashDir) {
 
 /// The trash's size in bytes (payloads and `.trashinfo` files, as
 /// `status` counts them): the stored total when current, else measured
-/// and stored.
+/// and stored. This is physical occupancy, so it includes entries named
+/// by the keep file. Retention counts those entries toward its budget but
+/// marks their candidates protected before it makes a deletion plan.
 pub fn bytes(prog: &str, dir: &TrashDir) -> u64 {
     if let Some((b, _)) = cached(dir) {
         return b;

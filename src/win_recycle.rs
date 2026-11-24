@@ -937,8 +937,9 @@ pub fn test_bin_put(dir: &Path, p: &Path) -> io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(dir)?;
     // The plain form with on-disk name casing, as the shell records it,
-    // even for a `\\?\` operand or a differently cased path.
-    let abs = crate::util::plain_path(&std::path::absolute(p)?);
+    // even for a `\\?\` operand or a differently cased path. The last
+    // component keeps a trailing dot or space.
+    let abs = crate::util::plain_path(&crate::util::absolute_keep_tail(p));
     let original = on_disk_entry(&abs);
     let fixed = if cfg!(debug_assertions) {
         std::env::var("RTRASH_TEST_BIN_TIME")
@@ -1241,10 +1242,32 @@ pub fn volume_mounts() -> Vec<(String, String)> {
     out
 }
 
+/// NTFS compares by a one-to-one uppercase table, not by Unicode case
+/// folding. `k` and U+212A KELVIN SIGN both lowercase to `k`, and `ß`
+/// uppercases to `SS`; either fold would merge names NTFS keeps apart.
+/// A character whose simple uppercase is a single character maps to it,
+/// and every other character stays as it is.
+fn ntfs_fold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let mut upper = c.to_uppercase();
+        let Some(first) = upper.next() else {
+            out.push(c);
+            continue;
+        };
+        if upper.next().is_none() {
+            out.push(first);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// A comparison key for a Windows path: the verbatim prefix gone, a volume
 /// GUID path read as its mount point (`mounts` from `volume_mounts`),
-/// forward slashes turned back, no trailing separator, and lower case,
-/// since Windows file names compare without case.
+/// forward slashes turned back, no trailing separator, and folded with
+/// [`ntfs_fold`].
 pub fn path_key(path: &str, mounts: &[(String, String)]) -> String {
     let mut s = path.replace('/', "\\");
     let lower = s.to_ascii_lowercase();
@@ -1268,7 +1291,20 @@ pub fn path_key(path: &str, mounts: &[(String, String)]) -> String {
     } else {
         t
     };
-    t.to_lowercase()
+    ntfs_fold(t)
+}
+
+/// The forms of `abs` that exact and prefix matching share: the path as
+/// given, and the same final component under its parent once that parent
+/// is resolved. The last component stays as named, so a junction or
+/// symlink there is not followed.
+#[cfg(any(windows, test))]
+fn forms_keeping_last(abs: &Path, parent_canon: Option<&Path>) -> Vec<PathBuf> {
+    let mut forms = vec![abs.to_path_buf()];
+    if let (Some(dir), Some(name)) = (parent_canon, abs.file_name()) {
+        forms.push(crate::util::plain_path(dir).join(name));
+    }
+    forms
 }
 
 /// The 8.3 path of `path`, when the volume has one. None when the path is
@@ -1319,6 +1355,52 @@ pub fn long_path(path: &Path) -> Option<PathBuf> {
     )))
 }
 
+/// Whether a [`path_key`] names a whole volume: a drive root (`c:` or
+/// `c:\`), a UNC share root (`\\server\share`, or a server with nothing
+/// below it) or an empty key. A prefix match on one of these takes every
+/// Recycle Bin item on that volume. Canonicalizing follows a junction, so
+/// a junction to a drive root contributes that root beside the path as typed.
+/// The key of an already-canonical path when that path is a volume root.
+/// The volume-root check canonicalizes first, so a junction to a drive
+/// root contributes the root and the path as typed does not.
+#[cfg(any(windows, test))]
+pub(crate) fn canonical_volume_key(canon: &Path, mounts: &[(String, String)]) -> Option<String> {
+    let key = path_key(&crate::util::plain_path(canon).to_string_lossy(), mounts);
+    mass_canonical_key(&key).then_some(key)
+}
+
+pub(crate) fn mass_canonical_key(key: &str) -> bool {
+    if key.is_empty() {
+        return true;
+    }
+    let b = key.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return b[2..].iter().all(|c| *c == b'\\');
+    }
+    let Some(rest) = key.strip_prefix(r"\\") else {
+        return false;
+    };
+    let parts = rest.split('\\').filter(|part| !part.is_empty()).count();
+    (1..=2).contains(&parts)
+}
+
+/// Whether a Recycle Bin item's normalized [`path_key`] matches any of
+/// `want_keys` under `Match::Exact` or `Match::Prefix`.
+pub fn win_path_matches(kind: crate::filters::Match, orig_key: &str, want_keys: &[String]) -> bool {
+    match kind {
+        crate::filters::Match::Exact => want_keys.iter().any(|k| k.as_str() == orig_key),
+        crate::filters::Match::Prefix => want_keys.iter().any(|k| {
+            let prefix = k.trim_end_matches('\\');
+            orig_key == k
+                || (!prefix.is_empty()
+                    && orig_key
+                        .strip_prefix(prefix)
+                        .is_some_and(|rest| rest.starts_with('\\')))
+        }),
+        _ => false,
+    }
+}
+
 /// A volume path that is a folder rather than a drive root (`C:\\`).
 pub fn mounted_folder(path: &str) -> bool {
     let b = path.as_bytes();
@@ -1367,7 +1449,7 @@ fn key_of(s: &str) -> u64 {
     if let Some(rest) = s.strip_prefix(r"\\") {
         let share: Vec<&str> = rest.splitn(3, '\\').take(2).collect();
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for c in share.join("\\").to_lowercase().bytes() {
+        for c in ntfs_fold(&share.join("\\")).bytes() {
             h = (h ^ u64::from(c)).wrapping_mul(0x100_0000_01b3);
         }
         return h | 1 << 63;
@@ -2610,7 +2692,7 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
     /// path, which no original path starts with. A directory that is gone
     /// keeps only its absolute form.
     fn dir_forms(dir: &Path) -> Vec<PathBuf> {
-        let abs = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let abs = crate::util::absolute_keep_tail(dir);
         let mut dirs = vec![crate::util::plain_path(&abs)];
         if let Ok(c) = std::fs::canonicalize(dir) {
             dirs.push(crate::util::plain_path(&c));
@@ -2622,13 +2704,19 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
     /// with its parent resolved. A short (8.3) name such as `RUNNER~1` in
     /// %TEMP% names the same folder as the long name the shell records,
     /// and the item itself is gone from there, so only the parent resolves.
+    /// The last component is not resolved, so a junction or symlink there
+    /// is not followed.
     fn path_forms(abs: &Path) -> Vec<PathBuf> {
-        let mut forms = vec![abs.to_path_buf()];
         let parent = abs.parent().and_then(|p| std::fs::canonicalize(p).ok());
-        if let (Some(dir), Some(name)) = (parent, abs.file_name()) {
-            forms.push(crate::util::plain_path(&dir).join(name));
-        }
-        forms
+        super::forms_keeping_last(abs, parent.as_deref())
+    }
+
+    /// The canonical key of `path` when that path is a junction or symlink
+    /// to a volume root, which a prefix would otherwise hide behind the
+    /// link's own name.
+    fn volume_root_key(path: &Path, mounts: &[(String, String)]) -> Option<String> {
+        let canon = std::fs::canonicalize(path).ok()?;
+        super::canonical_volume_key(&canon, mounts)
     }
 
     /// The value of --directory=DIR: absolute from here, or an error.
@@ -2637,9 +2725,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
             return Err("--directory needs a non-empty DIR".into());
         }
         let d = crate::util::arg_path(v);
-        Ok(crate::util::plain_path(
-            &std::path::absolute(&d).unwrap_or(d),
-        ))
+        Ok(crate::util::plain_path(&crate::util::absolute_keep_tail(
+            &d,
+        )))
     }
 
     pub fn list_run(prog: &str, args: &[String]) -> i32 {
@@ -3046,8 +3134,9 @@ With DAYS, only items deleted more than DAYS days ago, as on Linux.
 A PATH removes only the items whose original path is that path,
 exactly. A relative PATH is resolved from the current directory, and
 a trailing slash is ignored. When nothing matches, longer paths that
-start the same way are named and left in place. A number or a
-duration is an age, not a path.
+start the same way are named and left in place. When two items have the
+same original path, empty refuses; use rm --id=NAME for one or
+rm --all-matches for all. A number or a duration is an age, not a path.
 
   -n, --dry-run  list what would be removed
   -v, --verbose  print each removed original path
@@ -3110,6 +3199,32 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 return 1;
             }
         };
+        let keep = match crate::keep::Keep::load() {
+            Ok(keep) => keep,
+            Err(e) => {
+                eprintln!("{prog}: cannot read keep file: {e}; refusing permanent deletion");
+                return 1;
+            }
+        };
+        let census: Vec<PathBuf> = all.iter().map(original_of).collect();
+        let all: Vec<TrashItem> = if paths.is_empty() {
+            all.into_iter()
+                .filter(|it| {
+                    let original = original_of(it);
+                    if keep.protects(&original) {
+                        eprintln!(
+                            "{prog}: kept '{}' (listed in the keep file)",
+                            crate::util::err_path(&original)
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect()
+        } else {
+            all
+        };
         // An empty of everything may take what other sessions or agents
         // put; it goes ahead alone only for the latest put's items.
         let have: Vec<PathBuf> = all.iter().map(original_of).collect();
@@ -3157,6 +3272,15 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 &kept,
                 crate::orig_path::window(age.older_than.is_some(), false),
             );
+            if items.is_empty() {
+                if json {
+                    println!(
+                        "{}",
+                        empty_summary_json(dry_run, 0, 0, age.older_than, max_size)
+                    );
+                }
+                return crate::rm_match::no_matches(prog);
+            }
         }
         if let Some(max) = max_size {
             let sized: Vec<(i64, u64)> = rest
@@ -3166,6 +3290,49 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             let largest = policy == crate::budget::Policy::Largest;
             for i in pick_budget(&sized, max, largest) {
                 items.push(rest[i].clone());
+            }
+        }
+        if !paths.is_empty() {
+            let groups: Vec<Vec<String>> = paths
+                .iter()
+                .map(|path| crate::orig_path::forms(path))
+                .collect();
+            let keyed: Vec<(String, PathBuf)> = items
+                .iter()
+                .map(|it| {
+                    let original = original_of(it);
+                    (crate::orig_path::norm(&original), original)
+                })
+                .collect();
+            if crate::rm_match::refuse_ambiguous_keys(prog, &groups, &keyed, false) {
+                return 2;
+            }
+            let exact = crate::filters::Patterns::new(paths.clone(), crate::filters::Match::Exact)
+                .expect("exact paths are valid patterns");
+            let selected: Vec<PathBuf> = items.iter().map(original_of).collect();
+            if crate::filters::selection_covers_scope(&exact, &selected, &census) {
+                return 2;
+            }
+            items.retain(|it| {
+                let original = original_of(it);
+                if keep.protects(&original) {
+                    eprintln!(
+                        "{prog}: kept '{}' (listed in the keep file)",
+                        crate::util::err_path(&original)
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
+            if items.is_empty() {
+                if json {
+                    println!(
+                        "{}",
+                        empty_summary_json(dry_run, 0, 0, age.older_than, max_size)
+                    );
+                }
+                return 0;
             }
         }
         // The guard may have asked: act only on items still as listed.
@@ -3188,12 +3355,16 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         if dry_run {
             if json {
                 summary(&items);
-                return 0;
+                return i32::from(items.is_empty());
             }
             for it in &items {
                 println!("would remove {}", crate::util::term_path(&original_of(it)));
             }
             println!("{} item(s)", items.len());
+            if items.is_empty() {
+                eprintln!("{prog}: nothing would be permanently removed");
+                return 1;
+            }
             return 0;
         }
         if let Some(code) = crate::permanent_guard::check_count(prog, items.len() as u64) {
@@ -3321,6 +3492,13 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 crate::allow_roots::resolve(p).unwrap_or_else(|| crate::util::plain_path(p));
             key_of(&resolved, &mounts)
         };
+        let keep = match crate::keep::Keep::load() {
+            Ok(keep) => keep,
+            Err(e) => {
+                eprintln!("{prog}: cannot read keep file: {e}; refusing Recycle Bin retention");
+                return;
+            }
+        };
         let rows: Vec<(PathBuf, i64, u64)> = all
             .iter()
             .map(|it| {
@@ -3331,8 +3509,14 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 )
             })
             .collect();
-        let kept: Vec<PathBuf> = moved.iter().map(|p| norm(p)).collect();
-        let picked = crate::budget::trim_after_put(&rows, &kept, max, policy);
+        let mut protected: Vec<PathBuf> = moved.iter().map(|p| norm(p)).collect();
+        protected.extend(
+            all.iter()
+                .map(original_of)
+                .filter(|original| keep.protects(original))
+                .map(|original| norm(&original)),
+        );
+        let picked = crate::budget::trim_after_put(&rows, &protected, max, policy);
         if picked.is_empty() {
             return;
         }
@@ -3364,7 +3548,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         dry_run: bool,
         verbose: bool,
     ) -> (u64, u64, u64) {
-        let items: Vec<TrashItem> = match super::list_items() {
+        let mut items: Vec<TrashItem> = match super::list_items() {
             Ok(all) => {
                 let ids: Vec<PathBuf> = all.iter().map(|it| PathBuf::from(&it.id)).collect();
                 on_volume(&ids, volume_key, volume_key(at))
@@ -3377,6 +3561,25 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 return (0, 0, 0);
             }
         };
+        let keep = match crate::keep::Keep::load() {
+            Ok(keep) => keep,
+            Err(e) => {
+                eprintln!("{prog}: cannot read keep file: {e}; refusing Recycle Bin purge");
+                return (0, 0, 0);
+            }
+        };
+        items.retain(|it| {
+            let original = original_of(it);
+            if keep.protects(&original) {
+                eprintln!(
+                    "{prog}: kept '{}' (listed in the keep file)",
+                    crate::util::err_path(&original)
+                );
+                false
+            } else {
+                true
+            }
+        });
         let sized: Vec<(i64, u64, u64)> = items
             .iter()
             .map(|it| {
@@ -3746,7 +3949,7 @@ Without PATH, print a numbered list and read an index from stdin.
         let mut matches: Vec<TrashItem> = match &target {
             Some(t) => {
                 let mounts = super::volume_mounts();
-                let abs = std::path::absolute(t).unwrap_or_else(|_| t.clone());
+                let abs = crate::util::absolute_keep_tail(t);
                 let abs = crate::util::plain_path(&abs);
                 let want: Vec<PathBuf> = path_forms(&abs)
                     .iter()
@@ -4679,13 +4882,27 @@ registry), then the total and the free space on each (a warning under
         let mut bad_match: Option<String> = None;
         let mut json = false;
         let mut patterns: Vec<String> = Vec::new();
+        let mut ids: Vec<String> = Vec::new();
+        let mut all_matches = false;
         let mut batch: Option<String> = None;
         let (rest, operands, short_err) = super::rm_option_args(args);
         bad_match = bad_match.or(short_err);
         let filters = parse_with_filters(prog, &rest, |arg| {
             match arg {
                 "-n" | "--dry-run" => dry_run = true,
+                "--glob" => kind = crate::filters::Match::Glob,
+                "--prefix" => kind = crate::filters::Match::Prefix,
+                "--substring" => kind = crate::filters::Match::Substring,
                 "--regex" => kind = crate::filters::Match::Regex,
+                "--all-matches" => all_matches = true,
+                a if a.starts_with("--id=") => {
+                    let id = &a["--id=".len()..];
+                    if id.is_empty() {
+                        eprintln!("{prog}: --id needs a Recycle Bin item name");
+                        return Some(2);
+                    }
+                    ids.push(id.to_string());
+                }
                 a if a.starts_with("--match=") => match crate::filters::Match::parse(&a[8..]) {
                     Ok(k) => kind = k,
                     Err(e) => bad_match = Some(e),
@@ -4721,12 +4938,17 @@ directory, with a trailing slash ignored. It does not remove a longer
 name or a file inside it. When nothing matches, those are named and
 left in place.
 
+      --glob    PATHs are shell-style globs
+      --prefix  PATHs match themselves and paths below them
+      --substring PATHs are text searched in the original path
       --regex   PATTERNs are regular expressions searched in the original
                    path (the same as --match=regex)
       --match=KIND  how to read PATTERNs (trashy's -m): exact (the
-                   default), glob, regex, substring or id (the {{id}}
-                   from `list --format`, the trash name, deletion date
-                   and trash root)
+                   default), glob, regex, substring, prefix or id (the
+                   {{id}} from `list --format`, the trash name, deletion
+                   date and trash root)
+      --id=NAME select one item by its Recycle Bin payload name
+      --all-matches allow more than one item with the same original path
       --older-than=AGE  only match items deleted more than AGE ago: DAYS,
                    or a duration such as 2h, 30m or 1d12h
       --newer-than=AGE  only match items deleted within the last AGE
@@ -4738,8 +4960,13 @@ left in place.
   -i, --interactive  ask even when stdin is not a terminal (rm asks on
                    a terminal by default, naming the matches)
   -y, --yes      do not ask
-  -f, --force    do not ask, and allow mass patterns (e.g. '*')
-                  also remove entries that still hold risky git work;
+  -f, --force    do not ask, and allow broad patterns that cover every name
+                  below a matched directory or take every entry in a known
+                  scope, including its last entry;
+                  When the scope is unknown, regex and substring matching and
+                  globs containing a path separator require --force; use an
+                  exact path, --id, or a basename glob instead.
+                  Also remove entries that still hold risky git work;
                   without it, those entries are refused
       --max-count=N  refuse, deleting nothing, when more than N items
                    would go (also RTRASH_MAX_PERMANENT)
@@ -4780,8 +5007,13 @@ left in place.
                 return 2;
             }
         }
-        // The latest put is a scope of its own: with no PATTERN, take all.
-        let scoped = batch.is_some() && patterns.is_empty();
+        // The latest put is a scope of its own: with no PATTERN and no
+        // --id, take all. An id is a selection, so the run is not then `*`.
+        let scoped = crate::rm_match::batch_takes_the_whole_run(
+            batch.is_some(),
+            patterns.is_empty(),
+            ids.is_empty(),
+        );
         if let Some(e) = bad_match {
             eprintln!("{prog}: {e}");
             return 2;
@@ -4790,7 +5022,7 @@ left in place.
             kind = crate::filters::Match::Glob;
             patterns.push("*".into());
         }
-        if patterns.is_empty() {
+        if patterns.is_empty() && ids.is_empty() {
             eprintln!("{prog}: missing PATTERN");
             return 2;
         }
@@ -4804,8 +5036,94 @@ left in place.
         if kind == crate::filters::Match::Exact {
             pats.texts = crate::orig_path::expand(&pats.operands);
         }
+        let glob_pats = crate::filters::Patterns {
+            texts: pats
+                .texts
+                .iter()
+                .map(|text| crate::util::nfc(text))
+                .collect(),
+            ..pats.clone()
+        };
         if pats.is_mass() && !force && !scoped {
-            eprintln!("{prog}: refusing a pattern that matches everything without --force");
+            if pats.unknown_scope_needs_force() {
+                crate::rm_match::refuse_unknown_scope(prog);
+                return 2;
+            }
+            eprintln!(
+                "{prog}: refusing mass pattern {:?} without --force \
+                 (covers every name below a matched directory or every entry in a known scope)",
+                pats.texts
+            );
+            return 2;
+        }
+        let mounts = matches!(
+            kind,
+            crate::filters::Match::Exact | crate::filters::Match::Prefix
+        )
+        .then(super::volume_mounts)
+        .unwrap_or_default();
+        let mut exact_groups: Vec<Vec<String>> = Vec::new();
+        let path_keys: Vec<String> = match kind {
+            crate::filters::Match::Exact | crate::filters::Match::Prefix => {
+                let mut keys = Vec::new();
+                for p in &pats.texts {
+                    if p.is_empty() {
+                        continue;
+                    }
+                    let path = crate::util::arg_path(p);
+                    let abs = crate::util::absolute_keep_tail(&path);
+                    let abs = crate::util::plain_path(&abs);
+                    // Prefix and exact both leave the last component as
+                    // named. dir_forms would follow a final junction, so a
+                    // prefix of `vendor` would take everything under the
+                    // directory that junction names.
+                    let mut forms = path_forms(&abs);
+                    if let Some(resolved) = crate::allow_roots::resolve(&abs) {
+                        forms.push(resolved);
+                    }
+                    let mut group = Vec::new();
+                    for form in forms {
+                        let k = super::path_key(&form.to_string_lossy(), &mounts);
+                        if !group.contains(&k) {
+                            group.push(k.clone());
+                        }
+                        if !keys.contains(&k) {
+                            keys.push(k);
+                        }
+                    }
+                    // A final junction whose target is a volume root is a
+                    // mass prefix. --force is what allows that root as a key.
+                    if kind == crate::filters::Match::Prefix {
+                        if let Some(k) = volume_root_key(&abs, &mounts) {
+                            if !force && !scoped {
+                                eprintln!(
+                                    "{prog}: refusing mass pattern {:?} without --force \
+                                     (covers every name below a matched directory or every entry \
+                                     in a known scope)",
+                                    pats.texts
+                                );
+                                return 2;
+                            }
+                            if !keys.contains(&k) {
+                                keys.push(k);
+                            }
+                        }
+                    }
+                    exact_groups.push(group);
+                }
+                keys
+            }
+            _ => Vec::new(),
+        };
+        // A key that is a drive root, a UNC share root or empty matches
+        // every item there. The operand text was already checked; this
+        // catches a form the path keys produced.
+        if !force && !scoped && path_keys.iter().any(|k| super::mass_canonical_key(k)) {
+            eprintln!(
+                "{prog}: refusing mass pattern {:?} without --force \
+                 (covers every name below a matched directory or every entry in a known scope)",
+                pats.texts
+            );
             return 2;
         }
         let items = match super::list_items() {
@@ -4815,6 +5133,7 @@ left in place.
                 return 1;
             }
         };
+        let census: Vec<PathBuf> = items.iter().map(original_of).collect();
         let items = if batch.is_some() {
             match last_put_items(prog, &items) {
                 Ok(p) => p,
@@ -4829,21 +5148,47 @@ left in place.
             .into_iter()
             .filter(|it| {
                 let orig = original_of(it);
-                if exact {
-                    return crate::orig_path::selects(&pats.texts, &orig);
-                }
-                let full = orig.to_string_lossy().into_owned();
-                let base = orig
-                    .file_name()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let stable = Path::new(&it.id)
+                let id = Path::new(&it.id)
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let date = platform::epoch_to_iso_utc(it.time_deleted);
-                let root = bin_root_of(Path::new(&it.id)).unwrap_or_default();
-                pats.selects(&full, &base, &stable, &date, &root)
+                let pattern_hit = match kind {
+                    crate::filters::Match::Exact | crate::filters::Match::Prefix => {
+                        let key = super::path_key(&orig.to_string_lossy(), &mounts);
+                        super::win_path_matches(kind, &key, &path_keys)
+                    }
+                    crate::filters::Match::Id => {
+                        let full = orig.to_string_lossy().into_owned();
+                        let base = orig
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let date = platform::epoch_to_iso_utc(it.time_deleted);
+                        let root = bin_root_of(Path::new(&it.id)).unwrap_or_default();
+                        pats.selects(&full, &base, &id, &date, &root)
+                    }
+                    crate::filters::Match::Glob => {
+                        let full = crate::util::nfc(&orig.to_string_lossy());
+                        let base = orig
+                            .file_name()
+                            .map(|f| crate::util::nfc(&f.to_string_lossy()))
+                            .unwrap_or_default();
+                        glob_pats.hit(&full, &base, &base)
+                    }
+                    _ => {
+                        let full = orig.to_string_lossy().into_owned();
+                        let base = orig
+                            .file_name()
+                            .map(|f| f.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        pats.hit(&full, &base, &base)
+                    }
+                };
+                crate::rm_match::chosen(
+                    pattern_hit,
+                    crate::rm_match::id_hit(&ids, &id),
+                    !ids.is_empty(),
+                )
             })
             .collect();
         // Size last: only the matches need their `$I` read.
@@ -4852,6 +5197,71 @@ left in place.
             let kept: Vec<PathBuf> = matched.iter().map(original_of).collect();
             let window = crate::orig_path::window(filters.age.is_set(), filters.size.is_set());
             crate::orig_path::hint(prog, &pats.operands, &have, &kept, window);
+        }
+        if exact
+            && ids.is_empty()
+            && crate::rm_match::refuse_ambiguous_keys(
+                prog,
+                &exact_groups,
+                &matched
+                    .iter()
+                    .map(|it| {
+                        let orig = original_of(it);
+                        let key = super::path_key(&orig.to_string_lossy(), &mounts);
+                        (key, orig)
+                    })
+                    .collect::<Vec<_>>(),
+                all_matches,
+            )
+        {
+            return 2;
+        }
+        if matched.is_empty() {
+            return crate::rm_match::no_matches(prog);
+        }
+        if !force && !scoped {
+            let originals: Vec<PathBuf> = matched.iter().map(original_of).collect();
+            if crate::filters::selection_covers_scope(&pats, &originals, &census) {
+                eprintln!(
+                    "{prog}: refusing mass pattern {:?} without --force \
+                     (covers every name below a matched directory or every entry in a known scope)",
+                    pats.texts
+                );
+                return 2;
+            }
+        }
+        let keep = match crate::keep::Keep::load() {
+            Ok(keep) => keep,
+            Err(e) => {
+                eprintln!("{prog}: cannot read keep file: {e}; refusing permanent deletion");
+                return 1;
+            }
+        };
+        let matched: Vec<TrashItem> = matched
+            .into_iter()
+            .filter(|it| {
+                let original = original_of(it);
+                if keep.protects(&original) {
+                    eprintln!(
+                        "{prog}: kept '{}' (listed in the keep file)",
+                        crate::util::err_path(&original)
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if matched.is_empty() {
+            if json {
+                let sum = crate::filters::RmSummary {
+                    dry_run,
+                    removed: 0,
+                    bytes: 0,
+                };
+                print!("{}", sum.json(&[]));
+            }
+            return 0;
         }
         if !dry_run {
             // RTRASH_ALLOW_ROOTS: rm deletes only items trashed from there.
@@ -4943,6 +5353,14 @@ left in place.
             }
         }
         let code = if dry_run {
+            if !json {
+                let bytes: u64 = matched.iter().map(item_size).sum();
+                eprintln!(
+                    "Would permanently remove {} ({})",
+                    crate::util::plural(matched.len() as u64, "item", "items"),
+                    crate::util::format_bytes(bytes)
+                );
+            }
             i32::from(refused > 0)
         } else if let Err(e) = crate::permanent_guard::gate_many(matched.len() as u64) {
             eprintln!("{prog}: {e}");
@@ -5336,7 +5754,7 @@ pub fn purge_oldest_on(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn rm_options_stop_at_a_double_dash() {
@@ -6218,16 +6636,194 @@ mod tests {
         );
         assert_eq!(
             path_key(r"\\?\Volume{1234-ab}\d\x.txt", &mounts),
-            r"c:\rtrash-mnt\d\x.txt"
+            r"C:\RTRASH-MNT\D\X.TXT"
         );
     }
 
     #[test]
     fn path_key_strips_verbatim_and_case() {
-        assert_eq!(path_key(r"\\?\C:\Users\A\B.TXT", &[]), r"c:\users\a\b.txt");
-        assert_eq!(path_key(r"\\?\UNC\srv\share\f", &[]), r"\\srv\share\f");
-        assert_eq!(path_key("C:/x/y/", &[]), r"c:\x\y");
-        assert_eq!(path_key(r"C:\", &[]), r"c:\");
+        assert_eq!(path_key(r"\\?\C:\Users\A\B.TXT", &[]), r"C:\USERS\A\B.TXT");
+        assert_eq!(path_key(r"\\?\UNC\srv\share\f", &[]), r"\\SRV\SHARE\F");
+        assert_eq!(path_key("C:/x/y/", &[]), r"C:\X\Y");
+        assert_eq!(path_key(r"C:\", &[]), r"C:\");
+        // NTFS keeps U+212A apart from `k`, and `ß` apart from `ss`.
+        assert_ne!(
+            path_key("C:\\\u{212A}.txt", &[]),
+            path_key(r"C:\k.txt", &[])
+        );
+        assert_ne!(path_key("C:\\\u{00DF}", &[]), path_key(r"C:\ss", &[]));
+        assert_eq!(
+            path_key(r"C:\Temp\x.txt", &[]),
+            path_key(r"c:\temp\X.TXT", &[])
+        );
+    }
+
+    /// `dir_forms` follows a junction. The path as typed stays narrow, and
+    /// the canonical form of a junction to a drive root is that root. The
+    /// mass guard refuses the root, a UNC share root and an empty key.
+    #[test]
+    fn a_canonical_drive_root_key_is_a_mass_prefix() {
+        let typed = path_key(r"C:\safe-junction", &[]);
+        let canonical = path_key(r"C:\", &[]);
+        assert_eq!(typed, r"C:\SAFE-JUNCTION");
+        assert_eq!(canonical, r"C:\");
+        assert!(!mass_canonical_key(&typed));
+        assert!(mass_canonical_key(&canonical));
+        assert!(mass_canonical_key(&path_key("C:", &[])));
+        assert!(mass_canonical_key(&path_key(r"\\?\C:\", &[])));
+        assert_eq!(path_key(r"\\server\share\", &[]), r"\\SERVER\SHARE");
+        assert!(mass_canonical_key(&path_key(r"\\server\share\", &[])));
+        assert!(mass_canonical_key(&path_key(r"\\?\UNC\Server\Share", &[])));
+        assert!(mass_canonical_key(&path_key(r"\\server", &[])));
+        assert!(mass_canonical_key(&path_key("", &[])));
+        assert!(mass_canonical_key(&path_key(r"\", &[])));
+        assert!(!mass_canonical_key(&path_key(
+            r"C:\safe-junction\keep.txt",
+            &[]
+        )));
+        assert!(!mass_canonical_key(&path_key(r"D:\work", &[])));
+        assert!(!mass_canonical_key(&path_key(r"\\server\share\dir", &[])));
+        let keys = [typed, canonical.clone()];
+        assert!(keys.iter().any(|k| mass_canonical_key(k)));
+        let item = path_key(r"C:\Users\a\file.txt", &[]);
+        assert!(win_path_matches(
+            crate::filters::Match::Prefix,
+            &item,
+            &keys
+        ));
+        assert!(!win_path_matches(
+            crate::filters::Match::Prefix,
+            &path_key(r"D:\x.txt", &[]),
+            &keys
+        ));
+        // The root matches every item on its drive and nothing on another.
+        assert!(win_path_matches(
+            crate::filters::Match::Prefix,
+            &item,
+            &[canonical]
+        ));
+    }
+
+    /// A prefix keeps the final component, so a junction named `vendor`
+    /// does not take the directory it points at. A drive-root key still
+    /// matches every item on that drive.
+    #[test]
+    fn a_prefix_keeps_its_last_component() {
+        // Slashes, so the split is the same on Linux as on Windows.
+        let forms = forms_keeping_last(Path::new("/work/vendor"), Some(Path::new("/work")));
+        let keys: Vec<String> = forms
+            .iter()
+            .map(|f| path_key(&f.to_string_lossy(), &[]))
+            .collect();
+        assert!(keys.iter().all(|k| k.ends_with(r"\VENDOR")), "{keys:?}");
+        assert!(!win_path_matches(
+            crate::filters::Match::Prefix,
+            &path_key(r"C:\Users\me\a.txt", &[]),
+            &keys
+        ));
+        assert!(win_path_matches(
+            crate::filters::Match::Prefix,
+            &path_key("/work/vendor/a.txt", &[]),
+            &keys
+        ));
+        assert!(!mass_canonical_key(&path_key(r"C:\Users\me", &[])));
+        assert!(mass_canonical_key(&path_key(r"C:\", &[])));
+    }
+
+    /// The canonical target of a junction to a drive root is a mass key.
+    /// The junction's own name, and every form that keeps that name, is not.
+    #[test]
+    fn a_canonical_volume_key_is_mass_only_for_the_target() {
+        assert!(canonical_volume_key(Path::new(r"C:\"), &[]).is_some());
+        assert!(canonical_volume_key(Path::new(r"\\server\share"), &[]).is_some());
+        assert!(canonical_volume_key(Path::new(r"C:\safe-junction"), &[]).is_none());
+        let forms = forms_keeping_last(Path::new(r"C:\safe-junction"), Some(Path::new(r"C:\")));
+        assert!(
+            forms.iter().all(|f| canonical_volume_key(f, &[]).is_none()),
+            "{forms:?}"
+        );
+    }
+
+    /// Two originals that share a match key are one exact selection, and
+    /// so are a short name and the long name of the same parent.
+    #[test]
+    fn one_place_spelled_two_ways_is_one_exact_selection() {
+        let typed = PathBuf::from(r"C:\Temp\x.txt");
+        let other = PathBuf::from(r"c:\temp\X.TXT");
+        assert!(!crate::rm_match::refuse_ambiguous(
+            "rtrash",
+            [typed.as_path(), other.as_path()],
+            false
+        ));
+        let key = path_key(r"C:\Temp\x.txt", &[]);
+        assert_eq!(key, path_key(r"c:\temp\X.TXT", &[]));
+        let items = vec![(key.clone(), typed), (key.clone(), other)];
+        let groups = vec![vec![key]];
+        assert!(crate::rm_match::refuse_ambiguous_keys(
+            "rtrash", &groups, &items, false
+        ));
+        assert!(!crate::rm_match::refuse_ambiguous_keys(
+            "rtrash", &groups, &items, true
+        ));
+        let short = path_key(r"C:\Users\RUNNER~1\x.txt", &[]);
+        let long = path_key(r"C:\Users\runneradmin\x.txt", &[]);
+        assert_ne!(short, long);
+        let items = vec![
+            (short.clone(), PathBuf::from(r"C:\Users\RUNNER~1\x.txt")),
+            (long.clone(), PathBuf::from(r"C:\Users\runneradmin\x.txt")),
+        ];
+        let groups = vec![vec![short, long]];
+        assert!(crate::rm_match::refuse_ambiguous_keys(
+            "rtrash", &groups, &items, false
+        ));
+    }
+
+    #[test]
+    fn win_path_matches_exact_and_prefix_by_normalized_key() {
+        let exact = vec![path_key(r"\\?\C:\Users\Alice\In\x.txt", &[])];
+        let orig = path_key("c:/users/alice/in/x.txt", &[]);
+        assert!(win_path_matches(
+            crate::filters::Match::Exact,
+            &orig,
+            &exact
+        ));
+        let sibling = path_key(r"C:\Users\Alice\In\x.txt.bak", &[]);
+        assert!(!win_path_matches(
+            crate::filters::Match::Exact,
+            &sibling,
+            &exact
+        ));
+
+        let prefix = vec![path_key(r"C:\Users\Alice\In\", &[])];
+        assert!(win_path_matches(
+            crate::filters::Match::Prefix,
+            &orig,
+            &prefix
+        ));
+        let dir_itself = path_key(r"c:\users\alice\in", &[]);
+        assert!(win_path_matches(
+            crate::filters::Match::Prefix,
+            &dir_itself,
+            &prefix
+        ));
+        let nearby = path_key(r"C:\Users\Alice\Inbox\x.txt", &[]);
+        assert!(!win_path_matches(
+            crate::filters::Match::Prefix,
+            &nearby,
+            &prefix
+        ));
+
+        let drive = vec![path_key(r"C:\", &[])];
+        assert!(win_path_matches(
+            crate::filters::Match::Prefix,
+            &orig,
+            &drive
+        ));
+        assert!(!win_path_matches(
+            crate::filters::Match::Prefix,
+            &path_key(r"D:\x.txt", &[]),
+            &drive
+        ));
     }
 
     /// A `$I` record whose name holds an unpaired surrogate (valid on

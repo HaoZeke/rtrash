@@ -60,6 +60,20 @@ fn ok(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
 
+/// Removes the junction before the tree, including when a test panics.
+/// A junction to a drive root must not be walked.
+struct DropJunction {
+    link: PathBuf,
+    home: PathBuf,
+}
+
+impl Drop for DropJunction {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.link);
+        let _ = fs::remove_dir_all(&self.home);
+    }
+}
+
 #[test]
 fn put_list_rm_and_restore_reach_a_file_past_max_path() {
     let home = home("deep-file");
@@ -191,8 +205,9 @@ fn a_read_only_tree_past_max_path_leaves_the_bin_by_rm_and_empty() {
         let last = fs::read_to_string(&record).expect("a private last-put record");
         let want = s(&top).to_lowercase();
         assert!(last.to_lowercase().contains(&want), "{how}: {last}");
+        let top_s = s(&top);
         let args: Vec<&str> = if how == "rm" {
-            vec!["rm", name]
+            vec!["rm", &top_s]
         } else {
             vec!["empty"]
         };
@@ -322,8 +337,19 @@ fn rm_matches_the_exact_path_across_windows_spellings() {
     }
     match short_file {
         Some(short) if folded(&short) != folded(&file) => {
-            let dry = ok(&run(&home, &["rm", "-n", &s(&short)]));
-            assert_eq!(lines(&dry), 0, "a short final name matched: {dry}");
+            let dry = run(&home, &["rm", "-n", &s(&short)]);
+            assert_eq!(dry.status.code(), Some(1), "{}", text(&dry));
+            assert_eq!(
+                lines(&String::from_utf8_lossy(&dry.stdout)),
+                0,
+                "a short final name matched: {}",
+                text(&dry)
+            );
+            assert!(
+                String::from_utf8_lossy(&dry.stderr).contains("no trash items match"),
+                "{}",
+                text(&dry)
+            );
         }
         _ => common::skip("this volume has no 8.3 name for the file"),
     }
@@ -486,6 +512,68 @@ fn empty_refuses_an_empty_operand_after_a_double_dash() {
     assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
 }
 
+#[test]
+fn windows_empty_exact_keeps_a_protected_path() {
+    let home = home("empty-exact-keep");
+    fs::create_dir_all(home.join(".config/rtrash")).unwrap();
+    let kept = home.join("kept.txt");
+    let other = home.join("other.txt");
+    fs::write(
+        home.join(".config/rtrash/keep"),
+        format!("{}\n", kept.display()),
+    )
+    .unwrap();
+    fs::write(&kept, b"kept").unwrap();
+    fs::write(&other, b"other").unwrap();
+    ok(&run(&home, &["put", &s(&kept), &s(&other)]));
+
+    let out = run(&home, &["empty", "-f", &s(&kept)]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("listed in the keep file"),
+        "{}",
+        text(&out)
+    );
+    let listed = ok(&run(&home, &["list"]));
+    assert!(listed.contains(&s(&kept)), "{listed}");
+    assert!(listed.contains(&s(&other)), "{listed}");
+    let json = run(&home, &["empty", "--json", &s(&kept)]);
+    assert!(json.status.success(), "{}", text(&json));
+    let body: serde_json::Value =
+        serde_json::from_slice(&json.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&json)));
+    assert_eq!(body["removed"], 0, "{}", text(&json));
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn windows_empty_exact_refuses_duplicate_originals_until_an_id_selects_one() {
+    let home = home("empty-exact-ambiguous");
+    let same = home.join("same.txt");
+    fs::write(&same, b"first").unwrap();
+    ok(&run(&home, &["put", &s(&same)]));
+    fs::write(&same, b"second").unwrap();
+    ok(&run(&home, &["put", &s(&same)]));
+
+    let refused = run(&home, &["empty", "-f", &s(&same)]);
+    assert_eq!(refused.status.code(), Some(2), "{}", text(&refused));
+    assert!(
+        text(&refused).contains("refusing 2 trash items with original path"),
+        "{}",
+        text(&refused)
+    );
+    let ids = ok(&run(&home, &["list", "--format={id}\\n"]));
+    let id = ids.lines().next().unwrap();
+    let removed = run(&home, &["rm", "--yes", "--match=id", id]);
+    assert!(removed.status.success(), "{}", text(&removed));
+    assert_eq!(
+        ok(&run(&home, &["list", "--format={id}\\n"]))
+            .lines()
+            .count(),
+        1
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
 /// `--` ends empty's options, so `-n` after it is a path and the item stays.
 #[test]
 fn empty_takes_a_double_dash_as_the_end_of_its_options() {
@@ -495,10 +583,218 @@ fn empty_takes_a_double_dash_as_the_end_of_its_options() {
     ok(&run(&home, &["put", &s(&kept)]));
     let out = run(&home, &["empty", "--", "-n"]);
     let shown = text(&out);
-    assert_eq!(out.status.code(), Some(0), "{shown}");
+    assert_eq!(out.status.code(), Some(1), "{shown}");
     assert!(!shown.contains("unrecognized option"), "{shown}");
     assert!(!shown.contains("would remove"), "{shown}");
     assert!(!shown.contains("Would remove"), "{shown}");
+    assert!(shown.contains("no trash items match"), "{shown}");
+    let json = run(&home, &["empty", "--json", "--", "-n"]);
+    assert_eq!(json.status.code(), Some(1), "{}", text(&json));
+    let body: serde_json::Value =
+        serde_json::from_slice(&json.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&json)));
+    assert_eq!(body["removed"], 0, "{}", text(&json));
     let listed = ok(&run(&home, &["list"]));
     assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
+}
+
+/// `--prefix` of a junction whose target is a drive root canonicalizes to
+/// that root and would match every Recycle Bin item on the drive. Without
+/// `--force` rm refuses it and leaves the item. With `--force` the dry run
+/// lists the item, so the canonical key is what the guard stopped.
+#[test]
+fn a_prefix_of_a_junction_to_a_drive_root_is_refused() {
+    let home = home("drive-root");
+    let link = home.join("safe-junction");
+    let _cleanup = DropJunction {
+        link: link.clone(),
+        home: home.clone(),
+    };
+    let text_home = s(&home);
+    let bytes = text_home.as_bytes();
+    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
+        common::skip("the scratch dir is not on a drive letter; skipping");
+        return;
+    }
+    let root = format!(r"{}:\", char::from(bytes[0].to_ascii_uppercase()));
+    let narrow_dir = home.join("project");
+    fs::create_dir(&narrow_dir).unwrap();
+    let file = narrow_dir.join("keep.txt");
+    fs::write(&file, "k").unwrap();
+    ok(&run(&home, &["put", &s(&file)]));
+    common::mklink_junction(&link, Path::new(&root)).unwrap();
+    let canon = s(&fs::canonicalize(&link).unwrap());
+    let canon = canon
+        .trim_start_matches(r"\\?\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase();
+    assert_eq!(
+        canon,
+        root.trim_end_matches('\\').to_ascii_lowercase(),
+        "the junction did not resolve to the drive root"
+    );
+    let payloads = || {
+        fs::read_dir(common::test_bin(&home))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("$R"))
+            .count()
+    };
+    assert_eq!(payloads(), 1);
+    let junction = s(&link);
+    let refused = run(&home, &["rm", "--prefix", &junction]);
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+    assert!(refused.stdout.is_empty(), "{}", text(&refused));
+    assert_eq!(payloads(), 1, "a refused prefix purged the bin");
+    let listed = ok(&run(&home, &["rm", "-n", "-f", "--prefix", &junction]));
+    assert!(listed.lines().any(|l| l.ends_with("keep.txt")), "{listed}");
+    assert_eq!(payloads(), 1, "the dry run purged the bin");
+    let narrow = ok(&run(&home, &["rm", "-n", "--prefix", &s(&narrow_dir)]));
+    assert!(narrow.lines().any(|l| l.ends_with("keep.txt")), "{narrow}");
+}
+
+#[test]
+fn a_home_prefix_is_mass_and_a_child_prefix_is_narrow() {
+    let home = home("scope-prefix");
+    let project = home.join("project");
+    fs::create_dir(&project).unwrap();
+    let file = project.join("keep.txt");
+    fs::write(&file, "k").unwrap();
+    ok(&run(&home, &["put", &s(&file)]));
+
+    let refused = run(&home, &["rm", "-n", "--prefix", &s(&home)]);
+    let err = text(&refused);
+    assert_eq!(refused.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+
+    let narrow = ok(&run(&home, &["rm", "-n", "--prefix", &s(&project)]));
+    assert!(narrow.lines().any(|l| l.ends_with("keep.txt")), "{narrow}");
+}
+
+#[test]
+fn a_home_name_does_not_widen_a_basename_glob() {
+    let home = home("foldero-glob");
+    for name in ["keep.txt", "spared.txt"] {
+        fs::write(home.join(name), "x").unwrap();
+        ok(&run(&home, &["put", name]));
+    }
+    let out = run(&home, &["rm", "-n", "--glob", "*o*"]);
+    let shown = text(&out);
+    assert_eq!(out.status.code(), Some(1), "{shown}");
+    assert!(!shown.contains("refusing mass pattern"), "{shown}");
+    let listed = ok(&run(&home, &["list"]));
+    assert!(listed.contains("keep.txt"), "{listed}");
+    assert!(listed.contains("spared.txt"), "{listed}");
+}
+
+/// `--prefix` of a junction keeps the junction's own name. Items whose
+/// original path is the target are not matches, and they stay in the bin.
+#[test]
+fn a_prefix_of_a_final_junction_does_not_take_its_target() {
+    let home = home("junction-final");
+    let link = home.join("vendor");
+    let _cleanup = DropJunction {
+        link: link.clone(),
+        home: home.clone(),
+    };
+    let real = home.join("real");
+    fs::create_dir_all(&real).unwrap();
+    let file = real.join("keep.txt");
+    fs::write(&file, "k").unwrap();
+    ok(&run(&home, &["put", &s(&file)]));
+    common::mklink_junction(&link, &real).unwrap();
+    let missed = run(&home, &["rm", "-n", "--prefix", &s(&link)]);
+    let missed_text = text(&missed);
+    assert_eq!(missed.status.code(), Some(1), "{missed_text}");
+    assert!(!missed_text.contains("keep.txt"), "{missed_text}");
+    let listed = ok(&run(&home, &["rm", "-n", "--prefix", &s(&real)]));
+    assert!(listed.lines().any(|l| l.ends_with("keep.txt")), "{listed}");
+    let left = fs::read_dir(common::test_bin(&home))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("$R"))
+        .count();
+    assert_eq!(left, 1);
+}
+
+/// `C:\Temp\x.txt` and `c:\temp\X.TXT` are one place. Exact rm refuses
+/// both unless `--all-matches` is given.
+#[test]
+fn two_spellings_of_one_path_need_all_matches() {
+    let home = home("two-spellings");
+    let bin = common::test_bin(&home);
+    fs::create_dir_all(&bin).unwrap();
+    let ft = rtrash::win_recycle::FILETIME_UNIX_EPOCH;
+    for (id, orig) in [
+        ("AAAAAA.txt", r"C:\Temp\x.txt"),
+        ("BBBBBB.txt", r"c:\temp\X.TXT"),
+    ] {
+        let rec = rtrash::win_recycle::encode_recycle_i_v2(Path::new(orig), 1, ft);
+        fs::write(bin.join(format!("$I{id}")), rec).unwrap();
+        fs::write(bin.join(format!("$R{id}")), b"x").unwrap();
+    }
+    let out = run(&home, &["rm", "-n", r"C:\Temp\x.txt"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    let left = fs::read_dir(&bin)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("$R"))
+        .count();
+    let _ = fs::remove_dir_all(&home);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing 2 trash items"), "{err}");
+    assert!(err.contains("--all-matches"), "{err}");
+    assert_eq!(left, 2, "a refused rm purged the bin");
+}
+
+/// `C:\Users\Alice` and `c:\users\alice` are one home. A prefix of the
+/// other spelling is the whole scope and needs `--force`.
+#[test]
+fn a_differently_cased_home_prefix_is_refused() {
+    let home = home("case-scope");
+    let out = common::rtrash(&home)
+        .env("HOME", r"C:\Users\Alice")
+        .env("USERPROFILE", r"C:\Users\Alice")
+        .args(["rm", "--prefix", r"c:\users\alice"])
+        .current_dir(&home)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    let _ = fs::remove_dir_all(&home);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("refusing mass pattern"), "{err}");
+}
+
+/// Every match kept is a successful rm that deleted nothing. Exit 1 would
+/// say the path matched nothing.
+#[test]
+fn rm_of_only_a_kept_item_exits_success() {
+    let home = home("kept-only");
+    fs::create_dir_all(home.join(".config/rtrash")).unwrap();
+    let file = home.join("secret.txt");
+    fs::write(&file, b"s").unwrap();
+    fs::write(
+        home.join(".config/rtrash/keep"),
+        format!("{}\n", file.display()),
+    )
+    .unwrap();
+    ok(&run(&home, &["put", &s(&file)]));
+    let out = run(&home, &["rm", &s(&file)]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    let left = fs::read_dir(common::test_bin(&home))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("$R"))
+        .count();
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("listed in the keep file"), "{err}");
+    assert_eq!(left, 1);
+    let json = run(&home, &["rm", "--json", &s(&file)]);
+    assert!(json.status.success(), "{}", text(&json));
+    let body: serde_json::Value =
+        serde_json::from_slice(&json.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&json)));
+    assert_eq!(body["removed"], 0, "{}", text(&json));
+    assert_eq!(body["matches"], serde_json::json!([]), "{}", text(&json));
+    let _ = fs::remove_dir_all(&home);
 }
