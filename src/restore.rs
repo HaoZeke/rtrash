@@ -1051,6 +1051,83 @@ fn staging_path(parent: &Path, name: &str) -> PathBuf {
         .unwrap_or_else(|| crate::util::join_name(parent, name))
 }
 
+/// Move `src` to a fresh name in `parent`. `Ok` is that name, and a note
+/// when the copy is whole but part of the trash payload could not leave.
+/// A taken name is skipped. Any other failure puts a retained body back
+/// under `src` when the record would otherwise point at nothing.
+fn stage_payload(
+    src: &Path,
+    parent: &Path,
+    name: &str,
+) -> Result<(PathBuf, Option<String>), String> {
+    let mut last = None;
+    for _ in 0..64 {
+        let staged = staging_path(parent, name);
+        occupy_stage(&staged);
+        match crate::interrupt::abortable(|| trashdir::relocate(src, &staged)) {
+            Ok(()) => return Ok((staged, None)),
+            Err(e) if trashdir::replace_refused(&e) && !crate::util::is_gone(src) => {
+                last = Some(e);
+            }
+            Err(e) => {
+                if let Some(left) = trashdir::source_left(&e) {
+                    return Ok((staged, Some(left.err.to_string())));
+                }
+                let saved = trashdir::salvage(src, &e);
+                let extra = if saved.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {saved}")
+                };
+                return Err(format!(
+                    "cannot restore '{}' to staging area: {e}{extra}",
+                    src.display()
+                ));
+            }
+        }
+    }
+    Err(match last {
+        Some(e) => format!("cannot restore '{}' to staging area: {e}", src.display()),
+        None => format!("cannot restore '{}' to staging area", src.display()),
+    })
+}
+
+fn occupy_stage(path: &Path) {
+    #[cfg(test)]
+    if OCCUPY_STAGE.with(|c| c.replace(false)) {
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            let _ = file.write_all(b"staged-race");
+        }
+    }
+    #[cfg(not(test))]
+    let _ = path;
+}
+
+fn occupy_publish(path: &Path) {
+    #[cfg(test)]
+    if OCCUPY_PUBLISH.with(|c| c.replace(false)) {
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            let _ = file.write_all(b"publish-race");
+        }
+    }
+    #[cfg(not(test))]
+    let _ = path;
+}
+
+#[cfg(test)]
+thread_local! {
+    static OCCUPY_STAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static OCCUPY_PUBLISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// After a failed restore, move the payload from `staged` back to `src`,
 /// its name in the trash, where its record still points; `err` says what
 /// failed, and gains where the payload is if it cannot go back.
@@ -1195,23 +1272,9 @@ pub(crate) fn restore_one_to(
     let _critical = crate::interrupt::critical();
     // Stage into the destination directory first, then swap over any blocker.
     // On failure the live dest (if any) is left intact. A Ctrl-C stops a
-    // copy across file systems, and the staged part goes.
-    let staged = staging_path(parent, &entry.name);
-    // A move across file systems takes back a partial copy itself. When
-    // its copy was whole but the payload could not all go, the copy is
-    // the item: keep it and restore it, and say what stays in the trash.
-    let mut left = None;
-    if let Err(e) = crate::interrupt::abortable(|| trashdir::relocate(&src, &staged)) {
-        match trashdir::source_left(&e) {
-            Some(l) => left = Some(l.err.to_string()),
-            None => {
-                return Err(format!(
-                    "cannot restore '{}' to staging area: {e}",
-                    src.display()
-                ))
-            }
-        }
-    }
+    // copy across file systems, and the staged part goes. A name that
+    // appears at the staging path is not replaced; the next name is tried.
+    let (staged, left) = stage_payload(&src, parent, &entry.name)?;
 
     if dest_exists {
         // Payload is durable under `staged`; only now remove the blocker.
@@ -1221,9 +1284,11 @@ pub(crate) fn restore_one_to(
         }
     }
 
-    // A rename in one directory; it still fails on a name the kernel
-    // refuses, such as one with a NUL byte from a `%00` in Path=.
-    if let Err(e) = fs::rename(&staged, dest) {
+    // A rename in one directory that does not replace a name created after
+    // the blocker was removed. It still fails on a name the kernel refuses,
+    // such as one with a NUL byte from a `%00` in Path=.
+    occupy_publish(dest);
+    if let Err(e) = trashdir::publish_exclusive(&staged, dest) {
         let err = format!("cannot place restored file at '{}': {e}", dest.display());
         return Err(unstage(err, &staged, &src));
     }
@@ -1318,6 +1383,74 @@ mod tests {
         restore_one_to(&e, &out.join("item"), false).unwrap();
         assert_eq!(fs::read(out.join("item")).unwrap(), b"payload");
         assert_eq!(fs::read(&left).unwrap(), b"left behind");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A file created at the staging name after it was chosen is not
+    /// replaced. Restore uses the next name.
+    #[test]
+    fn restore_does_not_replace_a_staging_name_taken_after_the_check() {
+        let root = std::env::temp_dir().join(format!("rtrash-stage-race-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let trash = TrashDir {
+            root: root.join("Trash"),
+            topdir: None,
+        };
+        trash.ensure().unwrap();
+        fs::write(trash.files().join("item"), b"payload").unwrap();
+        let out = root.join("out");
+        fs::create_dir(&out).unwrap();
+        OCCUPY_STAGE.with(|c| c.set(true));
+        let mut e = entry(out.join("item").to_str().unwrap(), 0);
+        e.name = "item".into();
+        e.dir = trash;
+        e.recorded = false;
+        restore_one_to(&e, &out.join("item"), false).unwrap();
+        OCCUPY_STAGE.with(|c| c.set(false));
+        assert_eq!(fs::read(out.join("item")).unwrap(), b"payload");
+        let raced = fs::read_dir(&out).unwrap().flatten().find(|entry| {
+            fs::read(entry.path()).ok().as_deref() == Some(b"staged-race".as_slice())
+        });
+        assert!(raced.is_some(), "the raced staging file was replaced");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A file created at the destination after the old one was removed is
+    /// not replaced. The payload goes back to the trash.
+    #[test]
+    fn restore_does_not_replace_a_file_created_before_publish() {
+        let root = std::env::temp_dir().join(format!("rtrash-pub-race-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let trash = TrashDir {
+            root: root.join("Trash"),
+            topdir: None,
+        };
+        trash.ensure().unwrap();
+        fs::write(trash.files().join("item"), b"payload").unwrap();
+        let info = trash.info().join("item.trashinfo");
+        let dest = root.join("out").join("item");
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&dest, b"old").unwrap();
+        fs::write(
+            &info,
+            format!(
+                "[Trash Info]\nPath={}\nDeletionDate=2026-01-02T03:04:05\n",
+                dest.display()
+            ),
+        )
+        .unwrap();
+        let seen = list::collect(std::slice::from_ref(&trash));
+        assert_eq!(seen.len(), 1);
+        OCCUPY_PUBLISH.with(|c| c.set(true));
+        let err = restore_one_to(&seen[0], &dest, true).unwrap_err();
+        OCCUPY_PUBLISH.with(|c| c.set(false));
+        assert_eq!(fs::read(&dest).unwrap(), b"publish-race", "{err}");
+        assert_eq!(
+            fs::read(trash.files().join("item")).unwrap(),
+            b"payload",
+            "{err}"
+        );
+        assert!(info.exists(), "{err}");
         fs::remove_dir_all(&root).unwrap();
     }
 

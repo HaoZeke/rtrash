@@ -7,8 +7,6 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-#[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicBool, AtomicI32};
 
 use crate::info;
 use crate::util::{join_info, join_name};
@@ -771,9 +769,18 @@ pub fn volume_user_trashes(mp: &Path) -> Vec<PathBuf> {
 }
 
 /// Home directories from the user database (`getpwent`, so NSS sources
-/// such as LDAP count too).
+/// such as LDAP count too). Android's libc 0.2.186 has no `getpwent`,
+/// so that target adds none.
 fn user_homes() -> Vec<PathBuf> {
     let mut out = Vec::new();
+    passwd_homes(&mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+#[cfg(not(target_os = "android"))]
+fn passwd_homes(out: &mut Vec<PathBuf>) {
     unsafe {
         libc::setpwent();
         loop {
@@ -791,10 +798,10 @@ fn user_homes() -> Vec<PathBuf> {
         }
         libc::endpwent();
     }
-    out.sort();
-    out.dedup();
-    out
 }
+
+#[cfg(target_os = "android")]
+fn passwd_homes(_out: &mut Vec<PathBuf>) {}
 
 /// The account name owning `path`, or its uid when the user database has
 /// no name for it.
@@ -1627,10 +1634,11 @@ fn refuse_named(which: &str) -> io::Result<()> {
 
 /// Rename `src` onto `dest` only when `dest` is absent. Linux uses
 /// `renameat2(RENAME_NOREPLACE)`. macOS uses `renamex_np(RENAME_EXCL)`.
-/// Anywhere that call is missing, a non-directory is linked and the old
-/// name unlinked, which also fails with `EEXIST` rather than replacing.
-/// A directory on such a system is refused. A plain `rename` is never used:
-/// it would replace a name created after the caller looked.
+/// Where that call is missing, the rename is refused. Linking `dest` and
+/// then unlinking `src` is two steps: if the unlink fails, `dest` is
+/// already a name of the inode and a later cleanup can drop the trash
+/// record while that name remains. A plain `rename` is never used: it
+/// would replace a name created after the caller looked.
 fn rename_exclusive(src: &Path, dest: &Path) -> io::Result<()> {
     match rename_exclusive_os(src, dest) {
         Ok(()) => Ok(()),
@@ -1655,12 +1663,19 @@ fn exclusive_unavailable(err: &io::Error) -> bool {
 }
 
 fn rename_exclusive_os(src: &Path, dest: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(code) = forced_exclusive_errno() {
+        return Err(io::Error::from_raw_os_error(code));
+    }
     let from = path_cstr(src)?;
     let to = path_cstr(dest)?;
-    #[cfg(target_os = "linux")]
+    // Android has the same renameat2 syscall as Linux. libc 0.2.186
+    // exposes `SYS_renameat2` on both, and `renameat2` the function on
+    // Android. The syscall keeps musl, which does not always export the
+    // function, on the same path.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        // RENAME_NOREPLACE is 1. renameat2 is a syscall so musl does not
-        // have to export the function.
+        // RENAME_NOREPLACE is 1.
         let rc = unsafe {
             libc::syscall(
                 libc::SYS_renameat2,
@@ -1684,28 +1699,58 @@ fn rename_exclusive_os(src: &Path, dest: &Path) -> io::Result<()> {
         }
         Err(io::Error::last_os_error())
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    // libc 0.2.186 has no exclusive-rename flag for FreeBSD, Dragonfly,
+    // NetBSD or OpenBSD. `SHM_RENAME_NOREPLACE` is for shm, not files.
+    // Those targets take the fallback below.
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
     {
         let _ = (from, to);
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 }
 
-/// No-replace rename where the kernel flag is missing. A directory cannot
-/// be linked, so it is refused instead of replaced.
+#[cfg(test)]
+fn forced_exclusive_errno() -> Option<i32> {
+    let code = FORCE_EXCLUSIVE.with(|c| c.get());
+    if code == 0 {
+        None
+    } else {
+        Some(code)
+    }
+}
+
+/// No atomic no-replace rename. A regular file is hard-linked onto
+/// `dest` and the source name is then unlinked. A symbolic link is
+/// created anew at `dest` and the source name is then unlinked. Either
+/// new name is removed again if the source name cannot be unlinked. If
+/// that removal also fails, the error is [`PublishedKept`] so a trash
+/// record that already names `dest` is not dropped. A directory, or any
+/// other type a link cannot publish, is refused.
 fn rename_exclusive_fallback(src: &Path, dest: &Path, os_err: io::Error) -> io::Result<()> {
     let meta = fs::symlink_metadata(src)?;
-    if meta.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "cannot rename the directory '{}' onto '{}' without replacing \
-                 an existing path ({os_err})",
-                crate::util::err_path(src),
-                crate::util::err_path(dest),
-            ),
-        ));
+    if meta.file_type().is_symlink() {
+        return publish_symlink(src, dest);
     }
+    if meta.is_file() {
+        return publish_hard_link(src, dest);
+    }
+    let kind = if meta.is_dir() {
+        "directory"
+    } else {
+        "file of this type"
+    };
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "cannot move '{}' onto '{}' without an exclusive rename ({os_err}); \
+             a {kind} has no safe link to publish, so the move was refused",
+            crate::util::err_path(src),
+            crate::util::err_path(dest),
+        ),
+    ))
+}
+
+fn publish_hard_link(src: &Path, dest: &Path) -> io::Result<()> {
     let from = path_cstr(src)?;
     let to = path_cstr(dest)?;
     if unsafe {
@@ -1720,18 +1765,52 @@ fn rename_exclusive_fallback(src: &Path, dest: &Path, os_err: io::Error) -> io::
     {
         return Err(io::Error::last_os_error());
     }
-    if unsafe { libc::unlink(from.as_ptr()) } != 0 {
-        let err = io::Error::last_os_error();
-        return Err(io::Error::new(
-            err.kind(),
-            format!(
-                "linked '{}' to '{}' but could not unlink the old name: {err}",
-                crate::util::err_path(src),
-                crate::util::err_path(dest),
-            ),
-        ));
+    finish_link_move(src, dest)
+}
+
+fn publish_symlink(src: &Path, dest: &Path) -> io::Result<()> {
+    let target = fs::read_link(src)?;
+    let target_c = path_cstr(&target)?;
+    let to = path_cstr(dest)?;
+    if unsafe { libc::symlinkat(target_c.as_ptr(), libc::AT_FDCWD, to.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    finish_link_move(src, dest)
+}
+
+/// The new name exists. Drop the old one, or drop the new one if that
+/// fails. A new name that cannot be dropped either is a published
+/// payload and keeps its record.
+fn finish_link_move(src: &Path, dest: &Path) -> io::Result<()> {
+    if let Err(e) = unlink_link_name(src) {
+        return match unlink_link_name(dest) {
+            Ok(()) => Err(e),
+            Err(undo) => Err(published_kept(
+                dest,
+                format!(
+                    "unlinking '{}' failed ({e}) and removing the new link failed ({undo})",
+                    crate::util::err_path(src),
+                ),
+            )),
+        };
     }
     Ok(())
+}
+
+fn unlink_link_name(path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    if UNLINK_FAILS.with(|c| {
+        let left = c.get();
+        if left == 0 {
+            false
+        } else {
+            c.set(left - 1);
+            true
+        }
+    }) {
+        return Err(io::Error::other("test unlink failed"));
+    }
+    fs::remove_file(path)
 }
 
 fn info_mtime_secs(path: &Path) -> io::Result<i64> {
@@ -2199,6 +2278,11 @@ fn reopen_parent_dir(child: RawFd, id: (u64, u64)) -> io::Result<OwnedFd> {
 
 /// Names in `dirfd`, not `.` or `..`. The descriptor stays open.
 fn read_names(dirfd: RawFd) -> io::Result<Vec<OsString>> {
+    // A previous read of this description left the offset at the end.
+    // `fdopendir` does not rewind, so start at the first entry.
+    if unsafe { libc::lseek(dirfd, 0, libc::SEEK_SET) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
     let dup = unsafe { libc::fcntl(dirfd, libc::F_DUPFD_CLOEXEC, 0) };
     if dup < 0 {
         return Err(io::Error::last_os_error());
@@ -2447,6 +2531,8 @@ fn tree_removable(path: &Path, meta: &fs::Metadata) -> io::Result<()> {
 /// Give the owner write access to every directory under `path`, so a
 /// half-made copy of a read-only tree can be removed again. Same walk as
 /// [`tree_removable`]: no recursion, and no path long enough to fail.
+/// Production cleanup now chmods through the directory descriptor.
+#[cfg(test)]
 fn make_tree_writable(path: &Path) {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return;
@@ -2567,7 +2653,7 @@ pub fn relocate_back(src: &Path, dest: &Path) -> io::Result<()> {
 }
 
 fn relocate_with(src: &Path, dest: &Path, check_space: bool) -> io::Result<()> {
-    match fs::rename(src, dest) {
+    match rename_exclusive(src, dest) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             let meta = fs::symlink_metadata(src)?;
@@ -2692,19 +2778,28 @@ fn undo_publish(
     stage_src: &Path,
     dest: &Path,
     cause: io::Error,
-    stage_dst: &Path,
+    stage_dst: &OwnedDir,
 ) -> io::Result<()> {
     if source_changed(&cause).is_some() {
         // The copy is already at `dest`. The changed source stays at its
-        // private name, which the error names.
+        // private name, which the error names. The empty staging directory
+        // goes only when it is still the one this move created.
+        let _ = take_back_owned(stage_dst);
         return Err(cause);
     }
     let cause = if as_published(&cause).is_some() {
+        let _ = take_back_owned(stage_dst);
         cause
     } else {
-        match take_back_staged(stage_dst) {
+        match take_back_owned(stage_dst) {
             Ok(()) => cause,
-            Err(rm) => leftover_error(stage_dst, dest, cause, rm),
+            Err(rm) => {
+                let err = leftover_error(&stage_dst.inner(), dest, cause, rm);
+                // The copy now sits at `dest` or under another name. The
+                // wrapper directory is not a trash payload.
+                drop_empty_stage(stage_dst);
+                err
+            }
         }
     };
     restore_staged(src, stage_src, cause)
@@ -2740,14 +2835,131 @@ fn move_to_private(src: &Path, parent: &Path, kind: &str) -> io::Result<PathBuf>
     Err(last.unwrap_or_else(|| io::Error::other("could not choose a private staging name")))
 }
 
-fn unused_private(parent: &Path, kind: &str) -> io::Result<PathBuf> {
-    for _ in 0..64 {
-        let path = next_private(parent, kind);
-        if crate::util::is_gone(&path) {
-            return Ok(path);
+/// A directory this move created with `mkdir`, mode `0700`. `fd` is that
+/// directory, opened `O_DIRECTORY|O_NOFOLLOW` before anything is written
+/// into it. Cleanup never removes a path until that path has been renamed
+/// aside and the renamed entry's device and inode match `fd`.
+struct OwnedDir {
+    path: PathBuf,
+    fd: Option<OwnedFd>,
+    dev: u64,
+    ino: u64,
+}
+
+impl OwnedDir {
+    fn none() -> Self {
+        Self {
+            path: PathBuf::new(),
+            fd: None,
+            dev: 0,
+            ino: 0,
         }
     }
-    Err(io::Error::other("could not choose a private staging name"))
+
+    fn inner(&self) -> PathBuf {
+        self.path.join("copy")
+    }
+
+    /// The open directory, when its device and inode are still the ones
+    /// recorded at `mkdir` and the path still names that directory.
+    fn is_ours(&self) -> bool {
+        let Some(fd) = self.fd.as_ref() else {
+            return false;
+        };
+        let Ok((dev, ino)) = fd_dev_ino(fd.as_raw_fd()) else {
+            return false;
+        };
+        if dev != self.dev || ino != self.ino || self.path.as_os_str().is_empty() {
+            return false;
+        }
+        fs::symlink_metadata(&self.path)
+            .ok()
+            .is_some_and(|meta| meta.dev() == dev && meta.ino() == ino)
+    }
+}
+
+/// `mkdir` a fresh mode-0700 directory. A name taken between the choice
+/// and the call is left in place and another name is tried.
+fn reserve_dir(parent: &Path, kind: &str) -> io::Result<OwnedDir> {
+    let mut last = None;
+    for _ in 0..64 {
+        let path = next_private(parent, kind);
+        collide_dest(&path);
+        match mkdir_owned(&path) {
+            Ok(dir) => return Ok(dir),
+            Err(e) if name_taken(&e) => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("could not choose a private staging name")))
+}
+
+fn mkdir_owned(path: &Path) -> io::Result<OwnedDir> {
+    fs::DirBuilder::new().mode(0o700).create(path)?;
+    // A test may exchange the new directory for another before the first
+    // stat. The directory we open has to be the empty one `mkdir` made.
+    seam_after_mkdir(path);
+    let fd = open_dir_nofollow(path)?;
+    let names = read_names(fd.as_raw_fd())?;
+    if !names.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the staging directory was replaced before it was identified",
+        ));
+    }
+    let (dev, ino) = fd_dev_ino(fd.as_raw_fd())?;
+    Ok(OwnedDir {
+        path: path.to_path_buf(),
+        fd: Some(fd),
+        dev,
+        ino,
+    })
+}
+
+fn seam_after_mkdir(path: &Path) {
+    #[cfg(test)]
+    if SWAP_AFTER_MKDIR.with(|c| c.replace(false)) {
+        swap_in_foreign(path, true);
+    }
+    #[cfg(not(test))]
+    let _ = path;
+}
+
+fn seam_before_remove(path: &Path) {
+    #[cfg(test)]
+    if SWAP_BEFORE_REMOVE.with(|c| c.replace(false)) {
+        let marker = !SWAP_EMPTY.with(|c| c.replace(false));
+        swap_in_foreign(path, marker);
+    }
+    #[cfg(not(test))]
+    let _ = path;
+}
+
+/// Move `path` aside and put another directory at the name. With
+/// `marker`, that directory holds a file named `marker` containing
+/// `foreign`, so a recursive delete is visible. Without it the directory
+/// is empty, so a plain `remove_dir` would take it.
+#[cfg(test)]
+fn swap_in_foreign(path: &Path, marker: bool) {
+    let Some(name) = path.file_name() else {
+        return;
+    };
+    let mut aside = name.to_os_string();
+    aside.push(".aside");
+    let aside = path.with_file_name(aside);
+    if fs::rename(path, &aside).is_err() {
+        return;
+    }
+    if fs::create_dir(path).is_err() || !marker {
+        return;
+    }
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path.join("marker"))
+    {
+        let _ = file.write_all(b"foreign");
+    }
 }
 
 fn name_taken(err: &io::Error) -> bool {
@@ -2755,6 +2967,21 @@ fn name_taken(err: &io::Error) -> bool {
         err.raw_os_error(),
         Some(libc::EEXIST | libc::ENOTDIR | libc::EISDIR)
     ) || err.kind() == io::ErrorKind::AlreadyExists
+}
+
+fn collide_dest(path: &Path) {
+    #[cfg(test)]
+    if COLLIDE_DEST.with(|c| c.replace(false)) && fs::create_dir(path).is_ok() {
+        if let Ok(mut marker) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path.join("marker"))
+        {
+            let _ = marker.write_all(b"dest-collider");
+        }
+    }
+    #[cfg(not(test))]
+    let _ = path;
 }
 
 fn plant_collider(path: &Path) {
@@ -2772,22 +2999,24 @@ fn plant_collider(path: &Path) {
     let _ = path;
 }
 
-/// Copy `src` into a private name beside `dest`, check it, sync it, and
-/// rename that name onto `dest`. The `Err` path is the private name, which
-/// the caller removes or quarantines. An empty path was never created.
+/// Copy `src` into a directory this move created beside `dest`, check it,
+/// sync it, and rename that copy onto `dest`. The `Err` directory is
+/// removed only when it is still the one `mkdir` created.
 fn publish_staged(
     src: &Path,
     dest: &Path,
     meta: &fs::Metadata,
-) -> Result<(), (io::Error, PathBuf)> {
+) -> Result<(), (io::Error, OwnedDir)> {
     let parent = parent_dir(dest);
-    let stage = match unused_private(parent, "dst") {
-        Ok(p) => p,
-        Err(e) => return Err((e, PathBuf::new())),
+    let owned = match reserve_dir(parent, "dst") {
+        Ok(dir) => dir,
+        Err(e) => return Err((e, OwnedDir::none())),
     };
+    let stage = owned.inner();
     if let Err(e) = write_checked_copy(src, dest, parent, &stage, meta) {
-        return Err((e, stage));
+        return Err((e, owned));
     }
+    let _ = take_back_owned(&owned);
     Ok(())
 }
 
@@ -2805,8 +3034,7 @@ fn write_checked_copy(
     // second check. The staged source is then restored, not unlinked.
     poke_after_verify(src, stage);
     verify_tree(src, stage)?;
-    let _signals = LeaseSignals::install();
-    let mut watch = arm_files(src)?;
+    let watch = arm_files(src)?;
     sync_tree(stage)?;
     sync_dir(parent)?;
     rename_exclusive(stage, dest)?;
@@ -2816,24 +3044,149 @@ fn write_checked_copy(
             format!("syncing its directory failed: {e}; the original was kept"),
         ));
     }
-    if let Err(e) = recheck_source(src, dest, &mut watch) {
+    if let Err(e) = recheck_source(src, dest, &watch) {
         return Err(changed_source(dest, src, e));
     }
     Ok(())
 }
 
-/// Remove the private destination staging name. `Ok` when there is nothing
-/// to remove, including after it was published by rename.
-fn take_back_staged(stage: &Path) -> io::Result<()> {
-    if stage.as_os_str().is_empty() || crate::util::is_gone(stage) {
+/// Remove `dir` only when the entry renamed aside from its path is still
+/// the directory `mkdir` opened. A path exchanged after that check is
+/// renamed back, or left under the quarantine name, and is not deleted.
+/// `Ok` when there is nothing of ours to remove.
+fn take_back_owned(dir: &OwnedDir) -> io::Result<()> {
+    if !dir.is_ours() {
         return Ok(());
     }
+    seam_before_remove(&dir.path);
     if cleanup_refused() {
         return Err(io::Error::other("test cleanup failed"));
     }
-    make_tree_writable(stage);
-    // scratch: the part copied, or a copy that does not match.
-    remove_any_path(stage)
+    retire_owned(dir)
+}
+
+/// Remove a staging directory that is still ours and now empty. A
+/// directory that still holds the copy, or that is not ours, stays.
+fn drop_empty_stage(dir: &OwnedDir) {
+    if !dir.is_ours() {
+        return;
+    }
+    seam_before_remove(&dir.path);
+    let _ = retire_owned(dir);
+}
+
+/// Rename `dir.path` to a private name and delete it only when that name
+/// is the open directory. A mismatch is renamed back onto `dir.path`.
+fn retire_owned(dir: &OwnedDir) -> io::Result<()> {
+    let Some(quarantine) = claim_for_delete(dir)? else {
+        return Ok(());
+    };
+    let Some(fd) = dir.fd.as_ref() else {
+        return Ok(());
+    };
+    if let Err(e) = clear_dir_fd(fd.as_raw_fd()) {
+        let _ = rename_exclusive(&quarantine, &dir.path);
+        return Err(e);
+    }
+    if let Err(e) = fs::remove_dir(&quarantine) {
+        let _ = rename_exclusive(&quarantine, &dir.path);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// `Ok(Some(path))` is a private name whose device and inode are `dir`'s
+/// open directory. `Ok(None)` means the path was not that directory and
+/// was put back or left in place, and nothing was deleted.
+fn claim_for_delete(dir: &OwnedDir) -> io::Result<Option<PathBuf>> {
+    let Some(fd) = dir.fd.as_ref() else {
+        return Ok(None);
+    };
+    let (dev, ino) = fd_dev_ino(fd.as_raw_fd())?;
+    let quarantine = next_private(parent_dir(&dir.path), "quar");
+    if let Err(e) = rename_exclusive(&dir.path, &quarantine) {
+        if e.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(None);
+        }
+        return Err(e);
+    }
+    let meta = fs::symlink_metadata(&quarantine)?;
+    if meta.dev() == dev && meta.ino() == ino {
+        return Ok(Some(quarantine));
+    }
+    // The renamed entry is not the directory we opened. Put it back.
+    // If that rename fails, leave it under the private name. Do not
+    // delete it.
+    let _ = rename_exclusive(&quarantine, &dir.path);
+    Ok(None)
+}
+
+struct ClearFrame {
+    fd: OwnedFd,
+    entries: Vec<OsString>,
+    name: Option<OsString>,
+}
+
+/// Unlink every entry of the directory `root` already refers to. The
+/// directory itself stays. Names are unlinked through the directory
+/// descriptor, not through a path that another process can exchange.
+fn clear_dir_fd(root: RawFd) -> io::Result<()> {
+    let dup = unsafe { libc::fcntl(root, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let root_fd = unsafe { OwnedFd::from_raw_fd(dup) };
+    let entries = read_names(root_fd.as_raw_fd())?;
+    let mut stack = vec![ClearFrame {
+        fd: root_fd,
+        entries,
+        name: None,
+    }];
+    loop {
+        let Some(top) = stack.last() else {
+            return Ok(());
+        };
+        if top.entries.is_empty() {
+            let done = stack.pop().expect("frame");
+            if let Some(name) = done.name {
+                let parent = stack.last().expect("parent").fd.as_raw_fd();
+                drop(done.fd);
+                unlink_at_name(parent, &name, true)?;
+            }
+            continue;
+        }
+        let dirfd = stack.last().expect("frame").fd.as_raw_fd();
+        let name = stack
+            .last_mut()
+            .expect("frame")
+            .entries
+            .pop()
+            .expect("name");
+        let name_c = name_cstr(&name)?;
+        let st = fstatat_nofollow(dirfd, &name_c)?;
+        if is_type(&st, libc::S_IFDIR) {
+            let child = openat_dir(dirfd, &name_c)?;
+            chmod_dir_fd(child.as_raw_fd());
+            let entries = read_names(child.as_raw_fd())?;
+            stack.push(ClearFrame {
+                fd: child,
+                entries,
+                name: Some(name),
+            });
+        } else {
+            unlink_at_name(dirfd, &name, false)?;
+        }
+    }
+}
+
+fn unlink_at_name(dirfd: RawFd, name: &OsStr, dir: bool) -> io::Result<()> {
+    let name_c = name_cstr(name)?;
+    let flags = if dir { libc::AT_REMOVEDIR } else { 0 };
+    if unsafe { libc::unlinkat(dirfd, name_c.as_ptr(), flags) } != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// The partial copy at `stage` could not be removed. Put it at `dest` when
@@ -2929,7 +3282,9 @@ impl std::fmt::Display for SourceChanged {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "the copy at '{}' was published, but {}; the source was kept at '{}'",
+            "the copy at '{}' was published, but {} (this check is best-effort \
+             and cannot see every write from a descriptor that was already open); \
+             the source was kept at '{}'",
             crate::util::err_path(&self.dest),
             self.err,
             crate::util::err_path(&self.kept),
@@ -2949,6 +3304,98 @@ fn changed_source(dest: &Path, kept: &Path, err: io::Error) -> io::Error {
 
 fn source_changed(e: &io::Error) -> Option<&SourceChanged> {
     find_payload(e)
+}
+
+/// Paths a failed [`move_by_copy`] or [`relocate`] may have left behind.
+/// `published` is a copy that already has its final name. `source` is the
+/// original, or the private name it was staged to. `partial` is a copy
+/// that could not be removed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MoveRemain {
+    pub published: Option<PathBuf>,
+    pub source: Option<PathBuf>,
+    pub partial: Option<PathBuf>,
+}
+
+/// The surviving paths named by `err`, including one wrapped in the
+/// restore failure that tried to put the source back.
+pub fn move_remain(err: &io::Error) -> MoveRemain {
+    let mut out = MoveRemain::default();
+    if let Some(published) = as_published(err) {
+        out.published = Some(published.dest.clone());
+    }
+    if let Some(changed) = source_changed(err) {
+        out.published = Some(changed.dest.clone());
+        out.source = Some(changed.kept.clone());
+    }
+    if let Some(left) = source_left(err) {
+        out.published = Some(left.dest.clone());
+        out.source = Some(left.kept.clone());
+    }
+    if let Some(partial) = partial_kept(err) {
+        out.partial = Some(partial.path.clone());
+    }
+    if let Some(failed) = err
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<RestoreFailed>())
+    {
+        if out.source.is_none() {
+            out.source = Some(failed.kept.clone());
+        }
+    }
+    out
+}
+
+/// `payload` is the trash name a record still points at. When it is
+/// missing, put the retained body back there. The returned text names
+/// every path that still has bytes and is not `payload`.
+pub fn salvage(payload: &Path, err: &io::Error) -> String {
+    let remain = move_remain(err);
+    let mut notes = Vec::new();
+    if crate::util::is_gone(payload) {
+        let from = remain
+            .source
+            .clone()
+            .or(remain.partial.clone())
+            .or(remain.published.clone());
+        if let Some(from) = from.filter(|path| path != payload) {
+            match rename_exclusive(&from, payload) {
+                Ok(()) => notes.push(format!(
+                    "the payload is back at '{}'",
+                    crate::util::err_path(payload)
+                )),
+                Err(e) => notes.push(format!(
+                    "could not put '{}' back at '{}': {e}",
+                    crate::util::err_path(&from),
+                    crate::util::err_path(payload)
+                )),
+            }
+        }
+    }
+    for (label, path) in [
+        ("published copy", &remain.published),
+        ("retained source", &remain.source),
+        ("partial copy", &remain.partial),
+    ] {
+        let Some(path) = path else { continue };
+        if path != payload && path.exists() {
+            notes.push(format!(
+                "the {label} remains at '{}'",
+                crate::util::err_path(path)
+            ));
+        }
+    }
+    notes.join("; ")
+}
+
+/// Rename `src` onto `dest` only when `dest` is absent.
+pub fn publish_exclusive(src: &Path, dest: &Path) -> io::Result<()> {
+    rename_exclusive(src, dest)
+}
+
+/// `err` is from an exclusive rename that found the destination taken.
+pub fn replace_refused(err: &io::Error) -> bool {
+    name_taken(err)
 }
 
 fn record_stays(e: &io::Error) -> bool {
@@ -3153,16 +3600,6 @@ struct Stamp {
 struct Watched {
     file: fs::File,
     stamp: Stamp,
-    /// Slot in [`LEASE_FDS`] when a write lease was granted.
-    slot: Option<usize>,
-}
-
-impl Drop for Watched {
-    fn drop(&mut self) {
-        if let Some(slot) = self.slot.take() {
-            release_lease_slot(slot, self.file.as_raw_fd());
-        }
-    }
 }
 
 enum SourceWatch {
@@ -3171,91 +3608,6 @@ enum SourceWatch {
     /// More regular files than the process can hold open. The recheck
     /// reads the tree again instead of fstat'ing a held descriptor.
     Wide,
-}
-
-/// Install a `SIGIO` handler for the lease window, then put it back.
-struct LeaseSignals {
-    #[cfg(target_os = "linux")]
-    previous: Option<libc::sigaction>,
-}
-
-impl LeaseSignals {
-    fn install() -> Self {
-        #[cfg(target_os = "linux")]
-        {
-            LEASE_BROKEN.store(false, Ordering::SeqCst);
-            Self {
-                previous: install_lease_signal(),
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        Self {}
-    }
-}
-
-impl Drop for LeaseSignals {
-    fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
-        if let Some(previous) = self.previous.take() {
-            unsafe {
-                libc::sigaction(libc::SIGIO, &previous, std::ptr::null_mut());
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-const LEASE_SLOTS: usize = 128;
-
-#[cfg(target_os = "linux")]
-static LEASE_FDS: [AtomicI32; LEASE_SLOTS] = [const { AtomicI32::new(-1) }; LEASE_SLOTS];
-
-#[cfg(target_os = "linux")]
-static LEASE_BROKEN: AtomicBool = AtomicBool::new(false);
-
-#[cfg(target_os = "linux")]
-extern "C" fn on_lease_signal(_sig: libc::c_int) {
-    // A new open is waiting. Drop every lease so it is not stuck for
-    // lease-break-time, and remember that the source was no longer ours
-    // alone. fcntl here is the downgrade the kernel is waiting for.
-    LEASE_BROKEN.store(true, Ordering::SeqCst);
-    for slot in &LEASE_FDS {
-        let fd = slot.swap(-1, Ordering::SeqCst);
-        if fd >= 0 {
-            unsafe {
-                libc::fcntl(fd, libc::F_SETLEASE, libc::F_UNLCK);
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn install_lease_signal() -> Option<libc::sigaction> {
-    unsafe {
-        let mut new_action: libc::sigaction = std::mem::zeroed();
-        new_action.sa_sigaction =
-            on_lease_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
-        new_action.sa_flags = libc::SA_RESTART;
-        libc::sigemptyset(&mut new_action.sa_mask);
-        let mut old: libc::sigaction = std::mem::zeroed();
-        if libc::sigaction(libc::SIGIO, &new_action, &mut old) != 0 {
-            return None;
-        }
-        Some(old)
-    }
-}
-
-fn release_lease_slot(slot: usize, fd: RawFd) {
-    #[cfg(target_os = "linux")]
-    {
-        if slot < LEASE_FDS.len() && LEASE_FDS[slot].swap(-1, Ordering::SeqCst) >= 0 {
-            unsafe {
-                libc::fcntl(fd, libc::F_SETLEASE, libc::F_UNLCK);
-            }
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (slot, fd);
 }
 
 fn watch_budget() -> usize {
@@ -3272,8 +3624,8 @@ fn watch_budget() -> usize {
 }
 
 /// Open every regular file under `root` and remember its size and
-/// timestamps. A write lease is attempted on each; it blocks a later
-/// open, not a descriptor that was already open.
+/// timestamps. A descriptor that was already open is not stopped: this
+/// look is best-effort, and a write lease is not taken.
 fn arm_files(root: &Path) -> io::Result<SourceWatch> {
     let meta = fs::symlink_metadata(root)?;
     let kind = meta.file_type();
@@ -3283,23 +3635,13 @@ fn arm_files(root: &Path) -> io::Result<SourceWatch> {
     let mut nodes = Vec::new();
     if kind.is_file() {
         push_watched(&mut nodes, open_read(root)?)?;
-        lease_watched(&mut nodes);
         return Ok(SourceWatch::Held(nodes));
     }
     watch_dir(root, &mut nodes)?;
     if nodes.len() > watch_budget() {
         return Ok(SourceWatch::Wide);
     }
-    // Lease only after every name is open. A second hard link of a file
-    // we already leased would come back EAGAIN from O_NONBLOCK.
-    lease_watched(&mut nodes);
     Ok(SourceWatch::Held(nodes))
-}
-
-fn lease_watched(nodes: &mut [Watched]) {
-    for node in nodes {
-        node.slot = try_write_lease(node.file.as_raw_fd());
-    }
 }
 
 fn watch_dir(root: &Path, nodes: &mut Vec<Watched>) -> io::Result<()> {
@@ -3356,11 +3698,7 @@ fn watch_child(
 
 fn push_watched(nodes: &mut Vec<Watched>, file: fs::File) -> io::Result<()> {
     let stamp = stamp_of_fd(file.as_raw_fd())?;
-    nodes.push(Watched {
-        file,
-        stamp,
-        slot: None,
-    });
+    nodes.push(Watched { file, stamp });
     Ok(())
 }
 
@@ -3434,81 +3772,18 @@ fn stamp_from(st: &libc::stat) -> Stamp {
     }
 }
 
-/// `F_SETLEASE`/`F_WRLCK` when the kernel grants it. Failure is normal:
-/// the file is already open, the caller is not the owner, or the file
-/// system has no leases. The attempt still matters: a granted lease makes
-/// a later open wait until the lease is dropped.
-fn try_write_lease(fd: RawFd) -> Option<usize> {
-    note_lease_attempt();
-    #[cfg(target_os = "linux")]
-    {
-        if unsafe { libc::fcntl(fd, libc::F_SETLEASE, libc::F_WRLCK) } != 0 {
-            return None;
-        }
-        lease_slot(fd)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = fd;
-        None
-    }
-}
-
-fn note_lease_attempt() {
-    #[cfg(test)]
-    LEASE_ATTEMPTS.with(|c| c.set(c.get().saturating_add(1)));
-}
-
-#[cfg(target_os = "linux")]
-fn lease_slot(fd: RawFd) -> Option<usize> {
-    for (slot, cell) in LEASE_FDS.iter().enumerate() {
-        if cell
-            .compare_exchange(-1, fd, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            return Some(slot);
-        }
-    }
-    unsafe {
-        libc::fcntl(fd, libc::F_SETLEASE, libc::F_UNLCK);
-    }
-    None
-}
-
-fn lease_was_broken() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        LEASE_BROKEN.load(Ordering::SeqCst)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
-    }
-}
-
 /// After the copy is public: a write through an already-open descriptor
 /// shows up as a new size or timestamp on the descriptor this move held.
-/// A lease that broke means a new open got in. Either one keeps the source.
-/// Leases are dropped before the last content check, so that check's own
-/// opens are not mistaken for someone else.
-fn recheck_source(src: &Path, dest: &Path, watch: &mut SourceWatch) -> io::Result<()> {
+/// That look is best-effort. A same-length write in the same timestamp
+/// granule, after the last `fstat` and before the source is removed, is
+/// not visible, and a descriptor that was already open is not stopped.
+fn recheck_source(src: &Path, dest: &Path, watch: &SourceWatch) -> io::Result<()> {
     poke_after_publish();
-    if lease_was_broken() {
-        return Err(lease_broken());
-    }
     stamps_hold(watch)?;
-    release_watch(watch);
-    if lease_was_broken() {
-        return Err(lease_broken());
-    }
     verify_tree(src, dest)?;
-    // Once more, after this process's own reads, immediately before the
-    // caller unlinks. A write in between still lands in the residual window.
+    // Once more, immediately before the caller unlinks. A write in
+    // between still lands in the best-effort window.
     stamps_hold(watch)
-}
-
-fn lease_broken() -> io::Error {
-    io::Error::other("a write lease on the source was broken after the copy was published")
 }
 
 fn stamps_hold(watch: &SourceWatch) -> io::Result<()> {
@@ -3525,17 +3800,6 @@ fn stamps_hold(watch: &SourceWatch) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn release_watch(watch: &mut SourceWatch) {
-    let SourceWatch::Held(nodes) = watch else {
-        return;
-    };
-    for node in nodes.iter_mut() {
-        if let Some(slot) = node.slot.take() {
-            release_lease_slot(slot, node.file.as_raw_fd());
-        }
-    }
 }
 
 fn note_fstat_recheck() {
@@ -3957,10 +4221,15 @@ thread_local! {
     static FAIL_SYNC: std::cell::Cell<SyncSeam> = const { std::cell::Cell::new(SyncSeam::Off) };
     static FAIL_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static COLLIDE_STAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static COLLIDE_DEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SWAP_AFTER_MKDIR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SWAP_BEFORE_REMOVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SWAP_EMPTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_EXCLUSIVE: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    static UNLINK_FAILS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static OCCUPY_ORIGINAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MUTATE_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static HELD_FD: std::cell::Cell<RawFd> = const { std::cell::Cell::new(-1) };
-    static LEASE_ATTEMPTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static FSTAT_RECHECKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
@@ -4445,6 +4714,26 @@ fn apply_fd_meta(
     Ok(())
 }
 
+/// `mkfifoat`. libc 0.2.186 does not declare that on Android, where
+/// `mknodat` with `S_IFIFO` is the same call.
+fn fifo_at(dirfd: RawFd, name: &CStr) -> libc::c_int {
+    #[cfg(not(target_os = "android"))]
+    {
+        unsafe { libc::mkfifoat(dirfd, name.as_ptr(), 0o600) }
+    }
+    #[cfg(target_os = "android")]
+    {
+        unsafe {
+            libc::mknodat(
+                dirfd,
+                name.as_ptr(),
+                libc::S_IFIFO | (0o600 as libc::mode_t),
+                0,
+            )
+        }
+    }
+}
+
 /// A non-directory whose path does not fit in `PATH_MAX`. A regular file
 /// that already has a copy in `links` is a new name for that copy.
 fn copy_entry_deep(
@@ -4458,7 +4747,7 @@ fn copy_entry_deep(
         return copy_symlink_at(src_dir, dst_dir, name, st);
     }
     if is_type(st, libc::S_IFIFO) {
-        if unsafe { libc::mkfifoat(dst_dir, name.as_ptr(), 0o600) } != 0 {
+        if fifo_at(dst_dir, name) != 0 {
             return Err(io::Error::last_os_error());
         }
         return finish_node_at(dst_dir, name, st);
@@ -6113,10 +6402,15 @@ proc /proc proc rw 0 0
             FAIL_SYNC.with(|c| c.set(SyncSeam::Off));
             FAIL_CLEANUP.with(|c| c.set(false));
             COLLIDE_STAGE.with(|c| c.set(false));
+            COLLIDE_DEST.with(|c| c.set(false));
+            SWAP_AFTER_MKDIR.with(|c| c.set(false));
+            SWAP_BEFORE_REMOVE.with(|c| c.set(false));
+            SWAP_EMPTY.with(|c| c.set(false));
+            FORCE_EXCLUSIVE.with(|c| c.set(0));
+            UNLINK_FAILS.with(|c| c.set(0));
             OCCUPY_ORIGINAL.with(|c| c.set(false));
             MUTATE_HELD.with(|c| c.set(false));
             HELD_FD.with(|c| c.set(-1));
-            LEASE_ATTEMPTS.with(|c| c.set(0));
             FSTAT_RECHECKS.with(|c| c.set(0));
         }
     }
@@ -6217,7 +6511,7 @@ proc /proc proc rw 0 0
         assert_eq!(fs::read(payload.path()).unwrap(), b"before");
         assert_eq!(fs::read_dir(td.info()).unwrap().count(), 1, "{err}");
         assert!(!src.exists(), "{err}");
-        assert!(LEASE_ATTEMPTS.with(|c| c.get()) >= 1, "{err}");
+        assert!(err.to_string().contains("best-effort"), "{err}");
         assert!(FSTAT_RECHECKS.with(|c| c.get()) >= 1, "{err}");
         let _ = fs::remove_dir_all(&td.root);
         let _ = fs::remove_dir_all(&root);
@@ -6276,36 +6570,120 @@ proc /proc proc rw 0 0
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// The path used where `renameat2` / `renamex_np` is missing. It links
-    /// a file and refuses a directory, and neither replaces an existing name.
+    /// Where `renameat2` / `renamex_np` is missing, a file is published by
+    /// a hard link and a directory is refused. An existing destination is
+    /// not replaced.
     #[test]
-    fn the_rename_fallback_does_not_replace() {
+    fn the_rename_fallback_links_a_file_and_refuses_a_directory() {
         let root = std::env::temp_dir().join(format!("rtrash-fallback-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let (src, dest) = (root.join("src"), root.join("dest"));
         fs::write(&src, b"new").unwrap();
         fs::write(&dest, b"keep").unwrap();
-        let missing = io::Error::from_raw_os_error(libc::ENOSYS);
-        let err = rename_exclusive_fallback(&src, &dest, missing).unwrap_err();
+        let err =
+            rename_exclusive_fallback(&src, &dest, io::Error::from_raw_os_error(libc::ENOSYS))
+                .unwrap_err();
         assert!(name_taken(&err), "{err}");
         assert_eq!(fs::read(&dest).unwrap(), b"keep");
         assert_eq!(fs::read(&src).unwrap(), b"new");
         fs::remove_file(&dest).unwrap();
-        let missing = io::Error::from_raw_os_error(libc::ENOSYS);
-        rename_exclusive_fallback(&src, &dest, missing).unwrap();
+        rename_exclusive_fallback(&src, &dest, io::Error::from_raw_os_error(libc::ENOSYS)).unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"new");
-        assert!(!src.exists());
+        assert!(
+            src.symlink_metadata().is_err(),
+            "the source name was unlinked"
+        );
+        fs::write(&src, b"new").unwrap();
+        std::os::unix::fs::symlink("target-name", root.join("link")).unwrap();
+        let link_dest = root.join("link-out");
+        rename_exclusive_fallback(
+            &root.join("link"),
+            &link_dest,
+            io::Error::from_raw_os_error(libc::EINVAL),
+        )
+        .unwrap();
+        assert_eq!(fs::read_link(&link_dest).unwrap(), Path::new("target-name"));
+        assert!(root.join("link").symlink_metadata().is_err());
         fs::create_dir(root.join("sdir")).unwrap();
         fs::write(root.join("sdir/a"), b"a").unwrap();
         fs::create_dir(root.join("ddir")).unwrap();
         fs::write(root.join("ddir/b"), b"b").unwrap();
-        let missing = io::Error::from_raw_os_error(libc::ENOSYS);
-        let err =
-            rename_exclusive_fallback(&root.join("sdir"), &root.join("ddir"), missing).unwrap_err();
+        let err = rename_exclusive_fallback(
+            &root.join("sdir"),
+            &root.join("ddir"),
+            io::Error::from_raw_os_error(libc::ENOSYS),
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{err}");
+        assert!(err.to_string().contains("directory"), "{err}");
         assert_eq!(fs::read(root.join("ddir/b")).unwrap(), b"b");
         assert_eq!(fs::read(root.join("sdir/a")).unwrap(), b"a");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An ordinary same-device put of a file or a symbolic link still
+    /// publishes when the exclusive rename returns `ENOSYS` or `EINVAL`.
+    /// A directory is refused and its record is not left behind.
+    #[test]
+    fn an_ordinary_put_links_when_exclusive_rename_is_unavailable() {
+        let _seams = ClearSeams;
+        for code in [libc::ENOSYS, libc::EINVAL] {
+            let (root, td) = put_trash(&format!("nolink-{code}"));
+            FORCE_EXCLUSIVE.with(|c| c.set(code));
+            let item = root.join("note");
+            fs::write(&item, b"body").unwrap();
+            let meta = fs::symlink_metadata(&item).unwrap();
+            let name = trash_move_locked(&item, &meta, &td, false).unwrap();
+            assert!(item.symlink_metadata().is_err(), "{code}");
+            assert_eq!(fs::read(td.files().join(&name)).unwrap(), b"body");
+            assert!(td.info().join(format!("{name}.trashinfo")).is_file());
+            std::os::unix::fs::symlink("elsewhere", root.join("link")).unwrap();
+            let link = root.join("link");
+            let meta = fs::symlink_metadata(&link).unwrap();
+            let linked = trash_move_locked(&link, &meta, &td, false).unwrap();
+            assert!(link.symlink_metadata().is_err(), "{code}");
+            assert_eq!(
+                fs::read_link(td.files().join(&linked)).unwrap(),
+                Path::new("elsewhere")
+            );
+            fs::create_dir(root.join("dir")).unwrap();
+            fs::write(root.join("dir/a"), b"a").unwrap();
+            let dir = root.join("dir");
+            let meta = fs::symlink_metadata(&dir).unwrap();
+            let err = trash_move_locked(&dir, &meta, &td, false).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{err}");
+            assert!(err.to_string().contains("directory"), "{err}");
+            assert_eq!(fs::read(dir.join("a")).unwrap(), b"a");
+            assert!(
+                fs::read_dir(td.info())
+                    .unwrap()
+                    .flatten()
+                    .all(|e| !e.file_name().to_string_lossy().starts_with("dir")),
+                "a refused directory left a record"
+            );
+            FORCE_EXCLUSIVE.with(|c| c.set(0));
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    /// The new link could not be removed after the source unlink failed.
+    /// The payload stays in the trash and so does its record.
+    #[test]
+    fn a_link_that_cannot_be_rolled_back_keeps_the_record() {
+        let _seams = ClearSeams;
+        let (root, td) = put_trash("norollback");
+        FORCE_EXCLUSIVE.with(|c| c.set(libc::ENOSYS));
+        UNLINK_FAILS.with(|c| c.set(2));
+        let item = root.join("note");
+        fs::write(&item, b"body").unwrap();
+        let meta = fs::symlink_metadata(&item).unwrap();
+        let err = trash_move_locked(&item, &meta, &td, false).unwrap_err();
+        assert!(as_published(&err).is_some(), "{err}");
+        assert!(err.to_string().contains("trash record was kept"), "{err}");
+        assert_eq!(fs::read(&item).unwrap(), b"body");
+        assert_eq!(fs::read_dir(td.files()).unwrap().count(), 1, "{err}");
+        assert_eq!(fs::read_dir(td.info()).unwrap().count(), 1, "{err}");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -6325,6 +6703,182 @@ proc /proc proc rw 0 0
         assert!(kept.is_some(), "the colliding staging name was replaced");
         assert_eq!(fs::read(dest.join("a")).unwrap(), b"first");
         assert!(!src.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The first destination staging name is taken before `mkdir`. The
+    /// move uses another directory and leaves the taken one in place.
+    #[test]
+    fn a_destination_collision_is_left_in_place() {
+        let _seams = ClearSeams;
+        let root = move_root("dest-collide");
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        COLLIDE_DEST.with(|c| c.set(true));
+        let meta = fs::symlink_metadata(&src).unwrap();
+        move_by_copy(&src, &dest, &meta).unwrap();
+        let kept = fs::read_dir(&root).unwrap().flatten().find(|entry| {
+            fs::read(entry.path().join("marker")).ok().as_deref()
+                == Some(b"dest-collider".as_slice())
+        });
+        assert!(kept.is_some(), "the destination staging name was removed");
+        assert_eq!(fs::read(dest.join("a")).unwrap(), b"first");
+        assert!(!src.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Cleanup of a staging directory refuses a path whose inode is not
+    /// the one this move created.
+    #[test]
+    fn cleanup_leaves_a_directory_it_did_not_create() {
+        let root = std::env::temp_dir().join(format!("rtrash-notours-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let foreign = root.join("foreign");
+        fs::create_dir(&foreign).unwrap();
+        fs::write(foreign.join("marker"), b"keep").unwrap();
+        let claimed = OwnedDir {
+            path: foreign.clone(),
+            fd: None,
+            dev: 0,
+            ino: 0,
+        };
+        take_back_owned(&claimed).unwrap();
+        assert_eq!(fs::read(foreign.join("marker")).unwrap(), b"keep");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A directory swapped in after `mkdir` and before the first stat is
+    /// not adopted, and a later cleanup does not delete its marker.
+    #[test]
+    fn a_directory_swapped_in_after_mkdir_is_not_removed() {
+        let _seams = ClearSeams;
+        let root = std::env::temp_dir().join(format!("rtrash-swap-mkdir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("stage");
+        SWAP_AFTER_MKDIR.with(|c| c.set(true));
+        let owned = mkdir_owned(&path);
+        if let Ok(owned) = owned {
+            let _ = take_back_owned(&owned);
+        }
+        assert_eq!(fs::read(path.join("marker")).unwrap(), b"foreign");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A directory swapped in after the ownership check and before the
+    /// removal is quarantined, found not to be ours, and put back.
+    #[test]
+    fn a_directory_swapped_in_before_cleanup_is_not_removed() {
+        let _seams = ClearSeams;
+        let root = std::env::temp_dir().join(format!("rtrash-swap-rm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("stage");
+        let owned = mkdir_owned(&path).unwrap();
+        fs::write(path.join("copy"), b"ours").unwrap();
+        SWAP_BEFORE_REMOVE.with(|c| c.set(true));
+        take_back_owned(&owned).unwrap();
+        assert_eq!(fs::read(path.join("marker")).unwrap(), b"foreign");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The empty-directory removal takes the same quarantine check.
+    #[test]
+    fn a_directory_swapped_in_before_drop_is_not_removed() {
+        let _seams = ClearSeams;
+        let root = std::env::temp_dir().join(format!("rtrash-swap-drop-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("stage");
+        let owned = mkdir_owned(&path).unwrap();
+        SWAP_EMPTY.with(|c| c.set(true));
+        SWAP_BEFORE_REMOVE.with(|c| c.set(true));
+        drop_empty_stage(&owned);
+        assert!(
+            path.is_dir(),
+            "the empty directory swapped in before removal was deleted"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A same-directory relocate does not replace a path that is already there.
+    #[test]
+    fn relocate_does_not_replace_an_existing_path() {
+        let root = std::env::temp_dir().join(format!("rtrash-reloc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        fs::write(&src, b"new").unwrap();
+        fs::write(&dest, b"keep").unwrap();
+        let err = relocate(&src, &dest).unwrap_err();
+        assert!(replace_refused(&err), "{err}");
+        assert_eq!(fs::read(&dest).unwrap(), b"keep");
+        assert_eq!(fs::read(&src).unwrap(), b"new");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The published copy and the changed source are both reported, and
+    /// the changed source is put back at the name the caller still has.
+    #[test]
+    fn a_changed_source_is_put_back_at_its_old_name() {
+        let _seams = ClearSeams;
+        let root = std::env::temp_dir().join(format!("rtrash-salvage-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        fs::write(&src, b"before").unwrap();
+        let file = fs::OpenOptions::new().write(true).open(&src).unwrap();
+        HELD_FD.with(|c| c.set(file.as_raw_fd()));
+        MUTATE_HELD.with(|c| c.set(true));
+        let meta = fs::symlink_metadata(&src).unwrap();
+        let err = move_by_copy(&src, &dest, &meta).unwrap_err();
+        HELD_FD.with(|c| c.set(-1));
+        drop(file);
+        assert!(source_changed(&err).is_some(), "{err}");
+        assert!(!src.exists(), "{err}");
+        let note = salvage(&src, &err);
+        assert_eq!(fs::read(&src).unwrap(), b"before\nheld-write", "{note}");
+        assert_eq!(fs::read(&dest).unwrap(), b"before", "{note}");
+        assert!(note.contains("published copy"), "{note}");
+        assert!(err.to_string().contains("best-effort"), "{err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(target_os = "linux")]
+    extern "C" fn sigio_kept(_: libc::c_int) {}
+
+    /// A cross-device-style copy must not install a process-wide `SIGIO`
+    /// handler. The fstat recheck does not need one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_move_does_not_replace_the_sigio_handler() {
+        struct Guard(libc::sigaction);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::sigaction(libc::SIGIO, &self.0, std::ptr::null_mut());
+                }
+            }
+        }
+        let root = move_root("sigio");
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        let meta = fs::symlink_metadata(&src).unwrap();
+        unsafe {
+            let mut installed: libc::sigaction = std::mem::zeroed();
+            installed.sa_sigaction = sigio_kept as *const () as libc::sighandler_t;
+            installed.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut installed.sa_mask);
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            assert_eq!(libc::sigaction(libc::SIGIO, &installed, &mut previous), 0);
+            let _guard = Guard(previous);
+            move_by_copy(&src, &dest, &meta).unwrap();
+            let mut now: libc::sigaction = std::mem::zeroed();
+            assert_eq!(libc::sigaction(libc::SIGIO, &installed, &mut now), 0);
+            assert_eq!(
+                now.sa_sigaction as usize, sigio_kept as *const () as usize,
+                "SIGIO was replaced"
+            );
+        }
         let _ = fs::remove_dir_all(&root);
     }
 
