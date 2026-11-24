@@ -11427,6 +11427,9 @@ fn put_warns_when_the_trash_file_system_is_low() {
 #[cfg(all(unix, debug_assertions))]
 #[test]
 fn put_space_hint_keeps_flagged_git_work() {
+    if !common::have_git() {
+        return;
+    }
     let git = |repo: &Path, home: &Path, args: &[&str]| {
         Command::new("git")
             .args(args)
@@ -11508,6 +11511,9 @@ fn put_space_hint_keeps_flagged_git_work() {
 #[cfg(all(unix, debug_assertions))]
 #[test]
 fn put_space_hint_names_dirty_work_that_is_also_unpushed() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-both");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11617,6 +11623,9 @@ fn configure_test_fsmonitor(repo: &Path, home: &Path) -> PathBuf {
 /// probes that inspect work before and after a put must not run it.
 #[test]
 fn put_does_not_run_a_repository_fsmonitor() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-fsmonitor");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11645,6 +11654,9 @@ fn put_does_not_run_a_repository_fsmonitor() {
 /// repository's file-system monitor.
 #[test]
 fn rm_does_not_run_a_trashed_repository_fsmonitor() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("rm-git-fsmonitor");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11678,6 +11690,9 @@ fn rm_does_not_run_a_trashed_repository_fsmonitor() {
 #[cfg(debug_assertions)]
 #[test]
 fn put_space_hint_does_not_run_a_trashed_repository_fsmonitor() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("space-git-fsmonitor");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11720,6 +11735,9 @@ fn put_space_hint_does_not_run_a_trashed_repository_fsmonitor() {
 /// hashes a tracked file. A put's work probe must disable that command too.
 #[test]
 fn put_does_not_run_a_repository_filter_process() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-filter");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11770,6 +11788,9 @@ fn put_does_not_run_a_repository_filter_process() {
 /// probe run its configured signature verifier.
 #[test]
 fn put_does_not_run_a_repository_signature_verifier() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-signature");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11846,6 +11867,9 @@ signed\n"
 /// contains `=`; `-c key=` would split it at the wrong byte.
 #[test]
 fn put_does_not_run_a_filter_whose_subsection_contains_equals() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-filter-equals");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11894,6 +11918,9 @@ fn put_does_not_run_a_filter_whose_subsection_contains_equals() {
 /// while status still reads and runs them.
 #[test]
 fn put_clears_git_config_before_scanning_repository_programs() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-config-env");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11943,6 +11970,9 @@ fn put_clears_git_config_before_scanning_repository_programs() {
 /// and does not promise to bring it back.
 #[test]
 fn a_dry_run_does_not_promise_undo_before_the_move() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-dry");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11986,6 +12016,9 @@ fn a_dry_run_does_not_promise_undo_before_the_move() {
 #[cfg(unix)]
 #[test]
 fn put_json_leaves_out_the_repository_note() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-repo-json");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -12041,6 +12074,9 @@ fn git_env<'a>(cmd: &'a mut Command, repo: &Path, home: &Path) -> &'a mut Comman
 #[cfg(all(unix, debug_assertions))]
 #[test]
 fn put_of_a_parent_keeps_a_nested_dirty_repository() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-nested");
     let repo = sb.work().join("parent").join("child");
     fs::create_dir_all(&repo).unwrap();
@@ -12077,6 +12113,9 @@ fn put_of_a_parent_keeps_a_nested_dirty_repository() {
 #[cfg(all(unix, debug_assertions))]
 #[test]
 fn a_partial_git_probe_stays_unknown() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-shim");
     let shim = sb.root.join("shim");
     fs::create_dir(&shim).unwrap();
@@ -12138,6 +12177,9 @@ fn a_partial_git_probe_stays_unknown() {
 #[cfg(all(unix, debug_assertions))]
 #[test]
 fn a_later_status_and_put_keep_a_trashed_repository() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-later");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -12188,6 +12230,9 @@ fn a_later_status_and_put_keep_a_trashed_repository() {
 #[cfg(unix)]
 #[test]
 fn rm_refuses_a_repository_that_still_holds_risky_work() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("rm-git-keep");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -12221,6 +12266,9 @@ fn rm_refuses_a_repository_that_still_holds_risky_work() {
 #[cfg(unix)]
 #[test]
 fn rm_removes_a_dangling_record_without_a_git_work_refusal() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("rm-git-dangling");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -12256,6 +12304,9 @@ fn rm_removes_a_dangling_record_without_a_git_work_refusal() {
 #[cfg(all(unix, debug_assertions))]
 #[test]
 fn work_created_after_the_probe_is_still_flagged() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-seam");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -12609,6 +12660,9 @@ fn a_retargeted_parent_does_not_change_what_put_moves() {
 #[cfg(unix)]
 #[test]
 fn a_wsl_put_of_a_risky_repo_names_wsl_restore() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("wsl-git");
     let bin_dir = sb.root.join("bin");
     fs::create_dir(&bin_dir).unwrap();

@@ -1938,6 +1938,9 @@ fn finder_rm_keeps_an_item_that_took_the_name_while_it_asked() {
 /// whichever of the two checks (the git scan or the identity) meets it first.
 #[test]
 fn finder_rm_keeps_a_repository_that_took_the_name_while_it_asked() {
+    if !common::have_git() {
+        return;
+    }
     let b = Box_::new("rm-retaken-git");
     fs::write(b.work().join("rr"), b"plain").unwrap();
     let o = b.run(&["put", "rr"], "");
@@ -1981,6 +1984,9 @@ fn finder_rm_keeps_a_repository_that_took_the_name_while_it_asked() {
 /// immediately follows it.
 #[test]
 fn finder_rm_rechecks_identity_after_the_git_scan() {
+    if !common::have_git() {
+        return;
+    }
     let b = Box_::new("rm-recheck-after-git");
     let repo = b.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -2010,6 +2016,9 @@ fn finder_rm_rechecks_identity_after_the_git_scan() {
 /// FreeDesktop trash does, in a dry run too; `-f` removes it.
 #[test]
 fn finder_rm_refuses_a_repository_that_holds_risky_work() {
+    if !common::have_git() {
+        return;
+    }
     let b = Box_::new("rm-git");
     let repo = b.work().join("fr-repo");
     fs::create_dir(&repo).unwrap();
@@ -2076,6 +2085,9 @@ fn a_finder_id_hashes_the_composed_name() {
 /// not only the work of this put, and does not point at removing it.
 #[test]
 fn a_low_space_finder_put_names_risky_work_already_in_the_trash() {
+    if !common::have_git() {
+        return;
+    }
     let b = Box_::new("low-old-risk");
     let repo = b.work().join("old-repo");
     fs::create_dir(&repo).unwrap();
@@ -2122,6 +2134,9 @@ fn a_low_space_finder_put_names_risky_work_already_in_the_trash() {
 /// names each repository, and does not promise `undo`.
 #[test]
 fn an_unwritable_undo_log_still_names_the_git_work_it_moved() {
+    if !common::have_git() {
+        return;
+    }
     let b = Box_::new("log-fail-risk");
     let repo = b.work().join("old-repo");
     fs::create_dir(&repo).unwrap();
