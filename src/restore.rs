@@ -1373,6 +1373,9 @@ pub(crate) fn restore_one_to(
         warnings.push(warning);
         crate::trash_total::forget(&entry.dir);
         crate::trash_total::touched(&entry.dir);
+        // The record keeps its mtime, so the size of the whole folder
+        // would still pass for the remainder's.
+        trashdir::directorysizes_remove(&entry.dir, &entry.name);
     } else {
         // Under the lock, so a put cannot add to the total in between.
         let total = crate::trash_total::cached(&entry.dir);
@@ -1612,6 +1615,79 @@ mod tests {
         assert!(warning.contains("trash record was kept"), "{warning}");
         assert!(
             warning.contains(&private.display().to_string()),
+            "{warning}"
+        );
+        let _ = fs::remove_dir_all(&trash.root);
+        let _ = fs::remove_dir_all(&out);
+    }
+
+    /// The `directorysizes` line of the whole folder does not stay valid
+    /// for the smaller remainder a partial cross-device restore put back.
+    #[test]
+    fn a_partial_cross_device_restore_drops_the_stale_directory_size() {
+        use std::os::unix::fs::MetadataExt;
+        let stuck = std::ffi::OsStr::new("stuck-restore-size");
+        let shm = Path::new("/dev/shm");
+        let tmp = std::env::temp_dir();
+        let same = fs::metadata(&tmp)
+            .ok()
+            .zip(fs::metadata(shm).ok())
+            .is_none_or(|(a, b)| a.dev() == b.dev());
+        if same {
+            eprintln!("no second file system here; skipping");
+            return;
+        }
+        let pid = std::process::id();
+        let trash = TrashDir {
+            root: shm.join(format!("rtrash-restore-size-{pid}")),
+            topdir: None,
+        };
+        let _ = fs::remove_dir_all(&trash.root);
+        trash.ensure().unwrap();
+        let out = tmp.join(format!("rtrash-restore-size-out-{pid}"));
+        let _ = fs::remove_dir_all(&out);
+        fs::create_dir_all(&out).unwrap();
+        let dest = out.join("item");
+        let payload = trash.files().join("item");
+        fs::create_dir_all(payload.join("sub")).unwrap();
+        fs::write(payload.join("keep"), vec![7u8; 64 * 1024]).unwrap();
+        fs::write(payload.join("sub").join(stuck), b"stuck").unwrap();
+        let info = trash.info().join("item.trashinfo");
+        fs::write(
+            &info,
+            format!(
+                "[Trash Info]\nPath={}\nDeletionDate=2026-01-02T03:04:05\n",
+                dest.display()
+            ),
+        )
+        .unwrap();
+        let whole = crate::fastdelete::disk_usage(&payload);
+        let mtime = fs::metadata(&info).unwrap().mtime();
+        trashdir::directorysizes_upsert(&trash, "item", whole, mtime).unwrap();
+        assert_eq!(trashdir::DirSizes::load(&trash).cached("item"), Some(whole));
+        let seen = list::collect(std::slice::from_ref(&trash));
+        assert_eq!(seen.len(), 1);
+        struct Clear(&'static std::ffi::OsStr);
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                crate::fastdelete::accept_in_tests(self.0);
+            }
+        }
+        let _clear = Clear(stuck);
+        crate::fastdelete::refuse_in_tests(stuck);
+        let restored = restore_one_to(&seen[0], &dest, false).unwrap();
+        let warning = restored.warnings.join("\n");
+        assert!(info.is_file(), "{warning}");
+        assert!(warning.contains("put back"), "{warning}");
+        assert!(!payload.join("keep").exists(), "{warning}");
+        assert_eq!(
+            trashdir::DirSizes::load(&trash).cached("item"),
+            None,
+            "{warning}"
+        );
+        assert_eq!(
+            trashdir::DirSizes::load(&trash).payload_bytes("item"),
+            crate::fastdelete::disk_usage(&payload),
             "{warning}"
         );
         let _ = fs::remove_dir_all(&trash.root);
