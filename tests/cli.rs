@@ -8433,28 +8433,139 @@ fn put_warns_about_an_open_file_and_refuses_it_on_request() {
     assert!(stderr_of(&out).contains("warning: 'held.log' is in use by pid"));
     assert!(!held.exists());
     // Without root some processes cannot be inspected, and refuse then
-    // leaves even a file nobody holds, unless every process was seen. Two
-    // scans of /proc can differ: a process of another test that is in the
-    // middle of an exec reads as denied for a moment. So `who` and the put
-    // are tried again until they agree, and fail only if they never do.
-    let mut last = String::new();
-    for _ in 0..20 {
+    // leaves even a file nobody holds, unless every process was seen. Each
+    // pair is a `who` before the put and a `who` after it. Other tests
+    // start and end processes beside this one, so a pair is tried again
+    // only when the count of processes that could not be inspected is seen
+    // to change, in the two `who` runs or in the put's own message. A pair
+    // whose count held must agree, and any mismatch there fails the test.
+    let mut changed = Vec::new();
+    for _ in 0..IN_USE_PAIRS {
         sb.touch("idle.log");
-        let who = stdout_of(&sb.run(&["who", "--json", "idle.log"]));
-        let seen_all = who.contains("\"unreadable\":0}");
+        let before = who_unreadable(&stdout_of(&sb.run(&["who", "--json", "idle.log"])));
         let out = sb.run(&["put", &pin, "--in-use=refuse", "idle.log"]);
+        let after = who_unreadable(&stdout_of(&sb.run(&["who", "--json", "idle.log"])));
         let said = stderr_of(&out);
-        let agreed = if seen_all {
-            out.status.success() && said.is_empty()
-        } else {
-            out.status.code() == Some(1) && said.contains("could not be inspected")
-        };
-        if agreed {
-            return;
+        match judge_in_use_pair(before, after, out.status.code(), &said) {
+            InUsePair::Agreed => return,
+            InUsePair::Changed => changed.push(format!(
+                "before {before}, after {after}, put {:?}: {said}",
+                out.status.code()
+            )),
+            InUsePair::Mismatch(why) => panic!(
+                "the unreadable count held at {before} and put disagreed: {why}\n\
+                 put exit {:?}, stderr: {said}",
+                out.status.code()
+            ),
         }
-        last = format!("who: {who}\nexit: {:?}\nstderr: {said}", out.status.code());
     }
-    panic!("who and put never agreed in 20 tries; the last was\n{last}");
+    panic!(
+        "no pair of {IN_USE_PAIRS} had a steady unreadable count; the counts were\n{}",
+        changed.join("\n")
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const IN_USE_PAIRS: usize = 50;
+
+/// What one `who`, put, `who` triple showed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, PartialEq)]
+enum InUsePair {
+    /// The unreadable count held and put did what that count asks.
+    Agreed,
+    /// The unreadable count moved, so the pair says nothing.
+    Changed,
+    /// The unreadable count held and put did something else.
+    Mismatch(String),
+}
+
+/// The `unreadable` field of a `who --json` run.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn who_unreadable(json: &str) -> usize {
+    let tail = json
+        .split("\"unreadable\":")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no unreadable count in {json}"));
+    let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("no unreadable count in {json}"))
+}
+
+/// The count put names when it says "N processes could not be inspected".
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn put_unreadable(said: &str) -> Option<usize> {
+    let head = said.split("could not be inspected").next()?;
+    let mut words = head.split_whitespace().rev();
+    words.next()?;
+    words.next()?.parse().ok()
+}
+
+/// Judges one pair. `before` and `after` are the counts of the `who` runs
+/// around a `put --in-use=refuse` of a file nobody holds, whose exit code
+/// and stderr are `code` and `said`. With no unreadable process the put
+/// must succeed without a word, and with some it must refuse for them. A
+/// put that names another count than the `who` runs saw a count that moved.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn judge_in_use_pair(before: usize, after: usize, code: Option<i32>, said: &str) -> InUsePair {
+    if before != after {
+        return InUsePair::Changed;
+    }
+    if let Some(named) = put_unreadable(said) {
+        if named != before {
+            return InUsePair::Changed;
+        }
+    }
+    let agreed = if before == 0 {
+        code == Some(0) && said.is_empty()
+    } else {
+        code == Some(1) && put_unreadable(said) == Some(before)
+    };
+    if agreed {
+        InUsePair::Agreed
+    } else {
+        InUsePair::Mismatch(format!(
+            "with {before} unreadable processes put exited {code:?}"
+        ))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn an_in_use_pair_is_judged_only_when_the_unreadable_count_held() {
+    use InUsePair::{Agreed, Changed, Mismatch};
+    let refused = concat!(
+        "rtrash: cannot trash 'idle.log': it may be in use; ",
+        "4 processes could not be inspected\n",
+        "rtrash: use -f or --in-use=warn to trash it anyway\n"
+    );
+    let one =
+        "rtrash: cannot trash 'idle.log': it may be in use; 1 process could not be inspected\n";
+    assert_eq!(judge_in_use_pair(4, 4, Some(1), refused), Agreed);
+    assert_eq!(judge_in_use_pair(0, 0, Some(0), ""), Agreed);
+    assert_eq!(judge_in_use_pair(1, 1, Some(1), one), Agreed);
+    // The count moved between the runs, or the put saw another one.
+    assert_eq!(judge_in_use_pair(0, 1, Some(0), ""), Changed);
+    assert_eq!(judge_in_use_pair(4, 0, Some(1), refused), Changed);
+    assert_eq!(judge_in_use_pair(0, 0, Some(1), one), Changed);
+    assert_eq!(judge_in_use_pair(4, 4, Some(1), one), Changed);
+    // The count held and put did the other thing.
+    assert!(matches!(judge_in_use_pair(4, 4, Some(0), ""), Mismatch(_)));
+    assert!(matches!(
+        judge_in_use_pair(0, 0, Some(1), "rtrash: no\n"),
+        Mismatch(_)
+    ));
+    assert!(matches!(
+        judge_in_use_pair(0, 0, Some(0), "warning\n"),
+        Mismatch(_)
+    ));
+    assert!(matches!(
+        judge_in_use_pair(4, 4, Some(1), "rtrash: no\n"),
+        Mismatch(_)
+    ));
+    assert_eq!(who_unreadable("{\"holders\":[],\"unreadable\":4}"), 4);
+    assert_eq!(who_unreadable("{\"unreadable\":0}"), 0);
 }
 
 /// A stand-in `/proc` for the debug seam `RTRASH_TEST_PROC`: each of
