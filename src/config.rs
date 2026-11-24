@@ -299,6 +299,63 @@ impl Config {
     }
 }
 
+/// `[list] sort` values the CLI accepts across platforms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListSort {
+    Oldest,
+    Newest,
+    Size,
+    Name,
+    Path,
+}
+
+impl ListSort {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "date" | "time" | "oldest" => ListSort::Oldest,
+            "newest" => ListSort::Newest,
+            "size" => ListSort::Size,
+            "name" => ListSort::Name,
+            "path" => ListSort::Path,
+            _ => return None,
+        })
+    }
+}
+
+/// Defaults for `list` from the config file.
+pub struct ListDefaults {
+    pub with_size: bool,
+    pub sort: ListSort,
+    pub reverse: bool,
+}
+
+/// Read `[list]` defaults from `cfg`.
+///
+/// `list.sort` takes `oldest`, `newest`, `size`, `name` or `path`
+/// (`date`/`time` alias `oldest`). Invalid values are ignored with a warning.
+pub fn list_defaults(prog: &str, cfg: &Config) -> ListDefaults {
+    let with_size = cfg.bool("list", "size").unwrap_or(false);
+    let sort = match cfg.str("list", "sort") {
+        Some(s) => match ListSort::parse(s) {
+            Some(k) => k,
+            None => {
+                eprintln!(
+                    "{prog}: warning: {}",
+                    cfg.bad_value("list", "sort", "oldest, newest, size, name or path")
+                );
+                ListSort::Oldest
+            }
+        },
+        None => ListSort::Oldest,
+    };
+    let reverse = cfg.bool("list", "reverse").unwrap_or(false);
+    ListDefaults {
+        with_size,
+        sort,
+        reverse,
+    }
+}
+
 fn kind_of(v: &Value) -> Kind {
     match v {
         Value::Str(_) => Kind::Str,

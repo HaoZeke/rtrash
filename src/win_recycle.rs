@@ -2734,10 +2734,18 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut directory: Option<PathBuf> = None;
         let mut last: Option<usize> = None;
         let mut depth = 0usize;
-        let mut sort = ListSort::Oldest;
-        let mut reverse = false;
+        let cfg = crate::config::get();
+        let defaults = crate::config::list_defaults(prog, cfg);
+        let mut sort = match defaults.sort {
+            crate::config::ListSort::Oldest => ListSort::Oldest,
+            crate::config::ListSort::Newest => ListSort::Newest,
+            crate::config::ListSort::Size => ListSort::Size,
+            crate::config::ListSort::Name => ListSort::Name,
+            crate::config::ListSort::Path => ListSort::Path,
+        };
+        let mut reverse = defaults.reverse;
         let mut bad: Option<String> = None;
-        let mut with_size = false;
+        let mut with_size = defaults.with_size || matches!(sort, ListSort::Size);
         let mut show_trash = false;
         let mut format: Option<Vec<crate::listfmt::FmtPart>> = None;
         let filters = parse_with_filters(prog, args, |arg| match arg {

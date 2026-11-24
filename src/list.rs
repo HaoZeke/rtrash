@@ -653,23 +653,21 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     let mut newer_than: Option<i64> = None;
     // Defaults from the config file; options override them.
     let cfg = crate::config::get();
-    let mut with_size = cfg.bool("list", "size").unwrap_or(false);
+    let defaults = crate::config::list_defaults(prog, cfg);
+    let mut with_size = defaults.with_size;
     let mut show_trash = false;
     // trash-cli's trash-list shapes: --size (bytes in place of the date)
     // and its hidden --files (` -> FILE`, the payload in the trash).
     let mut size_flag = false;
     let mut show_files = false;
-    let mut sort = SortKey::Oldest;
-    if let Some(s) = cfg.str("list", "sort") {
-        match SortKey::parse(s) {
-            Some(k) => sort = k,
-            None => eprintln!(
-                "{prog}: warning: {}",
-                cfg.bad_value("list", "sort", "oldest, newest, size, name or path")
-            ),
-        }
-    }
-    let mut reverse = cfg.bool("list", "reverse").unwrap_or(false);
+    let mut sort = match defaults.sort {
+        crate::config::ListSort::Oldest => SortKey::Oldest,
+        crate::config::ListSort::Newest => SortKey::Newest,
+        crate::config::ListSort::Size => SortKey::Size,
+        crate::config::ListSort::Name => SortKey::Name,
+        crate::config::ListSort::Path => SortKey::Path,
+    };
+    let mut reverse = defaults.reverse;
     let mut size_filter = SizeFilter::default();
     let mut matcher: Option<crate::restore::Matcher> = None;
     let mut cwd_only = false;
@@ -1279,13 +1277,12 @@ pub enum SortKey {
 
 impl SortKey {
     pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "date" | "time" | "oldest" => SortKey::Oldest,
-            "newest" => SortKey::Newest,
-            "size" => SortKey::Size,
-            "name" => SortKey::Name,
-            "path" => SortKey::Path,
-            _ => return None,
+        Some(match crate::config::ListSort::parse(s)? {
+            crate::config::ListSort::Oldest => SortKey::Oldest,
+            crate::config::ListSort::Newest => SortKey::Newest,
+            crate::config::ListSort::Size => SortKey::Size,
+            crate::config::ListSort::Name => SortKey::Name,
+            crate::config::ListSort::Path => SortKey::Path,
         })
     }
 }
@@ -1600,6 +1597,25 @@ mod tests {
         assert_eq!(sorted_order(&es, None, SortKey::Path, true), [2, 0, 1]);
         let s = entry_to_json_sized(&es[0], Some(42));
         assert!(s.ends_with(",\"size\":42}"), "{s}");
+    }
+
+    #[test]
+    fn config_defaults_take_list_sort_reverse_and_size() {
+        let cfg = crate::config::Config::parse(
+            "[list]\nsort = 'newest'\nreverse = true\nsize = true\n",
+            None,
+        );
+        let d = crate::config::list_defaults("rtrash", &cfg);
+        assert!(d.with_size);
+        assert_eq!(d.sort, crate::config::ListSort::Newest);
+        assert!(d.reverse);
+    }
+
+    #[test]
+    fn config_defaults_keep_oldest_on_bad_sort() {
+        let cfg = crate::config::Config::parse("[list]\nsort = 'nope'\n", None);
+        let d = crate::config::list_defaults("rtrash", &cfg);
+        assert_eq!(d.sort, crate::config::ListSort::Oldest);
     }
 
     #[test]
