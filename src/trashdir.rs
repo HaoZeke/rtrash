@@ -1801,7 +1801,8 @@ fn publish_symlink(src: &Path, dest: &Path) -> io::Result<()> {
 /// name still removes the new one, or keeps the record if that removal
 /// fails, so a payload is never left without a record. When neither name
 /// can be removed, the error is [`PublishedKept`] and it says that the
-/// source is an extra hard link of the published file.
+/// source is an extra hard link of the published file, or for a symbolic
+/// link a second link to the same target.
 fn finish_link_move(
     src: &Path,
     dest: &Path,
@@ -1817,13 +1818,20 @@ fn finish_link_move(
     };
     if same {
         if let Err(e) = unlink_link_name(src) {
+            let kept = match target.as_deref() {
+                Some(to) => format!(
+                    "is a second symbolic link to '{}', like the published one",
+                    crate::util::err_path(to)
+                ),
+                None => "is an extra hard link of the published file".to_string(),
+            };
             return match unlink_if_same(dest, dest_id) {
                 Ok(()) => Err(e),
                 Err(undo) => Err(published_kept(
                     dest,
                     format!(
                         "unlinking '{}' failed ({e}) and removing the new link failed ({undo}); \
-                         '{}' is an extra hard link of the published file",
+                         '{}' {kept}",
                         crate::util::err_path(src),
                         crate::util::err_path(src),
                     ),
@@ -7191,6 +7199,32 @@ proc /proc proc rw 0 0
         assert_eq!(fs::read(&item).unwrap(), b"body");
         assert_eq!(fs::read_dir(td.files()).unwrap().count(), 1, "{err}");
         assert_eq!(fs::read_dir(td.info()).unwrap().count(), 1, "{err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The same for a symbolic link: the source that stays is a second
+    /// link to the same target, not a hard link of the published one.
+    #[test]
+    fn a_symlink_that_cannot_be_rolled_back_says_it_is_a_second_link() {
+        let _seams = ClearSeams;
+        let (root, td) = put_trash("norollback-link");
+        FORCE_EXCLUSIVE.with(|c| c.set(libc::ENOSYS));
+        UNLINK_FAILS.with(|c| c.set(2));
+        let item = root.join("link");
+        std::os::unix::fs::symlink("elsewhere", &item).unwrap();
+        let meta = fs::symlink_metadata(&item).unwrap();
+        let err = trash_move_locked(&item, &meta, &td, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(as_published(&err).is_some(), "{msg}");
+        assert!(msg.contains("trash record was kept"), "{msg}");
+        assert!(!msg.contains("hard link"), "{msg}");
+        assert!(
+            msg.contains("is a second symbolic link to 'elsewhere'"),
+            "{msg}"
+        );
+        assert_eq!(fs::read_link(&item).unwrap(), Path::new("elsewhere"));
+        assert_eq!(fs::read_dir(td.files()).unwrap().count(), 1, "{msg}");
+        assert_eq!(fs::read_dir(td.info()).unwrap().count(), 1, "{msg}");
         let _ = fs::remove_dir_all(&root);
     }
 
