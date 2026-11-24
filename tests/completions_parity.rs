@@ -260,6 +260,27 @@ fn man_page_documents_every_help_option() {
     );
 }
 
+/// /bin/bash when present, which on macOS is bash 3.2, else `bash`.
+#[cfg(unix)]
+fn bash_shell() -> &'static str {
+    if Path::new("/bin/bash").exists() {
+        "/bin/bash"
+    } else {
+        "bash"
+    }
+}
+
+/// Whether that bash has the `compgen` builtin. A bash built without
+/// readline, such as the plain `bash` of the Nix build sandbox, has none,
+/// and the completion function then offers nothing.
+#[cfg(unix)]
+fn bash_can_complete() -> bool {
+    Command::new(bash_shell())
+        .args(["--norc", "--noprofile", "-c", "compgen -W 'a b' -- a"])
+        .output()
+        .is_ok_and(|o| o.status.success() && o.stdout == b"a\n")
+}
+
 /// Run the bash completion function on `words` (the last one is the word
 /// being completed) and return what it offers. Uses /bin/bash when present,
 /// which on macOS is bash 3.2.
@@ -276,12 +297,7 @@ fn bash_complete(words: &[&str]) -> Vec<String> {
         quoted.join(" "),
         words.len() - 1
     );
-    let shell = if Path::new("/bin/bash").exists() {
-        "/bin/bash"
-    } else {
-        "bash"
-    };
-    let out = Command::new(shell)
+    let out = Command::new(bash_shell())
         .args(["--norc", "--noprofile", "-c", &prog])
         .current_dir(std::env::temp_dir())
         .output()
@@ -300,6 +316,10 @@ fn bash_complete(words: &[&str]) -> Vec<String> {
 #[cfg(unix)]
 #[test]
 fn bash_completion_offers_the_right_words() {
+    if !bash_can_complete() {
+        common::skip("bash has no compgen builtin; skipping");
+        return;
+    }
     assert_eq!(
         bash_complete(&["rtrash", "completions", ""]),
         ["bash", "zsh", "fish", "nu", "powershell", "elvish"]
