@@ -3113,12 +3113,21 @@ fn mkdir_owned(path: &Path) -> io::Result<OwnedDir> {
         return Err(io::Error::last_os_error());
     }
     let secret = identity_secret();
-    // Plant the marker through the directory `mkdirat` just created, then
-    // allow a swap, then open the name again. The directory we keep has to
-    // be the one that holds the marker. An empty directory exchanged onto
-    // the name does not, and it is not deleted.
+    // `mkdirat` does not return a descriptor, so the open is a second call.
+    // An empty directory swapped onto the name in between has no entries and
+    // cannot be told from the directory just created. Writing the marker
+    // there does not remove a file that was already inside it, and a later
+    // cleanup may remove that empty directory. A directory that already has
+    // an entry is not ours: leave it, and do not write the marker into it.
+    seam_before_open(path);
     {
         let planted = openat_dir(parent.as_raw_fd(), &name_c)?;
+        if !read_names(planted.as_raw_fd())?.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the staging directory was not empty when it was opened",
+            ));
+        }
         write_id_marker(planted.as_raw_fd(), &secret)?;
     }
     seam_after_mkdir(path);
@@ -3202,6 +3211,16 @@ fn id_marker_on_fd(dirfd: RawFd, secret: &[u8]) -> bool {
         Ok(_) => got == secret,
         Err(_) => false,
     }
+}
+
+fn seam_before_open(path: &Path) {
+    #[cfg(test)]
+    if SWAP_BEFORE_OPEN.with(|c| c.replace(false)) {
+        let marker = !SWAP_EMPTY.with(|c| c.replace(false));
+        swap_in_foreign(path, marker);
+    }
+    #[cfg(not(test))]
+    let _ = path;
 }
 
 fn seam_after_mkdir(path: &Path) {
@@ -3400,6 +3419,9 @@ fn retire_owned(dir: &OwnedDir) -> io::Result<()> {
     }
     if let Err(e) = clear_dir_fd(fd.as_raw_fd()) {
         restore_matching(&q, dir, dev, ino);
+        // `q` is back at `dir.path` when the rename worked, and the holder
+        // is empty. A holder that still contains `q` is left in place.
+        drop_holder(&q);
         return Err(e);
     }
     if !quarantine_matches(&q, dev, ino) {
@@ -3407,6 +3429,7 @@ fn retire_owned(dir: &OwnedDir) -> io::Result<()> {
     }
     if let Err(e) = unlink_at_name(q.parent.as_raw_fd(), &q.name, true) {
         restore_matching(&q, dir, dev, ino);
+        drop_holder(&q);
         return Err(e);
     }
     drop_holder(&q);
@@ -3468,6 +3491,7 @@ fn claim_for_delete(dir: &OwnedDir, dev: u64, ino: u64) -> io::Result<Option<Qua
     let holder_path = next_private(parent_dir(&dir.path), "qdir");
     if let Ok(holder) = mkdir_owned(&holder_path) {
         let qpath = holder.path.join("q");
+        seam_vanish_claimed(&dir.path);
         match rename_exclusive_os(&dir.path, &qpath) {
             Ok(()) => {
                 if path_id(&qpath) == Some((dev, ino)) {
@@ -3480,7 +3504,16 @@ fn claim_for_delete(dir: &OwnedDir, dev: u64, ino: u64) -> io::Result<Option<Qua
             Err(e) if exclusive_unavailable(&e) => {
                 let _ = unlink_empty_owned(&holder);
             }
-            Err(e) => return Err(e),
+            // The name went away after the check above. The holder is still
+            // empty. Remove it and report that there is nothing to delete.
+            Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
+                let _ = unlink_empty_owned(&holder);
+                return Ok(None);
+            }
+            Err(e) => {
+                let _ = unlink_empty_owned(&holder);
+                return Err(e);
+            }
         }
     }
     let parent = dup_fd(parent)?;
@@ -3539,6 +3572,17 @@ fn unlink_empty_owned(dir: &OwnedDir) -> io::Result<()> {
         return Ok(());
     }
     unlink_at_name(parent.as_raw_fd(), name, true)
+}
+
+fn seam_vanish_claimed(path: &Path) {
+    #[cfg(test)]
+    if VANISH_CLAIMED.with(|c| c.replace(false)) {
+        if let (Some(name), Ok(parent)) = (path.file_name(), open_dir(parent_dir(path))) {
+            let _ = unlink_at_name(parent.as_raw_fd(), name, true);
+        }
+    }
+    #[cfg(not(test))]
+    let _ = path;
 }
 
 fn seam_before_quar_rmdir(path: &Path) {
@@ -4648,6 +4692,7 @@ thread_local! {
     static FAIL_CLEANUP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static COLLIDE_STAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static COLLIDE_DEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SWAP_BEFORE_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SWAP_AFTER_MKDIR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SWAP_BEFORE_REMOVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SWAP_BEFORE_QUAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -4659,6 +4704,7 @@ thread_local! {
     static REPLACE_LINK_SRC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static REPLACE_LINK_DEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static REUSE_LINK_SRC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static VANISH_CLAIMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static OCCUPY_ORIGINAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MUTATE_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static HELD_FD: std::cell::Cell<RawFd> = const { std::cell::Cell::new(-1) };
@@ -6835,6 +6881,7 @@ proc /proc proc rw 0 0
             FAIL_CLEANUP.with(|c| c.set(false));
             COLLIDE_STAGE.with(|c| c.set(false));
             COLLIDE_DEST.with(|c| c.set(false));
+            SWAP_BEFORE_OPEN.with(|c| c.set(false));
             SWAP_AFTER_MKDIR.with(|c| c.set(false));
             SWAP_BEFORE_REMOVE.with(|c| c.set(false));
             SWAP_BEFORE_QUAR.with(|c| c.set(false));
@@ -6845,6 +6892,7 @@ proc /proc proc rw 0 0
             REPLACE_LINK_SRC.with(|c| c.set(false));
             REPLACE_LINK_DEST.with(|c| c.set(false));
             REUSE_LINK_SRC.with(|c| c.set(false));
+            VANISH_CLAIMED.with(|c| c.set(false));
             OCCUPY_ORIGINAL.with(|c| c.set(false));
             MUTATE_HELD.with(|c| c.set(false));
             HELD_FD.with(|c| c.set(-1));
@@ -7229,6 +7277,59 @@ proc /proc proc rw 0 0
             path.is_dir(),
             "the empty directory swapped in after mkdir was deleted"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A non-empty directory swapped in between `mkdirat` and the first
+    /// open is not marked and not adopted, so cleanup does not delete the
+    /// file that was already in it.
+    #[test]
+    fn a_nonempty_directory_swapped_before_open_is_not_marked() {
+        let _seams = ClearSeams;
+        let root = std::env::temp_dir().join(format!("rtrash-swap-open-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("stage");
+        SWAP_BEFORE_OPEN.with(|c| c.set(true));
+        let owned = mkdir_owned(&path);
+        let adopted = owned.is_ok();
+        if let Ok(owned) = owned {
+            let _ = take_back_owned(&owned);
+        }
+        assert!(
+            !adopted,
+            "a non-empty directory swapped before open was adopted"
+        );
+        assert_eq!(fs::read(path.join("marker")).unwrap(), b"foreign");
+        assert!(
+            path.join(ID_MARKER).symlink_metadata().is_err(),
+            "the foreign directory was marked"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The directory disappeared after it was checked and before it was
+    /// quarantined. The empty holder is removed and the caller is told
+    /// there was nothing to delete.
+    #[test]
+    fn a_vanished_directory_does_not_leave_its_quarantine_holder() {
+        let _seams = ClearSeams;
+        let root = std::env::temp_dir().join(format!("rtrash-vanish-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("stage");
+        let owned = mkdir_owned(&path).unwrap();
+        VANISH_CLAIMED.with(|c| c.set(true));
+        let result = take_back_owned(&owned);
+        let leaked = fs::read_dir(&root).unwrap().flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rtrash-qdir-")
+        });
+        assert!(!leaked, "the quarantine holder was left behind");
+        result.unwrap();
+        assert!(path.symlink_metadata().is_err());
         let _ = fs::remove_dir_all(&root);
     }
 
