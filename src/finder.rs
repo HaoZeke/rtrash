@@ -430,7 +430,7 @@ fn move_back_inner(src: &Path, dest: &Path, force: bool) -> Result<(), String> {
     // A move across file systems whose copy was whole keeps that copy
     // even when the item could not all leave the trash; say where it is.
     let failed = |e: std::io::Error, to: &Path, what: &str| {
-        let saved = crate::trashdir::salvage(src, &e);
+        let saved = crate::trashdir::salvage_keeping(src, &e, dest);
         let base = match crate::trashdir::source_left(&e) {
             Some(l) => format!(
                 "'{}' is copied whole to '{}', but removing it from the trash failed partway: {}",
@@ -1707,5 +1707,40 @@ mod tests {
         assert_eq!(fs::read(&dest).unwrap(), b"keep", "{err}");
         assert_eq!(fs::read(&src).unwrap(), b"new", "{err}");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A restore across file systems whose copy is published at `dest`,
+    /// and whose source is gone, keeps that copy at `dest` when a later
+    /// directory sync fails. It does not try to move it back into the
+    /// Trash.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_published_restore_stays_when_a_later_sync_fails() {
+        use std::os::unix::fs::MetadataExt;
+        let pid = std::process::id();
+        let trash = std::env::temp_dir().join(format!("rtrash-finder-pub-{pid}"));
+        let shm = Path::new("/dev/shm");
+        let _ = fs::remove_dir_all(&trash);
+        fs::create_dir_all(&trash).unwrap();
+        let dev = fs::metadata(&trash).unwrap().dev();
+        if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
+            let _ = fs::remove_dir_all(&trash);
+            eprintln!("no second file system here; skipping");
+            return;
+        }
+        let out = shm.join(format!("rtrash-finder-pub-out-{pid}"));
+        let _ = fs::remove_dir_all(&out);
+        fs::create_dir_all(&out).unwrap();
+        let (src, dest) = (trash.join("item"), out.join("item"));
+        fs::write(&src, b"body").unwrap();
+        crate::trashdir::fail_next_unlink_sync();
+        let err = move_back(&src, &dest, false).unwrap_err();
+        assert!(err.contains("test source directory sync failed"), "{err}");
+        assert!(!err.contains("could not put"), "{err}");
+        assert!(err.contains("published copy remains"), "{err}");
+        assert_eq!(fs::read(&dest).unwrap(), b"body", "{err}");
+        assert!(crate::util::is_gone(&src), "{err}");
+        let _ = fs::remove_dir_all(&trash);
+        let _ = fs::remove_dir_all(&out);
     }
 }

@@ -3820,14 +3820,28 @@ pub fn move_remain(err: &io::Error) -> MoveRemain {
 /// missing, put the retained body back there. The returned text names
 /// every path that still has bytes and is not `payload`.
 pub fn salvage(payload: &Path, err: &io::Error) -> String {
+    salvage_with(payload, err, None)
+}
+
+/// [`salvage`] for a move whose published copy, at `dest`, is the result
+/// the caller asked for: that copy stays where it is.
+pub fn salvage_keeping(payload: &Path, err: &io::Error, dest: &Path) -> String {
+    salvage_with(payload, err, Some(dest))
+}
+
+fn salvage_with(payload: &Path, err: &io::Error, keep: Option<&Path>) -> String {
     let remain = move_remain(err);
     let mut notes = Vec::new();
     if crate::util::is_gone(payload) {
+        let published = remain
+            .published
+            .clone()
+            .filter(|path| Some(path.as_path()) != keep);
         let from = remain
             .source
             .clone()
             .or(remain.partial.clone())
-            .or(remain.published.clone());
+            .or(published);
         if let Some(from) = from.filter(|path| path != payload) {
             match rename_exclusive(&from, payload) {
                 Ok(()) => notes.push(format!(
@@ -4709,6 +4723,13 @@ thread_local! {
     static MUTATE_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static HELD_FD: std::cell::Cell<RawFd> = const { std::cell::Cell::new(-1) };
     static FSTAT_RECHECKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// The next sync of the source directory, after its staged copy was
+/// removed, fails on this thread.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn fail_next_unlink_sync() {
+    FAIL_SYNC.with(|c| c.set(SyncSeam::SrcUnlink));
 }
 
 fn spoil_for_test(dest: &Path) {
