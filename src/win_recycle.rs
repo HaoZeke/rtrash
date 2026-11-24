@@ -5741,9 +5741,9 @@ pub fn purge_oldest_on(
     at: &Path,
     need: (u64, u64),
     dry_run: bool,
-    verbose: bool,
+    human: crate::util::HumanOutput,
 ) -> (u64, u64, u64) {
-    os::purge_oldest_on(prog, at, need, dry_run, verbose)
+    os::purge_oldest_on(prog, at, need, dry_run, human)
 }
 
 #[cfg(test)]
