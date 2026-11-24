@@ -1320,9 +1320,22 @@ fn put_skips_safe_rm_paths_and_refuses_home() {
     assert!(sb.work().join("precious/f").exists());
     assert!(!sb.work().join("other").exists(), "unlisted paths still go");
 
-    let out = sb.run(&["put", "-rf", "/usr"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(stderr_of(&out).contains("safe-rm list entry '/usr'"));
+    // A built-in safe-rm entry that exists here: put -f of a missing path
+    // says nothing and exits 0, and the Nix build sandbox has no /usr.
+    let system = ["/usr", "/etc", "/bin", "/lib", "/var"]
+        .into_iter()
+        .find(|p| Path::new(p).is_dir());
+    if let Some(system) = system {
+        let out = sb.run(&["put", "-rf", system]);
+        assert_eq!(out.status.code(), Some(1));
+        let err = stderr_of(&out);
+        assert!(
+            err.contains(&format!("safe-rm list entry '{system}'")),
+            "{err}"
+        );
+    } else {
+        common::skip("none of /usr, /etc, /bin, /lib or /var exists; skipping the system path");
+    }
 
     let home = sb.root.display().to_string();
     let out = sb.run(&["put", "-r", "--preserve-root=all", &home]);
