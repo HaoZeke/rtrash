@@ -5461,8 +5461,13 @@ fn empty_matches_the_original_path_exactly() {
     fs::write(sb.work().join("ab"), b"sib").unwrap();
     assert!(sb.run(&["put", "a", "ab"]).status.success());
 
-    let out = sb.run(&["empty", "--home-only", "--plain", "a/"]);
+    let out = sb.run(&["empty", "--home-only", "--plain", "--json", "-v", "a/"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
+    let body = stdout_of(&out);
+    let value: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("{e}: {body}"));
+    assert_eq!(value["removed"], 1, "{body}");
+    assert!(stderr_of(&out).contains("removed"), "{}", stderr_of(&out));
     let mut names = trash_names(&sb);
     names.sort();
     assert_eq!(names, vec!["ab".to_string(), "b".to_string()]);
@@ -9019,6 +9024,14 @@ fn reap_when_below_stops_once_the_measured_space_is_back() {
         text.contains("kept") && text.contains("back above the target"),
         "{text}"
     );
+    let out = run(&["-n", "-v", "--json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let body = stdout_of(&out);
+    serde_json::from_str::<serde_json::Value>(&body).unwrap_or_else(|e| panic!("{e}: {body}"));
+    assert!(
+        files.iter().all(|p| p.exists()),
+        "the JSON dry run removed a file"
+    );
     let out = run(&[]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
@@ -10557,9 +10570,19 @@ fn reap_profiles_come_from_config_and_replace_builtins() {
         text.contains("my scratch (config)") && text.contains("go replaced (config)"),
         "{text}"
     );
-    let out = reap_cmd(&sb, &["reap", "--list-profiles", "--json"]);
-    assert!(stdout_of(&out)
-        .contains(r#""name":"mine","about":"my scratch","age":3600,"action":"permanent""#));
+    let out = reap_cmd(&sb, &["reap", "--list-profiles", "-v", "--json"]);
+    let body = stdout_of(&out);
+    serde_json::from_str::<serde_json::Value>(&body).unwrap_or_else(|e| panic!("{e}: {body}"));
+    assert!(body.contains(r#""name":"mine","about":"my scratch","age":3600,"action":"permanent""#));
+
+    let out = reap_cmd(
+        &sb,
+        &["reap", "-p", "mine", "--age-by=m", "-n", "-v", "--json"],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let body = stdout_of(&out);
+    serde_json::from_str::<serde_json::Value>(&body).unwrap_or_else(|e| panic!("{e}: {body}"));
+    assert!(old.exists(), "the profile dry run removed its entry");
 
     let out = reap_cmd(&sb, &["reap", "-p", "mine", "--age-by=m"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -10890,11 +10913,10 @@ fn empty_dangling_removes_only_records_without_a_payload() {
     assert!(ghost.exists(), "the dry run removed it");
     let out = sb.run(&["empty", "--home-only", "--dangling", "--json"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    assert!(
-        stdout_of(&out).contains(r#""removed":1"#),
-        "{}",
-        stdout_of(&out)
-    );
+    let body = stdout_of(&out);
+    let value: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("{e}: {body}"));
+    assert_eq!(value["removed"], 1, "{body}");
     assert!(!ghost.exists() && odd.is_none_or(|p| p.exists()));
     assert!(info.join("keep.txt.trashinfo").exists() && files.join("orphan").exists());
     assert_eq!(
@@ -12615,6 +12637,23 @@ fn put_dry_run_checks_and_moves_nothing() {
     assert!(stderr_of(&out).contains("missing"));
     assert!(sb.work().join("a").exists());
     assert!(!sb.trash().join("files/a").exists());
+
+    for args in [
+        &["put", "--dry-run", "--json", "a"][..],
+        &["put", "--dry-run", "--json", "-v", "a"][..],
+    ] {
+        let out = sb.run(args);
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+        serde_json::from_slice::<serde_json::Value>(&out.stdout)
+            .unwrap_or_else(|e| panic!("{args:?}: {e}: {}", stdout_of(&out)));
+        if args.contains(&"-v") {
+            assert!(
+                stderr_of(&out).contains("would trash"),
+                "{args:?}: {}",
+                stderr_of(&out)
+            );
+        }
+    }
 }
 
 #[test]

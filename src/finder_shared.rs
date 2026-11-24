@@ -480,7 +480,8 @@ pub fn undo(
             (_, c) => (l.original.clone(), c == Conflict::Overwrite),
         };
         if dry_run {
-            println!("would restore '{}'", crate::util::term_path(&dest));
+            crate::util::HumanOutput::new(json, true)
+                .line(&format!("would restore '{}'", dest.display()));
             restored.push(dest);
             continue;
         }
