@@ -215,6 +215,9 @@ mod bin {
             force: true,
             quiet: true,
             trash_pin: pin.cloned(),
+            // The explorer shows the copy and can stop it. It has no
+            // flag of its own, so a row that crosses devices still goes.
+            allow_cross_device: true,
             ..put::Opts::default()
         };
         let scoped = crate::interrupt::Watch {

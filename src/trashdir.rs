@@ -1254,14 +1254,19 @@ pub fn abs_nofollow(path: &Path) -> io::Result<PathBuf> {
 /// runs in parallel and outside the lock, so a big tree does not hold up
 /// other puts and empties of the same root; the lock is taken again only
 /// to write the line.
-pub fn trash_move(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
+pub fn trash_move(
+    abs: &Path,
+    meta: &fs::Metadata,
+    trash: &TrashDir,
+    allow_cross: bool,
+) -> io::Result<String> {
     trash.ensure()?;
     let name = {
         // A Ctrl-C here waits until the record, payload and total agree.
         let _critical = crate::interrupt::critical();
         let _lock = TrashLock::acquire(&trash.root)?;
         let before = crate::trash_total::cached(trash);
-        let name = trash_move_locked(abs, meta, trash)?;
+        let name = trash_move_locked(abs, meta, trash, allow_cross)?;
         // Keep a total that was current before this put current after it.
         if let Some((bytes, items)) = before {
             let added = DirSizes::load(trash).entry_bytes(&name);
@@ -1332,7 +1337,14 @@ impl RecordLook {
 }
 
 /// Inner put path (caller holds the trash-root lock). Exposed for tests.
-pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> io::Result<String> {
+/// `allow_cross` lets a rename that fails with EXDEV fall through to a
+/// copy. Without it the copy does not start.
+pub fn trash_move_locked(
+    abs: &Path,
+    meta: &fs::Metadata,
+    trash: &TrashDir,
+    allow_cross: bool,
+) -> io::Result<String> {
     // From the name taken to the payload moved, or both undone: a Ctrl-C
     // never leaves a half-written record or a payload without one.
     let _critical = crate::interrupt::critical();
@@ -1355,16 +1367,23 @@ pub fn trash_move_locked(abs: &Path, meta: &fs::Metadata, trash: &TrashDir) -> i
     let moved = match rename_noreplace(abs, &dest) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            // A directory inside that this user can't empty would stop the
-            // removal halfway; refuse before copying, as a rename would.
-            // A copy that would fill the trash's file system is refused too.
-            tree_removable(abs, meta)
-                .and_then(|()| crate::space::guard_copy(abs, meta, &trash.files()))
-                .and_then(|()| {
-                    // A Ctrl-C stops the copy, which then takes back what
-                    // it made; the error path below removes the record.
-                    crate::interrupt::abortable(|| move_by_copy(abs, &dest, meta))
-                })
+            if !allow_cross {
+                // The devices looked the same, and the kernel still
+                // refused the rename. Do not start the copy. The error
+                // path below drops the record reserved above.
+                Err(refuse_cross_device(abs, &trash.files(), meta))
+            } else {
+                // A directory inside that this user can't empty would stop the
+                // removal halfway; refuse before copying, as a rename would.
+                // A copy that would fill the trash's file system is refused too.
+                tree_removable(abs, meta)
+                    .and_then(|()| crate::space::guard_copy(abs, meta, &trash.files()))
+                    .and_then(|()| {
+                        // A Ctrl-C stops the copy, which then takes back what
+                        // it made; the error path below removes the record.
+                        crate::interrupt::abortable(|| move_by_copy(abs, &dest, meta))
+                    })
+            }
         }
         Err(e) => Err(e),
     };
@@ -2465,23 +2484,31 @@ pub fn source_left(e: &io::Error) -> Option<&SourceLeft> {
 ///
 /// - a copy that fails or is stopped takes back what it made at `dest`,
 ///   so the source stays whole and nothing new is left behind;
-/// - once the copy is whole the source goes. A removal that fails partway
-///   keeps the copy and returns a [`SourceLeft`]: part of the source may
-///   be gone, and dropping the copy then would lose it (trash-cli #429).
+/// - a copy whose size or contents do not match the source is taken back
+///   the same way, and the source stays;
+/// - once the copy is whole and matches, the source goes. A removal that
+///   fails partway keeps the copy and returns a [`SourceLeft`]: part of
+///   the source may be gone, and dropping the copy then would lose it
+///   (trash-cli #429).
 ///
 /// Callers ask [`tree_removable`] first, so that removal rarely fails.
 fn move_by_copy(src: &Path, dest: &Path, meta: &fs::Metadata) -> io::Result<()> {
     // Only what this copy made is taken back, never a path that was there.
     let fresh = crate::util::is_gone(dest);
-    if let Err(e) = copy_recursive(src, dest, meta) {
+    let copied = copy_recursive(src, dest, meta).and_then(|()| {
+        spoil_for_test(dest);
+        verify_tree(src, dest)
+    });
+    if let Err(e) = copied {
         if fresh && e.kind() != io::ErrorKind::AlreadyExists {
             make_tree_writable(dest);
-            // scratch: the part copied; the source is still whole.
+            // scratch: the part copied, or a copy that does not match;
+            // the source is still whole.
             let _ = remove_any_path(dest);
         }
         return Err(e);
     }
-    // scratch: a move; the copy is whole first.
+    // scratch: a move; the copy is whole and matches first.
     remove_any(src, meta).map_err(|err| {
         io::Error::new(
             err.kind(),
@@ -2491,6 +2518,380 @@ fn move_by_copy(src: &Path, dest: &Path, meta: &fs::Metadata) -> io::Result<()> 
             },
         )
     })
+}
+
+/// Why a put will not copy `src` onto the directory `dest_dir`: the two
+/// devices, and how many bytes the copy would write.
+pub(crate) fn refuse_cross_device(src: &Path, dest_dir: &Path, meta: &fs::Metadata) -> io::Error {
+    let bytes = match crate::space::tree_need(src, meta) {
+        Ok((n, _)) => format!("{n} bytes ({})", crate::util::format_bytes(n)),
+        Err(_) => "an unknown number of bytes".to_string(),
+    };
+    io::Error::new(
+        io::ErrorKind::CrossesDevices,
+        format!(
+            "refusing to copy {bytes} from {} onto {}; \
+             pass --allow-cross-device to copy and then remove the original",
+            device_place(src),
+            device_place(dest_dir),
+        ),
+    )
+}
+
+/// Where `path` lives: the mount's device, its mount point and the
+/// `st_dev` number. Without a mount table, the number alone.
+fn device_place(path: &Path) -> String {
+    let dev = fs::symlink_metadata(path).ok().map(|m| m.dev());
+    let anchor = match fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => path.to_path_buf(),
+        _ => path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("/")),
+    };
+    let canon = fs::canonicalize(&anchor).unwrap_or(anchor);
+    let mounted = read_mount_table()
+        .ok()
+        .and_then(|table| mount_holding(&table, &canon));
+    match (mounted, dev) {
+        (Some((src, mp)), Some(d)) => {
+            format!("{src} ({}, device {d})", crate::util::err_path(&mp))
+        }
+        (Some((src, mp)), None) => format!("{src} ({})", crate::util::err_path(&mp)),
+        (None, Some(d)) => format!("device {d}"),
+        (None, None) => "unknown device".to_string(),
+    }
+}
+
+/// The mount in `table` that holds `path`: its device field and mount
+/// point. The longest mount point wins. `None` when none covers `path`.
+fn mount_holding(table: &str, path: &Path) -> Option<(String, PathBuf)> {
+    let mut best: Option<(usize, String, PathBuf)> = None;
+    for line in table.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(dev), Some(mp)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let mp = unescape_mount(mp);
+        if mp.as_os_str().is_empty() || !path.starts_with(&mp) {
+            continue;
+        }
+        let n = mp.components().count();
+        if best.as_ref().is_none_or(|(bn, _, _)| n > *bn) {
+            let dev = unescape_mount(dev).to_string_lossy().into_owned();
+            best = Some((n, dev, mp));
+        }
+    }
+    best.map(|(_, dev, mp)| (dev, mp))
+}
+
+/// The copy at `dst` matches `src`: the same names, and for each file
+/// the same size and the same bytes. A symlink is its target, not the
+/// file it names. Directories are walked by descriptor, the same way
+/// [`copy_dir_iter`] copies a tree past `PATH_MAX`.
+fn verify_tree(src: &Path, dst: &Path) -> io::Result<()> {
+    crate::interrupt::check()?;
+    let sm = fs::symlink_metadata(src)?;
+    let dm = fs::symlink_metadata(dst).map_err(|e| missing_copy(src, e))?;
+    let st = sm.file_type();
+    let dt = dm.file_type();
+    if st.is_symlink() {
+        if !dt.is_symlink() {
+            return Err(copy_mismatch(src, "not a symlink"));
+        }
+        if fs::read_link(src)? != fs::read_link(dst)? {
+            return Err(copy_mismatch(src, "symlink target differs"));
+        }
+        return Ok(());
+    }
+    if st.is_dir() {
+        if !dt.is_dir() {
+            return Err(copy_mismatch(src, "not a directory"));
+        }
+        return verify_dir(src, dst);
+    }
+    if st.is_file() {
+        if !dt.is_file() {
+            return Err(copy_mismatch(src, "not a file"));
+        }
+        if sm.len() != dm.len() {
+            return Err(copy_mismatch(src, "size differs"));
+        }
+        if !file_bytes_match(src, dst)? {
+            return Err(copy_mismatch(src, "contents differ"));
+        }
+        return Ok(());
+    }
+    if st != dt {
+        return Err(copy_mismatch(src, "file type differs"));
+    }
+    Ok(())
+}
+
+/// One directory on [`verify_dir`]'s heap stack. Both sides stay open
+/// together, and frames past [`WALK_FD_BUDGET`] close and reopen through
+/// `..`, as the copy does.
+struct VerifyFrame {
+    src: Option<OwnedFd>,
+    dst: Option<OwnedFd>,
+    src_id: (u64, u64),
+    dst_id: (u64, u64),
+    entries: Vec<OsString>,
+    /// This directory, for messages. The walk never hands it to a
+    /// syscall: a tree past `PATH_MAX` is read by descriptor.
+    path: PathBuf,
+}
+
+fn verify_dir(src: &Path, dst: &Path) -> io::Result<()> {
+    let sfd = open_dir_nofollow(src)?;
+    let dfd = open_dir_nofollow(dst)?;
+    let entries = same_dir_names(sfd.as_raw_fd(), dfd.as_raw_fd(), src)?;
+    let mut stack = vec![VerifyFrame {
+        src: Some(sfd),
+        dst: Some(dfd),
+        src_id: (0, 0),
+        dst_id: (0, 0),
+        entries,
+        path: src.to_path_buf(),
+    }];
+    let mut lo = 1usize;
+    loop {
+        let top = stack.len() - 1;
+        let Some(name) = stack[top].entries.pop() else {
+            if top == 0 {
+                return Ok(());
+            }
+            finish_verify_frame(&mut stack, &mut lo)?;
+            continue;
+        };
+        crate::interrupt::check()?;
+        let child = stack[top].path.join(&name);
+        let src_fd = dir_fd(&stack[top].src)?;
+        let dst_fd = dir_fd(&stack[top].dst)?;
+        verify_entry(src_fd, dst_fd, &name, &child, &mut stack, &mut lo)?;
+    }
+}
+
+fn finish_verify_frame(stack: &mut Vec<VerifyFrame>, lo: &mut usize) -> io::Result<()> {
+    let done = stack.pop().expect("child frame");
+    let parent = stack.len() - 1;
+    if stack[parent].src.is_none() || stack[parent].dst.is_none() {
+        let src = reopen_parent_dir(dir_fd(&done.src)?, stack[parent].src_id)?;
+        let dst = reopen_parent_dir(dir_fd(&done.dst)?, stack[parent].dst_id)?;
+        stack[parent].src = Some(src);
+        stack[parent].dst = Some(dst);
+        *lo = parent;
+    }
+    *lo = (*lo).min(stack.len());
+    Ok(())
+}
+
+fn trim_verify(stack: &mut [VerifyFrame], lo: &mut usize) -> io::Result<()> {
+    if stack.len() - *lo <= WALK_FD_BUDGET {
+        return Ok(());
+    }
+    let f = &mut stack[*lo];
+    if let Some(old) = f.src.take() {
+        f.src_id = fd_dev_ino(old.as_raw_fd())?;
+    }
+    if let Some(old) = f.dst.take() {
+        f.dst_id = fd_dev_ino(old.as_raw_fd())?;
+    }
+    *lo += 1;
+    Ok(())
+}
+
+fn same_dir_names(src: RawFd, dst: RawFd, dir: &Path) -> io::Result<Vec<OsString>> {
+    let mut a = read_names(src)?;
+    let mut b = read_names(dst)?;
+    a.sort();
+    b.sort();
+    if a != b {
+        return Err(copy_mismatch(dir, "directory entries differ"));
+    }
+    Ok(a)
+}
+
+fn verify_entry(
+    src_fd: RawFd,
+    dst_fd: RawFd,
+    name: &OsStr,
+    child: &Path,
+    stack: &mut Vec<VerifyFrame>,
+    lo: &mut usize,
+) -> io::Result<()> {
+    let name_c = name_cstr(name)?;
+    let ss = fstatat_nofollow(src_fd, &name_c)?;
+    let ds = fstatat_nofollow(dst_fd, &name_c).map_err(|e| missing_copy(child, e))?;
+    let sk = ss.st_mode & libc::S_IFMT;
+    let dk = ds.st_mode & libc::S_IFMT;
+    if sk != dk {
+        return Err(copy_mismatch(child, "file type differs"));
+    }
+    if sk == libc::S_IFLNK {
+        let a = link_target_at(src_fd, &name_c)?;
+        let b = link_target_at(dst_fd, &name_c)?;
+        if a != b {
+            return Err(copy_mismatch(child, "symlink target differs"));
+        }
+        return Ok(());
+    }
+    if sk == libc::S_IFDIR {
+        let child_src = openat_dir(src_fd, &name_c)?;
+        let child_dst = openat_dir(dst_fd, &name_c).map_err(|e| missing_copy(child, e))?;
+        let entries = same_dir_names(child_src.as_raw_fd(), child_dst.as_raw_fd(), child)?;
+        stack.push(VerifyFrame {
+            src: Some(child_src),
+            dst: Some(child_dst),
+            src_id: (0, 0),
+            dst_id: (0, 0),
+            entries,
+            path: child.to_path_buf(),
+        });
+        return trim_verify(stack, lo);
+    }
+    if sk == libc::S_IFREG {
+        if ss.st_size != ds.st_size {
+            return Err(copy_mismatch(child, "size differs"));
+        }
+        if !file_bytes_match_at(src_fd, dst_fd, &name_c)? {
+            return Err(copy_mismatch(child, "contents differ"));
+        }
+    }
+    Ok(())
+}
+
+fn missing_copy(path: &Path, err: io::Error) -> io::Error {
+    io::Error::new(
+        err.kind(),
+        format!(
+            "the copy is missing '{}': {err}; the original was kept",
+            crate::util::err_path(path)
+        ),
+    )
+}
+
+fn copy_mismatch(path: &Path, why: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "the copy of '{}' does not match the source ({why}); the original was kept",
+            crate::util::err_path(path)
+        ),
+    )
+}
+
+fn link_target_at(dirfd: RawFd, name: &CStr) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; 256];
+    loop {
+        // SAFETY: `name` is NUL-terminated and `buf` is writable for `buf.len()`.
+        let n =
+            unsafe { libc::readlinkat(dirfd, name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let n = n as usize;
+        if n < buf.len() {
+            buf.truncate(n);
+            return Ok(buf);
+        }
+        buf.resize(buf.len().saturating_mul(2), 0);
+    }
+}
+
+/// The bytes of two regular files, read in chunks. False when they differ.
+fn file_bytes_match(a: &Path, b: &Path) -> io::Result<bool> {
+    let mut fa = fs::File::open(a)?;
+    let mut fb = fs::File::open(b)?;
+    bytes_match(&mut fa, &mut fb)
+}
+
+fn file_bytes_match_at(src_dir: RawFd, dst_dir: RawFd, name: &CStr) -> io::Result<bool> {
+    let mut fa = open_nofollow(src_dir, name)?;
+    let mut fb = open_nofollow(dst_dir, name)?;
+    bytes_match(&mut fa, &mut fb)
+}
+
+fn open_nofollow(dirfd: RawFd, name: &CStr) -> io::Result<fs::File> {
+    // SAFETY: `name` is NUL-terminated. The descriptor is owned by the File.
+    let fd = unsafe {
+        libc::openat(
+            dirfd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+fn bytes_match(a: &mut fs::File, b: &mut fs::File) -> io::Result<bool> {
+    let mut ba = [0u8; 64 * 1024];
+    let mut bb = [0u8; 64 * 1024];
+    loop {
+        crate::interrupt::check()?;
+        let na = read_chunk(a, &mut ba)?;
+        let nb = read_chunk(b, &mut bb)?;
+        if na != nb || ba[..na] != bb[..nb] {
+            return Ok(false);
+        }
+        if na == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+fn read_chunk(file: &mut fs::File, buf: &mut [u8]) -> io::Result<usize> {
+    let mut n = 0;
+    while n < buf.len() {
+        match io::Read::read(file, &mut buf[n..])? {
+            0 => break,
+            k => n += k,
+        }
+    }
+    Ok(n)
+}
+
+// Set from a unit test so the next `move_by_copy` on this thread
+// changes the copy after it is written and before it is checked.
+#[cfg(test)]
+thread_local! {
+    static SPOIL_COPY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn spoil_for_test(dest: &Path) {
+    #[cfg(test)]
+    if SPOIL_COPY.with(|c| c.get()) {
+        spoil_one(dest);
+    }
+    #[cfg(not(test))]
+    let _ = dest;
+}
+
+#[cfg(test)]
+fn spoil_one(dest: &Path) {
+    let mut stack = vec![dest.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_file() {
+            if let Ok(mut file) = fs::File::options().write(true).open(&path) {
+                let _ = file.write_all(b"X");
+            }
+            return;
+        }
+        if meta.is_dir() {
+            if let Ok(rd) = fs::read_dir(&path) {
+                for entry in rd.flatten() {
+                    stack.push(entry.path());
+                }
+            }
+        }
+    }
 }
 
 /// Cross-device fallback, shared by put (EXDEV into trash) and restore
@@ -3376,7 +3777,7 @@ mod tests {
             let item = root.join(n);
             fs::write(&item, n).unwrap();
             let meta = fs::symlink_metadata(&item).unwrap();
-            trash_move_locked(&item, &meta, &td).unwrap();
+            trash_move_locked(&item, &meta, &td, true).unwrap();
         }
         assert_eq!(names(&td.files()), ["a.txt.2", "b.txt"]);
         assert_eq!(
@@ -3408,7 +3809,7 @@ mod tests {
         fs::write(&item, b"a").unwrap();
         let meta = fs::symlink_metadata(&item).unwrap();
         NO_HARD_LINKS.with(|n| n.set(true));
-        let name = trash_move_locked(&item, &meta, &td);
+        let name = trash_move_locked(&item, &meta, &td, true);
         NO_HARD_LINKS.with(|n| n.set(false));
         assert_eq!(name.unwrap(), "a.txt.2");
         assert_eq!(names(&td.files()), ["a.txt.2"]);
@@ -4027,6 +4428,65 @@ proc /proc proc rw 0 0
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// A tree deeper than `PATH_MAX`, copied onto another device, is kept.
+    /// The copy reaches those names by descriptor. A check that opened
+    /// them by path would fail, delete the copy and leave the original.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_deep_copy_across_devices_matches_and_is_kept() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-deepx-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let shm = Path::new("/dev/shm");
+        let dev = fs::metadata(&root).unwrap().dev();
+        if !fs::metadata(shm).is_ok_and(|m| m.dev() != dev) {
+            let _ = fs::remove_dir_all(&root);
+            eprintln!("no second file system here; skipping");
+            return;
+        }
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        let resolved = resolve_existing(&src).as_os_str().len();
+        let limit = libc::PATH_MAX as usize;
+        // "/d" is two bytes. A few levels past the limit, so a path open
+        // of the leaf fails even with the copy's headroom.
+        let depth = limit.saturating_sub(resolved) / 2 + 8;
+        deep_chain(&src, depth);
+        let mut leaf = src.clone();
+        for _ in 0..depth {
+            leaf.push("d");
+        }
+        leaf.push("leaf");
+        let open_err = fs::File::open(&leaf).unwrap_err();
+        assert_eq!(
+            open_err.raw_os_error(),
+            Some(libc::ENAMETOOLONG),
+            "leaf {} bytes opened: {open_err}",
+            leaf.as_os_str().len()
+        );
+        assert_eq!(read_deep_leaf(&src, depth), b"leaf");
+        let dest = shm.join(format!("rtrash-deepx-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dest);
+        assert_ne!(
+            fs::metadata(shm).unwrap().dev(),
+            fs::metadata(&src).unwrap().dev()
+        );
+        let meta = fs::symlink_metadata(&src).unwrap();
+        move_by_copy(&src, &dest, &meta).unwrap();
+        assert!(!src.exists(), "a matching copy removes the source");
+        assert_eq!(read_deep_leaf(&dest, depth), b"leaf");
+        let _ = fs::remove_dir_all(&dest);
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[test]
     fn copy_recursive_keeps_pipes_links_holes_xattrs_and_read_only_dirs() {
@@ -4299,6 +4759,68 @@ proc /proc proc rw 0 0
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// A copy that does not match is not a move: the copy goes and the
+    /// source stays, including every file the spoiler did not touch.
+    #[test]
+    fn a_spoiled_copy_is_removed_and_the_source_stays() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                SPOIL_COPY.with(|c| c.set(false));
+            }
+        }
+        let _reset = Reset;
+        let root = move_root("spoil");
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        SPOIL_COPY.with(|c| c.set(true));
+        let meta = fs::symlink_metadata(&src).unwrap();
+        let err = move_by_copy(&src, &dest, &meta).unwrap_err();
+        assert!(source_left(&err).is_none(), "{err}");
+        assert!(err.to_string().contains("does not match"), "{err}");
+        assert!(dest.symlink_metadata().is_err(), "the bad copy went");
+        assert_eq!(fs::read(src.join("a")).unwrap(), b"first");
+        assert_eq!(fs::read(src.join("sub/b")).unwrap(), b"second");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Size and, for a file, the bytes. A directory matches only when its
+    /// names do, and a symlink matches only when its target does.
+    #[test]
+    fn a_copy_matches_only_when_the_size_and_the_bytes_do() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-verify-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/sub")).unwrap();
+        fs::write(root.join("src/a"), b"same").unwrap();
+        fs::write(root.join("src/sub/b"), b"child").unwrap();
+        std::os::unix::fs::symlink("a", root.join("src/link")).unwrap();
+        let dst = root.join("dst");
+        let meta = fs::symlink_metadata(root.join("src")).unwrap();
+        copy_recursive(root.join("src").as_path(), &dst, &meta).unwrap();
+        verify_tree(&root.join("src"), &dst).unwrap();
+
+        fs::write(dst.join("a"), b"SAME").unwrap();
+        let err = verify_tree(&root.join("src"), &dst).unwrap_err();
+        assert!(err.to_string().contains("contents differ"), "{err}");
+
+        fs::write(dst.join("a"), b"same!").unwrap();
+        let err = verify_tree(&root.join("src"), &dst).unwrap_err();
+        assert!(err.to_string().contains("size differs"), "{err}");
+
+        fs::write(dst.join("a"), b"same").unwrap();
+        fs::remove_file(dst.join("link")).unwrap();
+        std::os::unix::fs::symlink("b", dst.join("link")).unwrap();
+        let err = verify_tree(&root.join("src"), &dst).unwrap_err();
+        assert!(err.to_string().contains("symlink target differs"), "{err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn copy_recursive_refuses_a_socket() {
         let root = std::env::temp_dir().join(format!("rtrash-copy3-{}", std::process::id()));
@@ -4361,8 +4883,8 @@ proc /proc proc rw 0 0
         w.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         for item in [root.join("f"), root.join("d")] {
             let meta = fs::symlink_metadata(&item).unwrap();
-            let err =
-                crate::interrupt::watched(&w, || trash_move_locked(&item, &meta, &td)).unwrap_err();
+            let err = crate::interrupt::watched(&w, || trash_move_locked(&item, &meta, &td, true))
+                .unwrap_err();
             assert!(err.to_string().contains("original stays"), "{err}");
             assert_eq!(fs::read_dir(td.files()).unwrap().count(), 0, "{err}");
             assert_eq!(fs::read_dir(td.info()).unwrap().count(), 0, "{err}");
@@ -4372,7 +4894,8 @@ proc /proc proc rw 0 0
         // Without the stop, the same put goes through.
         w.stop.store(false, std::sync::atomic::Ordering::SeqCst);
         let meta = fs::symlink_metadata(root.join("d")).unwrap();
-        crate::interrupt::watched(&w, || trash_move_locked(&root.join("d"), &meta, &td)).unwrap();
+        crate::interrupt::watched(&w, || trash_move_locked(&root.join("d"), &meta, &td, true))
+            .unwrap();
         assert!(!root.join("d").exists());
         assert_eq!(w.copied.load(std::sync::atomic::Ordering::SeqCst), 5000);
         let _ = fs::remove_dir_all(&td.root);
@@ -4749,7 +5272,7 @@ proc /proc proc rw 0 0
             let item = root.join("item.txt");
             fs::write(&item, b"keep").unwrap();
             let meta = fs::symlink_metadata(&item).unwrap();
-            assert!(trash_move(&item, &meta, &td).is_err(), "{sub}");
+            assert!(trash_move(&item, &meta, &td, true).is_err(), "{sub}");
             assert!(item.is_file(), "{sub}");
             assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0, "{sub}");
             // A volume trash like that is not used; the caller falls back.
@@ -4784,7 +5307,7 @@ proc /proc proc rw 0 0
         fs::write(&item, b"keep").unwrap();
         fs::set_permissions(td.info(), fs::Permissions::from_mode(0o500)).unwrap();
         let meta = fs::symlink_metadata(&item).unwrap();
-        let err = trash_move_locked(&item, &meta, &td).unwrap_err();
+        let err = trash_move_locked(&item, &meta, &td, true).unwrap_err();
         fs::set_permissions(td.info(), fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
         assert!(item.is_file());
@@ -4850,7 +5373,7 @@ proc /proc proc rw 0 0
         fs::create_dir(&item).unwrap();
         fs::write(item.join("f"), vec![7u8; 64 * 1024]).unwrap();
         let meta = fs::symlink_metadata(&item).unwrap();
-        let name = trash_move_locked(&item, &meta, &td).unwrap();
+        let name = trash_move_locked(&item, &meta, &td, true).unwrap();
         let (files, info_dir, again) = (td.files(), td.info(), name.clone());
         AFTER_WALK.set(Some(Box::new(move || {
             // Another run takes the item out, and a put gives its name to

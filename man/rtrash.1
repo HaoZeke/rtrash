@@ -217,16 +217,22 @@ s into the trash. Accepts common
 flags with the same interactive/force semantics; nothing is unlinked
 permanently.
 .PP
-A trash on another file system gets a copy, and the original goes only
-once the copy is whole. The copy keeps holes in sparse files, mode, owner
+A trash on another file system is refused before anything is copied.
+The refusal names both devices and how many bytes the copy would write.
+.B \-\-allow\-cross\-device
+copies, then checks the copy: each file's size and bytes, each
+symlink's target, and each directory's names. The original goes only
+when they match. The copy keeps holes in sparse files, mode, owner
 where allowed, times, extended attributes (with the access control
 list, which macOS keeps apart), named pipes, and hard links
 inside the tree. Within one btrfs file system it clones instead.
 A tree with a directory this user can't empty is refused before anything
 moves. Sockets can't be copied, so trashing one there fails. A copy that
-fails partway is removed again, and the original stays whole. When the
-copy is whole but the original can't all go, the copy stays, since part
-of the original may already be gone. Restore follows the same rules.
+fails partway, or whose size or contents do not match, is removed again,
+and the original stays whole. When the copy matches but the original
+can't all go, the copy stays, since part of the original may already
+be gone. Restore still copies across devices without the flag, and
+follows the same check.
 .TP
 .BR \-f ", " \-\-force
 Ignore nonexistent files and arguments, never prompt.
@@ -363,6 +369,14 @@ system with under 5% of its bytes or inodes free, or under
 .B RTRASH_MIN_FREE
 bytes.
 Without it, such a put fails before it copies anything.
+.TP
+.B \-\-allow\-cross\-device
+Copy an item into a trash on another device, then remove the original
+once the copy matches. Without it, put refuses before it copies and
+names both devices and the bytes. The put and du browsers, and reap,
+copy across devices on their own; they have no place to pass this flag.
+On Windows the flag is accepted and does nothing: the Recycle Bin is
+per drive, and put never copies onto another.
 .TP
 .BI \-\-in\-use= WHEN
 What to do when a live process holds an item, as

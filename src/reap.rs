@@ -971,6 +971,9 @@ mod plat {
             quiet: true,
             home_only: dest.home_only,
             trash_pin: dest.trash_pin.clone(),
+            // Temp files often sit on another device from the home trash.
+            // Reap has no flag of its own; refusing would leave them.
+            allow_cross_device: true,
             ..crate::put::Opts::default()
         };
         match crate::put::put_one(prog, p, &opts) {
