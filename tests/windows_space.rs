@@ -1299,7 +1299,7 @@ fn rm_json_summarizes_the_recycle_bin_removal() {
             String::from_utf8_lossy(&again.stderr)
         );
         assert!(
-            String::from_utf8_lossy(&again.stderr).contains("no exact match"),
+            !String::from_utf8_lossy(&again.stderr).contains("no exact match"),
             "{args:?}: {}",
             String::from_utf8_lossy(&again.stderr)
         );

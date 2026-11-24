@@ -3272,6 +3272,15 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 &kept,
                 crate::orig_path::window(age.older_than.is_some(), false),
             );
+            if items.is_empty() {
+                if json {
+                    println!(
+                        "{}",
+                        empty_summary_json(dry_run, 0, 0, age.older_than, max_size)
+                    );
+                }
+                return crate::rm_match::no_matches(prog);
+            }
         }
         if let Some(max) = max_size {
             let sized: Vec<(i64, u64)> = rest
@@ -3316,6 +3325,15 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                     true
                 }
             });
+            if items.is_empty() {
+                if json {
+                    println!(
+                        "{}",
+                        empty_summary_json(dry_run, 0, 0, age.older_than, max_size)
+                    );
+                }
+                return 0;
+            }
         }
         // The guard may have asked: act only on items still as listed.
         let items = if dry_run {
@@ -5235,6 +5253,14 @@ left in place.
             })
             .collect();
         if matched.is_empty() {
+            if json {
+                let sum = crate::filters::RmSummary {
+                    dry_run,
+                    removed: 0,
+                    bytes: 0,
+                };
+                print!("{}", sum.json(&[]));
+            }
             return 0;
         }
         if !dry_run {

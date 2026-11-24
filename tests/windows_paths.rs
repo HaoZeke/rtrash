@@ -537,6 +537,11 @@ fn windows_empty_exact_keeps_a_protected_path() {
     let listed = ok(&run(&home, &["list"]));
     assert!(listed.contains(&s(&kept)), "{listed}");
     assert!(listed.contains(&s(&other)), "{listed}");
+    let json = run(&home, &["empty", "--json", &s(&kept)]);
+    assert!(json.status.success(), "{}", text(&json));
+    let body: serde_json::Value =
+        serde_json::from_slice(&json.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&json)));
+    assert_eq!(body["removed"], 0, "{}", text(&json));
     let _ = fs::remove_dir_all(&home);
 }
 
@@ -578,10 +583,16 @@ fn empty_takes_a_double_dash_as_the_end_of_its_options() {
     ok(&run(&home, &["put", &s(&kept)]));
     let out = run(&home, &["empty", "--", "-n"]);
     let shown = text(&out);
-    assert_eq!(out.status.code(), Some(0), "{shown}");
+    assert_eq!(out.status.code(), Some(1), "{shown}");
     assert!(!shown.contains("unrecognized option"), "{shown}");
     assert!(!shown.contains("would remove"), "{shown}");
     assert!(!shown.contains("Would remove"), "{shown}");
+    assert!(shown.contains("no trash items match"), "{shown}");
+    let json = run(&home, &["empty", "--json", "--", "-n"]);
+    assert_eq!(json.status.code(), Some(1), "{}", text(&json));
+    let body: serde_json::Value =
+        serde_json::from_slice(&json.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&json)));
+    assert_eq!(body["removed"], 0, "{}", text(&json));
     let listed = ok(&run(&home, &["list"]));
     assert!(listed.to_ascii_lowercase().contains("keep.txt"), "{listed}");
 }
@@ -776,8 +787,14 @@ fn rm_of_only_a_kept_item_exits_success() {
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with("$R"))
         .count();
-    let _ = fs::remove_dir_all(&home);
     assert_eq!(out.status.code(), Some(0), "{err}");
     assert!(err.contains("listed in the keep file"), "{err}");
     assert_eq!(left, 1);
+    let json = run(&home, &["rm", "--json", &s(&file)]);
+    assert!(json.status.success(), "{}", text(&json));
+    let body: serde_json::Value =
+        serde_json::from_slice(&json.stdout).unwrap_or_else(|e| panic!("{e}: {}", text(&json)));
+    assert_eq!(body["removed"], 0, "{}", text(&json));
+    assert_eq!(body["matches"], serde_json::json!([]), "{}", text(&json));
+    let _ = fs::remove_dir_all(&home);
 }
