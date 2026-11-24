@@ -23,6 +23,17 @@
           src = craneLib.path ./.;
           strictDeps = true;
           nativeBuildInputs = [ pkgs.installShellFiles ];
+          # The tests drive git, bash completion, script(1) for a terminal
+          # and the release script, which makes its zip with zip or python.
+          nativeCheckInputs = [
+            pkgs.git
+            pkgs.bashInteractive
+            pkgs.util-linux
+            pkgs.zip
+          ];
+          # The tests use debug-only RTRASH_TEST_* seams, as upstream CI
+          # runs them, so the check phase builds the dev profile.
+          checkPhaseCargoCommand = "cargo test --locked";
           postInstall = pkgs.lib.optionalString (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''
             for n in rtrash trash trash-put trash-empty trash-list trash-restore trash-rm; do
               if [ "$n" != "rtrash" ]; then
