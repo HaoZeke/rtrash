@@ -434,7 +434,7 @@ fn prune_after_put(prog: &str, trashed: &[Trashed], quiet: bool) {
                 max,
                 policy,
                 dry_run: false,
-                verbose: false,
+                human: crate::util::HumanOutput::default(),
                 protect_batch: Some(crate::info::batch_id()),
                 gone_before: None,
                 free_inodes: 0,
@@ -1028,7 +1028,8 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         }
     }
     if opts.dry_run {
-        println!("would trash '{}'", crate::util::term_path(&abs));
+        crate::util::HumanOutput::new(opts.json, !opts.json || opts.verbose)
+            .line(&format!("would trash '{}'", abs.display()));
         return Ok(None);
     }
     // A test retargets a symlinked parent here. `abs` was already resolved,
@@ -1071,12 +1072,11 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                 if !opts.json {
                     say_wsl_restore(prog, name.as_ref(), work);
                 }
-                if opts.verbose && !opts.quiet {
-                    println!(
-                        "removed '{}' (Windows Recycle Bin)",
-                        crate::util::term_text(&name)
-                    );
-                }
+                crate::util::HumanOutput::new(
+                    opts.json,
+                    opts.verbose && (!opts.quiet || opts.json),
+                )
+                .line(&format!("removed '{name}' (Windows Recycle Bin)"));
                 Ok(None)
             }
             Err(e) => {
@@ -1101,10 +1101,11 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                     .flatten();
                 let risky_git = crate::du_git::union_work(probed, after);
                 crate::finder_total::carry(&trash_dir, size, true);
-                if opts.verbose && !opts.quiet {
-                    let to = crate::util::term_path(&trash_dir);
-                    println!("removed '{}' (trash {to})", crate::util::term_text(&name));
-                }
+                crate::util::HumanOutput::new(
+                    opts.json,
+                    opts.verbose && (!opts.quiet || opts.json),
+                )
+                .line(&format!("removed '{name}' (trash {})", trash_dir.display()));
                 Ok(Some(Trashed {
                     original: abs,
                     name: trash_name,
@@ -1157,18 +1158,18 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
             if !opts.json {
                 say_undo(prog, name.as_ref(), risky_git);
             }
-            if opts.verbose && !opts.quiet {
+            if opts.verbose && (!opts.quiet || opts.json) {
                 // Name the trash the item went to: a file on another
                 // file system goes to that file system's trash.
-                let to = crate::util::term_path(&trash.root);
-                if meta.is_dir() {
-                    println!(
-                        "removed directory '{}' (trash {to})",
-                        crate::util::term_text(&name)
-                    );
+                let line = if meta.is_dir() {
+                    format!(
+                        "removed directory '{name}' (trash {})",
+                        trash.root.display()
+                    )
                 } else {
-                    println!("removed '{}' (trash {to})", crate::util::term_text(&name));
-                }
+                    format!("removed '{name}' (trash {})", trash.root.display())
+                };
+                crate::util::HumanOutput::new(opts.json, true).line(&line);
             }
             Ok(Some(Trashed {
                 original: abs,

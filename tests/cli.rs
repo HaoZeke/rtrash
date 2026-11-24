@@ -901,7 +901,10 @@ fn put_json_reports_trashed_and_failed() {
         line.contains(&format!("\"trash_dir\":\"{}\"", sb.trash().display())),
         "{line}"
     );
-    assert!(stderr_of(&out).contains("missing.txt"));
+    let stderr = stderr_of(&out);
+    assert!(stderr.contains("removed 'a.txt'"), "{stderr}");
+    assert!(stderr.contains("removed directory 'd'"), "{stderr}");
+    assert!(stderr.contains("missing.txt"), "{stderr}");
 }
 
 /// Run rtrash in `cwd` with the trash under `data_home`.
@@ -6231,6 +6234,11 @@ fn empty_json_dry_run_with_age_is_one_document() {
     assert_eq!(json["dry_run"], true, "{text}");
     assert_eq!(json["removed"], 1, "{text}");
     assert_eq!(json["older_than_secs"], 0, "{text}");
+    assert!(
+        stderr_of(&aged).contains("would remove") && stderr_of(&aged).contains("old.txt"),
+        "{}",
+        stderr_of(&aged)
+    );
     assert!(sb.trash().join("files/old.txt").is_file());
     let capped = sb.run(&["empty", &pin, "--max-size=0", "-n", "--json", "-v"]);
     assert!(capped.status.success(), "{}", stderr_of(&capped));
@@ -6240,6 +6248,11 @@ fn empty_json_dry_run_with_age_is_one_document() {
     assert_eq!(json["dry_run"], true, "{text}");
     assert_eq!(json["removed"], 1, "{text}");
     assert_eq!(json["max_size"], 0, "{text}");
+    assert!(
+        stderr_of(&capped).contains("would remove") && stderr_of(&capped).contains("old.txt"),
+        "{}",
+        stderr_of(&capped)
+    );
 }
 
 #[test]
@@ -6250,7 +6263,7 @@ fn rm_json_and_age_filters() {
     sb.touch("drop.o");
     assert!(sb.run(&["put", "keep.c"]).status.success());
     assert!(sb.run(&["put", "drop.o"]).status.success());
-    let j = sb.run(&["rm", &pin, "--match=glob", "--json", "-n", "*.o"]);
+    let j = sb.run(&["rm", &pin, "--match=glob", "--json", "-n", "-v", "*.o"]);
     assert!(j.status.success(), "{}", stderr_of(&j));
     let s = stdout_of(&j);
     assert!(
@@ -6259,6 +6272,7 @@ fn rm_json_and_age_filters() {
     );
     assert!(s.contains("drop.o"), "{s}");
     assert!(!s.contains("keep.c"), "{s}");
+    assert!(stderr_of(&j).contains("drop.o"), "{}", stderr_of(&j));
     // dry-run keeps files
     assert!(sb.trash().join("files/drop.o").is_file());
     let gone = sb.run(&["rm", &pin, "--match=glob", "--json", "*.o"]);
@@ -8819,11 +8833,16 @@ fn reap_purge_trash_empties_the_oldest_trash_items_when_short() {
         stderr_of(&out)
     );
     let mut json: Vec<&str> = args.to_vec();
-    json.extend(["-n", "--json", tmp_arg]);
+    json.extend(["-n", "-v", "--json", tmp_arg]);
     let out = reap_cmd(&sb, &json);
     serde_json::from_slice::<serde_json::Value>(&out.stdout)
         .unwrap_or_else(|e| panic!("{e}: {}", stdout_of(&out)));
     assert!(!stdout_of(&out).contains("would remove"));
+    assert!(
+        stderr_of(&out).contains("would remove") && stderr_of(&out).contains("gone.txt"),
+        "{}",
+        stderr_of(&out)
+    );
     assert!(info.exists(), "the dry run emptied the trash");
     let mut real: Vec<&str> = args.to_vec();
     real.push(tmp_arg);
@@ -9337,12 +9356,24 @@ fn empty_until_free_removes_the_oldest_until_there_is_room() {
     );
     assert!(old.exists());
     let dry_json = run(
-        &["empty", "--home-only", "--until-free=30000", "-n", "--json"],
+        &[
+            "empty",
+            "--home-only",
+            "--until-free=30000",
+            "-n",
+            "-v",
+            "--json",
+        ],
         total,
     );
     serde_json::from_slice::<serde_json::Value>(&dry_json.stdout)
         .unwrap_or_else(|e| panic!("{e}: {}", stdout_of(&dry_json)));
     assert!(!stdout_of(&dry_json).contains("would remove"));
+    assert!(
+        stderr_of(&dry_json).contains("would remove") && stderr_of(&dry_json).contains("old.bin"),
+        "{}",
+        stderr_of(&dry_json)
+    );
     assert!(old.exists());
     let o = run(
         &["empty", "--home-only", "--until-free=30000", "--json"],

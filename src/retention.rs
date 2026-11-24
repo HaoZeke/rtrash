@@ -83,7 +83,7 @@ pub struct Prune<'a> {
     pub max: u64,
     pub policy: Policy,
     pub dry_run: bool,
-    pub verbose: bool,
+    pub human: crate::util::HumanOutput,
     /// Items with this batch id are never removed.
     pub protect_batch: Option<&'a str>,
     /// Items trashed at or before this epoch count as already gone (an age
@@ -187,13 +187,11 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
         let dir = &dirs[c.root];
         let shown = crate::util::join_name(&dir.files(), &c.name);
         if p.dry_run {
-            if p.verbose {
-                println!(
-                    "would remove {} ({})",
-                    crate::util::term_path(&shown),
-                    format_bytes(c.bytes)
-                );
-            }
+            p.human.line(&format!(
+                "would remove {} ({})",
+                shown.display(),
+                format_bytes(c.bytes)
+            ));
         } else {
             if let Err(e) = remove_entry(dir, &c.name, c.identity) {
                 eprintln!(
@@ -203,9 +201,7 @@ pub fn prune(prog: &str, dirs: &[TrashDir], p: &Prune) -> Outcome {
                 out.errors += 1;
                 continue;
             }
-            if p.verbose {
-                println!("removed {}", crate::util::term_path(&shown));
-            }
+            p.human.line(&format!("removed {}", shown.display()));
         }
         kept[c.root].0 -= c.bytes;
         kept[c.root].1 -= 1;

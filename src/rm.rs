@@ -556,17 +556,16 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 }
             }
             bytes = bytes.saturating_add(sz);
-            if !json {
-                if verbose {
-                    println!(
-                        "would permanently remove {} ({})",
-                        crate::util::term_path(&entry.original),
-                        crate::fastdelete::format_bytes(sz)
-                    );
-                } else {
-                    println!("{}", crate::util::term_path(&entry.original));
-                }
-            }
+            let line = if verbose {
+                format!(
+                    "would permanently remove {} ({})",
+                    entry.original.display(),
+                    crate::fastdelete::format_bytes(sz)
+                )
+            } else {
+                entry.original.display().to_string()
+            };
+            crate::util::HumanOutput::new(json, !json || verbose).line(&line);
             matched_paths.push(entry.original.to_string_lossy().into_owned());
             removed += 1;
             continue;
@@ -659,9 +658,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         }
         trashdir::directorysizes_remove(&entry.dir, &entry.name);
         bytes = bytes.saturating_add(sz);
-        if !json && verbose {
-            println!("removed '{}'", crate::util::term_path(&entry.original));
-        }
+        crate::util::HumanOutput::new(json, verbose)
+            .line(&format!("removed '{}'", entry.original.display()));
         matched_paths.push(entry.original.to_string_lossy().into_owned());
         removed += 1;
         drop(section);

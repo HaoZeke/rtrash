@@ -1036,11 +1036,19 @@ fn empty_until_free_takes_finder_items() {
         "{}",
         out(&human)
     );
-    let dry = run(&["empty", "--home-only", "-n", "--json", &want], &fs_spec);
+    let dry = run(
+        &["empty", "--home-only", "-n", "-v", "--json", &want],
+        &fs_spec,
+    );
     assert_eq!(dry.status.code(), Some(1), "{}", err(&dry));
     serde_json::from_slice::<serde_json::Value>(&dry.stdout)
         .unwrap_or_else(|e| panic!("{e}: {}", out(&dry)));
     assert!(!out(&dry).contains("would remove"), "{}", out(&dry));
+    assert!(
+        err(&dry).contains("would remove") && err(&dry).contains("gone.txt"),
+        "{}",
+        err(&dry)
+    );
     assert!(b.finder().join("gone.txt").exists());
 }
 

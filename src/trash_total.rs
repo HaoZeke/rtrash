@@ -142,7 +142,7 @@ pub fn bytes(prog: &str, dir: &TrashDir) -> u64 {
             max: u64::MAX,
             policy: crate::retention::Policy::Oldest,
             dry_run: true,
-            verbose: false,
+            human: crate::util::HumanOutput::default(),
             protect_batch: None,
             gone_before: None,
             free_inodes: 0,

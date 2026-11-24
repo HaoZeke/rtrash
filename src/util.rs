@@ -778,6 +778,33 @@ pub fn err_path<P: AsRef<std::path::Path> + ?Sized>(p: &P) -> String {
     }
 }
 
+/// One human-readable output stream beside an optional JSON document.
+///
+/// Human mode writes enabled lines to stdout. JSON mode keeps stdout for
+/// the document and moves the same lines to stderr.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HumanOutput {
+    json: bool,
+    enabled: bool,
+}
+
+impl HumanOutput {
+    pub fn new(json: bool, enabled: bool) -> Self {
+        Self { json, enabled }
+    }
+
+    pub fn line(&self, text: &str) {
+        if !self.enabled {
+            return;
+        }
+        if self.json {
+            eprintln!("{}", err_text(text));
+        } else {
+            println!("{}", term_text(text));
+        }
+    }
+}
+
 /// Shell-style glob match (`*`, `?`, `[…]` / `[!…]`), as used by trash-cli `trash-rm`.
 /// Matching is on the full string (callers also try the basename separately).
 pub fn fnmatch(pat: &str, text: &str) -> bool {

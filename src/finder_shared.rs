@@ -854,9 +854,8 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         let m = crate::finder_total::measure_item(&path);
         let sz = m.0;
         if dry_run {
-            if !json {
-                println!("{}", crate::util::term_path(&e.shown));
-            }
+            crate::util::HumanOutput::new(json, !json || verbose)
+                .line(&e.shown.display().to_string());
         } else if let Err(err) = crate::permanent_guard::remove(&path) {
             crate::finder_total::uncarried(&e.trash);
             eprintln!(
@@ -867,9 +866,8 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
             continue;
         } else {
             crate::finder_total::carry(&e.trash, m, false);
-            if verbose && !json {
-                println!("removed '{}'", crate::util::term_path(&e.shown));
-            }
+            crate::util::HumanOutput::new(json, verbose)
+                .line(&format!("removed '{}'", e.shown.display()));
         }
         removed += 1;
         bytes = bytes.saturating_add(sz);

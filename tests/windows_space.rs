@@ -192,6 +192,7 @@ fn reap_purge_trash_dry_run_lists_the_drive_recycle_bin_oldest_first() {
             "--purge-trash",
             "--dry-run",
             "--json",
+            "--verbose",
         ])
         .arg(&dir)
         .env("RTRASH_TEST_FS", format!("1000000:{}", dir.display()))
@@ -205,6 +206,13 @@ fn reap_purge_trash_dry_run_lists_the_drive_recycle_bin_oldest_first() {
     serde_json::from_slice::<serde_json::Value>(&json.stdout)
         .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&json.stdout)));
     assert!(!String::from_utf8_lossy(&json.stdout).contains("would remove"));
+    let json_err = String::from_utf8_lossy(&json.stderr);
+    assert!(
+        names
+            .iter()
+            .all(|name| json_err.contains("would remove") && json_err.contains(name)),
+        "{json_err}"
+    );
     assert!(old.exists() && base.join(&names[0]).symlink_metadata().is_err());
     let _ = fs::remove_dir_all(&base);
 }
@@ -932,7 +940,7 @@ fn two_quick_puts_of_one_path_find_the_second_payload() {
 
     std::fs::write(&file, b"new").unwrap();
     let second = common::rtrash(&home)
-        .args(["put", "--json", file.to_str().unwrap()])
+        .args(["put", "--json", "-v", file.to_str().unwrap()])
         .env("RTRASH_IN_USE", "ignore")
         .env("RTRASH_TEST_BIN_TIME", &fixed)
         .output()
@@ -943,7 +951,12 @@ fn two_quick_puts_of_one_path_find_the_second_payload() {
         String::from_utf8_lossy(&second.stderr)
     );
     let json = String::from_utf8_lossy(&second.stdout);
+    let err = String::from_utf8_lossy(&second.stderr);
     assert!(json.contains(r#""name":"$RT00000""#), "{json}");
+    assert!(
+        err.contains("removed") && err.contains(file.to_str().unwrap()),
+        "{err}"
+    );
     let new_index = bin.join("$IT00000");
     let deleted = |index: &std::path::Path| match rtrash::win_recycle::read_bin_index(index) {
         rtrash::win_recycle::IndexRead::Record(meta) => meta.delete_filetime,
@@ -1138,7 +1151,7 @@ fn empty_until_free_dry_run_reports_each_short_drive() {
         String::from_utf8_lossy(&out.stderr)
     );
     let out = common::rtrash_real(common::Real::RecycleBin)
-        .args(["empty", "--until-free=999999G", "--json", "-n"])
+        .args(["empty", "--until-free=999999G", "--json", "-n", "-v"])
         .output()
         .unwrap();
     let (stdout, stderr) = (
@@ -1154,7 +1167,12 @@ fn empty_until_free_dry_run_reports_each_short_drive() {
     );
     serde_json::from_slice::<serde_json::Value>(&out.stdout)
         .unwrap_or_else(|e| panic!("{e}: {stdout}"));
-    assert!(stderr.contains("from the Recycle Bin of"), "{stderr}");
+    assert!(
+        stderr.contains("from the Recycle Bin of")
+            && stderr.contains("would remove")
+            && stderr.contains(&name),
+        "{stderr}"
+    );
     // The dry run left the item; take it out by exact original path.
     let _ = common::rtrash_real(common::Real::RecycleBin)
         .arg("rm")
@@ -1204,7 +1222,7 @@ fn empty_max_size_dry_run_trims_the_recycle_bins() {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        out
     };
     let roomy = common::rtrash_real(common::Real::RecycleBin)
         .args(["empty", "--max-size=999999G", "-n"])
@@ -1224,11 +1242,18 @@ fn empty_max_size_dry_run_trims_the_recycle_bins() {
         String::from_utf8_lossy(&roomy.stderr)
     );
     let tight = dry(&["--max-size=0", "--prune=largest"]);
+    let tight = String::from_utf8_lossy(&tight.stdout);
     assert!(tight.contains(&name), "{tight}");
-    let json = dry(&["--max-size=0", "--json"]);
+    let json = dry(&["--max-size=0", "--json", "-v"]);
+    let json_err = String::from_utf8_lossy(&json.stderr);
+    let json = String::from_utf8_lossy(&json.stdout);
     assert!(
         json.starts_with(r#"{"dry_run":true,"removed":"#) && json.contains(r#""max_size":0}"#),
         "{json}"
+    );
+    assert!(
+        json_err.contains("would remove") && json_err.contains(&name),
+        "{json_err}"
     );
     let _ = common::rtrash_real(common::Real::RecycleBin)
         .arg("rm")
@@ -1300,15 +1325,21 @@ fn rm_json_summarizes_the_recycle_bin_removal() {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        String::from_utf8_lossy(&out.stdout).into_owned()
+        out
     };
-    let dry = rm(&["--json", "-n"]);
+    let dry = rm(&["--json", "-n", "-v"]);
+    let dry_err = String::from_utf8_lossy(&dry.stderr);
+    let dry = String::from_utf8_lossy(&dry.stdout);
     assert!(dry.contains("\"dry_run\": true"), "{dry}");
     assert!(dry.contains("\"removed\": 1"), "{dry}");
     assert!(dry.contains(&name), "{dry}");
-    let done = rm(&["--json"]);
+    assert!(dry_err.contains(&name), "{dry_err}");
+    let done = rm(&["--json", "-v"]);
+    let done_err = String::from_utf8_lossy(&done.stderr);
+    let done = String::from_utf8_lossy(&done.stdout);
     assert!(done.contains("\"dry_run\": false"), "{done}");
     assert!(done.contains("\"removed\": 1"), "{done}");
+    assert!(done_err.contains(&name), "{done_err}");
     for args in [&[][..], &["-n"][..], &["--json"][..]] {
         let again = common::rtrash_real(common::Real::RecycleBin)
             .arg("rm")
