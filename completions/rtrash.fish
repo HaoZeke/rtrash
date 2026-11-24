@@ -103,7 +103,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q status' -l fix
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q status' -s n -l dry-run -d 'with --fix, print what it would remove'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l size -d 'add each item size'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l show-trashpath -d 'show where each item sits in the trash'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l sort -x -a 'date size name path' -d 'row order'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l sort -x -a 'oldest newest date size name path' -d 'row order'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l reverse -d 'reverse the order'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l last -x -d 'only the last N rows'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l depth -x -d 'show what each trashed directory holds'
@@ -242,7 +242,7 @@ complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l no
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l batch -r -d 'restore one whole put run'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l newest-first -d 'list the most recently trashed item first'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l overwrite -d 'same as --force'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l sort -d 'numbered table order' -x -a 'date size path none'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l sort -d 'numbered table order' -x -a 'newest oldest date size path none'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l oldest-first -d 'list the oldest trashed item first'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -l name -x -a '(__rtrash_trashed name)' -d 'match by file name or trash name'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q restore' -f -a '(__rtrash_trashed path)'
@@ -359,7 +359,7 @@ complete -c trash-list -l smaller-than -r
 complete -c trash-list -l json
 complete -c trash-list -l size
 complete -c trash-list -l show-trashpath
-complete -c trash-list -l sort -x -a 'date size name path'
+complete -c trash-list -l sort -x -a 'oldest newest date size name path'
 complete -c trash-list -l reverse
 complete -c trash-list -l last -x
 complete -c trash-list -l depth -x
@@ -379,7 +379,7 @@ complete -c trash-restore -l no-space-check
 complete -c trash-restore -l batch -r
 complete -c trash-restore -l newest-first
 complete -c trash-restore -l overwrite
-complete -c trash-restore -l sort -x -a 'date size path none'
+complete -c trash-restore -l sort -x -a 'newest oldest date size path none'
 complete -c trash-restore -l oldest-first
 complete -c trash-restore -l name -x -a '(__rtrash_trashed name)'
 complete -c trash-restore -f -a '(__rtrash_trashed path)'

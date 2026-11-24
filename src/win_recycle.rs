@@ -2669,7 +2669,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
     /// What Windows `list --sort` orders by, as on FreeDesktop.
     #[derive(Clone, Copy)]
     enum ListSort {
-        Date,
+        Oldest,
+        Newest,
         Size,
         Name,
         Path,
@@ -2733,10 +2734,18 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
         let mut directory: Option<PathBuf> = None;
         let mut last: Option<usize> = None;
         let mut depth = 0usize;
-        let mut sort = ListSort::Date;
-        let mut reverse = false;
+        let cfg = crate::config::get();
+        let defaults = crate::config::list_defaults(prog, cfg);
+        let mut sort = match defaults.sort {
+            crate::config::ListSort::Oldest => ListSort::Oldest,
+            crate::config::ListSort::Newest => ListSort::Newest,
+            crate::config::ListSort::Size => ListSort::Size,
+            crate::config::ListSort::Name => ListSort::Name,
+            crate::config::ListSort::Path => ListSort::Path,
+        };
+        let mut reverse = defaults.reverse;
         let mut bad: Option<String> = None;
-        let mut with_size = false;
+        let mut with_size = defaults.with_size || matches!(sort, ListSort::Size);
         let mut show_trash = false;
         let mut format: Option<Vec<crate::listfmt::FmtPart>> = None;
         let filters = parse_with_filters(prog, args, |arg| match arg {
@@ -2757,8 +2766,12 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                 None
             }
             a if a.starts_with("--sort=") => match &a["--sort=".len()..] {
-                "date" | "time" => {
-                    sort = ListSort::Date;
+                "date" | "time" | "oldest" => {
+                    sort = ListSort::Oldest;
+                    None
+                }
+                "newest" => {
+                    sort = ListSort::Newest;
                     None
                 }
                 "size" => {
@@ -2775,7 +2788,9 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                     None
                 }
                 v => {
-                    bad = Some(format!("invalid --sort '{v}' (date, size, name or path)"));
+                    bad = Some(format!(
+                        "invalid --sort '{v}' (oldest, newest, size, name or path)"
+                    ));
                     Some(2)
                 }
             },
@@ -2859,7 +2874,7 @@ List items in the Windows Recycle Bin (system trash).
       --cwd-only only items that came from the current directory or below
       --directory=DIR  only items that came from DIR or below it (DIR
                    need not exist any more)
-      --sort=KEY order by date (default), size (largest first; implies
+      --sort=KEY order by oldest (default), newest, size (largest first; implies
                    --size), name (file name) or path (original path)
       --reverse  reverse the order
       --depth=N  under each deleted folder, show what it holds, N levels
@@ -2947,7 +2962,8 @@ on Windows (there is no FreeDesktop layout here).
                 items.sort_by_key(|i| i.time_deleted);
                 // Other keys sort stably, so ties keep the date order.
                 match sort {
-                    ListSort::Date => {}
+                    ListSort::Oldest => {}
+                    ListSort::Newest => items.reverse(),
                     ListSort::Size => items.sort_by_cached_key(|i| std::cmp::Reverse(item_size(i))),
                     ListSort::Name => items.sort_by_cached_key(|i| {
                         original_of(i).file_name().map(|n| n.to_os_string())
@@ -3649,7 +3665,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         let mut conflict = Conflict::Refuse;
         let mut json = false;
         let mut plain = false;
-        let mut newest_first = false;
+        let mut newest_first: Option<bool> = None;
         let mut target: Option<PathBuf> = None;
         let mut last_run = false;
         let mut dry_run = false;
@@ -3774,17 +3790,21 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
                 }
                 "--plain" | "--home-only" => plain = true,
                 a if a.starts_with("--sort=") => match &a["--sort=".len()..] {
-                    "date" => sort = Some(TableSort::Date),
+                    "date" | "oldest" => sort = Some(TableSort::Oldest),
+                    "newest" => sort = Some(TableSort::Newest),
                     "size" => sort = Some(TableSort::Size),
                     "path" => sort = Some(TableSort::Path),
                     "none" => sort = Some(TableSort::None),
                     v => {
-                        eprintln!("{prog}: invalid --sort '{v}' (date, size, path or none)");
+                        eprintln!(
+                            "{prog}: invalid --sort '{v}' (newest, oldest, size, path or none; \
+                             date is an alias of oldest)"
+                        );
                         return 2;
                     }
                 },
-                "--newest-first" => newest_first = true,
-                "--oldest-first" => newest_first = false,
+                "--newest-first" => newest_first = Some(true),
+                "--oldest-first" => newest_first = Some(false),
                 "--no-space-check" => crate::space::skip_check(true),
                 "--help" => {
                     print!(
@@ -3826,11 +3846,12 @@ Without PATH, print a numbered list and read an index from stdin.
                 current directory or below (implies --plain)
       --directory=DIR  as --cwd-only, for items deleted from under DIR;
                 DIR need not exist any more (implies --plain)
-      --sort=ORDER  numbered list order: date (oldest first, default),
-                size (largest first), path (original path) or none
+      --sort=ORDER  numbered list order: newest (default), oldest
+                (trash-restore also accepts date), size (largest first),
+                path (original path) or none
                 (as read)
       --newest-first  list the most recently deleted item first
-      --oldest-first  list the oldest deleted item first (default)
+      --oldest-first  list the oldest deleted item first
       --batch=last  restore every item the latest put moved, by the
                 record put keeps in %LOCALAPPDATA%\\rtrash
       --no-space-check  restore onto another drive even when it would
@@ -4048,6 +4069,13 @@ Without PATH, print a numbered list and read an index from stdin.
         if all || (matches.len() == 1 && !trash_cli) {
             return restore_one(prog, matches, &opts);
         }
+        #[cfg(feature = "tui")]
+        if !plain && to.is_none() && util::stdin_is_tty() {
+            let newest = apply_tui_order(&mut matches, newest_first, sort);
+            let items: Vec<BinItem> = matches.into_iter().map(BinItem::new).collect();
+            let refs: Vec<&BinItem> = items.iter().collect();
+            return crate::restore_tui::run(prog, refs, conflict == Conflict::Overwrite, newest);
+        }
         match sort {
             Some(TableSort::Path) => matches.sort_by_key(original_of),
             // Largest first; matches are oldest first, so ties keep that.
@@ -4055,22 +4083,17 @@ Without PATH, print a numbered list and read an index from stdin.
                 matches.sort_by_cached_key(|i| std::cmp::Reverse(item_size(i)));
             }
             Some(TableSort::None) => matches = as_read.unwrap_or(matches),
-            Some(TableSort::Date) | None => {
-                if newest_first {
+            Some(TableSort::Oldest) => {}
+            Some(TableSort::Newest) => matches.reverse(),
+            None => {
+                // The numbered selection table defaults newest-first; a
+                // non-interactive multi-restore keeps the historical
+                // oldest-first walk unless the caller asked for an order.
+                let newest = newest_first.unwrap_or(!all);
+                if newest {
                     matches.reverse();
                 }
             }
-        }
-        #[cfg(feature = "tui")]
-        if !plain && to.is_none() && util::stdin_is_tty() {
-            let items: Vec<BinItem> = matches.into_iter().map(BinItem::new).collect();
-            let refs: Vec<&BinItem> = items.iter().collect();
-            return crate::restore_tui::run(
-                prog,
-                refs,
-                conflict == Conflict::Overwrite,
-                newest_first,
-            );
         }
         let _ = plain;
         // Numbered pick.
@@ -4224,10 +4247,30 @@ Without PATH, print a numbered list and read an index from stdin.
     /// takes it.
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum TableSort {
-        Date,
+        Oldest,
+        Newest,
         Size,
         Path,
         None,
+    }
+
+    #[cfg(any(feature = "tui", test))]
+    fn tui_newest_first(newest_first: Option<bool>, _sort: Option<TableSort>) -> bool {
+        newest_first.unwrap_or(true)
+    }
+
+    #[cfg(any(feature = "tui", test))]
+    fn apply_tui_order<T>(
+        rows: &mut [T],
+        newest_first: Option<bool>,
+        sort: Option<TableSort>,
+    ) -> bool {
+        // The TUI order follows only --newest-first/--oldest-first.
+        let newest = tui_newest_first(newest_first, sort);
+        if newest {
+            rows.reverse();
+        }
+        newest
     }
 
     struct RestoreOpts {
@@ -5423,6 +5466,29 @@ On Windows, invoke `rtrash put|list|restore|empty|rm|status` directly.
         eprintln!("{prog}: for PowerShell completions, run `rtrash setup --powershell-profile`");
         eprintln!("{prog}: trash backend: {}", platform::trash_backend_label());
         0
+    }
+
+    #[cfg(all(test, windows))]
+    #[test]
+    fn apply_tui_order_ignores_sort_and_follows_the_direction_flag() {
+        let mut ids = [1, 2, 3];
+        let newest = apply_tui_order(&mut ids, None, Some(TableSort::Oldest));
+        assert_eq!(ids, [3, 2, 1], "TUI rows should default to newest-first");
+        assert!(newest, "newest-first label/cursor flag should be true");
+
+        let mut ids = [1, 2, 3];
+        let newest = apply_tui_order(&mut ids, None, Some(TableSort::Newest));
+        assert_eq!(
+            ids,
+            [3, 2, 1],
+            "TUI rows should ignore --sort and stay newest-first by default"
+        );
+        assert!(newest, "sort alone should not flip the label/cursor flag");
+
+        let mut ids = [1, 2, 3];
+        let newest = apply_tui_order(&mut ids, Some(false), Some(TableSort::Newest));
+        assert_eq!(ids, [1, 2, 3], "--oldest-first should keep oldest first");
+        assert!(!newest, "--oldest-first should flip the label/cursor flag");
     }
 }
 

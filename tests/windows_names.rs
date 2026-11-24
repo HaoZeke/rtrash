@@ -27,6 +27,32 @@ fn run_with(exe: &std::path::Path, dir: &std::path::Path, args: &[&str], input: 
     child.wait_with_output().unwrap()
 }
 
+fn run_with_env(
+    exe: &std::path::Path,
+    dir: &std::path::Path,
+    args: &[&str],
+    input: &str,
+    env: &[(&str, &std::ffi::OsStr)],
+) -> Output {
+    let mut cmd = Command::new(exe);
+    cmd.args(args)
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
 #[test]
 fn trash_cli_names_run_without_their_exe_suffix() {
     let dir = std::env::temp_dir().join(format!("rtrash-names-{}", std::process::id()));
@@ -202,8 +228,8 @@ fn trash_restore_takes_a_range_pick() {
     }
     let restore = dir.join("trash-restore.exe");
     fs::copy(env!("CARGO_BIN_EXE_rtrash"), &restore).unwrap();
-    // Rows run oldest first: 0 is a.txt, 2 is c.txt.
-    let out = run_with(&restore, &dir, &["sub"], "0,2\n");
+    // Numbered rows default newest-first, so 0 is c.txt.
+    let out = run_with(&restore, &dir, &["sub"], "0\n");
     let back: Vec<bool> = names.iter().map(|n| sub.join(n).exists()).collect();
     for n in names {
         if !sub.join(n).exists() {
@@ -220,7 +246,14 @@ fn trash_restore_takes_a_range_pick() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(back, [true, false, true]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.lines()
+            .find(|l| l.starts_with("   0 "))
+            .is_some_and(|l| l.ends_with("c.txt")),
+        "{said}"
+    );
+    assert_eq!(back, [false, false, true]);
 }
 
 #[test]
@@ -393,11 +426,11 @@ fn restore_sorts_by_size_on_windows() {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let (big, small) = (dir.join("big.bin"), dir.join("small.txt"));
-    fs::write(&small, "s").unwrap();
     fs::write(&big, vec![7u8; 1 << 20]).unwrap();
+    fs::write(&small, "s").unwrap();
     let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
-    // The small file goes first, so date order would list it at 0.
-    for f in [&small, &big] {
+    // big goes first (oldest), small second (newest).
+    for f in [&big, &small] {
         let put = common::rtrash_real(common::Real::RecycleBin)
             .arg("put")
             .arg(f)
@@ -411,10 +444,16 @@ fn restore_sorts_by_size_on_windows() {
         common::next_trash_second();
     }
     let scope = format!("--directory={}", dir.display());
+    let plain = run_with(
+        rtrash,
+        &dir,
+        &["restore", &scope, "--plain", "--dry-run"],
+        "0\n",
+    );
     let out = run_with(
         rtrash,
         &dir,
-        &["restore", &scope, "--plain", "--sort=size"],
+        &["restore", &scope, "--plain", "--dry-run", "--sort=size"],
         "0\n",
     );
     let (big_back, small_back) = (big.exists(), small.exists());
@@ -428,14 +467,103 @@ fn restore_sorts_by_size_on_windows() {
     }
     let _ = fs::remove_dir_all(&dir);
     assert!(
+        plain.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    let plain_text = String::from_utf8_lossy(&plain.stdout);
+    assert!(
+        plain_text
+            .lines()
+            .find(|l| l.starts_with("would restore"))
+            .is_some_and(|l| l.ends_with("small.txt'")),
+        "{plain_text}"
+    );
+    assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let said = String::from_utf8_lossy(&out.stdout);
     assert!(
-        big_back && !small_back,
-        "big {big_back}, small {small_back}"
+        said.lines()
+            .find(|l| l.starts_with("would restore"))
+            .is_some_and(|l| l.ends_with("big.bin'")),
+        "{said}"
     );
+    assert!(!big_back && !small_back, "dry-run restored something");
+}
+
+#[test]
+fn list_sort_keys_and_tailing_orders_on_windows() {
+    let dir = common::scratch_dir("names", "listsort");
+    // Put order (oldest -> newest): d-old, a-name, c-big, b-new.
+    // Distinct first rows by key:
+    // - default/oldest/date/time => d-old
+    // - newest/reverse/last      => b-new
+    // - name/path                => a-name
+    // - size                     => c-big
+    let d_old = dir.join("d-old.txt");
+    let a_name = dir.join("a-name.txt");
+    let c_big = dir.join("c-big.bin");
+    let b_new = dir.join("b-new.txt");
+    fs::write(&d_old, b"d").unwrap();
+    fs::write(&a_name, b"a").unwrap();
+    fs::write(&c_big, vec![7u8; 1 << 20]).unwrap();
+    fs::write(&b_new, b"b").unwrap();
+    let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
+    for f in [&d_old, &a_name, &c_big, &b_new] {
+        let put = common::rtrash_real(common::Real::RecycleBin)
+            .arg("put")
+            .arg(f)
+            .output()
+            .unwrap();
+        assert!(
+            put.status.success(),
+            "{}",
+            String::from_utf8_lossy(&put.stderr)
+        );
+        common::next_trash_second();
+    }
+    let scope = format!("--directory={}", dir.display());
+    let first = |args: &[&str], env: &[(&str, &std::ffi::OsStr)]| -> String {
+        let out = run_with_env(rtrash, &dir, args, "", env);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let no_env: [(&str, &std::ffi::OsStr); 0] = [];
+    assert!(first(&["list", &scope], &no_env).contains("d-old.txt"));
+    assert!(first(&["list", &scope, "--sort=newest"], &no_env).contains("b-new.txt"));
+    assert!(first(&["list", &scope, "--sort=name"], &no_env).contains("a-name.txt"));
+    assert!(first(&["list", &scope, "--sort=path"], &no_env).contains("a-name.txt"));
+    assert!(first(&["list", &scope, "--sort=size"], &no_env).contains("c-big.bin"));
+    assert!(first(&["list", &scope, "--reverse"], &no_env).contains("b-new.txt"));
+    assert!(first(&["list", &scope, "--last=1"], &no_env).contains("b-new.txt"));
+
+    // Put the default on newest so oldest/date/time must change row 0.
+    let cfg = dir.join("rtrash-config.toml");
+    fs::write(&cfg, "[list]\nsort = \"newest\"\n").unwrap();
+    let with_cfg = [("RTRASH_CONFIG", cfg.as_os_str())];
+    assert!(first(&["list", &scope], &with_cfg).contains("b-new.txt"));
+    assert!(first(&["list", &scope, "--sort=oldest"], &with_cfg).contains("d-old.txt"));
+    assert!(first(&["list", &scope, "--sort=date"], &with_cfg).contains("d-old.txt"));
+    assert!(first(&["list", &scope, "--sort=time"], &with_cfg).contains("d-old.txt"));
+
+    for f in [&d_old, &a_name, &c_big, &b_new] {
+        let _ = common::rtrash_real(common::Real::RecycleBin)
+            .arg("restore")
+            .arg(f)
+            .output();
+    }
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

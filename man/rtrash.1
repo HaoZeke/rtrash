@@ -902,8 +902,11 @@ so a terminal never gets a raw path.
 .TP
 .BI \-\-sort= KEY
 Order rows by
-.B date
-(the default),
+.B oldest
+(the default; also
+.BR date ),
+.B newest
+or
 .B size
 (largest first; implies
 .BR \-\-size ),
@@ -2971,8 +2974,12 @@ The trash-cli spelling of
 .TP
 .BI \-\-sort= ORDER
 Order of the numbered table:
-.B date
-(oldest first, the default),
+.B newest
+(default),
+.B oldest
+(or
+.BR date ,
+for trash-restore compatibility),
 .B size
 (largest first, as
 .B list \-\-sort=size
@@ -3068,10 +3075,10 @@ Any other kind of link, such as a volume mount point, stops the restore
 before it copies anything.
 .TP
 .B \-\-newest\-first
-List the most recently trashed item first (default in the interactive browser).
+List the most recently trashed item first (default in the interactive browser and numbered table).
 .TP
 .B \-\-oldest\-first
-Order from oldest to newest (default for the numbered list, so the newest row prints just above the prompt).
+Order from oldest to newest.
 .TP
 .BI \-\-name= NAME
 Match items by original file name or by name inside the trash, instead of by
@@ -4223,7 +4230,7 @@ trash = "finder"          # RTRASH_MACOS_TRASH: finder or freedesktop
 recycle = false           # RTRASH_WSL_RECYCLE: puts under /mnt/<drive>/ go to the Recycle Bin
 
 [list]
-sort = "date"             # \-\-sort: date, size, name or path
+sort = "oldest"           # \-\-sort: oldest, newest, size, name or path
 size = false              # \-\-size
 reverse = false           # \-\-reverse
 

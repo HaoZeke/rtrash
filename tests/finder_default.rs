@@ -662,11 +662,11 @@ fn finder_trash_restore_asks_on_a_scope() {
         .to_string();
     assert!(!row.is_empty() && !row.starts_with("   0  "), "{}", out(&o));
     assert!(!sub.join("a.txt").exists() && !sub.join("b.txt").exists());
-    // Rows run oldest first; 1 is b.txt, and a.txt stays in the trash.
+    // Numbered rows default newest first; 1 is a.txt, and b.txt stays in the trash.
     let o = b.run_as(&tr, &["sub"], "1\n");
     assert!(o.status.success(), "{}", err(&o));
-    assert_eq!(fs::read(sub.join("b.txt")).unwrap(), b"b.txt");
-    assert!(!sub.join("a.txt").exists());
+    assert_eq!(fs::read(sub.join("a.txt")).unwrap(), b"a.txt");
+    assert!(!sub.join("b.txt").exists());
 }
 
 #[test]
@@ -692,26 +692,30 @@ fn finder_restore_orders_the_numbered_list() {
         .collect();
     fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
 
-    // --newest-first puts m.txt, the last trashed, at 0.
-    let o = b.run(&["restore", "--plain", "--newest-first"], "0\n");
-    assert!(o.status.success(), "{}", err(&o));
-    assert!(
-        out(&o).lines().next().unwrap_or("").ends_with("m.txt"),
-        "{}",
+    let pick = |extra: &[&str]| {
+        let mut args = vec!["restore", "--plain", "--dry-run"];
+        args.extend_from_slice(extra);
+        let o = b.run(&args, "0\n");
+        assert!(o.status.success(), "{}", err(&o));
         out(&o)
-    );
-    assert!(b.work().join("m.txt").exists());
+            .lines()
+            .find(|l| l.starts_with("would restore"))
+            .unwrap_or_default()
+            .to_string()
+    };
+    // Numbered restore defaults newest-first, so m.txt is at 0.
+    assert!(pick(&[]).contains("m.txt"), "{}", pick(&[]));
     // --sort=path puts a.txt before z.txt.
-    let o = b.run(&["restore", "--plain", "--sort=path"], "0\n");
-    assert!(o.status.success(), "{}", err(&o));
-    assert!(b.work().join("a.txt").exists());
-    assert!(!b.work().join("z.txt").exists());
-    // The default stays oldest first.
-    let o = b.run(&["restore", "--plain"], "\n");
     assert!(
-        out(&o).lines().next().unwrap_or("").ends_with("z.txt"),
+        pick(&["--sort=path"]).contains("a.txt"),
         "{}",
-        out(&o)
+        pick(&["--sort=path"])
+    );
+    // --sort=date aliases oldest, for trash-restore compatibility.
+    assert!(
+        pick(&["--sort=date"]).contains("z.txt"),
+        "{}",
+        pick(&["--sort=date"])
     );
 }
 
@@ -766,12 +770,12 @@ fn finder_restore_takes_size_filters() {
 #[test]
 fn finder_restore_sorts_by_size() {
     let b = Box_::new("sortsize");
-    fs::write(b.work().join("small.txt"), b"s").unwrap();
-    assert!(b.run(&["put", "small.txt"], "").status.success());
-    common::next_trash_second();
     fs::write(b.work().join("big.bin"), vec![7u8; 1 << 20]).unwrap();
     assert!(b.run(&["put", "big.bin"], "").status.success());
-    let recs: Vec<Record> = ["small.txt", "big.bin"]
+    common::next_trash_second();
+    fs::write(b.work().join("small.txt"), b"s").unwrap();
+    assert!(b.run(&["put", "small.txt"], "").status.success());
+    let recs: Vec<Record> = ["big.bin", "small.txt"]
         .iter()
         .map(|n| Record {
             name: n.to_string(),
@@ -784,16 +788,22 @@ fn finder_restore_sorts_by_size() {
         .collect();
     fs::write(b.finder().join(".DS_Store"), ds_store::write(&recs)).unwrap();
 
-    // Date order lists small.txt first; size order puts big.bin at 0.
-    let o = b.run(&["restore", "--plain", "--sort=size"], "0\n");
+    // Date order defaults newest-first, so small.txt is first.
+    let o = b.run(&["restore", "--plain", "--dry-run"], "0\n");
+    assert!(o.status.success(), "{}", err(&o));
+    assert!(out(&o).lines().next().unwrap_or("").ends_with("small.txt"));
+    // --sort=size must differ and put big.bin at 0.
+    let o = b.run(&["restore", "--plain", "--dry-run", "--sort=size"], "0\n");
     assert!(o.status.success(), "{}", err(&o));
     assert!(
-        out(&o).lines().next().unwrap_or("").ends_with("big.bin"),
+        out(&o)
+            .lines()
+            .find(|l| l.starts_with("would restore"))
+            .unwrap_or_default()
+            .contains("big.bin"),
         "{}",
         out(&o)
     );
-    assert!(b.work().join("big.bin").exists());
-    assert!(!b.work().join("small.txt").exists());
 }
 
 #[test]

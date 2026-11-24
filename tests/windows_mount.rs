@@ -344,6 +344,16 @@ fn list_last_keeps_the_most_recently_deleted() {
     let text = rows(&["--reverse"]);
     let first = text.lines().next().unwrap_or_default();
     assert!(first.contains("new.txt"), "{text}");
+    let text = rows(&["--sort=newest"]);
+    assert!(
+        text.lines().next().is_some_and(|l| l.contains("new.txt")),
+        "{text}"
+    );
+    let text = rows(&["--sort=oldest"]);
+    assert!(
+        text.lines().next().is_some_and(|l| l.contains("old.txt")),
+        "{text}"
+    );
     let text = rows(&["--reverse", "--last=1"]);
     assert!(
         text.contains("old.txt") && !text.contains("new.txt"),
@@ -647,10 +657,10 @@ fn restore_sort_orders_the_numbered_list() {
     };
     let lad = local_app_data("sort");
     let id = std::process::id();
-    // b goes first, so it is the oldest; a sorts first by path.
-    let b = m.join(format!("sort-b-{id}.txt"));
+    // a goes first (oldest), b goes second (newest); a still sorts first by path.
     let a = m.join(format!("sort-a-{id}.txt"));
-    for p in [&b, &a] {
+    let b = m.join(format!("sort-b-{id}.txt"));
+    for p in [&a, &b] {
         fs::write(p, b"x").unwrap();
         let out = cmd(&lad).arg("put").arg(p).output().unwrap();
         assert!(
@@ -684,12 +694,22 @@ fn restore_sort_orders_the_numbered_list() {
             .unwrap_or_default()
             .to_string()
     };
-    assert!(
-        pick(&[]).contains("sort-b-"),
-        "date order puts the oldest first"
-    );
+    assert!(pick(&[]).contains("sort-b-"), "default newest-first order");
+    assert!(pick(&["--sort=oldest"]).contains("sort-a-"), "oldest order");
     assert!(pick(&["--sort=path"]).contains("sort-a-"), "path order");
-    assert!(pick(&["--sort=date", "--newest-first"]).contains("sort-a-"));
+    assert!(
+        pick(&["--sort=date"]).contains("sort-a-"),
+        "date aliases oldest"
+    );
+    assert!(
+        pick(&["--newest-first"]).contains("sort-b-"),
+        "newest-first flag"
+    );
+    assert!(
+        pick(&["--oldest-first"]).contains("sort-a-"),
+        "oldest-first flag"
+    );
+    assert!(pick(&["--sort=newest"]).contains("sort-b-"), "newest order");
     let bad = cmd(&lad).args(["restore", "--sort=bulk"]).output().unwrap();
     assert_eq!(bad.status.code(), Some(2));
     for p in [&a, &b] {

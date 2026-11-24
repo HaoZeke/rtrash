@@ -121,7 +121,7 @@ const KEYS: &[(&str, &str, Kind, &str)] = &[
         "list",
         "sort",
         Kind::Str,
-        "date, size, name or path (--sort)",
+        "oldest, newest, size, name or path (--sort)",
     ),
     ("list", "size", Kind::Bool, "show sizes (--size)"),
     (
@@ -296,6 +296,63 @@ impl Config {
             None => String::new(),
         };
         format!("{at}: ignoring {section}.{key} = '{v}' (want {want})")
+    }
+}
+
+/// `[list] sort` values the CLI accepts across platforms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListSort {
+    Oldest,
+    Newest,
+    Size,
+    Name,
+    Path,
+}
+
+impl ListSort {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "date" | "time" | "oldest" => ListSort::Oldest,
+            "newest" => ListSort::Newest,
+            "size" => ListSort::Size,
+            "name" => ListSort::Name,
+            "path" => ListSort::Path,
+            _ => return None,
+        })
+    }
+}
+
+/// Defaults for `list` from the config file.
+pub struct ListDefaults {
+    pub with_size: bool,
+    pub sort: ListSort,
+    pub reverse: bool,
+}
+
+/// Read `[list]` defaults from `cfg`.
+///
+/// `list.sort` takes `oldest`, `newest`, `size`, `name` or `path`
+/// (`date`/`time` alias `oldest`). Invalid values are ignored with a warning.
+pub fn list_defaults(prog: &str, cfg: &Config) -> ListDefaults {
+    let with_size = cfg.bool("list", "size").unwrap_or(false);
+    let sort = match cfg.str("list", "sort") {
+        Some(s) => match ListSort::parse(s) {
+            Some(k) => k,
+            None => {
+                eprintln!(
+                    "{prog}: warning: {}",
+                    cfg.bad_value("list", "sort", "oldest, newest, size, name or path")
+                );
+                ListSort::Oldest
+            }
+        },
+        None => ListSort::Oldest,
+    };
+    let reverse = cfg.bool("list", "reverse").unwrap_or(false);
+    ListDefaults {
+        with_size,
+        sort,
+        reverse,
     }
 }
 
@@ -571,7 +628,7 @@ pub fn template() -> String {
             ("du", "git", _) => "true".to_string(),
             ("du", "notify", _) => "\"bell\"".to_string(),
             ("du", "notify_after", _) => "10".to_string(),
-            ("list", "sort", _) => "\"date\"".to_string(),
+            ("list", "sort", _) => "\"oldest\"".to_string(),
             ("policy", "max_size", _) => "\"50G\"".to_string(),
             ("policy", "min_free", _) => "\"10G\"".to_string(),
             ("policy", "warn_size", _) => "\"20%\"".to_string(),
