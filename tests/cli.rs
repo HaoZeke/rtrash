@@ -713,16 +713,27 @@ fn put_waits_for_the_trash_lock_with_a_note_and_a_bound() {
     assert!(!moved.exists(), "{err}");
 }
 
+/// script(1): /usr/bin/script, else the first one on PATH, for a host
+/// that keeps it elsewhere (Nix has no /usr/bin). `None` without one.
+#[cfg(target_os = "linux")]
+fn script_bin() -> Option<PathBuf> {
+    let usr = Path::new("/usr/bin/script");
+    if usr.exists() {
+        return Some(usr.to_path_buf());
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join("script"))
+        .find(|p| p.is_file())
+}
+
 /// What `rtrash ARGS` shows on a terminal, through script(1), in `sb`;
 /// `None` without script(1). `args` is shell text, so a name with control
 /// characters can come from printf.
 #[cfg(target_os = "linux")]
 fn on_a_terminal(sb: &Sandbox, args: &str) -> Option<String> {
-    if !Path::new("/usr/bin/script").exists() {
-        return None;
-    }
+    let script = script_bin()?;
     let cmd = format!("{} {args}", bin());
-    let tty = Command::new("/usr/bin/script")
+    let tty = Command::new(script)
         .args(["-qec", &cmd, "/dev/null"])
         .current_dir(sb.work())
         .env("SHELL", "/bin/sh")
@@ -801,10 +812,10 @@ fn du_print0_scrubs_control_characters_on_a_terminal() {
 #[cfg(target_os = "linux")]
 #[test]
 fn restore_errors_scrub_control_characters_on_a_terminal() {
-    if !Path::new("/usr/bin/script").exists() {
+    let Some(script) = script_bin() else {
         common::skip("skipping: no script(1) to give rtrash a terminal");
         return;
-    }
+    };
     let sb = Sandbox::new("restore-scrub");
     // The destination exists, so restore refuses and quotes it.
     let dest = sb.work().join("a\x1b[2Jb");
@@ -824,7 +835,7 @@ fn restore_errors_scrub_control_characters_on_a_terminal() {
         stderr_of(&piped)
     );
     let cmd = format!("{} restore --home-only --name=evil", bin());
-    let tty = Command::new("/usr/bin/script")
+    let tty = Command::new(&script)
         .args(["-qec", &cmd, "/dev/null"])
         .current_dir(sb.work())
         .env("XDG_DATA_HOME", sb.root.join("xdg"))
@@ -7218,10 +7229,10 @@ fn list_all_users_adds_the_owner_and_stays_read_only() {
 #[cfg(target_os = "linux")]
 #[test]
 fn list_scrubs_control_characters_on_a_terminal() {
-    if !Path::new("/usr/bin/script").exists() {
+    let Some(script) = script_bin() else {
         common::skip("skipping: no script(1) to give rtrash a terminal");
         return;
-    }
+    };
     let sb = Sandbox::new("scrub");
     fs::create_dir_all(sb.trash().join("files")).unwrap();
     fs::create_dir_all(sb.trash().join("info")).unwrap();
@@ -7237,7 +7248,7 @@ fn list_scrubs_control_characters_on_a_terminal() {
     assert!(stdout_of(&piped).contains("/tmp/a\x1b[2Jb\nfake\x7f"));
 
     let cmd = format!("{} list", bin());
-    let tty = Command::new("/usr/bin/script")
+    let tty = Command::new(&script)
         .args(["-qec", &cmd, "/dev/null"])
         .current_dir(sb.work())
         .env("XDG_DATA_HOME", sb.root.join("xdg"))
