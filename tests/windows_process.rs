@@ -59,17 +59,28 @@ fn who_names_the_process_holding_a_file_open() {
     let _open = fs::File::open(&held).unwrap();
     let out = run(&root, &["who", "--json", held.to_str().unwrap()]);
     assert!(out.status.success(), "{}", text(&out));
-    let pid = std::process::id().to_string();
+    // The sandbox name carries this process id, so a bare substring of the
+    // output proves nothing; the holder's own field does.
+    let pid = std::process::id();
+    let holder = format!("\"pid\":{pid},");
     assert!(
-        text(&out).contains(&pid),
-        "pid {pid} missing: {}",
+        text(&out).contains(&holder),
+        "{holder} missing: {}",
         text(&out)
     );
 
     let free = root.join("free.txt");
     fs::write(&free, b"y").unwrap();
+    let out = run(&root, &["who", "--json", free.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(text(&out).contains("\"holders\":[]"), "{}", text(&out));
     let out = run(&root, &["who", free.to_str().unwrap()]);
-    assert!(!text(&out).contains(&pid), "{}", text(&out));
+    assert!(
+        text(&out).contains("no process holds this path"),
+        "{}",
+        text(&out)
+    );
+    assert!(!text(&out).contains(" pid "), "{}", text(&out));
     let _ = fs::remove_dir_all(&root);
 }
 

@@ -19,6 +19,10 @@ pub struct Hold {
     /// `fd N`, `cwd`, `root`, `exe` or `mmap`.
     pub how: String,
     pub path: PathBuf,
+    /// The command line, arguments separated by spaces, when the
+    /// platform gives one. Linux reads `/proc/PID/cmdline` and keeps at
+    /// most 4096 bytes. Empty where it cannot be read.
+    pub cmdline: String,
     /// Every name the process goes by: its short command name (which
     /// Linux cuts to 15 bytes), and the file names of its executable
     /// and of its first argument.
@@ -368,6 +372,7 @@ fn scan_in(s: &mut Snapshot, procs: &Path) {
             let command = fs::read_to_string(base.join("comm"))
                 .map(|c| c.trim_end_matches('\n').to_string())
                 .unwrap_or_default();
+            let cmdline = process_cmdline(&base);
             let mut names = Vec::new();
             if let Some(n) = fs::read_link(base.join("exe"))
                 .ok()
@@ -376,8 +381,8 @@ fn scan_in(s: &mut Snapshot, procs: &Path) {
             {
                 names.push(n);
             }
-            if let Ok(cmdline) = fs::read(base.join("cmdline")) {
-                let argv0 = cmdline.split(|&b| b == 0).next().unwrap_or_default();
+            if let Ok(raw) = fs::read(base.join("cmdline")) {
+                let argv0 = raw.split(|&b| b == 0).next().unwrap_or_default();
                 let argv0 = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(argv0);
                 if let Some(n) = base_name(Path::new(argv0)) {
                     if !names.contains(&n) {
@@ -392,6 +397,7 @@ fn scan_in(s: &mut Snapshot, procs: &Path) {
                     command: command.clone(),
                     how,
                     path,
+                    cmdline: cmdline.clone(),
                     names: names.clone(),
                 });
             }
@@ -400,6 +406,23 @@ fn scan_in(s: &mut Snapshot, procs: &Path) {
             s.unreadable += 1;
         }
     }
+}
+
+/// The command line of a process, arguments separated by spaces, at
+/// most 4096 bytes. Empty when `/proc/PID/cmdline` cannot be read.
+#[cfg(target_os = "linux")]
+fn process_cmdline(base: &Path) -> String {
+    let Ok(raw) = std::fs::read(base.join("cmdline")) else {
+        return String::new();
+    };
+    let raw = if raw.len() > 4096 {
+        &raw[..4096]
+    } else {
+        &raw[..]
+    };
+    String::from_utf8_lossy(raw)
+        .trim_end_matches('\0')
+        .replace('\0', " ")
 }
 
 /// Absolute paths only (not `socket:[N]` or `anon_inode:...`), with the
@@ -747,6 +770,7 @@ fn scan(s: &mut Snapshot) {
                 command: command.clone(),
                 how: how.to_string(),
                 path,
+                cmdline: String::new(),
                 names: names.clone(),
             };
             let mut holds = Vec::new();
@@ -1124,6 +1148,7 @@ mod win {
                 command: exe_name.unwrap_or(app),
                 how: "open".to_string(),
                 path: path.to_path_buf(),
+                cmdline: String::new(),
                 names,
             });
         }

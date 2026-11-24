@@ -3280,8 +3280,14 @@ Exit status 0 means every item came back; 1 means nothing matched or an item fai
 .PP
 List the live processes that hold
 .I PATH
-or anything below it, one line each: the process id, its command, how it
-holds the path and the path held.
+or anything below it. One line per holder, for each
+.IR PATH :
+the path asked about, the process id, the user, the command (the short
+name, and the command line when it is known), how the path is held, and
+the path held.
+A path nobody holds gets one line saying so. That line says the result
+is partial when that path could not be checked in full, or when some
+process could not be inspected.
 The ways are
 .BI "fd " N
 (an open descriptor),
@@ -3331,7 +3337,7 @@ same note.
 Print a JSON object:
 .I holders
 (each with
-.IR pid ", " uid ", " command ", " how ", " path )
+.IR pid ", " uid ", " user ", " command ", " cmdline ", " how ", " path )
 and
 .I unreadable
 (the count of processes that could not be read).

@@ -8128,7 +8128,10 @@ impl Holder {
                 .arg(path)
                 .output()
                 .unwrap();
-            if String::from_utf8_lossy(&out.stdout).contains(&format!("\"pid\":{}", child.id())) {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if text.contains(&format!("\"pid\":{}", child.id()))
+                && text.contains("\"command\":\"sleep\"")
+            {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -8156,21 +8159,57 @@ fn who_names_the_process_holding_a_file_or_its_directory() {
     let held = sb.touch("held.log");
     sb.touch("idle.log");
     let child = Holder::open(&held);
+    let user = String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout).unwrap();
+    let user = user.trim();
     let out = sb.run(&["who", "held.log"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let line = format!("{}", child.pid());
     let text = stdout_of(&out);
-    assert!(
-        text.lines()
-            .any(|l| l.trim_start().starts_with(&line) && l.contains("fd 3")),
-        "{text}"
-    );
+    let line = text
+        .lines()
+        .find(|l| l.contains(&format!("pid {}", child.pid())) && l.contains("fd 3"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("held.log"), "{line}");
+    assert!(line.contains(&format!("user {user}")), "{line}");
+    assert!(line.contains("command sleep"), "{line}");
     let out = sb.run(&["who", "--json", "."]);
     assert!(out.status.success());
-    assert!(stdout_of(&out).contains(&format!("\"pid\":{},", child.pid())));
+    let json = stdout_of(&out);
+    assert_eq!(json.lines().count(), 1, "{json}");
+    assert!(json.starts_with('{'), "{json}");
+    assert!(
+        json.contains(&format!("\"pid\":{},", child.pid())),
+        "{json}"
+    );
+    assert!(json.contains(&format!("\"user\":\"{user}\"")), "{json}");
+    assert!(json.contains("\"cmdline\":"), "{json}");
+    assert!(!json.contains("no process holds"), "{json}");
     let out = sb.run(&["who", "idle.log"]);
     assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
-    assert!(stdout_of(&out).is_empty());
+    let idle = stdout_of(&out);
+    assert!(
+        idle.contains("idle.log: no process holds this path"),
+        "{idle}"
+    );
+    let counted = stdout_of(&sb.run(&["who", "--json", "idle.log"]));
+    assert_eq!(counted.lines().count(), 1, "{counted}");
+    let unread = counted
+        .trim()
+        .rsplit_once("\"unreadable\":")
+        .and_then(|(_, n)| n.trim_end_matches('}').parse::<u64>().ok())
+        .unwrap_or(0);
+    if unread > 0 {
+        assert!(
+            idle.contains("the result is partial") && idle.contains("could not be inspected"),
+            "{idle}"
+        );
+        let err = stderr_of(&out);
+        assert!(
+            err.contains("could not be inspected") && err.contains("run as root"),
+            "unreadable {unread}: {err}"
+        );
+    } else {
+        assert!(!idle.contains("partial"), "{idle}");
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -8285,7 +8324,12 @@ fn who_says_how_many_processes_it_could_not_inspect() {
     let env = [("RTRASH_TEST_PROC", one.to_str().unwrap())];
     let out = sb.run_env(&["who", "w.log"], &env);
     assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
-    assert!(stdout_of(&out).is_empty());
+    let text = stdout_of(&out);
+    assert!(text.contains("w.log: no process holds this path"), "{text}");
+    assert!(
+        text.contains("the result is partial") && text.contains("could not be inspected"),
+        "{text}"
+    );
     let err = stderr_of(&out);
     assert!(
         err.contains("no holder seen, but 1 process could not be inspected"),
@@ -8297,6 +8341,9 @@ fn who_says_how_many_processes_it_could_not_inspect() {
     let out = sb.run_env(&["who", "w.log"], &env);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stderr_of(&out), "");
+    let text = stdout_of(&out);
+    assert!(text.contains("w.log: no process holds this path"), "{text}");
+    assert!(!text.contains("partial"), "{text}");
 }
 
 /// Debug builds on Linux only: `--in-use=refuse` never takes a process it
@@ -8444,9 +8491,29 @@ fn who_counts_only_the_paths_it_could_not_check() {
         "{err}"
     );
     assert!(!err.contains("run as root"), "{err}");
+    let text = stdout_of(&out);
+    let a_line = text
+        .lines()
+        .find(|l| l.starts_with("a.log:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    let b_line = text
+        .lines()
+        .find(|l| l.starts_with("b.log:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        a_line.contains("the result is partial") && a_line.contains("could not be checked in full"),
+        "{a_line}"
+    );
+    assert!(!b_line.contains("partial"), "{b_line}");
     let out = sb.run_env(&["who", "b.log"], &env);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stderr_of(&out), "");
+    let alone = stdout_of(&out);
+    assert!(
+        alone.contains("b.log: no process holds this path"),
+        "{alone}"
+    );
+    assert!(!alone.contains("partial"), "{alone}");
     fs::create_dir_all(sb.work().join("left")).unwrap();
     fs::create_dir_all(sb.work().join("right")).unwrap();
     sb.touch("left/a.log");
@@ -8458,6 +8525,14 @@ fn who_counts_only_the_paths_it_could_not_check() {
         err.contains("no holder seen, but 2 paths could not be checked in full"),
         "{err}"
     );
+    let text = stdout_of(&out);
+    for prefix in ["left/a.log:", "right/a.log:"] {
+        let line = text
+            .lines()
+            .find(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(line.contains("the result is partial"), "{line}");
+    }
     let out = sb.run_env(&["who", "left/a.log", "b.log"], &env);
     let err = stderr_of(&out);
     assert_eq!(out.status.code(), Some(1), "{err}");
@@ -8465,6 +8540,17 @@ fn who_counts_only_the_paths_it_could_not_check() {
         err.contains("no holder seen, but 1 path could not be checked in full"),
         "{err}"
     );
+    let text = stdout_of(&out);
+    let left = text
+        .lines()
+        .find(|l| l.starts_with("left/a.log:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    let plain = text
+        .lines()
+        .find(|l| l.starts_with("b.log:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(left.contains("the result is partial"), "{left}");
+    assert!(!plain.contains("partial"), "{plain}");
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

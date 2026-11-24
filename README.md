@@ -442,6 +442,10 @@ Existing paths at the destination are preserved unless `-f` / `--force` is given
 Same-filesystem restore uses `rename`; cross-device restore copies then deletes the trash payload (needed when put fell back to the home trash).
 Options: `--trash-dir=PATH` (repeatable), `--home-only`, `--cwd-only`.
 
+### `rtrash who PATH...`
+
+One line per process that holds PATH or anything below it: the path asked about, the process id, the user, the command (the short name, and the command line when it says more), how the path is held, and the path held. A path nobody holds gets one line, `PATH: no process holds this path`. That line says the result is partial when that path could not be checked in full, or when some process could not be inspected. A note on stderr, in `--json` mode too, counts those processes and, for a user who is not root, says to run as root to inspect them. `--json` prints one object, `{"holders": [...], "unreadable": N}`, and nothing else on stdout. Each holder has `pid`, `uid`, `user`, `command`, `cmdline`, `how` and `path`. Exit status is 0 when some process holds a path and 1 when none was seen.
+
 ### `rtrash undo [BATCH]`
 
 Each put run writes one batch id into every `.trashinfo` it creates, under the extra key `X-Rtrash-Batch` (other tools ignore keys they do not know).
