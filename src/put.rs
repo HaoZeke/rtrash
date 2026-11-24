@@ -71,10 +71,10 @@ pub(crate) struct Opts {
     pub trash_pin: Option<PathBuf>,
     /// Prefer home trash only (skip volume selection). Ignored when `trash_pin` is set.
     pub home_only: bool,
-    /// Suppress `-v` lines (stdout carries the `--json` summary instead).
+    /// Suppress implicit `-v` lines; an explicit `-v --json` writes them to stderr.
     pub quiet: bool,
-    /// `--json`: stdout is the summary and stderr stays errors, so the
-    /// repository note and the space warnings are left out.
+    /// `--json`: stdout is the summary; stderr carries errors and requested
+    /// verbose lines. The repository note and space warnings are left out.
     pub json: bool,
     /// Check for live processes holding the item. The browsers leave it off.
     pub in_use: InUse,
@@ -1154,7 +1154,8 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
                 .flatten();
             let risky_git = crate::du_git::union_work(probed, after);
             // The batch id is in the record trash_move just wrote.
-            // `--json` keeps stderr to errors, as it does for the space warnings.
+            // `--json` leaves stdout to the summary; requested verbose lines
+            // use stderr, while the repository note and space warnings stay out.
             if !opts.json {
                 say_undo(prog, name.as_ref(), risky_git);
             }
