@@ -1775,7 +1775,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         if purge_trash {
             for (dev, need) in needs.iter_mut().filter(|(_, n)| *n != (0, 0)) {
                 let at = on.iter().find(|(d, _)| d == dev).map(|(_, p)| p.as_path());
-                *need = purge_oldest(prog, *dev, at, *need, target, dry_run, verbose);
+                let show_items = verbose || (dry_run && !json);
+                *need = purge_oldest(prog, *dev, at, *need, target, dry_run, show_items);
             }
             for g in &mut groups {
                 g.entries
@@ -2127,7 +2128,7 @@ pub(crate) fn purge_oldest(
     need: (u64, u64),
     target: Floor,
     dry_run: bool,
-    verbose: bool,
+    show_items: bool,
 ) -> (u64, u64) {
     use crate::retention::{prune, Policy, Prune};
     use std::os::unix::fs::MetadataExt;
@@ -2139,7 +2140,7 @@ pub(crate) fn purge_oldest(
     let mut left = need;
     if crate::finder::is_default(false) {
         let before = left;
-        left = crate::finder::purge_oldest(prog, dev, left, dry_run);
+        left = crate::finder::purge_oldest(prog, dev, left, dry_run, show_items);
         purged(dry_run, u64::from(left != before));
         if !dry_run && left != before {
             if let Some(at) = at {
@@ -2169,7 +2170,7 @@ pub(crate) fn purge_oldest(
             one,
             &Prune {
                 dry_run,
-                verbose,
+                verbose: show_items,
                 free_inodes: left.1,
                 ..opts(max)
             },
@@ -2211,7 +2212,7 @@ pub(crate) fn purge_oldest(
     need: (u64, u64),
     target: Floor,
     dry_run: bool,
-    verbose: bool,
+    show_items: bool,
 ) -> (u64, u64) {
     // The volume that holds `at`: a drive, or a volume mounted on a
     // folder, whose Recycle Bin is its own.
@@ -2230,7 +2231,8 @@ pub(crate) fn purge_oldest(
     let Some(drive) = drive else {
         return need;
     };
-    let (n, bytes, files) = crate::win_recycle::purge_oldest_on(prog, &at, need, dry_run, verbose);
+    let (n, bytes, files) =
+        crate::win_recycle::purge_oldest_on(prog, &at, need, dry_run, show_items);
     purged(dry_run, n);
     if n > 0 {
         eprintln!(
@@ -2294,7 +2296,7 @@ pub(crate) fn free_until(
             need,
             floor,
             dry_run,
-            verbose && !json,
+            !json && (verbose || dry_run),
         );
         if left != (0, 0) {
             still += 1;

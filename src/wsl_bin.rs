@@ -118,8 +118,8 @@ pub fn scan(root: &Path, sid: &str) -> Vec<BinEntry> {
 const USAGE: &str = "\
 Usage: rtrash wsl list [--json | --format=TEMPLATE] [--match=KIND] [MATCH]
        rtrash wsl restore [-f] PATH...
-       rtrash wsl rm [-n] [-f] [--match=KIND] MATCH|PATH...
-       rtrash wsl empty [-n] [--all] [--older-than=AGE] [AGE | PATH]...
+       rtrash wsl rm [-n] [-f] [--json] [--match=KIND] MATCH|PATH...
+       rtrash wsl empty [-n] [--json] [--all] [--older-than=AGE] [AGE | PATH]...
 The Windows Recycle Bin from inside WSL: list its items by original path
 under the automount root, restore the newest item from each PATH, or
 delete items for good (rm by match, empty by age, path or all of them; a
@@ -132,7 +132,7 @@ a PATH, or all of them. rm and empty leave paths listed in the keep file
 alone. When two items have the same original path, an exact match refuses;
 use rm --match=id ID to select one.
       --json             list: a JSON array of {original, path, deleted,
-                         date, size, id}
+                         date, size, id}; rm and empty: one summary object
       --format=TEMPLATE  list: each item through TEMPLATE, as list --format
                          does: {date} {epoch} {path} (under the automount
                          root) {name} ($R payload) {trash} (its bin) {size}
@@ -568,8 +568,7 @@ pub fn list_json(items: &[&BinEntry]) -> String {
 }
 
 /// `wsl rm [-n] MATCH|PATH...`: delete the matching items for good, the
-/// `$R` payload and then its `$I` record. No match is not an error, as with
-/// `rtrash rm`.
+/// `$R` payload and then its `$I` record.
 fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     let args = match crate::filters::join_spaced(args) {
         Ok(a) => a,
@@ -580,6 +579,7 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
     };
     let mut dry = false;
     let mut force = false;
+    let mut json = false;
     let mut matcher = None;
     let mut kind = crate::filters::Match::Glob;
     let mut kind_set = false;
@@ -604,6 +604,10 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
         }
         if matches!(a.as_str(), "-f" | "--force") {
             force = true;
+            continue;
+        }
+        if a == "--json" {
+            json = true;
             continue;
         }
         match take_matcher(prog, a, &mut matcher, &mut kind, &mut kind_set) {
@@ -667,6 +671,18 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
             selected_by(items, patterns, literal)
         })
         .unwrap_or_default();
+    if let Some((patterns, shown)) = &parsed {
+        if patterns.kind == crate::filters::Match::Exact {
+            let have: Vec<PathBuf> = items.iter().map(|it| it.local.clone()).collect();
+            crate::orig_path::hint(
+                prog,
+                shown,
+                &have,
+                &have,
+                crate::orig_path::window(false, false),
+            );
+        }
+    }
     let mut chosen = exact_hits.clone();
     for hit in &matcher_hits {
         if !chosen.iter().any(|entry| std::ptr::eq(*entry, *hit)) {
@@ -674,8 +690,10 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
         }
     }
     if chosen.is_empty() {
-        eprintln!("{prog}: no Recycle Bin items match");
-        return 0;
+        if json {
+            print_rm_json(dry, 0, 0, &[]);
+        }
+        return crate::rm_match::no_matches(prog);
     }
     let census: Vec<PathBuf> = items.iter().map(|it| it.local.clone()).collect();
     if !paths.is_empty() && selection_refused(prog, &exact, &paths, &exact_hits, &census, force) {
@@ -691,9 +709,14 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
         Err(code) => return code,
     };
     if chosen.is_empty() {
+        if json {
+            print_rm_json(dry, 0, 0, &[]);
+        }
         return 0;
     }
     let mut status = 0;
+    let (mut removed, mut bytes) = (0u64, 0u64);
+    let mut matched = Vec::new();
     for it in chosen {
         if !force && !crate::util::is_gone(&it.payload) {
             if let Some(work) = crate::du_git::risky_tree(&it.payload) {
@@ -708,11 +731,23 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
             }
         }
         if dry {
-            println!("would remove '{}'", crate::util::term_path(&it.local));
+            if !json {
+                println!("would remove '{}'", crate::util::term_path(&it.local));
+            }
+            removed += 1;
+            bytes = bytes.saturating_add(it.size);
+            matched.push(it.local.to_string_lossy().into_owned());
             continue;
         }
         match remove_entry(it) {
-            Ok(()) => println!("removed '{}'", crate::util::term_path(&it.local)),
+            Ok(()) => {
+                if !json {
+                    println!("removed '{}'", crate::util::term_path(&it.local));
+                }
+                removed += 1;
+                bytes = bytes.saturating_add(it.size);
+                matched.push(it.local.to_string_lossy().into_owned());
+            }
             Err(e) => {
                 eprintln!(
                     "{prog}: cannot remove '{}': {e}",
@@ -722,7 +757,19 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
             }
         }
     }
+    if json {
+        print_rm_json(dry, removed, bytes, &matched);
+    }
     status
+}
+
+fn print_rm_json(dry_run: bool, removed: u64, bytes: u64, matched: &[String]) {
+    let sum = crate::filters::RmSummary {
+        dry_run,
+        removed,
+        bytes,
+    };
+    print!("{}", sum.json(matched));
 }
 
 fn now_epoch() -> i64 {
@@ -766,21 +813,35 @@ pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
     {
         return 2;
     }
+    if !scope.paths.is_empty() && chosen.is_empty() {
+        if scope.json {
+            print_empty_json(scope.dry, 0, 0, 0);
+        }
+        return crate::rm_match::no_matches(prog);
+    }
     let chosen = match without_kept(prog, chosen) {
         Ok(chosen) => chosen,
         Err(code) => return code,
     };
     if chosen.is_empty() {
+        if scope.json {
+            print_empty_json(scope.dry, 0, 0, 0);
+        }
         return 0;
     }
-    let (dry, all, age, paths) = (scope.dry, scope.all, scope.age, &scope.paths);
+    let (dry, all, json, age, paths) = (scope.dry, scope.all, scope.json, scope.age, &scope.paths);
     if age.is_none() && paths.is_empty() && !all && !dry && !confirm_whole(prog, chosen.len()) {
         return 2;
     }
     let mut status = 0;
+    let (mut removed, mut bytes, mut failed) = (0u64, 0u64, 0u64);
     for it in chosen {
         if dry {
-            println!("would remove '{}'", crate::util::term_path(&it.local));
+            if !json {
+                println!("would remove '{}'", crate::util::term_path(&it.local));
+            }
+            removed += 1;
+            bytes = bytes.saturating_add(it.size);
             continue;
         }
         if let Err(e) = remove_entry(it) {
@@ -789,14 +850,28 @@ pub fn empty(prog: &str, args: &[String], items: &[BinEntry], now: i64) -> i32 {
                 crate::util::err_path(&it.local)
             );
             status = 1;
+            failed += 1;
+        } else {
+            removed += 1;
+            bytes = bytes.saturating_add(it.size);
         }
     }
+    if json {
+        print_empty_json(dry, removed, bytes, failed);
+    }
     status
+}
+
+fn print_empty_json(dry_run: bool, removed: u64, bytes: u64, failed: u64) {
+    println!(
+        "{{\"dry_run\":{dry_run},\"removed\":{removed},\"bytes\":{bytes},\"failed\":{failed}}}"
+    );
 }
 
 struct EmptyArgs {
     dry: bool,
     all: bool,
+    json: bool,
     age: Option<i64>,
     paths: Vec<String>,
 }
@@ -807,6 +882,7 @@ struct EmptyArgs {
 fn parse_empty_args(prog: &str, args: &[String]) -> Result<EmptyArgs, i32> {
     let mut dry = false;
     let mut all = false;
+    let mut json = false;
     let mut age = None;
     let mut paths = Vec::new();
     let mut no_more_opts = false;
@@ -830,6 +906,7 @@ fn parse_empty_args(prog: &str, args: &[String]) -> Result<EmptyArgs, i32> {
         match a {
             "-n" | "--dry-run" => dry = true,
             "--all" => all = true,
+            "--json" => json = true,
             "--" => no_more_opts = true,
             _ => {
                 eprintln!("{prog}: empty: unknown argument '{a}'");
@@ -844,6 +921,7 @@ fn parse_empty_args(prog: &str, args: &[String]) -> Result<EmptyArgs, i32> {
     Ok(EmptyArgs {
         dry,
         all,
+        json,
         age,
         paths,
     })
