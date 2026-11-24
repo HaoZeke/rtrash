@@ -229,9 +229,11 @@ bytes after that look and before the original is removed. rtrash does
 not take a write lease. A change the look does see keeps the staged
 original and the trash record. Where the kernel cannot rename without
 replacing an existing name, a regular file or a symbolic link is
-published by creating that name and then unlinking the old one. The new
-name is removed again if the old one cannot be unlinked; if that removal
-also fails, the trash record stays. A directory is refused, because a
+published by creating that name and then unlinking the old one, and only
+when that old name is still the linked inode. A name that changed is
+left in place and the new name is removed. If the new name cannot be
+removed either, the error names the extra hard link and the trash record
+stays. A directory is refused, because a
 link cannot publish it. The copy keeps holes in sparse files, mode, owner
 where allowed, times, extended attributes (with the access control
 list, which macOS keeps apart), named pipes, and hard links

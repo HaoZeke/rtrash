@@ -1751,6 +1751,8 @@ fn rename_exclusive_fallback(src: &Path, dest: &Path, os_err: io::Error) -> io::
 }
 
 fn publish_hard_link(src: &Path, dest: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(src)?;
+    let src_id = (meta.dev(), meta.ino());
     let from = path_cstr(src)?;
     let to = path_cstr(dest)?;
     if unsafe {
@@ -1765,36 +1767,105 @@ fn publish_hard_link(src: &Path, dest: &Path) -> io::Result<()> {
     {
         return Err(io::Error::last_os_error());
     }
-    finish_link_move(src, dest)
+    let linked = fs::symlink_metadata(dest)?;
+    finish_link_move(src, dest, src_id, (linked.dev(), linked.ino()), None)
 }
 
 fn publish_symlink(src: &Path, dest: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(src)?;
+    let src_id = (meta.dev(), meta.ino());
     let target = fs::read_link(src)?;
     let target_c = path_cstr(&target)?;
     let to = path_cstr(dest)?;
     if unsafe { libc::symlinkat(target_c.as_ptr(), libc::AT_FDCWD, to.as_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    finish_link_move(src, dest)
+    let linked = fs::symlink_metadata(dest)?;
+    finish_link_move(
+        src,
+        dest,
+        src_id,
+        (linked.dev(), linked.ino()),
+        Some(target),
+    )
 }
 
-/// The new name exists. Drop the old one, or drop the new one if that
-/// fails. A new name that cannot be dropped either is a published
-/// payload and keeps its record.
-fn finish_link_move(src: &Path, dest: &Path) -> io::Result<()> {
-    if let Err(e) = unlink_link_name(src) {
-        return match unlink_link_name(dest) {
-            Ok(()) => Err(e),
-            Err(undo) => Err(published_kept(
-                dest,
-                format!(
-                    "unlinking '{}' failed ({e}) and removing the new link failed ({undo})",
-                    crate::util::err_path(src),
-                ),
-            )),
-        };
+/// The new name exists. Unlink the old one only when it is still the
+/// inode that was linked, then drop the new one if that unlink fails.
+/// A source that changed is left alone. When neither name can be removed,
+/// the error is [`PublishedKept`] and it says that the source is an extra
+/// hard link of the published file.
+fn finish_link_move(
+    src: &Path,
+    dest: &Path,
+    src_id: (u64, u64),
+    dest_id: (u64, u64),
+    target: Option<PathBuf>,
+) -> io::Result<()> {
+    seam_replace_link_src(src);
+    if same_linked_file(src, src_id, target.as_deref())? {
+        if let Err(e) = unlink_link_name(src) {
+            return match unlink_if_same(dest, dest_id) {
+                Ok(()) => Err(e),
+                Err(undo) => Err(published_kept(
+                    dest,
+                    format!(
+                        "unlinking '{}' failed ({e}) and removing the new link failed ({undo}); \
+                         '{}' is an extra hard link of the published file",
+                        crate::util::err_path(src),
+                        crate::util::err_path(src),
+                    ),
+                )),
+            };
+        }
+        return Ok(());
     }
-    Ok(())
+    match unlink_if_same(dest, dest_id) {
+        Ok(()) => Err(io::Error::other(format!(
+            "not unlinking '{}': it is no longer the file that was linked; {}",
+            crate::util::err_path(src),
+            "the new name was removed",
+        ))),
+        Err(undo) => Err(published_kept(
+            dest,
+            format!(
+                "'{}' changed before it could be unlinked \
+                 and removing the new link failed ({undo})",
+                crate::util::err_path(src),
+            ),
+        )),
+    }
+}
+
+fn same_linked_file(path: &Path, id: (u64, u64), target: Option<&Path>) -> io::Result<bool> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if crate::util::is_gone(path) => {
+            let _ = e;
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
+    };
+    if (meta.dev(), meta.ino()) != id {
+        return Ok(false);
+    }
+    if let Some(want) = target {
+        if fs::read_link(path)? != want {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn unlink_if_same(path: &Path, id: (u64, u64)) -> io::Result<()> {
+    if same_linked_file(path, id, None)? {
+        unlink_link_name(path)
+    } else {
+        Err(io::Error::other(format!(
+            "'{}' is no longer the link this move created",
+            crate::util::err_path(path),
+        )))
+    }
 }
 
 fn unlink_link_name(path: &Path) -> io::Result<()> {
@@ -1810,7 +1881,32 @@ fn unlink_link_name(path: &Path) -> io::Result<()> {
     }) {
         return Err(io::Error::other("test unlink failed"));
     }
-    fs::remove_file(path)
+    let Some(name) = path.file_name() else {
+        return Err(io::Error::other("cannot unlink a path with no name"));
+    };
+    let parent = open_dir(parent_dir(path))?;
+    let name_c = name_cstr(name)?;
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn seam_replace_link_src(path: &Path) {
+    #[cfg(test)]
+    if REPLACE_LINK_SRC.with(|c| c.replace(false)) {
+        let _ = unlink_link_name(path);
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            let _ = file.write_all(b"replacement-data");
+        }
+    }
+    #[cfg(not(test))]
+    let _ = path;
 }
 
 fn info_mtime_secs(path: &Path) -> io::Result<i64> {
@@ -2776,7 +2872,7 @@ fn stage_sync_error(src: &Path, err: io::Error) -> io::Error {
 fn undo_publish(
     src: &Path,
     stage_src: &Path,
-    dest: &Path,
+    _dest: &Path,
     cause: io::Error,
     stage_dst: &OwnedDir,
 ) -> io::Result<()> {
@@ -2794,10 +2890,12 @@ fn undo_publish(
         match take_back_owned(stage_dst) {
             Ok(()) => cause,
             Err(rm) => {
-                let err = leftover_error(&stage_dst.inner(), dest, cause, rm);
-                // The copy now sits at `dest` or under another name. The
-                // wrapper directory is not a trash payload.
-                drop_empty_stage(stage_dst);
+                let err = leftover_error(&stage_dst.inner(), &stage_dst.path, cause, rm);
+                // The copy now sits under a private name, not at `dest`.
+                // Drop the wrapper only once that copy has left it.
+                if crate::util::is_gone(&stage_dst.inner()) {
+                    drop_empty_stage(stage_dst);
+                }
                 err
             }
         }
@@ -2835,13 +2933,16 @@ fn move_to_private(src: &Path, parent: &Path, kind: &str) -> io::Result<PathBuf>
     Err(last.unwrap_or_else(|| io::Error::other("could not choose a private staging name")))
 }
 
-/// A directory this move created with `mkdir`, mode `0700`. `fd` is that
-/// directory, opened `O_DIRECTORY|O_NOFOLLOW` before anything is written
-/// into it. Cleanup never removes a path until that path has been renamed
-/// aside and the renamed entry's device and inode match `fd`.
+/// A directory this move created with `mkdirat` on `parent`. `fd` is that
+/// directory. A secret marker written through `fd` has to be visible at
+/// `path` before the directory is owned, so an empty directory swapped
+/// onto the name is not adopted. Cleanup removes it only through a
+/// directory descriptor, after that descriptor's device and inode are
+/// read again.
 struct OwnedDir {
     path: PathBuf,
     fd: Option<OwnedFd>,
+    parent: Option<OwnedFd>,
     dev: u64,
     ino: u64,
 }
@@ -2851,6 +2952,7 @@ impl OwnedDir {
         Self {
             path: PathBuf::new(),
             fd: None,
+            parent: None,
             dev: 0,
             ino: 0,
         }
@@ -2894,32 +2996,121 @@ fn reserve_dir(parent: &Path, kind: &str) -> io::Result<OwnedDir> {
     Err(last.unwrap_or_else(|| io::Error::other("could not choose a private staging name")))
 }
 
+/// Name of the secret file `mkdir_owned` writes through the directory
+/// descriptor. The path is owned only when this file is readable there
+/// with the same bytes.
+const ID_MARKER: &str = ".rtrash-id";
+
 fn mkdir_owned(path: &Path) -> io::Result<OwnedDir> {
-    fs::DirBuilder::new().mode(0o700).create(path)?;
-    // A test may exchange the new directory for another before the first
-    // stat. The directory we open has to be the empty one `mkdir` made.
+    let parent_path = parent_dir(path);
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a staging directory needs a name",
+        )
+    })?;
+    let parent = open_dir(parent_path)?;
+    let name_c = name_cstr(name)?;
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), name_c.as_ptr(), 0o700) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let secret = identity_secret();
+    // Plant the marker through the directory `mkdirat` just created, then
+    // allow a swap, then open the name again. The directory we keep has to
+    // be the one that holds the marker. An empty directory exchanged onto
+    // the name does not, and it is not deleted.
+    {
+        let planted = openat_dir(parent.as_raw_fd(), &name_c)?;
+        write_id_marker(planted.as_raw_fd(), &secret)?;
+    }
     seam_after_mkdir(path);
-    let fd = open_dir_nofollow(path)?;
-    let names = read_names(fd.as_raw_fd())?;
-    if !names.is_empty() {
+    let fd = openat_dir(parent.as_raw_fd(), &name_c)?;
+    if !id_marker_on_fd(fd.as_raw_fd(), &secret) {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
             "the staging directory was replaced before it was identified",
         ));
     }
+    let _ = unsafe { libc::fchmod(fd.as_raw_fd(), 0o700) };
+    let _ = unlink_at_name(fd.as_raw_fd(), OsStr::new(ID_MARKER), false);
     let (dev, ino) = fd_dev_ino(fd.as_raw_fd())?;
+    let st = fstatat_nofollow(parent.as_raw_fd(), &name_c)?;
+    if file_id(&st) != (dev, ino) {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the staging directory was replaced before it was identified",
+        ));
+    }
     Ok(OwnedDir {
         path: path.to_path_buf(),
         fd: Some(fd),
+        parent: Some(parent),
         dev,
         ino,
     })
 }
 
+fn identity_secret() -> [u8; 16] {
+    use std::sync::atomic::AtomicU64;
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let tick = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed) as u128;
+    let mixed = tick ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (std::process::id() as u128) << 32;
+    let mut secret = [0u8; 16];
+    secret[..8].copy_from_slice(&mixed.to_le_bytes()[..8]);
+    secret[8..].copy_from_slice(&mixed.rotate_left(17).to_le_bytes()[..8]);
+    secret
+}
+
+fn write_id_marker(dirfd: RawFd, secret: &[u8]) -> io::Result<()> {
+    let name = name_cstr(OsStr::new(ID_MARKER))?;
+    let fd = unsafe {
+        libc::openat(
+            dirfd,
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    file.write_all(secret)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn id_marker_on_fd(dirfd: RawFd, secret: &[u8]) -> bool {
+    let Ok(name) = name_cstr(OsStr::new(ID_MARKER)) else {
+        return false;
+    };
+    let fd = unsafe {
+        libc::openat(
+            dirfd,
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return false;
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    let mut got = Vec::new();
+    match std::io::Read::read_to_end(&mut file, &mut got) {
+        Ok(_) => got == secret,
+        Err(_) => false,
+    }
+}
+
 fn seam_after_mkdir(path: &Path) {
     #[cfg(test)]
     if SWAP_AFTER_MKDIR.with(|c| c.replace(false)) {
-        swap_in_foreign(path, true);
+        let marker = !SWAP_EMPTY.with(|c| c.replace(false));
+        swap_in_foreign(path, marker);
     }
     #[cfg(not(test))]
     let _ = path;
@@ -2950,7 +3141,9 @@ fn swap_in_foreign(path: &Path, marker: bool) {
     if fs::rename(path, &aside).is_err() {
         return;
     }
-    if fs::create_dir(path).is_err() || !marker {
+    #[cfg(test)]
+    SWAPPED_AT.with(|c| *c.borrow_mut() = Some(path.to_path_buf()));
+    if fs::DirBuilder::new().mode(0o700).create(path).is_err() || !marker {
         return;
     }
     if let Ok(mut file) = fs::OpenOptions::new()
@@ -3075,50 +3268,189 @@ fn drop_empty_stage(dir: &OwnedDir) {
     let _ = retire_owned(dir);
 }
 
-/// Rename `dir.path` to a private name and delete it only when that name
-/// is the open directory. A mismatch is renamed back onto `dir.path`.
+/// A name held through its parent descriptor. `holder` is the private
+/// directory this move created around the quarantine, when the rename
+/// into it succeeded.
+struct Quarantine {
+    parent: OwnedFd,
+    name: OsString,
+    path: PathBuf,
+    holder: Option<Holder>,
+}
+
+struct Holder {
+    parent: OwnedFd,
+    name: OsString,
+    dev: u64,
+    ino: u64,
+}
+
+/// Clear `dir` through its descriptor and `unlinkat` it only while the
+/// quarantined name still has that device and inode. A name that does not
+/// match is left where it is and is never renamed onto `dir.path`.
 fn retire_owned(dir: &OwnedDir) -> io::Result<()> {
-    let Some(quarantine) = claim_for_delete(dir)? else {
-        return Ok(());
-    };
     let Some(fd) = dir.fd.as_ref() else {
         return Ok(());
     };
+    let (dev, ino) = fd_dev_ino(fd.as_raw_fd())?;
+    let Some(q) = claim_for_delete(dir, dev, ino)? else {
+        return Ok(());
+    };
+    seam_before_quar_rmdir(&q.path);
+    if !quarantine_matches(&q, dev, ino) {
+        return Ok(());
+    }
     if let Err(e) = clear_dir_fd(fd.as_raw_fd()) {
-        let _ = rename_exclusive(&quarantine, &dir.path);
+        restore_matching(&q, dir, dev, ino);
         return Err(e);
     }
-    if let Err(e) = fs::remove_dir(&quarantine) {
-        let _ = rename_exclusive(&quarantine, &dir.path);
+    if !quarantine_matches(&q, dev, ino) {
+        return Ok(());
+    }
+    if let Err(e) = unlink_at_name(q.parent.as_raw_fd(), &q.name, true) {
+        restore_matching(&q, dir, dev, ino);
         return Err(e);
     }
+    drop_holder(&q);
     Ok(())
 }
 
-/// `Ok(Some(path))` is a private name whose device and inode are `dir`'s
-/// open directory. `Ok(None)` means the path was not that directory and
-/// was put back or left in place, and nothing was deleted.
-fn claim_for_delete(dir: &OwnedDir) -> io::Result<Option<PathBuf>> {
-    let Some(fd) = dir.fd.as_ref() else {
+fn quarantine_matches(q: &Quarantine, dev: u64, ino: u64) -> bool {
+    let Ok(name) = name_cstr(&q.name) else {
+        return false;
+    };
+    fstatat_nofollow(q.parent.as_raw_fd(), &name)
+        .ok()
+        .is_some_and(|st| file_id(&st) == (dev, ino))
+}
+
+/// Put the quarantine back at `dir.path` only when it is still `dir`'s
+/// inode. A different entry stays at the quarantine name.
+fn restore_matching(q: &Quarantine, dir: &OwnedDir, dev: u64, ino: u64) {
+    if q.path == dir.path || !quarantine_matches(q, dev, ino) {
+        return;
+    }
+    let _ = rename_exclusive_os(&q.path, &dir.path);
+}
+
+fn drop_holder(q: &Quarantine) {
+    let Some(holder) = &q.holder else {
+        return;
+    };
+    let Ok(name) = name_cstr(&holder.name) else {
+        return;
+    };
+    let Ok(st) = fstatat_nofollow(holder.parent.as_raw_fd(), &name) else {
+        return;
+    };
+    if file_id(&st) != (holder.dev, holder.ino) {
+        return;
+    }
+    let _ = unlink_at_name(holder.parent.as_raw_fd(), &holder.name, true);
+}
+
+/// `Ok(Some(_))` is a name whose device and inode are `dir`'s open
+/// directory, either inside a private directory this move created or, when
+/// that rename is not available, the original name. `Ok(None)` means the
+/// path was not that directory. Nothing was deleted.
+fn claim_for_delete(dir: &OwnedDir, dev: u64, ino: u64) -> io::Result<Option<Quarantine>> {
+    let Some(parent) = dir.parent.as_ref() else {
         return Ok(None);
     };
-    let (dev, ino) = fd_dev_ino(fd.as_raw_fd())?;
-    let quarantine = next_private(parent_dir(&dir.path), "quar");
-    if let Err(e) = rename_exclusive(&dir.path, &quarantine) {
-        if e.raw_os_error() == Some(libc::ENOENT) {
-            return Ok(None);
+    let Some(name) = dir.path.file_name() else {
+        return Ok(None);
+    };
+    let name_c = name_cstr(name)?;
+    match fstatat_nofollow(parent.as_raw_fd(), &name_c) {
+        Ok(st) if file_id(&st) == (dev, ino) => {}
+        Ok(_) => return Ok(None),
+        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let holder_path = next_private(parent_dir(&dir.path), "qdir");
+    if let Ok(holder) = mkdir_owned(&holder_path) {
+        let qpath = holder.path.join("q");
+        match rename_exclusive_os(&dir.path, &qpath) {
+            Ok(()) => {
+                if path_id(&qpath) == Some((dev, ino)) {
+                    return Ok(Some(held_quarantine(holder, qpath)));
+                }
+                // The renamed entry is not our directory. Leave it in the
+                // private directory. Do not move it onto `dir.path`.
+                return Ok(None);
+            }
+            Err(e) if exclusive_unavailable(&e) => {
+                let _ = unlink_empty_owned(&holder);
+            }
+            Err(e) => return Err(e),
         }
-        return Err(e);
     }
-    let meta = fs::symlink_metadata(&quarantine)?;
-    if meta.dev() == dev && meta.ino() == ino {
-        return Ok(Some(quarantine));
+    let parent = dup_fd(parent)?;
+    Ok(Some(Quarantine {
+        parent,
+        name: name.to_os_string(),
+        path: dir.path.clone(),
+        holder: None,
+    }))
+}
+
+fn held_quarantine(holder: OwnedDir, qpath: PathBuf) -> Quarantine {
+    let name = holder
+        .path
+        .file_name()
+        .unwrap_or(OsStr::new("qdir"))
+        .to_os_string();
+    Quarantine {
+        parent: holder.fd.expect("holder directory descriptor"),
+        name: OsString::from("q"),
+        path: qpath,
+        holder: holder.parent.map(|parent| Holder {
+            parent,
+            name,
+            dev: holder.dev,
+            ino: holder.ino,
+        }),
     }
-    // The renamed entry is not the directory we opened. Put it back.
-    // If that rename fails, leave it under the private name. Do not
-    // delete it.
-    let _ = rename_exclusive(&quarantine, &dir.path);
-    Ok(None)
+}
+
+fn path_id(path: &Path) -> Option<(u64, u64)> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    Some((meta.dev(), meta.ino()))
+}
+
+fn dup_fd(fd: &OwnedFd) -> io::Result<OwnedFd> {
+    let dup = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(dup) })
+    }
+}
+
+/// Remove an empty directory this move just created and identified.
+fn unlink_empty_owned(dir: &OwnedDir) -> io::Result<()> {
+    let (Some(fd), Some(parent), Some(name)) =
+        (dir.fd.as_ref(), dir.parent.as_ref(), dir.path.file_name())
+    else {
+        return Ok(());
+    };
+    let (dev, ino) = fd_dev_ino(fd.as_raw_fd())?;
+    let name_c = name_cstr(name)?;
+    let st = fstatat_nofollow(parent.as_raw_fd(), &name_c)?;
+    if file_id(&st) != (dev, ino) {
+        return Ok(());
+    }
+    unlink_at_name(parent.as_raw_fd(), name, true)
+}
+
+fn seam_before_quar_rmdir(path: &Path) {
+    #[cfg(test)]
+    if SWAP_BEFORE_QUAR.with(|c| c.replace(false)) {
+        let marker = !SWAP_EMPTY.with(|c| c.replace(false));
+        swap_in_foreign(path, marker);
+    }
+    #[cfg(not(test))]
+    let _ = path;
 }
 
 struct ClearFrame {
@@ -3189,17 +3521,13 @@ fn unlink_at_name(dirfd: RawFd, name: &OsStr, dir: bool) -> io::Result<()> {
     }
 }
 
-/// The partial copy at `stage` could not be removed. Put it at `dest` when
-/// that name is free (the reserved trash payload), otherwise under a
-/// private name, and report that path.
-fn leftover_error(stage: &Path, dest: &Path, cause: io::Error, rm: io::Error) -> io::Error {
-    let kept = if crate::util::is_gone(dest) && rename_exclusive(stage, dest).is_ok() {
-        dest.to_path_buf()
-    } else {
-        match move_to_private(stage, parent_dir(stage), "keep") {
-            Ok(path) => path,
-            Err(_) => stage.to_path_buf(),
-        }
+/// The partial copy at `stage` could not be removed. Leave it under a
+/// private name beside `stage_dir`, never at the reserved destination.
+/// A spoiled or failed copy is not published there.
+fn leftover_error(stage: &Path, stage_dir: &Path, cause: io::Error, rm: io::Error) -> io::Error {
+    let kept = match move_to_private(stage, parent_dir(stage_dir), "keep") {
+        Ok(path) => path,
+        Err(_) => stage.to_path_buf(),
     };
     io::Error::new(
         cause.kind(),
@@ -4224,9 +4552,13 @@ thread_local! {
     static COLLIDE_DEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SWAP_AFTER_MKDIR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SWAP_BEFORE_REMOVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SWAP_BEFORE_QUAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static SWAP_EMPTY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SWAPPED_AT: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
     static FORCE_EXCLUSIVE: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
     static UNLINK_FAILS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static REPLACE_LINK_SRC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static OCCUPY_ORIGINAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MUTATE_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static HELD_FD: std::cell::Cell<RawFd> = const { std::cell::Cell::new(-1) };
@@ -6405,9 +6737,12 @@ proc /proc proc rw 0 0
             COLLIDE_DEST.with(|c| c.set(false));
             SWAP_AFTER_MKDIR.with(|c| c.set(false));
             SWAP_BEFORE_REMOVE.with(|c| c.set(false));
+            SWAP_BEFORE_QUAR.with(|c| c.set(false));
             SWAP_EMPTY.with(|c| c.set(false));
+            SWAPPED_AT.with(|c| *c.borrow_mut() = None);
             FORCE_EXCLUSIVE.with(|c| c.set(0));
             UNLINK_FAILS.with(|c| c.set(0));
+            REPLACE_LINK_SRC.with(|c| c.set(false));
             OCCUPY_ORIGINAL.with(|c| c.set(false));
             MUTATE_HELD.with(|c| c.set(false));
             HELD_FD.with(|c| c.set(-1));
@@ -6681,6 +7016,7 @@ proc /proc proc rw 0 0
         let err = trash_move_locked(&item, &meta, &td, false).unwrap_err();
         assert!(as_published(&err).is_some(), "{err}");
         assert!(err.to_string().contains("trash record was kept"), "{err}");
+        assert!(err.to_string().contains("extra hard link"), "{err}");
         assert_eq!(fs::read(&item).unwrap(), b"body");
         assert_eq!(fs::read_dir(td.files()).unwrap().count(), 1, "{err}");
         assert_eq!(fs::read_dir(td.info()).unwrap().count(), 1, "{err}");
@@ -6739,6 +7075,7 @@ proc /proc proc rw 0 0
         let claimed = OwnedDir {
             path: foreign.clone(),
             fd: None,
+            parent: None,
             dev: 0,
             ino: 0,
         };
@@ -6762,6 +7099,92 @@ proc /proc proc rw 0 0
             let _ = take_back_owned(&owned);
         }
         assert_eq!(fs::read(path.join("marker")).unwrap(), b"foreign");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An empty mode-0700 directory swapped in after the marker is written
+    /// and before the path is confirmed is not adopted, so a later drop
+    /// does not delete it.
+    #[test]
+    fn an_empty_directory_swapped_in_after_mkdir_is_not_adopted() {
+        let _seams = ClearSeams;
+        let root = std::env::temp_dir().join(format!("rtrash-swap-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("stage");
+        SWAP_EMPTY.with(|c| c.set(true));
+        SWAP_AFTER_MKDIR.with(|c| c.set(true));
+        let owned = mkdir_owned(&path);
+        let adopted = owned.is_ok();
+        if let Ok(owned) = owned {
+            drop_empty_stage(&owned);
+        }
+        assert!(
+            !adopted,
+            "an empty directory swapped in after mkdir was adopted"
+        );
+        assert!(
+            path.is_dir(),
+            "the empty directory swapped in after mkdir was deleted"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Replacing the quarantine name after it was checked does not delete
+    /// that replacement, and does not move it onto the staging path.
+    #[test]
+    fn a_quarantine_replaced_before_removal_is_left_in_place() {
+        let _seams = ClearSeams;
+        let root = std::env::temp_dir().join(format!("rtrash-quar-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("stage");
+        let owned = mkdir_owned(&path).unwrap();
+        fs::write(path.join("copy"), b"ours").unwrap();
+        SWAP_EMPTY.with(|c| c.set(true));
+        SWAP_BEFORE_QUAR.with(|c| c.set(true));
+        take_back_owned(&owned).unwrap();
+        let swapped = SWAPPED_AT
+            .with(|c| c.borrow().clone())
+            .expect("quarantine seam");
+        assert!(
+            swapped.is_dir(),
+            "the empty directory swapped in before removal was deleted"
+        );
+
+        let path = root.join("stage2");
+        let owned = mkdir_owned(&path).unwrap();
+        SWAP_BEFORE_QUAR.with(|c| c.set(true));
+        take_back_owned(&owned).unwrap();
+        let swapped = SWAPPED_AT
+            .with(|c| c.borrow().clone())
+            .expect("quarantine seam");
+        if swapped != path {
+            assert!(
+                path.join("marker").symlink_metadata().is_err(),
+                "a non-matching directory was moved onto the staging path"
+            );
+        }
+        assert_eq!(fs::read(swapped.join("marker")).unwrap(), b"foreign");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A file swapped onto the source after `linkat` stays. The published
+    /// name is removed and the trash record does not stay.
+    #[test]
+    fn a_file_replaced_during_the_link_fallback_is_not_unlinked() {
+        let _seams = ClearSeams;
+        let (root, td) = put_trash("replacesrc");
+        FORCE_EXCLUSIVE.with(|c| c.set(libc::ENOSYS));
+        REPLACE_LINK_SRC.with(|c| c.set(true));
+        let item = root.join("note");
+        fs::write(&item, b"original-data").unwrap();
+        let meta = fs::symlink_metadata(&item).unwrap();
+        let err = trash_move_locked(&item, &meta, &td, false).unwrap_err();
+        assert_eq!(fs::read(&item).unwrap(), b"replacement-data", "{err}");
+        assert!(as_published(&err).is_none(), "{err}");
+        assert_eq!(fs::read_dir(td.files()).unwrap().count(), 0, "{err}");
+        assert_eq!(fs::read_dir(td.info()).unwrap().count(), 0, "{err}");
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -7026,8 +7449,8 @@ proc /proc proc rw 0 0
     }
 
     /// The copy is wrong and the staging tree cannot be removed. The
-    /// original stays, and the trash keeps a record of the leftover so
-    /// it is not an unrecorded payload under files/.
+    /// original stays. The leftover is a private name, not the reserved
+    /// trash payload, and the record stays so that name is not silent.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_cleanup_failure_keeps_a_record_of_the_partial_copy() {
@@ -7064,15 +7487,66 @@ proc /proc proc rw 0 0
         assert!(kept.path.exists(), "{err}");
         assert_eq!(fs::read(src.join("a")).unwrap(), b"first");
         let info = fs::read_dir(td.info()).unwrap().collect::<Vec<_>>();
-        let files = fs::read_dir(td.files()).unwrap().collect::<Vec<_>>();
         assert_eq!(info.len(), 1, "record kept: {err}");
-        assert_eq!(files.len(), 1, "payload kept: {err}");
         let record = info[0].as_ref().unwrap().file_name();
-        let payload = files[0].as_ref().unwrap().file_name();
         let record = record.to_string_lossy();
-        let payload = payload.to_string_lossy();
-        assert_eq!(record.as_ref(), format!("{payload}.trashinfo"));
-        assert_eq!(kept.path, td.files().join(payload.as_ref()));
+        let stem = record.trim_end_matches(".trashinfo");
+        assert!(
+            td.files().join(stem).symlink_metadata().is_err(),
+            "the spoiled copy was published at {stem}: {err}"
+        );
+        assert_ne!(kept.path, td.files().join(stem), "{err}");
+        let _ = fs::remove_dir_all(&td.root);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Without an exclusive rename, a cross-device file put still removes
+    /// its staging directory. A spoiled copy whose cleanup fails is left
+    /// at a private name, not at the reserved payload.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unavailable_exclusive_rename_does_not_publish_a_spoiled_copy() {
+        let _seams = ClearSeams;
+        let Some((root, td)) = shm_trash("nolink-stage") else {
+            return;
+        };
+        FORCE_EXCLUSIVE.with(|c| c.set(libc::ENOSYS));
+        let src = root.join("note");
+        fs::write(&src, b"body").unwrap();
+        let meta = fs::symlink_metadata(&src).unwrap();
+        let name = trash_move_locked(&src, &meta, &td, true).unwrap();
+        assert!(src.symlink_metadata().is_err());
+        assert_eq!(fs::read(td.files().join(&name)).unwrap(), b"body");
+        let leaked = fs::read_dir(td.files())
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with(".rtrash-"));
+        assert!(!leaked, "a staging directory was left behind");
+
+        let src = root.join("other");
+        fs::write(&src, b"clean").unwrap();
+        SPOIL_COPY.with(|c| c.set(true));
+        FAIL_CLEANUP.with(|c| c.set(true));
+        FORCE_EXCLUSIVE.with(|c| c.set(libc::ENOSYS));
+        let meta = fs::symlink_metadata(&src).unwrap();
+        let err = trash_move_locked(&src, &meta, &td, true).unwrap_err();
+        assert_eq!(fs::read(&src).unwrap(), b"clean", "{err}");
+        let info = fs::read_dir(td.info()).unwrap().collect::<Vec<_>>();
+        let record = info
+            .iter()
+            .flatten()
+            .map(|e| e.file_name())
+            .find(|n| n.to_string_lossy().starts_with("other"))
+            .expect("record");
+        let stem = record.to_string_lossy();
+        let stem = stem.trim_end_matches(".trashinfo");
+        let reserved = td.files().join(stem);
+        assert!(
+            reserved.symlink_metadata().is_err(),
+            "the spoiled copy was published at {stem}: {err}"
+        );
+        let kept = partial_kept(&err).unwrap_or_else(|| panic!("{err}"));
+        assert_ne!(kept.path, reserved, "{err}");
         let _ = fs::remove_dir_all(&td.root);
         let _ = fs::remove_dir_all(&root);
     }

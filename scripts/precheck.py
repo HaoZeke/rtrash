@@ -1111,8 +1111,6 @@ PERMANENT_ALLOW = {
     ("trashdir.rs", "remove_any_path"): (1, PRIMITIVE),
     ("trashdir.rs", "remove_record"): (1, PRIMITIVE),
     ("trashdir.rs", "move_by_copy"): (1, MOVE),
-    ("trashdir.rs", "retire_owned"): (1, "the private staging directory after its inode was checked against the directory descriptor"),
-    ("trashdir.rs", "unlink_link_name"): (1, "the source name, or the new link just created, of a move that has no exclusive rename"),
     ("trashdir.rs", "reserve_in_place"): (1, "a put taking back the record it could not write"),
     ("trashdir.rs", "reserve_record"): (2, OWN + ": the .rtrash-put temporary it wrote the record into"),
     ("trashdir.rs", "trash_move_locked"): (1, "a put undoing its own record when the move fails"),
