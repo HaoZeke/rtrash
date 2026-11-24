@@ -337,8 +337,19 @@ fn rm_matches_the_exact_path_across_windows_spellings() {
     }
     match short_file {
         Some(short) if folded(&short) != folded(&file) => {
-            let dry = ok(&run(&home, &["rm", "-n", &s(&short)]));
-            assert_eq!(lines(&dry), 0, "a short final name matched: {dry}");
+            let dry = run(&home, &["rm", "-n", &s(&short)]);
+            assert_eq!(dry.status.code(), Some(1), "{}", text(&dry));
+            assert_eq!(
+                lines(&String::from_utf8_lossy(&dry.stdout)),
+                0,
+                "a short final name matched: {}",
+                text(&dry)
+            );
+            assert!(
+                String::from_utf8_lossy(&dry.stderr).contains("no trash items match"),
+                "{}",
+                text(&dry)
+            );
         }
         _ => common::skip("this volume has no 8.3 name for the file"),
     }
