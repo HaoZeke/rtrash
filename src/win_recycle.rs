@@ -5213,7 +5213,7 @@ left in place.
             return 2;
         }
         if matched.is_empty() {
-            return crate::rm_match::no_matches(prog);
+            return crate::rm_match::rm_no_matches(prog, json, dry_run);
         }
         if !force && !scoped {
             let originals: Vec<PathBuf> = matched.iter().map(original_of).collect();

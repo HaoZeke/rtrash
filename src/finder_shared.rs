@@ -751,15 +751,7 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         return 2;
     }
     if hits.is_empty() {
-        if json {
-            let sum = crate::filters::RmSummary {
-                dry_run,
-                removed: 0,
-                bytes: 0,
-            };
-            print!("{}", sum.json(&[]));
-        }
-        return crate::rm_match::no_matches(prog);
+        return crate::rm_match::rm_no_matches(prog, json, dry_run);
     }
     if refuse_covered {
         let originals: Vec<PathBuf> = hits.iter().map(|e| e.shown.clone()).collect();

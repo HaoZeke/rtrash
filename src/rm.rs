@@ -463,7 +463,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         return 2;
     }
     if hits.is_empty() {
-        return crate::rm_match::no_matches(prog);
+        return crate::rm_match::rm_no_matches(prog, json, dry_run);
     }
     // After the match: a selection that holds every entry, or every entry
     // under a real scope root, is the same mass delete the probe check

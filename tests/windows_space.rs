@@ -1340,7 +1340,7 @@ fn rm_json_summarizes_the_recycle_bin_removal() {
     assert!(done.contains("\"dry_run\": false"), "{done}");
     assert!(done.contains("\"removed\": 1"), "{done}");
     assert!(done_err.contains(&name), "{done_err}");
-    for args in [&[][..], &["-n"][..], &["--json"][..]] {
+    for args in [&[][..], &["-n"][..], &["--json"][..], &["-n", "--json"][..]] {
         let again = common::rtrash_real(common::Real::RecycleBin)
             .arg("rm")
             .args(args)
@@ -1353,6 +1353,15 @@ fn rm_json_summarizes_the_recycle_bin_removal() {
             "{args:?}: {}",
             String::from_utf8_lossy(&again.stderr)
         );
+        if args.contains(&"--json") {
+            let body = String::from_utf8_lossy(&again.stdout);
+            let value: serde_json::Value =
+                serde_json::from_slice(&again.stdout).unwrap_or_else(|e| panic!("{e}: {body}"));
+            assert_eq!(value["dry_run"], args.contains(&"-n"), "{body}");
+            assert_eq!(value["removed"], 0, "{body}");
+            assert_eq!(value["bytes"], 0, "{body}");
+            assert_eq!(value["matches"], serde_json::json!([]), "{body}");
+        }
         assert!(
             !String::from_utf8_lossy(&again.stderr).contains("no exact match"),
             "{args:?}: {}",

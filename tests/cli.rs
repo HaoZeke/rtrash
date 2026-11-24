@@ -5235,6 +5235,26 @@ fn rm_matches_the_original_path_exactly() {
     assert!(err.contains("near miss"), "{err}");
     assert!(err.contains("/ab"), "{err}");
     assert!(err.contains("/a/b"), "{err}");
+
+    for args in [
+        &["rm", "--home-only", "--json", "a"][..],
+        &["rm", "--home-only", "-n", "--json", "a"][..],
+    ] {
+        let out = sb.run(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr_of(&out));
+        let body = stdout_of(&out);
+        let value: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or_else(|e| panic!("{args:?}: {e}: {body}"));
+        assert_eq!(value["dry_run"], args.contains(&"-n"), "{body}");
+        assert_eq!(value["removed"], 0, "{body}");
+        assert_eq!(value["bytes"], 0, "{body}");
+        assert_eq!(value["matches"], serde_json::json!([]), "{body}");
+        assert!(
+            stderr_of(&out).contains("no trash items match"),
+            "{args:?}: {}",
+            stderr_of(&out)
+        );
+    }
     assert_eq!(trash_names(&sb).len(), 2);
 }
 

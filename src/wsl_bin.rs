@@ -690,10 +690,7 @@ fn rm(prog: &str, args: &[String], items: &[BinEntry]) -> i32 {
         }
     }
     if chosen.is_empty() {
-        if json {
-            print_rm_json(dry, 0, 0, &[]);
-        }
-        return crate::rm_match::no_matches(prog);
+        return crate::rm_match::rm_no_matches(prog, json, dry);
     }
     let census: Vec<PathBuf> = items.iter().map(|it| it.local.clone()).collect();
     if !paths.is_empty() && selection_refused(prog, &exact, &paths, &exact_hits, &census, force) {
