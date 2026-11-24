@@ -846,11 +846,25 @@ mod tests {
     fn kernel_file_systems_are_told_apart() {
         let tmp = Dir::open(&std::env::temp_dir()).unwrap();
         assert!(!tmp.is_kernfs());
-        // proc and sysfs are mounted on any Linux host CI runs on.
+        // proc and sysfs are mounted on a Linux host. A build sandbox may
+        // mount only proc (the Nix sandbox has no /sys), so a mount point
+        // that is not there is skipped, and one of them must be found.
         #[cfg(target_os = "linux")]
-        for p in ["/proc", "/sys"] {
-            let d = Dir::open(std::path::Path::new(p)).unwrap();
-            assert!(d.is_kernfs(), "{p}");
+        {
+            let mut found = 0;
+            for p in ["/proc", "/sys"] {
+                match Dir::open(std::path::Path::new(p)) {
+                    Ok(d) => {
+                        assert!(d.is_kernfs(), "{p}");
+                        found += 1;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        eprintln!("{p} not tested: it does not exist here");
+                    }
+                    Err(e) => panic!("{p}: {e}"),
+                }
+            }
+            assert!(found > 0, "neither /proc nor /sys exists here");
         }
     }
 
