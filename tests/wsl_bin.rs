@@ -459,15 +459,19 @@ fn wsl_exact_misses_use_the_shared_diagnostic_and_json_summary() {
         vec!["rm", &path],
         vec!["rm", "-n", &path],
         vec!["rm", "--json", &path],
+        vec!["rm", "-n", "--json", &path],
         vec!["rm", "--json", "--match=exact", &path],
+        vec!["rm", "-n", "--json", "--match=exact", &path],
         vec!["empty", &path],
         vec!["empty", "-n", &path],
         vec!["empty", "--json", &path],
+        vec!["empty", "-n", "--json", &path],
     ] {
         let out = f.run(&args);
         let err = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{args:?}: {err}");
         assert!(err.contains("no exact match"), "{args:?}: {err}");
+        assert!(err.contains("near miss"), "{args:?}: {err}");
         assert!(err.contains("no trash items match"), "{args:?}: {err}");
         if args.contains(&"--json") {
             let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {

@@ -1270,6 +1270,13 @@ fn finder_rm_exact_with_no_match_exits_one() {
         vec!["rm", "--match=exact", missing.to_str().unwrap()],
         vec!["rm", "-n", "--match=exact", missing.to_str().unwrap()],
         vec!["rm", "--json", "--match=exact", missing.to_str().unwrap()],
+        vec![
+            "rm",
+            "-n",
+            "--json",
+            "--match=exact",
+            missing.to_str().unwrap(),
+        ],
     ] {
         let out = b.run(&args, "");
         assert_eq!(out.status.code(), Some(1), "{args:?}: {}", err(&out));
@@ -1278,11 +1285,18 @@ fn finder_rm_exact_with_no_match_exits_one() {
             "{args:?}: {}",
             err(&out)
         );
+        assert!(err(&out).contains("near miss"), "{args:?}: {}", err(&out));
         assert!(
             err(&out).contains("no trash items match"),
             "{args:?}: {}",
             err(&out)
         );
+        if args.contains(&"--json") {
+            let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+                panic!("{args:?}: {e}: {}", String::from_utf8_lossy(&out.stdout))
+            });
+            assert_eq!(body["removed"], 0, "{args:?}: {body}");
+        }
     }
     assert!(b.finder().join("kept.txt").exists());
 }
@@ -1298,6 +1312,7 @@ fn finder_empty_exact_with_no_match_exits_one() {
         vec!["empty", path],
         vec!["empty", "-n", path],
         vec!["empty", "--json", path],
+        vec!["empty", "-n", "--json", path],
     ] {
         let out = b.run(&args, "");
         assert_eq!(out.status.code(), Some(1), "{args:?}: {}", err(&out));
@@ -1306,6 +1321,7 @@ fn finder_empty_exact_with_no_match_exits_one() {
             "{args:?}: {}",
             err(&out)
         );
+        assert!(err(&out).contains("near miss"), "{args:?}: {}", err(&out));
         assert!(
             err(&out).contains("no trash items match"),
             "{args:?}: {}",

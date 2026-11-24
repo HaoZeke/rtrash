@@ -750,6 +750,14 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         return 2;
     }
     if hits.is_empty() {
+        if json {
+            let sum = crate::filters::RmSummary {
+                dry_run,
+                removed: 0,
+                bytes: 0,
+            };
+            print!("{}", sum.json(&[]));
+        }
         return crate::rm_match::no_matches(prog);
     }
     if refuse_covered {
