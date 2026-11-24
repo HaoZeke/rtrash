@@ -8496,7 +8496,7 @@ fn who_unreadable(json: &str) -> usize {
 /// The count put names when it says "N processes could not be inspected".
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn put_unreadable(said: &str) -> Option<usize> {
-    let head = said.split("could not be inspected").next()?;
+    let (head, _) = said.split_once("could not be inspected")?;
     let mut words = head.split_whitespace().rev();
     words.next()?;
     words.next()?.parse().ok()
@@ -8562,6 +8562,18 @@ fn an_in_use_pair_is_judged_only_when_the_unreadable_count_held() {
     ));
     assert!(matches!(
         judge_in_use_pair(4, 4, Some(1), "rtrash: no\n"),
+        Mismatch(_)
+    ));
+    // A message without "could not be inspected" names no count, however
+    // its last words read.
+    let other = "rtrash: cannot trash 'idle.log': 4 errors\n";
+    assert_eq!(put_unreadable(other), None);
+    assert!(matches!(
+        judge_in_use_pair(4, 4, Some(1), other),
+        Mismatch(_)
+    ));
+    assert!(matches!(
+        judge_in_use_pair(3, 3, Some(1), other),
         Mismatch(_)
     ));
     assert_eq!(who_unreadable("{\"holders\":[],\"unreadable\":4}"), 4);
