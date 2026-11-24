@@ -125,7 +125,7 @@ under the automount root, restore the newest item from each PATH, or
 delete items for good (rm by match, empty by age, path or all of them; a
 whole empty asks first, or needs --all). A bare PATH is that original path
 exactly, resolved from the current directory; a longer path is named and
-left in place. MATCH is read as glob, regex, name, substring, exact or id
+left in place. MATCH is read as glob, regex, name, substring, prefix, exact or id
 (with --match=KIND), and is tested against the original path as WSL sees
 it. empty takes an age (`7`, `2h`, `30m`, the same forms as --older-than),
 a PATH, or all of them. rm and empty leave paths listed in the keep file

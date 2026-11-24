@@ -45,8 +45,11 @@ impl Keep {
         if path.as_os_str().is_empty() {
             return false;
         }
-        let resolved = normalize_keep(path).unwrap_or_else(|_| path.to_path_buf());
-        self.paths.iter().any(|keep| keep_covers(keep, &resolved))
+        let candidate = keep_compare_path(path);
+        self.paths.iter().any(|keep| {
+            let stored = keep_compare_path(keep);
+            keep_covers(&stored, &candidate)
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -113,6 +116,15 @@ fn normalize_keep(path: &Path) -> io::Result<PathBuf> {
         ));
     }
     Ok(out)
+}
+
+/// The normalized spelling used for both sides of a keep comparison.
+///
+/// `Keep::load` stores normalized paths, but tests and internal callers can
+/// construct a `Keep` directly. Normalizing both sides also keeps rooted
+/// drive-less Windows paths in the same namespace.
+fn keep_compare_path(path: &Path) -> PathBuf {
+    normalize_keep(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn resolve_keep(path: &Path, depth: u8) -> PathBuf {
