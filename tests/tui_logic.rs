@@ -205,6 +205,59 @@ fn permanently_remove_entries_subset_leaves_others() {
 }
 
 #[test]
+fn permanently_remove_entries_keeps_paths_in_the_keep_file() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let sb = TrashSandbox::new("empty-keep");
+    sb.put(&["kept.txt", "drop.txt"]);
+    let kept = sb.work().join("kept.txt");
+    fs::create_dir_all(sb.root.join(".config/rtrash")).unwrap();
+    fs::write(
+        sb.root.join(".config/rtrash/keep"),
+        format!("{}\n", kept.display()),
+    )
+    .unwrap();
+    let old_home = std::env::var_os("HOME");
+    let old_config = std::env::var_os("XDG_CONFIG_HOME");
+    let old_override = std::env::var_os("RTRASH_CONFIG");
+    // SAFETY: process environment changes are serialized by ENV_LOCK and
+    // restored before the test returns.
+    unsafe {
+        std::env::set_var("HOME", &sb.root);
+        std::env::set_var("XDG_CONFIG_HOME", sb.root.join(".config"));
+        std::env::remove_var("RTRASH_CONFIG");
+    }
+    let entries = sb.collect_entries();
+    let refs: Vec<&list::Entry> = entries.iter().collect();
+    let result = empty_tui::permanently_remove_entries("rtrash", &refs, false);
+    unsafe {
+        match old_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_config {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match old_override {
+            Some(v) => std::env::set_var("RTRASH_CONFIG", v),
+            None => std::env::remove_var("RTRASH_CONFIG"),
+        }
+    }
+    assert_eq!((result.ok_count(), result.fail_count()), (1, 1));
+    assert!(
+        result
+            .reasons
+            .iter()
+            .any(|line| line.contains("listed in the keep file")),
+        "{:?}",
+        result.reasons
+    );
+    let left = sb.collect_entries();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].original, kept);
+}
+
+#[test]
 fn put_selection_trashes_two_paths() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let sb = TrashSandbox::new("put-sel");

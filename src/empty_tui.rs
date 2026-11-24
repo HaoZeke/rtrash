@@ -59,7 +59,26 @@ pub fn permanently_remove_entries(
     let mut succeeded = Vec::with_capacity(entries.len());
     let mut bytes = 0u64;
     let mut reasons = Vec::new();
+    let keep = match crate::keep::Keep::load() {
+        Ok(keep) => keep,
+        Err(e) => {
+            let reason = format!("{prog}: cannot read keep file: {e}; refusing permanent deletion");
+            return RemoveBatchResult {
+                succeeded: vec![false; entries.len()],
+                reclaim_bytes: 0,
+                reasons: vec![reason],
+            };
+        }
+    };
     for entry in entries {
+        if keep.protects(&entry.original) {
+            reasons.push(format!(
+                "{prog}: kept '{}' (listed in the keep file)",
+                crate::util::err_path(&entry.original)
+            ));
+            succeeded.push(false);
+            continue;
+        }
         if dry_run {
             bytes = bytes.saturating_add(trashdir::entry_reclaim_bytes(&entry.dir, &entry.name));
             succeeded.push(true);

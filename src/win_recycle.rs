@@ -3592,13 +3592,11 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             .iter()
             .fold((0u64, 0u64), |(b, f), &i| (b + sized[i].1, f + sized[i].2));
         let chosen: Vec<TrashItem> = picked.iter().map(|&i| items[i].clone()).collect();
-        if verbose || dry_run {
-            for it in &chosen {
-                println!(
-                    "{} {}",
-                    if dry_run { "would remove" } else { "removed" },
-                    crate::util::term_path(&original_of(it))
-                );
+        for it in &chosen {
+            if dry_run {
+                eprintln!("would remove {}", crate::util::err_path(&original_of(it)));
+            } else if verbose {
+                println!("removed {}", crate::util::term_path(&original_of(it)));
             }
         }
         let n = chosen.len() as u64;

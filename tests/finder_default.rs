@@ -991,6 +991,7 @@ fn reap_purge_trash_empties_the_finder_trash() {
     assert!(o.status.success(), "{}", err(&o));
     assert!(err(&o).contains("emptied 1 item"), "{}", err(&o));
     assert!(!b.finder().join("gone.txt").exists());
+
     let o = b.run(&["trash-stats", "--total", "--json"], "");
     assert!(out(&o).contains(r#""items":0"#), "{}", out(&o));
 }
@@ -1025,6 +1026,15 @@ fn empty_until_free_takes_finder_items() {
         err(&o)
     );
     assert!(!b.finder().join("gone.txt").exists());
+
+    fs::write(&p, "g").unwrap();
+    assert!(b.run(&["put", p.to_str().unwrap()], "").status.success());
+    let dry = run(&["empty", "--home-only", "-n", "--json", &want], &fs_spec);
+    assert_eq!(dry.status.code(), Some(1), "{}", err(&dry));
+    serde_json::from_slice::<serde_json::Value>(&dry.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", out(&dry)));
+    assert!(err(&dry).contains("would remove"), "{}", err(&dry));
+    assert!(b.finder().join("gone.txt").exists());
 }
 
 /// A trash budget trims the Finder Trash after a put, oldest first, and
@@ -1278,6 +1288,38 @@ fn finder_rm_exact_with_no_match_exits_one() {
 }
 
 #[test]
+fn finder_empty_exact_with_no_match_exits_one() {
+    let b = Box_::new("empty-exact-no-match");
+    fs::write(b.work().join("kept.txt"), b"x").unwrap();
+    assert!(b.run(&["put", "kept.txt"], "").status.success());
+    let missing = b.work().join("kept");
+    let path = missing.to_str().unwrap();
+    for args in [
+        vec!["empty", path],
+        vec!["empty", "-n", path],
+        vec!["empty", "--json", path],
+    ] {
+        let out = b.run(&args, "");
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", err(&out));
+        assert!(
+            err(&out).contains("no exact match"),
+            "{args:?}: {}",
+            err(&out)
+        );
+        assert!(
+            err(&out).contains("no trash items match"),
+            "{args:?}: {}",
+            err(&out)
+        );
+        if args.contains(&"--json") {
+            let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(body["removed"], 0, "{args:?}: {body}");
+        }
+    }
+    assert!(b.finder().join("kept.txt").exists());
+}
+
+#[test]
 fn list_and_restore_use_the_put_log_before_finder_writes_ds_store() {
     let b = Box_::new("nods");
     let f = b.work().join("a b %\u{e9}.txt");
@@ -1494,6 +1536,15 @@ fn finder_empty_exact_keeps_a_protected_path() {
     let o = b.run(&["empty", "-f", kept.to_str().unwrap()], "");
     assert!(o.status.success(), "{}", err(&o));
     assert!(err(&o).contains("listed in the keep file"), "{}", err(&o));
+    let json = b.run(&["empty", "--json", kept.to_str().unwrap()], "");
+    assert!(json.status.success(), "{}", err(&json));
+    let body: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(body["removed"], 0, "{body}");
+    let rm = b.run(&["rm", "--json", kept.to_str().unwrap()], "");
+    assert!(rm.status.success(), "{}", err(&rm));
+    let rm_body: serde_json::Value = serde_json::from_slice(&rm.stdout).unwrap();
+    assert_eq!(rm_body["removed"], 0, "{rm_body}");
+    assert_eq!(rm_body["matches"], serde_json::json!([]), "{rm_body}");
     assert!(b.finder().join("kept.txt").exists());
     assert!(b.finder().join("other.txt").exists());
 }

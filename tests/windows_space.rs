@@ -1130,6 +1130,8 @@ fn empty_until_free_dry_run_reports_each_short_drive() {
             && stdout.contains("$Recycle.Bin"),
         "{stdout}"
     );
+    serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {stdout}"));
     assert!(stderr.contains("from the Recycle Bin of"), "{stderr}");
     // The dry run left the item; take it out by exact original path.
     let _ = common::rtrash_real(common::Real::RecycleBin)

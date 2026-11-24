@@ -1299,7 +1299,7 @@ pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u
         let b = crate::fastdelete::disk_usage(&path);
         let inodes = 1 + crate::trash_stats::count_inodes(&path);
         if dry_run {
-            println!("would remove {}", crate::util::term_path(&e.shown));
+            eprintln!("would remove {}", crate::util::err_path(&e.shown));
         } else {
             if let Err(err) = crate::permanent_guard::remove(&path) {
                 crate::finder_total::uncarried(&e.trash);
@@ -1385,6 +1385,12 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
             return 2;
         }
     }
+    if !o.paths.is_empty() && picked.is_empty() {
+        if json {
+            println!("{{\"dry_run\":{dry_run},\"removed\":0,\"bytes\":0,\"failed\":0}}");
+        }
+        return crate::rm_match::no_matches(prog);
+    }
     for (e, _) in picked.iter().filter(|(e, _)| keep.protects(&e.shown)) {
         eprintln!(
             "{prog}: kept '{}' (listed in the keep file)",
@@ -1395,6 +1401,12 @@ pub fn default_empty(prog: &str, o: &EmptyOpts) -> i32 {
         .into_iter()
         .filter(|(e, _)| !keep.protects(&e.shown))
         .collect();
+    if !o.paths.is_empty() && picked.is_empty() {
+        if json {
+            println!("{{\"dry_run\":{dry_run},\"removed\":0,\"bytes\":0,\"failed\":0}}");
+        }
+        return 0;
+    }
     if o.interactive && !dry_run && !o.paths.is_empty() {
         let named: Vec<(String, u64)> = picked
             .iter()

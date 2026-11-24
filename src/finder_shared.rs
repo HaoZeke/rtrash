@@ -777,6 +777,14 @@ pub fn rm(prog: &str, patterns: &crate::filters::Patterns, opts: RmOpts<'_>) -> 
         .filter(|e| !keep.protects(&e.shown))
         .collect();
     if hits.is_empty() {
+        if json {
+            let sum = crate::filters::RmSummary {
+                dry_run,
+                removed: 0,
+                bytes: 0,
+            };
+            print!("{}", sum.json(&[]));
+        }
         return 0;
     }
     // A cap counts the matches first, and RTRASH_ALLOW_ROOTS checks where

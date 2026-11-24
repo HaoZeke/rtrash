@@ -295,8 +295,14 @@ fn wsl_rm_deletes_matching_items_for_good() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!f.bin().join("$RAB12CD.txt").exists());
-    // No match is not an error; no selector is.
-    assert!(f.run(&["rm", "--name=none"]).status.success());
+    // A selector with no match exits one; no selector is a usage error.
+    let missing = f.run(&["rm", "--name=none"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("no trash items match"),
+        "{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
     assert_eq!(f.run(&["rm"]).status.code(), Some(2));
 }
 
@@ -436,6 +442,66 @@ fn wsl_rm_keeps_an_exact_protected_path() {
 fn wsl_empty_keeps_an_exact_protected_path() {
     let (f, kept) = exact_kept("empty-exact-keep");
     assert_kept(&f, &kept, "empty");
+}
+
+#[test]
+fn wsl_exact_misses_use_the_shared_diagnostic_and_json_summary() {
+    let f = Fake::new("exact-miss");
+    f.recycle(
+        "AB12CD.txt",
+        r"C:\Users\me\kept.txt",
+        b"kept",
+        1_700_000_000,
+    );
+    let missing = f.root.join("c/Users/me/kept");
+    let path = missing.display().to_string();
+    for args in [
+        vec!["rm", &path],
+        vec!["rm", "-n", &path],
+        vec!["rm", "--json", &path],
+        vec!["rm", "--json", "--match=exact", &path],
+        vec!["empty", &path],
+        vec!["empty", "-n", &path],
+        vec!["empty", "--json", &path],
+    ] {
+        let out = f.run(&args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {err}");
+        assert!(err.contains("no exact match"), "{args:?}: {err}");
+        assert!(err.contains("no trash items match"), "{args:?}: {err}");
+        if args.contains(&"--json") {
+            let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+                panic!("{args:?}: {e}: {}", String::from_utf8_lossy(&out.stdout))
+            });
+            assert_eq!(body["removed"], 0, "{args:?}: {body}");
+        }
+    }
+    assert!(f.bin().join("$RAB12CD.txt").exists());
+}
+
+#[test]
+fn wsl_json_summarizes_an_exact_match_filtered_by_the_keep_file() {
+    let (f, kept) = exact_kept("json-exact-keep");
+    let path = kept.display().to_string();
+    let rm = f.run(&["rm", "--json", &path]);
+    assert!(
+        rm.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rm.stderr)
+    );
+    let rm_body: serde_json::Value = serde_json::from_slice(&rm.stdout).unwrap();
+    assert_eq!(rm_body["removed"], 0);
+    assert_eq!(rm_body["matches"], serde_json::json!([]));
+
+    let empty = f.run(&["empty", "--json", &path]);
+    assert!(
+        empty.status.success(),
+        "{}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    let empty_body: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(empty_body["removed"], 0);
+    assert!(f.bin().join("$RAB12CD.txt").exists());
 }
 
 #[test]
