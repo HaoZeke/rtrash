@@ -7612,7 +7612,7 @@ fn a_home_trash_on_another_device_takes_files_its_volume_cannot() {
     let f = sb.work().join("far.txt");
     fs::write(&f, b"far away").unwrap();
     let env = [("XDG_DATA_HOME", xdg.to_str().unwrap())];
-    let out = sb.run_env(&["put", "far.txt"], &env);
+    let out = sb.run_env(&["put", "--allow-cross-device", "far.txt"], &env);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!f.exists());
     let trash = xdg.join("Trash");
@@ -7793,7 +7793,7 @@ fn put_across_devices_refuses_what_it_could_only_half_remove() {
     }
     let pin = format!("--trash-dir={}", other.display());
     for (op, keep) in cases {
-        let out = sb.run(&["put", "-r", &pin, op]);
+        let out = sb.run(&["put", "-r", "--allow-cross-device", &pin, op]);
         assert_eq!(out.status.code(), Some(1), "{op}: {}", stderr_of(&out));
         assert!(w.join(keep).exists(), "{op}: {keep} is gone");
         assert_eq!(names_in(&other.join("files")), Vec::<String>::new(), "{op}");
@@ -7832,7 +7832,7 @@ fn put_across_devices_refuses_a_tree_with_an_immutable_file() {
             common::skip(&format!("chattr {set} failed here; {dir} case skipped"));
             continue;
         }
-        let out = sb.run(&["put", "-r", &pin, dir]);
+        let out = sb.run(&["put", "-r", "--allow-cross-device", &pin, dir]);
         as_root(&["chattr", unset, path]);
         assert_eq!(out.status.code(), Some(1), "{dir}: {}", stderr_of(&out));
         let err = stderr_of(&out);
@@ -7942,7 +7942,15 @@ fn copies_across_devices_keep_posix_acls() {
             .output()
             .unwrap()
     };
-    let out = run(&["put", "-r", "--no-space-check", &pin, "f.txt", "d"]);
+    let out = run(&[
+        "put",
+        "-r",
+        "--allow-cross-device",
+        "--no-space-check",
+        &pin,
+        "f.txt",
+        "d",
+    ]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     check(
         &other.join("files/f.txt"),
@@ -8038,7 +8046,15 @@ fn copies_across_volumes_keep_macos_acls() {
             .output()
             .unwrap()
     };
-    let out = run(&["put", "-r", "--no-space-check", &pin, "f.txt", "d"]);
+    let out = run(&[
+        "put",
+        "-r",
+        "--allow-cross-device",
+        "--no-space-check",
+        &pin,
+        "f.txt",
+        "d",
+    ]);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!file.exists() && !dir.exists());
     check(&other.join("files"), "trashed");
@@ -8097,7 +8113,7 @@ fn put_across_devices_keeps_the_target_from_filling() {
     fs::write(sb.work().join("big"), vec![b'x'; 4096]).unwrap();
     let pin = format!("--trash-dir={}", other.display());
     let out = common::rtrash(&sb.root)
-        .args(["put", &pin, "big"])
+        .args(["put", "--allow-cross-device", &pin, "big"])
         .current_dir(sb.work())
         .env("RTRASH_MIN_FREE", "1000000T")
         .output()
@@ -8113,7 +8129,13 @@ fn put_across_devices_keeps_the_target_from_filling() {
     assert_eq!(fs::read_dir(other.join("info")).unwrap().count(), 0);
 
     let out = common::rtrash(&sb.root)
-        .args(["put", "--no-space-check", &pin, "big"])
+        .args([
+            "put",
+            "--allow-cross-device",
+            "--no-space-check",
+            &pin,
+            "big",
+        ])
         .current_dir(sb.work())
         .env("RTRASH_MIN_FREE", "1000000T")
         .output()
@@ -8121,6 +8143,78 @@ fn put_across_devices_keeps_the_target_from_filling() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(!sb.work().join("big").exists());
     assert!(other.join("files/big").exists());
+    let _ = fs::remove_dir_all(&other);
+}
+
+/// A put onto a trash on another device is refused before it copies.
+/// The error names both devices and the bytes. `--allow-cross-device`
+/// copies, and the trash then holds the same bytes. `--json` keeps that
+/// refusal in the same summary other put failures use. A same-device put
+/// still needs no flag.
+#[test]
+fn put_refuses_a_cross_device_copy_until_asked_and_then_checks_it() {
+    use std::os::unix::fs::MetadataExt;
+    let sb = Sandbox::new("xdev-guard");
+    fs::write(sb.work().join("same.txt"), b"same").unwrap();
+    let same = sb.run(&["put", "same.txt"]);
+    assert!(same.status.success(), "{}", stderr_of(&same));
+    assert!(!sb.work().join("same.txt").exists());
+
+    let Some(other) = other_device_dir(&sb.root, "guard") else {
+        common::skip("no second file system here; skipping");
+        return;
+    };
+    let file = sb.work().join("note.txt");
+    fs::write(&file, b"hello-cross").unwrap();
+    fs::create_dir(sb.work().join("tree")).unwrap();
+    fs::write(sb.work().join("tree/inner.txt"), b"inside").unwrap();
+    let pin = format!("--trash-dir={}", other.display());
+    let meta = fs::symlink_metadata(&file).unwrap();
+    let src_dev = meta.dev();
+    let dst_dev = fs::symlink_metadata(other.join("files")).unwrap().dev();
+    assert_ne!(src_dev, dst_dev);
+    let need = rtrash::space::tree_need(&file, &meta).unwrap().0;
+
+    let out = sb.run(&["put", &pin, "note.txt"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(err.contains("--allow-cross-device"), "{err}");
+    assert!(err.contains(&format!("{need} bytes")), "{err}");
+    assert!(err.contains(&format!("device {src_dev}")), "{err}");
+    assert!(err.contains(&format!("device {dst_dev}")), "{err}");
+    assert_eq!(fs::read(&file).unwrap(), b"hello-cross");
+    assert_eq!(names_in(&other.join("files")), Vec::<String>::new());
+    assert_eq!(names_in(&other.join("info")), Vec::<String>::new());
+
+    let out = sb.run(&["put", "--json", &pin, "note.txt"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
+    assert_eq!(stdout_of(&out).trim(), r#"{"trashed":[],"failed":1}"#);
+    assert!(
+        stderr_of(&out).contains("--allow-cross-device"),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(fs::read(&file).unwrap(), b"hello-cross");
+
+    let out = sb.run(&[
+        "put",
+        "--allow-cross-device",
+        "-r",
+        &pin,
+        "note.txt",
+        "tree",
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(!file.exists());
+    assert!(!sb.work().join("tree").exists());
+    assert_eq!(
+        fs::read(other.join("files/note.txt")).unwrap(),
+        b"hello-cross"
+    );
+    assert_eq!(
+        fs::read(other.join("files/tree/inner.txt")).unwrap(),
+        b"inside"
+    );
     let _ = fs::remove_dir_all(&other);
 }
 
@@ -8176,7 +8270,10 @@ impl Holder {
                 .arg(path)
                 .output()
                 .unwrap();
-            if String::from_utf8_lossy(&out.stdout).contains(&format!("\"pid\":{}", child.id())) {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if text.contains(&format!("\"pid\":{}", child.id()))
+                && text.contains("\"command\":\"sleep\"")
+            {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -8204,21 +8301,84 @@ fn who_names_the_process_holding_a_file_or_its_directory() {
     let held = sb.touch("held.log");
     sb.touch("idle.log");
     let child = Holder::open(&held);
+    let user = String::from_utf8(Command::new("id").arg("-un").output().unwrap().stdout).unwrap();
+    let user = user.trim();
     let out = sb.run(&["who", "held.log"]);
     assert!(out.status.success(), "{}", stderr_of(&out));
-    let line = format!("{}", child.pid());
     let text = stdout_of(&out);
-    assert!(
-        text.lines()
-            .any(|l| l.trim_start().starts_with(&line) && l.contains("fd 3")),
-        "{text}"
-    );
+    let line = text
+        .lines()
+        .find(|l| l.contains(&format!("pid {}", child.pid())) && l.contains("fd 3"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(line.contains("held.log"), "{line}");
+    assert!(line.contains(&format!("user {user}")), "{line}");
+    assert!(line.contains("command sleep"), "{line}");
     let out = sb.run(&["who", "--json", "."]);
     assert!(out.status.success());
-    assert!(stdout_of(&out).contains(&format!("\"pid\":{},", child.pid())));
+    let json = stdout_of(&out);
+    assert_eq!(json.lines().count(), 1, "{json}");
+    assert!(json.starts_with('{'), "{json}");
+    assert!(
+        json.contains(&format!("\"pid\":{},", child.pid())),
+        "{json}"
+    );
+    assert!(json.contains(&format!("\"user\":\"{user}\"")), "{json}");
+    assert!(json.contains("\"cmdline\":"), "{json}");
+    assert!(!json.contains("no process holds"), "{json}");
     let out = sb.run(&["who", "idle.log"]);
     assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
-    assert!(stdout_of(&out).is_empty());
+    let idle = stdout_of(&out);
+    assert!(
+        idle.contains("idle.log: no process holds this path"),
+        "{idle}"
+    );
+    let counted = stdout_of(&sb.run(&["who", "--json", "idle.log"]));
+    assert_eq!(counted.lines().count(), 1, "{counted}");
+    let unread = counted
+        .trim()
+        .rsplit_once("\"unreadable\":")
+        .and_then(|(_, n)| n.trim_end_matches('}').parse::<u64>().ok())
+        .unwrap_or(0);
+    if unread > 0 {
+        assert!(
+            idle.contains("the result is partial") && idle.contains("could not be inspected"),
+            "{idle}"
+        );
+        let err = stderr_of(&out);
+        assert!(
+            err.contains("could not be inspected") && err.contains("run as root"),
+            "unreadable {unread}: {err}"
+        );
+    } else {
+        assert!(!idle.contains("partial"), "{idle}");
+    }
+}
+
+/// The same operand twice is one path. A holder and a free path each
+/// print once.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn who_prints_a_duplicate_held_path_and_a_duplicate_free_path_once() {
+    let sb = Sandbox::new("who-dup");
+    let held = sb.touch("held.log");
+    sb.touch("idle.log");
+    let child = Holder::open(&held);
+    let out = sb.run(&["who", "held.log", "held.log"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    let hits = text
+        .lines()
+        .filter(|l| l.contains(&format!("pid {}", child.pid())) && l.contains("held.log"))
+        .count();
+    assert_eq!(hits, 1, "{text}");
+    let out = sb.run(&["who", "idle.log", "idle.log"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
+    let idle = stdout_of(&out);
+    let free = idle
+        .lines()
+        .filter(|l| l.contains("idle.log: no process holds this path"))
+        .count();
+    assert_eq!(free, 1, "{idle}");
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -8333,7 +8493,12 @@ fn who_says_how_many_processes_it_could_not_inspect() {
     let env = [("RTRASH_TEST_PROC", one.to_str().unwrap())];
     let out = sb.run_env(&["who", "w.log"], &env);
     assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
-    assert!(stdout_of(&out).is_empty());
+    let text = stdout_of(&out);
+    assert!(text.contains("w.log: no process holds this path"), "{text}");
+    assert!(
+        text.contains("the result is partial") && text.contains("could not be inspected"),
+        "{text}"
+    );
     let err = stderr_of(&out);
     assert!(
         err.contains("no holder seen, but 1 process could not be inspected"),
@@ -8345,6 +8510,9 @@ fn who_says_how_many_processes_it_could_not_inspect() {
     let out = sb.run_env(&["who", "w.log"], &env);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stderr_of(&out), "");
+    let text = stdout_of(&out);
+    assert!(text.contains("w.log: no process holds this path"), "{text}");
+    assert!(!text.contains("partial"), "{text}");
 }
 
 /// Debug builds on Linux only: `--in-use=refuse` never takes a process it
@@ -8492,9 +8660,29 @@ fn who_counts_only_the_paths_it_could_not_check() {
         "{err}"
     );
     assert!(!err.contains("run as root"), "{err}");
+    let text = stdout_of(&out);
+    let a_line = text
+        .lines()
+        .find(|l| l.starts_with("a.log:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    let b_line = text
+        .lines()
+        .find(|l| l.starts_with("b.log:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        a_line.contains("the result is partial") && a_line.contains("could not be checked in full"),
+        "{a_line}"
+    );
+    assert!(!b_line.contains("partial"), "{b_line}");
     let out = sb.run_env(&["who", "b.log"], &env);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stderr_of(&out), "");
+    let alone = stdout_of(&out);
+    assert!(
+        alone.contains("b.log: no process holds this path"),
+        "{alone}"
+    );
+    assert!(!alone.contains("partial"), "{alone}");
     fs::create_dir_all(sb.work().join("left")).unwrap();
     fs::create_dir_all(sb.work().join("right")).unwrap();
     sb.touch("left/a.log");
@@ -8506,6 +8694,14 @@ fn who_counts_only_the_paths_it_could_not_check() {
         err.contains("no holder seen, but 2 paths could not be checked in full"),
         "{err}"
     );
+    let text = stdout_of(&out);
+    for prefix in ["left/a.log:", "right/a.log:"] {
+        let line = text
+            .lines()
+            .find(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert!(line.contains("the result is partial"), "{line}");
+    }
     let out = sb.run_env(&["who", "left/a.log", "b.log"], &env);
     let err = stderr_of(&out);
     assert_eq!(out.status.code(), Some(1), "{err}");
@@ -8513,6 +8709,17 @@ fn who_counts_only_the_paths_it_could_not_check() {
         err.contains("no holder seen, but 1 path could not be checked in full"),
         "{err}"
     );
+    let text = stdout_of(&out);
+    let left = text
+        .lines()
+        .find(|l| l.starts_with("left/a.log:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    let plain = text
+        .lines()
+        .find(|l| l.starts_with("b.log:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(left.contains("the result is partial"), "{left}");
+    assert!(!plain.contains("partial"), "{plain}");
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

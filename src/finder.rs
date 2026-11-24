@@ -429,14 +429,22 @@ fn move_back_inner(src: &Path, dest: &Path, force: bool) -> Result<(), String> {
     fs::create_dir_all(parent).map_err(|e| format!("cannot create '{}': {e}", parent.display()))?;
     // A move across file systems whose copy was whole keeps that copy
     // even when the item could not all leave the trash; say where it is.
-    let failed = |e: std::io::Error, to: &Path, what: &str| match crate::trashdir::source_left(&e) {
-        Some(l) => format!(
-            "'{}' is copied whole to '{}', but removing it from the trash failed partway: {}",
-            src.display(),
-            to.display(),
-            l.err
-        ),
-        None => format!("{what}: {e}"),
+    let failed = |e: std::io::Error, to: &Path, what: &str| {
+        let saved = crate::trashdir::salvage(src, &e);
+        let base = match crate::trashdir::source_left(&e) {
+            Some(l) => format!(
+                "'{}' is copied whole to '{}', but removing it from the trash failed partway: {}",
+                src.display(),
+                to.display(),
+                l.err
+            ),
+            None => format!("{what}: {e}"),
+        };
+        if saved.is_empty() {
+            base
+        } else {
+            format!("{base}; {saved}")
+        }
     };
     if !force {
         return crate::trashdir::relocate(src, dest)
@@ -448,11 +456,30 @@ fn move_back_inner(src: &Path, dest: &Path, force: bool) -> Result<(), String> {
         .map_err(|e| failed(e, &staged, &format!("cannot stage '{}'", src.display())))?;
     if dest.symlink_metadata().is_ok() {
         if let Err(e) = crate::permanent_guard::remove(dest) {
-            let _ = crate::trashdir::relocate_back(&staged, src);
-            return Err(format!("cannot remove existing '{}': {e}", dest.display()));
+            return Err(match crate::trashdir::relocate_back(&staged, src) {
+                Ok(()) => format!(
+                    "cannot remove existing '{}': {e}; the item stays",
+                    dest.display()
+                ),
+                Err(b) => format!(
+                    "cannot remove existing '{}': {e}; it is now at '{}': {b}",
+                    dest.display(),
+                    staged.display()
+                ),
+            });
         }
     }
-    fs::rename(&staged, dest).map_err(|e| format!("cannot place '{}': {e}", dest.display()))
+    crate::trashdir::publish_exclusive(&staged, dest).map_err(|e| {
+        let back = crate::trashdir::relocate_back(&staged, src);
+        match back {
+            Ok(()) => format!("cannot place '{}': {e}; the item stays", dest.display()),
+            Err(b) => format!(
+                "cannot place '{}': {e}; it is now at '{}': {b}",
+                dest.display(),
+                staged.display()
+            ),
+        }
+    })
 }
 
 /// Ask Finder to trash `paths`, so it records Put Back for each.
@@ -1666,5 +1693,19 @@ mod tests {
         assert_eq!(find("bare"), None);
         assert!(got.iter().all(|i| i.name != ".DS_Store"));
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn move_back_does_not_replace_an_existing_file() {
+        let root = std::env::temp_dir().join(format!("rtrash-mvback-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let (src, dest) = (root.join("src"), root.join("dest"));
+        fs::write(&src, b"new").unwrap();
+        fs::write(&dest, b"keep").unwrap();
+        let err = move_back(&src, &dest, false).unwrap_err();
+        assert_eq!(fs::read(&dest).unwrap(), b"keep", "{err}");
+        assert_eq!(fs::read(&src).unwrap(), b"new", "{err}");
+        let _ = fs::remove_dir_all(&root);
     }
 }

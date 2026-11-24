@@ -461,7 +461,8 @@ else
   # trash-cli #433: a `.Trash-$uid` that is a symlink, that other users
   # can write to, or that another user owns is skipped by list and put.
   # list reads every mount and only reports, so the real trash stays
-  # untouched; put falls back to the scratch home trash.
+  # untouched; put falls back to the scratch home trash. That home
+  # trash is another device, so the fallback copy has to be asked for.
   bait=$scratch/planted
   put_t=$vol/rtrash-interop-planted.txt
   for how in symlink writable foreign; do
@@ -485,7 +486,7 @@ else
     esac
     printf 'mine\n' > "$put_t"
     list_out=$("$rtrash" list 2>"$scratch/planted.err" || true)
-    put_log=$("$rtrash" put "$put_t" 2>&1 || true)
+    put_log=$("$rtrash" put --allow-cross-device "$put_t" 2>&1 || true)
     if [[ $list_out != *planted-rec* ]] && grep -qF "skipping '$vt'" "$scratch/planted.err" \
       && [[ ! -e $put_t && -f $trash/files/rtrash-interop-planted.txt ]] \
       && [[ $(ls -A "$rec/files") == planted ]]; then

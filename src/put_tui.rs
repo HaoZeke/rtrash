@@ -81,10 +81,17 @@ pub fn filter_indices(rows: &[PathRow], query: &str) -> Vec<usize> {
 }
 
 /// Put selected paths using default recursive-for-dirs opts. Returns exit code.
-pub fn put_selection(prog: &str, paths: &[PathBuf], recursive: bool, force: bool) -> i32 {
+pub fn put_selection(
+    prog: &str,
+    paths: &[PathBuf],
+    recursive: bool,
+    force: bool,
+    allow_cross_device: bool,
+) -> i32 {
     let opts = put::Opts {
         recursive,
         force,
+        allow_cross_device,
         ..put::Opts::default()
     };
     let mut status = 0;
@@ -124,6 +131,7 @@ struct App {
     quit: bool,
     recursive: bool,
     force: bool,
+    allow_cross_device: bool,
     viewport_rows: usize,
     keys: Keymap,
 }
@@ -156,6 +164,7 @@ impl App {
             quit: false,
             recursive: true,
             force: false,
+            allow_cross_device: false,
             viewport_rows: 10,
             keys,
         };
@@ -249,8 +258,15 @@ impl App {
         let paths = self.targets();
         // put writes why a path stayed to stderr, which the browser holds
         // while it owns the terminal; the status line shows it instead.
-        let (code, said) =
-            put::heard(|| put_selection(&self.prog, &paths, self.recursive, self.force));
+        let (code, said) = put::heard(|| {
+            put_selection(
+                &self.prog,
+                &paths,
+                self.recursive,
+                self.force,
+                self.allow_cross_device,
+            )
+        });
         if self.fixed {
             prune_missing(&mut self.rows);
             self.sel.clear();
@@ -480,6 +496,16 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     }
 }
 
+/// The browser `du --pick` opens. A picked row has no flag of its own
+/// for a copy onto another device, so that copy is allowed, as the
+/// explorer and reap allow it.
+fn picked_app(prog: &str, title: &Path, rows: Vec<PathRow>) -> App {
+    let mut app = App::new(prog, title.to_path_buf(), rows);
+    app.fixed = true;
+    app.allow_cross_device = true;
+    app
+}
+
 /// Browse a fixed list of rows (title shown in the header) and trash the
 /// marked ones. Returns the process exit code.
 pub fn run_rows(prog: &str, title: &Path, rows: Vec<PathRow>) -> i32 {
@@ -494,8 +520,7 @@ pub fn run_rows(prog: &str, title: &Path, rows: Vec<PathRow>) -> i32 {
             return 1;
         }
     };
-    let mut app = App::new(prog, title.to_path_buf(), rows);
-    app.fixed = true;
+    let mut app = picked_app(prog, title, rows);
     let result = event_loop(&mut terminal, &mut app);
     tui_term::leave(&mut terminal);
     if let Err(e) = result {
@@ -517,7 +542,7 @@ fn event_loop(terminal: &mut tui_term::Term, app: &mut App) -> io::Result<()> {
     }
 }
 
-pub fn run(prog: &str, start_dir: &Path) -> i32 {
+pub fn run(prog: &str, start_dir: &Path, allow_cross_device: bool) -> i32 {
     let cwd = start_dir
         .canonicalize()
         .unwrap_or_else(|_| start_dir.to_path_buf());
@@ -536,6 +561,7 @@ pub fn run(prog: &str, start_dir: &Path) -> i32 {
         }
     };
     let mut app = App::new(prog, cwd, rows);
+    app.allow_cross_device = allow_cross_device;
     let result = event_loop(&mut terminal, &mut app);
     tui_term::leave(&mut terminal);
     if let Err(e) = result {
@@ -574,6 +600,17 @@ mod fixed_rows_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, kept);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `du --pick` reaches put through [`picked_app`], which allows a
+    /// copy onto another device. The command has no flag to ask for it.
+    #[test]
+    fn a_picked_row_may_copy_across_devices() {
+        let app = picked_app("rtrash", Path::new("."), vec![]);
+        assert!(app.fixed);
+        assert!(app.allow_cross_device);
+        let plain = App::new("rtrash", PathBuf::from("."), vec![]);
+        assert!(!plain.allow_cross_device);
     }
 }
 

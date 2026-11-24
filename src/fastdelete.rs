@@ -1024,6 +1024,12 @@ pub(crate) fn refuse_in_tests(name: &OsStr) {
     tests::FAIL.lock().unwrap().push(name.to_os_string());
 }
 
+/// Undo one [`refuse_in_tests`] so a later test is not refused that name.
+#[cfg(test)]
+pub(crate) fn accept_in_tests(name: &OsStr) {
+    tests::FAIL.lock().unwrap().retain(|n| n != name);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

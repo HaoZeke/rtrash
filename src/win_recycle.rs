@@ -2251,6 +2251,9 @@ mod os {
                 "--json" => json = true,
                 "--dry-run" => dry_run = true,
                 "--allow-permanent" => allow_permanent = true,
+                // The Recycle Bin is per drive. The flag is the Unix
+                // opt-in for a copy across devices; here it changes nothing.
+                "--allow-cross-device" => {}
                 // FreeDesktop options: the Recycle Bin has one place per
                 // drive, so there is nothing to pin or narrow down.
                 "--home-only" => {}
@@ -2288,6 +2291,8 @@ Move FILE(s) to the Windows Recycle Bin (system trash; not FreeDesktop).
                    Bin cannot take (no bin on the drive, the bin turned
                    off, or the item over the bin's cap); without it such
                    an item is refused and left in place
+      --allow-cross-device  accepted for script parity; the Recycle Bin
+                   is per drive and already keeps a cross-drive delete
       --trash-dir=PATH, --home-only
                  accepted for script parity; items always go to the
                    Recycle Bin of their drive

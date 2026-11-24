@@ -274,7 +274,7 @@ fn put_selection_trashes_two_paths() {
         std::env::set_var("XDG_DATA_HOME", sb.root.join("xdg"));
         std::env::set_var("HOME", &sb.root);
     }
-    let code = put_tui::put_selection("rtrash", &[p1.clone(), p2.clone()], false, true);
+    let code = put_tui::put_selection("rtrash", &[p1.clone(), p2.clone()], false, true, false);
     unsafe {
         match prev_xdg {
             Some(v) => std::env::set_var("XDG_DATA_HOME", v),

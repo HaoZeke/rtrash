@@ -121,6 +121,7 @@ export extern "rtrash put" [
     --trash-dir: string  # put into this trash root (creates files/ and info/ if
     --home-only  # always use the home trash (skip volume trash)
     --plain  # never open the put browser; require FILE operands
+    --allow-cross-device  # copy onto a trash on another device, then
     --no-space-check  # copy across devices even when the copy would leave
     --dry-run  # run every check and print what would move, moving nothing
     --in-use: string@"nu-complete rtrash in-use"  # when a live process has an item open, mapped or as
@@ -471,6 +472,7 @@ export extern "trash-put" [
     --trash-dir: string  # put into this trash root (creates files/ and info/ if
     --home-only  # always use the home trash (skip volume trash)
     --plain  # never open the put browser; require FILE operands
+    --allow-cross-device  # copy onto a trash on another device, then
     --no-space-check  # copy across devices even when the copy would leave
     --dry-run  # run every check and print what would move, moving nothing
     --in-use: string@"nu-complete rtrash in-use"  # when a live process has an item open, mapped or as

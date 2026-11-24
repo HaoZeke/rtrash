@@ -80,6 +80,9 @@ pub(crate) struct Opts {
     pub in_use: InUse,
     /// `--dry-run`: run every check and say what would move, moving nothing.
     pub dry_run: bool,
+    /// `--allow-cross-device`: copy, check, then remove when the trash is
+    /// on another device. Without it that put is refused before it copies.
+    pub allow_cross_device: bool,
 }
 
 /// One item moved into a trash directory by `put_one`.
@@ -121,6 +124,7 @@ impl Default for Opts {
             json: false,
             in_use: InUse::Ignore,
             dry_run: false,
+            allow_cross_device: false,
         }
     }
 }
@@ -160,6 +164,11 @@ to require CLI operands even on a TTY.
       --no-space-check  copy across devices even when the copy would leave
                           the trash's file system under 5% of its bytes or
                           inodes free, or under RTRASH_MIN_FREE bytes
+      --allow-cross-device  copy onto a trash on another device, then
+                          remove the original once the copy matches in
+                          size and, for a file, in contents; without it
+                          such a put is refused and names both devices
+                          and the bytes that would be copied
       --in-use=WHEN     when a live process has an item open, mapped or as
                           its working directory: warn (the default), refuse,
                           or ignore (skips the process scan); refuse also
@@ -205,6 +214,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             "--" => no_more_opts = true,
             "--plain" => plain = true,
             "--no-space-check" => crate::space::skip_check(true),
+            "--allow-cross-device" => opts.allow_cross_device = true,
             "--json" => {
                 json = true;
                 opts.json = true;
@@ -309,7 +319,7 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         #[cfg(feature = "tui")]
         if !plain && !json && crate::util::stdin_is_tty() {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            return crate::put_tui::run(prog, &cwd);
+            return crate::put_tui::run(prog, &cwd, opts.allow_cross_device);
         }
         let _ = plain;
         if opts.force {
@@ -1145,7 +1155,12 @@ pub(crate) fn put_one(prog: &str, path: &Path, opts: &Opts) -> Result<Option<Tra
         }
         None => {}
     }
-    match trashdir::trash_move(&abs, &meta, &trash) {
+    if !opts.allow_cross_device && crosses_devices(&meta, &trash) {
+        let err = trashdir::refuse_cross_device(&abs, &trash.files(), &meta);
+        say!("{prog}: cannot trash '{name}': {err}");
+        return Err(1);
+    }
+    match trashdir::trash_move(&abs, &meta, &trash, opts.allow_cross_device) {
         Ok(trash_name) => {
             let payload = crate::util::join_name(&trash.files(), &trash_name);
             let after = meta
@@ -1216,6 +1231,13 @@ fn mappable(path: &Path) -> bool {
 
 /// The put operands, set before the first item so one scan covers them all.
 static SCAN_ROOTS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+
+/// The trash keeps its files on a different device from `meta`.
+/// A `files/` that cannot be statted is left to the move, which reports
+/// that failure itself.
+fn crosses_devices(meta: &fs::Metadata, trash: &trashdir::TrashDir) -> bool {
+    fs::symlink_metadata(trash.files()).is_ok_and(|m| m.dev() != meta.dev())
+}
 
 /// Pick destination trash: explicit pin (created if needed), home-only, or auto-select.
 fn resolve_put_trash(
