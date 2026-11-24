@@ -215,7 +215,10 @@ fn interop_smoke_script_passes_with_the_tools_present() {
     // RTRASH_INTEROP_NO_GIO=1 to leave gio out. The run pairs rtrash with
     // itself and with each of trash-cli and gtrash on PATH.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let out = std::process::Command::new(root.join("scripts/interop-smoke.sh"))
+    // Through bash by name: a shebang of /usr/bin/env fails where that
+    // path does not exist, as in the Nix build sandbox.
+    let out = std::process::Command::new("bash")
+        .arg(root.join("scripts/interop-smoke.sh"))
         .arg(env!("CARGO_BIN_EXE_rtrash"))
         .env("RTRASH_INTEROP_NO_GIO", "1")
         .output()
