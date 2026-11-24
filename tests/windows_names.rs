@@ -202,8 +202,8 @@ fn trash_restore_takes_a_range_pick() {
     }
     let restore = dir.join("trash-restore.exe");
     fs::copy(env!("CARGO_BIN_EXE_rtrash"), &restore).unwrap();
-    // Rows run oldest first: 0 is a.txt, 2 is c.txt.
-    let out = run_with(&restore, &dir, &["sub"], "0,2\n");
+    // Numbered rows default newest-first, so 0 is c.txt.
+    let out = run_with(&restore, &dir, &["sub"], "0\n");
     let back: Vec<bool> = names.iter().map(|n| sub.join(n).exists()).collect();
     for n in names {
         if !sub.join(n).exists() {
@@ -220,7 +220,14 @@ fn trash_restore_takes_a_range_pick() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(back, [true, false, true]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.lines()
+            .find(|l| l.starts_with("   0 "))
+            .is_some_and(|l| l.ends_with("c.txt")),
+        "{said}"
+    );
+    assert_eq!(back, [false, false, true]);
 }
 
 #[test]
@@ -393,11 +400,11 @@ fn restore_sorts_by_size_on_windows() {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let (big, small) = (dir.join("big.bin"), dir.join("small.txt"));
-    fs::write(&small, "s").unwrap();
     fs::write(&big, vec![7u8; 1 << 20]).unwrap();
+    fs::write(&small, "s").unwrap();
     let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
-    // The small file goes first, so date order would list it at 0.
-    for f in [&small, &big] {
+    // big goes first (oldest), small second (newest).
+    for f in [&big, &small] {
         let put = common::rtrash_real(common::Real::RecycleBin)
             .arg("put")
             .arg(f)
@@ -411,10 +418,16 @@ fn restore_sorts_by_size_on_windows() {
         common::next_trash_second();
     }
     let scope = format!("--directory={}", dir.display());
+    let plain = run_with(
+        rtrash,
+        &dir,
+        &["restore", &scope, "--plain", "--dry-run"],
+        "0\n",
+    );
     let out = run_with(
         rtrash,
         &dir,
-        &["restore", &scope, "--plain", "--sort=size"],
+        &["restore", &scope, "--plain", "--dry-run", "--sort=size"],
         "0\n",
     );
     let (big_back, small_back) = (big.exists(), small.exists());
@@ -428,14 +441,31 @@ fn restore_sorts_by_size_on_windows() {
     }
     let _ = fs::remove_dir_all(&dir);
     assert!(
+        plain.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+    let plain_text = String::from_utf8_lossy(&plain.stdout);
+    assert!(
+        plain_text
+            .lines()
+            .find(|l| l.starts_with("would restore"))
+            .is_some_and(|l| l.ends_with("small.txt")),
+        "{plain_text}"
+    );
+    assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let said = String::from_utf8_lossy(&out.stdout);
     assert!(
-        big_back && !small_back,
-        "big {big_back}, small {small_back}"
+        said.lines()
+            .find(|l| l.starts_with("would restore"))
+            .is_some_and(|l| l.ends_with("big.bin")),
+        "{said}"
     );
+    assert!(!big_back && !small_back, "dry-run restored something");
 }
 
 #[test]

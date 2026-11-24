@@ -29,14 +29,14 @@ from under the current directory, PATH also matches items trashed from
 under it, a single match still asks, and the table uses single spaces.
 
 The browser lists the most recently trashed item first, with the cursor on
-it. The numbered table lists oldest first, so the newest item sits next to
-the index prompt. --newest-first and --oldest-first set the order for both.
+it. The numbered table also defaults to newest first; use --oldest-first or
+--sort=oldest (trash-restore also accepts --sort=date) for oldest first.
 
   -f, --force     overwrite an existing file (same as --conflict=overwrite)
       --overwrite  same as --force (trash-cli spelling)
-      --sort=ORDER  numbered table order: date (oldest first, default),
-                    size (largest first), path (original path) or none
-                    (as read)
+      --sort=ORDER  numbered table order: newest (default), oldest
+                    (trash-restore also accepts date), size (largest
+                    first), path (original path) or none (as read)
       --conflict=POLICY  when the destination exists: refuse (default),
                     overwrite, rename (restore next to it as NAME.1.EXT)
                     or skip
@@ -81,7 +81,8 @@ the index prompt. --newest-first and --oldest-first set the order for both.
 /// The `--sort` orders of trash-cli's trash-restore.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Sort {
-    Date,
+    Oldest,
+    Newest,
     /// Largest first, as `list --sort=size`; ties keep the date order.
     Size,
     Path,
@@ -91,7 +92,8 @@ pub(crate) enum Sort {
 impl Sort {
     fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "date" => Sort::Date,
+            "date" | "oldest" => Sort::Oldest,
+            "newest" => Sort::Newest,
             "size" => Sort::Size,
             "path" => Sort::Path,
             "none" => Sort::None,
@@ -313,7 +315,8 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
                 Some(k) => sort = Some(k),
                 None => {
                     eprintln!(
-                        "{prog}: invalid --sort '{}' (date, size, path or none)",
+                        "{prog}: invalid --sort '{}' (newest, oldest, size, path or none; \
+                         date is an alias of oldest)",
                         &a["--sort=".len()..]
                     );
                     return 2;
@@ -646,7 +649,15 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
             }
         }
         Some(Sort::None) => {}
-        Some(Sort::Date) | None => order_entries(&mut matches, newest_first.unwrap_or(false)),
+        Some(Sort::Oldest) => order_entries(&mut matches, false),
+        Some(Sort::Newest) => order_entries(&mut matches, true),
+        None => {
+            // The numbered selection table defaults newest-first; a
+            // non-interactive multi-restore keeps the historical oldest-first
+            // walk unless the caller asked for an order.
+            let newest = newest_first.unwrap_or(!all);
+            order_entries(&mut matches, newest);
+        }
     }
 
     // trash-cli asks even for one match; rtrash restores it right away.

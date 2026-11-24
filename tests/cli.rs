@@ -529,21 +529,30 @@ fn put_inspect_shows_the_size_and_asks() {
 #[test]
 fn restore_sorts_the_numbered_table_by_size() {
     let sb = Sandbox::new("restore-sort-size");
-    // The small file goes first, so date order would list it first.
-    fs::write(sb.work().join("small.txt"), b"s").unwrap();
-    assert!(sb.run(&["put", "small.txt"]).status.success());
     fs::write(sb.work().join("big.bin"), vec![7u8; 1 << 20]).unwrap();
     assert!(sb.run(&["put", "big.bin"]).status.success());
+    common::next_trash_second();
+    fs::write(sb.work().join("small.txt"), b"s").unwrap();
+    assert!(sb.run(&["put", "small.txt"]).status.success());
 
-    let out = sb.run_with_stdin(&["restore", "--plain", "--sort=size"], "0\n");
+    let out = sb.run_with_stdin(&["restore", "--plain", "--dry-run"], "0\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
     let first = String::from_utf8_lossy(&out.stdout)
         .lines()
         .next()
         .unwrap_or("")
         .to_string();
-    assert!(first.ends_with("big.bin"), "{first}");
-    assert!(sb.work().join("big.bin").exists());
+    assert!(first.ends_with("small.txt"), "{first}");
+
+    let out = sb.run_with_stdin(&["restore", "--plain", "--dry-run", "--sort=size"], "0\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let first = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|l| l.starts_with("would restore"))
+        .unwrap_or("")
+        .to_string();
+    assert!(first.contains("big.bin"), "{first}");
+    assert!(!sb.work().join("big.bin").exists());
     assert!(!sb.work().join("small.txt").exists());
     let out = sb.run(&["restore", "--sort=bulk"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr_of(&out));
@@ -4049,7 +4058,7 @@ fn list_and_status_take_ages_in_hours_and_minutes() {
 }
 
 #[test]
-fn restore_plain_order_defaults_oldest_first_and_flags_flip_it() {
+fn restore_plain_order_defaults_newest_first_and_takes_oldest_date_alias() {
     let sb = Sandbox::new("restore-order");
     let old = sb.touch("old.txt");
     let new = sb.touch("new.txt");
@@ -4057,15 +4066,24 @@ fn restore_plain_order_defaults_oldest_first_and_flags_flip_it() {
     backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
     let pin = format!("--trash-dir={}", sb.trash().display());
 
-    // Numbered table keeps oldest first: index 0 is the backdated item.
+    // Numbered table defaults newest first: index 0 is the latest item.
     let out = sb.run_with_stdin(&["restore", &pin, "--plain"], "0\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let table = stdout_of(&out);
+    let first = table.lines().next().unwrap_or("");
+    assert!(first.contains("new.txt"), "{table}");
+    assert!(new.exists() && !old.exists());
+
+    // --oldest-first flips date order: index 0 is now the backdated item.
+    assert!(sb.run(&["put", "new.txt"]).status.success());
+    let out = sb.run_with_stdin(&["restore", &pin, "--plain", "--oldest-first"], "0\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
     let table = stdout_of(&out);
     let first = table.lines().next().unwrap_or("");
     assert!(first.contains("old.txt"), "{table}");
     assert!(old.exists() && !new.exists());
 
-    // --newest-first flips the table: index 0 is now the latest item.
+    // --newest-first keeps the default date order.
     assert!(sb.run(&["put", "old.txt"]).status.success());
     backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
     let out = sb.run_with_stdin(&["restore", &pin, "--plain", "--newest-first"], "0\n");
@@ -4073,6 +4091,26 @@ fn restore_plain_order_defaults_oldest_first_and_flags_flip_it() {
     let table = stdout_of(&out);
     let first = table.lines().next().unwrap_or("");
     assert!(first.contains("new.txt"), "{table}");
+    assert!(new.exists() && !old.exists());
+
+    // --sort=oldest takes index 0 from the oldest row.
+    assert!(sb.run(&["put", "new.txt"]).status.success());
+    let out = sb.run_with_stdin(&["restore", &pin, "--plain", "--sort=oldest"], "0\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(old.exists() && !new.exists());
+
+    // trash-restore compatibility: --sort=date is an alias of oldest.
+    assert!(sb.run(&["put", "old.txt"]).status.success());
+    backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
+    let out = sb.run_with_stdin(&["restore", &pin, "--plain", "--sort=date"], "0\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(old.exists() && !new.exists());
+
+    // --sort=newest takes index 0 from the newest row.
+    assert!(sb.run(&["put", "old.txt"]).status.success());
+    backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
+    let out = sb.run_with_stdin(&["restore", &pin, "--plain", "--sort=newest"], "0\n");
+    assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(new.exists() && !old.exists());
 }
 
@@ -4297,6 +4335,16 @@ fn list_size_and_sort() {
         rows[0].ends_with("/big") && rows[0].contains("KiB"),
         "{out}"
     );
+    // Date order defaults oldest first.
+    let out = stdout_of(&sb.run(&["list", &pin]));
+    let rows: Vec<&str> = out.lines().collect();
+    assert!(rows.first().is_some_and(|r| r.ends_with("/big")), "{out}");
+    let out = stdout_of(&sb.run(&["list", &pin, "--sort=newest"]));
+    let rows: Vec<&str> = out.lines().collect();
+    assert!(rows.first().is_some_and(|r| r.ends_with("/small")), "{out}");
+    let out = stdout_of(&sb.run(&["list", &pin, "--sort=oldest"]));
+    let rows: Vec<&str> = out.lines().collect();
+    assert!(rows.first().is_some_and(|r| r.ends_with("/big")), "{out}");
     let out = stdout_of(&sb.run(&["list", &pin, "--sort=name", "--reverse"]));
     assert!(
         out.lines().next().unwrap_or("").ends_with("/small"),

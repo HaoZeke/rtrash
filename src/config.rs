@@ -121,7 +121,7 @@ const KEYS: &[(&str, &str, Kind, &str)] = &[
         "list",
         "sort",
         Kind::Str,
-        "date, size, name or path (--sort)",
+        "oldest, newest, size, name or path (--sort)",
     ),
     ("list", "size", Kind::Bool, "show sizes (--size)"),
     (
@@ -571,7 +571,7 @@ pub fn template() -> String {
             ("du", "git", _) => "true".to_string(),
             ("du", "notify", _) => "\"bell\"".to_string(),
             ("du", "notify_after", _) => "10".to_string(),
-            ("list", "sort", _) => "\"date\"".to_string(),
+            ("list", "sort", _) => "\"oldest\"".to_string(),
             ("policy", "max_size", _) => "\"50G\"".to_string(),
             ("policy", "min_free", _) => "\"10G\"".to_string(),
             ("policy", "warn_size", _) => "\"20%\"".to_string(),

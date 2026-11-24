@@ -692,7 +692,8 @@ pub fn default_list(
         e.shown.file_name().unwrap_or_default()
     }
     match sort {
-        crate::list::SortKey::Date => {}
+        crate::list::SortKey::Oldest => {}
+        crate::list::SortKey::Newest => rows.reverse(),
         crate::list::SortKey::Size => rows.sort_by_key(|(_, size)| std::cmp::Reverse(*size)),
         crate::list::SortKey::Name => rows.sort_by(|(a, _), (b, _)| file_name(a).cmp(file_name(b))),
         crate::list::SortKey::Path => rows.sort_by(|(a, _), (b, _)| a.shown.cmp(&b.shown)),
@@ -809,7 +810,7 @@ pub(crate) struct RestoreOpts<'a> {
     pub(crate) json: bool,
     pub(crate) plain: bool,
     pub(crate) newest_first: Option<bool>,
-    /// `--sort`: the numbered list order (date by default, path, or none).
+    /// `--sort`: the numbered list order (newest by default, oldest/date, path, or none).
     pub(crate) sort: Option<crate::restore::Sort>,
     /// `--older-than` and `--newer-than`.
     pub(crate) age: crate::filters::AgeFilter,
@@ -829,7 +830,7 @@ fn no_match(prog: &str, json: bool) -> i32 {
     1
 }
 
-/// The numbered pick over `list` (oldest first): the restore browser on a
+/// The numbered pick over `list` (newest first by default): the restore browser on a
 /// terminal, else rows and an answer on stdin. `Err` carries the exit code.
 fn pick<'a>(
     prog: &str,
@@ -851,8 +852,9 @@ fn pick<'a>(
         ));
     }
     let _ = o.plain;
-    // The numbered list order, as on FreeDesktop: by date, oldest first
-    // unless --newest-first; by path; or as read with --sort=none.
+    // The numbered list order, as on FreeDesktop: newest first by default;
+    // oldest with --oldest-first or --sort=oldest/--sort=date; by path;
+    // or as read with --sort=none.
     let mut list = list.to_vec();
     match o.sort {
         Some(crate::restore::Sort::Path) => list.sort_by(|a, b| a.shown.cmp(&b.shown)),
@@ -861,9 +863,16 @@ fn pick<'a>(
             list.sort_by_cached_key(|e| std::cmp::Reverse(crate::fastdelete::disk_usage(&e.path())))
         }
         Some(crate::restore::Sort::None) => {}
-        Some(crate::restore::Sort::Date) | None => {
+        Some(crate::restore::Sort::Oldest) => {
             list.sort_by(|a, b| a.epoch.cmp(&b.epoch).then_with(|| a.name.cmp(&b.name)));
-            if o.newest_first.unwrap_or(false) {
+        }
+        Some(crate::restore::Sort::Newest) => {
+            list.sort_by(|a, b| a.epoch.cmp(&b.epoch).then_with(|| a.name.cmp(&b.name)));
+            list.reverse();
+        }
+        None => {
+            list.sort_by(|a, b| a.epoch.cmp(&b.epoch).then_with(|| a.name.cmp(&b.name)));
+            if o.newest_first.unwrap_or(true) {
                 list.reverse();
             }
         }
@@ -995,7 +1004,7 @@ pub(crate) fn default_restore(prog: &str, o: &RestoreOpts) -> i32 {
     if chosen.is_empty() {
         return no_match(prog, o.json);
     }
-    // Rows come oldest first, so the newest match is the last.
+    // Rows are oldest first here, so the newest match is the last.
     if o.latest {
         chosen = vec![*chosen.last().unwrap()];
     } else if chosen.len() > 1

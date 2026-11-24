@@ -43,8 +43,9 @@ in the trash (\"orphan\":true in JSON); an age filter leaves them out.
       --show-trashpath  under each row, show where the item sits in the
                      trash (\"trash_path\" in --json; not with --format),
                      as gtrash find --show-trashpath
-      --sort=KEY        order by date (default), size, name (file name)
-                     or path (original path); size implies --size
+      --sort=KEY        order by oldest (default), newest, size, name
+                     (file name) or path (original path); size implies
+                     --size; date is accepted as oldest
       --reverse         reverse the order
       --depth=N         under each trashed directory, show what it holds,
                      N levels down, indented (plain rows only)
@@ -658,13 +659,13 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     // and its hidden --files (` -> FILE`, the payload in the trash).
     let mut size_flag = false;
     let mut show_files = false;
-    let mut sort = SortKey::Date;
+    let mut sort = SortKey::Oldest;
     if let Some(s) = cfg.str("list", "sort") {
         match SortKey::parse(s) {
             Some(k) => sort = k,
             None => eprintln!(
                 "{prog}: warning: {}",
-                cfg.bad_value("list", "sort", "date, size, name or path")
+                cfg.bad_value("list", "sort", "oldest, newest, size, name or path")
             ),
         }
     }
@@ -770,7 +771,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
                 Some(k) => sort = k,
                 None => {
                     eprintln!(
-                        "{prog}: invalid --sort '{}' (date, size, name or path)",
+                        "{prog}: invalid --sort '{}' (oldest, newest, size, name or path)",
                         &a["--sort=".len()..]
                     );
                     return 2;
@@ -1008,7 +1009,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     }
     let sizes = sizes.filter(|_| with_size);
     let mut order = sorted_order(&entries, sizes.as_deref(), sort, reverse);
-    if sort == SortKey::Date {
+    if matches!(sort, SortKey::Oldest | SortKey::Newest) {
         // Keep orphans after the recorded items whichever way dates run.
         order.sort_by_key(|&i| i >= recorded);
     }
@@ -1269,7 +1270,8 @@ pub(crate) fn write_tree(
 /// What `list --sort` orders by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortKey {
-    Date,
+    Oldest,
+    Newest,
     Size,
     Name,
     Path,
@@ -1278,7 +1280,8 @@ pub enum SortKey {
 impl SortKey {
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "date" | "time" => SortKey::Date,
+            "date" | "time" | "oldest" => SortKey::Oldest,
+            "newest" => SortKey::Newest,
             "size" => SortKey::Size,
             "name" => SortKey::Name,
             "path" => SortKey::Path,
@@ -1319,7 +1322,10 @@ pub fn sorted_order(
     let mut order: Vec<usize> = (0..entries.len()).collect();
     let file_name = |i: usize| entries[i].original.file_name().unwrap_or_default();
     match key {
-        SortKey::Date => {}
+        SortKey::Oldest => {}
+        SortKey::Newest => {
+            order.reverse();
+        }
         SortKey::Size => {
             let sizes = sizes.unwrap_or(&[]);
             order.sort_by_key(|&i| std::cmp::Reverse(sizes.get(i).copied().unwrap_or(0)));
@@ -1584,7 +1590,8 @@ mod tests {
         };
         let es = vec![mk("/b/zeta", 1), mk("/a/beta", 2), mk("/c/alpha", 3)];
         let sizes = [10, 30, 20];
-        assert_eq!(sorted_order(&es, None, SortKey::Date, false), [0, 1, 2]);
+        assert_eq!(sorted_order(&es, None, SortKey::Oldest, false), [0, 1, 2]);
+        assert_eq!(sorted_order(&es, None, SortKey::Newest, false), [2, 1, 0]);
         assert_eq!(
             sorted_order(&es, Some(&sizes), SortKey::Size, false),
             [1, 2, 0]
