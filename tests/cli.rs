@@ -713,16 +713,27 @@ fn put_waits_for_the_trash_lock_with_a_note_and_a_bound() {
     assert!(!moved.exists(), "{err}");
 }
 
+/// script(1): /usr/bin/script, else the first one on PATH, for a host
+/// that keeps it elsewhere (Nix has no /usr/bin). `None` without one.
+#[cfg(target_os = "linux")]
+fn script_bin() -> Option<PathBuf> {
+    let usr = Path::new("/usr/bin/script");
+    if usr.exists() {
+        return Some(usr.to_path_buf());
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join("script"))
+        .find(|p| p.is_file())
+}
+
 /// What `rtrash ARGS` shows on a terminal, through script(1), in `sb`;
 /// `None` without script(1). `args` is shell text, so a name with control
 /// characters can come from printf.
 #[cfg(target_os = "linux")]
 fn on_a_terminal(sb: &Sandbox, args: &str) -> Option<String> {
-    if !Path::new("/usr/bin/script").exists() {
-        return None;
-    }
+    let script = script_bin()?;
     let cmd = format!("{} {args}", bin());
-    let tty = Command::new("/usr/bin/script")
+    let tty = Command::new(script)
         .args(["-qec", &cmd, "/dev/null"])
         .current_dir(sb.work())
         .env("SHELL", "/bin/sh")
@@ -801,10 +812,10 @@ fn du_print0_scrubs_control_characters_on_a_terminal() {
 #[cfg(target_os = "linux")]
 #[test]
 fn restore_errors_scrub_control_characters_on_a_terminal() {
-    if !Path::new("/usr/bin/script").exists() {
+    let Some(script) = script_bin() else {
         common::skip("skipping: no script(1) to give rtrash a terminal");
         return;
-    }
+    };
     let sb = Sandbox::new("restore-scrub");
     // The destination exists, so restore refuses and quotes it.
     let dest = sb.work().join("a\x1b[2Jb");
@@ -824,7 +835,7 @@ fn restore_errors_scrub_control_characters_on_a_terminal() {
         stderr_of(&piped)
     );
     let cmd = format!("{} restore --home-only --name=evil", bin());
-    let tty = Command::new("/usr/bin/script")
+    let tty = Command::new(&script)
         .args(["-qec", &cmd, "/dev/null"])
         .current_dir(sb.work())
         .env("XDG_DATA_HOME", sb.root.join("xdg"))
@@ -1320,9 +1331,22 @@ fn put_skips_safe_rm_paths_and_refuses_home() {
     assert!(sb.work().join("precious/f").exists());
     assert!(!sb.work().join("other").exists(), "unlisted paths still go");
 
-    let out = sb.run(&["put", "-rf", "/usr"]);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(stderr_of(&out).contains("safe-rm list entry '/usr'"));
+    // A built-in safe-rm entry that exists here: put -f of a missing path
+    // says nothing and exits 0, and the Nix build sandbox has no /usr.
+    let system = ["/usr", "/etc", "/bin", "/lib", "/var"]
+        .into_iter()
+        .find(|p| Path::new(p).is_dir());
+    if let Some(system) = system {
+        let out = sb.run(&["put", "-rf", system]);
+        assert_eq!(out.status.code(), Some(1));
+        let err = stderr_of(&out);
+        assert!(
+            err.contains(&format!("safe-rm list entry '{system}'")),
+            "{err}"
+        );
+    } else {
+        common::skip("none of /usr, /etc, /bin, /lib or /var exists; skipping the system path");
+    }
 
     let home = sb.root.display().to_string();
     let out = sb.run(&["put", "-r", "--preserve-root=all", &home]);
@@ -7205,10 +7229,10 @@ fn list_all_users_adds_the_owner_and_stays_read_only() {
 #[cfg(target_os = "linux")]
 #[test]
 fn list_scrubs_control_characters_on_a_terminal() {
-    if !Path::new("/usr/bin/script").exists() {
+    let Some(script) = script_bin() else {
         common::skip("skipping: no script(1) to give rtrash a terminal");
         return;
-    }
+    };
     let sb = Sandbox::new("scrub");
     fs::create_dir_all(sb.trash().join("files")).unwrap();
     fs::create_dir_all(sb.trash().join("info")).unwrap();
@@ -7224,7 +7248,7 @@ fn list_scrubs_control_characters_on_a_terminal() {
     assert!(stdout_of(&piped).contains("/tmp/a\x1b[2Jb\nfake\x7f"));
 
     let cmd = format!("{} list", bin());
-    let tty = Command::new("/usr/bin/script")
+    let tty = Command::new(&script)
         .args(["-qec", &cmd, "/dev/null"])
         .current_dir(sb.work())
         .env("XDG_DATA_HOME", sb.root.join("xdg"))
@@ -8408,19 +8432,140 @@ fn put_warns_about_an_open_file_and_refuses_it_on_request() {
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(stderr_of(&out).contains("warning: 'held.log' is in use by pid"));
     assert!(!held.exists());
-    sb.touch("idle.log");
     // Without root some processes cannot be inspected, and refuse then
-    // leaves even a file nobody holds, unless every process was seen.
-    let who = stdout_of(&sb.run(&["who", "--json", "idle.log"]));
-    let seen_all = who.contains("\"unreadable\":0}");
-    let out = sb.run(&["put", &pin, "--in-use=refuse", "idle.log"]);
-    if seen_all {
-        assert!(out.status.success(), "{}", stderr_of(&out));
-        assert!(stderr_of(&out).is_empty());
-    } else {
-        assert_eq!(out.status.code(), Some(1), "{}", stderr_of(&out));
-        assert!(stderr_of(&out).contains("could not be inspected"));
+    // leaves even a file nobody holds, unless every process was seen. Each
+    // pair is a `who` before the put and a `who` after it. Other tests
+    // start and end processes beside this one, so a pair is tried again
+    // only when the count of processes that could not be inspected is seen
+    // to change, in the two `who` runs or in the put's own message. A pair
+    // whose count held must agree, and any mismatch there fails the test.
+    let mut changed = Vec::new();
+    for _ in 0..IN_USE_PAIRS {
+        sb.touch("idle.log");
+        let before = who_unreadable(&stdout_of(&sb.run(&["who", "--json", "idle.log"])));
+        let out = sb.run(&["put", &pin, "--in-use=refuse", "idle.log"]);
+        let after = who_unreadable(&stdout_of(&sb.run(&["who", "--json", "idle.log"])));
+        let said = stderr_of(&out);
+        match judge_in_use_pair(before, after, out.status.code(), &said) {
+            InUsePair::Agreed => return,
+            InUsePair::Changed => changed.push(format!(
+                "before {before}, after {after}, put {:?}: {said}",
+                out.status.code()
+            )),
+            InUsePair::Mismatch(why) => panic!(
+                "the unreadable count held at {before} and put disagreed: {why}\n\
+                 put exit {:?}, stderr: {said}",
+                out.status.code()
+            ),
+        }
     }
+    panic!(
+        "no pair of {IN_USE_PAIRS} had a steady unreadable count; the counts were\n{}",
+        changed.join("\n")
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const IN_USE_PAIRS: usize = 50;
+
+/// What one `who`, put, `who` triple showed.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, PartialEq)]
+enum InUsePair {
+    /// The unreadable count held and put did what that count asks.
+    Agreed,
+    /// The unreadable count moved, so the pair says nothing.
+    Changed,
+    /// The unreadable count held and put did something else.
+    Mismatch(String),
+}
+
+/// The `unreadable` field of a `who --json` run.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn who_unreadable(json: &str) -> usize {
+    let tail = json
+        .split("\"unreadable\":")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no unreadable count in {json}"));
+    let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+    digits
+        .parse()
+        .unwrap_or_else(|_| panic!("no unreadable count in {json}"))
+}
+
+/// The count put names when it says "N processes could not be inspected".
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn put_unreadable(said: &str) -> Option<usize> {
+    let head = said.split("could not be inspected").next()?;
+    let mut words = head.split_whitespace().rev();
+    words.next()?;
+    words.next()?.parse().ok()
+}
+
+/// Judges one pair. `before` and `after` are the counts of the `who` runs
+/// around a `put --in-use=refuse` of a file nobody holds, whose exit code
+/// and stderr are `code` and `said`. With no unreadable process the put
+/// must succeed without a word, and with some it must refuse for them. A
+/// put that names another count than the `who` runs saw a count that moved.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn judge_in_use_pair(before: usize, after: usize, code: Option<i32>, said: &str) -> InUsePair {
+    if before != after {
+        return InUsePair::Changed;
+    }
+    if let Some(named) = put_unreadable(said) {
+        if named != before {
+            return InUsePair::Changed;
+        }
+    }
+    let agreed = if before == 0 {
+        code == Some(0) && said.is_empty()
+    } else {
+        code == Some(1) && put_unreadable(said) == Some(before)
+    };
+    if agreed {
+        InUsePair::Agreed
+    } else {
+        InUsePair::Mismatch(format!(
+            "with {before} unreadable processes put exited {code:?}"
+        ))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn an_in_use_pair_is_judged_only_when_the_unreadable_count_held() {
+    use InUsePair::{Agreed, Changed, Mismatch};
+    let refused = concat!(
+        "rtrash: cannot trash 'idle.log': it may be in use; ",
+        "4 processes could not be inspected\n",
+        "rtrash: use -f or --in-use=warn to trash it anyway\n"
+    );
+    let one =
+        "rtrash: cannot trash 'idle.log': it may be in use; 1 process could not be inspected\n";
+    assert_eq!(judge_in_use_pair(4, 4, Some(1), refused), Agreed);
+    assert_eq!(judge_in_use_pair(0, 0, Some(0), ""), Agreed);
+    assert_eq!(judge_in_use_pair(1, 1, Some(1), one), Agreed);
+    // The count moved between the runs, or the put saw another one.
+    assert_eq!(judge_in_use_pair(0, 1, Some(0), ""), Changed);
+    assert_eq!(judge_in_use_pair(4, 0, Some(1), refused), Changed);
+    assert_eq!(judge_in_use_pair(0, 0, Some(1), one), Changed);
+    assert_eq!(judge_in_use_pair(4, 4, Some(1), one), Changed);
+    // The count held and put did the other thing.
+    assert!(matches!(judge_in_use_pair(4, 4, Some(0), ""), Mismatch(_)));
+    assert!(matches!(
+        judge_in_use_pair(0, 0, Some(1), "rtrash: no\n"),
+        Mismatch(_)
+    ));
+    assert!(matches!(
+        judge_in_use_pair(0, 0, Some(0), "warning\n"),
+        Mismatch(_)
+    ));
+    assert!(matches!(
+        judge_in_use_pair(4, 4, Some(1), "rtrash: no\n"),
+        Mismatch(_)
+    ));
+    assert_eq!(who_unreadable("{\"holders\":[],\"unreadable\":4}"), 4);
+    assert_eq!(who_unreadable("{\"unreadable\":0}"), 0);
 }
 
 /// A stand-in `/proc` for the debug seam `RTRASH_TEST_PROC`: each of
@@ -11427,6 +11572,9 @@ fn put_warns_when_the_trash_file_system_is_low() {
 #[cfg(all(unix, debug_assertions))]
 #[test]
 fn put_space_hint_keeps_flagged_git_work() {
+    if !common::have_git() {
+        return;
+    }
     let git = |repo: &Path, home: &Path, args: &[&str]| {
         Command::new("git")
             .args(args)
@@ -11508,6 +11656,9 @@ fn put_space_hint_keeps_flagged_git_work() {
 #[cfg(all(unix, debug_assertions))]
 #[test]
 fn put_space_hint_names_dirty_work_that_is_also_unpushed() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-both");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11617,6 +11768,9 @@ fn configure_test_fsmonitor(repo: &Path, home: &Path) -> PathBuf {
 /// probes that inspect work before and after a put must not run it.
 #[test]
 fn put_does_not_run_a_repository_fsmonitor() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-fsmonitor");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11645,6 +11799,9 @@ fn put_does_not_run_a_repository_fsmonitor() {
 /// repository's file-system monitor.
 #[test]
 fn rm_does_not_run_a_trashed_repository_fsmonitor() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("rm-git-fsmonitor");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11678,6 +11835,9 @@ fn rm_does_not_run_a_trashed_repository_fsmonitor() {
 #[cfg(debug_assertions)]
 #[test]
 fn put_space_hint_does_not_run_a_trashed_repository_fsmonitor() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("space-git-fsmonitor");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11720,6 +11880,9 @@ fn put_space_hint_does_not_run_a_trashed_repository_fsmonitor() {
 /// hashes a tracked file. A put's work probe must disable that command too.
 #[test]
 fn put_does_not_run_a_repository_filter_process() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-filter");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11770,6 +11933,9 @@ fn put_does_not_run_a_repository_filter_process() {
 /// probe run its configured signature verifier.
 #[test]
 fn put_does_not_run_a_repository_signature_verifier() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-signature");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11846,6 +12012,9 @@ signed\n"
 /// contains `=`; `-c key=` would split it at the wrong byte.
 #[test]
 fn put_does_not_run_a_filter_whose_subsection_contains_equals() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-filter-equals");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11894,6 +12063,9 @@ fn put_does_not_run_a_filter_whose_subsection_contains_equals() {
 /// while status still reads and runs them.
 #[test]
 fn put_clears_git_config_before_scanning_repository_programs() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-config-env");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11943,6 +12115,9 @@ fn put_clears_git_config_before_scanning_repository_programs() {
 /// and does not promise to bring it back.
 #[test]
 fn a_dry_run_does_not_promise_undo_before_the_move() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-dry");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -11986,6 +12161,9 @@ fn a_dry_run_does_not_promise_undo_before_the_move() {
 #[cfg(unix)]
 #[test]
 fn put_json_leaves_out_the_repository_note() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-repo-json");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -12041,6 +12219,9 @@ fn git_env<'a>(cmd: &'a mut Command, repo: &Path, home: &Path) -> &'a mut Comman
 #[cfg(all(unix, debug_assertions))]
 #[test]
 fn put_of_a_parent_keeps_a_nested_dirty_repository() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-nested");
     let repo = sb.work().join("parent").join("child");
     fs::create_dir_all(&repo).unwrap();
@@ -12077,6 +12258,9 @@ fn put_of_a_parent_keeps_a_nested_dirty_repository() {
 #[cfg(all(unix, debug_assertions))]
 #[test]
 fn a_partial_git_probe_stays_unknown() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-shim");
     let shim = sb.root.join("shim");
     fs::create_dir(&shim).unwrap();
@@ -12138,6 +12322,9 @@ fn a_partial_git_probe_stays_unknown() {
 #[cfg(all(unix, debug_assertions))]
 #[test]
 fn a_later_status_and_put_keep_a_trashed_repository() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-later");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -12188,6 +12375,9 @@ fn a_later_status_and_put_keep_a_trashed_repository() {
 #[cfg(unix)]
 #[test]
 fn rm_refuses_a_repository_that_still_holds_risky_work() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("rm-git-keep");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -12221,6 +12411,9 @@ fn rm_refuses_a_repository_that_still_holds_risky_work() {
 #[cfg(unix)]
 #[test]
 fn rm_removes_a_dangling_record_without_a_git_work_refusal() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("rm-git-dangling");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -12256,6 +12449,9 @@ fn rm_removes_a_dangling_record_without_a_git_work_refusal() {
 #[cfg(all(unix, debug_assertions))]
 #[test]
 fn work_created_after_the_probe_is_still_flagged() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("put-git-seam");
     let repo = sb.work().join("repo");
     fs::create_dir(&repo).unwrap();
@@ -12609,6 +12805,9 @@ fn a_retargeted_parent_does_not_change_what_put_moves() {
 #[cfg(unix)]
 #[test]
 fn a_wsl_put_of_a_risky_repo_names_wsl_restore() {
+    if !common::have_git() {
+        return;
+    }
     let sb = Sandbox::new("wsl-git");
     let bin_dir = sb.root.join("bin");
     fs::create_dir(&bin_dir).unwrap();

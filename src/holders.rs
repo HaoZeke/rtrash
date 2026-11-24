@@ -402,7 +402,7 @@ fn scan_in(s: &mut Snapshot, procs: &Path) {
                 });
             }
         }
-        if denied {
+        if denied && !has_exited(&base) {
             s.unreadable += 1;
         }
     }
@@ -423,6 +423,26 @@ fn process_cmdline(base: &Path) -> String {
     String::from_utf8_lossy(raw)
         .trim_end_matches('\0')
         .replace('\0', " ")
+}
+
+/// A process that has exited and waits for its parent to reap it (state
+/// `Z`), or is being torn down (`X`), holds nothing. The kernel refuses
+/// the folder of its open files, so it must not count as one that could
+/// not be inspected: any run beside a busy parent would see one now and
+/// then, and `--in-use=refuse` would turn away a file nobody holds.
+#[cfg(target_os = "linux")]
+fn has_exited(base: &Path) -> bool {
+    std::fs::read_to_string(base.join("stat")).is_ok_and(|stat| exited_state(&stat))
+}
+
+/// Whether the `/proc/PID/stat` text names an exited process. The state is
+/// the field after the command name, which sits in parentheses and may
+/// itself hold spaces and parentheses, so it is read after the last `)`.
+#[cfg(target_os = "linux")]
+fn exited_state(stat: &str) -> bool {
+    stat.rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .is_some_and(|state| matches!(state, "Z" | "X" | "x"))
 }
 
 /// Absolute paths only (not `socket:[N]` or `anon_inode:...`), with the
@@ -1327,6 +1347,39 @@ mod tests {
         std::fs::set_permissions(shut.join("fd"), std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(s.unreadable, 1);
+    }
+
+    /// The state letter is read after the last `)`, so a command name with
+    /// spaces and parentheses does not move it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_state_of_an_exited_process_is_read_after_the_command_name() {
+        assert!(exited_state("12 (rtrash) Z 1 12 12 0 -1 4210700 1"));
+        assert!(exited_state("12 (a) b) Z 1 12"));
+        assert!(exited_state("12 (x) X 1"));
+        assert!(!exited_state("12 (rtrash) S 1 12 12 0 -1"));
+        assert!(!exited_state("12 (Z) R 1 12"));
+        assert!(!exited_state("12 (Z (Z) S 1"));
+        assert!(!exited_state(""));
+        assert!(!exited_state("12 (rtrash)"));
+    }
+
+    /// A child that has exited and is not yet waited for is a zombie in
+    /// `/proc`: `has_exited` says so, and says no for a live process.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_zombie_has_exited_and_a_live_process_has_not() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let base = PathBuf::from(format!("/proc/{}", child.id()));
+        // The child ends within moments; five seconds only guards a hang.
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !has_exited(&base) && std::time::Instant::now() < end {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(has_exited(&base), "no zombie at {}", base.display());
+        assert!(!has_exited(Path::new("/proc/self")));
+        child.wait().unwrap();
+        assert!(!has_exited(&base), "the reaped child still has a folder");
     }
 
     fn item(path: &str, kind: listing::Kind) -> listing::Item {

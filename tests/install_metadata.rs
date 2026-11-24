@@ -235,6 +235,18 @@ fn windows_package_has_its_files_at_the_zip_root() {
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
+    // The script makes its zip with zip, python3 or python, as it checks.
+    let zipper = Command::new("sh")
+        .args([
+            "-c",
+            "command -v zip || command -v python3 || command -v python",
+        ])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !zipper {
+        common::skip("neither zip nor python is on PATH; skipping");
+        return;
+    }
     let temp = common::scratch_dir("install-metadata", "windows-zip-root");
     let scripts = temp.join("scripts");
     let fake_bin = temp.join("fake-bin");

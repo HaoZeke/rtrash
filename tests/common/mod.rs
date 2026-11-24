@@ -172,6 +172,24 @@ pub fn skip(why: &str) {
     }
 }
 
+/// Whether `git` runs here. A test that drives git starts with
+/// `if !common::have_git() { return; }`, so a host without git (the Nix
+/// build sandbox has none unless the build asks for it) skips those tests
+/// through [`skip`] instead of failing on the spawn.
+pub fn have_git() -> bool {
+    static GIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let ok = *GIT.get_or_init(|| {
+        Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    });
+    if !ok {
+        skip("git is not on PATH; skipping");
+    }
+    ok
+}
+
 /// The end of each stderr line naming a path outside `RTRASH_ALLOW_ROOTS`.
 pub const OUTSIDE: &str = "is outside RTRASH_ALLOW_ROOTS";
 

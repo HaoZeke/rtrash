@@ -1085,20 +1085,40 @@ mod tests {
     #[test]
     fn opening_up_leaves_other_modes_and_files_alone() {
         let root = tmp_root("modes");
-        let d = root.join("d");
-        fs::create_dir(&d).unwrap();
         fs::write(root.join("f"), b"x").unwrap();
         chmod(&root.join("f"), 0o000);
-        chmod(&d, 0o2311);
         let c = |p: &Path| CString::new(p.as_os_str().as_bytes()).unwrap();
         // Not a directory: untouched.
         assert!(!own_dir_opened_up(libc::AT_FDCWD, &c(&root.join("f"))));
         assert_eq!(fs::metadata(root.join("f")).unwrap().mode() & 0o7777, 0o000);
-        // Our directory: owner rwx added, the other bits kept.
-        assert!(own_dir_opened_up(libc::AT_FDCWD, &c(&d)));
-        assert_eq!(fs::metadata(&d).unwrap().mode() & 0o7777, 0o2711);
-        // Already rwx for the owner: nothing to do.
-        assert!(!own_dir_opened_up(libc::AT_FDCWD, &c(&d)));
+        // Our directory: owner rwx added, the other bits kept. A sandbox
+        // can refuse a bit: the Nix build sandbox answers EPERM to chmod
+        // with setuid or setgid, so a bit the system will not set is
+        // skipped, and at least one must be tested.
+        let mut tried = 0;
+        for (special, name) in [(0o2000, "setgid"), (0o1000, "sticky")] {
+            let d = root.join(name);
+            fs::create_dir(&d).unwrap();
+            let set = fs::set_permissions(&d, fs::Permissions::from_mode(special | 0o311));
+            if let Err(e) = set {
+                eprintln!("{name} bit not tested: chmod refused it here: {e}");
+                continue;
+            }
+            if fs::metadata(&d).unwrap().mode() & special == 0 {
+                eprintln!("{name} bit not tested: chmod did not keep it here");
+                continue;
+            }
+            tried += 1;
+            assert!(own_dir_opened_up(libc::AT_FDCWD, &c(&d)), "{name}");
+            assert_eq!(
+                fs::metadata(&d).unwrap().mode() & 0o7777,
+                special | 0o711,
+                "{name}"
+            );
+            // Already rwx for the owner: nothing to do.
+            assert!(!own_dir_opened_up(libc::AT_FDCWD, &c(&d)), "{name}");
+        }
+        assert!(tried > 0, "no special mode bit could be set here");
         // A directory someone else owns is never changed.
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         st.st_mode = (libc::S_IFDIR | 0o311) as _;
