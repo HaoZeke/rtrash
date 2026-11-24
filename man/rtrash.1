@@ -231,9 +231,10 @@ original and the trash record. Where the kernel cannot rename without
 replacing an existing name, a regular file or a symbolic link is
 published by creating that name and then unlinking the old one, and only
 when that old name is still the linked inode. A name that changed is
-left in place and the new name is removed. If the new name cannot be
-removed either, the error names the extra hard link and the trash record
-stays. A directory is refused, because a
+left in place and the new name is removed. A failure while checking that
+name does the same. If the new name cannot be removed, the trash record
+stays; when the old name is still the linked inode, the error also names
+the extra hard link. A directory is refused, because a
 link cannot publish it. The copy keeps holes in sparse files, mode, owner
 where allowed, times, extended attributes (with the access control
 list, which macOS keeps apart), named pipes, and hard links

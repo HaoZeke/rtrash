@@ -1767,8 +1767,10 @@ fn publish_hard_link(src: &Path, dest: &Path) -> io::Result<()> {
     {
         return Err(io::Error::last_os_error());
     }
-    let linked = fs::symlink_metadata(dest)?;
-    finish_link_move(src, dest, src_id, (linked.dev(), linked.ino()), None)
+    // `linkat` made another name of `src_id`. A stat of `dest` here would
+    // name a file that replaced that link, and the rollback would delete it.
+    seam_replace_link_dest(dest);
+    finish_link_move(src, dest, src_id, src_id, None)
 }
 
 fn publish_symlink(src: &Path, dest: &Path) -> io::Result<()> {
@@ -1780,21 +1782,26 @@ fn publish_symlink(src: &Path, dest: &Path) -> io::Result<()> {
     if unsafe { libc::symlinkat(target_c.as_ptr(), libc::AT_FDCWD, to.as_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    let linked = fs::symlink_metadata(dest)?;
-    finish_link_move(
-        src,
-        dest,
-        src_id,
-        (linked.dev(), linked.ino()),
-        Some(target),
-    )
+    let dest_id = match fs::symlink_metadata(dest) {
+        Ok(linked) => (linked.dev(), linked.ino()),
+        Err(e) if crate::util::is_gone(dest) => return Err(e),
+        Err(e) => {
+            return Err(published_kept(
+                dest,
+                format!("the new name could not be identified ({e})"),
+            ));
+        }
+    };
+    finish_link_move(src, dest, src_id, dest_id, Some(target))
 }
 
 /// The new name exists. Unlink the old one only when it is still the
 /// inode that was linked, then drop the new one if that unlink fails.
-/// A source that changed is left alone. When neither name can be removed,
-/// the error is [`PublishedKept`] and it says that the source is an extra
-/// hard link of the published file.
+/// A source that changed is left alone. Any error while checking the old
+/// name still removes the new one, or keeps the record if that removal
+/// fails, so a payload is never left without a record. When neither name
+/// can be removed, the error is [`PublishedKept`] and it says that the
+/// source is an extra hard link of the published file.
 fn finish_link_move(
     src: &Path,
     dest: &Path,
@@ -1803,7 +1810,12 @@ fn finish_link_move(
     target: Option<PathBuf>,
 ) -> io::Result<()> {
     seam_replace_link_src(src);
-    if same_linked_file(src, src_id, target.as_deref())? {
+    seam_reuse_link_src(src);
+    let same = match same_linked_file(src, src_id, target.as_deref()) {
+        Ok(same) => same,
+        Err(e) => return roll_back_published(src, dest, dest_id, e),
+    };
+    if same {
         if let Err(e) = unlink_link_name(src) {
             return match unlink_if_same(dest, dest_id) {
                 Ok(()) => Err(e),
@@ -1837,6 +1849,26 @@ fn finish_link_move(
     }
 }
 
+/// `dest` is already a name of the published file. Remove that name when
+/// it is still `dest_id`. If it cannot be removed, keep the record.
+fn roll_back_published(
+    src: &Path,
+    dest: &Path,
+    dest_id: (u64, u64),
+    cause: io::Error,
+) -> io::Result<()> {
+    match unlink_if_same(dest, dest_id) {
+        Ok(()) => Err(cause),
+        Err(undo) => Err(published_kept(
+            dest,
+            format!(
+                "checking '{}' failed ({cause}) and removing the new link failed ({undo})",
+                crate::util::err_path(src),
+            ),
+        )),
+    }
+}
+
 fn same_linked_file(path: &Path, id: (u64, u64), target: Option<&Path>) -> io::Result<bool> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -1849,12 +1881,27 @@ fn same_linked_file(path: &Path, id: (u64, u64), target: Option<&Path>) -> io::R
     if (meta.dev(), meta.ino()) != id {
         return Ok(false);
     }
-    if let Some(want) = target {
-        if fs::read_link(path)? != want {
-            return Ok(false);
-        }
+    let Some(want) = target else {
+        return Ok(true);
+    };
+    // A regular file can be given the inode a symlink just freed. `read_link`
+    // then fails with `EINVAL`. That is a different file, not an error that
+    // may skip the rollback of `dest`.
+    if !meta.file_type().is_symlink() {
+        return Ok(false);
     }
-    Ok(true)
+    match fs::read_link(path) {
+        Ok(got) if got == want => Ok(true),
+        Ok(_) => Ok(false),
+        Err(e)
+            if e.raw_os_error() == Some(libc::EINVAL)
+                || e.raw_os_error() == Some(libc::ENOENT)
+                || crate::util::is_gone(path) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn unlink_if_same(path: &Path, id: (u64, u64)) -> io::Result<()> {
@@ -1907,6 +1954,57 @@ fn seam_replace_link_src(path: &Path) {
     }
     #[cfg(not(test))]
     let _ = path;
+}
+
+/// After `linkat` and before the source is checked: replace `dest` with a
+/// different file. The unlink counter is put back, so the test can still
+/// fail the source unlink that follows.
+fn seam_replace_link_dest(path: &Path) {
+    #[cfg(test)]
+    if REPLACE_LINK_DEST.with(|c| c.replace(false)) {
+        let saved = UNLINK_FAILS.with(|c| c.replace(0));
+        let _ = unlink_link_name(path);
+        UNLINK_FAILS.with(|c| c.set(saved));
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            let _ = file.write_all(b"victim-dest");
+        }
+    }
+    #[cfg(not(test))]
+    let _ = path;
+}
+
+/// Replace a symlink at `path` with a regular file that reuses its inode,
+/// which is what ext4 does with the inode just freed.
+fn seam_reuse_link_src(path: &Path) {
+    #[cfg(test)]
+    if REUSE_LINK_SRC.with(|c| c.replace(false)) {
+        reuse_link_src_as_file(path);
+    }
+    #[cfg(not(test))]
+    let _ = path;
+}
+
+#[cfg(test)]
+fn reuse_link_src_as_file(path: &Path) {
+    if !matches!(crate::util::look(path), crate::util::Look::There(_))
+        || unlink_link_name(path).is_err()
+    {
+        return;
+    }
+    // One create. On ext4 that is often the inode just freed. A miss leaves
+    // a different inode; the test tries the whole move again.
+    let Ok(mut file) = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    else {
+        return;
+    };
+    let _ = file.write_all(b"reused-inode");
 }
 
 fn info_mtime_secs(path: &Path) -> io::Result<i64> {
@@ -4559,6 +4657,8 @@ thread_local! {
     static FORCE_EXCLUSIVE: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
     static UNLINK_FAILS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static REPLACE_LINK_SRC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REPLACE_LINK_DEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REUSE_LINK_SRC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static OCCUPY_ORIGINAL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static MUTATE_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static HELD_FD: std::cell::Cell<RawFd> = const { std::cell::Cell::new(-1) };
@@ -6743,6 +6843,8 @@ proc /proc proc rw 0 0
             FORCE_EXCLUSIVE.with(|c| c.set(0));
             UNLINK_FAILS.with(|c| c.set(0));
             REPLACE_LINK_SRC.with(|c| c.set(false));
+            REPLACE_LINK_DEST.with(|c| c.set(false));
+            REUSE_LINK_SRC.with(|c| c.set(false));
             OCCUPY_ORIGINAL.with(|c| c.set(false));
             MUTATE_HELD.with(|c| c.set(false));
             HELD_FD.with(|c| c.set(-1));
@@ -7185,6 +7287,70 @@ proc /proc proc rw 0 0
         assert!(as_published(&err).is_none(), "{err}");
         assert_eq!(fs::read_dir(td.files()).unwrap().count(), 0, "{err}");
         assert_eq!(fs::read_dir(td.info()).unwrap().count(), 0, "{err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A symlink replaced by a regular file that reused its inode is not
+    /// the file that was linked. The published name is removed and the
+    /// trash record does not stay.
+    #[test]
+    fn a_reused_symlink_inode_does_not_leave_an_unrecorded_payload() {
+        use std::os::unix::fs::MetadataExt;
+        let _seams = ClearSeams;
+        let (root, td) = put_trash("reuse-ino");
+        let item = root.join("sym");
+        let mut proved = false;
+        for _ in 0..64 {
+            let _ = fs::remove_file(&item);
+            for dir in [td.files(), td.info()] {
+                for entry in fs::read_dir(&dir).unwrap().flatten() {
+                    let path = entry.path();
+                    let _ = fs::remove_file(&path);
+                    let _ = fs::remove_dir_all(&path);
+                }
+            }
+            std::os::unix::fs::symlink("elsewhere", &item).unwrap();
+            let ino = fs::symlink_metadata(&item).unwrap().ino();
+            FORCE_EXCLUSIVE.with(|c| c.set(libc::ENOSYS));
+            REUSE_LINK_SRC.with(|c| c.set(true));
+            let meta = fs::symlink_metadata(&item).unwrap();
+            let err = trash_move_locked(&item, &meta, &td, false).unwrap_err();
+            let Ok(now) = fs::symlink_metadata(&item) else {
+                continue;
+            };
+            if now.ino() != ino || !now.is_file() {
+                continue;
+            }
+            assert_eq!(fs::read(&item).unwrap(), b"reused-inode", "{err}");
+            assert!(as_published(&err).is_none(), "{err}");
+            assert_eq!(fs::read_dir(td.files()).unwrap().count(), 0, "{err}");
+            assert_eq!(fs::read_dir(td.info()).unwrap().count(), 0, "{err}");
+            proved = true;
+            break;
+        }
+        assert!(proved, "the file system did not reuse the symlink inode");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A file planted at the published name after `linkat` is not the link
+    /// this move created, so a failed source unlink does not delete it.
+    #[test]
+    fn a_replaced_link_destination_is_not_deleted() {
+        let _seams = ClearSeams;
+        let (root, td) = put_trash("victim-dest");
+        FORCE_EXCLUSIVE.with(|c| c.set(libc::ENOSYS));
+        REPLACE_LINK_DEST.with(|c| c.set(true));
+        UNLINK_FAILS.with(|c| c.set(1));
+        let item = root.join("note");
+        fs::write(&item, b"body").unwrap();
+        let meta = fs::symlink_metadata(&item).unwrap();
+        let err = trash_move_locked(&item, &meta, &td, false).unwrap_err();
+        assert_eq!(fs::read(&item).unwrap(), b"body", "{err}");
+        assert_eq!(
+            fs::read(td.files().join("note")).unwrap(),
+            b"victim-dest",
+            "{err}"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
