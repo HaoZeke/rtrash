@@ -8809,10 +8809,21 @@ fn reap_purge_trash_empties_the_oldest_trash_items_when_short() {
     let out = reap_cmd(&sb, &dry);
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(
+        stdout_of(&out).contains("would remove"),
+        "{}",
+        stdout_of(&out)
+    );
+    assert!(
         stderr_of(&out).contains("would empty 1 item"),
         "{}",
         stderr_of(&out)
     );
+    let mut json: Vec<&str> = args.to_vec();
+    json.extend(["-n", "--json", tmp_arg]);
+    let out = reap_cmd(&sb, &json);
+    serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", stdout_of(&out)));
+    assert!(!stdout_of(&out).contains("would remove"));
     assert!(info.exists(), "the dry run emptied the trash");
     let mut real: Vec<&str> = args.to_vec();
     real.push(tmp_arg);
@@ -9315,10 +9326,23 @@ fn empty_until_free_removes_the_oldest_until_there_is_room() {
     );
     let dry = run(&["empty", "--home-only", "--until-free=30000", "-n"], total);
     assert!(
+        stdout_of(&dry).contains("would remove") && stdout_of(&dry).contains("old.bin"),
+        "{}",
+        stdout_of(&dry)
+    );
+    assert!(
         stderr_of(&dry).contains("would empty 1 item"),
         "{}",
         stderr_of(&dry)
     );
+    assert!(old.exists());
+    let dry_json = run(
+        &["empty", "--home-only", "--until-free=30000", "-n", "--json"],
+        total,
+    );
+    serde_json::from_slice::<serde_json::Value>(&dry_json.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", stdout_of(&dry_json)));
+    assert!(!stdout_of(&dry_json).contains("would remove"));
     assert!(old.exists());
     let o = run(
         &["empty", "--home-only", "--until-free=30000", "--json"],

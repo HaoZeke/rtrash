@@ -183,6 +183,28 @@ fn reap_purge_trash_dry_run_lists_the_drive_recycle_bin_oldest_first() {
         at[0] < at[1] && at[1] < at[2],
         "not oldest first: {stdout:?}"
     );
+    let json = common::rtrash_real(common::Real::RecycleBin)
+        .args([
+            "reap",
+            "--older-than=1h",
+            "--age-by=m",
+            "--when-below=999999G",
+            "--purge-trash",
+            "--dry-run",
+            "--json",
+        ])
+        .arg(&dir)
+        .env("RTRASH_TEST_FS", format!("1000000:{}", dir.display()))
+        .output()
+        .unwrap();
+    assert!(
+        json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    serde_json::from_slice::<serde_json::Value>(&json.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&json.stdout)));
+    assert!(!String::from_utf8_lossy(&json.stdout).contains("would remove"));
     assert!(old.exists() && base.join(&names[0]).symlink_metadata().is_err());
     let _ = fs::remove_dir_all(&base);
 }

@@ -1260,7 +1260,13 @@ pub fn prune_after_put(prog: &str, moved: &[(PathBuf, String)], quiet: bool) {
 /// `reap --purge-trash` on the Finder trashes of device `dev`: remove
 /// the oldest items until `need` (bytes, inodes) is freed, and return
 /// what is still needed. A dry run counts the items instead.
-pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u64, u64) {
+pub fn purge_oldest(
+    prog: &str,
+    dev: u64,
+    need: (u64, u64),
+    dry_run: bool,
+    show_items: bool,
+) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     let Ok(rows) = read_all(prog) else {
         return need;
@@ -1299,7 +1305,9 @@ pub fn purge_oldest(prog: &str, dev: u64, need: (u64, u64), dry_run: bool) -> (u
         let b = crate::fastdelete::disk_usage(&path);
         let inodes = 1 + crate::trash_stats::count_inodes(&path);
         if dry_run {
-            eprintln!("would remove {}", crate::util::err_path(&e.shown));
+            if show_items {
+                println!("would remove {}", crate::util::term_path(&e.shown));
+            }
         } else {
             if let Err(err) = crate::permanent_guard::remove(&path) {
                 crate::finder_total::uncarried(&e.trash);

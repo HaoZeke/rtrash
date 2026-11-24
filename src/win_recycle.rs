@@ -3546,7 +3546,7 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
         at: &Path,
         need: (u64, u64),
         dry_run: bool,
-        verbose: bool,
+        show_items: bool,
     ) -> (u64, u64, u64) {
         let mut items: Vec<TrashItem> = match super::list_items() {
             Ok(all) => {
@@ -3593,9 +3593,9 @@ FreeDesktop --trash-dir pins do not apply to the Recycle Bin.
             .fold((0u64, 0u64), |(b, f), &i| (b + sized[i].1, f + sized[i].2));
         let chosen: Vec<TrashItem> = picked.iter().map(|&i| items[i].clone()).collect();
         for it in &chosen {
-            if dry_run {
-                eprintln!("would remove {}", crate::util::err_path(&original_of(it)));
-            } else if verbose {
+            if dry_run && show_items {
+                println!("would remove {}", crate::util::term_path(&original_of(it)));
+            } else if show_items {
                 println!("removed {}", crate::util::term_path(&original_of(it)));
             }
         }

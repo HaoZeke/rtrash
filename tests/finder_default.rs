@@ -1029,11 +1029,18 @@ fn empty_until_free_takes_finder_items() {
 
     fs::write(&p, "g").unwrap();
     assert!(b.run(&["put", p.to_str().unwrap()], "").status.success());
+    let human = run(&["empty", "--home-only", "-n", &want], &fs_spec);
+    assert_eq!(human.status.code(), Some(1), "{}", err(&human));
+    assert!(
+        out(&human).contains("would remove") && out(&human).contains("gone.txt"),
+        "{}",
+        out(&human)
+    );
     let dry = run(&["empty", "--home-only", "-n", "--json", &want], &fs_spec);
     assert_eq!(dry.status.code(), Some(1), "{}", err(&dry));
     serde_json::from_slice::<serde_json::Value>(&dry.stdout)
         .unwrap_or_else(|e| panic!("{e}: {}", out(&dry)));
-    assert!(err(&dry).contains("would remove"), "{}", err(&dry));
+    assert!(!out(&dry).contains("would remove"), "{}", out(&dry));
     assert!(b.finder().join("gone.txt").exists());
 }
 
