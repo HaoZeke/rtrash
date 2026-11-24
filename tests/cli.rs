@@ -8306,6 +8306,33 @@ fn who_names_the_process_holding_a_file_or_its_directory() {
     }
 }
 
+/// The same operand twice is one path. A holder and a free path each
+/// print once.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn who_prints_a_duplicate_held_path_and_a_duplicate_free_path_once() {
+    let sb = Sandbox::new("who-dup");
+    let held = sb.touch("held.log");
+    sb.touch("idle.log");
+    let child = Holder::open(&held);
+    let out = sb.run(&["who", "held.log", "held.log"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let text = stdout_of(&out);
+    let hits = text
+        .lines()
+        .filter(|l| l.contains(&format!("pid {}", child.pid())) && l.contains("held.log"))
+        .count();
+    assert_eq!(hits, 1, "{text}");
+    let out = sb.run(&["who", "idle.log", "idle.log"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stdout_of(&out));
+    let idle = stdout_of(&out);
+    let free = idle
+        .lines()
+        .filter(|l| l.contains("idle.log: no process holds this path"))
+        .count();
+    assert_eq!(free, 1, "{idle}");
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn put_warns_about_an_open_file_and_refuses_it_on_request() {

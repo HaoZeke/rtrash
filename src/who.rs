@@ -135,6 +135,8 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
         eprintln!("{prog}: cannot list the processes holding a path on this platform");
         return 1;
     }
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|p| seen.insert(p.clone()));
     let mut unchecked = 0;
     let mut holds: Vec<Hold> = Vec::new();
     for p in &paths {
