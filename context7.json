@@ -1,0 +1,29 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "rtrash",
+  "description": "Native FreeDesktop trash with an rm-compatible CLI and Python bindings.",
+  "folders": [
+    "docs/orgmode",
+    "docs",
+    "man",
+    "completions"
+  ],
+  "excludeFolders": [
+    "docs/source",
+    "docs/newsfragments",
+    "benches",
+    "benchmarks",
+    "bench",
+    "tests",
+    "scripts",
+    ".github",
+    "fuzz",
+    "contrib"
+  ],
+  "excludeFiles": [
+    "CHANGELOG.md",
+    "CODE_OF_CONDUCT.md",
+    "LICENSE"
+  ],
+  "rules": []
+}
