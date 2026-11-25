@@ -18,8 +18,7 @@
     "scripts",
     ".github",
     "fuzz",
-    "contrib",
-    "docs/demo"
+    "contrib"
   ],
   "excludeFiles": [
     "CHANGELOG.md",
