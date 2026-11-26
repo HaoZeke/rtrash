@@ -837,7 +837,7 @@ pub(crate) struct RestoreOpts<'a> {
     pub(crate) json: bool,
     pub(crate) plain: bool,
     pub(crate) newest_first: Option<bool>,
-    /// `--sort`: the numbered list order (newest by default, oldest/date, path, or none).
+    /// `--sort`: the numbered list order (oldest/date by default, newest, size, path, or none).
     pub(crate) sort: Option<crate::restore::Sort>,
     /// `--older-than` and `--newer-than`.
     pub(crate) age: crate::filters::AgeFilter,
