@@ -1817,9 +1817,16 @@ fn mass_pattern_keeps_the_trash(tag: &str, args: &[&str]) {
     cmd.extend_from_slice(args);
     let out = sb.run(&cmd);
     let err = stderr_of(&out);
-    assert_eq!(out.status.code(), Some(2), "{err}");
-    assert!(err.contains("refusing mass pattern"), "{err}");
-    assert_eq!(trash_names(&sb), vec!["keep.txt".to_string()]);
+    assert_eq!(out.status.code(), Some(2), "{tag} {args:?}: {err}");
+    assert!(
+        err.contains("refusing mass pattern"),
+        "{tag} {args:?}: {err}"
+    );
+    assert_eq!(
+        trash_names(&sb),
+        vec!["keep.txt".to_string()],
+        "{tag} {args:?}"
+    );
 }
 
 #[test]
@@ -2370,7 +2377,7 @@ fn remove_only_objects_without_scope_roots(tag: &str, flag: &str, pattern: &str,
         .output()
         .unwrap();
     assert!(out.status.success(), "{tag}: {}", stderr_of(&out));
-    assert_eq!(trash_names(&sb), vec!["outside.txt".to_string()]);
+    assert_eq!(trash_names(&sb), vec!["outside.txt".to_string()], "{tag}");
 }
 
 #[test]
