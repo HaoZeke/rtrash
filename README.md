@@ -427,8 +427,8 @@ $ rtrash empty -n && rtrash empty 14                    # free the space
 | `rtrash restore --conflict=rename\|skip\|overwrite …` | When the destination exists: restore as `NAME.1.EXT`, leave the item in the trash, or replace it (`-f`); the default refuses |
 | `rtrash restore --cwd-only` | Same as bare restore, only originals under `$PWD` |
 | `rtrash restore --name=NAME --latest --json` | Restore the newest item named `NAME` (file name or trash name) without a prompt and print `{"restored": [...], "failed": N, "skipped": N}` |
-| `rtrash restore --newest-first` / `--oldest-first` | Set the date-order direction. The interactive browser lists newest first and `o` flips it; `--plain` also defaults to newest first |
-| `rtrash restore --sort=newest\|oldest` | Numbered table order by deletion date; `--sort=date` is accepted as an alias of `--sort=oldest` for trash-cli `trash-restore` compatibility |
+| `rtrash restore --newest-first` / `--oldest-first` | Set the date-order direction. The interactive browser lists newest first, with the cursor on that row, and `o` flips it. `--plain` lists oldest first, so the newest row sits next to the index prompt |
+| `rtrash restore --sort=newest\|oldest` | Numbered table order by deletion date. The default is oldest, with the newest row next to the prompt. `--sort=newest` puts that row at index 0. `--sort=date` is an alias of `--sort=oldest` for trash-cli `trash-restore` compatibility |
 | Single match | Restores immediately without prompting |
 
 **TUI keys (shared by restore / empty / put):** defaults `↑↓`/`jk` move · `PgUp`/`PgDn` page · `g`/`G` first/last · `Space` mark · `a`/`A` all/clear · `/` live fuzzy · `?` help · `Enter` action · `q`/`Esc` quit.

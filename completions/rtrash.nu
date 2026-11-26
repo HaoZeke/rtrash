@@ -302,10 +302,10 @@ export extern "rtrash restore" [
     --plain  # force numbered line selection even on a TTY (no TUI)
     --no-space-check  # copy across devices even when the copy would leave
     --batch: string  # restore one whole put run (an undo --list id, or last)
-    --newest-first  # list the most recently trashed item first
+    --newest-first  # newest first (browser default; numbered index 0)
     --overwrite  # same as --force (trash-cli spelling)
-    --sort: string  # numbered table order: newest (default), oldest/date, size, path or none
-    --oldest-first  # list the oldest trashed item first
+    --sort: string  # numbered table order: oldest (default), newest, date, size, path or none
+    --oldest-first  # oldest first (numbered table default)
     --name: string@"nu-complete rtrash trashed names"  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original
     --regex: string  # match items whose original path contains REGEX
@@ -544,10 +544,10 @@ export extern "trash-restore" [
     --plain  # force numbered line selection even on a TTY (no TUI)
     --no-space-check  # copy across devices even when the copy would leave
     --batch: string  # restore one whole put run (an undo --list id, or last)
-    --newest-first  # list the most recently trashed item first
+    --newest-first  # newest first (browser default; numbered index 0)
     --overwrite  # same as --force (trash-cli spelling)
-    --sort: string  # numbered table order: newest (default), oldest/date, size, path or none
-    --oldest-first  # list the oldest trashed item first
+    --sort: string  # numbered table order: oldest (default), newest, date, size, path or none
+    --oldest-first  # oldest first (numbered table default)
     --name: string@"nu-complete rtrash trashed names"  # match items by file name or trash name instead of PATH
     --glob: string  # match items by shell pattern: against the original
     --regex: string  # match items whose original path contains REGEX

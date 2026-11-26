@@ -2966,6 +2966,9 @@ use
 .B \-\-name
 for a literal name holding those characters.
 A single match restores directly; multiple matches require a selection.
+The interactive browser lists the newest item first, with the cursor on
+it. The numbered list is oldest first, so the newest row sits next to
+the index prompt.
 .PP
 Whatever the flags, restore refuses a destination that is, contains or
 sits inside the item's trash or the home trash.
@@ -3004,12 +3007,12 @@ The trash-cli spelling of
 .TP
 .BI \-\-sort= ORDER
 Order of the numbered table:
-.B newest
-(default),
 .B oldest
-(or
-.BR date ,
-for trash-restore compatibility),
+(the default, so the newest row sits next to the index prompt) or
+.B date
+(the trash-restore spelling of oldest),
+.B newest
+(that row at index 0),
 .B size
 (largest first, as
 .B list \-\-sort=size
@@ -3105,10 +3108,13 @@ Any other kind of link, such as a volume mount point, stops the restore
 before it copies anything.
 .TP
 .B \-\-newest\-first
-List the most recently trashed item first (default in the interactive browser and numbered table).
+List the most recently trashed item first. This is the default in the
+interactive browser, where the cursor starts on that item. On the
+numbered table it puts that item at index 0.
 .TP
 .B \-\-oldest\-first
-Order from oldest to newest.
+List the oldest trashed item first. This is the default for the numbered
+table, so the newest row sits next to the index prompt.
 .TP
 .BI \-\-name= NAME
 Match items by original file name or by name inside the trash, instead of by

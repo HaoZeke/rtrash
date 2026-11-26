@@ -694,7 +694,7 @@ fn restore_sort_orders_the_numbered_list() {
             .unwrap_or_default()
             .to_string()
     };
-    assert!(pick(&[]).contains("sort-b-"), "default newest-first order");
+    assert!(pick(&[]).contains("sort-a-"), "default oldest-first order");
     assert!(pick(&["--sort=oldest"]).contains("sort-a-"), "oldest order");
     assert!(pick(&["--sort=path"]).contains("sort-a-"), "path order");
     assert!(

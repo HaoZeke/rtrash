@@ -139,7 +139,7 @@ For automation: `--plain` or pipe an index (`printf '0\n' | rtrash restore`).
 rtrash a.txt b.txt
 rtrash restore              # TUI on TTY
 rtrash restore --cwd-only   # only originals under $PWD
-rtrash restore --plain      # line mode even on TTY
+rtrash restore --plain      # oldest first; the newest row is next to the prompt
 rtrash restore --plain --newest-first   # latest item at index 0
 ```
 
