@@ -1434,7 +1434,7 @@ mod tests {
             format!("--trash-dir={}", root.display()),
         ];
         argv.extend(args.iter().map(|a| a.to_string()));
-        assert_eq!(run_inner("rtrash", &argv), 0);
+        assert_eq!(run_inner("rtrash", &argv), 0, "{tag} {args:?}");
         assert!(AFTER_COUNT.take().is_none(), "the hook never ran");
         assert!(!root.join("files/a").exists());
         assert!(!root.join("info/a.trashinfo").exists());
