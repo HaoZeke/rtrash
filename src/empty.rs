@@ -1435,11 +1435,20 @@ mod tests {
         ];
         argv.extend(args.iter().map(|a| a.to_string()));
         assert_eq!(run_inner("rtrash", &argv), 0, "{tag} {args:?}");
-        assert!(AFTER_COUNT.take().is_none(), "the hook never ran");
-        assert!(!root.join("files/a").exists());
-        assert!(!root.join("info/a.trashinfo").exists());
+        assert!(
+            AFTER_COUNT.take().is_none(),
+            "{tag} {args:?}: the hook never ran"
+        );
+        assert!(
+            !root.join("files/a").exists(),
+            "{tag} {args:?}: files/a stayed"
+        );
+        assert!(
+            !root.join("info/a.trashinfo").exists(),
+            "{tag} {args:?}: info/a.trashinfo stayed"
+        );
         for kept in ["files/b", "info/b.trashinfo", "files/c", "info/c.trashinfo"] {
-            assert!(root.join(kept).exists(), "{kept} went");
+            assert!(root.join(kept).exists(), "{tag} {args:?}: {kept} went");
         }
         let _ = fs::remove_dir_all(&root);
     }
