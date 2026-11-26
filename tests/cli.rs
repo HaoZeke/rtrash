@@ -1812,7 +1812,7 @@ fn mass_pattern_keeps_the_trash(tag: &str, args: &[&str]) {
     let pin = format!("--trash-dir={}", sb.trash().display());
     sb.touch("keep.txt");
     let put = sb.run(&["put", &pin, "keep.txt"]);
-    assert!(put.status.success(), "{}", stderr_of(&put));
+    assert!(put.status.success(), "{tag} {args:?}: {}", stderr_of(&put));
     let mut cmd = vec!["rm", pin.as_str()];
     cmd.extend_from_slice(args);
     let out = sb.run(&cmd);
