@@ -228,7 +228,7 @@ fn trash_restore_takes_a_range_pick() {
     }
     let restore = dir.join("trash-restore.exe");
     fs::copy(env!("CARGO_BIN_EXE_rtrash"), &restore).unwrap();
-    // Numbered rows default newest-first, so 0 is c.txt.
+    // Numbered rows default oldest-first, so 0 is a.txt.
     let out = run_with(&restore, &dir, &["sub"], "0\n");
     let back: Vec<bool> = names.iter().map(|n| sub.join(n).exists()).collect();
     for n in names {
@@ -250,10 +250,10 @@ fn trash_restore_takes_a_range_pick() {
     assert!(
         said.lines()
             .find(|l| l.starts_with("   0 "))
-            .is_some_and(|l| l.ends_with("c.txt")),
+            .is_some_and(|l| l.ends_with("a.txt")),
         "{said}"
     );
-    assert_eq!(back, [false, false, true]);
+    assert_eq!(back, [true, false, false]);
 }
 
 #[test]
@@ -429,8 +429,8 @@ fn restore_sorts_by_size_on_windows() {
     fs::write(&big, vec![7u8; 1 << 20]).unwrap();
     fs::write(&small, "s").unwrap();
     let rtrash = std::path::Path::new(env!("CARGO_BIN_EXE_rtrash"));
-    // big goes first (oldest), small second (newest).
-    for f in [&big, &small] {
+    // small goes first (oldest), big second (newest and larger).
+    for f in [&small, &big] {
         let put = common::rtrash_real(common::Real::RecycleBin)
             .arg("put")
             .arg(f)

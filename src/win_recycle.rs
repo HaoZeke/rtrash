@@ -3851,12 +3851,14 @@ Without PATH, print a numbered list and read an index from stdin.
                 current directory or below (implies --plain)
       --directory=DIR  as --cwd-only, for items deleted from under DIR;
                 DIR need not exist any more (implies --plain)
-      --sort=ORDER  numbered list order: newest (default), oldest
-                (trash-restore also accepts date), size (largest first),
-                path (original path) or none
-                (as read)
+      --sort=ORDER  numbered list order: oldest (default; the newest
+                row sits next to the prompt), newest, size (largest
+                first), path (original path) or none (as read).
+                trash-restore accepts date as an alias of oldest
       --newest-first  list the most recently deleted item first
+                (browser default; numbered list index 0)
       --oldest-first  list the oldest deleted item first
+                (numbered list default)
       --batch=last  restore every item the latest put moved, by the
                 record put keeps in %LOCALAPPDATA%\\rtrash
       --no-space-check  restore onto another drive even when it would
@@ -4091,10 +4093,10 @@ Without PATH, print a numbered list and read an index from stdin.
             Some(TableSort::Oldest) => {}
             Some(TableSort::Newest) => matches.reverse(),
             None => {
-                // The numbered selection table defaults newest-first; a
-                // non-interactive multi-restore keeps the historical
-                // oldest-first walk unless the caller asked for an order.
-                let newest = newest_first.unwrap_or(!all);
+                // Oldest first, so the newest row sits next to the index
+                // prompt. The browser above keeps newest first. An explicit
+                // --newest-first puts that row at index 0.
+                let newest = newest_first.unwrap_or(false);
                 if newest {
                     matches.reverse();
                 }

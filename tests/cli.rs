@@ -529,11 +529,12 @@ fn put_inspect_shows_the_size_and_asks() {
 #[test]
 fn restore_sorts_the_numbered_table_by_size() {
     let sb = Sandbox::new("restore-sort-size");
-    fs::write(sb.work().join("big.bin"), vec![7u8; 1 << 20]).unwrap();
-    assert!(sb.run(&["put", "big.bin"]).status.success());
-    common::next_trash_second();
+    // small is older; big is newer and larger, so date order and size differ.
     fs::write(sb.work().join("small.txt"), b"s").unwrap();
     assert!(sb.run(&["put", "small.txt"]).status.success());
+    common::next_trash_second();
+    fs::write(sb.work().join("big.bin"), vec![7u8; 1 << 20]).unwrap();
+    assert!(sb.run(&["put", "big.bin"]).status.success());
 
     let out = sb.run_with_stdin(&["restore", "--plain", "--dry-run"], "0\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
@@ -4082,7 +4083,7 @@ fn list_and_status_take_ages_in_hours_and_minutes() {
 }
 
 #[test]
-fn restore_plain_order_defaults_newest_first_and_takes_oldest_date_alias() {
+fn restore_plain_order_takes_direction_flags_and_the_date_alias() {
     let sb = Sandbox::new("restore-order");
     let old = sb.touch("old.txt");
     let new = sb.touch("new.txt");
@@ -4090,16 +4091,28 @@ fn restore_plain_order_defaults_newest_first_and_takes_oldest_date_alias() {
     backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
     let pin = format!("--trash-dir={}", sb.trash().display());
 
-    // Numbered table defaults newest first: index 0 is the latest item.
+    // Numbered table defaults oldest first: index 0 is the backdated item,
+    // and the newest row is last, next to the index prompt.
     let out = sb.run_with_stdin(&["restore", &pin, "--plain"], "0\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
     let table = stdout_of(&out);
-    let first = table.lines().next().unwrap_or("");
-    assert!(first.contains("new.txt"), "{table}");
-    assert!(new.exists() && !old.exists());
+    let rows: Vec<_> = table
+        .lines()
+        .filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+        .collect();
+    assert!(
+        rows.first().is_some_and(|l| l.contains("old.txt")),
+        "{table}"
+    );
+    assert!(
+        rows.last().is_some_and(|l| l.contains("new.txt")),
+        "{table}"
+    );
+    assert!(old.exists() && !new.exists());
 
-    // --oldest-first flips date order: index 0 is now the backdated item.
-    assert!(sb.run(&["put", "new.txt"]).status.success());
+    // Both items back in the trash. --oldest-first keeps the oldest at 0.
+    assert!(sb.run(&["put", "old.txt"]).status.success());
+    backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
     let out = sb.run_with_stdin(&["restore", &pin, "--plain", "--oldest-first"], "0\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
     let table = stdout_of(&out);
@@ -4107,7 +4120,7 @@ fn restore_plain_order_defaults_newest_first_and_takes_oldest_date_alias() {
     assert!(first.contains("old.txt"), "{table}");
     assert!(old.exists() && !new.exists());
 
-    // --newest-first keeps the default date order.
+    // --newest-first puts the latest item at index 0.
     assert!(sb.run(&["put", "old.txt"]).status.success());
     backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
     let out = sb.run_with_stdin(&["restore", &pin, "--plain", "--newest-first"], "0\n");
@@ -4136,6 +4149,61 @@ fn restore_plain_order_defaults_newest_first_and_takes_oldest_date_alias() {
     let out = sb.run_with_stdin(&["restore", &pin, "--plain", "--sort=newest"], "0\n");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(new.exists() && !old.exists());
+}
+
+/// Three deletion dates: the numbered table is oldest first, so the newest
+/// row is last, next to where the index prompt is printed. `--sort=newest`
+/// puts that row at index 0.
+#[test]
+fn restore_plain_date_order_is_oldest_first_and_sort_newest_flips_it() {
+    let sb = Sandbox::new("restore-date-rows");
+    sb.touch("old.txt");
+    sb.touch("mid.txt");
+    sb.touch("new.txt");
+    assert!(sb
+        .run(&["put", "old.txt", "mid.txt", "new.txt"])
+        .status
+        .success());
+    backdate_trashinfo(&sb, "old.txt", "2001-01-01T00:00:00");
+    backdate_trashinfo(&sb, "mid.txt", "2010-06-15T12:00:00");
+    backdate_trashinfo(&sb, "new.txt", "2020-03-03T03:03:03");
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let names = |text: &str| -> Vec<&str> {
+        text.lines()
+            .filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+            .filter_map(|l| {
+                ["old.txt", "mid.txt", "new.txt"]
+                    .into_iter()
+                    .find(|n| l.contains(n))
+            })
+            .collect()
+    };
+    let table = |args: &[&str]| {
+        let mut full = vec!["restore", &pin, "--plain", "--dry-run"];
+        full.extend_from_slice(args);
+        let out = sb.run_with_stdin(&full, "0\n");
+        assert!(out.status.success(), "{}", stderr_of(&out));
+        stdout_of(&out)
+    };
+
+    let plain = table(&[]);
+    assert_eq!(
+        names(&plain),
+        ["old.txt", "mid.txt", "new.txt"],
+        "default oldest-first, newest row last: {plain}"
+    );
+    let newest = table(&["--sort=newest"]);
+    assert_eq!(
+        names(&newest),
+        ["new.txt", "mid.txt", "old.txt"],
+        "--sort=newest puts the latest row at index 0: {newest}"
+    );
+    let oldest = table(&["--sort=oldest"]);
+    assert_eq!(
+        names(&oldest),
+        ["old.txt", "mid.txt", "new.txt"],
+        "{oldest}"
+    );
 }
 
 #[test]
