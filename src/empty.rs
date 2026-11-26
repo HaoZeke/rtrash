@@ -1470,22 +1470,18 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// A full empty takes only what it counted before the lock (round 245).
+    /// A full empty, an age cut and a size budget take only what they
+    /// counted before the lock (round 245). The late items are as old as
+    /// the cut asks, and the size budget counts them but they stay.
     #[test]
-    fn a_full_empty_spares_what_came_after_its_count() {
-        empty_with_late_items("late-full", &[]);
-    }
-
-    /// So does an age cut: the late items are as old as the cut asks.
-    #[test]
-    fn an_age_cut_keeps_late_items_as_old_as_the_cut() {
-        empty_with_late_items("late-age", &["1"]);
-    }
-
-    /// And a size budget: the late items count toward it but stay.
-    #[test]
-    fn a_size_budget_counts_late_items_but_never_picks_them() {
-        empty_with_late_items("late-size", &["--max-size=0"]);
+    fn late_items_survive_a_full_empty_an_age_cut_and_a_size_budget() {
+        for (tag, args) in [
+            ("late-full", &[][..]),
+            ("late-age", &["1"][..]),
+            ("late-size", &["--max-size=0"][..]),
+        ] {
+            empty_with_late_items(tag, args);
+        }
     }
 
     #[test]
