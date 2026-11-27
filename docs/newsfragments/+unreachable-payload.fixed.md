@@ -1,0 +1,1 @@
+`status --check --fix` no longer deletes a `.trashinfo` when `files/` cannot be searched. The payload is not treated as gone, so the record stays. `list` does not call that payload missing, and a Recycle Bin `$R` that cannot be reached does not make its `$I` dangling.

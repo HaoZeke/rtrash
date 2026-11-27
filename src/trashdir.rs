@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
@@ -939,11 +939,14 @@ impl TrashLock {
     ) -> io::Result<Self> {
         fs::create_dir_all(root)?;
         let path = root.join(".rtrash.lock");
+        // O_NOFOLLOW: a symlink planted at the lock name is not the lock,
+        // and must not be followed into whatever it points at.
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&path)?;
         // Before the flock, which would never return.
         #[cfg(debug_assertions)]
@@ -1449,7 +1452,7 @@ fn claim_name(
         } else {
             format!("{base}.{}", attempt + 1)
         };
-        if join_name(&files, &name).symlink_metadata().is_ok() {
+        if crate::util::is_there(&join_name(&files, &name)) {
             continue;
         }
         if take(&name)? {
@@ -2331,8 +2334,12 @@ impl<'a> DirSizes<'a> {
         let misses = self.misses.into_inner().unwrap_or_else(|e| e.into_inner());
         let files = self.trash.files();
         let gone = |name: &[u8]| {
-            let name = OsStr::from_bytes(name);
-            !fs::symlink_metadata(files.join(name)).is_ok_and(|m| m.is_dir())
+            let path = files.join(OsStr::from_bytes(name));
+            match crate::util::look(&path) {
+                crate::util::Look::Gone => true,
+                crate::util::Look::There(meta) => !meta.is_dir(),
+                crate::util::Look::Unreachable(_) => false,
+            }
         };
         if misses.is_empty() && !self.lines.keys().any(|name| gone(name)) {
             return;
@@ -9052,6 +9059,40 @@ proc /proc proc rw 0 0
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// The lock open does not follow a symlink planted at `.rtrash.lock`.
+    #[test]
+    fn the_lock_open_does_not_follow_a_symlink() {
+        let root = std::env::temp_dir().join(format!(
+            "rtrash-locklink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("outside-lock");
+        fs::write(&target, b"do-not-touch").unwrap();
+        std::os::unix::fs::symlink(&target, root.join(".rtrash.lock")).unwrap();
+        let err = match TrashLock::acquire(&root) {
+            Err(err) => err,
+            Ok(_) => panic!("the lock open followed the symlink"),
+        };
+        assert!(
+            err.raw_os_error() == Some(libc::ELOOP) || err.kind() == io::ErrorKind::InvalidInput,
+            "{err}"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"do-not-touch");
+        assert!(root
+            .join(".rtrash.lock")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn trashinfo_sync_file_flushes() {
         let root = std::env::temp_dir().join(format!(
@@ -9248,6 +9289,39 @@ proc /proc proc rw 0 0
         .unwrap();
         assert_eq!(directorysizes_cached_size(&trash, "My Dir"), None);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A `files/` that cannot be searched is not gone. `write_back` keeps
+    /// the cached line instead of dropping it.
+    #[cfg(unix)]
+    #[test]
+    fn directorysizes_keeps_a_line_when_files_cannot_be_searched() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            crate::test_skip::skip("root searches a mode 0600 directory; skipping");
+            return;
+        }
+        let root = sizes_root("shut");
+        let trash = TrashDir {
+            root: root.clone(),
+            topdir: None,
+        };
+        fs::create_dir(trash.files().join("tree")).unwrap();
+        fs::write(root.join("directorysizes"), "123 1700000000 tree\n").unwrap();
+        struct Open(PathBuf);
+        impl Drop for Open {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+                let _ = fs::remove_dir_all(self.0.parent().unwrap());
+            }
+        }
+        let _open = Open(trash.files());
+        fs::set_permissions(trash.files(), fs::Permissions::from_mode(0o600)).unwrap();
+        DirSizes::load(&trash).write_back();
+        fs::set_permissions(trash.files(), fs::Permissions::from_mode(0o755)).unwrap();
+        let kept = fs::read_to_string(root.join("directorysizes")).unwrap();
+        assert!(kept.contains("tree"), "{kept}");
     }
 
     #[test]

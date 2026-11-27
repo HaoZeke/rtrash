@@ -1,3 +1,10 @@
+[workspace]
+members = ["crates/rtrash-hud"]
+# The CLI stays the default build. `cargo build` and `cargo test` do not
+# compile rtrash-hud, so the desktop display adds no dependency to rtrash.
+default-members = ["."]
+resolver = "2"
+
 [package]
 name = "rtrash"
 version = "0.1.5"

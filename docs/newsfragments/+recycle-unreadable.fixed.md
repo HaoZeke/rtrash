@@ -1,0 +1,1 @@
+`status --check` reports a Recycle Bin payload that cannot be reached as `unreadable: ... (kept)` and keeps its `$I` record, and a `$I` whose metadata cannot be read is unreadable rather than stray. `--fix` still removes only dangling and bad records.

@@ -138,7 +138,7 @@ status_opts=(
   '--smaller-than=[only count items taking less than SIZE on disk]:size:'
   '--json[emit a JSON object]'
   '--check[check each record and list problems]'
-  '--fix[with --check, remove broken and dangling records]'
+  '--fix[with --check, remove dangling and bad records and put leftovers]'
   '(-n --dry-run)'{-n,--dry-run}'[with --fix, print what it would remove]'
   '(- *)'--help'[display help and exit]'
   '(- *)'--version'[output version and exit]'

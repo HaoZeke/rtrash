@@ -233,7 +233,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             status = 1;
             continue;
         }
-        if std::fs::symlink_metadata(&it.local).is_ok() {
+        if crate::util::is_there(&it.local) {
             if !force {
                 eprintln!(
                     "{prog}: refusing to overwrite '{}' (use -f)",
@@ -253,7 +253,7 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
             }
         }
         match restore_payload(&it.payload, &it.local) {
-            Ok(()) if std::fs::symlink_metadata(&it.local).is_ok() => {}
+            Ok(()) if crate::util::is_there(&it.local) => {}
             Ok(()) => {
                 eprintln!(
                     "{prog}: restored '{}' but nothing is there now",

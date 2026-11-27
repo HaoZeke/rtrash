@@ -992,8 +992,17 @@ pub enum Look {
 /// reached is never taken for a missing one, so a denied file is not
 /// reported as "No such file or directory" (trash-cli #377), and a
 /// record whose payload sits under a denied folder is not taken for
-/// dangling. The precheck refuses `metadata(..).is_err()` elsewhere.
+/// dangling. The precheck refuses `metadata(..).is_err()` and a
+/// `metadata(..).is_ok()` presence test elsewhere.
 pub fn look(path: &std::path::Path) -> Look {
+    // Debug-only: one path is unreachable, so a test can put that name
+    // beside one that stats normally. The message is fixed. glibc, musl
+    // and Windows do not agree on what raw os error 5 says.
+    if cfg!(debug_assertions)
+        && std::env::var_os("RTRASH_TEST_LOOK_IO").as_deref() == Some(path.as_os_str())
+    {
+        return Look::Unreachable(io::Error::other("rtrash test: stat failed"));
+    }
     match std::fs::symlink_metadata(path) {
         Ok(m) => Look::There(Box::new(m)),
         Err(e) if is_missing(&e) => Look::Gone,
@@ -1005,6 +1014,14 @@ pub fn look(path: &std::path::Path) -> Look {
 /// that is there and for one that cannot be reached.
 pub fn is_gone(path: &std::path::Path) -> bool {
     matches!(look(path), Look::Gone)
+}
+
+/// Whether `path` is there, without following a final link. A path that
+/// is gone and one that cannot be reached are both not there. A decision
+/// that the path is gone uses [`is_gone`], which stays false when the
+/// path cannot be reached.
+pub fn is_there(path: &std::path::Path) -> bool {
+    matches!(look(path), Look::There(_))
 }
 
 /// Which file a payload was when a scan or a match read it: its device and
@@ -1083,6 +1100,307 @@ pub fn is_missing(e: &io::Error) -> bool {
     matches!(
         e.kind(),
         io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
+}
+
+/// The parenthetical a status row adds when a trash has orphans or
+/// records whose payload is gone. Empty when it has neither.
+/// `rtrash-hud` prints the same words. This crate's status module is
+/// Unix-only, so on Windows the HUD is the caller.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn status_notes(orphans: u64, dangling: u64) -> String {
+    let mut parts = Vec::new();
+    if orphans > 0 {
+        parts.push(format!("{orphans} without .trashinfo"));
+    }
+    if dangling > 0 {
+        parts.push(format!("{dangling} without a payload"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    }
+}
+
+/// Debug-only seam: when `RTRASH_TEST_NOFOLLOW_SWAP` names `path`, replace
+/// that file with a symlink to `RTRASH_TEST_NOFOLLOW_TARGET` after the
+/// lstat and before the open. The open's own nofollow is then what
+/// refuses the link; the lstat already passed.
+fn nofollow_swap_seam(path: &std::path::Path) {
+    if cfg!(debug_assertions)
+        && std::env::var_os("RTRASH_TEST_NOFOLLOW_SWAP").as_deref() == Some(path.as_os_str())
+    {
+        let Some(target) = std::env::var_os("RTRASH_TEST_NOFOLLOW_TARGET") else {
+            return;
+        };
+        let _ = std::fs::remove_file(path);
+        #[cfg(unix)]
+        let _ = std::os::unix::fs::symlink(&target, path);
+        #[cfg(windows)]
+        let _ = std::os::windows::fs::symlink_file(&target, path);
+    }
+}
+
+/// Open `path` for reading only when it is a regular file. A symlink is
+/// refused from an lstat, and the open itself does not follow one that
+/// appears in its place (`O_NOFOLLOW` on Unix,
+/// `FILE_FLAG_OPEN_REPARSE_POINT` on Windows), including one planted
+/// after the lstat. A Windows data reparse point, such as a Compact
+/// file, is reopened from the same handle without that flag so the
+/// filter supplies the file bytes. A tag that cannot be confirmed is an
+/// error, not file data. Cache and record reads use this so a planted
+/// link cannot be read as `directorysizes` or a `.trashinfo`.
+pub(crate) fn open_regular_nofollow(path: &std::path::Path) -> io::Result<std::fs::File> {
+    let not_regular = || io::Error::new(io::ErrorKind::InvalidData, "not a regular file");
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.file_type().is_file() {
+        return Err(not_regular());
+    }
+    nofollow_swap_seam(path);
+    let file = open_nofollow_read(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(not_regular());
+    }
+    Ok(file)
+}
+
+/// `winnt.h` `IsReparseTagNameSurrogate`: the tag names another file
+/// (a symlink, a junction, a mount point) rather than holding this
+/// file's data (Compact / WOF, a cloud placeholder).
+#[cfg(any(windows, test))]
+pub(crate) fn reparse_tag_names_another_file(tag: u32) -> bool {
+    const NAME_SURROGATE: u32 = 0x2000_0000;
+    tag & NAME_SURROGATE != 0
+}
+
+/// What a reparse-tag query says about a handle opened with
+/// `FILE_FLAG_OPEN_REPARSE_POINT`.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug)]
+enum ReparseLook {
+    /// The query succeeded and the file is not a reparse point.
+    Plain,
+    /// A data tag (Compact / WOF and the like), not a name surrogate.
+    Data,
+    /// A tag that names another file.
+    Surrogate,
+    /// The query failed, or the attribute and the tag disagree.
+    Unconfirmed,
+}
+
+/// `query_ok` is a successful `GetFileInformationByHandleEx`. A clear
+/// reparse attribute together with tag 0 is a plain file. A set attribute
+/// with tag 0, a clear attribute with a tag, or a failed query is not
+/// confirmed: a Compact file in that state must not be read as its
+/// reparse buffer.
+#[cfg(any(windows, test))]
+fn classify_reparse(query_ok: bool, reparse_attribute: bool, tag: u32) -> ReparseLook {
+    if !query_ok {
+        return ReparseLook::Unconfirmed;
+    }
+    if reparse_attribute && tag != 0 {
+        if reparse_tag_names_another_file(tag) {
+            ReparseLook::Surrogate
+        } else {
+            ReparseLook::Data
+        }
+    } else if !reparse_attribute && tag == 0 {
+        ReparseLook::Plain
+    } else {
+        ReparseLook::Unconfirmed
+    }
+}
+
+/// What to do with a handle after [`classify_reparse`]. `reopened` is
+/// true once the handle has been opened again without the reparse flag.
+/// A data tag is reopened once; after that, only a plain file is kept.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReparseOpen {
+    /// Keep this handle.
+    Plain,
+    /// Open again from this handle, without the reparse flag.
+    Reopen,
+    /// Do not read this handle. The text is the error.
+    Refuse(&'static str),
+}
+
+/// The open decision for `look`. A name surrogate is refused. A data tag
+/// is reopened once. A tag that cannot be confirmed is refused, and a
+/// reopen that is still a reparse point is refused too.
+#[cfg(any(windows, test))]
+fn reparse_open(look: ReparseLook, reopened: bool) -> ReparseOpen {
+    match (look, reopened) {
+        (ReparseLook::Plain, _) => ReparseOpen::Plain,
+        (ReparseLook::Surrogate, _) => ReparseOpen::Refuse("not a regular file"),
+        (ReparseLook::Data, false) => ReparseOpen::Reopen,
+        (ReparseLook::Unconfirmed, false) => {
+            ReparseOpen::Refuse("reparse tag could not be confirmed")
+        }
+        (ReparseLook::Data | ReparseLook::Unconfirmed, true) => {
+            ReparseOpen::Refuse("reparse data was not read through its filter")
+        }
+    }
+}
+
+/// What to do with a handle once [`reparse_open`] has classified it.
+/// `reopen` runs only for a first reopen. A second one is the filter
+/// error, so the reparse buffer is not read. Both Windows matches call
+/// this, and the unit test runs on every platform.
+#[cfg(any(windows, test))]
+fn apply_reparse_open<T>(
+    decision: ReparseOpen,
+    reopened: bool,
+    file: T,
+    reopen: impl FnOnce(T) -> io::Result<T>,
+) -> io::Result<T> {
+    match decision {
+        ReparseOpen::Plain => Ok(file),
+        ReparseOpen::Refuse(why) => Err(io::Error::new(io::ErrorKind::InvalidData, why)),
+        ReparseOpen::Reopen if !reopened => reopen(file),
+        ReparseOpen::Reopen => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "reparse data was not read through its filter",
+        )),
+    }
+}
+
+fn open_nofollow_read(path: &std::path::Path) -> io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
+            .open(path)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        // The flag above skips filters. [`apply_reparse_open`] keeps a
+        // plain file, reopens a data tag from this handle, and refuses
+        // the rest. Reading a refused handle would return the reparse
+        // buffer, or follow a symlink raced in after the lstat.
+        apply_reparse_open(
+            reparse_open(reparse_look(&file), false),
+            false,
+            file,
+            reopen_without_reparse_flag,
+        )
+    }
+}
+
+/// The reparse tag of a handle opened with `FILE_FLAG_OPEN_REPARSE_POINT`.
+#[cfg(windows)]
+fn reparse_look(file: &std::fs::File) -> ReparseLook {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ATTRIBUTE_TAG_INFO,
+    };
+    let mut info = std::mem::MaybeUninit::<FILE_ATTRIBUTE_TAG_INFO>::uninit();
+    // SAFETY: the buffer holds exactly one FILE_ATTRIBUTE_TAG_INFO.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as _,
+            FileAttributeTagInfo,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return ReparseLook::Unconfirmed;
+    }
+    // SAFETY: the call succeeded, so it filled `info`.
+    let info = unsafe { info.assume_init() };
+    classify_reparse(
+        true,
+        info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+        info.ReparseTag,
+    )
+}
+
+/// Volume serial and file index of `file`.
+#[cfg(windows)]
+fn file_id(file: &std::fs::File) -> io::Result<(u32, u32, u32)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: the buffer holds exactly one BY_HANDLE_FILE_INFORMATION.
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, info.as_mut_ptr()) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call succeeded, so it filled `info`.
+    let info = unsafe { info.assume_init() };
+    Ok((
+        info.dwVolumeSerialNumber,
+        info.nFileIndexHigh,
+        info.nFileIndexLow,
+    ))
+}
+
+/// A second handle on `file` without `FILE_FLAG_OPEN_REPARSE_POINT`, so a
+/// data reparse point's filter can supply the file bytes. Not a path open:
+/// a symlink that took the name is not followed.
+#[cfg(windows)]
+fn reopen_file(file: &std::fs::File) -> io::Result<std::fs::File> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        ReOpenFile, FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    // SAFETY: `file` is open. A null or invalid handle is not owned.
+    let handle = unsafe {
+        ReOpenFile(
+            file.as_raw_handle() as _,
+            FILE_GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            0,
+        )
+    };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: ReOpenFile returned a new handle, and this owns it. The
+    // original `file` stays open until the caller drops it.
+    let owned = unsafe { OwnedHandle::from_raw_handle(handle as _) };
+    Ok(std::fs::File::from(owned))
+}
+
+/// Reopen a data reparse point from its handle and keep the result only
+/// when it is the same file and the filter supplied plain bytes.
+#[cfg(windows)]
+fn reopen_without_reparse_flag(file: std::fs::File) -> io::Result<std::fs::File> {
+    let before = file_id(&file)?;
+    let again = reopen_file(&file)?;
+    let after = file_id(&again)?;
+    if before != after {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "reopened file is not the same file",
+        ));
+    }
+    // A second reopen is refused inside [`apply_reparse_open`]. The
+    // closure is the same refusal if that function asks for one anyway.
+    apply_reparse_open(
+        reparse_open(reparse_look(&again), true),
+        true,
+        again,
+        |_| {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "reparse data was not read through its filter",
+            ))
+        },
     )
 }
 
@@ -1174,7 +1492,9 @@ mod tests {
         std::fs::write(top.join("file"), b"x").unwrap();
         std::fs::write(top.join("shut/inner"), b"x").unwrap();
         assert!(is_gone(&top.join("none")));
+        assert!(!is_there(&top.join("none")));
         assert!(is_gone(&top.join("file/below")));
+        assert!(is_there(&top.join("file")));
         assert!(matches!(look(&top.join("file")), Look::There(_)));
         #[cfg(unix)]
         {
@@ -1185,6 +1505,7 @@ mod tests {
             if unsafe { libc::geteuid() } != 0 {
                 assert!(matches!(look(&shut.join("inner")), Look::Unreachable(_)));
                 assert!(!is_gone(&shut.join("inner")));
+                assert!(!is_there(&shut.join("inner")));
             }
             std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -1447,5 +1768,213 @@ mod tests {
     fn wtf8_decode_replaces_bytes_no_name_made() {
         assert_eq!(wtf8_decode(&[0xFF, 0x61]), [0xFFFD, 0x61]);
         assert_eq!(wtf8_decode(&[0xE0, 0x80, 0x80]), [0xFFFD, 0xFFFD, 0xFFFD]);
+    }
+
+    /// The open refuses a name-surrogate tag and rereads a data tag.
+    /// A symlink (`0xA000000C`) and a mount point (`0xA0000003`) set the
+    /// name-surrogate bit; Compact / WOF (`0x80000017`) does not.
+    #[test]
+    fn a_name_surrogate_tag_is_not_file_data() {
+        assert!(super::reparse_tag_names_another_file(0xA000_000C));
+        assert!(super::reparse_tag_names_another_file(0xA000_0003));
+        assert!(!super::reparse_tag_names_another_file(0x8000_0017));
+        assert!(!super::reparse_tag_names_another_file(0));
+    }
+
+    /// A failed query, a set attribute with tag 0, or a clear attribute
+    /// with a tag is not file data. A clear attribute and tag 0 is a
+    /// plain file. WOF is data; a symlink tag is a surrogate.
+    #[test]
+    fn an_unconfirmed_reparse_tag_is_not_file_data() {
+        use super::{classify_reparse, ReparseLook};
+        assert!(matches!(
+            classify_reparse(false, true, 0x8000_0017),
+            ReparseLook::Unconfirmed
+        ));
+        assert!(matches!(
+            classify_reparse(true, true, 0),
+            ReparseLook::Unconfirmed
+        ));
+        assert!(matches!(
+            classify_reparse(true, false, 0x8000_0017),
+            ReparseLook::Unconfirmed
+        ));
+        assert!(matches!(
+            classify_reparse(true, false, 0),
+            ReparseLook::Plain
+        ));
+        assert!(matches!(
+            classify_reparse(true, true, 0x8000_0017),
+            ReparseLook::Data
+        ));
+        assert!(matches!(
+            classify_reparse(true, true, 0xA000_000C),
+            ReparseLook::Surrogate
+        ));
+    }
+
+    /// The Windows open keeps a plain file, reopens a data tag once, and
+    /// refuses a surrogate or a tag it cannot confirm.
+    #[test]
+    fn a_reparse_open_refuses_reopens_or_keeps_the_handle() {
+        use super::{reparse_open, ReparseLook, ReparseOpen};
+        let refuse = |look, again, why| {
+            assert_eq!(
+                reparse_open(look, again),
+                ReparseOpen::Refuse(why),
+                "{look:?} reopened={again}"
+            );
+        };
+        assert_eq!(reparse_open(ReparseLook::Plain, false), ReparseOpen::Plain);
+        assert_eq!(reparse_open(ReparseLook::Plain, true), ReparseOpen::Plain);
+        assert_eq!(reparse_open(ReparseLook::Data, false), ReparseOpen::Reopen);
+        refuse(ReparseLook::Surrogate, false, "not a regular file");
+        refuse(ReparseLook::Surrogate, true, "not a regular file");
+        refuse(
+            ReparseLook::Unconfirmed,
+            false,
+            "reparse tag could not be confirmed",
+        );
+        refuse(
+            ReparseLook::Data,
+            true,
+            "reparse data was not read through its filter",
+        );
+        refuse(
+            ReparseLook::Unconfirmed,
+            true,
+            "reparse data was not read through its filter",
+        );
+    }
+
+    /// Applying the decision keeps a plain handle, reopens once, and
+    /// refuses a second reopen. Replacing that with `Ok(file)` fails
+    /// here, on Linux as well as on Windows.
+    #[test]
+    fn apply_reparse_open_keeps_reopens_or_refuses() {
+        use super::{apply_reparse_open, ReparseOpen};
+        let kept = apply_reparse_open(ReparseOpen::Plain, false, 7, |_| panic!("reopen")).unwrap();
+        assert_eq!(kept, 7);
+        let kept = apply_reparse_open(ReparseOpen::Plain, true, 7, |_| panic!("reopen")).unwrap();
+        assert_eq!(kept, 7);
+        let reopened = apply_reparse_open(ReparseOpen::Reopen, false, 7, |n| Ok(n + 1)).unwrap();
+        assert_eq!(reopened, 8);
+        let err = apply_reparse_open(ReparseOpen::Reopen, true, 7, |_| panic!("second reopen"))
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            err.to_string(),
+            "reparse data was not read through its filter"
+        );
+        let err = apply_reparse_open(ReparseOpen::Refuse("not a regular file"), false, 7, |_| {
+            panic!("reopen")
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "not a regular file");
+    }
+
+    /// Set `key` for this test and put the previous value back, including
+    /// when the open panics.
+    #[cfg(debug_assertions)]
+    struct RestoreEnv(&'static str, Option<std::ffi::OsString>);
+
+    #[cfg(debug_assertions)]
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            match self.1.take() {
+                Some(v) => std::env::set_var(self.0, v),
+                None => std::env::remove_var(self.0),
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    impl RestoreEnv {
+        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let prev = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self(key, prev)
+        }
+    }
+
+    /// The lstat sees a regular file. The seam then plants a symlink, so
+    /// only the open's own nofollow can refuse it. Dropping `O_NOFOLLOW`
+    /// (or `FILE_FLAG_OPEN_REPARSE_POINT`) would read the target.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn open_refuses_a_symlink_planted_after_the_stat() {
+        let dir = std::env::temp_dir().join(format!("rtrash-nofollow-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = dir.join("secret");
+        std::fs::write(&secret, b"secret-target").unwrap();
+        let file = dir.join("plain");
+        std::fs::write(&file, b"plain-bytes").unwrap();
+        let _swap = RestoreEnv::set("RTRASH_TEST_NOFOLLOW_SWAP", file.as_os_str());
+        let _target = RestoreEnv::set("RTRASH_TEST_NOFOLLOW_TARGET", secret.as_os_str());
+        let opened = super::open_regular_nofollow(&file);
+        let meta = std::fs::symlink_metadata(&file).ok();
+        let planted = meta.is_some_and(|m| m.file_type().is_symlink());
+        assert!(
+            planted,
+            "the seam did not plant a symlink (privilege or Developer Mode?)"
+        );
+        assert!(opened.is_err(), "the open followed the planted symlink");
+        assert_eq!(std::fs::read(&secret).unwrap(), b"secret-target");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A symlink to a regular file is not opened. The target stays as it was.
+    #[cfg(unix)]
+    #[test]
+    fn open_regular_nofollow_refuses_a_symlink_to_a_file() {
+        let dir = std::env::temp_dir().join(format!("rtrash-nofollow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        std::fs::write(&target, b"secret-target").unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = super::open_regular_nofollow(&link).unwrap_err();
+        // The lstat refuses the link. Without that check the open's
+        // O_NOFOLLOW fails instead, and the error is not this one.
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "not a regular file");
+        assert_eq!(std::fs::read(&target).unwrap(), b"secret-target");
+        let file = dir.join("plain");
+        std::fs::write(&file, b"plain-bytes").unwrap();
+        let mut got = Vec::new();
+        use std::io::Read;
+        super::open_regular_nofollow(&file)
+            .unwrap()
+            .read_to_end(&mut got)
+            .unwrap();
+        assert_eq!(got, b"plain-bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Windows open refuses a file symlink the same way. Creating the
+    /// link needs the symlink privilege or Developer Mode.
+    #[cfg(windows)]
+    #[test]
+    fn open_regular_nofollow_refuses_a_symlink_to_a_file() {
+        let dir = std::env::temp_dir().join(format!("rtrash-nofollow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("target");
+        std::fs::write(&target, b"secret-target").unwrap();
+        let link = dir.join("link");
+        if let Err(e) = std::os::windows::fs::symlink_file(&target, &link) {
+            panic!(
+                "cannot create a file link ({e}); this test needs the symlink \
+                 privilege or Developer Mode"
+            );
+        }
+        let err = super::open_regular_nofollow(&link).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "not a regular file");
+        assert_eq!(std::fs::read(&target).unwrap(), b"secret-target");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

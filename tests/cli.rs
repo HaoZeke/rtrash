@@ -5100,8 +5100,10 @@ fn list_leaves_out_a_record_with_no_path_and_counts_it() {
 /// trash-list prints trash-cli's stderr line for each record trash-cli
 /// reports (no `Path=` line, a record it cannot open), in path order and
 /// before the rows, and its hint counts only the records trash-cli would
-/// list (an empty `Path=`, one over the size cap). `rtrash list` prints
-/// no such lines and counts all of them. Each record is reported once.
+/// list (an empty `Path=`, one over the size cap). A symlink is not a
+/// record, so it gets no line. `rtrash list` prints no such lines and
+/// counts every record it left out, plus names in `info/` that are not
+/// records. Each record is reported once.
 #[test]
 fn trash_list_prints_trash_cli_lines_and_hints_the_rest() {
     let sb = Sandbox::new("trash-list-errors");
@@ -5136,7 +5138,8 @@ fn trash_list_prints_trash_cli_lines_and_hints_the_rest() {
     assert!(clean.status.success(), "{}", stderr_of(&clean));
     assert_eq!(stderr_of(&clean), "");
 
-    // trash-cli reports these three.
+    // trash-cli reports the directory and the record with no Path= line.
+    // A dangling symlink is not a record, so it gets no ENOENT line.
     let nopath = info.join("nopath.txt.trashinfo");
     fs::write(&nopath, "[Trash Info]\nDeletionDate=2026-01-02T03:04:05\n").unwrap();
     let dir = info.join("d.trashinfo");
@@ -5156,25 +5159,22 @@ fn trash_list_prints_trash_cli_lines_and_hints_the_rest() {
     assert_eq!(cli.stdout, clean.stdout, "the rows stay the same");
     let err = stderr_of(&cli);
     let lines: Vec<&str> = err.lines().collect();
-    assert_eq!(lines.len(), 4, "{err}");
+    assert_eq!(lines.len(), 3, "{err}");
     assert!(lines[0].starts_with("[Errno 21] "), "{err}");
     assert!(
         lines[0].ends_with(&format!(": '{}'", dir.display())),
         "{err}"
     );
-    assert_eq!(
-        lines[1],
-        format!(
-            "[Errno 2] No such file or directory: '{}'",
-            dangling.display()
-        )
+    assert!(
+        !err.contains("dl.trashinfo"),
+        "a symlink is not opened: {err}"
     );
     assert_eq!(
-        lines[2],
+        lines[1],
         format!("Parse Error: {}: Unable to parse Path.", nopath.display())
     );
     assert_hint(
-        lines[3],
+        lines[2],
         "trash-list",
         &t,
         "2 trash records could not be listed; `rtrash status --check` shows them",
@@ -5187,7 +5187,14 @@ fn trash_list_prints_trash_cli_lines_and_hints_the_rest() {
         &stderr_of(&out),
         "rtrash list",
         &t,
-        "5 trash records could not be listed; `rtrash status --check` shows them",
+        "4 trash records could not be listed, and 1 name in info/ is not a trash record; \
+         `rtrash status --check` shows them",
+    );
+    let check = sb.run(&["status", "--check", &pin]);
+    let report = format!("{}{}", stdout_of(&check), stderr_of(&check));
+    assert!(
+        report.contains("stray:") && report.contains("dl.trashinfo"),
+        "{report}"
     );
 }
 
@@ -6826,6 +6833,20 @@ fn status_json_and_age_filter() {
     assert!(
         r.contains("\"total_items\": 1") || r.contains("\"total_items\":1"),
         "{r}"
+    );
+}
+
+/// `--json` with no trash writes the status object to stdout and leaves
+/// stderr empty. The two "no trash" lines are the text display only.
+#[test]
+fn status_json_with_no_trash_leaves_stderr_empty() {
+    let sb = Sandbox::new("status-json-none");
+    let out = sb.run(&["status", "--json", "--home-only"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert_eq!(stderr_of(&out), "");
+    assert_eq!(
+        stdout_of(&out),
+        "{\n  \"roots\": [\n  ],\n  \"total_items\": 0,\n  \"total_bytes\": 0\n}\n"
     );
 }
 
@@ -11739,6 +11760,136 @@ fn empty_dangling_keeps_records_whose_payload_cannot_be_reached() {
     let out = sb.run(&["empty", "--home-only", "--dangling"]);
     fs::set_permissions(&files, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(record.exists(), "{} {}", stdout_of(&out), stderr_of(&out));
+}
+
+/// `status --check --fix` keeps a record whose `files/` denies search.
+/// The payload may still be there, so the record is not dangling.
+#[test]
+fn status_fix_keeps_a_record_whose_files_dir_cannot_be_searched() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        common::skip("root searches every folder; skipping");
+        return;
+    }
+    let sb = Sandbox::new("check-shut");
+    let keep = sb.work().join("keep.txt");
+    fs::write(&keep, "k").unwrap();
+    assert!(sb.run(&["put", keep.to_str().unwrap()]).status.success());
+    let files = sb.trash().join("files");
+    let record = sb.trash().join("info").join("keep.txt.trashinfo");
+    let payload = files.join("keep.txt");
+    struct Open(PathBuf);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+    fs::set_permissions(&files, fs::Permissions::from_mode(0o600)).unwrap();
+    let _open = Open(files);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let out = sb.run(&["status", &pin, "--check", "--fix"]);
+    let text = format!("{}{}", stdout_of(&out), stderr_of(&out));
+    assert!(record.exists(), "{text}");
+    assert!(!stdout_of(&out).contains("dangling:"), "{text}");
+    assert!(!stdout_of(&out).contains("removed "), "{text}");
+    assert!(stderr_of(&out).contains("removed 0 records"), "{text}");
+    drop(_open);
+    assert!(payload.exists(), "{text}");
+}
+
+/// An unsearchable `files/` is not a `--check` problem. The check exits
+/// 0, restore cannot read the payload, and `--fix` is not described as
+/// removing every record that cannot be restored.
+#[test]
+fn an_unreachable_payload_is_not_a_check_problem() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        common::skip("root searches every folder; skipping");
+        return;
+    }
+    let sb = Sandbox::new("check-unreached");
+    let keep = sb.work().join("keep.txt");
+    fs::write(&keep, "k").unwrap();
+    assert!(sb.run(&["put", keep.to_str().unwrap()]).status.success());
+    let files = sb.trash().join("files");
+    struct Open(PathBuf);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+    fs::set_permissions(&files, fs::Permissions::from_mode(0o600)).unwrap();
+    let _open = Open(files);
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let check = sb.run(&["status", &pin, "--check"]);
+    let text = format!("{}{}", stdout_of(&check), stderr_of(&check));
+    assert_eq!(check.status.code(), Some(0), "{text}");
+    assert!(stderr_of(&check).contains("0 problems found"), "{text}");
+    assert!(!stdout_of(&check).contains("dangling:"), "{text}");
+    let restored = sb.run(&["restore", &pin, "keep.txt"]);
+    let why = format!("{}{}", stdout_of(&restored), stderr_of(&restored));
+    assert!(!restored.status.success(), "{why}");
+    assert!(why.contains("cannot read the trash payload"), "{why}");
+    let help = stdout_of(&sb.run(&["status", "--help"]));
+    assert!(help.contains("cannot be reached is not dangling"), "{help}");
+    assert!(help.contains("record is kept"), "{help}");
+    assert!(help.contains("put leftovers"), "{help}");
+    let blurb = "with --check, remove dangling and bad records and put leftovers";
+    for rel in [
+        "completions/_rtrash",
+        "completions/rtrash.fish",
+        "completions/rtrash.nu",
+    ] {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+        let body = fs::read_to_string(&path).unwrap();
+        assert!(body.contains(blurb), "{rel}");
+        assert!(!body.contains("broken and dangling"), "{rel}");
+    }
+}
+
+/// An unsearchable `files/` is not a missing payload. `list --json` keeps
+/// `"missing":false`, and status does not count the item as dangling.
+#[test]
+fn list_json_and_status_keep_an_unsearchable_payload() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        common::skip("root searches every folder; skipping");
+        return;
+    }
+    let sb = Sandbox::new("list-shut");
+    let keep = sb.work().join("kept.txt");
+    fs::write(&keep, "payload").unwrap();
+    assert!(sb.run(&["put", keep.to_str().unwrap()]).status.success());
+    let files = sb.trash().join("files");
+    struct Open(std::path::PathBuf);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let _open = Open(files.clone());
+    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let pin = format!("--trash-dir={}", sb.trash().display());
+    let listed = sb.run(&["list", &pin, "--json"]);
+    assert_eq!(listed.status.code(), Some(0));
+    let body = stdout_of(&listed);
+    assert!(body.contains("\"missing\":false"), "{body}");
+    assert!(!body.contains("\"missing\":true"), "{body}");
+    let status = sb.run(&["status", &pin]);
+    let shown = stdout_of(&status);
+    let warned = stderr_of(&status);
+    assert!(!shown.contains("without a payload"), "{shown}");
+    assert!(!warned.contains("cannot be restored"), "{warned}");
+    let json = sb.run(&["status", &pin, "--json"]);
+    let object = stdout_of(&json);
+    assert!(object.contains("\"dangling\":0"), "{object}");
+    drop(_open);
+    assert!(sb.trash().join("files").join("kept.txt").exists());
 }
 
 /// A file in a folder that denies search is not reported missing: put

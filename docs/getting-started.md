@@ -37,6 +37,7 @@ Regenerate: [`docs/demo/record.sh`](demo/record.sh). Platform: Linux FreeDesktop
 | Permanent purge of trash entries | `rtrash empty` / `rtrash rm PATH` |
 | Windows system Recycle Bin | `rtrash put/list/restore/empty` (from source; not FreeDesktop layout) |
 | macOS Finder Trash | Default for plain put, list, restore and empty (experimental); `RTRASH_MACOS_TRASH=freedesktop` keeps the FreeDesktop home trash |
+| Trash size on the desktop | optional `rtrash-hud` (not in the CLI build); launcher `crates/rtrash-hud/rtrash-hud.desktop` |
 
 - [architecture.md](architecture.md) — FreeDesktop placement, fail-safes
 - [benchmarks.md](benchmarks.md) — measured comparison vs trash-cli

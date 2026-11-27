@@ -258,7 +258,7 @@ impl<'a, E: TuiItem> App<'a, E> {
         if targets.len() == 1 {
             let ei = targets[0];
             let entry = self.entries[ei];
-            let dest_exists = entry.original().symlink_metadata().is_ok();
+            let dest_exists = crate::util::is_there(entry.original());
             if dest_exists && !self.force {
                 self.mode = Mode::ConfirmOverwrite;
                 self.pending_idxs = vec![ei];
@@ -275,7 +275,7 @@ impl<'a, E: TuiItem> App<'a, E> {
         let need_confirm = !self.force
             && targets
                 .iter()
-                .any(|&ei| self.entries[ei].original().symlink_metadata().is_ok());
+                .any(|&ei| crate::util::is_there(self.entries[ei].original()));
         if need_confirm {
             self.mode = Mode::ConfirmBulk;
             self.pending_idxs = targets;

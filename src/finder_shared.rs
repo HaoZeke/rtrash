@@ -85,7 +85,7 @@ impl Entry {
     /// An item that [`Entry::checked`] does not pass stays.
     pub fn restore_to(&self, dest: &Path, force: bool) -> Result<(), String> {
         let src = self.checked().map_err(|s| s.reason(&self.name))?;
-        if !force && dest.symlink_metadata().is_ok() {
+        if !force && crate::util::is_there(dest) {
             return Err(format!(
                 "refusing to overwrite existing '{}' (use -f to force)",
                 dest.display()
@@ -130,7 +130,7 @@ pub fn nfc_path(p: &Path) -> PathBuf {
 /// The entry of `dir` named `name`, or failing that the one whose
 /// composed (NFC) form matches; None when neither is there.
 pub fn resolve_name(dir: &Path, name: &str) -> Option<String> {
-    if dir.join(name).symlink_metadata().is_ok() {
+    if crate::util::is_there(&dir.join(name)) {
         return Some(name.to_string());
     }
     let want = nfc(name);
@@ -318,7 +318,7 @@ pub fn log_batch(batch: &str, items: &[(String, PathBuf, PathBuf)]) -> std::io::
     };
     let mut keep: Vec<Logged> = read_log()
         .into_iter()
-        .filter(|l| l.trash.join(&l.name).symlink_metadata().is_ok())
+        .filter(|l| crate::util::is_there(&l.trash.join(&l.name)))
         .collect();
     let now = crate::util::now_epoch();
     for (name, original, trash) in items {
@@ -458,7 +458,7 @@ pub fn undo(
     }
     let (mut restored, mut failed, mut skipped) = (Vec::new(), 0usize, 0usize);
     for l in items {
-        let exists = l.original.symlink_metadata().is_ok();
+        let exists = crate::util::is_there(&l.original);
         let (dest, force) = match (exists, conflict) {
             (true, Conflict::Skip) => {
                 eprintln!(

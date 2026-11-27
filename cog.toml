@@ -5,11 +5,12 @@ disable_changelog = true
 generate_mono_repository_global_tag = true
 tag_prefix = "v"
 
-# Keep Cargo.toml, pyproject.toml, and Sphinx release in lockstep.
+# Keep Cargo.toml, pyproject.toml, the rtrash-hud package, and Sphinx release
+# in lockstep. The hud package version is its first `version = ` line. A
+# pinned `rtrash = { ..., version = "..." }` on that package moves too.
+# perl, not sed -i: BSD sed rejects both -i and the 0, address.
 pre_bump_hooks = [
-  "sed -i '0,/^version = /s/^version = \".*\"/version = \"{{version}}\"/' Cargo.toml",
-  "sed -i '0,/^version = /s/^version = \".*\"/version = \"{{version}}\"/' pyproject.toml",
-  "sed -i 's/^release = \".*\"/release = \"{{version}}\"/' docs/source/conf.py",
+  "perl scripts/bump-version.pl {{version}}",
 ]
 
 [commit_types]

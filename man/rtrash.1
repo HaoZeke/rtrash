@@ -1035,6 +1035,7 @@ The batch holds the put run id for items rtrash trashed, else null.
 is true for a record whose payload is gone: the item cannot be restored, and
 .B rtrash empty \-\-dangling
 removes the record.
+A payload that cannot be reached is not missing.
 .TP
 .B \-\-help
 Display help and exit.
@@ -1070,6 +1071,82 @@ notes how many, a hint on stderr names
 .BR "rtrash empty \-\-dangling" ,
 and the JSON roots carry the count as
 .BR dangling .
+.PP
+The optional
+.B rtrash-hud
+program prints this same item count and reclaimable size. It does not
+take the trash lock or rewrite
+.IR directorysizes ,
+and it has no age or size filter.
+.BR \-\-older\-than ,
+.BR \-\-newer\-than ,
+.B \-\-larger\-than
+and
+.B \-\-smaller\-than
+are unrecognized options, and the program exits 2.
+It is the workspace member
+.I crates/rtrash-hud
+and is not built with the
+.B rtrash
+binary or shipped in the musl tarball. A desktop launcher is
+.IR crates/rtrash-hud/rtrash-hud.desktop .
+The program asks this command's library for the numbers and does not
+parse trash records itself. It reads a FreeDesktop trash (the same
+.B \-\-trash\-dir
+and
+.B \-\-home\-only
+pins), not the Finder Trash or the Recycle Bin. On macOS, where Finder
+is the default, pass
+.B \-\-trash\-dir
+or set
+.B RTRASH_MACOS_TRASH=freedesktop
+(or
+.B macos.trash
+to
+.BR freedesktop ).
+Its
+.B \-\-json
+object uses
+.BR items ", " bytes
+and
+.B roots
+.RB ( path ", " items ", " bytes ", " orphans ", " dangling ),
+not the
+.BR total_items ", " total_bytes
+and
+.B fs_*
+names of this command's
+.BR \-\-json .
+With no trash found, the text display writes
+.B "No trash directories found"
+and
+.B "Total: 0 items (0 B)"
+to stderr.
+A
+.B \-\-trash\-dir
+that is not a trash prints
+.B "rtrash: ignoring --trash-dir='...'"
+with the path in single quotes.
+When that pin is the only one, it then prints
+.B "rtrash-hud: no valid --trash-dir pins"
+and exits 2.
+Beside a valid trash it exits 0 and prints only the ignoring line.
+With
+.BR \-\-json ,
+this program and
+.B rtrash status
+write only their JSON object to stdout and leave stderr empty: this
+program prints
+.B {"items":0,"bytes":0,"roots":[]}
+and
+.B status
+prints its own object, with an empty
+.B roots
+array and
+.B total_items
+and
+.B total_bytes
+of 0.
 .TP
 .B \-\-home\-only
 Only the home trash
@@ -1139,6 +1216,7 @@ whose name starts with
 .RB ( "put leftover:" ):
 put writes each record there first, so one that stays was left by a
 put that was killed before the record took its name.
+A payload that cannot be reached is not dangling, and its record is kept.
 A summary goes to stderr, and the exit status is 1 when anything is
 found.
 It takes only
@@ -1174,8 +1252,19 @@ for one with no line starting
 .BR Path= ,
 and
 .RB \(oq "[Errno N] TEXT: 'FILE'" \(cq
-for one it cannot open (a directory, a dangling symlink, no read
-permission).
+for one it cannot open (a directory, or a file it cannot read).
+A
+.I .trashinfo
+that is a symlink is not a record:
+.B trash\-list
+prints nothing for it,
+.B rtrash list
+counts it as a name in
+.I info/
+that is not a trash record, and
+.B "status \-\-check"
+reports it as
+.BR stray: .
 It then counts only the records trash-cli would list, and no stray
 name, since trash-cli mentions none: an empty
 .BR Path= ,
@@ -1282,8 +1371,9 @@ payload is gone
 .RB ( dangling: ),
 a
 .I $I
-record that cannot be read, is larger than any record or cannot be
-parsed
+record that cannot be read, which is kept
+.RB ( "unreadable:" ),
+one that is larger than any record or cannot be parsed
 .RB ( "bad record:" ),
 a
 .I $R
@@ -1293,6 +1383,18 @@ and a
 .I $I
 name that is a folder or a link
 .RB ( stray: ).
+A
+.I $I
+whose metadata cannot be read is kept
+.RB ( "unreadable:" ).
+Stray is only a folder or a link.
+A
+.I $R
+that cannot be reached is reported as
+.B "unreadable: ... (kept)" ,
+and its
+.I $I
+is kept.
 .B \-\-fix
 removes the dangling and bad records under the same guards, and a
 payload a bad record named stays, as an orphan.

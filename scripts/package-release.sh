@@ -106,7 +106,7 @@ package_one() {
   local NAME="rtrash-${VERSION}-${TARGET}"
   echo "==> target=${TARGET} version=${VERSION}"
 
-  echo "==> cargo build --release --target ${TARGET}"
+  echo "==> cargo build --release --target ${TARGET} -p rtrash"
   if ! rustc --print target-list 2>/dev/null | grep -qx "${TARGET}"; then
     if command -v rustup >/dev/null 2>&1; then
       rustup target add "${TARGET}"
@@ -121,7 +121,9 @@ package_one() {
   if [[ "${TARGET}" == *-musl && -z "${!cc_var:-}" ]] && command -v musl-gcc >/dev/null 2>&1; then
     export "${cc_var}=musl-gcc"
   fi
-  cargo build --release --target "${TARGET}"
+  # Name the CLI package. The optional rtrash-hud member is not a default
+  # member and is not part of this tarball.
+  cargo build --release --target "${TARGET}" -p rtrash
 
   if [[ "${TARGET}" == *-windows-* ]]; then
     package_windows "$TARGET"

@@ -64,6 +64,7 @@ $ rtrash empty --plain
 | `empty --dry-run` | suite GIF |
 | Custom keys (`rtrash keys`, `keys.toml`) | suite GIF |
 | Interactive TUI (fuzzy, multi-select, `?`) | **TTY** — not in the GIF; run `rtrash restore` |
+| Desktop status (`rtrash-hud`) | optional crate; same counts as `rtrash status`; not in the musl tarball |
 | Python `unlink` / `rmtree` | [bindings](docs/bindings.md) |
 
 Demos are regenerable: `./docs/demo/record.sh` (pinned `--trash-dir` sandbox — safe).
@@ -242,7 +243,7 @@ $ rtrash setup --prefix=/usr --force    # system prefix when packaging
 - **Changelog:** add a towncrier fragment under `docs/newsfragments/` for user-visible changes:
   - `towncrier create -c "Short description." +slug.added.md` (or `.fixed.md`, `.changed.md`, …)
   - At release: `towncrier build --version X.Y.Z --yes` then tag `vX.Y.Z`
-- **Version lockstep:** cocogitto (`cog.toml`) bumps `Cargo.toml`, `pyproject.toml`, and `docs/source/conf.py` together (`disable_changelog = true`; towncrier owns `CHANGELOG.md`).
+- **Version lockstep:** cocogitto (`cog.toml`) bumps `Cargo.toml`, `pyproject.toml`, `crates/rtrash-hud/Cargo.toml` (its package version, and a pinned `rtrash` dependency version when one is set), and `docs/source/conf.py` together (`disable_changelog = true`; towncrier owns `CHANGELOG.md`). `scripts/check-version-lockstep.sh` checks the three package versions and that pin.
 - **Hooks:** `prek install` then `prek run -a` (builtin large-file check, yaml/toml, codespell, version lockstep). CI also runs [HaoZeke/large-file-auditor](https://github.com/HaoZeke/large-file-auditor) and [lychee](https://github.com/lycheeverse/lychee).
 - **Docs PRs:** the documentation workflow uploads a `documentation` artifact; [HaoZeke/doc-previewer](https://github.com/HaoZeke/doc-previewer) comments a preview link on the PR.
 
@@ -348,6 +349,8 @@ In JSON they carry `"orphan": true`; an age filter leaves them out.
 
 Per-root item count and reclaimable size (uses `directorysizes` when valid). Same discovery pins as list. Also accepts `--json`, `--older-than=DAYS`, `--newer-than=DAYS`, `--larger-than=SIZE`, `--smaller-than=SIZE`.
 Orphans count as items, noted as `(N without .trashinfo)` per root and as `orphans` in JSON.
+
+The optional `rtrash-hud` program prints that same per-root item count and reclaimable size. It does not take the trash lock or rewrite `directorysizes`, and it has no age or size filter (`--older-than`, `--newer-than`, `--larger-than` and `--smaller-than` are unrecognized options and the program exits 2). It is a workspace member and not a default one, so `cargo build` of the CLI does not build it and the musl tarball does not ship it. Build it with `cargo build -p rtrash-hud`. `crates/rtrash-hud/rtrash-hud.desktop` is a desktop launcher; `desktop-file-validate` checks that file. The program calls the status library for the numbers and does not parse `.trashinfo` files itself. It reads a FreeDesktop trash, not the Finder Trash or the Recycle Bin. On macOS, where Finder is the default, pass `--trash-dir` or set `RTRASH_MACOS_TRASH=freedesktop` (or `macos.trash = "freedesktop"`). Its `--json` object uses `items`, `bytes`, and `roots` (`path`, `items`, `bytes`, `orphans`, `dangling`), not the `total_items`, `total_bytes`, and `fs_*` names of `status --json`. With no trash found, the text display writes `No trash directories found` and `Total: 0 items (0 B)` to stderr. A `--trash-dir` that is not a trash prints `rtrash: ignoring --trash-dir='...'` (the path in single quotes). When that pin is the only one, it then prints `rtrash-hud: no valid --trash-dir pins` and exits 2. Beside a valid trash it exits 0 and prints only the ignoring line. With `--json`, both this program and `rtrash status` write only their JSON object to stdout and leave stderr empty. This program prints `{"items":0,"bytes":0,"roots":[]}`. `rtrash status --json` prints its own object, with an empty `roots` array and `total_items` and `total_bytes` of 0.
 
 ### `rtrash du [PATH]...`
 

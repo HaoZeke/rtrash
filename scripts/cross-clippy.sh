@@ -15,4 +15,8 @@ for target in x86_64-pc-windows-gnu aarch64-apple-darwin x86_64-unknown-linux-mu
         # shellcheck disable=SC2086
         cargo clippy --locked --all-targets --target "$target" $features -- -D warnings
     done
+    # Not a default member. Windows drops the unix-only HUD tests; a helper
+    # they alone use is dead_code there unless it is cfg-gated.
+    echo "cross-clippy: $target rtrash-hud"
+    cargo clippy --locked -p rtrash-hud --all-targets --target "$target" -- -D warnings
 done

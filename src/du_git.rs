@@ -109,7 +109,7 @@ pub fn union_work(a: Option<RiskyGit>, b: Option<RiskyGit>) -> Option<RiskyGit> 
 /// [`RiskyGit::unknown`] and never `None`. Shared by put on Unix and on
 /// Windows: `safety` is Unix-only.
 pub fn risky_repo_state(abs: &Path) -> Option<RiskyGit> {
-    let is_repo = abs.join(".git").symlink_metadata().is_ok() || crate::du::is_bare_repo(abs);
+    let is_repo = crate::util::is_there(&abs.join(".git")) || crate::du::is_bare_repo(abs);
     if !is_repo {
         return None;
     }
@@ -443,7 +443,7 @@ pub fn config_path(repo: &Path, key: &str) -> Option<Option<String>> {
 pub fn enclosing_repo(path: &Path) -> Option<PathBuf> {
     let mut cur = path.parent();
     while let Some(dir) = cur {
-        if dir.join(".git").symlink_metadata().is_ok() {
+        if crate::util::is_there(&dir.join(".git")) {
             return Some(dir.to_path_buf());
         }
         cur = dir.parent();

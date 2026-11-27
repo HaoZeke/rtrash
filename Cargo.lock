@@ -661,6 +661,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtrash-hud"
+version = "0.1.5"
+dependencies = [
+ "libc",
+ "rtrash",
+]
+
+[[package]]
 name = "rustix"
 version = "0.38.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,22 @@
+[package]
+name = "rtrash-hud"
+version = "0.1.5"
+edition = "2021"
+rust-version = "1.88"
+description = "Desktop status display of trash size and item count"
+license = "MIT"
+authors = ["Rohit Goswami <rgoswami@ieee.org>"]
+repository = "https://github.com/HaoZeke/rtrash"
+readme = "README.md"
+publish = false
+
+# Not part of the musl CLI tarball or cargo-dist archives.
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+rtrash = { path = "../..", default-features = false }
+
+[dev-dependencies]
+libc = "0.2"
+rtrash = { path = "../..", default-features = false }

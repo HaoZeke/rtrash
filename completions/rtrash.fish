@@ -103,7 +103,7 @@ for sub in list status
     complete -c rtrash -n "__rtrash_seen_subcommand | string match -q $sub" -l json -d 'JSON output'
 end
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q status' -l check -d 'check each record and list problems'
-complete -c rtrash -n '__rtrash_seen_subcommand | string match -q status' -l fix -d 'with --check, remove broken and dangling records'
+complete -c rtrash -n '__rtrash_seen_subcommand | string match -q status' -l fix -d 'with --check, remove dangling and bad records and put leftovers'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q status' -s n -l dry-run -d 'with --fix, print what it would remove'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l size -d 'add each item size'
 complete -c rtrash -n '__rtrash_seen_subcommand | string match -q list' -l show-trashpath -d 'show where each item sits in the trash'

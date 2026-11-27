@@ -27,12 +27,15 @@ on stderr to remove them with `rtrash empty --dangling`.
       --smaller-than=SIZE only count items taking less than SIZE on disk
                      (SIZE as in `empty --max-size`: 500M, 1.5G, 64k)
       --json            emit a JSON object (scripts)
-      --check           check each record instead: list records whose
-                     payload is gone or that cannot serve a restore, bad
-                     dates, payloads with no record and stray names in
-                     info/; exit 1 when it finds any
-      --fix             with --check, remove the records whose payload is
-                     gone or that cannot serve a restore (a payload stays)
+      --check           check each record instead: dangling (payload
+                     gone), bad records, bad dates, payloads with no
+                     record, stray names and put leftovers. A payload
+                     that cannot be reached is not dangling, and its
+                     record is kept. Exit 1 when it finds any
+      --fix             with --check, remove dangling records, bad
+                     records and put leftovers. A record whose payload
+                     cannot be reached stays, and a payload a bad
+                     record named stays
   -n, --dry-run         with --fix, print what it would remove
       --help            display this help and exit
       --version         output version information and exit
@@ -175,7 +178,9 @@ pub fn run(prog: &str, args: &[String]) -> i32 {
     0
 }
 
-pub(crate) struct RootSummary {
+/// One trash as [`print_status`] counts it. `rtrash-hud` reads these fields
+/// instead of parsing `.trashinfo` files.
+pub struct RootSummary {
     pub path: String,
     pub items: u64,
     pub bytes: u64,
@@ -185,11 +190,36 @@ pub(crate) struct RootSummary {
     pub dangling: u64,
 }
 
-pub(crate) fn summarize_dirs(
+/// Per-root rows, total items and total bytes of `dirs`, as [`print_status`]
+/// shows them. Ages are seconds; `size` is the larger/smaller filter.
+/// Walked directory sizes are written back into `directorysizes`.
+pub fn summarize_dirs(
     dirs: &[TrashDir],
     older_than: Option<i64>,
     newer_than: Option<i64>,
     size: list::SizeFilter,
+) -> (Vec<RootSummary>, u64, u64) {
+    summarize(dirs, older_than, newer_than, size, true)
+}
+
+/// [`summarize_dirs`] without taking the trash lock or rewriting
+/// `directorysizes`. `rtrash-hud` uses this so a display cannot create
+/// `.rtrash.lock` or change a cache, including a stale one.
+pub fn summarize_dirs_readonly(
+    dirs: &[TrashDir],
+    older_than: Option<i64>,
+    newer_than: Option<i64>,
+    size: list::SizeFilter,
+) -> (Vec<RootSummary>, u64, u64) {
+    summarize(dirs, older_than, newer_than, size, false)
+}
+
+fn summarize(
+    dirs: &[TrashDir],
+    older_than: Option<i64>,
+    newer_than: Option<i64>,
+    size: list::SizeFilter,
+    write_back: bool,
 ) -> (Vec<RootSummary>, u64, u64) {
     let mut roots = Vec::new();
     let mut total_items = 0u64;
@@ -200,8 +230,9 @@ pub(crate) fn summarize_dirs(
             older_than,
             newer_than,
         );
-        // One read of the cache per root; walked directories are written
-        // back at the end, so the next status is a lookup.
+        // One read of the cache per root. `rtrash status` writes walked
+        // directories back, so the next status is a lookup. A read-only
+        // caller keeps the cache as it was.
         let sizes = trashdir::DirSizes::load(dir);
         let mut each: Vec<u64> = {
             use rayon::prelude::*;
@@ -210,7 +241,9 @@ pub(crate) fn summarize_dirs(
                 .map(|e| sizes.entry_bytes(&e.name))
                 .collect()
         };
-        sizes.write_back();
+        if write_back {
+            sizes.write_back();
+        }
         if size.is_set() {
             let mut kept = each.iter();
             entries.retain(|_| kept.next().is_some_and(|&n| size.keeps(n)));
@@ -257,18 +290,7 @@ pub fn print_status(
     }
     let (roots, total_items, total_bytes) = summarize_dirs(dirs, older_than, newer_than, size);
     for r in &roots {
-        let mut notes = Vec::new();
-        if r.orphans > 0 {
-            notes.push(format!("{} without .trashinfo", r.orphans));
-        }
-        if r.dangling > 0 {
-            notes.push(format!("{} without a payload", r.dangling));
-        }
-        let orphans = if notes.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", notes.join(", "))
-        };
+        let orphans = crate::util::status_notes(r.orphans, r.dangling);
         println!(
             "{}\t{}{orphans}\t{}",
             r.path,

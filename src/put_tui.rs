@@ -33,7 +33,7 @@ pub struct PathRow {
 
 /// Drop rows whose path no longer exists (after a put from a fixed list).
 pub fn prune_missing(rows: &mut Vec<PathRow>) {
-    rows.retain(|r| r.path.symlink_metadata().is_ok());
+    rows.retain(|r| crate::util::is_there(&r.path));
 }
 
 /// List directory entries (non-hidden first), for TUI and tests.

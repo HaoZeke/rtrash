@@ -354,10 +354,7 @@ pub fn remove(prog: &str, dry_run: bool) -> i32 {
             return 2;
         }
     };
-    let present: Vec<&PathBuf> = files
-        .iter()
-        .filter(|f| f.symlink_metadata().is_ok())
-        .collect();
+    let present: Vec<&PathBuf> = files.iter().filter(|f| crate::util::is_there(f)).collect();
     if !cfg!(windows) && present.is_empty() {
         println!("no reap timer installed");
         return 0;

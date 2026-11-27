@@ -153,7 +153,7 @@ fn stamp(trash: &Path) -> Option<u128> {
 
 /// Inodes in the trash as the totals count them: `.DS_Store` left out.
 fn trash_inodes(trash: &Path) -> u64 {
-    let ds = u64::from(trash.join(DS_STORE).symlink_metadata().is_ok());
+    let ds = u64::from(crate::util::is_there(&trash.join(DS_STORE)));
     crate::trash_stats::count_inodes(trash).saturating_sub(ds)
 }
 
