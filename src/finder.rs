@@ -837,7 +837,7 @@ pub(crate) struct RestoreOpts<'a> {
     pub(crate) json: bool,
     pub(crate) plain: bool,
     pub(crate) newest_first: Option<bool>,
-    /// `--sort`: the numbered list order (newest by default, oldest/date, path, or none).
+    /// `--sort`: the numbered list order (oldest/date by default, newest, size, path, or none).
     pub(crate) sort: Option<crate::restore::Sort>,
     /// `--older-than` and `--newer-than`.
     pub(crate) age: crate::filters::AgeFilter,
@@ -857,8 +857,9 @@ fn no_match(prog: &str, json: bool) -> i32 {
     1
 }
 
-/// The numbered pick over `list` (newest first by default): the restore browser on a
-/// terminal, else rows and an answer on stdin. `Err` carries the exit code.
+/// The numbered pick over `list`: the restore browser on a terminal lists
+/// newest first, else the rows run oldest first so the newest sits next to
+/// the index prompt. `Err` carries the exit code.
 fn pick<'a>(
     prog: &str,
     list: &[&'a crate::finder_shared::Entry],
@@ -879,9 +880,9 @@ fn pick<'a>(
         ));
     }
     let _ = o.plain;
-    // The numbered list order, as on FreeDesktop: newest first by default;
-    // oldest with --oldest-first or --sort=oldest/--sort=date; by path;
-    // or as read with --sort=none.
+    // Numbered list: oldest first, so the newest row sits next to the
+    // index prompt. --newest-first or --sort=newest puts it at index 0;
+    // --sort=oldest and --sort=date keep oldest first; path, or as read.
     let mut list = list.to_vec();
     match o.sort {
         Some(crate::restore::Sort::Path) => list.sort_by(|a, b| a.shown.cmp(&b.shown)),
@@ -899,7 +900,9 @@ fn pick<'a>(
         }
         None => {
             list.sort_by(|a, b| a.epoch.cmp(&b.epoch).then_with(|| a.name.cmp(&b.name)));
-            if o.newest_first.unwrap_or(true) {
+            // --newest-first puts the newest row at index 0. Otherwise the
+            // newest row stays last, next to the index prompt.
+            if o.newest_first.unwrap_or(false) {
                 list.reverse();
             }
         }

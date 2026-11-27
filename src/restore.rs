@@ -29,14 +29,17 @@ from under the current directory, PATH also matches items trashed from
 under it, a single match still asks, and the table uses single spaces.
 
 The browser lists the most recently trashed item first, with the cursor on
-it. The numbered table also defaults to newest first; use --oldest-first or
---sort=oldest (trash-restore also accepts --sort=date) for oldest first.
+it. The numbered table lists oldest first, so the newest row sits next to
+the index prompt. --newest-first or --sort=newest puts that row at index 0.
+--oldest-first or --sort=oldest (trash-restore also accepts --sort=date)
+keeps oldest first.
 
   -f, --force     overwrite an existing file (same as --conflict=overwrite)
       --overwrite  same as --force (trash-cli spelling)
-      --sort=ORDER  numbered table order: newest (default), oldest
-                    (trash-restore also accepts date), size (largest
-                    first), path (original path) or none (as read)
+      --sort=ORDER  numbered table order: oldest (default; the newest
+                    row sits next to the prompt), newest, size (largest
+                    first), path (original path) or none (as read).
+                    trash-restore accepts date as an alias of oldest
       --conflict=POLICY  when the destination exists: refuse (default),
                     overwrite, rename (restore next to it as NAME.1.EXT)
                     or skip
@@ -55,7 +58,9 @@ it. The numbered table also defaults to newest first; use --oldest-first or
                     the target under 5% of its bytes or inodes free, or
                     under RTRASH_MIN_FREE bytes
       --newest-first  list the most recently trashed item first
+                    (browser default; numbered table index 0)
       --oldest-first  list the oldest trashed item first
+                    (numbered table default)
       --name=NAME  match items by file name or trash name instead of PATH
       --glob=PATTERN  match items by shell pattern: against the original
                     path when PATTERN has a '/', else against the file name
@@ -652,10 +657,12 @@ fn run_inner(prog: &str, args: &[String]) -> i32 {
         Some(Sort::Oldest) => order_entries(&mut matches, false),
         Some(Sort::Newest) => order_entries(&mut matches, true),
         None => {
-            // The numbered selection table defaults newest-first; a
-            // non-interactive multi-restore keeps the historical oldest-first
-            // walk unless the caller asked for an order.
-            let newest = newest_first.unwrap_or(!all);
+            // The numbered table lists oldest first, so the newest row sits
+            // next to the index prompt. The browser above keeps newest
+            // first, with the cursor on that row. --newest-first and
+            // --oldest-first override the table. --all never asks; it keeps
+            // this oldest-first walk unless an order was asked for.
+            let newest = newest_first.unwrap_or(false);
             order_entries(&mut matches, newest);
         }
     }
